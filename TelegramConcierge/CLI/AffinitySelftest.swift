@@ -722,13 +722,14 @@ private func fileMode(_ path: String) throws -> mode_t {
     return st.st_mode & 0o777
 }
 
-/// Minimal loopback HTTP/1.1 server that records request headers and answers
+/// Minimal loopback HTTP/1.1 server that records complete requests and answers
 /// every POST with a fixed chat-completion body (or `statusOverride`).
 final class CaptureServer: @unchecked Sendable {
     let port: Int
     private let listenFd: Int32
     private let lock = NSLock()
-    private var recorded: [[String: String]] = []
+    private var recorded: [CapturedHTTPRequest] = []
+    private var captureErrors: [String] = []
     private var running = true
     var statusOverride: Int? {
         get { lock.lock(); defer { lock.unlock() }; return _status }
@@ -741,8 +742,10 @@ final class CaptureServer: @unchecked Sendable {
     }
     private var _content: String?
 
-    var requests: [[String: String]] { lock.lock(); defer { lock.unlock() }; return recorded }
-    func clear() { lock.lock(); recorded = []; lock.unlock() }
+    var requests: [[String: String]] { completeRequests.map(\.headers) }
+    var completeRequests: [CapturedHTTPRequest] { lock.lock(); defer { lock.unlock() }; return recorded }
+    var errors: [String] { lock.lock(); defer { lock.unlock() }; return captureErrors }
+    func clear() { lock.lock(); recorded = []; captureErrors = []; lock.unlock() }
 
     init() throws {
         #if os(Linux)
@@ -776,7 +779,10 @@ final class CaptureServer: @unchecked Sendable {
     }
 
     func stop() {
-        lock.lock(); running = false; lock.unlock()
+        lock.lock()
+        guard running else { lock.unlock(); return }
+        running = false
+        lock.unlock()
         shutdown(listenFd, Int32(SHUT_RDWR))
         close(listenFd)
     }
@@ -793,35 +799,42 @@ final class CaptureServer: @unchecked Sendable {
 
     private func handle(_ fd: Int32) {
         defer { close(fd) }
-        var buffer = Data()
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var parser = CaptureRequestParser()
         var chunk = [UInt8](repeating: 0, count: 65536)
-        var headerEnd: Range<Data.Index>?
-        var contentLength = 0
-        while true {
-            let n = chunk.withUnsafeMutableBytes { read(fd, $0.baseAddress!, $0.count) }
-            if n <= 0 { break }
-            buffer.append(contentsOf: chunk[0..<n])
-            if headerEnd == nil, let r = buffer.range(of: Data("\r\n\r\n".utf8)) {
-                headerEnd = r
-                let head = String(decoding: buffer[buffer.startIndex..<r.lowerBound], as: UTF8.self)
-                var headers: [String: String] = [:]
-                for line in head.split(separator: "\r\n").dropFirst() {
-                    if let colon = line.firstIndex(of: ":") {
-                        headers[line[..<colon].lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-                    }
+        do {
+            while true {
+                let n = chunk.withUnsafeMutableBytes { read(fd, $0.baseAddress!, $0.count) }
+                if n < 0 && errno == EINTR { continue }
+                guard n > 0 else { throw CaptureRequestParser.Invalid("EOF or timeout before complete request") }
+                if let request = try parser.append(Data(chunk[0..<n])) {
+                    lock.lock(); recorded.append(request); lock.unlock()
+                    break
                 }
-                contentLength = Int(headers["content-length"] ?? "0") ?? 0
-                lock.lock(); recorded.append(headers); lock.unlock()
             }
-            if let he = headerEnd, buffer.count - he.upperBound >= contentLength { break }
+        } catch {
+            lock.lock(); captureErrors.append(String(describing: error)); lock.unlock()
+            return
         }
         let status = statusOverride ?? 200
         let content = contentOverride ?? "OK"
+        let encodedContent = String(data: try! JSONEncoder().encode(content), encoding: .utf8)!
         let body = status == 200
-            ? "{\"id\":\"cap\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"\(content)\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}"
+            ? "{\"id\":\"cap\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\(encodedContent)},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}"
             : "{\"error\":{\"message\":\"injected \(status)\"}}"
         let reason = status == 200 ? "OK" : "Service Unavailable"
         let response = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-        _ = response.withCString { write(fd, $0, strlen($0)) }
+        let bytes = Data(response.utf8)
+        bytes.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                let n = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                if n < 0 && errno == EINTR { continue }
+                if n <= 0 { return }
+                offset += n
+            }
+        }
     }
 }
