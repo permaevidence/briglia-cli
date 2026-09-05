@@ -636,6 +636,7 @@ enum SetupAPICore {
             || ProviderProfiles.wireProtocol(profile) == .responses || ProviderProfiles.usesResponses
         var lease: InstanceLease?
         if affectsResponses {
+            try StoragePaths.ensureRootsChecked()
             switch InstanceLease.acquire(label: "Responses profile configuration") {
             case .success(let held): lease = held
             case .failure: throw APIError(code: "agent_running", message: "Stop Briglia before changing a Responses profile through Setup API.")

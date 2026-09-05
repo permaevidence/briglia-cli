@@ -236,7 +236,11 @@ struct ResponsesSelftest: AsyncParsableCommand {
             model: "fixture-model", effort: nil, textOnly: false, wireProtocol: .responses)
         try ProviderProfiles.activate(.custom)
         c.check("custom Responses activation explicit", ProviderProfiles.usesResponses)
-        try PrivateStorage.ensureDirectory(StoragePaths.dataRoot)
+        c.check("native setup fixture starts without a data root", !FileManager.default.fileExists(atPath: StoragePaths.dataRoot.path))
+        let fresh = await SetupAPICore.apply(["provider": ["profile": "openai", "api_key": "synthetic-fresh-key",
+            "model": "fixture-model", "text_only": false, "activate": false]])
+        c.check("first native profile creates checked roots and saves", fresh["ok"] as? Bool == true
+            && ProviderProfiles.isConfigured(.openai) && ProviderProfiles.activeProfile() == .custom)
         let held = try InstanceLease.acquire(label: "Responses configuration test").get()
         let refusal = await SetupAPICore.apply(["provider": ["profile": "custom", "model": "other-model",
             "text_only": false, "protocol": "responses"]])
