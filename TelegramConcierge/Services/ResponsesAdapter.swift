@@ -133,7 +133,7 @@ struct ResponsesAdapter {
 
     static func message(role: String, text: String) -> JSONValue {
         .object(["role": .string(role), "content": .array([
-            .object(["type": .string("input_text"), "text": .string(text)])])])
+            .object(["type": .string(role == "assistant" ? "output_text" : "input_text"), "text": .string(text)])])])
     }
 
     /// Returns nil for invalid/foreign optional metadata. Canonical history then

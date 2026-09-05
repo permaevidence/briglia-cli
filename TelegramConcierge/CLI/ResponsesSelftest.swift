@@ -290,6 +290,18 @@ struct ResponsesSelftest: AsyncParsableCommand {
     }
 
     private func requestChecks(_ c: Checks, root: URL) async throws {
+        // Semantic replay covers Chat Completions history, pruned turns, and
+        // native envelopes invalidated by a model/account switch. OpenAI rejects
+        // input_text in assistant messages even though user/tool inputs use it.
+        for role in ["assistant", "user", "system", "developer"] {
+            let message = ResponsesAdapter.message(role: role, text: "Historical text")
+            let object = message.responsesObject
+            let parts = object?["content"]?.responsesArray
+            c.check("semantic replay text type for \(role)",
+                object?["role"]?.responsesString == role
+                && parts?.first?.responsesObject?["type"]?.responsesString == (role == "assistant" ? "output_text" : "input_text")
+                && parts?.first?.responsesObject?["text"]?.responsesString == "Historical text")
+        }
         for (raw, expected) in [("https://api.openai.com/v1", "https://api.openai.com/v1/responses"),
                                 ("https://EXAMPLE.com/Case/responses///", "https://EXAMPLE.com/Case/responses"),
                                 ("http://127.0.0.1:1234/v1/", "http://127.0.0.1:1234/v1/responses")] {

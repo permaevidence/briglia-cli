@@ -269,6 +269,11 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         server.script([try P2Life.body("Native tool", tool: "read_file", path: file.path, id: "scopeA"), try P2Life.body("Native final", id: "scopeAfinal")])
         let native = try await manager.p2Turn(human: Message(role: .user, content: "Continue with native protocol and read again"))
         let first = try P2Life.input(server.completeRequests.first!)
+        let historicalAssistantParts = first.filter { $0["role"] as? String == "assistant" }
+            .flatMap { $0["content"] as? [[String: Any]] ?? [] }
+        try P2Life.require(historicalAssistantParts.count >= 2
+            && historicalAssistantParts.allSatisfy { $0["type"] as? String == "output_text" },
+            "real chat history replays assistant text as Responses output_text")
         try P2Life.require(await manager.p2Error() == nil && first.allSatisfy { $0["encrypted_content"] == nil && $0["id"] == nil }, "chat to Responses excludes foreign provider identities and ciphertext")
         try P2Life.require(first.filter { $0["call_id"] as? String == mappedID }.count == 2,
             "chat call and result map to one deterministic Responses id")
