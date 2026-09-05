@@ -188,6 +188,9 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         let saved = try await manager.p2Turn(human: Message(role: .user, content: prompt))
         try P2Life.require(await manager.p2Error() == nil, "live main request succeeds")
         guard let final = saved.last, final.responsesReplay != nil else { throw P2Life.Failure("live native replay missing") }
+        try P2Life.require(final.toolInteractions.contains { round in
+            round.assistantMessage.responsesReplay?.entries.contains { ($0.encryptedContent?.isEmpty == false) } == true
+        }, "live tool round persists encrypted reasoning")
         let results = final.toolInteractions.flatMap(\.results)
         try P2Life.require(results.contains { $0.content.contains("P2_TOOL_READ_OK") }, "live text tool succeeds")
         try P2Life.require(results.contains { !$0.fileAttachmentReferences.isEmpty }, "live image tool returned media")

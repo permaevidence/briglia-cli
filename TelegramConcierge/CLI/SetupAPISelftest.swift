@@ -87,7 +87,7 @@ struct SetupAPISelftest: AsyncParsableCommand {
                   setup?["complete"] as? Bool == false && setup?["step_in_progress"] == nil)
             let providers = status["providers"] as? [String: Any]
             let profiles = providers?["profiles"] as? [String: Any]
-            let allUnconfigured = ProviderProfiles.Profile.allCases.allSatisfy {
+            let allUnconfigured = [ProviderProfiles.Profile.opencode, .openrouter, .custom, .local].allSatisfy {
                 (profiles?[$0.rawValue] as? [String: Any])?["configured"] as? Bool == false
             }
             check("virgin status: all four profiles present and unconfigured",

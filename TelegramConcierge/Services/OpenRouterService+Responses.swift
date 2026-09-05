@@ -106,7 +106,7 @@ extension OpenRouterService {
                     try await appendRound(interaction, identity: "\(message.id):\(index)")
                 }
                 if message.toolInteractions.isEmpty, let log = message.compactToolLog, !log.isEmpty {
-                    input.append(ResponsesAdapter.message(role: "system", text: MarkerNeutralizer.escape(log)))
+                    input.append(ResponsesAdapter.message(role: "assistant", text: MarkerNeutralizer.escape(log)))
                 }
                 if let native = ResponsesAdapter.nativeItems(envelope: nativeHistory.contains("\(message.id):final") ? message.responsesReplay : nil,
                     scope: context.responsesScope, text: message.content, calls: []),
@@ -115,8 +115,7 @@ extension OpenRouterService {
                     input.append(contentsOf: native)
                     replayBytes += message.responsesReplay?.byteCount ?? 0
                 } else if !message.content.isEmpty {
-                    let role = message.content.hasPrefix("[TOOL RUN LOG") ? "system" : "assistant"
-                    input.append(ResponsesAdapter.message(role: role, text: MarkerNeutralizer.escape(message.content)))
+                    input.append(ResponsesAdapter.message(role: "assistant", text: MarkerNeutralizer.escape(message.content)))
                 }
             } else {
                 var media: [ContentPart] = [], hints: [String] = []

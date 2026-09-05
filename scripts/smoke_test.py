@@ -779,10 +779,10 @@ def main():
             # so the step totals in its headers differ per platform.
             total_steps = 8 if sys.platform == "darwin" else 9
             # Complete step 1 (custom-endpoint profile, menu option 3,
-            # against the mock server; vision=y; Enter declines "configure
+            # against the mock server; Responses=n, vision=y; Enter declines "configure
             # another provider"), then close stdin at step 2 — the
             # FDA-relaunch shape of interruption.
-            step1 = f"3\nhttp://127.0.0.1:{port}/v1\nmock-model\nsk-mock-main\ny\n\n"
+            step1 = f"3\nhttp://127.0.0.1:{port}/v1\nmock-model\nn\nsk-mock-main\ny\n\n"
             result = subprocess.run([ADA, "setup"], input=step1, capture_output=True,
                                     text=True, timeout=120, env=env)
             interrupted_ok = (result.returncode == 1
