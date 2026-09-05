@@ -4,6 +4,8 @@ Run from the private code checkout:
 
 ```sh
 python3 scripts/chat_lifecycle_baseline_test.py
+python3 scripts/chat_lifecycle_baseline.py --baseline scripts/fixtures/chat-lifecycle/local-darwin-arm64-r2.json
+# Record only from SOURCE, to a new path (never the candidate):
 python3 scripts/chat_lifecycle_baseline.py --save-reference /new/path/reference.json
 ```
 
@@ -17,7 +19,10 @@ storage roots are set before services initialize. No installed binary is changed
 
 The only behavior substitutions are **inputs**: isolated preferences, specific
 request-visible clocks, one subagent session's generated ID, and one context
-structuring operation's UUID. Progress and timeout clocks stay real. The seams
+structuring operation's UUID. Review-2 additionally fixes default Message IDs
+and dates plus persisted usage/session dates, now that their raw bytes are
+observed. These are entropy inputs; no encoder, retry policy or branch is
+replaced. Progress and timeout clocks stay real. The seams
 call the real manager budget/planning/pruning functions, actual main tool loop,
 subagent runner and registry, archive summary builder, media rehydrator, setup
 status and Mind exporter/importer. Scripted responses travel through real HTTP
@@ -64,7 +69,7 @@ Coverage includes:
 - Saved image/PDF references, source-PDF page bounds, missing snapshots, raw
   inbound PDF hints, manager save/reload and old-importer Mind compatibility.
 
-The existing 77-case wire gate remains separate and unchanged. It covers the
+The original 77 wire cases plus 14 review-2 additions remain a separate gate. It covers the
 broader model/provider/cache-control matrix; this lifecycle driver uses a
 synthetic OpenCode-shaped GLM endpoint. Existing full smoke and mid-turn suites
 remain required. These gates record legacy behavior, including imperfect legacy
@@ -74,3 +79,49 @@ The companion app Python sources are copied without edits from public UT commit
 `3b6b8ef8db980599a9b526a95607c3b000c462a7` (0.8.4). Their provenance and hashes are
 in `ut-0.8.4/provenance.json`. Their subprocess function is replaced only in the
 Python test process; no phone, installer, subprocess or network operation runs.
+
+## Review-2 contracts
+
+The complete inventory is **31 observations / 48 HTTP requests**. Three added
+scenarios invoke real `startActiveProcessing` and await its task chain: queued
+carry over a tool round, four HTTP 503 attempts after the tool round, and an
+initial final answer followed by the real queued-user follow-up turn. No drain,
+acknowledgement, restoration or teardown helper is called by these new seams.
+The no-tools scenario enables the follow-up condition without starting a poller;
+no account or reply channel is configured. Assertions inspect canonical ordering,
+queue uniqueness, disk state, guard state, final answers, typed delivery in the
+actual second request, and hostile-prefix neutralization. All retry bodies are
+captured and compared byte-for-byte.
+
+Legacy behavior differs from the review's suggested failure expectation: transport
+failure retains the human and annotated partial work in history, then requeues
+once by ID during teardown. Render-invariant failure strips annotations; the
+separate existing direct guard test covers that contract. P0 records both
+behaviors rather than silently changing production to fit the proposed assertions.
+
+Raw bytes of conversation, usage, pending queue (including its absence), media
+history and the subagent session are base64 observations. Required files must
+exist. The actual ZIP entry inventory, including directories, is sorted only to
+remove filesystem-dependent listing order; new/removed entries fail. Message
+save/reload assertions compare complete encoded values, including tool interactions
+and attachment references, never the incomplete manual `Message ==` operator.
+
+`chat_persistence_contract.py` separately pins model source, including optional
+fields that do not appear in a fixture because they are nil. It conservatively
+hashes Message, ToolModels and HarnessAnnotations files plus the complete usage,
+subagent-session and ToolInteraction declarations. Any change needs independent
+review, including a harmless comment or extraction. This is not a general Swift
+schema parser and does not replace review of new persistence writers/types.
+
+CI passes committed `--baseline` files to both runners. Lifecycle platform
+matching uses OS + architecture plus the full compiler string, not the changing
+kernel/image build. A compiler or SOURCE bump needs a separate reviewed record
+from SOURCE. Per-file UserDefaults isolation evidence remains fail-closed: a P1
+extraction may move counts, but must explain and review it explicitly. Keep old
+seam entry points as thin wrappers; the same test source must compile in both
+release and candidate trees. Review driver/comparator/fixture changes against
+the accepted P0 head and their original `d4767d9` lineage.
+
+The LM Studio addition observes the real local-model estimator/planner. UT
+coverage remains shipped Python-bridge coverage; P2 requires the updated UT app
+to ship and pass a device check before new profile kinds are enabled there.

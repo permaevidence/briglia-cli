@@ -1,0 +1,23 @@
+{
+  "ci_run": 33966440281,
+  "files": {
+    "ci-darwin-arm64-r2.json": {
+      "platform": "darwin-arm64",
+      "sha256": "72c4537505f59673ccc5c9c89887f6df0b10832b333cf0aa9f0950879d04a099",
+      "toolchain": "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)\nTarget: arm64-apple-macosx15.0"
+    },
+    "ci-linux-x86_64-r2.json": {
+      "platform": "linux-x86_64",
+      "sha256": "e25439fdfcb9bb4f8cd814cd1e820c82a4d022567d82d7228d59fb880a06c9a4",
+      "toolchain": "Swift version 6.1.3 (swift-6.1.3-RELEASE)\nTarget: x86_64-unknown-linux-gnu"
+    },
+    "local-darwin-arm64-r2.json": {
+      "platform": "darwin-arm64",
+      "sha256": "a87ac707442aa1913786a9637f35e103b1f464ec4cf6304fb8637387e300eb42",
+      "toolchain": "Apple Swift version 6.3 (swiftlang-6.3.0.123.5 clang-2100.0.123.102)\nTarget: arm64-apple-macosx26.0"
+    }
+  },
+  "note": "All references built from pinned SOURCE. Original 77 wire cases / 26 lifecycle observations and 39 requests matched their previous same-compiler references; only reviewed additions. Local Apple Swift 6.3, CI Apple Swift 6.1.2 and Linux Swift 6.1.3. Never regenerate from the candidate.",
+  "recording_head": "c63a3d769a47052347372827d1f366ad2a9fe2a6",
+  "source": "4dd86133de03b484bed62fb81ce59935b89a7de8"
+}

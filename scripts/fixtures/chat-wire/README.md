@@ -1,7 +1,7 @@
 # Legacy request compatibility gate
 
-P0 remains incomplete. Do not start P1 until the remaining lifecycle/accounting,
-persistence and shipped-client gates in the private progress notes are accepted.
+P0 review-2 safeguards are under verification. Do not start P1 until independent
+review accepts both the wire and lifecycle gates and their frozen references.
 
 The original `darwin-arm64.json` and `linux-aarch64.json` are unchanged historical
 v1 evidence from `d4767d9`: 36 **no-tools** requests, bodies and targets only.
@@ -15,8 +15,8 @@ per build, then compares reference to candidate. No platform is skipped.
 ```sh
 python3 scripts/chat_wire_baseline_test.py
 python3 scripts/chat_wire_baseline.py
-# Add a secondary, reviewed frozen reference for this compiler/platform:
-python3 scripts/chat_wire_baseline.py --baseline scripts/fixtures/chat-wire/darwin-arm64-v2.json
+# Enforce the committed reference for local Apple Swift 6.3:
+python3 scripts/chat_wire_baseline.py --baseline scripts/fixtures/chat-wire/local-darwin-arm64-r2.json
 # Recording ALWAYS builds the pinned source, even after production changes:
 python3 scripts/chat_wire_baseline.py --record /tmp/new-reviewed-reference.json
 ```
@@ -72,8 +72,8 @@ have independent Swift assertions. No affinity value is masked.
 
 The six original model IDs remain: `glm-5.3`, `kimi-k3`, `kimi-k2.7-code`,
 `qwen3.8-max`, `custom-model`, `local-model`. Instrumented builds add actual
-OpenRouter routing for `anthropic/claude-sonnet-4`: 7 models × 11 cases = 77.
-Ordinary selftest builds run 66 cases with no OpenRouter traffic.
+OpenRouter routing for `anthropic/claude-sonnet-4`: 7 models × 13 cases = 91.
+Ordinary selftest builds run 78 cases with no OpenRouter traffic.
 
 | Suffix | Scenario |
 | --- | --- |
@@ -88,6 +88,8 @@ Ordinary selftest builds run 66 cases with no OpenRouter traffic.
 | 8 | Populated main with deferred MCP summary and proxy tools |
 | 9 | Populated main with a current-round, two-message typed batch and attachment path; canonical users last in history |
 | 10 | Populated main with positively matching model AND gateway provenance for historical tool and final reasoning |
+| 11 | Chat profile URL entered as `/v1/responses`; legacy result is `/v1/responses/v1/chat/completions` (OpenRouter's fixed endpoint is unaffected) |
+| 12 | Text-only model + image tool output; missing OCR credentials produce the existing explicit inspect-media placeholder without inline image bytes |
 
 Serialization fixtures do not claim to drive the ConversationManager delivery
 acknowledgement, pruning decisions, usage watermarks or persistence/rehydration.
@@ -109,3 +111,10 @@ fixture directory. Later changes must be justified, reviewed and additive where
 possible, with pinned-source provenance. Never change SOURCE or regenerate from
 a changed candidate merely to make a gate pass. This gate cannot protect against
 a reviewer accepting weakened fixtures or comparison logic.
+
+Review-2 adds suffixes 11–12. The original 77 cases must still match their
+previous frozen references; additions do not authorize changing those bytes.
+CI references are compiler-specific; an image/compiler upgrade fails explicitly
+and requires a reviewed pinned-SOURCE re-record. CI must pass `--baseline` in
+addition to its current reference-versus-candidate comparison. Never re-record
+from the candidate or silently update a file after a comparison failure.
