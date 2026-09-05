@@ -83,6 +83,7 @@ struct Message: Identifiable, Codable, Equatable {
     /// downgrade. nil on messages stored before this field existed
     /// (replayed natively, as before).
     var finalReasoningModel: String?
+    var responsesReplay: ResponsesReplayEnvelope? = nil
 
     // LLM-generated summary of heavy context pruned after this turn (tool
     // calls/results/reasoning, media, or synthetic bodies). Rendered as
@@ -122,7 +123,7 @@ struct Message: Identifiable, Codable, Equatable {
 
     /// Whether this message still carries replayable final-response reasoning.
     var hasFinalReasoningPayload: Bool {
-        finalReasoning != nil || finalReasoningDetails != nil
+        finalReasoning != nil || finalReasoningDetails != nil || responsesReplay != nil
     }
 
     /// Whether this message carries inline media that hasn't been pruned yet.
@@ -249,6 +250,7 @@ struct Message: Identifiable, Codable, Equatable {
     // MARK: - Codable (with backward compatibility)
     
     enum CodingKeys: String, CodingKey {
+        case responsesReplay
         case id, role, content, timestamp
         // New array fields
         case imageFileNames, documentFileNames, imageFileSizes, documentFileSizes
@@ -347,6 +349,7 @@ struct Message: Identifiable, Codable, Equatable {
         compactToolLog = try? container.decodeIfPresent(String.self, forKey: .compactToolLog)
 
         // Final-response reasoning (new fields, default nil for old messages)
+        responsesReplay = try? container.decodeIfPresent(ResponsesReplayEnvelope.self, forKey: .responsesReplay)
         finalReasoning = try? container.decodeIfPresent(JSONValue.self, forKey: .finalReasoning)
         finalReasoningDetails = try? container.decodeIfPresent(JSONValue.self, forKey: .finalReasoningDetails)
         finalReasoningModel = try? container.decodeIfPresent(String.self, forKey: .finalReasoningModel)
@@ -403,6 +406,7 @@ struct Message: Identifiable, Codable, Equatable {
             try container.encode(toolInteractions, forKey: .toolInteractions)
         }
         try container.encodeIfPresent(compactToolLog, forKey: .compactToolLog)
+        try container.encodeIfPresent(responsesReplay, forKey: .responsesReplay)
         try container.encodeIfPresent(finalReasoning, forKey: .finalReasoning)
         try container.encodeIfPresent(finalReasoningDetails, forKey: .finalReasoningDetails)
         try container.encodeIfPresent(finalReasoningModel, forKey: .finalReasoningModel)

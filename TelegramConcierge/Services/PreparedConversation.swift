@@ -36,6 +36,15 @@ struct ProviderExecutionContext {
     let textOnly: Bool
     let anthropicCacheControl: Bool
     let renderPDFAsImages: Bool
+    var wireProtocol: ProviderWireProtocol = .chatCompletions
+    var profileIdentity: String = "legacy"
+    var nativeToolMedia: Bool = true
+    var configurationError: String? = nil
+
+    var responsesScope: ResponsesScope {
+        ResponsesScope(endpoint: (try? ResponsesAdapter.endpoint(endpoint)) ?? endpoint, profile: profileIdentity, model: model,
+            credentialFingerprint: ResponsesReplayEnvelope.hash(Data(("briglia-responses-key-v1:" + affinityKey).utf8)))
+    }
 
     var usingCustomEndpoint: Bool { provider.isCustomEndpoint }
     var providerLabel: String { usingCustomEndpoint ? provider.displayName : "OpenRouter" }

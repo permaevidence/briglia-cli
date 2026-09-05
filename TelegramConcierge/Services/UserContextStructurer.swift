@@ -17,6 +17,7 @@ struct UserContextStructurer {
         var openAICompatibleApiKey: String
         var lmStudioBaseURL: String
         var lmStudioModel: String
+        var wireProtocol: ProviderWireProtocol = .chatCompletions
 
         /// Builds a config from the persisted settings — used by callers that
         /// don't hold the provider fields in local state (onboarding).
@@ -29,7 +30,8 @@ struct UserContextStructurer {
                 openAICompatibleModel: KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) ?? "",
                 openAICompatibleApiKey: KeychainHelper.load(key: KeychainHelper.openAICompatibleApiKeyKey) ?? "",
                 lmStudioBaseURL: KeychainHelper.load(key: KeychainHelper.lmStudioBaseURLKey) ?? "",
-                lmStudioModel: KeychainHelper.load(key: KeychainHelper.lmStudioModelKey) ?? ""
+                lmStudioModel: KeychainHelper.load(key: KeychainHelper.lmStudioModelKey) ?? "",
+                wireProtocol: ProviderProfiles.usesResponses ? .responses : .chatCompletions
             )
         }
     }
@@ -185,6 +187,13 @@ struct UserContextStructurer {
             """
         }
 
+        if config.wireProtocol == .responses {
+            let operationLane = AffinityLane.ephemeral(UUID())
+            let context = ProviderExecutionContext.responsesAPI(baseURL: config.openAICompatibleBaseURL,
+                key: config.openAICompatibleApiKey, model: configuredModel,
+                lane: operationLane, effort: configuredReasoningEffort)
+            return try await ResponsesAuxiliary.text(context: context, messages: [("user", prompt)])
+        }
         let body: [String: Any] = [
             "model": configuredModel,
             "messages": [

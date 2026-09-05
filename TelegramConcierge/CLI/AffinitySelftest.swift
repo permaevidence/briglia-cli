@@ -839,7 +839,8 @@ final class CaptureServer: @unchecked Sendable {
             ? "{\"id\":\"cap\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\(encodedContent)},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}"
             : "{\"error\":{\"message\":\"injected \(status)\"}}")
         let reason = status == 200 ? "OK" : "Service Unavailable"
-        let response = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        let contentType = body.hasPrefix("data:") ? "text/event-stream" : "application/json"
+        let response = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
         let bytes = Data(response.utf8)
         bytes.withUnsafeBytes { raw in
             var offset = 0

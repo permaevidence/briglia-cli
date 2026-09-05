@@ -227,12 +227,19 @@ enum SetupAPICore {
 
         var profiles: [String: Any] = [:]
         for profile in ProviderProfiles.Profile.allCases {
+            if profile == .openai && !ProviderProfiles.isConfigured(profile) { continue }
             var entry: [String: Any] = ["configured": ProviderProfiles.isConfigured(profile)]
             if let model = ProviderProfiles.configuredModel(profile) { entry["model"] = model }
             if let endpoint = ProviderProfiles.configuredEndpoint(profile) { entry["endpoint"] = endpoint }
             if let effort = ProviderProfiles.configuredEffort(profile) { entry["effort"] = effort }
             if let masked = ProviderProfiles.maskedKey(profile) { entry["masked_key"] = masked }
             if let textOnly = ProviderProfiles.textOnly(profile) { entry["text_only"] = textOnly }
+            if ProviderProfiles.wireProtocol(profile) == .responses {
+                entry["protocol"] = "responses"
+                entry["capabilities"] = ["auth": "apiKey", "streaming": true,
+                    "encrypted_reasoning_replay": true,
+                    "native_tool_media": profile != .custom || KeychainHelper.load(key: ProviderProfiles.customNativeMediaKey) != "false"] as [String: Any]
+            }
             profiles[profile.rawValue] = entry
         }
         var providers: [String: Any] = ["profiles": profiles]
@@ -354,6 +361,9 @@ enum SetupAPICore {
                 let model = try require("model")
                 let key = try require("api_key")
                 return verdict(await Probes.chatCompletion(baseURL: base, apiKey: key, model: model))
+            case "responses":
+                let base = nonEmptyString(request["base_url"]) ?? "https://api.openai.com/v1"
+                return verdict(await Probes.responses(baseURL: base, apiKey: try require("api_key"), model: try require("model")))
             case "local":
                 let base = try require("base_url")
                 let model = try require("model")
@@ -618,8 +628,20 @@ enum SetupAPICore {
         guard let raw = nonEmptyString(section["profile"]),
               let profile = ProviderProfiles.Profile(rawValue: raw.lowercased()) else {
             throw APIError(code: "invalid_value",
-                           message: "provider.profile must be opencode|openrouter|custom|local")
+                           message: "provider.profile must be opencode|openrouter|openai|custom|local")
         }
+        // Hold the lease through all synchronous profile mutations. A probe
+        // of daemonRunning alone has a check/write race with daemon startup.
+        let affectsResponses = profile == .openai || section["protocol"] as? String == "responses"
+            || ProviderProfiles.wireProtocol(profile) == .responses || ProviderProfiles.usesResponses
+        var lease: InstanceLease?
+        if affectsResponses {
+            switch InstanceLease.acquire(label: "Responses profile configuration") {
+            case .success(let held): lease = held
+            case .failure: throw APIError(code: "agent_running", message: "Stop Briglia before changing a Responses profile through Setup API.")
+            }
+        }
+        defer { lease?.release() }
         if section["remove"] as? Bool == true {
             try removeProvider(profile)
             return
@@ -635,6 +657,7 @@ enum SetupAPICore {
             switch profile {
             case .opencode: apiKey = nonEmptyString(KeychainHelper.load(key: ProviderProfiles.opencodeApiKeyKey))
             case .openrouter: apiKey = nonEmptyString(KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey))
+            case .openai: apiKey = nonEmptyString(KeychainHelper.load(key: ProviderProfiles.openaiApiKeyKey))
             case .custom: apiKey = nonEmptyString(KeychainHelper.load(key: ProviderProfiles.customApiKeyKey))
             case .local: break
             }
@@ -660,7 +683,7 @@ enum SetupAPICore {
             guard baseURL != nil else {
                 throw APIError(code: "missing_field", message: "provider.base_url is required")
             }
-        case .opencode, .openrouter:
+        case .opencode, .openrouter, .openai:
             baseURL = nil  // fixed endpoints
         }
 
@@ -680,11 +703,26 @@ enum SetupAPICore {
                            : "provider.text_only is required (can the model see images?)")
         }
 
+        let requestedProtocol: ProviderWireProtocol?
+        if let rawProtocol = section["protocol"] {
+            guard let text = rawProtocol as? String, let parsed = ProviderWireProtocol(rawValue: text),
+                  profile == .custom || (profile == .openai && parsed == .responses) else {
+                throw APIError(code: "invalid_value", message: "protocol must be chatCompletions|responses; only custom profiles select a protocol")
+            }
+            requestedProtocol = parsed
+        } else { requestedProtocol = nil }
+        if profile == .openai || requestedProtocol == .responses || ProviderProfiles.wireProtocol(profile) == .responses {
+            if profile == .custom { _ = try ResponsesAdapter.endpoint(baseURL ?? "") }
+        }
+        if let media = section["native_tool_media"], !(media is Bool) || profile != .custom {
+            throw APIError(code: "invalid_value", message: "native_tool_media must be a boolean for a custom Responses profile")
+        }
         let effort: String? = profile == .local ? nil : (nonEmptyString(section["effort"]) ?? "high")
         do {
             try ProviderProfiles.saveProfile(profile, apiKey: profile == .local ? nil : apiKey,
                                              baseURL: baseURL, model: model,
-                                             effort: effort, textOnly: textOnly)
+                                             effort: effort, textOnly: textOnly, wireProtocol: requestedProtocol,
+                                             nativeToolMedia: section["native_tool_media"] as? Bool)
         } catch { throw saveFailed(error) }
 
         // Default mirrors the wizard's activateAfterConfiguring: the first
@@ -714,6 +752,11 @@ enum SetupAPICore {
         }
         var changes: [String: String?] = [:]
         switch profile {
+        case .openai:
+            changes[ProviderProfiles.openaiApiKeyKey] = String?.none
+            changes[ProviderProfiles.openaiModelKey] = String?.none
+            changes[ProviderProfiles.openaiEffortKey] = String?.none
+            changes[ProviderProfiles.openaiTextOnlyKey] = String?.none
         case .opencode:
             changes[ProviderProfiles.opencodeApiKeyKey] = String?.none
             changes[ProviderProfiles.opencodeModelKey] = String?.none
@@ -725,6 +768,8 @@ enum SetupAPICore {
             changes[KeychainHelper.openRouterReasoningEffortKey] = String?.none
             changes[ProviderProfiles.openrouterTextOnlyKey] = String?.none
         case .custom:
+            changes[ProviderProfiles.customProtocolKey] = String?.none
+            changes[ProviderProfiles.customNativeMediaKey] = String?.none
             changes[ProviderProfiles.customBaseURLKey] = String?.none
             changes[ProviderProfiles.customApiKeyKey] = String?.none
             changes[ProviderProfiles.customModelKey] = String?.none

@@ -222,6 +222,7 @@ struct SetupWizard {
                 case .opencode: hint = "OpenCode Go (recommended)"
                 case .openrouter: hint = "OpenRouter (pay-per-token, any model)"
                 case .custom: hint = "Custom OpenAI-compatible endpoint (with API key)"
+                case .openai: hint = "OpenAI Platform API — Responses (separate API billing)"
                 case .local: hint = "Local server — vLLM, Ollama, LM Studio (no key)"
                 }
                 let status: String
@@ -245,6 +246,7 @@ struct SetupWizard {
             case .opencode: saved = await configureOpenCode()
             case .openrouter: saved = await configureOpenRouter()
             case .custom: saved = await configureCustomEndpoint()
+            case .openai: saved = await configureOpenAIResponses()
             case .local: saved = await configureLocalEndpoint()
             }
             if saved { activateAfterConfiguring(profile) }
@@ -339,20 +341,36 @@ struct SetupWizard {
     }
 
     /// Returns true when the profile was saved.
+    private func configureOpenAIResponses() async -> Bool {
+        let model = WizardIO.askNonEmpty("OpenAI model ID")
+        let key = await WizardIO.askSecretValidated("OpenAI Platform API key",
+            current: KeychainHelper.load(key: ProviderProfiles.openaiApiKeyKey),
+            probe: { await Probes.responses(baseURL: "https://api.openai.com/v1", apiKey: $0, model: model) })
+        let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: false)
+        saveProfile(.openai, apiKey: key, baseURL: nil, model: model, effort: nil, textOnly: textOnly)
+        return true
+    }
+
     private func configureCustomEndpoint() async -> Bool {
         let baseURL = WizardIO.askNonEmpty("Base URL (e.g. https://api.example.com/v1)")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let model = WizardIO.askNonEmpty("Model ID (as the endpoint expects it)")
+        let protocolChoice: ProviderWireProtocol = WizardIO.askYesNo(
+            "Use the Responses protocol? (No uses Chat Completions)",
+            default: ProviderProfiles.wireProtocol(.custom) == .responses) ? .responses : .chatCompletions
         print("This provider needs an API key — for a keyless local server use the Local option instead.")
         let key = await WizardIO.askSecretValidated(
             "API key",
             current: KeychainHelper.load(key: ProviderProfiles.customApiKeyKey),
-            probe: { await Probes.chatCompletion(baseURL: baseURL, apiKey: $0, model: model) }
+            probe: { key in
+                if protocolChoice == .responses { return await Probes.responses(baseURL: baseURL, apiKey: key, model: model) }
+                return await Probes.chatCompletion(baseURL: baseURL, apiKey: key, model: model)
+            }
         )
         let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: false)
         if textOnly { printTextOnlyWarning() }
         saveProfile(.custom, apiKey: key, baseURL: baseURL, model: model,
-                    effort: "high", textOnly: textOnly)
+                    effort: "high", textOnly: textOnly, wireProtocol: protocolChoice)
         print("  ✔ Custom endpoint: \(model) at \(baseURL)")
         return true
     }
@@ -398,11 +416,12 @@ struct SetupWizard {
         baseURL: String?,
         model: String,
         effort: String?,
-        textOnly: Bool
+        textOnly: Bool,
+        wireProtocol: ProviderWireProtocol? = nil
     ) {
         do {
             try ProviderProfiles.saveProfile(profile, apiKey: apiKey, baseURL: baseURL,
-                                             model: model, effort: effort, textOnly: textOnly)
+                                             model: model, effort: effort, textOnly: textOnly, wireProtocol: wireProtocol)
         } catch {
             reportFatalSaveFailure(error)
         }

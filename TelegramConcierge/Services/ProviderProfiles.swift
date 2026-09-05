@@ -27,6 +27,7 @@ enum ProviderProfiles {
         case openrouter
         case custom
         case local
+        case openai
 
         var displayName: String {
             switch self {
@@ -34,6 +35,7 @@ enum ProviderProfiles {
             case .openrouter: return "OpenRouter"
             case .custom: return "Custom endpoint"
             case .local: return "Local server"
+            case .openai: return "OpenAI API (Responses)"
             }
         }
     }
@@ -58,6 +60,26 @@ enum ProviderProfiles {
     static let customReasoningEffortKey = "custom_endpoint_reasoning_effort"
     static let customTextOnlyKey = "custom_endpoint_text_only"
 
+    static let openaiApiKeyKey = "openai_platform_api_key"
+    static let openaiModelKey = "openai_platform_model"
+    static let openaiEffortKey = "openai_platform_effort"
+    static let openaiTextOnlyKey = "openai_platform_text_only"
+    static let customProtocolKey = "custom_endpoint_protocol"
+    static let runtimeProtocolKey = "active_provider_protocol"
+    static let customNativeMediaKey = "custom_responses_native_tool_media"
+    static let runtimeNativeMediaKey = "responses_native_tool_media"
+
+    static func wireProtocol(_ profile: Profile) -> ProviderWireProtocol {
+        if profile == .openai { return .responses }
+        if profile == .custom { return value(customProtocolKey).flatMap(ProviderWireProtocol.init(rawValue:)) ?? .chatCompletions }
+        return .chatCompletions
+    }
+
+    static var usesResponses: Bool {
+        KeychainHelper.load(key: KeychainHelper.llmProviderKey) == LLMProvider.openAICompatible.rawValue
+            && value(runtimeProtocolKey).map { $0 != ProviderWireProtocol.chatCompletions.rawValue } == true
+    }
+
     // OpenRouter + local profiles ride their existing native slots
     // (openrouter_api_key/model/reasoning_effort, lmstudio_base_url/model);
     // only the vision/text-only memory is new.
@@ -81,6 +103,7 @@ enum ProviderProfiles {
     /// model, and Ada.app-heritage installs may have a key without a model.
     static func isConfigured(_ profile: Profile) -> Bool {
         switch profile {
+        case .openai: return value(openaiApiKeyKey) != nil && value(openaiModelKey) != nil
         case .opencode:
             return value(opencodeApiKeyKey) != nil && value(opencodeModelKey) != nil
         case .openrouter:
@@ -98,6 +121,7 @@ enum ProviderProfiles {
     /// OpenRouter, which reports its runtime default).
     static func configuredModel(_ profile: Profile) -> String? {
         switch profile {
+        case .openai: return value(openaiModelKey)
         case .opencode: return value(opencodeModelKey)
         case .openrouter:
             guard isConfigured(.openrouter) else { return nil }
@@ -109,6 +133,7 @@ enum ProviderProfiles {
 
     static func configuredEndpoint(_ profile: Profile) -> String? {
         switch profile {
+        case .openai: return isConfigured(.openai) ? "https://api.openai.com/v1" : nil
         case .opencode: return isConfigured(.opencode) ? OpenCodeGo.baseURL : nil
         case .openrouter: return isConfigured(.openrouter) ? "https://openrouter.ai/api/v1" : nil
         case .custom: return value(customBaseURLKey)
@@ -120,6 +145,7 @@ enum ProviderProfiles {
     static func maskedKey(_ profile: Profile) -> String? {
         let raw: String?
         switch profile {
+        case .openai: raw = value(openaiApiKeyKey)
         case .opencode: raw = value(opencodeApiKeyKey)
         case .openrouter: raw = value(KeychainHelper.openRouterApiKeyKey)
         case .custom: raw = value(customApiKeyKey)
@@ -132,6 +158,7 @@ enum ProviderProfiles {
 
     static func configuredEffort(_ profile: Profile) -> String? {
         switch profile {
+        case .openai: return value(openaiEffortKey)
         case .opencode: return value(opencodeReasoningEffortKey)
         case .openrouter: return value(KeychainHelper.openRouterReasoningEffortKey)
         case .custom: return value(customReasoningEffortKey)
@@ -144,6 +171,7 @@ enum ProviderProfiles {
     static func textOnly(_ profile: Profile) -> Bool? {
         let key: String
         switch profile {
+        case .openai: key = openaiTextOnlyKey
         case .opencode: key = opencodeTextOnlyKey
         case .openrouter: key = openrouterTextOnlyKey
         case .custom: key = customTextOnlyKey
@@ -171,13 +199,20 @@ enum ProviderProfiles {
         baseURL: String?,
         model: String,
         effort: String?,
-        textOnly: Bool
+        textOnly: Bool,
+        wireProtocol: ProviderWireProtocol? = nil,
+        nativeToolMedia: Bool? = nil
     ) throws {
         // nil-valued EXPRESSIONS on the right store String?.none (= delete in
         // saveBatch); never assign a literal nil here — that removes the key
         // from the batch instead of recording a deletion.
         var changes: [String: String?] = [:]
         switch profile {
+        case .openai:
+            changes[openaiApiKeyKey] = apiKey
+            changes[openaiModelKey] = model
+            changes[openaiEffortKey] = effort
+            changes[openaiTextOnlyKey] = textOnly ? "true" : "false"
         case .opencode:
             changes[opencodeApiKeyKey] = apiKey
             changes[opencodeModelKey] = model
@@ -189,6 +224,10 @@ enum ProviderProfiles {
             changes[KeychainHelper.openRouterReasoningEffortKey] = effort
             changes[openrouterTextOnlyKey] = textOnly ? "true" : "false"
         case .custom:
+            if let nativeToolMedia { changes[customNativeMediaKey] = nativeToolMedia ? "true" : "false" }
+            if let wireProtocol {
+                changes[customProtocolKey] = wireProtocol == .responses ? wireProtocol.rawValue : String?.none
+            }
             changes[customApiKeyKey] = apiKey
             changes[customBaseURLKey] = baseURL
             changes[customModelKey] = model
@@ -208,6 +247,9 @@ enum ProviderProfiles {
     /// flag, and active-profile marker commit as ONE atomic batch write, so
     /// a storage failure activates nothing — never a half-switch.
     static func activate(_ profile: Profile) throws {
+        if profile == .custom, let raw = value(customProtocolKey), ProviderWireProtocol(rawValue: raw) == nil {
+            throw ResponsesFailure.malformed("unsupported explicit custom protocol")
+        }
         guard isConfigured(profile) else {
             throw ActivationError.notConfigured(profile)
         }
@@ -215,6 +257,12 @@ enum ProviderProfiles {
         // "delete this key" in the batch.
         var changes: [String: String?] = [:]
         switch profile {
+        case .openai:
+            changes[KeychainHelper.openAICompatibleBaseURLKey] = "https://api.openai.com/v1"
+            changes[KeychainHelper.openAICompatibleModelKey] = value(openaiModelKey)!
+            changes[KeychainHelper.openAICompatibleApiKeyKey] = value(openaiApiKeyKey)!
+            changes[KeychainHelper.openAICompatibleReasoningEffortKey] = value(openaiEffortKey)
+            changes[KeychainHelper.llmProviderKey] = LLMProvider.openAICompatible.rawValue
         case .opencode:
             changes[KeychainHelper.openAICompatibleBaseURLKey] = OpenCodeGo.baseURL
             changes[KeychainHelper.openAICompatibleModelKey] = value(opencodeModelKey)!
@@ -239,6 +287,8 @@ enum ProviderProfiles {
         if let profileTextOnly = textOnly(profile) {
             changes[KeychainHelper.textOnlyModelEnabledKey] = profileTextOnly ? "true" : "false"
         }
+        changes[runtimeProtocolKey] = wireProtocol(profile) == .responses ? "responses" : String?.none
+        changes[runtimeNativeMediaKey] = profile == .custom && wireProtocol(profile) == .responses ? value(customNativeMediaKey) : String?.none
         changes[activeProfileKey] = profile.rawValue
         try KeychainHelper.saveBatch(changes)
     }
@@ -274,6 +324,7 @@ enum ProviderProfiles {
         let modelKey: String
         let textOnlyKey: String
         switch profile {
+        case .openai: modelKey = openaiModelKey; textOnlyKey = openaiTextOnlyKey
         case .opencode: modelKey = opencodeModelKey; textOnlyKey = opencodeTextOnlyKey
         case .openrouter: modelKey = KeychainHelper.openRouterModelKey; textOnlyKey = openrouterTextOnlyKey
         case .custom: modelKey = customModelKey; textOnlyKey = customTextOnlyKey
@@ -290,6 +341,7 @@ enum ProviderProfiles {
         guard let profile = activeProfile() else { return }
         let key: String
         switch profile {
+        case .openai: key = openaiEffortKey
         case .opencode: key = opencodeReasoningEffortKey
         case .openrouter: key = KeychainHelper.openRouterReasoningEffortKey
         case .custom: key = customReasoningEffortKey

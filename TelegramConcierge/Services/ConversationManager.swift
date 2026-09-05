@@ -882,6 +882,7 @@ class ConversationManager: ObservableObject {
         let finalReasoningDetails: JSONValue?
         /// Model that produced finalReasoning/-Details (nil when no reasoning).
         var finalReasoningModel: String? = nil
+        var responsesReplay: ResponsesReplayEnvelope? = nil
         let compactToolLog: String?
         let toolInteractions: [ToolInteraction]
         let accessedProjects: [String]?
@@ -2381,6 +2382,21 @@ class ConversationManager: ObservableObject {
         }
     }
 
+    private func clearResponsesMidTurnBatch(_ response: LLMResponse) {
+        let receipt: PreparedRequestReceipt?
+        switch response {
+        case .text(_, _, _, _, _, _, let metadata): receipt = metadata?.receipt
+        case .toolCalls(let assistant, _, _, _, _): receipt = assistant.responsesReceipt
+        }
+        if let batch = inFlightMidTurnBatch, receipt?.deliveryNonces.contains(batch.nonce) == true {
+            inFlightMidTurnBatch = nil
+        }
+    }
+
+    private func persistResponsesSalvage(_ interactions: [ToolInteraction]) throws {
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(interactions), to: turnSalvageFileURL)
+    }
+
     /// Remove every attached annotation from an interaction chain that is
     /// about to be retried or persisted after an aborted render.
     private func stripCurrentTurnAnnotations(in toolInteractions: inout [ToolInteraction]) {
@@ -2863,7 +2879,7 @@ class ConversationManager: ObservableObject {
             if let assistantCompletionTokens = response.measuredAssistantCompletionTokens {
                 lastCompletionTokens = assistantCompletionTokens
             }
-            let assistantMessage = Message(
+            var assistantMessage = Message(
                 role: .assistant,
                 content: finalResponse,
                 downloadedDocumentFileNames: downloadedFilenames,
@@ -2881,11 +2897,13 @@ class ConversationManager: ObservableObject {
                 measuredToolTokens: response.measuredToolTokens,
                 measuredTokens: response.measuredAssistantTokens
             )
+            assistantMessage.responsesReplay = response.responsesReplay
             messages.append(assistantMessage)
             didMutateHistory = true
 
             if didMutateHistory {
                 let saved = saveConversation()
+                if !saved && response.responsesReplay != nil { throw ResponsesFailure.failed("could not save the completed Responses turn; salvage retained") }
                 // Completion-receipt acknowledgement (BASH_V2_PLAN §8.3):
                 // a tool result that observed a bash settlement suppresses
                 // the automatic completion notice ONLY once the turn that
@@ -2978,6 +2996,7 @@ class ConversationManager: ObservableObject {
             // Salvage partial tool interactions from the interrupted turn so
             // the agent can see what it did on the next turn.
             let partialInteractions = activeTurnToolInteractionsByRun.removeValue(forKey: runId) ?? []
+            var salvageSaved = true
             if !partialInteractions.isEmpty {
                 let assistantMessage = Message(
                     role: .assistant,
@@ -2985,10 +3004,12 @@ class ConversationManager: ObservableObject {
                     toolInteractions: partialInteractions
                 )
                 messages.append(assistantMessage)
-                saveConversation()
+                salvageSaved = saveConversation()
                 print("[ConversationManager] Saved \(partialInteractions.count) partial tool interaction(s) from cancelled turn")
             }
-            clearTurnSalvageFile(ifStillOwnedBy: runId)
+            if salvageSaved || !partialInteractions.contains(where: { $0.assistantMessage.responsesReplay != nil }) {
+                clearTurnSalvageFile(ifStillOwnedBy: runId)
+            }
 
             print("[ConversationManager] Active run cancelled")
         } catch {
@@ -3019,7 +3040,8 @@ class ConversationManager: ObservableObject {
             // common cases (rate limit, network, provider outage) without
             // leaking internal stack details.
             var errText = "❌ Something went wrong: \(error.localizedDescription). Send another message to retry."
-            if !partialInteractions.isEmpty {
+            let nativePartial = partialInteractions.contains { $0.assistantMessage.responsesReplay != nil }
+            if !partialInteractions.isEmpty && !nativePartial {
                 errText += " The work done so far (\(partialInteractions.count) operation\(partialInteractions.count == 1 ? "" : "s")) has been saved."
             }
             let errMessage = Message(
@@ -3028,10 +3050,15 @@ class ConversationManager: ObservableObject {
                 toolInteractions: partialInteractions
             )
             messages.append(errMessage)
-            saveConversation()
-            clearTurnSalvageFile(ifStillOwnedBy: runId)
+            let salvageSaved = saveConversation()
+            if salvageSaved || !partialInteractions.contains(where: { $0.assistantMessage.responsesReplay != nil }) {
+                clearTurnSalvageFile(ifStillOwnedBy: runId)
+            }
+            if nativePartial {
+                errText += salvageSaved ? " Completed tool work has been saved." : " Saving conversation failed; the recovery record has been retained."
+            }
             if !partialInteractions.isEmpty {
-                print("[ConversationManager] Saved \(partialInteractions.count) partial tool interaction(s) from failed turn")
+                print("[ConversationManager] Partial tool interactions persisted: \(salvageSaved)")
             }
             do {
                 try await sendText(errText, to: userMessage.originChannel ?? replyAddress)
@@ -4312,6 +4339,11 @@ class ConversationManager: ObservableObject {
             return
         }
 
+        guard activeRunId == nil, activeProcessingTask == nil else {
+            try? await sendText("A turn is running — change /effort when Briglia is idle, or /stop first.")
+            return
+        }
+
         let requested = argument.lowercased()
         if requested == "off", provider == .openAICompatible {
             try? KeychainHelper.delete(key: effortKey)
@@ -4319,7 +4351,7 @@ class ConversationManager: ObservableObject {
             try? await sendText("✅ Reasoning effort cleared — the endpoint's default applies from the next message.")
             return
         }
-        guard Self.validReasoningEfforts.contains(requested) else {
+        guard (Self.validReasoningEfforts + (ProviderProfiles.usesResponses ? ["max", "ultra"] : [])).contains(requested) else {
             try? await sendText("Unknown effort \"\(argument)\" — use minimal, low, medium, high or xhigh.")
             return
         }
@@ -5079,6 +5111,12 @@ class ConversationManager: ObservableObject {
         salvageRunId: UUID? = nil
     ) async throws -> ToolAwareResponse {
         try Task.checkCancellation()
+        let snapshot = await openRouterService.executionContext(modelOverride: nil, providerOverride: nil,
+            reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
+        let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
+        if responsesExecution != nil && !saveConversation() {
+            throw ResponsesFailure.failed("cannot persist canonical history before Responses dispatch")
+        }
         defer {
             // File descriptions are now created at prune time from persisted
             // message/tool attachment state, not from this transient byte queue.
@@ -5246,7 +5284,7 @@ class ConversationManager: ObservableObject {
             totalChunkCount: totalChunkCount,
             turnStartDate: prePruneSystemPromptDate,
             tools: initialToolsForRound,
-            deferredMCPSummaries: initialDeferredSummaries
+            deferredMCPSummaries: initialDeferredSummaries, execution: responsesExecution
         )
         if didPrune {
             refreshSystemPromptTimestamp()
@@ -5290,7 +5328,7 @@ class ConversationManager: ObservableObject {
             set {
                 if let salvageRunId {
                     activeTurnToolInteractionsByRun[salvageRunId] = newValue
-                    persistTurnSalvage(newValue)
+                    if responsesExecution == nil { persistTurnSalvage(newValue) }
                 } else {
                     localToolInteractions = newValue
                 }
@@ -5390,11 +5428,12 @@ class ConversationManager: ObservableObject {
                     currentUserMessageId: currentUserMessageId,
                     turnStartDate: systemPromptDate,
                     deferredMCPSummaries: deferredSummaries.isEmpty ? nil : deferredSummaries,
-                    lane: .main
+                    execution: responsesExecution, lane: .main
                 )
                 // The request was sent — but the guard stands down only if it
                 // actually carried the in-flight annotation (nonce-checked).
-                clearInFlightMidTurnBatchIfCarried(by: toolInteractions.isEmpty ? nil : toolInteractions)
+                if responsesExecution != nil { clearResponsesMidTurnBatch(response) }
+                else { clearInFlightMidTurnBatchIfCarried(by: toolInteractions.isEmpty ? nil : toolInteractions) }
             } catch let renderError as HarnessAnnotationRenderError {
                 // Request construction aborted BEFORE network transmission
                 // (MIDTURN_NONCE_PLAN §8 step 13): fail closed — requeue the
@@ -5415,7 +5454,7 @@ class ConversationManager: ObservableObject {
             }
             
             switch response {
-            case .text(let content, let reasoning, let reasoningDetails, let promptTokens, let completionTokens, _):
+            case .text(let content, let reasoning, let reasoningDetails, let promptTokens, let completionTokens, _, let native):
                 // LLM decided to respond with text - we're done
                 if let tokens = promptTokens {
                     lastPromptTokens = tokens
@@ -5446,6 +5485,7 @@ class ConversationManager: ObservableObject {
                     finalReasoning: reasoning,
                     finalReasoningDetails: reasoningDetails,
                     finalReasoningModel: reasoningModel,
+                    responsesReplay: native?.envelope,
                     compactToolLog: buildCompactToolExecutionLog(from: toolInteractions),
                     toolInteractions: toolInteractions,
                     accessedProjects: accessedProjects,
@@ -5543,6 +5583,14 @@ class ConversationManager: ObservableObject {
                 
                 // Execute available tools only. Return explicit errors for blocked/unavailable tool calls.
                 // Then reorder results to match the assistant's tool call order for deterministic follow-up prompts.
+                if responsesExecution != nil {
+                    let uncertain = ToolInteraction(assistantMessage: assistantMessage, results: calls.map {
+                        ToolResultMessage(toolCallId: $0.id, content: "[Interrupted tool intent: outcome unknown. This call was not automatically rerun; inspect external state before repeating it.]")
+                    })
+                    let pending = toolInteractions + [uncertain]
+                    try persistResponsesSalvage(pending)
+                    toolInteractions = pending
+                }
                 var toolResults: [ToolResultMessage] = []
                 if !executableCalls.isEmpty {
                     let executedResults = try await toolExecutor.executeParallel(executableCalls)
@@ -5637,7 +5685,12 @@ class ConversationManager: ObservableObject {
                     assistantMessage: assistantMessage,
                     results: orderedToolResults
                 )
-                toolInteractions.append(interaction)
+                if responsesExecution != nil {
+                    var completed = toolInteractions
+                    completed[completed.count - 1] = interaction
+                    try persistResponsesSalvage(completed)
+                    toolInteractions = completed
+                } else { toolInteractions.append(interaction) }
 
                 // Mid-loop: prune stored tool interactions from older turns if context is growing too large
                 let midLoopResult = await pruneStoredToolInteractionsMidLoop(
@@ -5650,7 +5703,7 @@ class ConversationManager: ObservableObject {
                     currentUserMessageId: currentUserMessageId,
                     turnStartDate: systemPromptDate,
                     tools: toolsForRound,
-                    deferredMCPSummaries: deferredSummaries
+                    deferredMCPSummaries: deferredSummaries, execution: responsesExecution
                 )
                 if midLoopResult == .pruned {
                     // Cache is already invalidated by the prune — take the opportunity
@@ -5773,14 +5826,15 @@ class ConversationManager: ObservableObject {
                     turnStartDate: systemPromptDate,
                     tailSystemMessage: tail,
                     deferredMCPSummaries: lastDeferredSummaries.isEmpty ? nil : lastDeferredSummaries,
-                    lane: .main
+                    execution: responsesExecution, lane: .main
                 )
                 // Carried-check matters most here: an exhaustion path that
                 // discarded the annotation's interaction reaches this
                 // force-finish with finalForceInteractions lacking the
                 // annotation — the guard must stay armed for teardown
                 // recovery instead of being cleared by this success.
-                clearInFlightMidTurnBatchIfCarried(by: finalForceInteractions)
+                if responsesExecution != nil { clearResponsesMidTurnBatch(response) }
+                else { clearInFlightMidTurnBatchIfCarried(by: finalForceInteractions) }
             } catch let renderError as HarnessAnnotationRenderError {
                 // Fail closed before network transmission: requeue the batch
                 // and strip the undeliverable annotation from BOTH the retry
@@ -5815,7 +5869,7 @@ class ConversationManager: ObservableObject {
         let finalPromptTokens: Int?
         let finalCompTokens: Int?
         switch finalResponse {
-        case .text(_, _, _, let pt, let ct, _):
+        case .text(_, _, _, let pt, let ct, _, _):
             finalPromptTokens = pt
             finalCompTokens = ct
         case .toolCalls(_, _, let pt, let ct, _):
@@ -5846,7 +5900,7 @@ class ConversationManager: ObservableObject {
         }()
 
         switch finalResponse {
-        case .text(let content, let reasoning, let reasoningDetails, _, _, _):
+        case .text(let content, let reasoning, let reasoningDetails, _, _, _, let native):
             let reasoningModel = (reasoning != nil || reasoningDetails != nil)
                 ? await openRouterService.activeModelIdentifier() : nil
             return ToolAwareResponse(
@@ -5854,6 +5908,7 @@ class ConversationManager: ObservableObject {
                 finalReasoning: reasoning,
                 finalReasoningDetails: reasoningDetails,
                 finalReasoningModel: reasoningModel,
+                    responsesReplay: native?.envelope,
                 compactToolLog: buildCompactToolExecutionLog(from: toolInteractions),
                 toolInteractions: toolInteractions,
                 accessedProjects: accessedProjects,
@@ -5958,7 +6013,7 @@ class ConversationManager: ObservableObject {
     
     private func spendUSD(from response: LLMResponse) -> Double? {
         switch response {
-        case .text(_, _, _, _, _, let spendUSD):
+        case .text(_, _, _, _, _, let spendUSD, _):
             return spendUSD
         case .toolCalls(_, _, _, _, let spendUSD):
             return spendUSD
@@ -6554,6 +6609,7 @@ class ConversationManager: ObservableObject {
                 targetMessages[index].finalReasoning = nil
                 targetMessages[index].finalReasoningDetails = nil
                 targetMessages[index].finalReasoningModel = nil
+                targetMessages[index].responsesReplay = nil
                 targetMessages[index].measuredToolTokens = nil
                 if let m = targetMessages[index].measuredTokens {
                     targetMessages[index].measuredTokens = max(m - savedTokens, 0)
@@ -6640,7 +6696,8 @@ class ConversationManager: ObservableObject {
         totalChunkCount: Int,
         currentUserMessageId: UUID?,
         turnStartDate: Date,
-        deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]
+        deferredMCPSummaries: [(name: String, description: String, toolCount: Int)],
+        execution: ProviderExecutionContext? = nil
     ) async -> String? {
         guard !plan.isEmpty || !compressedIndices.isEmpty else { return nil }
 
@@ -6669,6 +6726,11 @@ class ConversationManager: ObservableObject {
         [END PRUNE SUMMARY REQUEST]
         """
 
+        let selected: ProviderExecutionContext
+        if let execution { selected = execution }
+        else { selected = await openRouterService.executionContext(modelOverride: nil,
+            providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main) }
+        let summaryExecution = selected.wireProtocol == .responses ? selected : nil
         let summaryStart = Date()
         DebugTelemetry.log(
             .info,
@@ -6681,7 +6743,7 @@ class ConversationManager: ObservableObject {
                 messages: sourceMessages,
                 imagesDirectory: imagesDirectory,
                 documentsDirectory: documentsDirectory,
-                tools: tools,
+                tools: summaryExecution == nil ? tools : [],
                 toolResultMessages: currentTurnInteractions,
                 calendarContext: calendarContext,
                 emailContext: emailContext,
@@ -6691,10 +6753,10 @@ class ConversationManager: ObservableObject {
                 turnStartDate: turnStartDate,
                 tailUserMessage: tail,
                 deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
-                lane: .main
+                execution: summaryExecution, lane: .main
             )
             switch response {
-            case .text(let content, _, _, _, _, _):
+            case .text(let content, _, _, _, _, _, _):
                 let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
                 DebugTelemetry.log(
                     .info,
@@ -6726,7 +6788,7 @@ class ConversationManager: ObservableObject {
                             messages: sourceMessages,
                             imagesDirectory: imagesDirectory,
                             documentsDirectory: documentsDirectory,
-                            tools: tools,
+                            tools: summaryExecution == nil ? tools : [],
                             toolResultMessages: retryInteractions,
                             calendarContext: calendarContext,
                             emailContext: emailContext,
@@ -6736,10 +6798,10 @@ class ConversationManager: ObservableObject {
                             turnStartDate: turnStartDate,
                             tailUserMessage: retryTail,
                             deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
-                            lane: .main
+                            execution: summaryExecution, lane: .main
                         )
                         switch retryResponse {
-                        case .text(let content, _, _, _, _, _):
+                        case .text(let content, _, _, _, _, _, _):
                             let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
                             DebugTelemetry.log(
                                 .info,
@@ -6842,7 +6904,8 @@ class ConversationManager: ObservableObject {
         totalChunkCount: Int,
         turnStartDate: Date,
         tools: [ToolDefinition],
-        deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]
+        deferredMCPSummaries: [(name: String, description: String, toolCount: Int)],
+        execution: ProviderExecutionContext? = nil
     ) async -> Bool {
         let maxTokens = configuredMaxContextTokens()
         let targetTokens = configuredTargetContextTokens()
@@ -6931,7 +6994,7 @@ class ConversationManager: ObservableObject {
             totalChunkCount: totalChunkCount,
             currentUserMessageId: currentUserMessageId,
             turnStartDate: turnStartDate,
-            deferredMCPSummaries: deferredMCPSummaries
+            deferredMCPSummaries: deferredMCPSummaries, execution: execution
         ),
            let anchor = pruneSummaryAnchorIndex(plan: plan, compressedIndices: compressedIndices, messageCount: messages.count) {
             appendPrunedContextSummary(summary, toMessageAt: anchor)
@@ -6999,7 +7062,8 @@ class ConversationManager: ObservableObject {
         currentUserMessageId: UUID?,
         turnStartDate: Date,
         tools: [ToolDefinition],
-        deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]
+        deferredMCPSummaries: [(name: String, description: String, toolCount: Int)],
+        execution: ProviderExecutionContext? = nil
     ) async -> MidLoopPruneResult {
         let maxTokens = configuredMaxContextTokens()
         let targetTokens = configuredTargetContextTokens()
@@ -7081,7 +7145,7 @@ class ConversationManager: ObservableObject {
             totalChunkCount: totalChunkCount,
             currentUserMessageId: currentUserMessageId,
             turnStartDate: turnStartDate,
-            deferredMCPSummaries: deferredMCPSummaries
+            deferredMCPSummaries: deferredMCPSummaries, execution: execution
         ),
            let anchor = pruneSummaryAnchorIndex(plan: plan, compressedIndices: compressedIndices, messageCount: messagesForLLM.count) {
             appendPrunedContextSummary(summary, toMessageAt: anchor)
@@ -7135,6 +7199,7 @@ class ConversationManager: ObservableObject {
                     messages[i].finalReasoning = nil
                     messages[i].finalReasoningDetails = nil
                     messages[i].finalReasoningModel = nil
+                    messages[i].responsesReplay = nil
                     messages[i].measuredToolTokens = nil
                     messages[i].measuredTokens = messagesForLLM[i].measuredTokens
                 }
@@ -9099,9 +9164,10 @@ class ConversationManager: ObservableObject {
     /// produce, so the next turn's prompt replays the completed rounds.
     private func recoverInterruptedTurnSalvageIfNeeded() {
         guard let data = try? Data(contentsOf: turnSalvageFileURL) else { return }
-        clearTurnSalvageFile()
         guard let interactions = try? JSONDecoder().decode([ToolInteraction].self, from: data),
               !interactions.isEmpty else { return }
+        let native = interactions.contains { $0.assistantMessage.responsesReplay != nil }
+        if !native { clearTurnSalvageFile() }
         // A crash in the window between saveConversation() and
         // clearTurnSalvageFile() leaves a file whose content already reached
         // history on the turn's final message — re-appending it would
@@ -9110,6 +9176,7 @@ class ConversationManager: ObservableObject {
         let recoveredCallIds = interactions.flatMap { $0.assistantMessage.toolCalls.map(\.id) }
         if let last = messages.last,
            last.toolInteractions.flatMap({ $0.assistantMessage.toolCalls.map(\.id) }) == recoveredCallIds {
+            if native && saveConversation() { clearTurnSalvageFile() }
             print("[ConversationManager] Turn salvage already present in history; skipping recovery")
             return
         }
@@ -9119,7 +9186,8 @@ class ConversationManager: ObservableObject {
             toolInteractions: interactions
         )
         messages.append(recovered)
-        saveConversation()
+        let recoveredSaved = saveConversation()
+        if native && recoveredSaved { clearTurnSalvageFile() }
         print("[ConversationManager] Recovered \(interactions.count) tool interaction(s) from a turn interrupted by app termination")
     }
 

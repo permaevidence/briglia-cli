@@ -52,6 +52,7 @@ enum CredentialCatalog {
         Entry(key: KeychainHelper.openAICompatibleApiKeyKey, treatment: .visible),
         Entry(key: ProviderProfiles.opencodeApiKeyKey, treatment: .visible),
         Entry(key: ProviderProfiles.customApiKeyKey, treatment: .visible),
+        Entry(key: ProviderProfiles.openaiApiKeyKey, treatment: .visible),
 
         // Web search / extraction
         Entry(key: KeychainHelper.serperApiKeyKey, treatment: .visible),
@@ -125,6 +126,14 @@ enum CredentialCatalog {
 
         // Provider profiles
         Entry(key: ProviderProfiles.activeProfileKey, treatment: .notSecret),
+        Entry(key: ProviderProfiles.openaiModelKey, treatment: .notSecret),
+        Entry(key: ProviderProfiles.openaiEffortKey, treatment: .notSecret),
+        Entry(key: ProviderProfiles.openaiTextOnlyKey, treatment: .notSecret),
+        Entry(key: ProviderProfiles.customProtocolKey, treatment: .notSecret),
+        Entry(key: ProviderProfiles.runtimeProtocolKey, treatment: .notSecret),
+        Entry(key: ProviderProfiles.customNativeMediaKey, treatment: .notSecret),
+        Entry(key: ProviderProfiles.runtimeNativeMediaKey, treatment: .notSecret),
+
         Entry(key: ProviderProfiles.opencodeModelKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.opencodeReasoningEffortKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.opencodeTextOnlyKey, treatment: .notSecret),

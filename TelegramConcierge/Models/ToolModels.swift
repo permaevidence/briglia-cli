@@ -594,7 +594,7 @@ struct WebSearchResult: Codable {
 // MARK: - LLM Response Types
 
 enum LLMResponse {
-    case text(String, reasoning: JSONValue?, reasoningDetails: JSONValue?, promptTokens: Int?, completionTokens: Int?, spendUSD: Double?)
+    case text(String, reasoning: JSONValue?, reasoningDetails: JSONValue?, promptTokens: Int?, completionTokens: Int?, spendUSD: Double?, responses: ResponsesRoundMetadata? = nil)
     case toolCalls(assistantMessage: AssistantToolCallMessage, calls: [ToolCall], promptTokens: Int?, completionTokens: Int?, spendUSD: Double?)
 }
 
@@ -610,6 +610,9 @@ struct AssistantToolCallMessage: Codable {
     /// of feeding it to a different model in a provider-native field.
     /// nil on messages stored before this field existed.
     let producedByModel: String?
+    var responsesReplay: ResponsesReplayEnvelope? = nil
+    // Transient: receipt proves which typed deliveries were actually encoded.
+    var responsesReceipt: PreparedRequestReceipt? = nil
 
     enum CodingKeys: String, CodingKey {
         case role
@@ -618,6 +621,18 @@ struct AssistantToolCallMessage: Codable {
         case reasoning
         case reasoningDetails = "reasoning_details"
         case producedByModel = "produced_by_model"
+        case responsesReplay
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        role = try c.decode(String.self, forKey: .role)
+        content = try c.decodeIfPresent(String.self, forKey: .content)
+        toolCalls = try c.decode([ToolCall].self, forKey: .toolCalls)
+        reasoning = try c.decodeIfPresent(JSONValue.self, forKey: .reasoning)
+        reasoningDetails = try c.decodeIfPresent(JSONValue.self, forKey: .reasoningDetails)
+        producedByModel = try c.decodeIfPresent(String.self, forKey: .producedByModel)
+        responsesReplay = try? c.decodeIfPresent(ResponsesReplayEnvelope.self, forKey: .responsesReplay)
     }
 
     init(content: String?, toolCalls: [ToolCall], reasoning: JSONValue? = nil, reasoningDetails: JSONValue? = nil, producedByModel: String? = nil) {

@@ -12,6 +12,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / 'scripts/fixtures/chat-lifecycle/persistence-contract.json'
+P2_MANIFEST = ROOT / 'scripts/fixtures/chat-lifecycle/responses-persistence-contract.json'
 FILES = ['TelegramConcierge/Models/Message.swift', 'TelegramConcierge/Models/ToolModels.swift',
          'TelegramConcierge/Services/HarnessAnnotations.swift']
 REGIONS = {
@@ -42,6 +43,13 @@ def verify(root=ROOT):
     if frozen['source'] != SOURCE:
         raise RuntimeError('Persistence contract SOURCE changed: independent rebaseline required')
     current = digest(lambda path: (root / path).read_bytes())
+    # P0 remains immutable. P2's additive optional fields have a separate exact
+    # candidate manifest, reviewed with the P2 implementation, never a rewritten
+    # baseline. Raw no-Responses fixture bytes must still match the old binary.
+    if current != frozen['sha256'] and P2_MANIFEST.exists():
+        additive = json.loads(P2_MANIFEST.read_text())
+        if additive.get('source') == SOURCE and current == additive.get('sha256'):
+            return
     if current != frozen['sha256']:
         changed = [k for k in current if current[k] != frozen['sha256'].get(k)]
         raise RuntimeError('Persisted model contract changed (nil fields count): ' + ', '.join(changed))

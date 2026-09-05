@@ -296,6 +296,16 @@ actor SubagentRunner {
         var compactionsUsed = 0
 
         // Eager compaction on resume. Sessions normally stay under the budget
+        let snapshot = await openRouterService.executionContext(modelOverride: effectiveModelOverride,
+            providerOverride: effectiveProviderOverride, reasoningEffortOverride: effectiveReasoningOverride,
+            textOnlyOverride: effectiveTextOnlyOverride, lane: .subagent(resolvedSessionId))
+        let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
+        if responsesExecution != nil,
+           !(await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: priorToolInteractions)) {
+            return RunResult(sessionId: resolvedSessionId, isNewSession: isNew, finalMessage: "",
+                turnsUsed: 0, toolsCalled: [], filesTouched: [], spendUSD: 0,
+                error: "Cannot persist subagent history before Responses dispatch.", sessionPersisted: false)
+        }
         // (mid-run compaction bounds them before they are persisted), but a
         // lowered budget, a smaller-window model, or a legacy session from
         // before mid-run compaction existed can still arrive oversized.
@@ -312,7 +322,7 @@ actor SubagentRunner {
                providerOverride: effectiveProviderOverride,
                reasoningEffortOverride: effectiveReasoningOverride,
                textOnlyOverride: effectiveTextOnlyOverride,
-           lane: .subagent(resolvedSessionId)
+           execution: responsesExecution, lane: .subagent(resolvedSessionId)
 ) {
             messagesForLLM = compacted.messages
             priorToolInteractions = compacted.interactions
@@ -336,6 +346,7 @@ actor SubagentRunner {
         var turnsUsed = 0
         var runError: String? = nil
         var finalText: String = ""
+        var finalReplay: ResponsesReplayEnvelope? = nil
 
         let maxTurns = AgentTurnOverrides.override(forAgent: subagentType.name)
             ?? subagentType.defaultMaxTurns
@@ -364,7 +375,7 @@ actor SubagentRunner {
                        providerOverride: effectiveProviderOverride,
                        reasoningEffortOverride: effectiveReasoningOverride,
                        textOnlyOverride: effectiveTextOnlyOverride,
-                   lane: .subagent(resolvedSessionId)
+                   execution: responsesExecution, lane: .subagent(resolvedSessionId)
 ) {
                     messagesForLLM = compacted.messages
                     toolInteractions = compacted.interactions
@@ -404,15 +415,16 @@ actor SubagentRunner {
                     providerOverride: effectiveProviderOverride,
                     reasoningEffortOverride: effectiveReasoningOverride,
                     textOnlyOverride: effectiveTextOnlyOverride,
-                    lane: .subagent(resolvedSessionId)
+                    execution: responsesExecution, lane: .subagent(resolvedSessionId)
                 )
                 markProgress()  // LLM responded — subagent is alive
 
                 switch response {
-                case .text(let content, _, _, let promptTk, _, let spend):
+                case .text(let content, _, _, let promptTk, _, let spend, let native):
                     if let spend { totalSpendUSD += spend }
                     if let pt = promptTk { lastPromptTokens = pt }
                     finalText = content
+                    finalReplay = native?.envelope
                     break loop
 
                 case .toolCalls(let assistantMessage, let calls, let promptTk, _, let spend):
@@ -451,15 +463,16 @@ actor SubagentRunner {
                                 providerOverride: effectiveProviderOverride,
                                 reasoningEffortOverride: effectiveReasoningOverride,
                                 textOnlyOverride: effectiveTextOnlyOverride,
-                                lane: .subagent(resolvedSessionId)
+                                execution: responsesExecution, lane: .subagent(resolvedSessionId)
                             )
                             markProgress()
 
                             switch retryResponse {
-                            case .text(let content, _, _, let retryPromptTk, _, let retrySpend):
+                            case .text(let content, _, _, let retryPromptTk, _, let retrySpend, let native):
                                 if let retrySpend { totalSpendUSD += retrySpend }
                                 if let pt = retryPromptTk { lastPromptTokens = pt }
                                 finalText = content
+                                finalReplay = native?.envelope
                                 break loop
                             case .toolCalls(let retryAssistantMessage, let retryCalls, let retryPromptTk, _, let retrySpend):
                                 if let retrySpend { totalSpendUSD += retrySpend }
@@ -499,6 +512,15 @@ actor SubagentRunner {
                         }
                     }
 
+                    if responsesExecution != nil {
+                        let pending = toolInteractions + [ToolInteraction(assistantMessage: assistantMessage,
+                            results: calls.map { ToolResultMessage(toolCallId: $0.id,
+                                content: "[Interrupted tool intent: outcome unknown. Inspect external state before repeating this call.]") })]
+                        guard await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: pending) else {
+                            throw ResponsesFailure.failed("cannot persist subagent tool intent")
+                        }
+                        toolInteractions = pending
+                    }
                     var toolResults: [ToolResultMessage] = []
                     if !executableCalls.isEmpty {
                         let executed = try await executeWithTimeout(executableCalls, using: toolExecutor)
@@ -520,10 +542,13 @@ actor SubagentRunner {
                     }
                     if !remaining.isEmpty { ordered.append(contentsOf: remaining) }
 
-                    toolInteractions.append(ToolInteraction(
-                        assistantMessage: assistantMessage,
-                        results: ordered
-                    ))
+                    let completed = ToolInteraction(assistantMessage: assistantMessage, results: ordered)
+                    if responsesExecution != nil {
+                        toolInteractions[toolInteractions.count - 1] = completed
+                        guard await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: toolInteractions) else {
+                            throw ResponsesFailure.failed("cannot persist subagent tool results")
+                        }
+                    } else { toolInteractions.append(completed) }
 
                     // Pre-flight budget check: if the new interaction pushed the
                     // context over the threshold, compact FIRST — the result the
@@ -549,7 +574,7 @@ actor SubagentRunner {
                                    providerOverride: effectiveProviderOverride,
                                    reasoningEffortOverride: effectiveReasoningOverride,
                                    textOnlyOverride: effectiveTextOnlyOverride,
-                               lane: .subagent(resolvedSessionId)
+                               execution: responsesExecution, lane: .subagent(resolvedSessionId)
 ),
                                compacted.estimatedTokens < turnTokenBudget {
                                 messagesForLLM = compacted.messages
@@ -617,15 +642,16 @@ actor SubagentRunner {
                         providerOverride: effectiveProviderOverride,
                         reasoningEffortOverride: effectiveReasoningOverride,
                         textOnlyOverride: effectiveTextOnlyOverride,
-                        lane: .subagent(resolvedSessionId)
+                        execution: responsesExecution, lane: .subagent(resolvedSessionId)
                     )
                     markProgress()
 
                     switch forceResponse {
-                    case .text(let content, _, _, let promptTk, _, let spend):
+                    case .text(let content, _, _, let promptTk, _, let spend, let native):
                         if let spend { totalSpendUSD += spend }
                         if let pt = promptTk { lastPromptTokens = pt }
                         finalText = content
+                        finalReplay = native?.envelope
                         break
                     case .toolCalls(let assistantMessage, let calls, let promptTk, _, let spend):
                         // Tools remain available for prompt-cache stability, so a model
@@ -658,14 +684,21 @@ actor SubagentRunner {
 
         // 10. Commit run state to the session registry so the session is resumable.
         let newInteractions = Array(toolInteractions.dropFirst(priorToolInteractions.count))
-        let sessionPersisted = await registry.commitRun(
+        var canCommit = true
+        if responsesExecution != nil {
+            canCommit = await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: toolInteractions)
+            if !canCommit { runError = "Cannot persist completed Responses subagent state; prior recovery checkpoint retained." }
+        }
+        let sessionPersisted: Bool
+        if canCommit { sessionPersisted = await registry.commitRun(
             sessionId: resolvedSessionId,
             additionalTurns: turnsUsed,
             additionalSpend: totalSpendUSD,
             newToolsCalled: toolsCalledOrdered,
-            newToolInteractions: newInteractions,
-            finalAssistantText: finalText.isEmpty ? nil : finalText
-        )
+            newToolInteractions: responsesExecution == nil ? newInteractions : [],
+            finalAssistantText: finalText.isEmpty ? nil : finalText,
+            responsesReplay: finalReplay, responsesMode: responsesExecution != nil
+        ) } else { sessionPersisted = false }
 
         // Report the CONCRETE model for inherit-routed runs, not just the
         // route name — this is where an unconfigured frontmatter lane that
@@ -733,6 +766,7 @@ actor SubagentRunner {
         providerOverride: [String]?,
         reasoningEffortOverride: String?,
         textOnlyOverride: Bool?,
+        execution: ProviderExecutionContext? = nil,
         lane: AffinityLane
     ) async -> CompactionOutcome? {
         var keptMessages = messages
@@ -766,7 +800,7 @@ actor SubagentRunner {
             providerOverride: providerOverride,
             reasoningEffortOverride: reasoningEffortOverride,
             textOnlyOverride: textOnlyOverride,
-            lane: lane
+            execution: execution, lane: lane
         ) else { return nil }
 
         let summaryMsg = Message(role: .user, content: summary, timestamp: Date(timeIntervalSince1970: 0))
@@ -804,6 +838,7 @@ actor SubagentRunner {
         providerOverride: [String]?,
         reasoningEffortOverride: String?,
         textOnlyOverride: Bool?,
+        execution: ProviderExecutionContext? = nil,
         lane: AffinityLane
     ) async -> String? {
         // Build a text representation of the evicted content.
@@ -870,11 +905,11 @@ actor SubagentRunner {
                     providerOverride: providerOverride,
                     reasoningEffortOverride: reasoningEffortOverride,
                     textOnlyOverride: textOnlyOverride,
-                    lane: lane
+                    execution: execution, lane: lane
                 )
 
                 switch response {
-                case .text(let content, _, _, _, _, _):
+                case .text(let content, _, _, _, _, _, _):
                     return "[SESSION HISTORY SUMMARY — Earlier work in this session was summarized to free context space. Details below are from the evicted portion.]\n\n\(content)"
                 case .toolCalls(let assistantMessage, let calls, _, _, _):
                     refusalInteractions.append(disabledToolInteraction(

@@ -148,6 +148,16 @@ actor SubagentSessionRegistry {
         persist(session)
     }
 
+    /// Persist the full canonical interaction list before dispatch/continuation.
+    /// The intent has explicit uncertain results so crash recovery never reruns it.
+    func checkpointResponses(sessionId: String, interactions: [ToolInteraction]) -> Bool {
+        guard var session = sessions[sessionId] else { return false }
+        session.toolInteractions = interactions
+        guard persist(session) else { return false }
+        sessions[sessionId] = session
+        return true
+    }
+
     /// Update session after a run completes. Returns whether the session —
     /// including the run's final assistant text (the triage verdict record)
     /// — actually reached disk: SKIP acknowledgments are built on this
@@ -160,7 +170,9 @@ actor SubagentSessionRegistry {
         additionalSpend: Double,
         newToolsCalled: [String],
         newToolInteractions: [ToolInteraction],
-        finalAssistantText: String?
+        finalAssistantText: String?,
+        responsesReplay: ResponsesReplayEnvelope? = nil,
+        responsesMode: Bool = false
     ) -> Bool {
         guard var session = sessions[sessionId] else { return false }
         session.totalTurns += additionalTurns
@@ -168,6 +180,19 @@ actor SubagentSessionRegistry {
         session.lastUsed = Date()
         session.lastAssistantText = finalAssistantText
         session.toolInteractions.append(contentsOf: newToolInteractions)
+        if responsesMode {
+            // Completed native turns own their interactions in chronological
+            // canonical Messages. The separate list is only this run's pending
+            // checkpoint, so resume cannot move old calls behind a new user turn.
+            var final = Message(role: .assistant,
+                content: finalAssistantText ?? "[Subagent interrupted; inspect recorded tool outcomes before continuing.]",
+                toolInteractions: session.toolInteractions)
+            final.responsesReplay = responsesReplay
+            session.messages.append(final)
+            session.toolInteractions = []
+            session.lastAssistantText = nil
+        }
+
 
         // Merge new unique tool names preserving first-seen order.
         let existing = Set(session.toolsCalled)

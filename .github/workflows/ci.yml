@@ -54,6 +54,8 @@ jobs:
         with:
           name: chat-lifecycle-reference-${{ runner.os }}-${{ runner.arch }}
           path: chat-lifecycle-reference.json
+      - name: Responses real-owner lifecycle
+        run: python3 scripts/responses_lifecycle_test.py
       - name: Smoke test
         run: python3 scripts/smoke_test.py .build/debug/briglia
         env:
@@ -94,6 +96,8 @@ jobs:
         with:
           name: chat-lifecycle-reference-${{ runner.os }}-${{ runner.arch }}
           path: chat-lifecycle-reference.json
+      - name: Responses real-owner lifecycle
+        run: python3 scripts/responses_lifecycle_test.py
       - name: Smoke test
         run: python3 scripts/smoke_test.py .build/debug/briglia
       - name: Quick-setup browser test (best effort on the macOS runner)

@@ -1274,17 +1274,18 @@ actor OpenRouterService {
         reasoningEffortOverride: String? = nil,
         textOnlyOverride: Bool? = nil,
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]? = nil,
+        execution: ProviderExecutionContext? = nil,
         lane: AffinityLane
     ) async throws -> LLMResponse {
-        guard isCustomEndpoint || !apiKey.isEmpty else {
+        guard execution != nil || isCustomEndpoint || !apiKey.isEmpty else {
             throw OpenRouterError.notConfigured
         }
 
-        if isCustomEndpoint && model.isEmpty {
+        if execution == nil && isCustomEndpoint && model.isEmpty {
             throw OpenRouterError.apiError("Model name is not configured for the selected provider. Set it in Settings.")
         }
 
-        let context = executionContext(
+        let context = execution ?? executionContext(
             modelOverride: modelOverride, providerOverride: providerOverride,
             reasoningEffortOverride: reasoningEffortOverride,
             textOnlyOverride: textOnlyOverride, lane: lane
@@ -1299,6 +1300,7 @@ actor OpenRouterService {
             tailSystemMessage: tailSystemMessage, tailUserMessage: tailUserMessage,
             deferredMCPSummaries: deferredMCPSummaries
         )
+        if context.wireProtocol == .responses { return try await generateResponses(conversation, context: context) }
         return try await generateChatCompletion(conversation, context: context)
     }
 
@@ -1306,6 +1308,25 @@ actor OpenRouterService {
         modelOverride: String?, providerOverride: [String]?,
         reasoningEffortOverride: String?, textOnlyOverride: Bool?, lane: AffinityLane
     ) -> ProviderExecutionContext {
+        let stored = KeychainHelper.loadSnapshot()
+        if let wire = stored[ProviderProfiles.runtimeProtocolKey], !wire.isEmpty, wire != "chatCompletions",
+           stored[KeychainHelper.llmProviderKey] == LLMProvider.openAICompatible.rawValue {
+            let selectedModel = modelOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let selectedEffort = reasoningEffortOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = (stored[KeychainHelper.openAICompatibleApiKeyKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let model = selectedModel.flatMap { $0.isEmpty ? nil : $0 } ?? stored[KeychainHelper.openAICompatibleModelKey] ?? ""
+            return ProviderExecutionContext(provider: .openAICompatible, model: model,
+                endpoint: stored[KeychainHelper.openAICompatibleBaseURLKey] ?? "",
+                authorization: "Bearer " + key, affinityKey: key, lane: lane,
+                provenance: model + "#responses", providerPreferences: nil, reasoning: nil,
+                reasoningEffort: selectedEffort.flatMap { $0.isEmpty ? nil : $0 } ?? stored[KeychainHelper.openAICompatibleReasoningEffortKey],
+                thinkingType: nil, reasoningHistory: nil, useReasoningContent: false,
+                textOnly: textOnlyOverride ?? (stored[KeychainHelper.textOnlyModelEnabledKey] == "true"),
+                anthropicCacheControl: false, renderPDFAsImages: true, wireProtocol: .responses,
+                profileIdentity: stored[ProviderProfiles.activeProfileKey] ?? "custom",
+                nativeToolMedia: stored[ProviderProfiles.runtimeNativeMediaKey] != "false",
+                configurationError: wire == "responses" ? nil : "unsupported explicit provider protocol")
+        }
         // Build request — skip OpenRouter-specific fields when using a custom OpenAI-compatible endpoint
         let usingCustomEndpoint = isCustomEndpoint
 
@@ -1362,7 +1383,7 @@ actor OpenRouterService {
         }
 
         let effectiveProvenance = reasoningProvenance(for: effectiveModel)
-        return ProviderExecutionContext(
+        let context = ProviderExecutionContext(
             provider: currentProvider, model: effectiveModel, endpoint: baseURL,
             authorization: authorizationHeaderValue, affinityKey: activeAPIKey,
             lane: lane, provenance: effectiveProvenance,
@@ -1375,6 +1396,7 @@ actor OpenRouterService {
             anthropicCacheControl: isAnthropicModel,
             renderPDFAsImages: requiresPDFToImageConversion
         )
+        return context
     }
 
     // MARK: - Context Snapshot
@@ -2574,6 +2596,11 @@ actor OpenRouterService {
             return [:]
         }
 
+        let descriptionInheritsResponses = ProviderProfiles.usesResponses && !isTextOnlyModel
+            && (KeychainHelper.load(key: KeychainHelper.lmStudioDescriptionBaseURLKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let descriptionSnapshot = descriptionInheritsResponses ? executionContext(
+            modelOverride: KeychainHelper.load(key: KeychainHelper.lmStudioDescriptionModelKey),
+            providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: false, lane: AffinityLane.ephemeral(UUID())) : nil
         let usingVisionPreprocessorForDescriptions = isTextOnlyModel
         let usingCustomEndpointForDescriptions = isCustomEndpoint && !usingVisionPreprocessorForDescriptions
 
@@ -2757,6 +2784,24 @@ actor OpenRouterService {
             descriptionReasoningConfig = reasoningEffort.map { ReasoningConfig(effort: $0) }
         }
 
+        let content: String
+        if let descriptionSnapshot {
+            var input: [JSONValue] = []
+            for message in apiMessages {
+                let parts: [ContentPart]
+                switch message.content {
+                case .text(let text): parts = [.text(text)]
+                case .parts(let values): parts = values
+                case nil: parts = []
+                }
+                input.append(.object(["role": .string(message.role), "content": .array(try await responsesMedia(parts, textOnly: false))]))
+            }
+            let receipt = PreparedRequestReceipt(requestID: UUID(),
+                historyFingerprint: ResponsesReplayEnvelope.hash(try JSONEncoder().encode(input)), deliveryNonces: [])
+            let answer = try await ResponsesAdapter(context: descriptionSnapshot).send(input: input, tools: nil, receipt: receipt)
+            guard case .text(let text, _, _, _, _, _, _) = answer else { throw ResponsesFailure.malformed("file description returned tools") }
+            content = text
+        } else {
         let request = OpenRouterRequest(
             model: descriptionModel,
             messages: apiMessages,
@@ -2802,10 +2847,13 @@ actor OpenRouterService {
         
         let apiResponse = try JSONDecoder().decode(OpenRouterResponse.self, from: data)
         
-        guard let content = apiResponse.choices.first?.message.content else {
+        guard let legacyContent = apiResponse.choices.first?.message.content else {
             throw OpenRouterError.noContent
         }
         
+        content = legacyContent
+        }
+
         // Parse response into dictionary
         let lines = content.components(separatedBy: "\n")
         

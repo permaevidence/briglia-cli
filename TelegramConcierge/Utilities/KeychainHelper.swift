@@ -128,6 +128,15 @@ enum KeychainHelper {
         return storeLocked()[key]
     }
 
+    /// One coherent file version for an operation's provider selection. Callers
+    /// must never log or persist this in-memory snapshot. Atomic store replacement
+    /// gives a complete old-or-new dictionary even across another process's write.
+    static func loadSnapshot() -> [String: String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storeLocked()
+    }
+
     static func delete(key: String) throws {
         try mutate { $0.removeValue(forKey: key) }
     }

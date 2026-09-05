@@ -111,6 +111,8 @@ actor MindExportService {
             to: tempDir.appendingPathComponent("subagent_sessions", isDirectory: true)
         )
 
+        try ResponsesMindExport.sanitize(tempDir)
+
         // 4. Create mind_config.json with Keychain and UserDefaults data.
         let config = buildMindConfig()
         let encoder = JSONEncoder()

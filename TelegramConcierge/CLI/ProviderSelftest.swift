@@ -133,8 +133,8 @@ struct ProviderSelftest: AsyncParsableCommand {
                                          model: "my-model", effort: nil, textOnly: true)
         try ProviderProfiles.saveProfile(.local, apiKey: nil, baseURL: "http://localhost:1234/v1",
                                          model: "qwen-local", effort: nil, textOnly: true)
-        check("all four profiles configured simultaneously",
-              ProviderProfiles.Profile.allCases.allSatisfy { ProviderProfiles.isConfigured($0) })
+        check("all four legacy profiles configured simultaneously",
+              [ProviderProfiles.Profile.opencode, .openrouter, .custom, .local].allSatisfy { ProviderProfiles.isConfigured($0) })
 
         try ProviderProfiles.activate(.opencode)
         check("activate(opencode) fills runtime slots + pins the Go base URL",
