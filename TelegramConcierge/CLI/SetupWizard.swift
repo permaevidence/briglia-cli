@@ -370,7 +370,7 @@ struct SetupWizard {
         let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: false)
         if textOnly { printTextOnlyWarning() }
         saveProfile(.custom, apiKey: key, baseURL: baseURL, model: model,
-                    effort: "high", textOnly: textOnly, wireProtocol: protocolChoice)
+                    effort: protocolChoice == .responses ? nil : "high", textOnly: textOnly, wireProtocol: protocolChoice)
         print("  ✔ Custom endpoint: \(model) at \(baseURL)")
         return true
     }

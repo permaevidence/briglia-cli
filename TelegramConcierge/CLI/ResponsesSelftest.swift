@@ -211,6 +211,14 @@ struct ResponsesSelftest: AsyncParsableCommand {
         c.check("Mind strips account-bound envelope", sanitized[0].responsesReplay == nil && sanitized[0].content == "answer")
         let bytes = try Data(contentsOf: path); try ResponsesMindExport.sanitize(root)
         c.check("legacy Mind bytes unchanged", try Data(contentsOf: path) == bytes)
+        message.responsesReplay = nil
+        message.finalReasoningDetails = .object(["responsesReplay": .string("unrelated vendor data")])
+        let legacyEncoder = JSONEncoder(); legacyEncoder.outputFormatting = .prettyPrinted
+        let unrelated = try legacyEncoder.encode([message])
+        try unrelated.write(to: path)
+        try ResponsesMindExport.sanitize(root)
+        c.check("Mind preserves opaque vendor JSON and its exact bytes", try Data(contentsOf: path) == unrelated)
+
     }
 
     private func requestChecks(_ c: Checks, root: URL) async throws {
@@ -303,6 +311,7 @@ struct ResponsesSelftest: AsyncParsableCommand {
         let openAIContext = await service.executionContext(modelOverride: nil, providerOverride: nil,
             reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
         c.check("OpenAI profile selects fixed Responses endpoint", try ResponsesAdapter.endpoint(openAIContext.endpoint) == "https://api.openai.com/v1/responses")
+        c.check("Responses setup does not assume a reasoning model", openAIContext.reasoningEffort == nil)
         try KeychainHelper.save(key: ProviderProfiles.runtimeProtocolKey, value: "future-invalid")
         let invalid = await service.executionContext(modelOverride: nil, providerOverride: nil,
             reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)

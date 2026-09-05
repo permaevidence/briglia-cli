@@ -29,7 +29,9 @@ enum ResponsesMindExport {
             guard size <= ResponsesLimits.roundBytes * 2 else { throw ResponsesFailure.overflow }
             let data = try Data(contentsOf: file)
             let original = try JSONDecoder().decode(JSONValue.self, from: data)
-            let clean = strip(original)
+            var changed = false
+            let clean = strip(original, changed: &changed)
+            guard changed else { continue }
             let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
             try PrivateStorage.writeAtomically(try encoder.encode(clean), to: file)
         }
@@ -48,13 +50,22 @@ enum ResponsesMindExport {
         return false
     }
 
-    private static func strip(_ value: JSONValue) -> JSONValue {
+    private static func strip(_ value: JSONValue, changed: inout Bool) -> JSONValue {
         switch value {
         case .object(var object):
-            object.removeValue(forKey: "responsesReplay")
-            object.removeValue(forKey: "lastResponsesReplay")
-            return .object(object.mapValues(strip))
-        case .array(let values): return .array(values.map(strip))
+            // Only canonical Message/AssistantToolCallMessage fields are ours.
+            // Vendor reasoning JSON and ordinary document data stay opaque.
+            if object["role"]?.responsesString == "assistant",
+               object["id"] != nil || object["tool_calls"] != nil {
+                if object.removeValue(forKey: "responsesReplay") != nil { changed = true }
+            }
+            if object["messages"]?.responsesArray != nil,
+               object.removeValue(forKey: "lastResponsesReplay") != nil { changed = true }
+            for key in ["messages", "toolInteractions", "assistantMessage"] {
+                if let child = object[key] { object[key] = strip(child, changed: &changed) }
+            }
+            return .object(object)
+        case .array(let values): return .array(values.map { strip($0, changed: &changed) })
         default: return value
         }
     }

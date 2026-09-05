@@ -2129,10 +2129,7 @@ actor ConversationArchiveService {
     // MARK: - Archive LLM API
     
     private func callLLM(systemPrompt: String, userPrompt: String, maxTokens: Int? = nil, sharedContextPrompt: String? = nil) async throws -> String {
-        if ProviderProfiles.usesResponses {
-            let context = ProviderExecutionContext.responsesAPI(
-                baseURL: KeychainHelper.load(key: KeychainHelper.openAICompatibleBaseURLKey) ?? "",
-                key: activeAPIKey, model: model, lane: .archive, effort: reasoningEffort)
+        if let context = ResponsesAuxiliary.inheritedSnapshot(lane: .archive) {
             var input = [("system", archiveSystemPrefix)]
             if let sharedContextPrompt, !sharedContextPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 input.append(("system", sharedContextPrompt))

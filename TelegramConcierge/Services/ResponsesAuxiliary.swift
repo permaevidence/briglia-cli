@@ -25,6 +25,19 @@ extension ProviderExecutionContext {
 }
 
 enum ResponsesAuxiliary {
+    static func inheritedSnapshot(lane: AffinityLane) -> ProviderExecutionContext? {
+        let stored = KeychainHelper.loadSnapshot()
+        guard stored[KeychainHelper.llmProviderKey] == LLMProvider.openAICompatible.rawValue,
+              let wire = stored[ProviderProfiles.runtimeProtocolKey], !wire.isEmpty, wire != "chatCompletions" else { return nil }
+        var context = ProviderExecutionContext.responsesAPI(
+            baseURL: stored[KeychainHelper.openAICompatibleBaseURLKey] ?? "",
+            key: stored[KeychainHelper.openAICompatibleApiKeyKey] ?? "",
+            model: stored[KeychainHelper.openAICompatibleModelKey] ?? "", lane: lane,
+            effort: stored[KeychainHelper.openAICompatibleReasoningEffortKey])
+        context.configurationError = wire == "responses" ? nil : "unsupported explicit provider protocol"
+        return context
+    }
+
     static func text(context: ProviderExecutionContext, messages: [(String, String)],
                      maxOutputTokens: Int? = nil) async throws -> String {
         let input = messages.map { ResponsesAdapter.message(role: $0.0, text: MarkerNeutralizer.escape($0.1)) }

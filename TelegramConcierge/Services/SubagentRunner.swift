@@ -707,7 +707,9 @@ actor SubagentRunner {
         if let effectiveModelOverride {
             modelUsedLabel = effectiveModelOverride
         } else {
-            let concrete = await openRouterService.activeModelId
+            let concrete: String
+            if let responsesExecution { concrete = responsesExecution.model }
+            else { concrete = await openRouterService.activeModelId }
             modelUsedLabel = concrete.isEmpty ? "inherit" : "\(concrete) (inherited)"
         }
 

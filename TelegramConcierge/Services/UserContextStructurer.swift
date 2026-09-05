@@ -18,11 +18,22 @@ struct UserContextStructurer {
         var lmStudioBaseURL: String
         var lmStudioModel: String
         var wireProtocol: ProviderWireProtocol = .chatCompletions
+        var nativeEffort: String? = nil
+        var nativeConfigurationError: String? = nil
 
         /// Builds a config from the persisted settings — used by callers that
         /// don't hold the provider fields in local state (onboarding).
         static func fromKeychain() -> Config {
-            Config(
+            // The lane here is not dispatched: structure() allocates its own
+            // operation lane. All inherited provider fields come from one read.
+            if let native = ResponsesAuxiliary.inheritedSnapshot(lane: .archive) {
+                return Config(provider: .openAICompatible, openRouterApiKey: "", openRouterModel: "",
+                    openAICompatibleBaseURL: native.endpoint, openAICompatibleModel: native.model,
+                    openAICompatibleApiKey: native.affinityKey, lmStudioBaseURL: "", lmStudioModel: "",
+                    wireProtocol: .responses, nativeEffort: native.reasoningEffort,
+                    nativeConfigurationError: native.configurationError)
+            }
+            return Config(
                 provider: LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)),
                 openRouterApiKey: KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? "",
                 openRouterModel: KeychainHelper.load(key: KeychainHelper.openRouterModelKey) ?? "",
@@ -31,7 +42,7 @@ struct UserContextStructurer {
                 openAICompatibleApiKey: KeychainHelper.load(key: KeychainHelper.openAICompatibleApiKeyKey) ?? "",
                 lmStudioBaseURL: KeychainHelper.load(key: KeychainHelper.lmStudioBaseURLKey) ?? "",
                 lmStudioModel: KeychainHelper.load(key: KeychainHelper.lmStudioModelKey) ?? "",
-                wireProtocol: ProviderProfiles.usesResponses ? .responses : .chatCompletions
+                wireProtocol: .chatCompletions
             )
         }
     }
@@ -189,9 +200,10 @@ struct UserContextStructurer {
 
         if config.wireProtocol == .responses {
             let operationLane = AffinityLane.ephemeral(UUID())
-            let context = ProviderExecutionContext.responsesAPI(baseURL: config.openAICompatibleBaseURL,
+            var context = ProviderExecutionContext.responsesAPI(baseURL: config.openAICompatibleBaseURL,
                 key: config.openAICompatibleApiKey, model: configuredModel,
-                lane: operationLane, effort: configuredReasoningEffort)
+                lane: operationLane, effort: config.nativeEffort)
+            context.configurationError = config.nativeConfigurationError
             return try await ResponsesAuxiliary.text(context: context, messages: [("user", prompt)])
         }
         let body: [String: Any] = [

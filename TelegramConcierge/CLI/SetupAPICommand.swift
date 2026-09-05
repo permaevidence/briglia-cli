@@ -717,7 +717,11 @@ enum SetupAPICore {
         if let media = section["native_tool_media"], !(media is Bool) || profile != .custom {
             throw APIError(code: "invalid_value", message: "native_tool_media must be a boolean for a custom Responses profile")
         }
-        let effort: String? = profile == .local ? nil : (nonEmptyString(section["effort"]) ?? "high")
+        let protocolForSave = requestedProtocol ?? ProviderProfiles.wireProtocol(profile)
+        // Responses also supports models without a reasoning parameter. Only
+        // send an effort explicitly requested by the owner; no model-name sniff.
+        let effort: String? = profile == .local ? nil
+            : (nonEmptyString(section["effort"]) ?? (protocolForSave == .responses ? nil : "high"))
         do {
             try ProviderProfiles.saveProfile(profile, apiKey: profile == .local ? nil : apiKey,
                                              baseURL: baseURL, model: model,
