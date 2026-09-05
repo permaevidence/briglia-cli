@@ -28,6 +28,15 @@ def command(args, cwd=ROOT, **kwargs):
     return subprocess.run(args, cwd=cwd, check=True, **kwargs)
 
 
+def validate_scratch_path(actual, expected):
+    # expected is calculated directly from Foundation in the test driver,
+    # independently of the production LandingZone accessor.
+    if (actual != expected or not actual.startswith("/")
+            or not actual.endswith("/Documents/Briglia/scratch/repos")):
+        raise RuntimeError("Unexpected scratch path")
+    return actual
+
+
 def run_driver(binary, destination):
     run = subprocess.run([str(binary), "__chat-wire-selftest", "--capture-directory", str(destination)],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
@@ -57,9 +66,7 @@ def run_driver(binary, destination):
         headers["host"] = "127.0.0.1:<capture-port>"
         # One exact absolute scratch-repos path inside the main system prompt.
         # No JSON decoding/re-encoding. Swift's encoder escapes slash bytes.
-        path = item["scratch_path"]
-        if path != str(pathlib.Path.home() / "Documents/Briglia/scratch/repos"):
-            raise RuntimeError("Unexpected scratch path")
+        path = validate_scratch_path(item["scratch_path"], item["expected_scratch_path"])
         old = path.replace("/", r"\/").encode()
         new = b"/__fixture_home__/Documents/Briglia/scratch/repos".replace(b"/", br"\/")
         count = body.count(old)

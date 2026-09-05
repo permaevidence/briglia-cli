@@ -279,7 +279,8 @@ struct ChatWireSelftest: AsyncParsableCommand {
                     try captures[0].body.write(to: output.appendingPathComponent(fixtureName + ".body.json"), options: .withoutOverwriting)
                     let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
                     try encoder.encode(captures[0].headers).write(to: output.appendingPathComponent(fixtureName + ".headers.json"), options: .withoutOverwriting)
-                    manifest.append(["fixture": fixtureName, "target": captures[0].target, "kind": "instrumented-development-build", "substitutions": "scratch-repos-path-and-host-port-v2", "authority": "127.0.0.1:\(server.port)", "scratch_path": LandingZone.scratchReposRoot.path])
+                    manifest.append(["fixture": fixtureName, "target": captures[0].target, "kind": "instrumented-development-build", "substitutions": "scratch-repos-path-and-host-port-v2", "authority": "127.0.0.1:\(server.port)", "scratch_path": LandingZone.scratchReposRoot.path,
+                                     "expected_scratch_path": FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents/Briglia/scratch/repos").path])
                 }
             }
         }

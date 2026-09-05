@@ -59,7 +59,8 @@ are narrowly defined and recorded:
 * The captured `Host` value must equal this server's exact loopback authority;
   replace only its ephemeral port with `<capture-port>`.
 * Replace at most one exact JSON-escaped `LandingZone.scratchReposRoot` absolute
-  path with `/__fixture_home__/Documents/Briglia/scratch/repos`. It must equal the independent current home plus the fixed suffix;
+  path with `/__fixture_home__/Documents/Briglia/scratch/repos`. It must equal an independent Foundation home-directory calculation plus the fixed suffix
+  (Python and Foundation can resolve home differently in CI);
   the exact expected replacement count is checked and compared. All other paths are fixed.
 
 Every other body byte, target and lowercased header key/value is compared, including
