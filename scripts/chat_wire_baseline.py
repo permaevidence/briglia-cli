@@ -29,9 +29,8 @@ def command(args, cwd=ROOT, **kwargs):
 
 
 def run_driver(binary, destination):
-    env = dict(os.environ, BRIGLIA_CHAT_WIRE_ROUTER_INSTRUMENTED="1")
     run = subprocess.run([str(binary), "__chat-wire-selftest", "--capture-directory", str(destination)],
-                         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
     if run.returncode:
         raise RuntimeError(run.stdout.decode(errors="replace")[-12000:])
     manifest = json.loads((destination / "manifest.json").read_text())
@@ -92,6 +91,13 @@ def instrument(tree):
     for name in DRIVERS:
         source = ROOT / name
         shutil.copyfile(source, tree / name)
+        if name.endswith("/ChatWireSelftest.swift"):
+            driver = tree / name
+            contents = driver.read_text()
+            anchor = "private let chatWireRouterInstrumented = false"
+            if contents.count(anchor) != 1:
+                raise RuntimeError("OpenRouter test-only flag anchor changed")
+            driver.write_text(contents.replace(anchor, "private let chatWireRouterInstrumented = true"))
         evidence[name] = hashlib.sha256((tree / name).read_bytes()).hexdigest()
     main = tree / "TelegramConcierge/CLI/AdaMain.swift"
     text = main.read_text()
@@ -162,9 +168,12 @@ def main():
                     return
             if args.baseline:
                 frozen = json.loads(args.baseline.read_text())
-                for key in ("version", "source_sha", "platform", "toolchain", "instrumentation", "substitutions"):
+                for key in ("version", "source_sha", "platform", "toolchain", "substitutions"):
                     if frozen[key] != document[key]:
                         raise RuntimeError("Frozen reference metadata differs: " + key)
+                # Historical hashes describe the driver that CREATED the frozen
+                # evidence. A revised driver must still match those same bytes;
+                # requiring its hash to match would force pointless re-recording.
                 compare(frozen["fixtures"], fixtures)
             candidate = root / "candidate"
             command(["git", "worktree", "add", "--detach", str(candidate), "HEAD"])

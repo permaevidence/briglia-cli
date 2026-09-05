@@ -30,7 +30,9 @@ an artifact. Branch protection configuration is separate from workflow execution
 ## Precisely bounded instrumentation
 
 The reference worktree receives only the capture parser, capture/affinity test
-file and wire driver, plus hidden command registration. Their hashes are recorded.
+file and wire driver, plus hidden command registration. Their hashes are recorded. Historical frozen hashes describe the drivers that
+created that evidence; newer drivers must match its bodies, headers and inventory
+without regenerating it. Driver/comparator changes still require independent review.
 The candidate retains all its production changes (including Utilities, Resources,
 Package.swift and non-test CLI files); no production directories are replaced.
 
@@ -38,10 +40,13 @@ One explicitly checked OpenRouter endpoint literal is replaced **only in both
 disposable builds**, using the loopback URL supplied by the driver. This exercises
 `LLMProvider.openRouter`, provider preferences, Anthropic cache control, reasoning,
 and headers without paid traffic. A missing or changed literal fails the gate.
-The ordinary source and installed binary are untouched. These are instrumented
+A test-only flag is enabled only in those disposable copies; an environment
+variable cannot enable OpenRouter in an ordinary selftest build. The ordinary
+production source and installed binary are untouched. These are instrumented
 release-source captures, **not unchanged shipped-binary captures**.
 
-Inputs fix the clock, synthetic names/key/context, UUIDs, salt, nonce and isolated
+Inputs explicitly select the synthetic Google Workspace provider (no installed-CLI
+inference or Google requests). Inputs fix the clock, synthetic names/key/context, UUIDs, salt, nonce and isolated
 storage path. The driver exclusively creates `/tmp/briglia-chat-wire-fixture-v2`
 and removes only its own directory. Concurrent/stale-directory collisions fail;
 do not run this driver concurrently on the same host. It uses in-memory preference

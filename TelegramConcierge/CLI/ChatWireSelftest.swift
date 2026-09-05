@@ -4,6 +4,9 @@ import Foundation
 import FoundationNetworking
 #endif
 
+// Switched only in disposable test builds by the pinned-source runner.
+private let chatWireRouterInstrumented = false
+
 /// P0 instrumentation: invokes the unchanged production Chat Completions
 /// builder. All traffic goes to a synthetic loopback endpoint.
 struct ChatWireSelftest: AsyncParsableCommand {
@@ -101,6 +104,8 @@ struct ChatWireSelftest: AsyncParsableCommand {
         try KeychainHelper.save(key: KeychainHelper.openAICompatibleApiKeyKey, value: "synthetic-wire-key")
         try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "high")
         try KeychainHelper.save(key: KeychainHelper.textOnlyModelEnabledKey, value: "false")
+        // Do not let the installed gws binary change the prompt on different hosts.
+        try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: EmailCalendarProvider.gws.rawValue)
         let fixedState = SessionAffinity.State(version: 1, installSalt: Data((0..<32).map(UInt8.init)).base64EncodedString(),
                                               mainConversationId: "33333333-3333-4333-8333-333333333333")
         try FileManager.default.createDirectory(at: StoragePaths.dataRoot, withIntermediateDirectories: true,
@@ -125,7 +130,7 @@ struct ChatWireSelftest: AsyncParsableCommand {
         var models = ["glm-5.3", "kimi-k3", "kimi-k2.7-code", "qwen3.8-max", "custom-model", "local-model"]
         // Enabled only in disposable builds whose URL literal is redirected
         // by chat_wire_baseline.py. Normal builds cannot contact OpenRouter.
-        let routerInstrumented = ProcessInfo.processInfo.environment["BRIGLIA_CHAT_WIRE_ROUTER_INSTRUMENTED"] == "1"
+        let routerInstrumented = chatWireRouterInstrumented
         if routerInstrumented { models.append("anthropic/claude-sonnet-4") }
         let skillDir = SkillsRegistry.skillsDirectoryURL().appendingPathComponent("fixture-skill")
         try FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
@@ -243,6 +248,7 @@ struct ChatWireSelftest: AsyncParsableCommand {
                           && rendered.contains("fixture-skill") && rendered.contains("Fixture User studies astronomy")
                           && rendered.contains("fixture appointment") && rendered.contains("fixture inbox")
                           && rendered.contains("Earlier fixture findings") && rendered.contains("Fixture tail system note"))
+                    check("\(fixtureName): configured email/calendar guidance", rendered.contains("Use `gws` for Google Workspace actions."))
                     check("\(fixtureName): subagent switch", toolNames.contains("Agent") == (index != 7))
                     check("\(fixtureName): hostile context neutralized", !rendered.contains(hostile))
                     if index == 8 { check("\(fixtureName): deferred MCP", toolNames.contains("tool_search") && rendered.contains("fixture-server")) }
