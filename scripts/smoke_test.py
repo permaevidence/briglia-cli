@@ -383,6 +383,11 @@ def main():
     check("chat-wire-selftest (complete captures, legacy body repeatability)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    result = subprocess.run([os.path.abspath(ADA), "__chat-adapter-selftest"], capture_output=True,
+                            text=True, timeout=120)
+    check("chat-adapter-selftest (origins, snapshot and retry isolation)", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
     # Repository invariant: every URLRequest to a model endpoint is decorated
     # by SessionAffinity in the same function, or allowlisted with a reason.
     scan = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "model_request_scan.py")],
