@@ -196,7 +196,12 @@ final class HoldingChatSelftestServer: @unchecked Sendable {
     var errors: [String] { lock.lock(); defer { lock.unlock() }; return failures }
     private var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
 
-    init() throws {
+    private let responseHeaders: Bool
+    private let heartbeatInterval: TimeInterval?
+
+    init(responseHeaders: Bool = false, heartbeatInterval: TimeInterval? = nil) throws {
+        self.responseHeaders = responseHeaders
+        self.heartbeatInterval = heartbeatInterval
         #if os(Linux)
         let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
         #else
@@ -243,7 +248,15 @@ final class HoldingChatSelftestServer: @unchecked Sendable {
             close(listener)
             finished.leave()
         }
+        var lastHeartbeat = Date.distantPast
         while isRunning {
+            if let interval = heartbeatInterval, Date().timeIntervalSince(lastHeartbeat) >= interval {
+                lastHeartbeat = Date()
+                clients = clients.filter { fd in
+                    if sendBytes(Data(": heartbeat\n\n".utf8), to: fd) { return true }
+                    close(fd); return false
+                }
+            }
             var ready = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
             let polled = poll(&ready, 1, 50)
             if polled < 0 && errno == EINTR { continue }
@@ -273,11 +286,25 @@ final class HoldingChatSelftestServer: @unchecked Sendable {
                     guard count > 0 else { recordError("incomplete held request"); return }
                     if try parser.append(Data(bytes[..<count])) != nil {
                         lock.lock(); captured += 1; lock.unlock()
-                        break // Retain the socket, with no response, until stop.
+                        if responseHeaders {
+                            _ = sendBytes(Data("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: connected\n\n".utf8), to: client)
+                        }
+                        break // Retain the socket until stop or peer disconnect.
                     }
                 }
             } catch { recordError("request framing failed"); return }
         }
+    }
+
+    private func sendBytes(_ data: Data, to fd: Int32) -> Bool {
+        #if os(Linux)
+        let flags = Int32(MSG_NOSIGNAL)
+        #else
+        var enabled: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+        let flags: Int32 = 0
+        #endif
+        return data.withUnsafeBytes { send(fd, $0.baseAddress!, $0.count, flags) == $0.count }
     }
 
     private func recordError(_ message: String) {

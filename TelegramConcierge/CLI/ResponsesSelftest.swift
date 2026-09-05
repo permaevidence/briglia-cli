@@ -89,6 +89,42 @@ struct ResponsesSelftest: AsyncParsableCommand {
         do { _ = try await task.value; c.check("cancelled transport fails closed", false) }
         catch { c.check("cancelled transport fails closed", error is CancellationError || (error as? URLError)?.code == .cancelled) }
         c.check("transport holding server settles", server.stopAndJoin())
+        func phase(_ error: Error) -> String? {
+            (error as NSError).userInfo["BrigliaResponsesDeadline"] as? String
+        }
+        let connectServer = try HoldingChatSelftestServer()
+        request.url = connectServer.url
+        do {
+            _ = try await ResponsesHTTPTransport().send(request, overallTimeout: 5, connectTimeout: 0.2, idleTimeout: 5)
+            c.check("connect deadline bounds missing response headers", false)
+        } catch { c.check("connect deadline bounds missing response headers", phase(error) == "connect") }
+        c.check("connect fixture settles", connectServer.stopAndJoin())
+
+        let idleServer = try HoldingChatSelftestServer(responseHeaders: true)
+        request.url = idleServer.url
+        do {
+            _ = try await ResponsesHTTPTransport().send(request, overallTimeout: 5, connectTimeout: 3, idleTimeout: 0.2)
+            c.check("idle deadline bounds stalled response body", false)
+        } catch {
+            c.check("idle deadline bounds stalled response body", phase(error) == "idle")
+            if phase(error) != "idle" { print("Idle fixture error: \(error as NSError)") }
+        }
+        c.check("idle fixture settles", idleServer.stopAndJoin())
+
+        let heartbeatServer = try HoldingChatSelftestServer(responseHeaders: true, heartbeatInterval: 0.05)
+        request.url = heartbeatServer.url
+        let heartbeatStart = Date()
+        do {
+            _ = try await ResponsesHTTPTransport().send(request, overallTimeout: 1, connectTimeout: 0.5, idleTimeout: 0.3)
+            c.check("heartbeats reset idle but never extend overall deadline", false)
+        } catch {
+            // URLSession's redundant resource deadline may win the same race.
+            c.check("heartbeats reset idle but never extend overall deadline",
+                    (error as? URLError)?.code == .timedOut && phase(error) != "idle" && phase(error) != "connect" &&
+                    Date().timeIntervalSince(heartbeatStart) >= 0.8 && Date().timeIntervalSince(heartbeatStart) < 4)
+        }
+        c.check("heartbeat fixture settles", heartbeatServer.stopAndJoin())
+
     }
 
     private func decoderChecks(_ c: Checks, context: ProviderExecutionContext, receipt: PreparedRequestReceipt) throws {

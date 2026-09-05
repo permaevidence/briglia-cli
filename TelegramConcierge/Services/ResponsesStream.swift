@@ -169,8 +169,29 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked
     private var data = Data()
     private var assembler = ResponsesStreamAssembler()
     private var overallTimer: DispatchWorkItem?
+    private var phaseTimer: DispatchWorkItem?
+    private var phaseGeneration: UInt64 = 0
+    private var idleTimeout: TimeInterval = 360
 
-    func send(_ request: URLRequest, overallTimeout: TimeInterval = 360) async throws -> Data {
+    // These are independent clocks even where provider defaults coincide. The
+    // connect clock bounds request start through response headers; idle starts
+    // at headers and resets on bytes (including SSE comments/heartbeats).
+    // Only the immutable overall clock bounds a perpetually active stream.
+    private func armPhaseTimerLocked(_ seconds: TimeInterval, phase: String) {
+        phaseTimer?.cancel()
+        phaseGeneration &+= 1
+        let generation = phaseGeneration
+        let timer = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.finish(.failure(URLError(.timedOut, userInfo: ["BrigliaResponsesDeadline": phase])),
+                        ifLocked: { self.phaseGeneration == generation })
+        }
+        phaseTimer = timer
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: timer)
+    }
+
+    func send(_ request: URLRequest, overallTimeout: TimeInterval = 360,
+              connectTimeout: TimeInterval? = nil, idleTimeout: TimeInterval? = nil) async throws -> Data {
         try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
@@ -178,12 +199,18 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked
                 if completed { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
                 self.continuation = continuation
                 let config = URLSessionConfiguration.ephemeral
-                config.timeoutIntervalForRequest = request.timeoutInterval
+                // Own the idle clock so its behavior matches FoundationNetworking
+                // and Darwin. URLSession's resource clock remains a second bound.
+                config.timeoutIntervalForRequest = overallTimeout
                 config.timeoutIntervalForResource = overallTimeout
                 let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
                 self.session = session
                 let task = session.dataTask(with: request); self.task = task
-                let timer = DispatchWorkItem { [weak self] in self?.finish(.failure(URLError(.timedOut))) }
+                self.idleTimeout = idleTimeout ?? request.timeoutInterval
+                armPhaseTimerLocked(connectTimeout ?? request.timeoutInterval, phase: "connect")
+                let timer = DispatchWorkItem { [weak self] in
+                    self?.finish(.failure(URLError(.timedOut, userInfo: ["BrigliaResponsesDeadline": "overall"])))
+                }
                 overallTimer = timer
                 DispatchQueue.global().asyncAfter(deadline: .now() + overallTimeout, execute: timer)
                 task.resume(); lock.unlock()
@@ -191,14 +218,16 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked
         }, onCancel: { self.finish(.failure(CancellationError())) })
     }
 
-    private func finish(_ result: Result<Data, Error>) {
+    private func finish(_ result: Result<Data, Error>, ifLocked predicate: () -> Bool = { true }) {
         lock.lock()
-        guard !completed else { lock.unlock(); return }
+        guard !completed, predicate() else { lock.unlock(); return }
         completed = true
         let callback = continuation; continuation = nil
         let task = task; self.task = nil
         let session = session; self.session = nil
         overallTimer?.cancel(); overallTimer = nil
+        phaseTimer?.cancel(); phaseTimer = nil
+        phaseGeneration &+= 1
         lock.unlock()
         task?.cancel(); session?.invalidateAndCancel()
         callback?.resume(with: result)
@@ -215,6 +244,7 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked
             lock.unlock(); completionHandler(.cancel); return
         }
         self.response = http
+        armPhaseTimerLocked(idleTimeout, phase: "idle")
         streamed = http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/event-stream") == true
         lock.unlock(); completionHandler(.allow)
     }
@@ -223,6 +253,7 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked
         lock.lock()
         guard !completed else { lock.unlock(); return }
         do {
+            if !bytes.isEmpty { armPhaseTimerLocked(idleTimeout, phase: "idle") }
             if streamed && response?.statusCode == 200 { try assembler.append(bytes) }
             else {
                 let cap = response?.statusCode == 200 ? ResponsesLimits.roundBytes : 64 * 1024
