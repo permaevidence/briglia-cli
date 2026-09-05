@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'wip/responses-*']
   pull_request:
   workflow_dispatch:
 
@@ -13,6 +13,8 @@ jobs:
     container: swift:6.1-jammy
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
       - name: Install runtime dependencies
         run: |
           apt-get update
@@ -30,6 +32,15 @@ jobs:
           /opt/node/bin/node --version
       - name: Build
         run: swift build
+      - name: Wire comparator negative tests
+        run: python3 scripts/chat_wire_baseline_test.py
+      - name: Chat Completions pinned-release differential gate
+        run: python3 scripts/chat_wire_baseline.py --save-reference chat-wire-reference.json
+      - name: Preserve pinned-release reference
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chat-wire-reference-${{ runner.os }}-${{ runner.arch }}
+          path: chat-wire-reference.json
       - name: Smoke test
         run: python3 scripts/smoke_test.py .build/debug/briglia
         env:
@@ -46,8 +57,19 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
       - name: Build
         run: swift build
+      - name: Wire comparator negative tests
+        run: python3 scripts/chat_wire_baseline_test.py
+      - name: Chat Completions pinned-release differential gate
+        run: python3 scripts/chat_wire_baseline.py --save-reference chat-wire-reference.json
+      - name: Preserve pinned-release reference
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chat-wire-reference-${{ runner.os }}-${{ runner.arch }}
+          path: chat-wire-reference.json
       - name: Smoke test
         run: python3 scripts/smoke_test.py .build/debug/briglia
       - name: Quick-setup browser test (best effort on the macOS runner)

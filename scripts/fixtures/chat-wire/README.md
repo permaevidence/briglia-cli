@@ -1,54 +1,105 @@
-# Legacy request-byte fixtures
+# Legacy request compatibility gate
 
-These are raw HTTP body bytes from the production Chat Completions builder at
-release source `4dd86133de03b484bed62fb81ce59935b89a7de8`, driven by development
-test instrumentation. They are **not captures from the shipped release binary**.
-Each platform file records the source, compiler and captured binary SHA-256.
-Base64 keeps the exact bytes while respecting the repository's reserved-prefix
-source invariant. There is no JSON normalization or volatility substitution.
+P0 remains incomplete. Do not start P1 until the remaining lifecycle/accounting,
+persistence and shipped-client gates in the private progress notes are accepted.
 
-Run from the repository root after `swift build`:
+The original `darwin-arm64.json` and `linux-aarch64.json` are unchanged historical
+v1 evidence from `d4767d9`: 36 **no-tools** requests, bodies and targets only.
+They are not the P1 gate. Never overwrite them.
+
+The v2 gate builds release source `4dd86133de03b484bed62fb81ce59935b89a7de8`
+and the candidate on the **same current compiler/platform**, in disposable Git
+worktrees, with the same test instrumentation. It compares two fresh processes
+per build, then compares reference to candidate. No platform is skipped.
 
 ```sh
-python3 scripts/chat_wire_baseline.py .build/debug/briglia
+python3 scripts/chat_wire_baseline_test.py
+python3 scripts/chat_wire_baseline.py
+# Add a secondary, reviewed frozen reference for this compiler/platform:
+python3 scripts/chat_wire_baseline.py --baseline scripts/fixtures/chat-wire/darwin-arm64-v2.json
+# Recording ALWAYS builds the pinned source, even after production changes:
+python3 scripts/chat_wire_baseline.py --record /tmp/new-reviewed-reference.json
 ```
 
-The driver captures twice in separate processes with independent storage roots,
-ports and caches, checks both runs against one another, then compares every byte
-and destination against the frozen file. It separately asserts methods, relevant
-headers and a fixed independently computed affinity value. The test binary talks
-only to its loopback server using synthetic credentials.
+`--record` refuses overwrite. `--save-reference PATH` saves the pinned reference
+while also comparing the candidate. CI runs the differential gate as a mandatory
+step in both existing platform jobs, and retains the exact pinned reference as
+an artifact. Branch protection configuration is separate from workflow execution.
+`--scratch-root PATH` optionally retains Swift compilation caches.
 
-The initial matrix contains six exact model IDs (`glm-5.3`, `kimi-k3`,
-`kimi-k2.7-code`, `qwen3.8-max`, `custom-model`, `local-model`) and six scenarios:
+## Precisely bounded instrumentation
+
+The reference worktree receives only the capture parser, capture/affinity test
+file and wire driver, plus hidden command registration. Their hashes are recorded.
+The candidate retains all its production changes (including Utilities, Resources,
+Package.swift and non-test CLI files); no production directories are replaced.
+
+One explicitly checked OpenRouter endpoint literal is replaced **only in both
+disposable builds**, using the loopback URL supplied by the driver. This exercises
+`LLMProvider.openRouter`, provider preferences, Anthropic cache control, reasoning,
+and headers without paid traffic. A missing or changed literal fails the gate.
+The ordinary source and installed binary are untouched. These are instrumented
+release-source captures, **not unchanged shipped-binary captures**.
+
+Inputs fix the clock, synthetic names/key/context, UUIDs, salt, nonce and isolated
+storage path. The driver exclusively creates `/tmp/briglia-chat-wire-fixture-v2`
+and removes only its own directory. Concurrent/stale-directory collisions fail;
+do not run this driver concurrently on the same host. It uses in-memory preference
+overrides and isolated XDG secrets, never real credentials.
+
+Comparison never parses/re-encodes request JSON. Base64 preserves the body bytes
+without putting the reserved harness prefix in tracked files. Two substitutions
+are narrowly defined and recorded:
+
+* The captured `Host` value must equal this server's exact loopback authority;
+  replace only its ephemeral port with `<capture-port>`.
+* Replace at most one exact JSON-escaped `LandingZone.scratchReposRoot` absolute
+  path with `/__fixture_home__/Documents/Briglia/scratch/repos`. It must equal the independent current home plus the fixed suffix;
+  the exact expected replacement count is checked and compared. All other paths are fixed.
+
+Every other body byte, target and lowercased header key/value is compared, including
+added/removed headers. Content-Length is validated against the original raw body
+before substitution, then omitted as redundant. POST and credential routing also
+have independent Swift assertions. No affinity value is masked.
+
+## Matrix
+
+The six original model IDs remain: `glm-5.3`, `kimi-k3`, `kimi-k2.7-code`,
+`qwen3.8-max`, `custom-model`, `local-model`. Instrumented builds add actual
+OpenRouter routing for `anthropic/claude-sonnet-4`: 7 models × 11 cases = 77.
+Ordinary selftest builds run 66 cases with no OpenRouter traffic.
 
 | Suffix | Scenario |
 | --- | --- |
-| 0 | Plain input, bare endpoint URL |
-| 1 | Two stored tool results, reasoning, forced-final instruction, `/v1/` URL |
-| 2 | Typed annotation paired with its canonical user message, hostile ordinary text, summary tail, full endpoint URL |
-| 3 | Tool reasoning from a different model/gateway |
-| 4 | Current-round image result and the existing synthetic user-role media message |
-| 5 | Rasterized PDF-page result using the same media path |
+| 0 | Plain input; bare endpoint |
+| 1 | Stored two-tool history/reasoning; forced-final instruction; `/v1/` |
+| 2 | Historical annotation/next-turn replay; hostile text; summary tail |
+| 3 | Reasoning from mismatching model/gateway |
+| 4 | Current-round tool image and legacy synthetic user-role media |
+| 5 | Rasterized PDF page (PNG), not raw PDF |
+| 6 | Real default AvailableTools schemas, user skill, structured persona, calendar/email, chunk summary, current user ID, system tail |
+| 7 | Populated main with subagents disabled |
+| 8 | Populated main with deferred MCP summary and proxy tools |
+| 9 | Populated main with a current-round, two-message typed batch and attachment path; canonical users last in history |
+| 10 | Populated main with positively matching model AND gateway provenance for historical tool and final reasoning |
 
-The page fixture is a PNG returned by a tool, not a raw PDF or a PDF-reader test.
-Tool schemas are not supplied by this initial matrix. A no-tools request with a
-summary tail does not claim to drive the manager's pruning lifecycle. Reasoning
-with absent legacy provenance is distinct from positively matched provenance.
+Serialization fixtures do not claim to drive the ConversationManager delivery
+acknowledgement, pruning decisions, usage watermarks or persistence/rehydration.
+Archive/probe/subagent execution and shipped-client/Mind tests remain required.
 
-`__chat-wire-selftest` additionally tests fragmented and truncated HTTP bodies,
-ambiguous framing, byte limits, and a real large Unicode request. Smoke runs this
-battery on both platforms. The frozen-byte comparator is an additional manual
-gate until the compiler/platform baseline set covers the CI runner configurations.
-An unrecognized platform/compiler fails comparison rather than skipping it.
+## Independent affinity derivation
 
-`--record` creates a new baseline only when production Services/Models still
-match the pinned source and there are no untracked production files. It never
-overwrites a baseline. A compiler change, matrix expansion or explained legacy
-difference needs a separately reviewed fixture revision; never regenerate
-expectations from a changed production builder to make a comparison pass.
+```python
+import hashlib, hmac, struct
+fingerprint = hashlib.sha256(b"synthetic-wire-key").digest()
+lane = b"main:33333333-3333-4333-8333-333333333333"
+message = b"briglia-affinity-v1" + b"".join(struct.pack(">I", len(p)) + p for p in (fingerprint, lane))
+print(hmac.new(bytes(range(32)), message, hashlib.sha256).hexdigest()[:32])
+# 772be81ca4a295114141686608dd0b89
+```
 
-These fixtures are an initial subset, not full compatibility acceptance. Still
-required: real OpenRouter/cache-control routing; supplied tool schemas; positively
-matched reasoning provenance; archive/probe/subagent execution paths; pruning and
-accounting decisions; persistence/rehydration; and shipped-client/Mind compatibility.
+Every P1 review must inspect diffs from `d4767d9` to the driver, comparator and
+fixture directory. Later changes must be justified, reviewed and additive where
+possible, with pinned-source provenance. Never change SOURCE or regenerate from
+a changed candidate merely to make a gate pass. This gate cannot protect against
+a reviewer accepting weakened fixtures or comparison logic.
