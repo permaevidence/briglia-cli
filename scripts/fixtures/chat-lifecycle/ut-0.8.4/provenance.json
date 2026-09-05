@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/permaevidence/briglia-ut",
+  "commit": "3b6b8ef8db980599a9b526a95607c3b000c462a7",
+  "files": {
+    "briglia_bridge.py": "b57d6e49ed1c505a0d288849dc056f3c6d452acc494bcdd520ba19d7a28b6c28",
+    "release_verify.py": "6a3d76fb6d824ba5d1619592c31b3ca0fe5c42fbc8b16bfbe32e24cb6ceb5583"
+  }
+}

@@ -742,12 +742,20 @@ final class CaptureServer: @unchecked Sendable {
     }
     private var _content: String?
 
+    // Scripted local responses for lifecycle tests. Empty preserves the existing
+    // wire/affinity fixtures. Access is serialized with capture recording.
+    private var responseQueue: [String] = []
+    func script(_ bodies: [String]) {
+        lock.lock(); responseQueue = bodies; lock.unlock()
+    }
+    var remainingResponses: Int { lock.lock(); defer { lock.unlock() }; return responseQueue.count }
+
     var requests: [[String: String]] { completeRequests.map(\.headers) }
     var completeRequests: [CapturedHTTPRequest] { lock.lock(); defer { lock.unlock() }; return recorded }
     var errors: [String] { lock.lock(); defer { lock.unlock() }; return captureErrors }
     func clear() { lock.lock(); recorded = []; captureErrors = []; lock.unlock() }
 
-    init() throws {
+    init(port requestedPort: UInt16 = 0) throws {
         #if os(Linux)
         let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
         #else
@@ -758,7 +766,7 @@ final class CaptureServer: @unchecked Sendable {
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = 0
+        addr.sin_port = requestedPort.bigEndian
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
@@ -821,9 +829,12 @@ final class CaptureServer: @unchecked Sendable {
         let status = statusOverride ?? 200
         let content = contentOverride ?? "OK"
         let encodedContent = String(data: try! JSONEncoder().encode(content), encoding: .utf8)!
-        let body = status == 200
+        lock.lock()
+        let scripted = responseQueue.isEmpty ? nil : responseQueue.removeFirst()
+        lock.unlock()
+        let body = scripted ?? (status == 200
             ? "{\"id\":\"cap\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\(encodedContent)},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}"
-            : "{\"error\":{\"message\":\"injected \(status)\"}}"
+            : "{\"error\":{\"message\":\"injected \(status)\"}}")
         let reason = status == 200 ? "OK" : "Service Unavailable"
         let response = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
         let bytes = Data(response.utf8)
