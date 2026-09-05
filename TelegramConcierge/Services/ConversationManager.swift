@@ -2901,9 +2901,10 @@ class ConversationManager: ObservableObject {
             messages.append(assistantMessage)
             didMutateHistory = true
 
+            var finalHistorySaved = false
             if didMutateHistory {
                 let saved = saveConversation()
-                if !saved && response.responsesReplay != nil { throw ResponsesFailure.failed("could not save the completed Responses turn; salvage retained") }
+                finalHistorySaved = saved
                 // Completion-receipt acknowledgement (BASH_V2_PLAN §8.3):
                 // a tool result that observed a bash settlement suppresses
                 // the automatic completion notice ONLY once the turn that
@@ -2922,7 +2923,11 @@ class ConversationManager: ObservableObject {
                 }
             }
             activeTurnToolInteractionsByRun.removeValue(forKey: runId)
-            clearTurnSalvageFile(ifStillOwnedBy: runId)
+            // A failed final save must not duplicate completed tool rounds in
+            // the error path or suppress delivery. Keep native recovery evidence.
+            if finalHistorySaved || response.responsesReplay == nil {
+                clearTurnSalvageFile(ifStillOwnedBy: runId)
+            }
 
             let turnReplyAddress = userMessage.originChannel ?? replyAddress
             if let replyTo = turnReplyAddress {
@@ -4331,6 +4336,11 @@ class ConversationManager: ObservableObject {
         let current = KeychainHelper.load(key: effortKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
+        if argument.isEmpty && ProviderProfiles.usesResponses {
+            let allowed = ResponsesAdapter.allowedEfforts(model: KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) ?? "")
+            try? await sendText("Current reasoning effort: \(current.isEmpty ? defaultDescription : current)\nSet with /effort \(allowed.joined(separator: "|")), or /effort off to use the endpoint default.")
+            return
+        }
         guard !argument.isEmpty else {
             try? await sendText("""
                 Current reasoning effort: \(current.isEmpty ? defaultDescription : current)
@@ -4351,8 +4361,14 @@ class ConversationManager: ObservableObject {
             try? await sendText("✅ Reasoning effort cleared — the endpoint's default applies from the next message.")
             return
         }
-        guard (Self.validReasoningEfforts + (ProviderProfiles.usesResponses ? ["max", "ultra"] : [])).contains(requested) else {
-            try? await sendText("Unknown effort \"\(argument)\" — use minimal, low, medium, high or xhigh.")
+        let allowedEfforts = ProviderProfiles.usesResponses
+            ? ResponsesAdapter.allowedEfforts(model: KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) ?? "")
+            : Self.validReasoningEfforts
+        guard allowedEfforts.contains(requested) else {
+            let message = ProviderProfiles.usesResponses
+                ? "Unknown effort \"\(argument)\" — use \(allowedEfforts.joined(separator: ", "))."
+                : "Unknown effort \"\(argument)\" — use minimal, low, medium, high or xhigh."
+            try? await sendText(message)
             return
         }
         try? KeychainHelper.save(key: effortKey, value: requested)
@@ -4989,6 +5005,8 @@ class ConversationManager: ObservableObject {
     }
 
     private func spendSnapshotText() -> String {
+        let nativeNotice = ProviderProfiles.usesResponses
+            ? ["Responses model costs are not included in these totals or caps. Set a budget in your API provider account; these limits do not cap total Responses spending."] : []
         let snapshot = KeychainHelper.openRouterSpendSnapshot(referenceDate: Date())
         let status = currentSpendLimitStatus(referenceDate: Date())
         let turnCap = configuredToolSpendLimitPerTurnUSD()
@@ -4996,13 +5014,13 @@ class ConversationManager: ObservableObject {
             guard let base else { return "off" }
             return "$\(formatUSD(base + extra))" + (extra > 0 ? " (incl. +$\(formatUSD(extra)) temporary)" : "")
         }
-        return [
+        return (nativeNotice + [
             "💸 API spend (paid tools: image generation, web search, subagent calls billed through the gateway)",
             "Today: $\(formatUSD(snapshot.today)) — daily limit: \(limitText(status.dailyBaseLimitUSD, extra: status.dailyExtraUSD))",
             "This month: $\(formatUSD(snapshot.month)) — monthly limit: \(limitText(status.monthlyBaseLimitUSD, extra: status.monthlyExtraUSD))",
             "Per-turn cap: \(turnCap.map { "$" + formatUSD($0) } ?? "off")",
             SpendLimitCommand.usage,
-        ].joined(separator: "\n")
+        ]).joined(separator: "\n")
     }
 
     private func setPrivacyMode(enabled: Bool) async {
@@ -9165,7 +9183,10 @@ class ConversationManager: ObservableObject {
     private func recoverInterruptedTurnSalvageIfNeeded() {
         guard let data = try? Data(contentsOf: turnSalvageFileURL) else { return }
         guard let interactions = try? JSONDecoder().decode([ToolInteraction].self, from: data),
-              !interactions.isEmpty else { return }
+              !interactions.isEmpty else {
+            clearTurnSalvageFile()
+            return
+        }
         let native = interactions.contains { $0.assistantMessage.responsesReplay != nil }
         if !native { clearTurnSalvageFile() }
         // A crash in the window between saveConversation() and

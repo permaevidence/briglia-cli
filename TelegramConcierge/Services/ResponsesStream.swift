@@ -67,7 +67,17 @@ struct ResponsesStreamAssembler {
             }
             sequences[sequence] = fingerprint
         }
-        guard terminal == nil else { throw ResponsesFailure.malformed("event after terminal response") }
+        // Informational events may evolve independently of output item types.
+        // Only the validated terminal snapshot supplies executable work.
+        if type == "ping" || type == "keepalive" { return }
+        let semanticEvents: Set<String> = [
+            "response.created", "response.in_progress", "response.output_item.added", "response.output_item.done",
+            "response.function_call_arguments.delta", "response.output_text.delta", "response.refusal.delta",
+            "response.completed", "response.failed", "response.incomplete", "error"
+        ]
+        guard semanticEvents.contains(type) else { return }
+        if type == "error" { throw ResponsesFailure.failed(event["code"]?.responsesString ?? "stream error") }
+        guard terminal == nil else { throw ResponsesFailure.malformed("semantic event after terminal response") }
         switch type {
         case "response.created", "response.in_progress":
             guard let id = event["response"]?.responsesObject?["id"]?.responsesString else {
@@ -109,9 +119,7 @@ struct ResponsesStreamAssembler {
              "response.reasoning_summary_text.done", "response.reasoning_text.delta", "response.reasoning_text.done":
             break // The terminal snapshot supplies the complete, validated item.
         default:
-            // Unknown output/terminal events can carry work we do not understand.
-            // Only explicitly nonsemantic keepalive events are ignorable.
-            guard type == "ping" || type == "keepalive" else { throw ResponsesFailure.unsupported(type) }
+            break // Informational events never provide executable output.
         }
     }
 

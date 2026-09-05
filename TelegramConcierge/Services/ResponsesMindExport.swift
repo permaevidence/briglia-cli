@@ -40,7 +40,7 @@ enum ResponsesMindExport {
     private static func containsReplayKey(_ file: URL) throws -> Bool {
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
-        let keys = [Data("\"responsesReplay\"".utf8), Data("\"lastResponsesReplay\"".utf8)]
+        let keys = [Data("\"responsesReplay\"".utf8)]
         var tail = Data()
         while let chunk = try handle.read(upToCount: 65536), !chunk.isEmpty {
             tail.append(chunk)
@@ -59,8 +59,6 @@ enum ResponsesMindExport {
                object["id"] != nil || object["tool_calls"] != nil {
                 if object.removeValue(forKey: "responsesReplay") != nil { changed = true }
             }
-            if object["messages"]?.responsesArray != nil,
-               object.removeValue(forKey: "lastResponsesReplay") != nil { changed = true }
             for key in ["messages", "toolInteractions", "assistantMessage"] {
                 if let child = object[key] { object[key] = strip(child, changed: &changed) }
             }

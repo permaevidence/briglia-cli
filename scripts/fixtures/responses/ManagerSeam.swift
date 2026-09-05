@@ -37,6 +37,8 @@ extension ConversationManager {
         await manualPruneToolInteractions()
         return messages
     }
+    func p2Recover() { recoverInterruptedTurnSalvageIfNeeded() }
+    func p2Effort(_ value: String) async { await handleEffortCommand(argument: value) }
     func p2ReadOnlyCommands() async {
         await handleModelCommand(argument: "")
         await handleEffortCommand(argument: "")

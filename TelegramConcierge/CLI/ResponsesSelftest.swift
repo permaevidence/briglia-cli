@@ -64,6 +64,16 @@ struct ResponsesSelftest: AsyncParsableCommand {
         let context = ProviderExecutionContext.responsesAPI(baseURL: "https://api.openai.com/v1",
             key: "synthetic-test-key", model: "fixture-model", lane: .main)
         let receipt = PreparedRequestReceipt(requestID: UUID(), historyFingerprint: "fixture", deliveryNonces: [])
+        for (model, effort, accepted) in [("gpt-6-astra", "max", true), ("gpt-5.6-luna", "max", true),
+                                          ("gpt-5.4", "max", false), ("gpt-6-astra", "ultra", false),
+                                          ("gpt-6-astra", "none", false)] {
+            let candidate = ProviderExecutionContext.responsesAPI(baseURL: "https://api.openai.com/v1",
+                key: "synthetic", model: model, lane: .main, effort: effort)
+            do {
+                _ = try ResponsesAdapter(context: candidate).request(input: [], tools: nil)
+                checks.check("effort \(model)/\(effort)", accepted)
+            } catch { checks.check("effort \(model)/\(effort)", !accepted) }
+        }
         try decoderChecks(checks, context: context, receipt: receipt)
         try streamChecks(checks, context: context, receipt: receipt)
         try persistenceChecks(checks, root: root, context: context, receipt: receipt)
@@ -187,6 +197,28 @@ struct ResponsesSelftest: AsyncParsableCommand {
             }
             let parsed = try ResponsesRoundDecoder.decode(parser.finish(), scope: context.responsesScope, receipt: receipt, allowedTools: ["fixture"])
             c.check("SSE arbitrary UTF-8/CRLF chunk \(chunkSize)", parsed.text == "Hello 🌍" && parsed.calls.count == 1)
+        }
+        var forwardCompatible = ResponsesStreamAssembler()
+        try forwardCompatible.append(Self.event(["type": "response.future_annotation", "item": ["type": "shell_call"]]))
+        try forwardCompatible.append(wire)
+        try forwardCompatible.append(Data(": keepalive\n\n".utf8))
+        try forwardCompatible.append(Self.event(["type": "ping"]))
+        try forwardCompatible.append(Self.event(["type": "response.future_metric", "value": 42]))
+        let future = try ResponsesRoundDecoder.decode(forwardCompatible.finish(), scope: context.responsesScope, receipt: receipt, allowedTools: ["fixture"])
+        c.check("unknown informational events and terminal keepalives preserve validated output", future.calls.count == 1 && future.text == "Hello 🌍")
+        c.rejects("error after terminal remains fatal") {
+            var parser = ResponsesStreamAssembler(); try parser.append(wire)
+            try parser.append(Self.event(["type": "error", "code": "failure"]))
+        }
+        c.rejects("unknown event cannot replace terminal validation") {
+            var parser = ResponsesStreamAssembler()
+            try parser.append(Self.event(["type": "response.future_terminal", "response": output]))
+            _ = try parser.finish()
+        }
+        c.rejects("unknown terminal output remains unsupported") {
+            var parser = ResponsesStreamAssembler()
+            try parser.append(Self.event(["type": "response.completed", "response": Self.response([["type": "future_tool", "id": "unknown"]])]))
+            _ = try ResponsesRoundDecoder.decode(parser.finish(), scope: context.responsesScope, receipt: receipt, allowedTools: ["fixture"])
         }
         c.rejects("EOF after item done is not success") {
             var parser = ResponsesStreamAssembler()

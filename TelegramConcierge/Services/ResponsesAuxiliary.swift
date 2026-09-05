@@ -4,9 +4,10 @@ extension Probes {
     static func responses(baseURL: String, apiKey: String, model: String,
                           lane: AffinityLane = .probe(UUID())) async -> String? {
         do {
-            let context = ProviderExecutionContext.responsesAPI(baseURL: baseURL, key: apiKey, model: model, lane: lane)
+            let context = ProviderExecutionContext.responsesAPI(baseURL: baseURL, key: apiKey, model: model, lane: lane,
+                effort: ResponsesAdapter.probeEffort(model: model))
             _ = try await ResponsesAuxiliary.text(context: context,
-                messages: [("user", "Reply OK.")], maxOutputTokens: 128)
+                messages: [("user", "Reply OK.")], maxOutputTokens: 2048)
             return nil
         } catch { return error.localizedDescription }
     }

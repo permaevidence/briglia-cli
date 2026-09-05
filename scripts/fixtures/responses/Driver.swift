@@ -5,6 +5,25 @@ import ArgumentParser
 enum P2Life {
     static let defaults = UserDefaults(suiteName: "dev.briglia.p2.lifecycle")!
     static var liveMode = false
+    static var failFinalSave = false
+    static var finalFaults = 0
+    static var captureDelivery = false
+    static var deliveries: [String] = []
+    static var contexts: [ProviderExecutionContext] = []
+    static func recordContext(_ context: ProviderExecutionContext) {
+        budgetLock.lock(); defer { budgetLock.unlock() }
+        contexts.append(context)
+    }
+    static func beforeConversationSave(_ url: URL, messages: [Message]) {
+        guard failFinalSave, messages.last?.responsesReplay != nil else { return }
+        failFinalSave = false
+        do {
+            try FileManager.default.moveItem(at: url, to: url.appendingPathExtension("before-final"))
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+            try Data("block final replacement".utf8).write(to: url.appendingPathComponent("sentinel"))
+            finalFaults += 1
+        } catch { preconditionFailure("could not inject final-save fault") }
+    }
     static var failSalvageAt: Int?
     static var salvageWrites = 0
     static func beforeSalvage(_ url: URL) throws {
@@ -98,6 +117,10 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         } else {
             try await runMain(manager, server: server, root: root, file: file)
             try await runSubagents(server: server, root: root, file: file)
+            try await runFinalSave(manager, server: server, file: file)
+            try await runAuxiliary(server: server, root: root)
+            try await runSwitching(manager, server: server, file: file)
+            await manager.p2ReadOnlyCommands()
         }
         print("Responses lifecycle PASS")
     }
@@ -153,6 +176,130 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
             if FileManager.default.fileExists(atPath: salvage.path) { try FileManager.default.removeItem(at: salvage) }
             try await manager.p2Seed([])
         }
+    }
+
+    @MainActor private func runFinalSave(_ manager: ConversationManager, server: CaptureServer, file: URL) async throws {
+        try await manager.p2Seed([])
+        server.clear()
+        server.script([try P2Life.body("Read before final failure", tool: "read_file", path: file.path), try P2Life.body("FINAL_ANSWER_DELIVERED")])
+        P2Life.failFinalSave = true; P2Life.captureDelivery = true; P2Life.deliveries = []
+        var human = Message(role: .user, content: "Read the fixture, then answer")
+        human.originChannel = ChannelAddress(kind: .app, chatId: "fixture")
+        let history = try await manager.p2Turn(human: human)
+        P2Life.captureDelivery = false
+        try P2Life.require(P2Life.finalFaults == 1, "final save hits real filesystem write failure")
+        try P2Life.require(await manager.p2Error() == nil && history.last?.content == "FINAL_ANSWER_DELIVERED", "failed final save keeps completed answer without error append")
+        try P2Life.require(P2Life.deliveries.filter { $0 == "FINAL_ANSWER_DELIVERED" }.count == 1, "failed final save delivers answer exactly once")
+        let ids = history.flatMap(\.toolInteractions).flatMap { $0.assistantMessage.toolCalls.map(\.id) }
+        try P2Life.require(ids.count == 1 && Set(ids).count == ids.count, "failed final save never duplicates call ids")
+        let salvage = StoragePaths.dataRoot.appendingPathComponent("turn_salvage.json")
+        try P2Life.require(FileManager.default.fileExists(atPath: salvage.path), "failed final save retains salvage")
+        let disk = StoragePaths.dataRoot.appendingPathComponent("conversation.json")
+        try FileManager.default.removeItem(at: disk)
+        try FileManager.default.moveItem(at: disk.appendingPathExtension("before-final"), to: disk)
+        _ = try manager.p2Reload(); manager.p2Recover()
+        let recovered = try manager.p2Reload()
+        try P2Life.require(recovered.flatMap(\.toolInteractions).count == 1 && !FileManager.default.fileExists(atPath: salvage.path), "restart recovers completed rounds once after final-save failure")
+        for corrupt in [Data("not json".utf8), Data("[]".utf8)] {
+            try corrupt.write(to: salvage); manager.p2Recover()
+            try P2Life.require(!FileManager.default.fileExists(atPath: salvage.path), "invalid or empty salvage removed on startup")
+        }
+    }
+
+    @MainActor private func runAuxiliary(server: CaptureServer, root: URL) async throws {
+        server.clear(); P2Life.contexts = []
+        let archive = ConversationArchiveService()
+        await archive.configure(apiKey: "synthetic-unused-key")
+        let summary = String(repeating: "Detailed fixture facts retained for the future. ", count: 100)
+        server.script([try P2Life.body(summary), try P2Life.body(summary), try P2Life.body("You prefer concise replies and durable local memory.")])
+        try P2Life.require(try await archive.p2Summary() == summary.trimmingCharacters(in: .whitespacesAndNewlines), "Responses archive summary decoded")
+        try P2Life.require(try await archive.p2Meta() == summary.trimmingCharacters(in: .whitespacesAndNewlines), "Responses archive meta-summary decoded")
+        try KeychainHelper.save(key: KeychainHelper.structuredUserContextKey, value: "You prefer concise replies.")
+        try P2Life.require(await archive.p2Restructure(), "Responses archive restructure saved")
+        try P2Life.require(KeychainHelper.load(key: KeychainHelper.structuredUserContextKey) == "You prefer concise replies and durable local memory.", "restructured facts persist")
+        server.script([try P2Life.body("Structured user fixture"), try P2Life.body("Structured second fixture"), try P2Life.body("fixture.png: A small red square.")])
+        for index in 0..<2 {
+            let structured = try await UserContextStructurer.structure(assistantName: "Fixture", userName: "User",
+                rawContext: "Keep concise replies", existingContext: "", config: .fromKeychain())
+            try P2Life.require(structured == (index == 0 ? "Structured user fixture" : "Structured second fixture"), "Responses standalone structurer decodes operation \(index)")
+        }
+        let service = OpenRouterService(); await service.configure(apiKey: "synthetic-unused-key")
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKElEQVR4nO3NsQ0AAAzCMP5/un0CNkuZ41wybXsHAAAAAAAAAAAAxR4yw/wuPL6QkAAAAABJRU5ErkJggg==")!
+        let descriptions = try await service.generateFileDescriptions(files: [("fixture.png", png, "image/png")])
+        try P2Life.require(descriptions["fixture.png"] == "A small red square.", "Responses file description decoded")
+        try P2Life.require(P2Life.contexts.count == 6 && P2Life.contexts.prefix(3).allSatisfy { $0.lane == .archive }, "archive operations use archive affinity lane")
+        let ephemeral = P2Life.contexts.suffix(3).map { $0.lane.laneId }
+        try P2Life.require(ephemeral.allSatisfy { $0.hasPrefix("ephemeral:") } && Set(ephemeral).count == 3, "structuring and descriptions get independent operation lanes")
+        try P2Life.require(server.completeRequests.count == 6 && server.completeRequests.allSatisfy { $0.target == "/v1/responses" }, "all inherited auxiliaries target Responses")
+        for request in server.completeRequests {
+            let body = try JSONSerialization.jsonObject(with: request.body) as! [String: Any]
+            try P2Life.require(body["tools"] == nil && body["messages"] == nil, "auxiliary request has no tools or chat payload")
+        }
+        server.script([try P2Life.body("OK")])
+        let probe = await Probes.responses(baseURL: "http://127.0.0.1:\(server.port)/v1", apiKey: "synthetic-p2-key", model: "gpt-5.6-luna")
+        let probeBody = try JSONSerialization.jsonObject(with: server.completeRequests.last!.body) as! [String: Any]
+        try P2Life.require(probe == nil && probeBody["max_output_tokens"] as? Int == 2048 && (probeBody["reasoning"] as? [String: String])?["effort"] == "low", "reasoning probe uses low effort and adequate cap")
+        try P2Life.require(server.remainingResponses == 0 && server.errors.isEmpty, "auxiliary capture script exhausted")
+    }
+
+    @MainActor private func runSwitching(_ manager: ConversationManager, server: CaptureServer, file: URL) async throws {
+        func select(_ wire: ProviderWireProtocol, key: String = "synthetic-p2-key") throws {
+            try ProviderProfiles.saveProfile(.custom, apiKey: key, baseURL: "http://127.0.0.1:\(server.port)/v1",
+                model: "kimi-k2.5", effort: nil, textOnly: false, wireProtocol: wire)
+            try ProviderProfiles.activate(.custom)
+        }
+        func chat(_ text: String, tool: Bool = false) throws -> String {
+            var message: [String: Any] = ["role": "assistant", "content": text,
+                "reasoning_details": [["type": "reasoning.text", "text": "chat-only-reasoning", "format": "unknown"]]]
+            if tool {
+                let args = String(data: try JSONSerialization.data(withJSONObject: ["path": file.path]), encoding: .utf8)!
+                message["tool_calls"] = [["id": "functions.read_file:0", "type": "function", "function": ["name": "read_file", "arguments": args]]]
+            }
+            return String(data: try JSONSerialization.data(withJSONObject: ["choices": [["message": message,
+                "finish_reason": tool ? "tool_calls" : "stop"]], "usage": ["prompt_tokens": 100, "completion_tokens": 20]]), encoding: .utf8)!
+        }
+        try select(.chatCompletions); try await manager.p2Seed([]); server.clear()
+        server.script([try chat("Chat tool round", tool: true), try chat("Chat final")])
+        let chatHistory = try await manager.p2Turn(human: Message(role: .user, content: "Use the chat tool"))
+        guard let chatFinal = chatHistory.last, let chatRound = chatFinal.toolInteractions.first else { throw P2Life.Failure("chat seed missing real round") }
+        try P2Life.require(await manager.p2Error() == nil && chatRound.assistantMessage.toolCalls.first?.id == "functions.read_file:0"
+            && chatRound.assistantMessage.reasoningDetails != nil && chatRound.assistantMessage.producedByModel != nil, "real chat history has foreign call id, reasoning details and provenance")
+        let mappedID = "call_" + String(ResponsesReplayEnvelope.hash(Data("\(chatFinal.id):0:0:functions.read_file:0".utf8)).prefix(40))
+        try select(.responses); server.clear()
+        server.script([try P2Life.body("Native tool", tool: "read_file", path: file.path, id: "scopeA"), try P2Life.body("Native final", id: "scopeAfinal")])
+        let native = try await manager.p2Turn(human: Message(role: .user, content: "Continue with native protocol and read again"))
+        let first = try P2Life.input(server.completeRequests.first!)
+        try P2Life.require(await manager.p2Error() == nil && first.allSatisfy { $0["encrypted_content"] == nil && $0["id"] == nil }, "chat to Responses excludes foreign provider identities and ciphertext")
+        try P2Life.require(first.filter { $0["call_id"] as? String == mappedID }.count == 2,
+            "chat call and result map to one deterministic Responses id")
+        try P2Life.require(!String(decoding: server.completeRequests.first!.body, as: UTF8.self).contains("chat-only-reasoning"), "foreign reasoning details stay off Responses wire")
+        try P2Life.require(native.last?.responsesReplay != nil, "native era retained after real manager switch")
+        _ = try manager.p2Reload()
+        try select(.chatCompletions); server.clear(); server.script([try chat("Back on chat")])
+        _ = try await manager.p2Turn(human: Message(role: .user, content: "Continue on chat"))
+        let chatBytes = String(decoding: server.completeRequests.last!.body, as: UTF8.self)
+        let chatBody = try JSONSerialization.jsonObject(with: server.completeRequests.last!.body) as! [String: Any]
+        let messages = chatBody["messages"] as! [[String: Any]]
+        let calls = messages.flatMap { ($0["tool_calls"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String } }
+        let results = messages.compactMap { $0["tool_call_id"] as? String }
+        try P2Life.require(await manager.p2Error() == nil && server.completeRequests.last!.target == "/v1/chat/completions"
+            && !chatBytes.contains("encrypted_content") && !chatBytes.contains("responsesReplay") && !chatBytes.contains("opaque_scopeA"), "native history passes frozen chat serializer without metadata leak")
+        try P2Life.require(calls == results && calls.contains("functions.read_file:0") && calls.contains("call_scopeA"), "chat preserves canonical call ids and result pairing across protocols")
+        try select(.responses, key: "synthetic-account-B"); server.clear(); server.script([try P2Life.body("Account B answer", id: "scopeB")])
+        _ = try await manager.p2Turn(human: Message(role: .user, content: "Use account B"))
+        let accountB = try P2Life.input(server.completeRequests.last!)
+        try P2Life.require(accountB.allSatisfy { $0["encrypted_content"] == nil }, "account switch omits A ciphertext")
+        try select(.responses); server.clear(); server.script([try P2Life.body("Back to A", id: "scopeAreturn")])
+        _ = try await manager.p2Turn(human: Message(role: .user, content: "Restore account A"))
+        let accountA = try P2Life.input(server.completeRequests.last!)
+        let encrypted = accountA.compactMap { $0["encrypted_content"] as? String }
+        try P2Life.require(encrypted.contains("opaque_scopeA") && encrypted.contains("opaque_scopeAfinal") && !encrypted.contains("opaque_scopeB"), "return restores only matching A native replay after chat and account switches")
+        try P2Life.require(accountA.filter { $0["call_id"] as? String == mappedID }.count == 2, "semantic chat id remains stable after restart and switches")
+        P2Life.captureDelivery = true; defer { P2Life.captureDelivery = false }
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "low")
+        await manager.p2Effort("ultra")
+        try P2Life.require(KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey) == "low", "Responses effort command refuses ultra without persisting it")
+        try P2Life.require(server.remainingResponses == 0 && server.errors.isEmpty, "switch capture script exhausted")
     }
 
     @MainActor private func runSubagents(server: CaptureServer, root: URL, file: URL) async throws {

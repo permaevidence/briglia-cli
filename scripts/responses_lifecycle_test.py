@@ -42,7 +42,15 @@ def main():
         anchor = '    private func persistResponsesSalvage(_ interactions: [ToolInteraction]) throws {'
         assert text.count(anchor) == 1
         text = text.replace(anchor, anchor + '\n        try P2Life.beforeSalvage(turnSalvageFileURL)')
+        anchor = '    private func saveConversation() -> Bool {'
+        assert text.count(anchor) == 1
+        text = text.replace(anchor, anchor + '\n        P2Life.beforeConversationSave(conversationFileURL, messages: messages)')
+        anchor = '    private func sendText(_ text: String, to address: ChannelAddress? = nil) async throws {'
+        assert text.count(anchor) == 1
+        text = text.replace(anchor, anchor + '\n        if P2Life.captureDelivery { P2Life.deliveries.append(text); return }')
         manager.write_text(text + (fixture / 'ManagerSeam.swift').read_text())
+        archive = tree / 'TelegramConcierge/Services/ConversationArchiveService.swift'
+        archive.write_text(archive.read_text() + (fixture / 'ArchiveSeam.swift').read_text())
         main = tree / 'TelegramConcierge/CLI/AdaMain.swift'
         text = main.read_text()
         anchor = 'ResponsesSelftest.self,'
@@ -64,6 +72,9 @@ def main():
         anchor = '                let bytes = try await ResponsesHTTPTransport().send('
         assert text.count(anchor) == 1
         text = text.replace(anchor, '                try P2Life.claimLiveRequest()\n' + anchor)
+        anchor = '        if let error = context.configurationError { throw ResponsesFailure.malformed(error) }'
+        assert text.count(anchor) == 1
+        text = text.replace(anchor, '        P2Life.recordContext(context)\n' + anchor)
         adapter.write_text(text)
         renderer = tree / 'TelegramConcierge/Services/OpenRouterService+Responses.swift'
         text = renderer.read_text()
@@ -71,7 +82,10 @@ def main():
         assert text.count(anchor) == 1
         renderer.write_text(text.replace(anchor, 'tools: P2Life.liveMode ? conversation.tools?.filter { $0.function.name == "read_file" } : conversation.tools, receipt: receipt'))
         scratch = args.scratch_root or root / 'build'
-        wire.command(['swift', 'build', '--scratch-path', str(scratch)], cwd=tree)
+        # Large batches of legacy diagnostics can stall macOS SwiftPM's output
+        # regex. Production/CI builds still report warnings; this disposable
+        # instrumented build suppresses warnings only, never compiler errors.
+        wire.command(['swift', 'build', '-Xswiftc', '-suppress-warnings', '--scratch-path', str(scratch)], cwd=tree)
         binarydir = subprocess.check_output(['swift', 'build', '--scratch-path', str(scratch), '--show-bin-path'], cwd=tree, text=True).strip()
         binary = Path(binarydir) / 'briglia'
         print('Instrumented binary: ' + str(binary), flush=True)

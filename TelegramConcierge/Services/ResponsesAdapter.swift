@@ -6,6 +6,28 @@ import FoundationNetworking
 struct ResponsesAdapter {
     let context: ProviderExecutionContext
 
+    /// Documented model capabilities, separate from Codex subscription settings.
+    /// Unknown models retain the common API enum; max is opt-in for documented models.
+    static func allowedEfforts(model: String) -> [String] {
+        if model == "gpt-6-astra" || model.hasPrefix("gpt-6-astra-20") {
+            return ["low", "medium", "high", "xhigh", "max"]
+        }
+        if ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].contains(where: {
+            model == $0 || model.hasPrefix($0 + "-20")
+        }) {
+            return ["none", "low", "medium", "high", "xhigh", "max"]
+        }
+        return ["none", "minimal", "low", "medium", "high", "xhigh"]
+    }
+
+    static func probeEffort(model: String) -> String? {
+        // Pro models have narrower ranges; non-reasoning models omit the field.
+        if model == "gpt-5-pro" || model.hasPrefix("gpt-5-pro-20") { return "high" }
+        if ["gpt-5.4-pro", "gpt-5.5-pro"].contains(where: { model == $0 || model.hasPrefix($0 + "-20") }) { return "medium" }
+        if model.hasPrefix("gpt-5") || model.hasPrefix("gpt-6") || model.hasPrefix("o3") || model.hasPrefix("o4") { return "low" }
+        return nil
+    }
+
     /// Independent normalizer; the legacy Chat Completions normalizer is frozen.
     static func endpoint(_ base: String) throws -> String {
         guard var url = URLComponents(string: base.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -29,6 +51,9 @@ struct ResponsesAdapter {
             "include": .array([.string("reasoning.encrypted_content")])
         ]
         if let effort = context.reasoningEffort ?? context.reasoning?.effort {
+            guard Self.allowedEfforts(model: context.model).contains(effort) else {
+                throw ResponsesFailure.unsupported("reasoning effort \(effort) for \(context.model); use /effort off or a supported value")
+            }
             body["reasoning"] = .object(["effort": .string(effort)])
         }
         if let maxOutputTokens { body["max_output_tokens"] = .int(maxOutputTokens) }
