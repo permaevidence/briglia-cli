@@ -34,6 +34,8 @@ jobs:
           /opt/node/bin/node --version
       - name: Build
         run: swift build
+      - name: Persisted model source contract and negative tests
+        run: python3 scripts/chat_persistence_contract_test.py
       - name: Wire comparator negative tests
         run: python3 scripts/chat_wire_baseline_test.py
       - name: Chat Completions pinned-release differential gate
@@ -72,6 +74,8 @@ jobs:
           fetch-depth: 0
       - name: Build
         run: swift build
+      - name: Persisted model source contract and negative tests
+        run: python3 scripts/chat_persistence_contract_test.py
       - name: Wire comparator negative tests
         run: python3 scripts/chat_wire_baseline_test.py
       - name: Chat Completions pinned-release differential gate

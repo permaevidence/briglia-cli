@@ -72,7 +72,9 @@ extension ConversationManager {
         let saved = messages
         messages = []
         loadConversation(clearWhenMissing: true)
-        P0Life.require(messages == saved, "manager save/reload differs")
+        P0Life.require(try P0Life.bytes(messages) == P0Life.bytes(saved), "manager save/reload differs")
+        result["rawConversation"] = try P0Life.rawFile(conversationFileURL)
+        result["rawUsage"] = try P0Life.rawFile(contextUsageFileURL)
         return result
     }
 
@@ -121,5 +123,55 @@ extension ConversationManager {
         P0Life.require(pendingMidTurnMessages.isEmpty, "successful delivery must not requeue")
         return ["canonicalIDs": messages.map { $0.id.uuidString }, "queue": pendingMidTurnMessages.count,
                 "guardCleared": inFlightMidTurnBatch == nil]
+    }
+}
+
+// Full active-processing lifecycle: real loop, save, error salvage, teardown,
+// and (no-tools) actual automatic follow-up. No guard/drain invoked by the seam.
+extension ConversationManager {
+    func p0Midturn(_ mode: String, human: Message, queued: Message) async throws -> [String: Any] {
+        await p0Seed([human], prompt: 1000, completion: 100)
+        P0Life.require(activeProcessingTask == nil && activeRunId == nil, "prior task still active")
+        pendingMidTurnMessages = [queued]
+        inFlightMidTurnBatch = nil
+        error = nil
+        P0Life.require(persistPendingMidTurnQueue(), "queue persistence failed")
+        let queuedBytes = try P0Life.rawFile(pendingMidTurnFileURL)
+        HarnessNonce.overrideForTesting = { P0Life.nonce }
+        isPolling = mode == "no-tools" // enables real follow-up drain, no poller is started
+        defer { isPolling = false; HarnessNonce.overrideForTesting = nil }
+        startActiveProcessing(for: human)
+        while let task = activeProcessingTask { await task.value }
+        P0Life.require(inFlightMidTurnBatch == nil, "active-processing teardown left batch armed")
+        P0Life.require(messages.filter { $0.id == queued.id }.count == 1, "queued user duplicated or lost")
+        P0Life.require(messages.first?.id == human.id, "human order changed")
+        if mode == "abort" {
+            P0Life.require(error != nil, "503 retries did not fail")
+            P0Life.require(pendingMidTurnMessages.map(\.id) == [queued.id], "failed delivery must requeue once")
+            // Transport failure retains history AND salvaged annotations in
+            // v0.2.9; render-invariant failure strips them (separate unit gate).
+            P0Life.require(messages[1].id == queued.id, "legacy abort history retained")
+        } else {
+            P0Life.require(error == nil && pendingMidTurnMessages.isEmpty, "successful delivery not acknowledged")
+            P0Life.require(!FileManager.default.fileExists(atPath: pendingMidTurnFileURL.path), "empty queue file remains")
+            P0Life.require(messages.last?.content == (mode == "no-tools" ? "follow-up final" : "midturn final"), "wrong final reply")
+            if mode == "no-tools" {
+                P0Life.require(messages.count == 4 && messages[1].role == .assistant && messages[2].id == queued.id, "follow-up order changed")
+            } else { P0Life.require(messages[1].id == queued.id, "carried user order changed") }
+        }
+        let output: [String: Any] = ["history": try P0Life.json(messages), "queue": try P0Life.json(pendingMidTurnMessages),
+            "guardCleared": inFlightMidTurnBatch == nil, "queuedRaw": queuedBytes,
+            "rawPending": try P0Life.rawFile(pendingMidTurnFileURL, allowMissing: true), "rawConversation": try P0Life.rawFile(conversationFileURL)]
+        // Leave subsequent independent scenarios clean only after observing state.
+        pendingMidTurnMessages = []; P0Life.require(persistPendingMidTurnQueue(), "cleanup queue")
+        return output
+    }
+
+    func p0LocalEstimates(_ history: [Message]) async throws -> [String: Any] {
+        await p0Seed(history, prompt: nil, completion: nil)
+        let plan = buildPrunePlan(for: history, totalTokens: 20000, targetTokens: configuredTargetContextTokens(),
+            protectedIndex: lastAssistantIndexWithTools(in: history), providerIsLMStudio: true)
+        return ["boundary": plan.pruningBoundary, "saved": plan.savedTokens,
+            "estimates": history.map { [estimatedPromptTokens(for: $0, isLMStudio: true), toolTokensForMessage($0, isLMStudio: true)] }]
     }
 }

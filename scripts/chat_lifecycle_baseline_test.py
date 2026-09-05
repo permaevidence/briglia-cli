@@ -8,7 +8,8 @@ from chat_lifecycle_baseline import compare, expected_affinity
 class ComparatorTests(unittest.TestCase):
     def setUp(self):
         self.fixture = {'observations': {'prune': {'decision': 'pruned', 'saved': 90},
-                        'loop': {'prompt': 1200, 'completion': 80, 'tools': ['read_file']}},
+                        'loop': {'prompt': 1200, 'completion': 80, 'tools': ['read_file']},
+                        'persistence': {'rawConversation': 'e30=', 'mindEntries': ['conversation.json']}},
                         'captures': [{'fixture': 'loop-0', 'body': base64.b64encode(b'{"role":"tool","content":"x"}').decode(),
                                       'headers': {'x-opencode-session': 'fixed'}, 'target': '/v1/chat/completions'}]}
 
@@ -26,7 +27,9 @@ class ComparatorTests(unittest.TestCase):
                    lambda f: f['captures'][0]['headers'].update(extra='header'),
                    lambda f: f['captures'][0].update(target='/responses'),
                    lambda f: f['captures'].clear(),
-                   lambda f: f['observations'].pop('loop')]
+                   lambda f: f['observations'].pop('loop'),
+                   lambda f: f['observations']['persistence'].update(rawConversation='eyB9'),
+                   lambda f: f['observations']['persistence']['mindEntries'].append('responses.json')]
         for mutate in changes:
             fixture = copy.deepcopy(self.fixture)
             mutate(fixture)

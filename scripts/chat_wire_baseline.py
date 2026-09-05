@@ -48,9 +48,9 @@ def run_driver(binary, destination):
         raise RuntimeError("Empty/duplicate capture manifest")
     required = {f"{model}-{index}" for model in (
         "glm-5.3", "kimi-k3", "kimi-k2.7-code", "qwen3.8-max",
-        "custom-model", "local-model", "anthropic_claude-sonnet-4") for index in range(11)}
+        "custom-model", "local-model", "anthropic_claude-sonnet-4") for index in range(13)}
     if set(names) != required:
-        raise RuntimeError("Reviewed 77-case inventory changed; review fixture additions/removals explicitly")
+        raise RuntimeError("Reviewed 91-case inventory changed; review fixture additions/removals explicitly")
     captured = {}
     for item in manifest:
         name = item["fixture"]
@@ -70,7 +70,7 @@ def run_driver(binary, destination):
         old = path.replace("/", r"\/").encode()
         new = b"/__fixture_home__/Documents/Briglia/scratch/repos".replace(b"/", br"\/")
         count = body.count(old)
-        if count != (1 if int(name.rsplit("-", 1)[1]) >= 6 else 0):
+        if count != (1 if 6 <= int(name.rsplit("-", 1)[1]) <= 10 else 0):
             raise RuntimeError("Scratch-path substitution count differs from the reviewed fixture")
         body = body.replace(old, new)
         captured[name] = {"body_base64": base64.b64encode(body).decode(), "target": item["target"],

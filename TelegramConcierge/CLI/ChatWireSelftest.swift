@@ -175,20 +175,21 @@ struct ChatWireSelftest: AsyncParsableCommand {
             try KeychainHelper.save(key: KeychainHelper.lmStudioModelKey, value: model)
             try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: model)
             await service.configure(apiKey: "synthetic-wire-key")
-            let urlForms = [base, base + "/v1/", " \(base)/v1/chat/completions/// ", base, base, base, base, base, base, base, base]
+            let urlForms = [base, base + "/v1/", " \(base)/v1/chat/completions/// ", base, base, base, base, base, base, base, base, base + "/v1/responses", base]
             for (index, enteredURL) in urlForms.enumerated() {
                 try KeychainHelper.save(key: local ? KeychainHelper.lmStudioBaseURLKey : KeychainHelper.openAICompatibleBaseURLKey, value: enteredURL)
-                let populated = index >= 6
+                let populated = (6...10).contains(index)
+                try KeychainHelper.save(key: KeychainHelper.textOnlyModelEnabledKey, value: index == 12 ? "true" : "false")
                 AvailableTools.subagentsStoredFlagOverrideForTesting = { index == 7 ? false : nil }
                 try KeychainHelper.save(key: KeychainHelper.structuredUserContextKey,
                     value: populated ? "Fixture User studies astronomy." : "")
                 var result = ToolResultMessage(toolCallId: call.id, content: hostile)
                 result.harnessAnnotations = index == 9 ? [batch] : (index == 2 ? [annotation] : [])
-                if index == 4 || index == 5 {
+                if index == 4 || index == 5 || index == 12 {
                     // No snapshot persistence in this current-round fixture;
                     // historical attachment rehydration has a separate gate.
                     result.fileAttachments = [FileAttachment(data: png, mimeType: "image/png",
-                        filename: index == 4 ? "fixture.png" : "fixture.pdf-page-1.png", pageRange: index == 5 ? "1" : nil)]
+                        filename: index != 5 ? "fixture.png" : "fixture.pdf-page-1.png", pageRange: index == 5 ? "1" : nil)]
                 }
                 let matchingProvenance = await service.activeModelIdentifier()
                 let interaction = ToolInteraction(
@@ -204,10 +205,10 @@ struct ChatWireSelftest: AsyncParsableCommand {
                 for _ in 0..<2 {
                     server.clear()
                     _ = try await service.generateResponse(
-                        messages: index == 9 ? [plain, midturn, secondMidturn] : (index == 0 || index == 4 || index == 5 || (populated && index != 10) ? [plain] : history),
+                        messages: index == 9 ? [plain, midturn, secondMidturn] : (index == 0 || index == 4 || index == 5 || index == 12 || (populated && index != 10) ? [plain] : history),
                         imagesDirectory: images, documentsDirectory: documents,
                         tools: populated ? AvailableTools.all(includeWebSearch: true, hasDeferredMCPs: index == 8) : nil,
-                        toolResultMessages: index == 4 || index == 5 || index == 9 ? [interaction] : nil,
+                        toolResultMessages: index == 4 || index == 5 || index == 9 || index == 12 ? [interaction] : nil,
                         calendarContext: populated ? "Calendar: fixture appointment. \(hostile)" : nil,
                         emailContext: populated ? "Email: fixture inbox. \(hostile)" : nil,
                         chunkSummaries: populated ? [chunk] : nil, totalChunkCount: populated ? 1 : 0,
@@ -216,7 +217,7 @@ struct ChatWireSelftest: AsyncParsableCommand {
                         finalResponseInstruction: index == 1 ? "Give the final answer now." : nil,
                         tailSystemMessage: populated ? "Fixture tail system note." : nil,
                         tailUserMessage: index == 2 ? "Summarize the retained work." : nil,
-                        textOnlyOverride: false,
+                        textOnlyOverride: index == 12,
                         deferredMCPSummaries: index == 8 ? [(name: "fixture-server", description: "Fixture deferred tools. \(hostile)", toolCount: 2)] : nil,
                         lane: .main)
                     guard server.errors.isEmpty, server.completeRequests.count == 1,
@@ -226,7 +227,7 @@ struct ChatWireSelftest: AsyncParsableCommand {
                     captures.append(captured)
                 }
                 check("\(fixtureName): byte-identical repeated body", captures[0].body == captures[1].body)
-                check("\(fixtureName): normalized destination preserved", captures.allSatisfy { $0.target == (router ? "/api/v1/chat/completions" : "/v1/chat/completions") })
+                check("\(fixtureName): normalized destination preserved", captures.allSatisfy { $0.target == (router ? "/api/v1/chat/completions" : (index == 11 ? "/v1/responses/v1/chat/completions" : "/v1/chat/completions")) })
                 check("\(fixtureName): method and credential routing preserved", captures.allSatisfy {
                     $0.method == "POST" && $0.headers["authorization"] == (local ? "Bearer lm-studio" : "Bearer synthetic-wire-key")
                     && $0.headers["content-type"] == "application/json"
@@ -274,6 +275,10 @@ struct ChatWireSelftest: AsyncParsableCommand {
                     check("\(fixtureName): existing synthetic user-role media split",
                           media.count == 1 && media[0]["role"] as? String == "user"
                           && messages.filter { $0["role"] as? String == "tool" }.count == 2)
+                }
+                if index == 12 {
+                    let rendered = String(decoding: captures[0].body, as: UTF8.self)
+                    check("\(fixtureName): text-only image never inlined", !rendered.contains("data:image/") && !rendered.contains("image_url"))
                 }
                 if let output {
                     try captures[0].body.write(to: output.appendingPathComponent(fixtureName + ".body.json"), options: .withoutOverwriting)

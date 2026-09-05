@@ -745,8 +745,10 @@ final class CaptureServer: @unchecked Sendable {
     // Scripted local responses for lifecycle tests. Empty preserves the existing
     // wire/affinity fixtures. Access is serialized with capture recording.
     private var responseQueue: [String] = []
-    func script(_ bodies: [String]) {
-        lock.lock(); responseQueue = bodies; lock.unlock()
+    private var statusQueue: [Int] = []
+    func script(_ bodies: [String], statuses: [Int] = []) {
+        precondition(statuses.isEmpty || statuses.count == bodies.count)
+        lock.lock(); responseQueue = bodies; statusQueue = statuses; lock.unlock()
     }
     var remainingResponses: Int { lock.lock(); defer { lock.unlock() }; return responseQueue.count }
 
@@ -826,11 +828,12 @@ final class CaptureServer: @unchecked Sendable {
             lock.lock(); captureErrors.append(String(describing: error)); lock.unlock()
             return
         }
-        let status = statusOverride ?? 200
+        let fallbackStatus = statusOverride ?? 200
         let content = contentOverride ?? "OK"
         let encodedContent = String(data: try! JSONEncoder().encode(content), encoding: .utf8)!
         lock.lock()
         let scripted = responseQueue.isEmpty ? nil : responseQueue.removeFirst()
+        let status = statusQueue.isEmpty ? fallbackStatus : statusQueue.removeFirst()
         lock.unlock()
         let body = scripted ?? (status == 200
             ? "{\"id\":\"cap\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\(encodedContent)},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}"

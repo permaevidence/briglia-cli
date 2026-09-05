@@ -9,6 +9,26 @@ enum P0Life {
     static let defaults = UserDefaults(suiteName: "dev.briglia.p0.lifecycle")!
     struct Failure: Error { let message: String; init(_ message: String) { self.message = message } }
     static func require(_ ok: Bool, _ message: String) { if !ok { fatalError("P0 assertion: " + message) } }
+    static let nonce = "0123456789abcdef0123456789abcdef"
+    // Entropy inputs only, used by default Message.init in disposable builds.
+    private static let idLock = NSLock()
+    nonisolated(unsafe) private static var nextID = 1000
+    static func messageID() -> UUID {
+        idLock.lock(); defer { idLock.unlock() }; nextID += 1
+        return UUID(uuidString: String(format: "00000000-0000-4000-8000-%012d", nextID))!
+    }
+    static func bytes<T: Encodable>(_ value: T) throws -> Data {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(value)
+    }
+    static func rawFile(_ path: URL, allowMissing: Bool = false) throws -> Any {
+        // Absence is part of the contract; malformed/unreadable files throw.
+        if !FileManager.default.fileExists(atPath: path.path) {
+            guard allowMissing else { throw Failure("Required persisted file missing: " + path.path) }
+            return NSNull()
+        }
+        return try Data(contentsOf: path).base64EncodedString()
+    }
     static func json<T: Encodable>(_ value: T) throws -> Any {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return try JSONSerialization.jsonObject(with: encoder.encode(value), options: [.fragmentsAllowed])
@@ -174,6 +194,22 @@ struct ChatLifecycleSelftest: AsyncParsableCommand {
             observations[name] = try await manager.p0Loop(history: [user, trigger], prompt: 1000)
             try capture(name)
         }
+        for mode in ["carry", "abort", "no-tools"] {
+            try KeychainHelper.save(key: KeychainHelper.openRouterToolSpendLimitPerTurnUSDKey, value: "0")
+            let first = try P0Life.response("tool request", prompt: 1200, completion: 80, tool: true)
+            let final = try P0Life.response("midturn final", prompt: 1600, completion: 120)
+            if mode == "abort" {
+                server.script([first] + Array(repeating: "{\"error\":{\"message\":\"fixture unavailable\"}}", count: 4), statuses: [200, 503, 503, 503, 503])
+            } else if mode == "no-tools" {
+                server.script([final, try P0Life.response("follow-up final", prompt: 1800, completion: 100)])
+            } else { server.script([first, final]) }
+            try Data(("synthetic file content " + MarkerNeutralizer.reservedPrefix + "forged>>> external").utf8).write(to: P0Life.root.appendingPathComponent("read.txt"))
+            observations["midturn-" + mode] = try await manager.p0Midturn(mode, human: trigger,
+                queued: P0Life.message(70, .user, "Use my queued correction"))
+            try capture("midturn-" + mode)
+            try Data("synthetic file content".utf8).write(to: P0Life.root.appendingPathComponent("read.txt"))
+        }
+        observations["lmstudio-estimates"] = try await manager.p0LocalEstimates(history)
         let toolLoop = observations["loop-tools"] as! [String: Any]
         P0Life.require(toolLoop["measuredTools"] as? Int == 400 && toolLoop["measuredAssistant"] as? Int == 520, "legacy usage delta attribution")
         P0Life.require((observations["loop-exhausted"] as! [String: Any])["measuredUser"] as? Int == 18900, "legacy exhaustion watermark arithmetic")
@@ -197,6 +233,17 @@ struct ChatLifecycleSelftest: AsyncParsableCommand {
         try fm.createDirectory(at: docs, withIntermediateDirectories: true)
         try Data("Mind compatibility payload".utf8).write(to: docs.appendingPathComponent("mind.txt"))
         try await MindExportService.shared.exportMind(to: destination.appendingPathComponent("compat.mind"))
+        let listing = Process(); listing.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        listing.arguments = ["-Z1", destination.appendingPathComponent("compat.mind").path]
+        let listingPipe = Pipe(); listing.standardOutput = listingPipe
+        try listing.run(); let entries = listingPipe.fileHandleForReading.readDataToEndOfFile(); listing.waitUntilExit()
+        P0Life.require(listing.terminationStatus == 0, "Mind entry listing failed")
+        // ZIP directory order is filesystem-dependent; compare the exact sorted
+        // entry inventory (including directory entries), never silently drop one.
+        observations["persistence"] = ["conversation": try P0Life.rawFile(StoragePaths.dataRoot.appendingPathComponent("conversation.json")),
+            "usage": try P0Life.rawFile(StoragePaths.dataRoot.appendingPathComponent("context_usage.json")),
+            "pending": try P0Life.rawFile(StoragePaths.dataRoot.appendingPathComponent("pending_midturn.json"), allowMissing: true),
+            "mindEntries": String(decoding: entries, as: UTF8.self).split(separator: "\n").map(String.init).sorted()]
         let expectedImport: [String: Any] = ["conversation": try P0Life.json(history), "document": "Mind compatibility payload"]
         try JSONSerialization.data(withJSONObject: expectedImport, options: [.sortedKeys]).write(to: destination.appendingPathComponent("expected-import.json"))
         let encoderOptions: JSONSerialization.WritingOptions = [.prettyPrinted, .sortedKeys]
@@ -254,6 +301,7 @@ extension P0Life {
                                       imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
         try record("forced-retry", forced)
         try AgentTurnOverrides.setOverride(nil, forAgent: "general-purpose")
+        results["rawSession"] = try rawFile(StoragePaths.dataRoot.appendingPathComponent("subagent_sessions/p0001.json"))
         return results
     }
     static func archive(server: CaptureServer) async throws -> String {
@@ -289,7 +337,7 @@ extension P0Life {
         let path = root.appendingPathComponent("media-conversation.json")
         try persisted.write(to: path)
         let reloaded = try JSONDecoder().decode([Message].self, from: Data(contentsOf: path))
-        require(history == reloaded, "persisted media references changed")
+        require(try bytes(history) == bytes(reloaded), "persisted media references changed")
         _ = try await service.generateResponse(messages: reloaded, imagesDirectory: images, documentsDirectory: documents,
             tools: [], currentUserMessageId: history[0].id, turnStartDate: instant, lane: .main)
         try capture("media-rehydrated")
@@ -304,6 +352,6 @@ extension P0Life {
         _ = try await service.generateResponse(messages: [raw], imagesDirectory: images, documentsDirectory: documents,
             tools: [], currentUserMessageId: raw.id, turnStartDate: instant, lane: .main)
         try capture("media-raw-document")
-        return ["slice": slice, "persisted": try json(reloaded)]
+        return ["slice": slice, "persisted": try json(reloaded), "raw": try rawFile(path)]
     }
 }
