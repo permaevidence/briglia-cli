@@ -165,6 +165,9 @@ def main():
     if args.candidate_only and args.save_reference: p.error("diagnostic candidate cannot record a reference")
     if args.save_reference and args.save_reference.exists():
         raise RuntimeError("Refusing to overwrite frozen evidence")
+    missing = [name for name in ("zip", "unzip") if shutil.which(name) is None]
+    if missing:
+        raise RuntimeError("Mind compatibility gate requires: " + ", ".join(missing) + ". Install them before building; this check cannot be skipped.")
     root = Path(tempfile.mkdtemp(prefix="briglia-lifecycle-"))
     trees = []
     try:
