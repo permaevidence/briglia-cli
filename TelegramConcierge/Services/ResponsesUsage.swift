@@ -86,11 +86,16 @@ struct ResponsesUsageStore {
             data.append(chunk)
             guard data.count <= Self.maxBytes else { throw Failure() }
         }
+        guard let state = try? JSONDecoder().decode(State.self, from: data) else {
+            // Inspect unknown schema versions only after decoding fails. Valid
+            // ledgers take a single decode on the frequent recording path.
+            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let version = object["version"] as? NSNumber, version != 1 { throw Failure() }
+            throw CorruptState(device: info.st_dev, inode: info.st_ino)
+        }
         // Never reset a future format written by a newer Briglia installation.
-        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let version = object["version"] as? NSNumber, version != 1 { throw Failure() }
-        guard let state = try? JSONDecoder().decode(State.self, from: data), state.version == 1,
-              state.records.count <= Self.capacity,
+        guard state.version == 1 else { throw Failure() }
+        guard state.records.count <= Self.capacity,
               state.records.allSatisfy({ record in
                   record.model.utf8.count <= 512 && record.lane.utf8.count <= 32 &&
                   [record.counts.input, record.counts.cachedInput, record.counts.cacheWriteInput,
