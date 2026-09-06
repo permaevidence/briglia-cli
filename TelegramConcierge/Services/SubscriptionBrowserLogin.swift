@@ -58,7 +58,7 @@ extension SubscriptionLogin {
         let pending = try await store.beginLogin()
         let state = Self.randomURLToken(), verifier = Self.randomURLToken()
         let callback = SubscriptionBrowserCallback(state: state)
-        let server = QuickSetupHTTPServer(port: 1455) { await callback.receive($0) }
+        let server = QuickSetupHTTPServer(port: 1455, reuseAddress: true) { await callback.receive($0) }
         defer { server.stop() }
         do {
             try server.start()

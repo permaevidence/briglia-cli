@@ -59,6 +59,7 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
     static let maxConnections = 16
 
     private let requestedPort: UInt16
+    private let reuseAddress: Bool
     private let handler: (Request) async -> Response
     private var listenFD: Int32 = -1
     private(set) var port: UInt16 = 0
@@ -89,8 +90,9 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
     }
     var activeConnections: Int { lock.lock(); defer { lock.unlock() }; return active }
 
-    init(port: UInt16 = 0, handler: @escaping (Request) async -> Response) {
+    init(port: UInt16 = 0, reuseAddress: Bool = false, handler: @escaping (Request) async -> Response) {
         self.requestedPort = port
+        self.reuseAddress = reuseAddress
         self.handler = handler
     }
 
@@ -104,7 +106,15 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
         #endif
         guard fd >= 0 else { throw ServerError("socket() failed: \(String(cString: strerror(errno)))") }
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
-        // SO_REUSEADDR deliberately OFF (plan §5.1).
+        // Quick Setup keeps SO_REUSEADDR OFF (plan §5.1). OAuth opts in for
+        // its fixed callback port so TIME_WAIT cannot block an immediate login.
+        // SO_REUSEPORT is never enabled; an existing listener still wins.
+        if reuseAddress {
+            var enabled: Int32 = 1
+            guard setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                close(fd); throw ServerError("Cannot configure callback address reuse")
+            }
+        }
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = requestedPort.bigEndian

@@ -1,5 +1,8 @@
 import ArgumentParser
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 #if canImport(Glibc)
 import Glibc
 #else
@@ -205,6 +208,33 @@ struct SubscriptionSelftest: AsyncParsableCommand {
         }
         c.check("device flow commits generation", try store.read()?.generation == generation)
         c.check("device flow persists credential", try store.read()?.credential?.account == "account-A")
+        let browserStore = SubscriptionAuthStore(directory: root.appendingPathComponent("browser"))
+        let browser = SubscriptionLogin(store: browserStore, post: { path, fields, form in
+            guard path == "/oauth/token", form, fields["code"] == "browser-fixture",
+                  fields["grant_type"] == "authorization_code", fields["code_verifier"]?.count == 43 else {
+                throw SubscriptionError("Unexpected browser exchange")
+            }
+            return (try Self.tokenData(), 200)
+        })
+        let browserGeneration = try await browser.browser { link in
+            let competing = QuickSetupHTTPServer(port: 1455, reuseAddress: true) { _ in .status(400) }
+            defer { competing.stop() }
+            await c.rejects("fixed callback port cannot share a live listener") { try competing.start() }
+            let components = URLComponents(string: link)!
+            let state = components.queryItems!.first { $0.name == "state" }!.value!
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 3; config.timeoutIntervalForResource = 5
+            let session = URLSession(configuration: config)
+            defer { session.invalidateAndCancel() }
+            let (_, invalid) = try await session.data(from: URL(string: "http://127.0.0.1:1455/auth/callback?state=wrong&code=browser-fixture")!)
+            c.check("real loopback listener rejects wrong state", (invalid as? HTTPURLResponse)?.statusCode == 400)
+            let (_, valid) = try await session.data(from: URL(string: "http://127.0.0.1:1455/auth/callback?state=\(state)&code=browser-fixture")!)
+            c.check("real loopback listener accepts own state", (valid as? HTTPURLResponse)?.statusCode == 200)
+        }
+        c.check("browser flow exchanges and commits own credentials", try browserStore.read()?.generation == browserGeneration)
+        let stopped = QuickSetupHTTPServer(port: 1455, reuseAddress: true) { _ in .status(400) }
+        try stopped.start(); stopped.stop()
+        c.check("browser listener releases fixed port after completion", true)
         var revoked = login
         revoked.post = { path, _, _ in
             if path.hasSuffix("usercode") { return (Data("{\"device_auth_id\":\"d\",\"user_code\":\"c\",\"interval\":1}".utf8), 200) }
