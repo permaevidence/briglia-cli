@@ -82,7 +82,7 @@ struct SubscriptionSetup {
                 let o = try SubscriptionLogin.object(data)
                 guard let device = o["device_auth_id"] as? String, let code = o["user_code"] as? String,
                       let interval = Double(String(describing: o["interval"] ?? "5")) else { throw SubscriptionError("Invalid device authorization response") }
-                let lifetime = Double(String(describing: o["expires_in"] ?? "900")) ?? 0
+                let lifetime = Double(String(describing: o["expires_in"] ?? "900")) ?? 900
                 guard lifetime.isFinite, lifetime > 0 else { throw SubscriptionError("Invalid device authorization expiry") }
                 let duration = min(900, lifetime)
                 let challenge = SubscriptionDeviceChallenge(deviceID: device, userCode: code,
@@ -167,10 +167,11 @@ struct SubscriptionSetup {
                 throw SubscriptionError("Device login expired; start again")
             }
             if Date() < challenge.nextPoll { return challenge }
-            // Reserve the two bounded (30 s each) exchanges. A crashed owner
+            // Reserve both 30 s exchanges and both subsequent 45 s lock waits,
+            // plus 5 s margin. A crashed owner
             // can be superseded after this window; its late result cannot commit.
             challenge.pollAttempt = attempt
-            challenge.nextPoll = Date().addingTimeInterval(65)
+            challenge.nextPoll = Date().addingTimeInterval(155)
             state.deviceChallenge = challenge; try store.write(state)
             return challenge
         }

@@ -207,7 +207,11 @@ struct SetupWizard {
 
     /// Multi-provider menu: configure any subset of the four providers, then
     /// pick which one is active. Hop later anytime with /provider.
-    private func configureSubscription() async -> Bool {
+    // Inject only terminal input and network work in the offline wizard test;
+    // lease ownership, profile persistence and activation use the real path.
+    func configureSubscription(login: SubscriptionLogin = SubscriptionLogin(),
+        ask: (String, String?) -> String = { WizardIO.ask($0, default: $1) },
+        probeRequest: (([String: Any]) async -> [String: Any])? = nil) async -> Bool {
         print("ChatGPT subscription runs the main agent. Web search, voice and image tools retain separate API billing.")
         let setup = SubscriptionSetup()
         let lease: InstanceLease
@@ -220,7 +224,7 @@ struct SetupWizard {
             let state = try SubscriptionAuthStore().read()
             let signedIn = state?.credential != nil && state?.requiresLogin != true
             print(signedIn ? "ChatGPT: signed in (quota unknown)." : "ChatGPT: sign-in required.")
-            let action = WizardIO.ask("Account action: keep, login, or logout", default: signedIn ? "keep" : "login").lowercased()
+            let action = ask("Account action: keep, login, or logout", signedIn ? "keep" : "login").lowercased()
             if action == "logout" {
                 try await SubscriptionAuthStore().logout()
                 print("ChatGPT signed out locally. Your subscription is unchanged.")
@@ -228,15 +232,16 @@ struct SetupWizard {
             }
             guard action == "keep" || action == "login" else { print("Unknown account action."); return false }
             if !signedIn || action == "login" {
-                _ = try await SubscriptionLogin().device { url, code in
+                _ = try await login.device { url, code in
                     print("Open \(url) and enter code: \(code). Enable device login in ChatGPT security settings if needed.")
                 }
             }
-            if ProviderProfiles.activeProfile() == .chatgpt { try ProviderProfiles.activate(.chatgpt) }
-            let model = WizardIO.ask("Model", default: ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna")
-            let effort = WizardIO.ask("Reasoning effort", default: ProviderProfiles.configuredEffort(.chatgpt) ?? "high")
+            let model = ask("Model", ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna")
+            let effort = ask("Reasoning effort", ProviderProfiles.configuredEffort(.chatgpt) ?? "high")
             let request: [String: Any] = ["action": "probe", "model": model, "effort": effort]
-            let probe = await setup.perform(request, ownsLease: true)
+            let probe: [String: Any]
+            if let probeRequest { probe = await probeRequest(request) }
+            else { probe = await setup.perform(request, ownsLease: true) }
             guard probe["ok"] as? Bool == true else { print("Connection check failed: \(probe["error"] ?? "unknown error")"); return false }
             let saved = await setup.perform(["action": "select", "model": model, "effort": effort,
                 "generation": probe["generation"] ?? "", "activate": false], ownsLease: true)

@@ -88,6 +88,7 @@ extension SubscriptionSelftest {
         await c.rejects("device owner observes expiry") { _ = try await deviceLogin.device { _, _ in } }
         c.check("device expiry cannot commit", try raceStore.read()?.credential == nil)
 
+        try await expiryTests(root, c)
         try await pollConcurrencyTests(root, c)
 
         // R1 active invalid login may recover; valid active login cannot be replaced.
@@ -106,7 +107,68 @@ extension SubscriptionSelftest {
         do { try SubscriptionSetup.checkLoginReplacement(); c.check("active revoked profile can re-login", true) }
         catch { c.check("active revoked profile can re-login", false) }
         try await defaultStore.logout()
+        try await wizardRecoveryTests(c)
     }
+
+    @MainActor
+    func wizardRecoveryTests(_ c: Checks) async throws {
+        let store = SubscriptionAuthStore()
+        for mode in ["valid", "revoked", "logged-out"] {
+            let pending = try await store.beginLogin()
+            let oldGeneration = try await store.commitLogin(Self.credential(), pending: pending)
+            try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil,
+                model: "gpt-5.6-terra", effort: "medium", textOnly: false)
+            try ProviderProfiles.activate(.chatgpt)
+            if mode == "revoked" { try await store.requireLogin(generation: oldGeneration, rejectedAccess: "synthetic-access") }
+            if mode == "logged-out" { try await store.logout() }
+            var login = SubscriptionLogin(store: store)
+            login.post = { path, _, _ in
+                if path.hasSuffix("usercode") {
+                    switch InstanceLease.acquire(label: "wizard regression contender") {
+                    case .success(let lease): lease.release(); c.check("wizard owns instance lease during login", false)
+                    case .failure: c.check("wizard owns instance lease during login", true)
+                    }
+                    return (Data(#"{"device_auth_id":"wizard","user_code":"TEST","interval":1}"#.utf8), 200)
+                }
+                if path.hasSuffix("deviceauth/token") { return (Data(#"{"authorization_code":"code","code_verifier":"verifier"}"#.utf8), 200) }
+                return (try Self.tokenData(), 200)
+            }
+            var probes = 0
+            let result = await SetupWizard().configureSubscription(login: login, ask: { prompt, fallback in
+                prompt.hasPrefix("Account action") ? "login" : fallback ?? ""
+            }, probeRequest: { request in
+                probes += 1
+                // The real device flow has committed the new generation. This
+                // is exactly where the old wizard's early activate threw.
+                do {
+                    try ProviderProfiles.activate(.chatgpt)
+                    c.check("old activation order rejects a newly committed login", false)
+                } catch { c.check("old activation order rejects a newly committed login", true) }
+                c.check("wizard retains chosen model and effort at probe", request["model"] as? String == "gpt-5.6-terra" && request["effort"] as? String == "medium")
+                return ["ok": true, "generation": (try? store.read()?.generation) ?? ""]
+            })
+            let newGeneration = try store.read()!.generation
+            c.check("wizard recovers active \(mode) login through probe/select/activate", result && probes == 1
+                && newGeneration != oldGeneration && ProviderProfiles.activeProfile() == .chatgpt
+                && KeychainHelper.load(key: KeychainHelper.openAICompatibleApiKeyKey) == newGeneration)
+            c.check("wizard preserves non-default runtime model and effort", KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) == "gpt-5.6-terra"
+                && KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey) == "medium")
+        }
+        try await store.logout()
+    }
+
+    func expiryTests(_ root: URL, _ c: Checks) async throws {
+        let store = SubscriptionAuthStore(directory: root.appendingPathComponent("expiry-auth"))
+        for (value, expected) in [("\"unparseable\"", 900.0), ("null", 900), ("30", 30), ("1800", 900), ("0", 0), ("-1", 0), ("\"nan\"", 0), ("\"inf\"", 0)] {
+            var login = SubscriptionLogin(store: store)
+            login.post = { _, _, _ in
+                (Data((#"{"device_auth_id":"expiry","user_code":"TEST","interval":1,"expires_in":"# + value + "}").utf8), 200)
+            }
+            let result = await SubscriptionSetup(login: login).perform(["action": "start"])
+            c.check("expiry parsing \(value)", expected == 0 ? result["ok"] as? Bool == false : result["expires_in"] as? Double == expected)
+        }
+    }
+
     func pollConcurrencyTests(_ root: URL, _ c: Checks) async throws {
         // A gate watchdog makes the old network-under-lock implementation fail
         // a bounded assertion instead of hanging the suite for 45 seconds.
@@ -136,6 +198,7 @@ extension SubscriptionSelftest {
                     c.check("poll reaches network gate", false); continue
                 }
                 let watchdog = Task { try? await Task.sleep(nanoseconds: 3_000_000_000); if !Task.isCancelled { await gate.release() } }
+                c.check("poll reservation covers exchanges and lock waits", (try store.read()?.deviceChallenge?.nextPoll.timeIntervalSinceNow ?? 0) > 150)
                 let duplicate = await setup.perform(["action": "poll", "pending": pending])
                 c.check("in-flight poll returns pending without another exchange", duplicate["state"] as? String == "pending")
                 switch operation {
