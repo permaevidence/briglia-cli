@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -328,9 +329,51 @@ def main():
         check("quicksetup.lock removed at the end", not os.path.exists(lock))
         check("no job journal left", not os.path.exists(home + "/.local/share/briglia/quicksetup.job.json"))
 
-        # 8. Refusal: already set up.
-        r2 = subprocess.run([ADA, "quicksetup"], env=env, capture_output=True, text=True, timeout=60)
-        check("rerun refuses: already set up (exit 2)", r2.returncode == 2 and "already set up" in r2.stdout, r2.stdout[-200:])
+        # 8. The completed installation now opens independent browser
+        # settings. It must preserve setup/pairing and never run installers.
+        before_rerun = dict(secrets)
+        r2 = subprocess.Popen([ADA, "quicksetup"], env=env, stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, bufsize=1)
+        rerun_lines = []
+        def read_rerun():
+            for line in r2.stdout:
+                rerun_lines.append(line)
+        rerun_reader = threading.Thread(target=read_rerun, daemon=True)
+        rerun_reader.start()
+        try:
+            deadline = time.time() + 30
+            match = None
+            while time.time() < deadline:
+                match = re.search(r"Briglia settings: http://127\.0\.0\.1:(\d+)/start\?t=([0-9a-f]{32})", "".join(rerun_lines))
+                if match or r2.poll() is not None:
+                    break
+                time.sleep(0.05)
+            check("rerun opens browser settings", match is not None, "".join(rerun_lines)[-300:])
+            if match:
+                rerun_port, rerun_token = match.groups()
+                conn = http.client.HTTPConnection("127.0.0.1", int(rerun_port), timeout=10)
+                conn.request("GET", "/start?t=" + rerun_token)
+                response = conn.getresponse()
+                cookie_header = response.getheader("Set-Cookie", "").split(";", 1)[0]
+                response.read()
+                conn.request("GET", "/api/status", headers={"Cookie": cookie_header})
+                response = conn.getresponse()
+                settings_status = json.loads(response.read())
+                conn.close()
+                check("rerun serves settings rather than installation steps", response.status == 200 and settings_status.get("mode") == "settings")
+        finally:
+            if r2.poll() is None:
+                r2.send_signal(signal.SIGINT)
+                try:
+                    r2.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    r2.kill(); r2.wait()
+            rerun_reader.join(timeout=2)
+        check("settings rerun exits cleanly", r2.returncode == 0)
+        after_rerun = json.load(open(home + "/.config/briglia/secrets.json"))
+        check("settings rerun preserves keys, pairing and completion", after_rerun == before_rerun)
+        check("settings rerun does not install anything", "stub: installing" not in "".join(rerun_lines))
     except Exception as e:
         check("driver raised %r" % (e,), False, "rc=%s tail=%r" % (proc.poll(), output()[-1500:]))
     finally:
