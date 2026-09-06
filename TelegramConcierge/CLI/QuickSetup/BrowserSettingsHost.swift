@@ -66,7 +66,13 @@ final class BrowserSettingsHost {
         "http://127.0.0.1:\(server.port)/start?t=\(await auth.launchToken)"
     }
     func stop() async {
-        guard !stopped, !stopping else { return }
+        if stopped { return }
+        if stopping {
+            // A signal, idle expiry and normal quit may converge here. Every
+            // caller must await the same settlement before releasing a lease.
+            while !stopped { try? await Task.sleep(nanoseconds: 50_000_000) }
+            return
+        }
         stopping = true
         server.stop()
         _ = await auth.rotate()

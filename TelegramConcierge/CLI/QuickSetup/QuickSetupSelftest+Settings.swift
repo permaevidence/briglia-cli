@@ -136,6 +136,10 @@ extension SelftestContext {
         let stopping = Task { await host.stop() }
         while await host.auth.generation == g { await Task.yield() }
         check("settings: shutdown waits for the old callback", !host.stopped)
+        var secondStopped = false
+        let secondStop = Task { await host.stop(); secondStopped = true }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        check("settings: overlapping shutdown callers both await settlement", !secondStopped)
         switch InstanceLease.acquire(label: "competing daemon fixture") {
         case .success(let other): check("settings: shutdown retains lease until callback exits", false); other.release()
         case .failure: check("settings: shutdown retains lease until callback exits", true)
@@ -143,6 +147,7 @@ extension SelftestContext {
         release?.resume()
         check("settings: revoked callback cannot write during shutdown", (await saving.value).0 == 404 && !wrote)
         await stopping.value
+        await secondStop.value
         check("settings: server closes after settlement", host.stopped)
         switch InstanceLease.acquire(label: "next daemon fixture") {
         case .success(let other): check("settings: next daemon can acquire lease after settlement", true); other.release()
