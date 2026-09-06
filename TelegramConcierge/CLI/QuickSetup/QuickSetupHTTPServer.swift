@@ -30,6 +30,8 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
         var status: Int
         var headers: [(String, String)] = []
         var body: Data = Data()
+        // Set only by the authorized done-status route; never serialized.
+        var completesSetup: Bool = false
         static func status(_ code: Int) -> Response { Response(status: code) }
     }
 
@@ -63,6 +65,27 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
     private var active = 0
     private(set) var lastActivity = Date()
     private var stopped = false
+    private var completionDelivered = false
+    var hasDeliveredCompletion: Bool { lock.lock(); defer { lock.unlock() }; return completionDelivered }
+
+    /// Allow the final status to reach the browser before tearing down its server.
+    /// A closed tab cannot keep setup alive; use a monotonic, capped deadline.
+    func waitForCompletionDelivery(timeout: TimeInterval = 10) async -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + min(10, max(0, timeout))
+        while !hasDeliveredCompletion && ProcessInfo.processInfo.systemUptime < deadline && !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return hasDeliveredCompletion
+    }
+
+    @discardableResult
+    func writeResponse(_ response: Response, to fd: Int32) -> Bool {
+        let written = Self.writeAll(fd, Self.serialize(response))
+        if written && response.completesSetup {
+            lock.lock(); completionDelivered = true; lock.unlock()
+        }
+        return written
+    }
     var activeConnections: Int { lock.lock(); defer { lock.unlock() }; return active }
 
     init(handler: @escaping (Request) async -> Response) {
@@ -194,7 +217,7 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
             done.signal()
         }
         done.wait()
-        Self.writeAll(fd, Self.serialize(response))
+        writeResponse(response, to: fd)
     }
 
     // MARK: Parser (pure, selftest-callable)
@@ -315,14 +338,21 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
         return Data(buf[0..<n])
     }
 
-    static func writeAll(_ fd: Int32, _ data: Data) {
+    @discardableResult
+    static func writeAll(_ fd: Int32, _ data: Data) -> Bool {
         data.withUnsafeBytes { raw in
             var off = 0
             while off < raw.count, let base = raw.baseAddress {
+                #if canImport(Glibc)
+                let n = send(fd, base + off, raw.count - off, Int32(MSG_NOSIGNAL))
+                #else
                 let n = write(fd, base + off, raw.count - off)
-                if n < 0 { if errno == EINTR { continue }; return }
+                #endif
+                if n < 0 { if errno == EINTR { continue }; return false }
+                if n == 0 { return false }
                 off += n
             }
+            return true
         }
     }
 

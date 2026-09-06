@@ -68,4 +68,15 @@ class ComparatorTests(unittest.TestCase):
                 self.assertIn(snapshot, (service / 'OpenRouterService.swift').read_text())
                 with self.assertRaises(RuntimeError): freeze_fallback_prompt_day(root)
 
+    def test_two_fallback_clock_owners_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = root / 'TelegramConcierge/Services'
+            service.mkdir(parents=True)
+            for name in ('OpenRouterService.swift', 'OpenRouterService+Preparation.swift'):
+                (service / name).write_text('turnStartDate ?? Date()')
+            with self.assertRaisesRegex(RuntimeError, 'exactly one'):
+                freeze_fallback_prompt_day(root)
+            self.assertTrue(all(p.read_text() == 'turnStartDate ?? Date()' for p in service.iterdir()))
+
 if __name__ == '__main__': unittest.main()

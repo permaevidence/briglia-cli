@@ -35,6 +35,7 @@ except ImportError:
 
 ADA = os.path.abspath(sys.argv[1])
 FAILS = 0
+CLOSE_AT_FINISH = "--close-at-finish" in sys.argv[2:]
 
 
 def check(label, ok, detail=""):
@@ -81,6 +82,7 @@ def main():
         "TMPDIR": home + "/tmp/", "BRIGLIA_IGNORE_LEGACY_SETUP_FLAG": "1",
         "BRIGLIA_DEV_QUICKSETUP_STUBS": "1", "BRIGLIA_QUICKSETUP_NO_BROWSER": "1",
         "BRIGLIA_DEV_STUB_SLOW_TOOLCHAIN": "4",
+        "BRIGLIA_DEV_DONE_STATUS_DELAY_MS": "1500",
     })
     os.makedirs(home + "/tmp", exist_ok=True)
     mock = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Mock)
@@ -113,6 +115,21 @@ def main():
             time.sleep(0.1)
         return None
 
+    last_status = {}
+
+    def remember_status(response):
+        if response.url.endswith("/api/status") and response.status == 200:
+            try:
+                last_status.clear()
+                last_status.update(response.json())
+            except Exception:
+                pass
+
+    def sanitized(text):
+        for value in GOOD.values():
+            text = text.replace(value, "<test-key>")
+        return re.sub(r"(?<=t=)[0-9a-f]{32}", "<launch-token>", text)
+
     try:
         m = wait_for(r"http://127\.0\.0\.1:(\d+)/start\?t=([0-9a-f]{32})")
         check("launch link printed", m is not None)
@@ -123,6 +140,7 @@ def main():
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
             page = browser.new_page()
+            page.on("response", remember_status)
             page.goto(base + "/start?t=" + token)
             page.wait_for_selector("#phase-intro:not([hidden])")
             check("exchange landed on the page", page.url.rstrip("/") == base)
@@ -182,18 +200,31 @@ def main():
             token2 = m2[-1]
             page.goto(base + "/start?t=" + token2)
             page.wait_for_selector("#btn-finish:not([hidden])", timeout=15000)
-            page.click("#btn-finish")
-            page.wait_for_selector("#phase-done:not([hidden])", timeout=60000)
-            check("finish → Done", True)
+            finish_started = time.monotonic()
+            if CLOSE_AT_FINISH:
+                # Stop all status polls, accept finish without the page's
+                # refresh handler, and close the tab before it can see DONE.
+                page.route("**/api/status", lambda route: route.abort())
+                accepted = page.evaluate("""async () => (await fetch('/api/finish', {
+                    method: 'POST', headers: {'Content-Type': 'application/json',
+                    'X-Briglia-Quick-Setup': '1'}, body: '{}'})).status""")
+                check("finish accepted before tab closes", accepted == 202)
+                page.close()
+            else:
+                page.click("#btn-finish")
+                page.wait_for_selector("#phase-done:not([hidden])", timeout=60000)
+                check("delayed finish → Done", time.monotonic() - finish_started >= 1.5)
             if sys.platform == "darwin":
                 wait_for(r"Start Briglia now\?", 20)
                 proc.stdin.write("n\n")
                 proc.stdin.flush()
-            for _ in range(100):
+            for _ in range(150):
                 if proc.poll() is not None:
                     break
                 time.sleep(0.1)
             check("process exited 0", proc.returncode == 0, str(proc.returncode))
+            if CLOSE_AT_FINISH:
+                check("closed tab cannot keep CLI alive", time.monotonic() - finish_started < 15)
             # A finished page stops polling by design; the "terminal was
             # restarted" sentence is for a server lost MID-RUN: second session
             # on a fresh home, killed while the page is open.
@@ -223,6 +254,10 @@ def main():
         text = output()
         for name, value in GOOD.items():
             check("no %s key in terminal output" % name, value not in text)
+    except Exception:
+        print("LAST STATUS: " + sanitized(json.dumps(last_status, sort_keys=True)))
+        print("CLI OUTPUT:\n" + sanitized(output()))
+        raise
     finally:
         if proc.poll() is None:
             proc.kill()

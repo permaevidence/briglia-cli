@@ -374,6 +374,7 @@ final class SelftestContext: @unchecked Sendable {
         check("no cookie → 404", r.status == 404)
         r = request(port: port, method: "GET", path: "/api/status", cookie: cookie)
         check("status with cookie → 200 phase intro", r.status == 200 && r.json["phase"] as? String == "intro")
+        check("ordinary/unauthorized responses do not signal completion", !server.hasDeliveredCompletion)
         check("§5.7 headers on every response", (r.headers["content-security-policy"] ?? "").hasPrefix("default-src 'none'") && r.headers["x-content-type-options"] == "nosniff" && r.headers["cache-control"] == "no-store" && r.headers["x-frame-options"] == "DENY" && r.headers["referrer-policy"] == "no-referrer" && r.headers["connection"] == "close")
         r = request(port: port, method: "GET", path: "/api/status", cookie: cookie, host: "localhost:\(port)")
         check("wrong Host → 400", r.status == 400)
@@ -876,6 +877,23 @@ final class SelftestContext: @unchecked Sendable {
         for _ in 0..<100 { try? await Task.sleep(nanoseconds: 50_000_000); if await wf.isDone { break } }
         let doneL = await wf.isDone
         check("finish reached done", doneL)
+        // The CLI may tear down only after an authorized DONE status was
+        // fully written. No observer still has a bounded grace period.
+        let (completionServer, _) = try startServer(wf)
+        defer { completionServer.stop() }
+        let waitStart = ProcessInfo.processInfo.systemUptime
+        let unseen = await completionServer.waitForCompletionDelivery(timeout: 0.08)
+        check("closed-tab completion wait is bounded", !unseen && ProcessInfo.processInfo.systemUptime - waitStart < 1)
+        let rejected = request(port: completionServer.port, method: "GET", path: "/api/status")
+        check("unauthorized DONE poll cannot release completion wait", rejected.status == 404 && !completionServer.hasDeliveredCompletion)
+        let failedWrite = completionServer.writeResponse(.init(status: 200, completesSetup: true), to: -1)
+        check("failed response write cannot release completion wait", !failedWrite && !completionServer.hasDeliveredCompletion)
+        let completionToken = await wf.launchToken
+        let completionCookie = exchange(port: completionServer.port, token: completionToken).cookie
+        let delivered = request(port: completionServer.port, method: "GET", path: "/api/status", cookie: completionCookie)
+        let observed = await completionServer.waitForCompletionDelivery(timeout: 0.08)
+        check("authorized DONE reaches client before completion release", delivered.status == 200 && delivered.json["phase"] as? String == "done" && observed)
+
         check("lease released exactly once, after the unit was installed and quick:handoff was on disk",
               store.releaseCalls == 1 && store.unitInstalledAtRelease && store.progressAtRelease == "quick:handoff")
         check("service started after the release, evidence checked", store.serviceStarted)

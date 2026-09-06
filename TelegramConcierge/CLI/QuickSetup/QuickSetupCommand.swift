@@ -177,7 +177,20 @@ final class QuickSetupRouter: @unchecked Sendable {
         case ("GET", "/"): return staticFile("index.html", type: "text/html; charset=utf-8")
         case ("GET", "/app.js"): return staticFile("app.js", type: "text/javascript; charset=utf-8")
         case ("GET", "/app.css"): return staticFile("app.css", type: "text/css; charset=utf-8")
-        case ("GET", "/api/status"): return Self.json(200, await workflow.status())
+        case ("GET", "/api/status"):
+            let status = await workflow.status()
+            let completed = status["phase"] as? String == "done"
+            // Dev-only server-side latency seam: a completed status must survive
+            // well past the old 500 ms shutdown window, before any bytes are sent.
+            if completed, adaCLIVersion.hasSuffix("-dev"),
+               ProcessInfo.processInfo.environment["BRIGLIA_DEV_QUICKSETUP_STUBS"] == "1",
+               let raw = ProcessInfo.processInfo.environment["BRIGLIA_DEV_DONE_STATUS_DELAY_MS"],
+               let delay = Int(raw), delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(min(delay, 5000)) * 1_000_000)
+            }
+            var response = Self.json(200, status)
+            response.completesSetup = completed
+            return response
         case ("GET", "/api/job"):
             return Self.json(200, await workflow.jobLines(since: 0))
         case ("POST", "/api/job"):
@@ -428,7 +441,11 @@ enum QuickSetupSession {
         // Main loop: wait for done / wizard fallback / idle timeout.
         while true {
             try? await Task.sleep(nanoseconds: 500_000_000)
-            if await workflow.isDone { break }
+            if await workflow.isDone {
+                listener.stop()
+                _ = await server.waitForCompletionDelivery()
+                break
+            }
             if await workflow.wizardRequested {
                 server.stop(); listener.stop()
                 leaseBox.release()

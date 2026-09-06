@@ -80,6 +80,24 @@ def check(label, ok, detail=""):
         failed += 1
 
 
+def run_selftest(*args, **kwargs):
+    """Retain the complete failed suite in CI logs, including timeout output."""
+    def emit(stdout, stderr):
+        for name, value in (("stdout", stdout), ("stderr", stderr)):
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            if value:
+                print("\nFAILED SELFTEST " + name + ":\n" + value, flush=True)
+    try:
+        result = subprocess.run(*args, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        emit(exc.stdout, exc.stderr)
+        raise
+    if result.returncode != 0:
+        emit(result.stdout, result.stderr)
+    return result
+
+
 def isolated_env(home):
     env = dict(os.environ)
     env["HOME"] = home
@@ -212,7 +230,7 @@ def main():
         os.remove(link_root)
 
     # 3. media pipeline
-    result = subprocess.run([ADA, "media-selftest"], capture_output=True, text=True, timeout=300)
+    result = run_selftest([ADA, "media-selftest"], capture_output=True, text=True, timeout=300)
     check("media-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-800:])
 
@@ -221,7 +239,7 @@ def main():
     # generous — the suite itself proves the deadlock fix by finishing in
     # seconds where the old implementation burned a 120s timeout per big test.
     try:
-        result = subprocess.run([ADA, "__bash-pipeline-selftest"], capture_output=True, text=True, timeout=300)
+        result = run_selftest([ADA, "__bash-pipeline-selftest"], capture_output=True, text=True, timeout=300)
         check("bash-pipeline-selftest", result.returncode == 0,
               (result.stdout + result.stderr)[-1500:])
     except subprocess.TimeoutExpired as e:
@@ -237,7 +255,7 @@ def main():
     # static values — frozen before the managed-jobs lifecycle refactor.
     # Any drift here is a compatibility break.
     try:
-        result = subprocess.run([ADA, "__bash-golden-selftest"], capture_output=True, text=True, timeout=240)
+        result = run_selftest([ADA, "__bash-golden-selftest"], capture_output=True, text=True, timeout=240)
         check("bash-golden-selftest", result.returncode == 0,
               (result.stdout + result.stderr)[-1500:])
     except subprocess.TimeoutExpired as e:
@@ -249,14 +267,14 @@ def main():
     # 3b3. managed bash jobs v2 machinery: completion-acknowledgement
     # receipts (settle → receipt → durable-save-gated withdrawal, stale-UUID
     # safety, idempotence) and receipt exclusion from persisted/encoded JSON.
-    result = subprocess.run([ADA, "__bash-jobs-selftest"], capture_output=True, text=True, timeout=240)
+    result = run_selftest([ADA, "__bash-jobs-selftest"], capture_output=True, text=True, timeout=240)
     check("bash-jobs-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
     # 3c. external-trigger watcher pipeline: spool intake, leading-edge fire,
     # cooldown queueing, trailing batch, orphan/delete cleanup, batch capping.
     # Self-isolates into a temp XDG_DATA_HOME and shortens the cooldown to 2s.
-    result = subprocess.run([ADA, "__trigger-selftest"], capture_output=True, text=True, timeout=120)
+    result = run_selftest([ADA, "__trigger-selftest"], capture_output=True, text=True, timeout=120)
     check("trigger-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -264,7 +282,7 @@ def main():
     # 2026-08-29): a warm-cached writer must not revert another process's
     # keys, keys saved externally must be visible without restart, and the
     # sidecar flock must genuinely serialize writers. Isolated XDG roots.
-    result = subprocess.run([ADA, "__secretstore-selftest"], capture_output=True, text=True, timeout=120)
+    result = run_selftest([ADA, "__secretstore-selftest"], capture_output=True, text=True, timeout=120)
     check("secretstore-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -272,7 +290,7 @@ def main():
     # vectors, envelope/domain/manifest strictness, anti-rollback decisions,
     # trust store, bounded streaming downloads, OpenSSL↔Swift interop
     # through the real keygen + signing scripts (needs the repo-root cwd).
-    result = subprocess.run([ADA, "__release-signing-selftest"], capture_output=True,
+    result = run_selftest([ADA, "__release-signing-selftest"], capture_output=True,
                             text=True, timeout=300, cwd=REPO_ROOT)
     check("release-signing-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
@@ -290,7 +308,7 @@ def main():
 
     # 3c1b. userdata toolchain installer: fake-apt/dpkg-backed prefix
     # install, alternatives-aware wrappers, probe enforcement, cleanup.
-    result = subprocess.run([ADA, "__toolchain-selftest"], capture_output=True, text=True, timeout=600)
+    result = run_selftest([ADA, "__toolchain-selftest"], capture_output=True, text=True, timeout=600)
     check("toolchain-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -300,7 +318,7 @@ def main():
     # byte-identical rollback, park-restoring rollback, corruption refusal,
     # service-state matrix, preferences-domain copy, diagnostics
     # no-mutation battery. Self-isolates into a temp root + fake systemctl.
-    result = subprocess.run([ADA, "__migration-selftest"], capture_output=True, text=True, timeout=600)
+    result = run_selftest([ADA, "__migration-selftest"], capture_output=True, text=True, timeout=600)
     combined = result.stdout + result.stderr
     failed_lines = "\n".join(l for l in combined.splitlines() if l.startswith("\u2716"))
     check("migration-selftest", result.returncode == 0,
@@ -312,7 +330,7 @@ def main():
     # funnel-counter telemetry + runaway backstop thresholds, triage
     # instruction hash verification, session pinning vs LRU, per-session
     # FIFO run lock. Self-isolates into a temp XDG_DATA_HOME.
-    result = subprocess.run([ADA, "__watcher-selftest"], capture_output=True, text=True, timeout=180)
+    result = run_selftest([ADA, "__watcher-selftest"], capture_output=True, text=True, timeout=180)
     check("watcher-triage-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -321,7 +339,7 @@ def main():
     # gate, watcher triage_model round-trips, FireRecord lane snapshots and
     # the legacy cheapFast frontmatter mapping. Self-isolates into temp XDG
     # roots.
-    result = subprocess.run([ADA, "__lane-selftest"], capture_output=True, text=True, timeout=120)
+    result = run_selftest([ADA, "__lane-selftest"], capture_output=True, text=True, timeout=120)
     check("lane-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -330,7 +348,7 @@ def main():
     # per-profile vision restore, /model + /effort mirrors, the loud
     # unconfigured-hop guard and masked-key listings. Self-isolates into
     # temp XDG roots.
-    result = subprocess.run([ADA, "__provider-selftest"], capture_output=True, text=True, timeout=120)
+    result = run_selftest([ADA, "__provider-selftest"], capture_output=True, text=True, timeout=120)
     check("provider-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -338,7 +356,7 @@ def main():
     # plain slashes (no Foundation \/ escaping the model would copy into
     # old_string), the escape-mismatch hint covers \/, and the read-before-edit
     # error explains the cross-restart ledger reset. Temp-dir isolated.
-    result = subprocess.run([ADA, "__fstools-selftest"], capture_output=True, text=True, timeout=120)
+    result = run_selftest([ADA, "__fstools-selftest"], capture_output=True, text=True, timeout=120)
     check("fstools-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -346,7 +364,7 @@ def main():
     # nonce/validator/neutralizer/renderer goldens, provider wire text,
     # persistence round-trips, adversarial fixtures, fail-closed paths, and
     # the repository no-contiguous-prefix invariant (runs from the repo cwd).
-    result = subprocess.run([os.path.abspath(ADA), "__midturn-selftest"], capture_output=True,
+    result = run_selftest([os.path.abspath(ADA), "__midturn-selftest"], capture_output=True,
                             text=True, timeout=120, cwd=REPO_ROOT)
     check("midturn-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
@@ -357,7 +375,7 @@ def main():
     # for direct calls / tool_search / mcp_call, legacy-name grace via the
     # validated reverse map, and mcp-routing.json / mcp_tools migration.
     # Spawns fake stdio MCP servers (python3) under an isolated XDG root.
-    result = subprocess.run([ADA, "__storage-selftest"], capture_output=True, text=True, timeout=120)
+    result = run_selftest([ADA, "__storage-selftest"], capture_output=True, text=True, timeout=120)
     check("storage selftest (private-by-default modes, symlink policy, sweep)",
           result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
@@ -373,22 +391,22 @@ def main():
     # derivation, the decorator on the real builders against a local capture
     # server, stability, separation, key change, two-process creation,
     # quarantine, durability seams, wipe, Mind ID replacement, /rotateaffinity.
-    result = subprocess.run([os.path.abspath(ADA), "__affinity-selftest"], capture_output=True,
+    result = run_selftest([os.path.abspath(ADA), "__affinity-selftest"], capture_output=True,
                             text=True, timeout=300)
     check("affinity-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
-    result = subprocess.run([os.path.abspath(ADA), "__chat-wire-selftest"], capture_output=True,
+    result = run_selftest([os.path.abspath(ADA), "__chat-wire-selftest"], capture_output=True,
                             text=True, timeout=120)
     check("chat-wire-selftest (complete captures, legacy body repeatability)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
-    result = subprocess.run([os.path.abspath(ADA), "__chat-adapter-selftest"], capture_output=True,
+    result = run_selftest([os.path.abspath(ADA), "__chat-adapter-selftest"], capture_output=True,
                             text=True, timeout=120)
     check("chat-adapter-selftest (origins, snapshot and retry isolation)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
-    result = subprocess.run([os.path.abspath(ADA), "__responses-selftest"], capture_output=True,
+    result = run_selftest([os.path.abspath(ADA), "__responses-selftest"], capture_output=True,
                             text=True, timeout=120)
     check("responses-selftest (codec, stream, replay and native/fallback media)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
@@ -400,7 +418,7 @@ def main():
     check("model-request repository scan (every model request site is decorated or allowlisted)",
           scan.returncode == 0, (scan.stdout + scan.stderr)[-1500:])
 
-    result = subprocess.run([os.path.abspath(ADA), "__mcp-surface-selftest"], capture_output=True,
+    result = run_selftest([os.path.abspath(ADA), "__mcp-surface-selftest"], capture_output=True,
                             text=True, timeout=300)
     check("mcp-surface-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
@@ -412,21 +430,21 @@ def main():
     # transaction, reuse, quarantine, failures, timeout + process group,
     # lock, orphans, external edits, profile bundle, registry reload, crash
     # injection at five boundaries (development builds).
-    result = subprocess.run([os.path.abspath(ADA), "__playwright-selftest"], capture_output=True,
+    result = run_selftest([os.path.abspath(ADA), "__playwright-selftest"], capture_output=True,
                             text=True, timeout=600)
     check("playwright-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
     # Live: the real bootstrap (bundled lockfile, real npm ci, real handshake)
     # wherever a usable Node is on PATH (CI installs one; skipped otherwise).
     if shutil.which("node") and shutil.which("npm"):
-        result = subprocess.run([os.path.abspath(ADA), "__playwright-selftest", "--live"], capture_output=True,
+        result = run_selftest([os.path.abspath(ADA), "__playwright-selftest", "--live"], capture_output=True,
                                 text=True, timeout=900)
         check("playwright-selftest --live (real npm ci against the committed lockfile)", result.returncode == 0,
               (result.stdout + result.stderr)[-2500:])
     else:
         print("· playwright-selftest --live skipped (no node/npm on PATH)")
 
-    result = subprocess.run([ADA, "__deleteuserdata-selftest"], capture_output=True, text=True, timeout=120)
+    result = run_selftest([ADA, "__deleteuserdata-selftest"], capture_output=True, text=True, timeout=120)
     check("deleteuserdata-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -435,14 +453,14 @@ def main():
     # intact), quiescence barrier over all three producer classes, the
     # wipe's triage abort, pre-import output discard, and a full
     # export → mutate → apply round trip. XDG-isolated.
-    result = subprocess.run([ADA, "__mind-selftest"], capture_output=True, text=True, timeout=180)
+    result = run_selftest([ADA, "__mind-selftest"], capture_output=True, text=True, timeout=180)
     check("mind-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
     # 3c7. Chat command catalog: the Telegram menu stays trimmed to the five
     # everyday commands, /commands lists every public command and none of the
     # power/owner commands, terminal /help derives from the same registry.
-    result = subprocess.run([ADA, "__command-menu-selftest"], capture_output=True, text=True, timeout=60)
+    result = run_selftest([ADA, "__command-menu-selftest"], capture_output=True, text=True, timeout=60)
     check("command-menu-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -450,7 +468,7 @@ def main():
     # cuts over), token-shape gate, one-time code format, tolerant
     # getUpdates parsing, private-human-only code discovery, and the
     # behind-/commands visibility contract. Pure, no storage or network.
-    result = subprocess.run([ADA, "__botswitch-selftest"], capture_output=True, text=True, timeout=60)
+    result = run_selftest([ADA, "__botswitch-selftest"], capture_output=True, text=True, timeout=60)
     check("botswitch-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -460,7 +478,7 @@ def main():
     # bullet + new-mail envelope hint never name an absent CLI), AgentMail
     # wire parsing/formatting, and the local calendar store roundtrip with
     # short-id resolution. XDG-isolated; provider reads use test seams.
-    result = subprocess.run([ADA, "__emailcal-selftest"], capture_output=True, text=True, timeout=120)
+    result = run_selftest([ADA, "__emailcal-selftest"], capture_output=True, text=True, timeout=120)
     check("emailcal-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -469,7 +487,7 @@ def main():
     # inference > legacy OpenRouter > opencode, plus the live-test process
     # override), Responses API replay fidelity, cap enforcement, cross-round
     # dedup, and strict-schema validity. Pure in-memory.
-    result = subprocess.run([ADA, "__web-agent-selftest"], capture_output=True, text=True, timeout=120)
+    result = run_selftest([ADA, "__web-agent-selftest"], capture_output=True, text=True, timeout=120)
     check("web-agent-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -505,7 +523,7 @@ def main():
     # management on Linux, a readable refusal on macOS. On Linux the status
     # subcommand must stay exit-0 with no unit installed AND with no
     # reachable systemd user bus (the CI container case).
-    result = subprocess.run([ADA, "__service-selftest"], capture_output=True, text=True, timeout=120)
+    result = run_selftest([ADA, "__service-selftest"], capture_output=True, text=True, timeout=120)
     check("service-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
     with tempfile.TemporaryDirectory() as home:
@@ -532,7 +550,7 @@ def main():
     # checks here prove the real binary keeps stdout pure JSON, applies an
     # offline provider config, reads it back, and fails transport errors
     # with exit 64.
-    result = subprocess.run([ADA, "__setup-api-selftest"], capture_output=True, text=True, timeout=180)
+    result = run_selftest([ADA, "__setup-api-selftest"], capture_output=True, text=True, timeout=180)
     check("setup-api-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -540,7 +558,7 @@ def main():
     # workflow enforcement, job runner + start gate, AgentMail transaction,
     # lease, census, package maps), then the headless end-to-end run of the
     # real binary against a mock provider server with dev stubs.
-    result = subprocess.run([os.path.abspath(ADA), "__quicksetup-selftest"],
+    result = run_selftest([os.path.abspath(ADA), "__quicksetup-selftest"],
                             capture_output=True, text=True, timeout=600)
     qs_out = result.stdout + result.stderr
     qs_failed = "\n".join(l for l in qs_out.splitlines() if l.startswith("✖") or "FAILED" in l or "threw" in l)
@@ -554,7 +572,7 @@ def main():
     # covers rendering rules, the live protocol, privacy withhold/replay,
     # and socket hygiene; poller phase 10 later proves the same wire on a
     # fully configured daemon end-to-end.
-    result = subprocess.run([ADA, "__chat-socket-selftest"],
+    result = run_selftest([ADA, "__chat-socket-selftest"],
                             capture_output=True, text=True, timeout=300)
     check("chat-socket-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])

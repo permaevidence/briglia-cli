@@ -65,7 +65,9 @@ jobs:
           python3 -m pip install playwright==1.55.0
           python3 -m playwright install --with-deps chromium
       - name: Quick-setup browser test
-        run: python3 scripts/quicksetup_browser_test.py .build/debug/briglia
+        run: |
+          python3 scripts/quicksetup_browser_test.py .build/debug/briglia
+          python3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish
 
   macos:
     name: macOS
@@ -106,3 +108,4 @@ jobs:
           python3 -m pip install --break-system-packages playwright==1.55.0 || python3 -m pip install playwright==1.55.0
           python3 -m playwright install chromium
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia
+          python3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish
