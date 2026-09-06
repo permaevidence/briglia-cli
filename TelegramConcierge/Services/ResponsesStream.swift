@@ -256,7 +256,10 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked
         }
         self.response = http
         armPhaseTimerLocked(idleTimeout, phase: "idle")
-        streamed = http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/event-stream") == true
+        // The pinned subscription endpoint always streams, but successful live
+        // responses can omit Content-Type. Its request contract selects SSE;
+        // HTTP failures still take the bounded JSON error path below.
+        streamed = assembler.subscription || http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/event-stream") == true
         lock.unlock(); completionHandler(.allow)
     }
 

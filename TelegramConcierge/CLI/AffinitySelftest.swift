@@ -741,6 +741,12 @@ final class CaptureServer: @unchecked Sendable {
         set { lock.lock(); _content = newValue; lock.unlock() }
     }
     private var _content: String?
+    // nil retains automatic fixture headers; empty omits Content-Type.
+    var contentTypeOverride: String? {
+        get { lock.lock(); defer { lock.unlock() }; return _contentType }
+        set { lock.lock(); _contentType = newValue; lock.unlock() }
+    }
+    private var _contentType: String?
 
     // Scripted local responses for lifecycle tests. Empty preserves the existing
     // wire/affinity fixtures. Access is serialized with capture recording.
@@ -839,8 +845,9 @@ final class CaptureServer: @unchecked Sendable {
             ? "{\"id\":\"cap\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\(encodedContent)},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}"
             : "{\"error\":{\"message\":\"injected \(status)\"}}")
         let reason = status == 200 ? "OK" : "Service Unavailable"
-        let contentType = body.hasPrefix("data:") ? "text/event-stream" : "application/json"
-        let response = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        let contentType = contentTypeOverride ?? (body.hasPrefix("data:") ? "text/event-stream" : "application/json")
+        let typeHeader = contentType.isEmpty ? "" : "Content-Type: \(contentType)\r\n"
+        let response = "HTTP/1.1 \(status) \(reason)\r\n\(typeHeader)Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
         let bytes = Data(response.utf8)
         bytes.withUnsafeBytes { raw in
             var offset = 0

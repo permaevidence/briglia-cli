@@ -135,6 +135,43 @@ struct ResponsesSelftest: AsyncParsableCommand {
         }
         c.check("heartbeat fixture settles", heartbeatServer.stopAndJoin())
 
+        let capture = try CaptureServer()
+        defer { capture.stop() }
+        request.url = URL(string: "http://127.0.0.1:\(capture.port)/responses")!
+        let snapshot = Self.response([Self.message("SUBSCRIPTION_STREAM_OK")])
+        let terminal = String(data: try Self.event(["type": "response.completed", "response": snapshot]), encoding: .utf8)!
+        for contentType in ["", "text/plain", "application/json", "text/event-stream"] {
+            capture.contentTypeOverride = contentType
+            capture.script([terminal])
+            let result = try await ResponsesHTTPTransport().send(request, overallTimeout: 5, subscription: true)
+            c.check("subscription SSE survives content type '\(contentType)'", try Self.object(result)["id"] as? String == "resp_1")
+        }
+        capture.contentTypeOverride = ""
+        capture.script(["{\"error\":{\"code\":\"usage_limit_reached\"}}"], statuses: [429])
+        do {
+            _ = try await ResponsesHTTPTransport().send(request, overallTimeout: 5, subscription: true)
+            c.check("headerless subscription quota error remains classified", false)
+        } catch { c.check("headerless subscription quota error remains classified", error is SubscriptionError) }
+        capture.script(["{\"error\":{\"code\":\"invalid_token\"}}"], statuses: [401])
+        do {
+            _ = try await ResponsesHTTPTransport().send(request, overallTimeout: 5, subscription: true)
+            c.check("headerless subscription 401 remains refreshable", false)
+        } catch {
+            if case ResponsesFailure.http(401, _) = error { c.check("headerless subscription 401 remains refreshable", true) }
+            else { c.check("headerless subscription 401 remains refreshable", false) }
+        }
+        for invalid in [String(data: try Self.json(snapshot), encoding: .utf8)!, "data: {invalid}\n\n", "data: {\"type\":\"ping\"}\n\n"] {
+            capture.script([invalid])
+            do {
+                _ = try await ResponsesHTTPTransport().send(request, overallTimeout: 5, subscription: true)
+                c.check("invalid subscription stream never succeeds", false)
+            } catch { c.check("invalid subscription stream never succeeds", true) }
+        }
+        let plain = try Self.json(snapshot)
+        capture.script([String(data: plain, encoding: .utf8)!])
+        let api = try await ResponsesHTTPTransport().send(request, overallTimeout: 5)
+        c.check("API JSON response without content type preserved", api == plain)
+        c.check("subscription transport fixtures framed cleanly", capture.errors.isEmpty)
     }
 
     private func decoderChecks(_ c: Checks, context: ProviderExecutionContext, receipt: PreparedRequestReceipt) throws {
