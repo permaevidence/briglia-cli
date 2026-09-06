@@ -25,6 +25,19 @@ def replace(path, old, new, count=1):
     path.write_text(source.replace(old, new))
 
 
+def freeze_fallback_prompt_day(tree):
+    # P1 moved the same builder to +Preparation; pin the input on both layouts.
+    # Do not touch the encoder or normalize the captured output.
+    sources = [tree / "TelegramConcierge/Services" / name for name in
+               ("OpenRouterService.swift", "OpenRouterService+Preparation.swift")]
+    anchor = "let currentDate = dateFormatter.string(from: turnStartDate ?? Date())"
+    matches = [path for path in sources if path.exists() and anchor in path.read_text()]
+    if len(matches) != 1:
+        raise RuntimeError("Expected exactly one fallback prompt clock owner")
+    replace(matches[0], anchor,
+            "let currentDate = dateFormatter.string(from: turnStartDate ?? Date(timeIntervalSince1970: 1788609600))")
+
+
 def instrument(tree):
     evidence = {}
     for name in ("AffinitySelftest.swift", "CaptureRequestParser.swift"):
@@ -64,9 +77,7 @@ def instrument(tree):
     # Both frozen platform fixtures recorded September 5, 2026 for this path
     # (the explicit main-turn clock remains P0Life.instant). Freeze that input
     # before either capture; do not normalize dates out of captured wire bytes.
-    replace(tree / "TelegramConcierge/Services/OpenRouterService.swift",
-            "let currentDate = dateFormatter.string(from: Date())",
-            "let currentDate = dateFormatter.string(from: Date(timeIntervalSince1970: 1788609600))")
+    freeze_fallback_prompt_day(tree)
     path = tree / "TelegramConcierge/Services/SubagentRunner.swift"
     replace(path, "let turnStartDate = Date()", "let turnStartDate = P0Life.instant")
     replace(path, "timestamp: Date()", "timestamp: P0Life.instant", 2)

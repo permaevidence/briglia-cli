@@ -3,7 +3,9 @@
 import base64
 import copy
 import unittest
-from chat_lifecycle_baseline import compare, expected_affinity
+import tempfile
+from pathlib import Path
+from chat_lifecycle_baseline import compare, expected_affinity, freeze_fallback_prompt_day
 
 class ComparatorTests(unittest.TestCase):
     def setUp(self):
@@ -48,5 +50,22 @@ class ComparatorTests(unittest.TestCase):
         actual['captures'][0]['body'] = base64.b64encode(b'Sunday, September 6, 2026 (GMT)').decode()
         with self.assertRaises(RuntimeError):
             compare(expected, actual)
+
+    def test_fallback_clock_targets_actual_builder_before_and_after_p1(self):
+        for owner in ('OpenRouterService.swift', 'OpenRouterService+Preparation.swift'):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                service = root / 'TelegramConcierge/Services'
+                service.mkdir(parents=True)
+                snapshot = 'let currentDate = dateFormatter.string(from: Date())'
+                (service / 'OpenRouterService.swift').write_text(snapshot)
+                target = service / owner
+                target.write_text(target.read_text() + '\n' if target.exists() else '')
+                with target.open('a') as f:
+                    f.write('let currentDate = dateFormatter.string(from: turnStartDate ?? Date())')
+                freeze_fallback_prompt_day(root)
+                self.assertIn('turnStartDate ?? Date(timeIntervalSince1970: 1788609600)', target.read_text())
+                self.assertIn(snapshot, (service / 'OpenRouterService.swift').read_text())
+                with self.assertRaises(RuntimeError): freeze_fallback_prompt_day(root)
 
 if __name__ == '__main__': unittest.main()
