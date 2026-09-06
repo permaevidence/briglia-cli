@@ -121,8 +121,18 @@ briglia subscription select --model gpt-5.6-luna --effort high
 briglia subscription logout
 ```
 
+Choose **ChatGPT subscription** in `briglia setup` or in desktop Quick Setup.
+Both use the same native device-code sign-in and check the selected model before
+saving. Quick Setup replaces the OpenCode-key requirement with subscription login;
+its OpenAI API tool key remains separate. The companion Ubuntu Touch app exposes
+the same provider in Settings and Quick Setup when the CLI advertises support.
+Older CLIs keep their existing setup menus.
+
 Stop the daemon before terminal activation or replacement of an active ChatGPT
-login. Login alone saves the profile; `/provider chatgpt` selects it when idle.
+login. Re-login on an already-active terminal profile refreshes its runtime scope
+and preserves model/effort unless flags override them. Otherwise login saves the
+profile; `/provider chatgpt` selects it when idle. Telegram re-login works when the
+active account is signed out or requires authentication.
 In the paired private Telegram chat, `/subscription login` starts device login,
 `/subscription cancel` cancels it, and `/subscription logout` signs out locally.
 Device login may need enabling in ChatGPT security settings. Do not send access
@@ -131,7 +141,9 @@ login after fifteen. Briglia never reads or changes Codex's login cache.
 
 OAuth credentials stay in the owner-only `subscription-auth.json` in Briglia's
 config directory. Refresh is serialized between processes; logout invalidates
-pending login callbacks and future requests. An already-dispatched inference
+pending login callbacks and future requests. `/deleteuserdata` cancels pending
+login and signs out locally; Mind import cancels pending login while retaining an
+established account. An already-dispatched inference
 may complete after logout. A failed credential-store write is reported; a
 remote refresh followed by a local disk failure can require signing in again.
 

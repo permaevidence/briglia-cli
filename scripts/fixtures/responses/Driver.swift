@@ -7,6 +7,15 @@ import FoundationNetworking
 // UserDefaults reads AND writes are redirected here only in disposable builds.
 enum P2Life {
     static let defaults = UserDefaults(suiteName: "dev.briglia.p2.lifecycle")!
+    static var refreshCalls = 0
+    static var failRefresh = false
+    static func authPost(_ path: String, _ fields: [String: String], _ form: Bool) async throws -> SubscriptionAuthHTTP.Reply {
+        if liveMode { return try await SubscriptionAuthHTTP().post(path: path, fields: fields, form: form) }
+        guard path == "/oauth/token", fields["grant_type"] == "refresh_token" else { throw Failure("unexpected fixture auth request") }
+        refreshCalls += 1
+        if failRefresh { throw SubscriptionError("synthetic transport failure") }
+        return (try SubscriptionSelftest.tokenData(), 200)
+    }
     static var subscriptionCaptureURL: URL?
     static func route(_ request: URLRequest) -> URLRequest {
         guard !liveMode, let target = subscriptionCaptureURL,
@@ -139,6 +148,7 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
             try await runSwitching(manager, server: server, file: file)
             await manager.p2ReadOnlyCommands()
             try await runSubscription(manager, server: server, root: root, file: file)
+            try await runSubscriptionRecovery(manager, server: server)
         }
         print("Responses lifecycle PASS")
     }
@@ -194,6 +204,47 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         server.clear()
         _ = try await manager.p2Turn(human: Message(role: .user, content: "This cannot dispatch after logout"))
         try P2Life.require(await manager.p2Error() != nil && server.completeRequests.isEmpty, "logout fails closed before another manager request")
+    }
+
+    @MainActor private func runSubscriptionRecovery(_ manager: ConversationManager, server: CaptureServer) async throws {
+        let store = SubscriptionAuthStore()
+        P2Life.subscriptionCaptureURL = URL(string: "http://127.0.0.1:\(server.port)/responses")!
+        defer { P2Life.subscriptionCaptureURL = nil; P2Life.failRefresh = false }
+        for mode in ["success", "double401", "transport", "retry-budget"] {
+            let pending = try await store.beginLogin()
+            let generation = try await store.commitLogin(SubscriptionSelftest.credential(), pending: pending)
+            var context = ProviderExecutionContext.responsesAPI(baseURL: SubscriptionEndpoint.inference, key: generation,
+                model: "gpt-5.6-luna", lane: .main, effort: "high")
+            context.subscriptionGeneration = generation; context.profileIdentity = "chatgpt"; context.nativeToolMedia = false
+            P2Life.refreshCalls = 0; P2Life.failRefresh = mode == "transport"
+            server.clear()
+            if mode == "double401" { server.script(["{}", "{}"], statuses: [401, 401]) }
+            else if mode == "retry-budget" { server.script(["{}", "{}", "{}", "{}", try P2Life.body("RECOVERED")], statuses: [401, 500, 500, 500, 200]) }
+            else { server.script(["{}", try P2Life.body("RECOVERED")], statuses: [401, 200]) }
+            let receipt = PreparedRequestReceipt(requestID: UUID(), historyFingerprint: "fixture", deliveryNonces: [])
+            var succeeded = false
+            do {
+                _ = try await ResponsesAdapter(context: context).send(input: [ResponsesAdapter.message(role: "user", text: "Test")], tools: nil, receipt: receipt)
+                succeeded = true
+            } catch {}
+            try P2Life.require(succeeded == (mode == "success" || mode == "retry-budget"), "401 owner outcome \(mode)")
+            try P2Life.require(P2Life.refreshCalls == 1, "exactly one refresh \(mode)")
+            let requests = server.completeRequests
+            try P2Life.require(requests.count == (mode == "transport" ? 1 : mode == "retry-budget" ? 5 : 2), "bounded request count \(mode)")
+            if requests.count > 1 {
+                try P2Life.require(requests[0].body == requests[1].body, "retry body byte-identical \(mode)")
+                try P2Life.require(requests[0].headers["authorization"] != requests[1].headers["authorization"], "refreshed bearer used \(mode)")
+            }
+            try P2Life.require((try store.read()?.requiresLogin == true) == (mode == "double401"), "login-required persistence \(mode)")
+            if mode == "double401" {
+                var refused = false
+                do { _ = try await store.credential(generation: generation) { _ in throw P2Life.Failure("must not refresh") } }
+                catch { refused = true }
+                try P2Life.require(refused && P2Life.refreshCalls == 1, "next credential refuses without refresh")
+            }
+        }
+        P2Life.failRefresh = false
+        try await manager.p3PendingLoginBarrier()
     }
 
     @MainActor private func runMain(_ manager: ConversationManager, server: CaptureServer, root: URL, file: URL) async throws {

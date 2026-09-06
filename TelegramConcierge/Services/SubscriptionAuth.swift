@@ -70,10 +70,12 @@ struct SubscriptionAuthState: Codable {
     var pendingLogin: String?
     var credential: SubscriptionCredential?
     var requiresLogin: Bool? = nil
+    var deviceChallenge: SubscriptionDeviceChallenge? = nil
     var valid: Bool {
         version == 1 && UUID(uuidString: generation) != nil
             && (pendingLogin == nil || UUID(uuidString: pendingLogin!) != nil)
             && (credential == nil || credential!.valid)
+            && (deviceChallenge == nil || (pendingLogin != nil && deviceChallenge!.valid))
     }
 }
 
@@ -153,6 +155,7 @@ struct SubscriptionAuthStore {
             var state = try read() ?? SubscriptionAuthState(generation: UUID().uuidString)
             let pending = UUID().uuidString
             state.pendingLogin = pending
+            state.deviceChallenge = nil
             try write(state)
             return pending
         }
@@ -165,6 +168,7 @@ struct SubscriptionAuthStore {
             }
             state.generation = UUID().uuidString
             state.pendingLogin = nil
+            state.deviceChallenge = nil
             state.credential = credential
             state.requiresLogin = nil
             try Task.checkCancellation()
@@ -177,6 +181,7 @@ struct SubscriptionAuthStore {
         try await locked {
             guard var state = try read(), state.pendingLogin == pending else { return }
             state.pendingLogin = nil
+            state.deviceChallenge = nil
             try write(state)
         }
     }
@@ -299,6 +304,7 @@ final class SubscriptionAuthHTTP: NSObject, URLSessionDataDelegate, @unchecked S
 struct SubscriptionLogin {
     typealias Post = (String, [String: String], Bool) async throws -> SubscriptionAuthHTTP.Reply
     var store = SubscriptionAuthStore()
+    var deviceTimeout: TimeInterval = 900
     var post: Post = { try await SubscriptionAuthHTTP().post(path: $0, fields: $1, form: $2) }
 
     static func object(_ data: Data) throws -> [String: Any] {
@@ -360,7 +366,7 @@ struct SubscriptionLogin {
             }
             var interval = offeredInterval
             try await show(SubscriptionEndpoint.verificationURL, code)
-            let deadline = Date().addingTimeInterval(900)
+            let deadline = Date().addingTimeInterval(deviceTimeout)
             while Date() < deadline {
                 try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard try store.read()?.pendingLogin == pending else { throw SubscriptionError("Login cancelled or superseded") }

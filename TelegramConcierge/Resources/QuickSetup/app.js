@@ -133,18 +133,20 @@
     return state.kept.indexOf(k) >= 0 ? k : null;
   }
 
+  function usesSubscription() { return $("main-provider").value === "chatgpt"; }
+
   function updateCount() {
     var n = 0;
     FIELDS.required.forEach(function (f) {
       var k = keptFor(f.id);
       if ((k && !state.replace[k]) || (state.values[f.id] || '').length > 0) n += 1;
     });
-    $('req-count').textContent = n + ' of 6 filled';
+    $('req-count').textContent = (usesSubscription() ? Math.max(0, n - ((keptFor('opencode') || state.values.opencode) ? 1 : 0)) : n) + ' of ' + (usesSubscription() ? 5 : 6) + ' filled';
   }
 
   function renderIntro() {
     var req = $('required-fields'); clear(req);
-    FIELDS.required.forEach(function (f, i) { req.appendChild(fieldNode(f, i)); });
+    FIELDS.required.forEach(function (f, i) { if (!usesSubscription() || f.id !== "opencode") req.appendChild(fieldNode(f, i)); });
     var am = $('agentmail-fields'); clear(am);
     FIELDS.agentmail.forEach(function (f) { am.appendChild(fieldNode(f)); });
     var ex = $('extra-fields'); clear(ex);
@@ -164,7 +166,10 @@
       if (v) req[apiName] = { value: v };
       else if (required) missing.push(apiName);
     }
-    keyField('opencode', 'opencode', true);
+    if (usesSubscription()) {
+      if (!subscriptionGeneration) missing.push('ChatGPT sign-in');
+      req.chatgpt = {model: $('subscription-model').value.trim(), effort: $('subscription-effort').value, generation: subscriptionGeneration};
+    } else keyField('opencode', 'opencode', true);
     keyField('openai', 'openai', true);
     keyField('serper', 'serper', true);
     keyField('jina', 'jina', true);
@@ -187,6 +192,57 @@
     }
     return { request: req, missing: missing };
   }
+
+  $('subscription-url').href = 'https://auth.openai.com/codex/device';
+  var subscriptionGeneration = '', subscriptionPending = '', subscriptionTimer = null;
+  function subscriptionCall(body) {
+    return api('POST', '/api/subscription', body).then(function(r) {
+      if (!r.json.ok) throw new Error((r.json.error && r.json.error.message) || 'ChatGPT login failed; retry.');
+      return r.json;
+    });
+  }
+  function subscriptionStatus() {
+    return subscriptionCall({action: 'status'}).then(function(r) {
+      subscriptionGeneration = r.generation || '';
+      $('subscription-status').textContent = r.state === 'signed_in' ? 'Signed in. Your selected model will be checked before saving.' : 'Sign in to continue. Enable device login in ChatGPT security settings if needed.';
+    });
+  }
+  function subscriptionError(e) { $('subscription-status').textContent = e.message || 'Login interrupted; reload and retry.'; }
+  function subscriptionPoll() {
+    var id = subscriptionPending;
+    if (!id) return;
+    subscriptionCall({action: 'poll', pending: id}).then(function(r) {
+      if (id !== subscriptionPending) return;
+      if (r.state === 'signed_in') { subscriptionPending = ''; $('subscription-code').textContent = ''; $('subscription-url').hidden = true; $('subscription-cancel').hidden = true; return subscriptionStatus(); }
+      subscriptionTimer = setTimeout(subscriptionPoll, Math.max(1, r.interval || 5) * 1000);
+    }).catch(subscriptionError);
+  }
+  $('main-provider').addEventListener('change', function() {
+    $('subscription-panel').hidden = !usesSubscription(); renderIntro();
+    if (usesSubscription()) subscriptionStatus().catch(subscriptionError);
+  });
+  $('subscription-start').addEventListener('click', function() {
+    $('subscription-start').disabled = true;
+    subscriptionGeneration = ''; clearTimeout(subscriptionTimer);
+    subscriptionCall({action: 'start'}).then(function(r) {
+      subscriptionPending = r.pending; $('subscription-code').textContent = 'Enter code: ' + r.code;
+      // The URL is a compiled fixed endpoint, not an arbitrary provider redirect.
+      $('subscription-url').hidden = false; $('subscription-cancel').hidden = false;
+      $('subscription-status').textContent = 'Waiting for sign-in (15 minutes maximum).';
+      subscriptionTimer = setTimeout(subscriptionPoll, Math.max(1, r.interval || 5) * 1000);
+    }).catch(subscriptionError).then(function() { $('subscription-start').disabled = false; });
+  });
+  function subscriptionEnd(action) {
+    clearTimeout(subscriptionTimer);
+    var body = {action: action}; if (action === 'cancel') body.pending = subscriptionPending;
+    subscriptionPending = ''; subscriptionGeneration = '';
+    subscriptionCall(body).then(function() {
+      $('subscription-code').textContent = ''; $('subscription-url').hidden = true; $('subscription-cancel').hidden = true;
+      return subscriptionStatus();
+    }).catch(subscriptionError);
+  }
+  $('subscription-cancel').addEventListener('click', function() { subscriptionEnd('cancel'); });
+  $('subscription-logout').addEventListener('click', function() { subscriptionEnd('logout'); });
 
   // ---- verify rows ----------------------------------------------------------
 

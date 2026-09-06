@@ -78,7 +78,7 @@ struct SetupAPI: AsyncParsableCommand {
                 request = object
             }
             respond(SetupAPICore.migrate(request))
-        case "probe", "apply", "service":
+        case "probe", "apply", "service", "subscription":
             let data = FileHandle.standardInput.readDataToEndOfFile()
             guard !data.isEmpty,
                   let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -86,6 +86,7 @@ struct SetupAPI: AsyncParsableCommand {
                     "stdin must carry exactly one JSON request object"), exitCode: 64)
             }
             switch verb {
+            case "subscription": respond(await SubscriptionSetup().perform(object))
             case "probe": respond(await SetupAPICore.probe(object))
             case "apply": respond(await SetupAPICore.apply(object))
             default: respond(await SetupAPICore.service(object))
@@ -204,6 +205,7 @@ enum SetupAPICore {
         ProviderProfiles.ensureMigrated()
         var payload = base(ok: true)
         payload["version"] = adaCLIVersion
+        payload["subscription_setup"] = ["supported": true, "auth": "device_code", "quota": "unknown"]
         payload["platform"] = platformKey
         payload["is_ubuntu_touch"] = AgentServiceSupport.isUbuntuTouch()
         payload["wakelock_supported"] = AgentServiceSupport.wakeLockSupported()

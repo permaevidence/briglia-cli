@@ -3354,6 +3354,7 @@ class ConversationManager: ObservableObject {
         • reminders and watchers (including pending triggers)
         • saved documents, files ledger and todo list
         • subagent session histories
+        • ChatGPT subscription login (signed out locally; your subscription itself is unchanged)
         • the local calendar and EMAIL ACCESS: the AgentMail API key and the gws OAuth client + token store are deleted and the gws CLI on this machine is logged out of Google (server-side mailboxes are untouched; rerun `briglia setup` to reconnect email)
 
         Also stopped and discarded: running background jobs and subagents, their pending notifications, buffered attachments, pending replies, calendar/contacts caches, logs, and temporary tool outputs.
@@ -4516,8 +4517,9 @@ class ConversationManager: ObservableObject {
             } catch { try? await sendText(error.localizedDescription, to: address) }
             return
         }
-        guard ProviderProfiles.activeProfile() != .chatgpt else {
-            try? await sendText("Switch away from ChatGPT before replacing its login, or stop Briglia and use terminal login.", to: address); return
+        guard !isRestoringMind else { return }
+        do { try SubscriptionSetup.checkLoginReplacement() } catch {
+            try? await sendText(error.localizedDescription, to: address); return
         }
         guard subscriptionLoginTask == nil else { try? await sendText("Login is already pending; use /subscription cancel first.", to: address); return }
         guard activeRunId == nil, activeProcessingTask == nil else { try? await sendText("Start ChatGPT login when Briglia is idle.", to: address); return }
@@ -9381,6 +9383,10 @@ class ConversationManager: ObservableObject {
         }
         defer { endMindRestore() }
 
+        if let why = await quiesceSubscriptionLogin(timeoutSeconds: 10) {
+            return ["ABORTED: \(why) — nothing was deleted"]
+        }
+
         // 0b. Quiesce background work — cancelling is not enough (Codex
         //     round 2): a cancelled subagent still runs to its commit point
         //     and could re-persist its session or queue a completion AFTER
@@ -9502,6 +9508,9 @@ class ConversationManager: ObservableObject {
                              (activeTurnMarkerFileURL, "active-turn marker")] {
             if let f = UserDataWipe.remove(url.path, label: label) { failures.append(f) }
         }
+
+        do { if try SubscriptionAuthStore().read() != nil { try await SubscriptionAuthStore().logout() } }
+        catch { failures.append("ChatGPT local sign-out: \(error.localizedDescription)") }
 
         // 2. Clear all archived chunks
         await archiveService.clearAllArchives()
@@ -9664,7 +9673,24 @@ class ConversationManager: ObservableObject {
     /// discardPreImportBackgroundOutputs() before mutating anything, so
     /// outputs queued by now-quiescent producers cannot surface inside the
     /// restored Mind.
+    /// Cancel pending authorization under its cross-process lock before allowing
+    /// restored/deleted state to become live. Await the owner task's real exit.
+    private func quiesceSubscriptionLogin(timeoutSeconds: Double) async -> String? {
+        subscriptionLoginTask?.cancel()
+        do {
+            if let pending = try SubscriptionAuthStore().read()?.pendingLogin {
+                try await SubscriptionAuthStore().cancelLogin(pending)
+            }
+        } catch { return "cannot cancel ChatGPT login: \(error.localizedDescription)" }
+        let deadline = ProcessInfo.processInfo.systemUptime + timeoutSeconds
+        while subscriptionLoginTask != nil && ProcessInfo.processInfo.systemUptime < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return subscriptionLoginTask == nil ? nil : "ChatGPT login is still shutting down"
+    }
+
     func quiesceBackgroundWorkForMindRestore(timeoutSeconds: Double = 10) async -> String? {
+        if let why = await quiesceSubscriptionLogin(timeoutSeconds: timeoutSeconds) { return why }
         let unquiesced = await SubagentBackgroundRegistry.shared.cancelAllAndQuiesce(timeoutSeconds: timeoutSeconds)
         guard unquiesced.isEmpty else {
             return "background subagents still shutting down (\(unquiesced.joined(separator: ", ")))"

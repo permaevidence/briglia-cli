@@ -13,11 +13,12 @@ import Darwin
 // MARK: - Typed request (plan §5.5)
 
 enum QuickSetupField: String, CaseIterable {
-    case opencode, openai, serper, jina, telegram, agentmail, openrouter, custom
+    case opencode, chatgpt, openai, serper, jina, telegram, agentmail, openrouter, custom
 
     var title: String {
         switch self {
         case .opencode: return "OpenCode Go key"
+        case .chatgpt: return "ChatGPT subscription"
         case .openai: return "OpenAI key"
         case .serper: return "Serper key"
         case .jina: return "Jina key"
@@ -34,6 +35,7 @@ struct QuickSetupRequest: Equatable {
 
     enum Value: Equatable {
         case kept
+        case subscription(model: String, effort: String, generation: String)
         case key(String)
         case telegram(token: String, chatId: String)
         case custom(key: String, baseURL: String, model: String, vision: Bool)
@@ -43,6 +45,8 @@ struct QuickSetupRequest: Equatable {
             var data = Data(field.rawValue.utf8)
             data.append(0)
             switch self {
+            case .subscription(let m, let e, let g):
+                data.append(Data([m, e, g].joined(separator: "\u{0}").utf8))
             case .kept: return nil
             case .key(let k): data.append(Data(k.utf8))
             case .telegram(let t, let c): data.append(Data(t.utf8)); data.append(0); data.append(Data(c.utf8))
@@ -68,13 +72,20 @@ struct QuickSetupRequest: Equatable {
         var values: [QuickSetupField: Value] = [:]
         for field in QuickSetupField.allCases {
             guard let raw = object[field.rawValue] else {
-                if [.opencode, .openai, .serper, .jina, .telegram].contains(field) {
+                if [.openai, .serper, .jina, .telegram].contains(field) || (field == .opencode && object["chatgpt"] == nil) {
                     throw BadRequest(description: "\(field.rawValue) is required")
                 }
                 continue
             }
             guard let entry = raw as? [String: Any] else { throw BadRequest(description: "\(field.rawValue) must be an object") }
             let keys = Set(entry.keys)
+            if field == .chatgpt {
+                guard keys == ["model", "effort", "generation"], let m = entry["model"] as? String, !m.isEmpty,
+                      let e = entry["effort"] as? String, let g = entry["generation"] as? String, UUID(uuidString: g) != nil else {
+                    throw BadRequest(description: "chatgpt requires model, effort and current login")
+                }
+                values[field] = .subscription(model: m, effort: e, generation: g); continue
+            }
             if entry["kept"] as? Bool == true {
                 guard keys == ["kept"] else { throw BadRequest(description: "\(field.rawValue): kept must be alone") }
                 values[field] = .kept
@@ -101,6 +112,7 @@ struct QuickSetupRequest: Equatable {
                 values[field] = .key(try str("value"))
             }
         }
+        guard !(values[.opencode] != nil && values[.chatgpt] != nil) else { throw BadRequest(description: "Choose one main provider") }
         return QuickSetupRequest(name: name, values: values)
     }
 
@@ -119,7 +131,14 @@ struct QuickSetupEnvironment {
         return false
         #endif
     }()
-    var probe: ([String: Any]) async -> [String: Any] = { await SetupAPICore.probe($0) }
+    var subscription: ([String: Any], () throws -> Void) async -> [String: Any] = { await SubscriptionSetup().perform($0, ownsLease: true, checkpoint: $1) }
+    var probe: ([String: Any]) async -> [String: Any] = {
+        if $0["kind"] as? String == "chatgpt" {
+            var request = $0; request.removeValue(forKey: "kind"); request["action"] = "probe"
+            return await SubscriptionSetup().perform(request, ownsLease: true)
+        }
+        return await SetupAPICore.probe($0)
+    }
     var apply: ([String: Any], () throws -> Void) async -> [String: Any] = { await SetupAPICore.apply($0, checkpoint: $1) }
     var storedValue: (String) -> String? = { KeychainHelper.load(key: $0) }
     var saveBatch: ([String: String?]) throws -> Void = { try KeychainHelper.saveBatch($0) }
@@ -528,6 +547,7 @@ actor QuickSetupWorkflow {
         if let t = rowTask { await t.value }
         if let t = finishTask { await t.value }
         await settleInFlight()                     // (3) suspended operations unwound
+        await cancelSetupLogin()
         // (4) mint — or abort: the revoked token/cookie were already cleared.
         guard let newToken = Self.randomHex(), let newCookie = Self.randomHex() else {
             return RotationResult(poison: poison, randomnessFailed: true)
@@ -598,6 +618,30 @@ actor QuickSetupWorkflow {
         var out: [String: Any] = ["lines": lines, "next": next]
         if let job = runner.currentJob { out["running"] = ["row": job.row, "label": job.label] as [String: Any] }
         return out
+    }
+
+    private var subscriptionPending: String?
+    func subscription(_ request: [String: Any], generation g: Int) async throws -> (Int, [String: Any]) {
+        try checkpoint(g)
+        guard [.intro, .verified].contains(phase), inFlight == 0 else { return (409, ["error": "busy"]) }
+        guard let action = request["action"] as? String, ["start", "poll", "cancel", "logout", "status"].contains(action) else {
+            return (400, ["error": "invalid_action"])
+        }
+        beginOperation(); defer { endOperation() }
+        let result = await env.subscription(request) { [weak self] in
+            guard let self else { throw Superseded() }; try self.checkpointSync(g)
+        }
+        try checkpoint(g)
+        if action == "start", let id = result["pending"] as? String { subscriptionPending = id }
+        if ["signed_in", "cancelled", "signed_out"].contains(result["state"] as? String ?? "") { subscriptionPending = nil }
+        if action != "status" { digests[.chatgpt] = nil; verifyRows[.chatgpt] = nil; phase = .intro }
+        return (result["ok"] as? Bool == true ? 200 : 400, result)
+    }
+    private func cancelSetupLogin() async {
+        if let pending = subscriptionPending {
+            _ = await env.subscription(["action": "cancel", "pending": pending], {})
+            subscriptionPending = nil
+        }
     }
 
     // MARK: Verify (§4.3)
@@ -683,6 +727,7 @@ actor QuickSetupWorkflow {
 
     static func probeRequest(_ field: QuickSetupField, _ value: QuickSetupRequest.Value) -> [String: Any] {
         switch (field, value) {
+        case (.chatgpt, .subscription(let m, let e, let g)): return ["kind": "chatgpt", "model": m, "effort": e, "generation": g]
         case (.opencode, .key(let k)): return ["kind": "opencode", "api_key": k]
         case (.openai, .key(let k)): return ["kind": "openai", "api_key": k]
         case (.serper, .key(let k)): return ["kind": "serper", "api_key": k]
@@ -723,6 +768,15 @@ actor QuickSetupWorkflow {
         }
         phase = .saving
         for section in Self.sectionOrder where !savedSections.contains(section) {
+            if section == "provider", case .subscription(let model, let effort, let expected) = request.values[.chatgpt] {
+                try checkpoint(g)
+                let result = await env.subscription(["action": "select", "model": model, "effort": effort, "generation": expected]) { [weak self] in
+                    guard let self else { throw Superseded() }; try self.checkpointSync(g)
+                }
+                try checkpoint(g)
+                guard result["ok"] as? Bool == true else { return (409, result) }
+                savedSections.insert(section); continue
+            }
             guard let payload = Self.applyPayload(section: section, request: request) else { continue }
             try checkpoint(g)   // immediately before each apply
             let result = await env.apply(payload) { [weak self] in
@@ -1075,7 +1129,18 @@ actor QuickSetupWorkflow {
                     guard alive() else { return }
                     guard ev.ok else { fail(id, "service: \(ev.detail)"); return }
                 }
-                for key in [ProviderProfiles.opencodeApiKeyKey, KeychainHelper.openAITranscriptionApiKeyKey, KeychainHelper.serperApiKeyKey,
+                let subscriptionActive = env.storedValue(ProviderProfiles.activeProfileKey) == "chatgpt"
+                if subscriptionActive {
+                    let auth = await env.subscription(["action": "status"]) { [weak self] in
+                        guard let self else { throw Superseded() }; try self.checkpointSync(g)
+                    }
+                    guard alive() else { return }
+                    guard auth["ok"] as? Bool == true, auth["state"] as? String == "signed_in",
+                          auth["generation"] as? String == env.storedValue(ProviderProfiles.subscriptionGenerationKey) else {
+                        fail(id, "ChatGPT login changed or ended; sign in and select it again before finishing setup"); return
+                    }
+                }
+                for key in [(subscriptionActive ? ProviderProfiles.subscriptionModelKey : ProviderProfiles.opencodeApiKeyKey), KeychainHelper.openAITranscriptionApiKeyKey, KeychainHelper.serperApiKeyKey,
                             KeychainHelper.jinaApiKeyKey, KeychainHelper.telegramBotTokenKey, KeychainHelper.telegramChatIdKey, KeychainHelper.userNameKey]
                     where (env.storedValue(key) ?? "").isEmpty {
                     fail(id, "stored value missing: \(key)"); return
@@ -1116,6 +1181,7 @@ actor QuickSetupWorkflow {
         cookie = ""
         tokenUsed = true
         await settleInFlight()
+        await cancelSetupLogin()
         wizardRequested = true
         return (200, ["message": "continue in the terminal"])
     }

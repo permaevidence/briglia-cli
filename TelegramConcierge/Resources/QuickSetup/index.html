@@ -24,6 +24,21 @@
       <input id="f-name" type="text" autocomplete="off" spellcheck="false" placeholder="How Briglia should call you">
     </label>
 
+    <label class="field"><span class="label">Main provider</span>
+      <select id="main-provider"><option value="opencode">OpenCode Go</option><option value="chatgpt">ChatGPT subscription</option></select>
+    </label>
+    <div id="subscription-panel" hidden>
+      <p>Sign in with your ChatGPT account. Subscription limits apply; quota is currently unknown. The OpenAI API key below is still used for separate tools.</p>
+      <label class="field">Model <input id="subscription-model" value="gpt-5.6-luna" autocomplete="off"></label>
+      <label class="field">Reasoning effort <select id="subscription-effort"><option>low</option><option>medium</option><option selected>high</option><option>xhigh</option><option>max</option></select></label>
+      <p id="subscription-status" role="status"></p>
+      <a id="subscription-url" href="#" target="_blank" rel="noopener noreferrer" hidden>Open ChatGPT sign-in</a>
+      <p id="subscription-code"></p>
+      <button id="subscription-start" type="button">Sign in</button>
+      <button id="subscription-cancel" type="button" hidden>Cancel login</button>
+      <button id="subscription-logout" type="button">Sign out locally</button>
+    </div>
+
     <h2>1 · Required <span id="req-count" class="badge">0 of 6 filled</span></h2>
     <div id="required-fields"></div>
 
@@ -32,7 +47,7 @@
     <div id="agentmail-fields"></div>
 
     <h2>3 · Additional providers <span class="muted">optional</span></h2>
-    <p class="hint">OpenRouter is saved as an alternative provider (OpenCode Go stays the main one). A custom OpenAI-compatible endpoint needs its key, base URL and model.</p>
+    <p class="hint">OpenRouter is saved as an alternative provider (your selected main provider stays active). A custom OpenAI-compatible endpoint needs its key, base URL and model.</p>
     <div id="extra-fields"></div>
 
     <div class="actions">

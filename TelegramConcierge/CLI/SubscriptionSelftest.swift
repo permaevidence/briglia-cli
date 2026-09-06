@@ -53,6 +53,7 @@ struct SubscriptionSelftest: AsyncParsableCommand {
         try await storeTests(root, c)
         try await wireTests(root, c)
         try await loginTests(root, c)
+        try await setupTests(root, c)
         print("Subscription selftest: \(c.total - c.failed)/\(c.total)")
         if c.failed > 0 { throw ExitCode.failure }
     }

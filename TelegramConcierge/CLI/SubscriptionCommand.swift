@@ -6,8 +6,8 @@ struct SubscriptionCommand: AsyncParsableCommand {
         abstract: "Connect your own ChatGPT subscription. API credentials and billing stay separate.")
     @Argument(help: "login, status, select, cancel, logout, or models") var action: String = "status"
     @Flag(help: "Use a local browser callback instead of device login") var browser = false
-    @Option(help: "Model to save; availability depends on your subscription") var model: String = "gpt-5.6-luna"
-    @Option(help: "Reasoning effort") var effort: String = "high"
+    @Option(help: "Model to save; availability depends on your subscription") var model: String?
+    @Option(help: "Reasoning effort") var effort: String?
     @Flag(help: "Activate after login (requires stopped Briglia)") var activate = false
 
     func run() async throws {
@@ -25,7 +25,11 @@ struct SubscriptionCommand: AsyncParsableCommand {
             try IdentityMigration.gateMutatingEntry()
             // Profile changes need daemon exclusion. Logout may invalidate an
             // active session; each queued dispatch checks its captured generation.
-            guard ResponsesAdapter.allowedEfforts(model: model).contains(effort) else { throw ValidationError("Unsupported reasoning effort") }
+            let model = model ?? ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna"
+            let effort = effort ?? ProviderProfiles.configuredEffort(.chatgpt) ?? "high"
+            if action == "login" || action == "select" {
+                guard ResponsesAdapter.allowedEfforts(model: model).contains(effort) else { throw ValidationError("Unsupported reasoning effort") }
+            }
             var lease: InstanceLease?
             if action == "select" || activate || (action == "login" && ProviderProfiles.activeProfile() == .chatgpt) {
                 switch InstanceLease.acquire(label: "ChatGPT subscription selection") {
@@ -56,7 +60,7 @@ struct SubscriptionCommand: AsyncParsableCommand {
             // Saving never implicitly activates. A stopped daemon can be selected
             // here; a running daemon uses its existing /provider idle guard.
             try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil, model: model, effort: effort, textOnly: false)
-            if activate || action == "select" { try ProviderProfiles.activate(.chatgpt); print("ChatGPT subscription selected.") }
+            if activate || action == "select" || (lease != nil && ProviderProfiles.activeProfile() == .chatgpt) { try ProviderProfiles.activate(.chatgpt); print("ChatGPT subscription selected.") }
             else { print("Use /provider chatgpt while idle, or briglia subscription select while stopped.") }
         default: throw ValidationError("Use login, status, select, cancel, logout, or models")
         }

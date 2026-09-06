@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'wip/responses-*']
+    branches: [main, 'wip/responses-*', 'wip/subscription-*']
   pull_request:
   workflow_dispatch:
 
@@ -54,6 +54,8 @@ jobs:
         with:
           name: chat-lifecycle-reference-${{ runner.os }}-${{ runner.arch }}
           path: chat-lifecycle-reference.json
+      - name: Configured subscription shipped-client compatibility
+        run: python3 scripts/subscription_client_test.py .build/debug/briglia
       - name: Responses real-owner lifecycle
         run: python3 scripts/responses_lifecycle_test.py
       - name: Smoke test
@@ -68,6 +70,7 @@ jobs:
         run: |
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish
+          python3 scripts/subscription_browser_test.py
 
   macos:
     name: macOS
@@ -98,6 +101,8 @@ jobs:
         with:
           name: chat-lifecycle-reference-${{ runner.os }}-${{ runner.arch }}
           path: chat-lifecycle-reference.json
+      - name: Configured subscription shipped-client compatibility
+        run: python3 scripts/subscription_client_test.py .build/debug/briglia
       - name: Responses real-owner lifecycle
         run: python3 scripts/responses_lifecycle_test.py
       - name: Smoke test
@@ -109,3 +114,4 @@ jobs:
           python3 -m playwright install chromium
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish
+          python3 scripts/subscription_browser_test.py

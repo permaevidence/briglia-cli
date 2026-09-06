@@ -83,6 +83,8 @@ def main():
         anchor = '        if let error = context.configurationError { throw ResponsesFailure.malformed(error) }'
         assert text.count(anchor) == 1
         text = text.replace(anchor, '        P2Life.recordContext(context)\n' + anchor)
+        # Disposable-only auth POST injection drives the real 401 retry owner.
+        text = text.replace('let login = SubscriptionLogin()', 'let login = SubscriptionLogin(post: P2Life.authPost)')
         adapter.write_text(text)
         renderer = tree / 'TelegramConcierge/Services/OpenRouterService+Responses.swift'
         text = renderer.read_text()

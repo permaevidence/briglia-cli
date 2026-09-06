@@ -61,6 +61,7 @@ struct QuickSetupSelftest: AsyncParsableCommand {
         let t = SelftestContext(tempRoot: tempRoot, only: only)
         await t.section("1. parser") { try await t.parser() }
         await t.section("2. server, authorization, generations") { try await t.serverAndGenerations() }
+        await t.section("3b. subscription workflow") { try await t.subscriptionWorkflow() }
         await t.section("3. workflow enforcement") { try await t.workflowEnforcement() }
         await t.section("7. mandatory rows fail closed") { try await t.mandatoryRows() }
         await t.section("8. job runner") { try await t.runner() }

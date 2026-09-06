@@ -196,6 +196,12 @@ final class QuickSetupRouter: @unchecked Sendable {
         case ("POST", "/api/job"):
             let offset = (parseBody(request)?["offset"] as? Int) ?? 0
             return Self.json(200, await workflow.jobLines(since: offset))
+        case ("POST", "/api/subscription"):
+            guard let body = parseBody(request) else { return Self.json(400, ["error": "bad_json"]) }
+            do {
+                let (status, payload) = try await workflow.subscription(body, generation: g)
+                return Self.json(status, payload)
+            } catch { return .status(404) }
         case ("POST", "/api/verify"), ("POST", "/api/save"):
             guard let body = parseBody(request) else { return Self.json(400, ["error": "bad_json"]) }
             let typed: QuickSetupRequest

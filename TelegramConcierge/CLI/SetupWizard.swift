@@ -207,6 +207,45 @@ struct SetupWizard {
 
     /// Multi-provider menu: configure any subset of the four providers, then
     /// pick which one is active. Hop later anytime with /provider.
+    private func configureSubscription() async -> Bool {
+        print("ChatGPT subscription runs the main agent. Web search, voice and image tools retain separate API billing.")
+        let setup = SubscriptionSetup()
+        let lease: InstanceLease
+        switch InstanceLease.acquire(label: "ChatGPT setup") {
+        case .success(let held): lease = held
+        case .failure: print("Stop Briglia before configuring ChatGPT, then retry setup."); return false
+        }
+        defer { lease.release() }
+        do {
+            let state = try SubscriptionAuthStore().read()
+            let signedIn = state?.credential != nil && state?.requiresLogin != true
+            print(signedIn ? "ChatGPT: signed in (quota unknown)." : "ChatGPT: sign-in required.")
+            let action = WizardIO.ask("Account action: keep, login, or logout", default: signedIn ? "keep" : "login").lowercased()
+            if action == "logout" {
+                try await SubscriptionAuthStore().logout()
+                print("ChatGPT signed out locally. Your subscription is unchanged.")
+                return false
+            }
+            guard action == "keep" || action == "login" else { print("Unknown account action."); return false }
+            if !signedIn || action == "login" {
+                try SubscriptionSetup.checkLoginReplacement()
+                _ = try await SubscriptionLogin().device { url, code in
+                    print("Open \(url) and enter code: \(code). Enable device login in ChatGPT security settings if needed.")
+                }
+            }
+            let model = WizardIO.ask("Model", default: ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna")
+            let effort = WizardIO.ask("Reasoning effort", default: ProviderProfiles.configuredEffort(.chatgpt) ?? "high")
+            let request: [String: Any] = ["action": "probe", "model": model, "effort": effort]
+            let probe = await setup.perform(request, ownsLease: true)
+            guard probe["ok"] as? Bool == true else { print("Connection check failed: \(probe["error"] ?? "unknown error")"); return false }
+            let saved = await setup.perform(["action": "select", "model": model, "effort": effort,
+                "generation": probe["generation"] ?? "", "activate": false], ownsLease: true)
+            guard saved["ok"] as? Bool == true else { print("Could not save ChatGPT: \(saved["error"] ?? "unknown error")"); return false }
+            activateAfterConfiguring(.chatgpt)
+            return true
+        } catch { print("ChatGPT login failed: \(error.localizedDescription)"); return false }
+    }
+
     private func runProviderMenu() async {
         while true {
             print("""
@@ -222,7 +261,7 @@ struct SetupWizard {
                 case .opencode: hint = "OpenCode Go (recommended)"
                 case .openrouter: hint = "OpenRouter (pay-per-token, any model)"
                 case .custom: hint = "Custom OpenAI-compatible endpoint (with API key)"
-                case .chatgpt: hint = "ChatGPT subscription — configure with briglia subscription login"
+                case .chatgpt: hint = "ChatGPT subscription — sign in with your account"
                 case .openai: hint = "OpenAI Platform API — Responses (separate API billing)"
                 case .local: hint = "Local server — vLLM, Ollama, LM Studio (no key)"
                 }
@@ -247,11 +286,11 @@ struct SetupWizard {
             case .opencode: saved = await configureOpenCode()
             case .openrouter: saved = await configureOpenRouter()
             case .custom: saved = await configureCustomEndpoint()
-            case .chatgpt: print("Use briglia subscription login, then /provider chatgpt."); saved = false
+            case .chatgpt: saved = await configureSubscription()
             case .openai: saved = await configureOpenAIResponses()
             case .local: saved = await configureLocalEndpoint()
             }
-            if saved { activateAfterConfiguring(profile) }
+            if saved && profile != .chatgpt { activateAfterConfiguring(profile) }
 
             let anotherDefault = !Self.mainAgentConfigured()
             if !WizardIO.askYesNo("Configure another provider?", default: anotherDefault) { break }
@@ -285,6 +324,14 @@ struct SetupWizard {
         let answer = WizardIO.ask("Active provider (\(names)) [\(current.rawValue)]", default: current.rawValue)
         guard answer != current.rawValue,
               let chosen = ProviderProfiles.Profile(rawValue: answer.lowercased()) else { return }
+        var lease: InstanceLease?
+        if chosen == .chatgpt {
+            switch InstanceLease.acquire(label: "ChatGPT setup selection") {
+            case .success(let held): lease = held
+            case .failure: print("Stop Briglia before selecting ChatGPT."); return
+            }
+        }
+        defer { lease?.release() }
         do {
             try ProviderProfiles.activate(chosen)
             print("  ✔ Active provider: \(chosen.displayName)")

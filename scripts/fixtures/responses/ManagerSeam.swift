@@ -44,3 +44,27 @@ extension ConversationManager {
         await handleEffortCommand(argument: "")
     }
 }
+
+// Real manager barrier, with a cancellable pending device owner.
+extension ConversationManager {
+    func p3PendingLoginBarrier() async throws {
+        let store = SubscriptionAuthStore()
+        let pending = try await store.beginLogin()
+        let before = try store.read()!.generation
+        subscriptionLoginRunID = UUID()
+        subscriptionLoginTask = Task { [weak self] in
+            defer { self?.subscriptionLoginTask = nil; self?.subscriptionLoginRunID = nil }
+            do {
+                try await Task.sleep(nanoseconds: 30_000_000_000)
+                _ = try await store.commitLogin(SubscriptionSelftest.credential(), pending: pending)
+            } catch {}
+        }
+        let result = await quiesceBackgroundWorkForMindRestore(timeoutSeconds: 2)
+        try P2Life.require(result == nil && subscriptionLoginTask == nil, "Mind barrier awaits subscription owner exit")
+        try P2Life.require(try store.read()?.pendingLogin == nil, "Mind barrier durably cancels pending login")
+        try P2Life.require(try store.read()?.generation == before, "Mind barrier preserves established account")
+        let failures = await deleteAllMemory()
+        try P2Life.require(failures.isEmpty, "wipe completes with subscription account")
+        try P2Life.require(try store.read()?.credential == nil, "wipe signs out subscription locally")
+    }
+}
