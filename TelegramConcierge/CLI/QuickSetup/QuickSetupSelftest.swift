@@ -776,7 +776,7 @@ final class SelftestContext: @unchecked Sendable {
             check("app.js does not use \(banned)", !js.contains(banned))
         }
         check("secret inputs set autocomplete off", js.contains("autocomplete = 'off'") || js.contains("autocomplete=\"off\""))
-        let allowed = ["https://opencode.ai/zen", "https://platform.openai.com/api-keys", "https://serper.dev", "https://jina.ai", "https://t.me/BotFather", "https://t.me/userinfobot", "https://agentmail.to", "https://openrouter.ai/keys"]
+        let allowed = ["https://opencode.ai/zen", "https://platform.openai.com/api-keys", "https://serper.dev", "https://jina.ai", "https://t.me/BotFather", "https://t.me/userinfobot", "https://agentmail.to", "https://openrouter.ai/keys", "https://auth.openai.com/codex/device"]
         let urlRegex = try NSRegularExpression(pattern: "https?://[A-Za-z0-9./_-]+")
         let urls = urlRegex.matches(in: js, range: NSRange(js.startIndex..., in: js)).map { String(js[Range($0.range, in: js)!]) }
         let foreign = urls.filter { u in !allowed.contains(u) && !u.hasPrefix("https://my-server.example") && u != "http://127.0.0.1" }
