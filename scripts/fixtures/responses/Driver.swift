@@ -243,9 +243,9 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
     }
 
     @MainActor private func runSwitching(_ manager: ConversationManager, server: CaptureServer, file: URL) async throws {
-        func select(_ wire: ProviderWireProtocol, key: String = "synthetic-p2-key") throws {
+        func select(_ wire: ProviderWireProtocol, key: String = "synthetic-p2-key", model: String = "kimi-k2.5") throws {
             try ProviderProfiles.saveProfile(.custom, apiKey: key, baseURL: "http://127.0.0.1:\(server.port)/v1",
-                model: "kimi-k2.5", effort: nil, textOnly: false, wireProtocol: wire)
+                model: model, effort: nil, textOnly: false, wireProtocol: wire)
             try ProviderProfiles.activate(.custom)
         }
         func chat(_ text: String, tool: Bool = false) throws -> String {
@@ -277,7 +277,20 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         try P2Life.require(await manager.p2Error() == nil && first.allSatisfy { $0["encrypted_content"] == nil && $0["id"] == nil }, "chat to Responses excludes foreign provider identities and ciphertext")
         try P2Life.require(first.filter { $0["call_id"] as? String == mappedID }.count == 2,
             "chat call and result map to one deterministic Responses id")
-        try P2Life.require(!String(decoding: server.completeRequests.first!.body, as: UTF8.self).contains("chat-only-reasoning"), "foreign reasoning details stay off Responses wire")
+        func notes(_ items: [[String: Any]]) -> [[String: Any]] {
+            items.filter { item in
+                (item["content"] as? [[String: Any]])?.contains {
+                    ($0["text"] as? String)?.contains("[reasoning record — harness note]") == true
+                } == true
+            }
+        }
+        try P2Life.require(notes(first).count == 2 && notes(first).allSatisfy { $0["role"] as? String == "system" },
+            "tool and final textual reasoning each get a separate system note")
+        try P2Life.require(historicalAssistantParts.allSatisfy {
+            !(($0["text"] as? String)?.contains("chat-only-reasoning") ?? false)
+        }, "historical assistant text never incorporates reasoning notes")
+        try P2Life.require(first.allSatisfy { $0["reasoning_details"] == nil && $0["reasoning"] == nil },
+            "textual reasoning never becomes native Responses reasoning fields")
         try P2Life.require(native.last?.responsesReplay != nil, "native era retained after real manager switch")
         _ = try manager.p2Reload()
         try select(.chatCompletions); server.clear(); server.script([try chat("Back on chat")])
@@ -300,6 +313,34 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         let encrypted = accountA.compactMap { $0["encrypted_content"] as? String }
         try P2Life.require(encrypted.contains("opaque_scopeA") && encrypted.contains("opaque_scopeAfinal") && !encrypted.contains("opaque_scopeB"), "return restores only matching A native replay after chat and account switches")
         try P2Life.require(accountA.filter { $0["call_id"] as? String == mappedID }.count == 2, "semantic chat id remains stable after restart and switches")
+        try P2Life.require(notes(accountA).count == 3, "restart and account switches do not duplicate historical notes")
+        try select(.responses, model: "another-openai-model"); server.clear()
+        server.script([try P2Life.body("Other model answer", id: "otherModel")])
+        _ = try await manager.p2Turn(human: Message(role: .user, content: "Change model"))
+        let switched = try P2Life.input(server.completeRequests.last!)
+        try P2Life.require(switched.allSatisfy { $0["encrypted_content"] == nil } && notes(switched).count == 3,
+            "model change omits ciphertext while preserving readable notes")
+        _ = try manager.p2Reload()
+        try select(.responses); server.clear(); server.script([try P2Life.body("Original model again", id: "originalModel")])
+        _ = try await manager.p2Turn(human: Message(role: .user, content: "Restore original model"))
+        let returned = try P2Life.input(server.completeRequests.last!)
+        let returnedCiphertext = returned.compactMap { $0["encrypted_content"] as? String }
+        try P2Life.require(returnedCiphertext.contains("opaque_scopeA") && !returnedCiphertext.contains("opaque_otherModel")
+            && notes(returned).count == 3, "model round trip after reload restores only compatible ciphertext")
+        // Drive actual pruning, then serialize its result: no sidecar note can
+        // outlive the canonical reasoning that the pruner cleared.
+        server.clear(); server.script([try P2Life.body("Pruned summary")])
+        let protected = Message(role: .assistant, content: "Recent protected turn", toolInteractions: chatFinal.toolInteractions)
+        let pruned = try await manager.p2Prune([Message(role: .user, content: "Old task"), chatFinal,
+            Message(role: .user, content: "Recent task"), protected])
+        try P2Life.require(pruned.first { $0.id == chatFinal.id }?.finalReasoningDetails == nil
+            && pruned.first { $0.id == chatFinal.id }?.toolInteractions.isEmpty == true,
+            "pruning clears old textual reasoning at its canonical owner")
+        server.script([try P2Life.body("After pruning")])
+        _ = try await OpenRouterService().generateResponse(messages: pruned, imagesDirectory: file.deletingLastPathComponent(),
+            documentsDirectory: file.deletingLastPathComponent(), tools: [], lane: .main)
+        let afterPrune = try P2Life.input(server.completeRequests.last!)
+        try P2Life.require(notes(afterPrune).count == 1, "pruned reasoning note disappears; recent protected reasoning remains")
         P2Life.captureDelivery = true; defer { P2Life.captureDelivery = false }
         try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "low")
         await manager.p2Effort("ultra")

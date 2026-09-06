@@ -52,6 +52,10 @@ extension OpenRouterService {
                 replayBytes += assistant.responsesReplay?.byteCount ?? 0
             } else {
                 if assistant.responsesReplay != nil { print("[Responses] Replaying incompatible/edited round semantically; native reasoning omitted") }
+                if let note = Self.responsesReasoningNote(reasoning: assistant.reasoning,
+                                                         details: assistant.reasoningDetails) {
+                    input.append(ResponsesAdapter.message(role: "system", text: note))
+                }
                 if let text = assistant.content, !text.isEmpty {
                     input.append(ResponsesAdapter.message(role: "assistant", text: MarkerNeutralizer.escape(text)))
                 }
@@ -114,8 +118,14 @@ extension OpenRouterService {
                     usedItemIDs.formUnion(native.compactMap { $0.responsesObject?["id"]?.responsesString })
                     input.append(contentsOf: native)
                     replayBytes += message.responsesReplay?.byteCount ?? 0
-                } else if !message.content.isEmpty {
-                    input.append(ResponsesAdapter.message(role: "assistant", text: MarkerNeutralizer.escape(message.content)))
+                } else {
+                    if let note = Self.responsesReasoningNote(reasoning: message.finalReasoning,
+                                                             details: message.finalReasoningDetails) {
+                        input.append(ResponsesAdapter.message(role: "system", text: note))
+                    }
+                    if !message.content.isEmpty {
+                        input.append(ResponsesAdapter.message(role: "assistant", text: MarkerNeutralizer.escape(message.content)))
+                    }
                 }
             } else {
                 var media: [ContentPart] = [], hints: [String] = []
@@ -164,6 +174,30 @@ extension OpenRouterService {
         let receipt = PreparedRequestReceipt(requestID: UUID(),
             historyFingerprint: ResponsesReplayEnvelope.hash(try encoder.encode(input)), deliveryNonces: nonces)
         return try await ResponsesAdapter(context: context).send(input: input, tools: conversation.tools, receipt: receipt)
+    }
+
+    /// Only readable Chat Completions reasoning crosses protocols. Never dump
+    /// opaque provider objects, signatures, IDs or encrypted reasoning as text.
+    /// Reuse the established system-voice wrapper without changing chat encoding.
+    /// This is a request projection: persisted history and pruning stay canonical.
+    static func responsesReasoningNote(reasoning: JSONValue?, details: JSONValue?) -> String? {
+        let plain = reasoning?.responsesString.flatMap { $0.isEmpty ? nil : JSONValue.string($0) }
+        let readable = (details?.responsesArray ?? []).compactMap { value -> JSONValue? in
+            guard let item = value.responsesObject,
+                  let type = item["type"]?.responsesString else { return nil }
+            let field: String
+            switch type {
+            case "reasoning.text": field = "text"
+            case "reasoning.summary": field = "summary"
+            default: return nil
+            }
+            guard let text = item[field]?.responsesString, !text.isEmpty else { return nil }
+            return .object(["type": .string(type), field: .string(text)])
+        }
+        let record = OpenRouterAPIMessage(role: "assistant", content: nil, reasoning: plain,
+            reasoningDetails: readable.isEmpty ? nil : .array(readable))
+        return record.sanitizedForProvider(.openAICompatible, useReasoningContent: false,
+            reasoningFromCurrentModel: false).reasoningNote.map { MarkerNeutralizer.escape($0) }
     }
 
     /// Reuse media/OCR utilities, not the Chat Completions serializer. Conversion
