@@ -111,7 +111,7 @@ extension SubscriptionSelftest {
         // A gate watchdog makes the old network-under-lock implementation fail
         // a bounded assertion instead of hanging the suite for 45 seconds.
         for stage in ["deviceauth/token", "oauth/token"] {
-            for operation in ["refresh", "cancel", "logout", "replace"] {
+            for operation in ["refresh", "cancel", "logout", "replace", "reclaim", "expire"] {
                 let store = SubscriptionAuthStore(directory: root.appendingPathComponent("poll-" + stage.replacingOccurrences(of: "/", with: "-") + operation))
                 let oldPending = try await store.beginLogin()
                 let generation = try await store.commitLogin(Self.credential(expired: true), pending: oldPending)
@@ -143,9 +143,20 @@ extension SubscriptionSelftest {
                     _ = try await store.credential(generation: generation) { _ in Self.credential("refreshed-during-poll") }
                 case "cancel": _ = await setup.perform(["action": "cancel", "pending": pending])
                 case "logout": try await store.logout()
+                case "reclaim":
+                    try await store.locked {
+                        var state = try store.read()!
+                        state.deviceChallenge!.pollAttempt = UUID().uuidString
+                        try store.write(state)
+                    }
+                case "expire":
+                    try await store.locked {
+                        var state = try store.read()!; state.deviceChallenge!.expires = .distantPast; try store.write(state)
+                    }
                 default: _ = try await store.beginLogin()
                 }
                 c.check("\(operation) completes while \(stage) is suspended", !(await gate.released))
+                let beforeRelease = try store.read()?.deviceChallenge?.pollAttempt
                 watchdog.cancel(); await gate.release()
                 let result = await polling.value
                 if operation == "refresh" {
@@ -153,6 +164,13 @@ extension SubscriptionSelftest {
                 } else {
                     c.check("late \(stage) cannot commit after \(operation)", result["ok"] as? Bool == false)
                     c.check("late poll preserves generation/tombstone", try operation == "logout" ? store.read()?.credential == nil : store.read()?.generation == generation)
+                    if operation == "reclaim" {
+                        c.check("late owner preserves newer claim on the same handle", try store.read()?.deviceChallenge?.pollAttempt == beforeRelease)
+                    }
+                    if operation == "expire" {
+                        c.check("expired completion clears pending and is not retryable", try store.read()?.pendingLogin == nil
+                            && (result["error"] as? [String: Any])?["retryable"] as? Bool == false)
+                    }
                 }
             }
         }
