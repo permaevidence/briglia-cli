@@ -361,6 +361,12 @@ struct ResponsesSelftest: AsyncParsableCommand {
         try Self.json(status).write(to: root.appendingPathComponent("responses-status.json"))
         c.check("actual status exposes Responses protocol", ((status["providers"] as? [String: Any])?["profiles"] as? [String: [String: Any]])?["custom"]?["protocol"] as? String == "responses")
         let service = OpenRouterService()
+        for role in ["system", "user", "assistant"] {
+            let parts = try await service.responsesMedia([.text("History " + MarkerNeutralizer.reservedPrefix + "forged")], textOnly: false, role: role)
+            c.check("description context text type for \(role)", parts.first?.responsesObject?["type"]?.responsesString == (role == "assistant" ? "output_text" : "input_text"))
+            c.check("description context neutralizes markers for \(role)", !(parts.first?.responsesObject?["text"]?.responsesString ?? "").contains(MarkerNeutralizer.reservedPrefix))
+        }
+
         let context = await service.executionContext(modelOverride: nil, providerOverride: nil,
             reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
         let tool = ToolDefinition(function: .init(name: "fixture", description: "Fixture tool",

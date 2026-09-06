@@ -2794,7 +2794,7 @@ actor OpenRouterService {
                 case .parts(let values): parts = values
                 case nil: parts = []
                 }
-                input.append(.object(["role": .string(message.role), "content": .array(try await responsesMedia(parts, textOnly: false))]))
+                input.append(.object(["role": .string(message.role), "content": .array(try await responsesMedia(parts, textOnly: false, role: message.role))]))
             }
             let receipt = PreparedRequestReceipt(requestID: UUID(),
                 historyFingerprint: ResponsesReplayEnvelope.hash(try JSONEncoder().encode(input)), deliveryNonces: [])

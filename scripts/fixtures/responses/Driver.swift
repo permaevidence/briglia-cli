@@ -225,8 +225,20 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         }
         let service = OpenRouterService(); await service.configure(apiKey: "synthetic-unused-key")
         let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKElEQVR4nO3NsQ0AAAzCMP5/un0CNkuZ41wybXsHAAAAAAAAAAAAxR4yw/wuPL6QkAAAAABJRU5ErkJggg==")!
-        let descriptions = try await service.generateFileDescriptions(files: [("fixture.png", png, "image/png")])
+        let descriptions = try await service.generateFileDescriptions(files: [("fixture.png", png, "image/png")],
+            conversationContext: [Message(role: .user, content: "Describe the image later."),
+                                  Message(role: .assistant, content: "I will retain its description.")])
         try P2Life.require(descriptions["fixture.png"] == "A small red square.", "Responses file description decoded")
+        let descriptionBody = try JSONSerialization.jsonObject(with: server.completeRequests.last!.body) as! [String: Any]
+        let descriptionInput = descriptionBody["input"] as! [[String: Any]]
+        try P2Life.require(descriptionInput.map { $0["role"] as! String } == ["system", "user", "assistant", "user"], "description request retains prior user and assistant context")
+        for message in descriptionInput {
+            let expected = message["role"] as? String == "assistant" ? "output_text" : "input_text"
+            let parts = message["content"] as! [[String: Any]]
+            let textParts = parts.filter { $0["text"] != nil }
+            try P2Life.require(!textParts.isEmpty && textParts.allSatisfy { $0["type"] as? String == expected }, "description wire text matches its message role")
+        }
+
         try P2Life.require(P2Life.contexts.count == 6 && P2Life.contexts.prefix(3).allSatisfy { $0.lane == .archive }, "archive operations use archive affinity lane")
         let ephemeral = P2Life.contexts.suffix(3).map { $0.lane.laneId }
         try P2Life.require(ephemeral.allSatisfy { $0.hasPrefix("ephemeral:") } && Set(ephemeral).count == 3, "structuring and descriptions get independent operation lanes")

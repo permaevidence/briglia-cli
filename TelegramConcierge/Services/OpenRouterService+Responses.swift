@@ -202,7 +202,7 @@ extension OpenRouterService {
 
     /// Reuse media/OCR utilities, not the Chat Completions serializer. Conversion
     /// happens one result at a time so tool ownership cannot be lost.
-    func responsesMedia(_ content: [ContentPart], textOnly: Bool) async throws -> [JSONValue] {
+    func responsesMedia(_ content: [ContentPart], textOnly: Bool, role: String = "user") async throws -> [JSONValue] {
         var parts = content
         if textOnly && !parts.isEmpty {
             var holder = [OpenRouterAPIMessage(role: "user", content: .parts(parts))]
@@ -217,7 +217,7 @@ extension OpenRouterService {
         }
         return parts.map { part in
             switch part {
-            case .text(let text, _): return .object(["type": .string("input_text"), "text": .string(MarkerNeutralizer.escape(text))])
+            case .text(let text, _): return .object(["type": .string(role == "assistant" ? "output_text" : "input_text"), "text": .string(MarkerNeutralizer.escape(text))])
             case .image(let image): return .object(["type": .string("input_image"), "image_url": .string(image.url)])
             case .file(let file): return .object(["type": .string("input_file"), "file_data": .string(file.url), "filename": .string("attachment.pdf")])
             }
