@@ -16,12 +16,18 @@ extension Probes {
 extension ProviderExecutionContext {
     static func responsesAPI(baseURL: String, key: String, model: String,
                              lane: AffinityLane, effort: String? = nil) -> ProviderExecutionContext {
-        ProviderExecutionContext(provider: .openAICompatible, model: model, endpoint: baseURL,
+        var context = ProviderExecutionContext(provider: .openAICompatible, model: model, endpoint: baseURL,
             authorization: "Bearer \(key)", affinityKey: key, lane: lane, provenance: model + "#responses",
             providerPreferences: nil, reasoning: nil, reasoningEffort: effort, thinkingType: nil,
             reasoningHistory: nil, useReasoningContent: false, textOnly: false,
             anthropicCacheControl: false, renderPDFAsImages: true, wireProtocol: .responses,
             profileIdentity: "explicit-api")
+        switch lane {
+        case .archive: context.responsesOperation = .archive
+        case .probe: context.responsesOperation = .probe
+        default: break
+        }
+        return context
     }
 }
 
@@ -46,6 +52,7 @@ enum ResponsesAuxiliary {
 
     static func text(context: ProviderExecutionContext, messages: [(String, String)],
                      maxOutputTokens: Int? = nil) async throws -> String {
+        defer { context.responsesTurn.close() }
         let input = messages.map { ResponsesAdapter.message(role: $0.0, text: MarkerNeutralizer.escape($0.1)) }
         let receipt = PreparedRequestReceipt(requestID: UUID(),
             historyFingerprint: ResponsesReplayEnvelope.hash(try JSONEncoder().encode(input)), deliveryNonces: [])

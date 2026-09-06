@@ -152,6 +152,25 @@ which does not mean unlimited. `subscription models` lists compatibility
 candidates, not a live account-entitlement catalog. Unsupported models fail
 explicitly. Image generation, transcription, web search and independently
 configured services retain their own credentials and may incur API costs.
+Use `/cachestats` in Briglia's paired chat or `briglia cache-stats` in the terminal
+for recorded cache coverage. `briglia cache-stats --json` exposes the individual
+attempts, including model, operation, input/cached/cache-write/output/reasoning
+counters when reported, HTTP status and retry number. Missing usage stays unknown;
+a reported zero is a cache miss. The ledger retains at most 1,000 attempts in the
+owner-only `responses_usage.json` (2 MiB ceiling), including main turns, subagents,
+maintenance and the web agent's separate Responses calls. Subscription, OpenAI
+API and custom Responses traffic are reported separately. Chat Completions and
+non-model tool requests are outside this ledger. Prompts, account identifiers,
+credentials, ciphertext and routing token values are never recorded. Mind exports
+exclude this diagnostic state; `/deleteuserdata` clears it. Recording failures
+warn once and never prevent a model request; lost records cannot be reconstructed.
+
+Subscription requests echo the first valid `x-codex-turn-state` response header
+only within the same turn/operation, including its retries and tool rounds. New
+turns and maintenance operations use a fresh owner. This complements the existing
+stable `prompt_cache_key` and `session_id`; it does not guarantee cache hits or
+establish how cached tokens affect subscription allowances.
+
 Subscription tool media currently uses the labeled synthetic-observation
 fallback. Opaque reasoning is replayed only for the same model/login scope;
 ordinary token refresh preserves it, while logout/reconnect invalidates it.

@@ -3142,6 +3142,10 @@ class ConversationManager: ObservableObject {
         case "/stop":
             await stopActiveExecution()
             return true
+        case "/cachestats":
+            do { try await sendText(ResponsesUsageStore().summary()) }
+            catch { try? await sendText("Cache statistics unavailable: cannot safely read the local usage ledger.") }
+            return true
         case "/spend":
             await handleSpendCommand(argument: commandArgument(from: text))
             return true
@@ -5200,6 +5204,7 @@ class ConversationManager: ObservableObject {
         let snapshot = await openRouterService.executionContext(modelOverride: nil, providerOverride: nil,
             reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
         let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
+        defer { responsesExecution?.responsesTurn.close() }
         if responsesExecution != nil && !saveConversation() {
             throw ResponsesFailure.failed("cannot persist canonical history before Responses dispatch")
         }
@@ -6816,7 +6821,8 @@ class ConversationManager: ObservableObject {
         if let execution { selected = execution }
         else { selected = await openRouterService.executionContext(modelOverride: nil,
             providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main) }
-        let summaryExecution = selected.wireProtocol == .responses ? selected : nil
+        let summaryExecution = selected.wireProtocol == .responses ? selected.forOperation(.pruneSummary) : nil
+        defer { summaryExecution?.responsesTurn.close() }
         let summaryStart = Date()
         DebugTelemetry.log(
             .info,
@@ -9586,6 +9592,8 @@ class ConversationManager: ObservableObject {
         // Session affinity (harness state, plan §5/§9): the file and every
         // quarantined sibling, deleted under affinity.lock with a checked
         // directory fsync; the next start mints a new salt and main ID.
+        do { try ResponsesUsageStore().clearForWipe() }
+        catch { failures.append("Could not clear Responses cache statistics") }
         failures.append(contentsOf: SessionAffinity.deleteForUserDataWipe())
         for (dir, label) in [
             (appFolder.appendingPathComponent("archive", isDirectory: true), "archive directory"),

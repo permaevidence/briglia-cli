@@ -76,7 +76,7 @@ def main():
         anchor = '        var request = try request(input: input, tools: tools, maxOutputTokens: maxOutputTokens)'
         assert text.count(anchor) == 1
         text = text.replace(anchor, '        let maxOutputTokens = P2Life.liveMode ? 1024 : maxOutputTokens\n' + anchor)
-        anchor = '                let bytes = try await ResponsesHTTPTransport().send('
+        anchor = '                let bytes = try await transport.send('
         assert text.count(anchor) == 1
         text = text.replace(anchor, '                try P2Life.claimLiveRequest()\n' + anchor)
         text = text.replace('.send(request, overallTimeout: request.timeoutInterval, subscription: context.subscriptionGeneration != nil)', '.send(P2Life.route(request), overallTimeout: request.timeoutInterval, subscription: context.subscriptionGeneration != nil)')

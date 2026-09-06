@@ -1025,7 +1025,9 @@ actor WebOrchestrator {
                 headers: try requestHeaders(for: .openai, url: Endpoints.openaiResponses, lane: .ephemeral(executionID)),
                 timeout: generous ? 600 : 120,
                 label: "openai \(stage)",
-                retryTimeouts: !generous
+                retryTimeouts: !generous,
+                usageRecord: ResponsesUsageStore.Record(requestID: UUID(), operationID: executionID,
+                    provider: .openaiAPI, model: String(model.prefix(128)), lane: "ephemeral", operation: .webResearch, attempt: 1)
             )
 
             var detail = "empty response body"

@@ -300,6 +300,7 @@ actor SubagentRunner {
             providerOverride: effectiveProviderOverride, reasoningEffortOverride: effectiveReasoningOverride,
             textOnlyOverride: effectiveTextOnlyOverride, lane: .subagent(resolvedSessionId))
         let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
+        defer { responsesExecution?.responsesTurn.close() }
         if responsesExecution != nil,
            !(await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: priorToolInteractions)) {
             return RunResult(sessionId: resolvedSessionId, isNewSession: isNew, finalMessage: "",
@@ -843,6 +844,8 @@ actor SubagentRunner {
         execution: ProviderExecutionContext? = nil,
         lane: AffinityLane
     ) async -> String? {
+        let execution = execution?.forOperation(.subagentCompaction)
+        defer { execution?.responsesTurn.close() }
         // Build a text representation of the evicted content.
         var transcript = ""
 

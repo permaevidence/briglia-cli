@@ -205,6 +205,7 @@ struct UserContextStructurer {
             var context = ProviderExecutionContext.responsesAPI(baseURL: config.openAICompatibleBaseURL,
                 key: config.openAICompatibleApiKey, model: configuredModel,
                 lane: operationLane, effort: config.nativeEffort)
+            context.responsesOperation = .userContext
             context.configurationError = config.nativeConfigurationError
             if let generation = config.subscriptionGeneration {
                 context.subscriptionGeneration = generation

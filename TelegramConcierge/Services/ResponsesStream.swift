@@ -209,6 +209,18 @@ struct ResponsesStreamAssembler {
 /// cancellation before start and late callbacks. Credentials never follow redirects.
 final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
+    private let routingContext: ProviderExecutionContext?
+    init(routingContext: ProviderExecutionContext? = nil) {
+        self.routingContext = routingContext
+        super.init()
+    }
+    var usageStatus: Int? {
+        lock.lock(); defer { lock.unlock() }; return response?.statusCode
+    }
+    var receivedRoutingState: Bool {
+        lock.lock(); defer { lock.unlock() }; return receivedState
+    }
+    private var receivedState = false
     private var continuation: CheckedContinuation<Data, Error>?
     private var session: URLSession?
     private var task: URLSessionDataTask?
@@ -294,6 +306,11 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked
             lock.unlock(); completionHandler(.cancel); return
         }
         self.response = http
+        if http.statusCode == 200, let context = routingContext, context.subscriptionGeneration != nil,
+           let value = http.value(forHTTPHeaderField: ResponsesTurn.header) {
+            context.responsesTurn.receive(value, scope: context.responsesScope)
+            receivedState = context.responsesTurn.value(for: context.responsesScope) != nil
+        }
         armPhaseTimerLocked(idleTimeout, phase: "idle")
         // The pinned subscription endpoint always streams, but successful live
         // responses can omit Content-Type. Its request contract selects SSE;

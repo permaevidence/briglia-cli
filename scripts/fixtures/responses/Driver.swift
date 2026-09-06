@@ -80,7 +80,7 @@ enum P2Life {
                            "status": "completed", "name": tool, "arguments": arguments])
         }
         let snapshot: [String: Any] = ["id": "resp_" + id, "status": status, "output": output,
-            "usage": ["input_tokens": 100, "output_tokens": 30]]
+            "usage": ["input_tokens": 100, "input_tokens_details": ["cached_tokens": 80], "output_tokens": 30, "output_tokens_details": ["reasoning_tokens": 20]]]
         func json(_ value: [String: Any]) throws -> String {
             String(data: try JSONSerialization.data(withJSONObject: value, options: .sortedKeys), encoding: .utf8)!
         }
@@ -172,7 +172,8 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         try ProviderProfiles.activate(.chatgpt)
         try P2Life.require(KeychainHelper.load(key: KeychainHelper.openAICompatibleApiKeyKey) == generation, "runtime slot contains generation, not OAuth token")
         P2Life.subscriptionCaptureURL = URL(string: "http://127.0.0.1:\(server.port)/v1/responses")!
-        defer { P2Life.subscriptionCaptureURL = nil }
+        defer { P2Life.subscriptionCaptureURL = nil; server.contentTypeOverride = nil }
+        server.contentTypeOverride = "text/event-stream\r\nx-codex-turn-state: fixture-turn-state"
         server.clear()
         server.script([try P2Life.body("Read subscription fixture", tool: "read_file", path: file.path), try P2Life.body("SUBSCRIPTION_OK")])
         let saved = try await manager.p2Turn(human: Message(role: .user, content: "Read the fixture through the subscription provider"))
@@ -185,12 +186,17 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         }
         let identifiers = server.completeRequests.compactMap { $0.headers["session_id"] }
         try P2Life.require(identifiers.count == 2 && Set(identifiers).count == 1, "subscription tool rounds share stable main affinity")
+        try P2Life.require(server.completeRequests[0].headers[ResponsesTurn.header] == nil && server.completeRequests[1].headers[ResponsesTurn.header] == "fixture-turn-state", "main tool continuation echoes first routing state")
+        let usage = try ResponsesUsageStore().read()!.records.filter { $0.provider == .subscription }.suffix(2)
+        try P2Life.require(usage.count == 2 && Set(usage.map { $0.operationID }).count == 1 && usage.allSatisfy { $0.counts.cachedInput == 80 && $0.counts.reasoningOutput == 20 && $0.outcome == .completed }, "real main requests persist server counters under one operation")
         _ = try manager.p2Reload()
         server.clear(); server.script([try P2Life.body("RESTART_OK")])
         _ = try await manager.p2Turn(human: Message(role: .user, content: "Continue after reload"))
         let restartInput = (try JSONSerialization.jsonObject(with: server.completeRequests.last!.body) as! [String: Any])["input"] as! [[String: Any]]
         try P2Life.require(restartInput.contains { $0["encrypted_content"] != nil }, "subscription reload restores compatible encrypted items")
+        try P2Life.require(server.completeRequests.last?.headers[ResponsesTurn.header] == nil, "new main turn does not reuse prior routing state")
         try await runSubagents(server: server, root: root, file: file)
+        try P2Life.require(server.completeRequests.count == 3 && server.completeRequests[0].headers[ResponsesTurn.header] == nil && server.completeRequests[1].headers[ResponsesTurn.header] == "fixture-turn-state" && server.completeRequests[2].headers[ResponsesTurn.header] == nil, "subagent tools share state but resume starts fresh")
         try P2Life.require(server.completeRequests.allSatisfy { $0.headers["chatgpt-account-id"] == "account-A" }, "new and resumed subagents retain subscription account")
         let workerIDs = server.completeRequests.compactMap { $0.headers["session_id"] }
         try P2Life.require(workerIDs.count == 3 && Set(workerIDs).count == 1 && workerIDs.first != identifiers.first, "subscription subagent session affinity is stable and separate from main")
@@ -211,6 +217,9 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         try P2Life.require(P2Life.contexts.prefix(3).allSatisfy { $0.lane == .archive }, "subscription archive lane retained")
         let scopes = P2Life.contexts.suffix(2).map { $0.lane.laneId }
         try P2Life.require(Set(scopes).count == 2 && scopes.allSatisfy { $0.hasPrefix("ephemeral:") }, "subscription auxiliary operation lanes distinct")
+        try P2Life.require(server.completeRequests.allSatisfy { $0.headers[ResponsesTurn.header] == nil }, "auxiliary operations never borrow another operation routing state")
+        let auxUsage = try ResponsesUsageStore().read()!.records.suffix(5)
+        try P2Life.require(Set(auxUsage.map { $0.operationID }).count == 5 && auxUsage.suffix(2).map { $0.operation } == [.userContext, .fileDescription], "auxiliary receipts label owners and distinct operations")
         try await store.logout()
         server.clear()
         _ = try await manager.p2Turn(human: Message(role: .user, content: "This cannot dispatch after logout"))
@@ -227,6 +236,7 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
             var context = ProviderExecutionContext.responsesAPI(baseURL: SubscriptionEndpoint.inference, key: generation,
                 model: "gpt-5.6-luna", lane: .main, effort: "high")
             context.subscriptionGeneration = generation; context.profileIdentity = "chatgpt"; context.nativeToolMedia = false
+            context.responsesTurn.receive("before-refresh", scope: context.responsesScope)
             P2Life.refreshCalls = 0; P2Life.failRefresh = mode == "transport"
             server.clear()
             if mode == "double401" { server.script(["{}", "{}"], statuses: [401, 401]) }
@@ -242,6 +252,9 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
             try P2Life.require(P2Life.refreshCalls == 1, "exactly one refresh \(mode)")
             let requests = server.completeRequests
             try P2Life.require(requests.count == (mode == "transport" ? 1 : mode == "retry-budget" ? 5 : 2), "bounded request count \(mode)")
+            try P2Life.require(requests.allSatisfy { $0.headers[ResponsesTurn.header] == "before-refresh" }, "401 and server retries keep same-turn routing state " + mode)
+            let attempts = try ResponsesUsageStore().read()!.records.filter { $0.requestID == receipt.requestID }
+            try P2Life.require(attempts.count == requests.count && attempts.map { $0.attempt } == Array(1...requests.count) && attempts.first?.httpStatus == 401, "ledger records every HTTP attempt " + mode)
             if requests.count > 1 {
                 try P2Life.require(requests[0].body == requests[1].body, "retry body byte-identical \(mode)")
                 try P2Life.require(requests[0].headers["authorization"] != requests[1].headers["authorization"], "refreshed bearer used \(mode)")
@@ -255,6 +268,26 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
             }
         }
         P2Life.failRefresh = false
+        let holding = try HoldingChatSelftestServer()
+        defer { _ = holding.stopAndJoin() }
+        P2Life.subscriptionCaptureURL = holding.url
+        let generation = try store.read()!.generation
+        var cancelledContext = ProviderExecutionContext.responsesAPI(baseURL: SubscriptionEndpoint.inference,
+            key: generation, model: "gpt-5.6-luna", lane: .main, effort: "high")
+        cancelledContext.subscriptionGeneration = generation; cancelledContext.profileIdentity = "chatgpt"
+        cancelledContext.responsesTurn.receive("cancel-state", scope: cancelledContext.responsesScope)
+        let cancelledReceipt = PreparedRequestReceipt(requestID: UUID(), historyFingerprint: "cancel-fixture", deliveryNonces: [])
+        let cancelledTask = Task { try await ResponsesAdapter(context: cancelledContext).send(
+            input: [ResponsesAdapter.message(role: "user", text: "Cancel this request")], tools: nil, receipt: cancelledReceipt) }
+        let deadline = Date().addingTimeInterval(5)
+        while holding.requestCount == 0 && Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        cancelledTask.cancel()
+        _ = try? await cancelledTask.value
+        try P2Life.require(holding.requestCount == 1 && cancelledContext.responsesTurn.value(for: cancelledContext.responsesScope) == nil,
+            "cancellation closes the real adapter routing owner")
+        let cancelledRows = try ResponsesUsageStore().read()!.records.filter { $0.requestID == cancelledReceipt.requestID }
+        try P2Life.require(cancelledRows.count == 1 && cancelledRows[0].outcome == .cancelled && cancelledRows[0].counts.input == nil,
+            "cancelled request records unknown usage without inventing a cache miss")
         try await manager.p3PendingLoginBarrier()
     }
 

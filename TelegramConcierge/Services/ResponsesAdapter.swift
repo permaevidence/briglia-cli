@@ -115,11 +115,13 @@ struct ResponsesAdapter {
 
     func send(input: [JSONValue], tools: [ToolDefinition]?, receipt: PreparedRequestReceipt,
               maxOutputTokens: Int? = nil) async throws -> LLMResponse {
+        defer { if Task.isCancelled { context.responsesTurn.close() } }
         var request = try request(input: input, tools: tools, maxOutputTokens: maxOutputTokens)
         let allowed = Set((tools ?? []).map { $0.function.name })
         var usedAccess: String?
         var didRefreshAfter401 = false
         var attempt = 0
+        var dispatch = 0
         while attempt < 4 {
             try Task.checkCancellation()
             do {
@@ -132,9 +134,32 @@ struct ResponsesAdapter {
                     request.setValue(credential.account, forHTTPHeaderField: "ChatGPT-Account-Id")
                     usedAccess = credential.access
                 }
-                let bytes = try await ResponsesHTTPTransport().send(request, overallTimeout: request.timeoutInterval, subscription: context.subscriptionGeneration != nil)
+                request.setValue(context.subscriptionGeneration == nil ? nil : context.responsesTurn.value(for: context.responsesScope),
+                    forHTTPHeaderField: ResponsesTurn.header)
+                dispatch += 1
+                let transport = ResponsesHTTPTransport(routingContext: context)
+                let usage = ResponsesUsageStore()
+                let started = ProcessInfo.processInfo.systemUptime
+                let ticket: ResponsesUsageStore.Ticket?
+                do { ticket = try usage.begin(ResponsesUsageStore.record(context: context, requestID: receipt.requestID,
+                    attempt: dispatch, sentRoutingState: request.value(forHTTPHeaderField: ResponsesTurn.header) != nil)) }
+                catch { ticket = nil; ResponsesUsageStore.warn() }
+                var counts = ResponsesUsageCounts()
+                var completed = false
+                defer {
+                    if Task.isCancelled { context.responsesTurn.close() }
+                    if let ticket {
+                        do { try usage.finish(ticket, outcome: completed ? .completed : (Task.isCancelled ? .cancelled : .failed),
+                            status: transport.usageStatus, durationMs: Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
+                            counts: counts, receivedRoutingState: transport.receivedRoutingState) }
+                        catch { ResponsesUsageStore.warn() }
+                    }
+                }
+                let bytes = try await transport.send(request, overallTimeout: request.timeoutInterval, subscription: context.subscriptionGeneration != nil)
+                counts = ResponsesUsageCounts.parse(bytes)
                 try Task.checkCancellation()
                 let round = try ResponsesRoundDecoder.decode(bytes, scope: context.responsesScope, receipt: receipt, allowedTools: allowed)
+                completed = true
                 DebugTelemetry.log(.info, summary: "Responses usage",
                     detail: "input=\(round.inputTokens.map(String.init) ?? "unknown") output=\(round.outputTokens.map(String.init) ?? "unknown") cached_input=\(round.metadata.cachedInputTokens.map(String.init) ?? "unknown") reasoning_output_subset=\(round.metadata.reasoningTokens.map(String.init) ?? "unknown")")
                 if !round.calls.isEmpty {

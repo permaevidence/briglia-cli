@@ -108,14 +108,34 @@ func webPipelineFailureText(_ prefix: String, error: Error) -> String {
 /// drops) with exponential backoff before giving up. Cancellation is never
 /// retried and always surfaces as CancellationError so /stop keeps working
 /// mid-request.
-func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4, retryTimeouts: Bool = true) async throws -> Data {
+func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4, retryTimeouts: Bool = true, usageRecord: ResponsesUsageStore.Record? = nil) async throws -> Data {
     var attempt = 1
     var lastError: Error?
 
     while attempt <= maxAttempts {
         try Task.checkCancellation()
+        let usage = ResponsesUsageStore()
+        var ticket: ResponsesUsageStore.Ticket?
+        if var record = usageRecord {
+            record.attempt = attempt
+            do { ticket = try usage.begin(record) } catch { ResponsesUsageStore.warn() }
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        var counts = ResponsesUsageCounts()
+        var status: Int?
+        var completed = false
         do {
+            defer {
+                if let ticket {
+                    do { try usage.finish(ticket, outcome: completed ? .completed : (Task.isCancelled ? .cancelled : .failed),
+                        status: status, durationMs: Int((ProcessInfo.processInfo.systemUptime - started) * 1000),
+                        counts: counts, receivedRoutingState: false) }
+                    catch { ResponsesUsageStore.warn() }
+                }
+            }
             let (data, response) = try await URLSession.shared.data(for: request)
+            status = (response as? HTTPURLResponse)?.statusCode
+            if usageRecord != nil { counts = ResponsesUsageCounts.parse(data) }
             try HTTPError.throwIfBad(response, data: data)
             // Truncation forensics: URLSession should never deliver fewer
             // bytes than the server announced as a success — if this ever
@@ -130,6 +150,7 @@ func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4,
             if attempt > 1 {
                 webLog("[WebPipeline] \(label) succeeded on attempt \(attempt)")
             }
+            completed = true
             return data
         } catch is CancellationError {
             throw CancellationError()
@@ -156,7 +177,7 @@ func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4,
     throw lastError ?? URLError(.unknown)
 }
 
-func httpJSONPostWithRetry<T: Encodable>(url: URL, body: T, headers: [String: String], timeout: TimeInterval, label: String, retryTimeouts: Bool = true) async throws -> Data {
+func httpJSONPostWithRetry<T: Encodable>(url: URL, body: T, headers: [String: String], timeout: TimeInterval, label: String, retryTimeouts: Bool = true, usageRecord: ResponsesUsageStore.Record? = nil) async throws -> Data {
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -165,7 +186,7 @@ func httpJSONPostWithRetry<T: Encodable>(url: URL, body: T, headers: [String: St
         request.setValue(value, forHTTPHeaderField: key)
     }
     request.httpBody = try JSONEncoder().encode(body)
-    return try await httpDataWithRetry(request: request, label: label, retryTimeouts: retryTimeouts)
+    return try await httpDataWithRetry(request: request, label: label, retryTimeouts: retryTimeouts, usageRecord: usageRecord)
 }
 
 func isRetryableHTTPFailure(_ error: Error) -> Bool {

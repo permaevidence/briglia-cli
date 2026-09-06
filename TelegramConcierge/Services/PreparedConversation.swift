@@ -42,6 +42,8 @@ struct ProviderExecutionContext {
     var configurationError: String? = nil
 
     var subscriptionGeneration: String? = nil
+    var responsesTurn = ResponsesTurn()
+    var responsesOperation: ResponsesOperation = .conversation
 
     var responsesScope: ResponsesScope {
         ResponsesScope(endpoint: (try? ResponsesAdapter.endpoint(endpoint)) ?? endpoint, profile: profileIdentity, model: model,

@@ -2601,7 +2601,8 @@ actor OpenRouterService {
             && (KeychainHelper.load(key: KeychainHelper.lmStudioDescriptionBaseURLKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let descriptionSnapshot = descriptionInheritsResponses ? executionContext(
             modelOverride: KeychainHelper.load(key: KeychainHelper.lmStudioDescriptionModelKey),
-            providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: false, lane: AffinityLane.ephemeral(UUID())) : nil
+            providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: false, lane: AffinityLane.ephemeral(UUID())).forOperation(.fileDescription) : nil
+        defer { descriptionSnapshot?.responsesTurn.close() }
         let usingVisionPreprocessorForDescriptions = isTextOnlyModel
         let usingCustomEndpointForDescriptions = isCustomEndpoint && !usingVisionPreprocessorForDescriptions
 

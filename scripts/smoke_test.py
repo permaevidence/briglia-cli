@@ -411,6 +411,11 @@ def main():
     check("responses-selftest (codec, stream, replay and native/fallback media)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    result = run_selftest([os.path.abspath(ADA), "__responses-cache-selftest"], capture_output=True,
+                         text=True, timeout=120)
+    check("responses-cache-selftest (routing scope and durable bounded usage)", result.returncode == 0,
+          result.stdout + result.stderr)
+
     result = run_selftest([os.path.abspath(ADA), "__subscription-selftest"], capture_output=True,
                             text=True, timeout=120)
     check("subscription-selftest (OAuth, refresh concurrency and endpoint isolation)", result.returncode == 0,
