@@ -68,6 +68,15 @@ struct Doctor: AsyncParsableCommand {
         note("data: \(StoragePaths.dataRoot.path)")
         note("config: \(StoragePaths.configRoot.path)")
 
+        if ProviderProfiles.activeProfile() == .chatgpt {
+            do {
+                let state = try SubscriptionAuthStore().read()
+                check("ChatGPT subscription login", ok: state?.credential != nil && state?.requiresLogin != true && state?.generation == mainKey,
+                      hint: "run briglia subscription login, then select the profile")
+                note("Subscription billing; quota unknown. Image, transcription and web services may use separate API billing.")
+            } catch { check("ChatGPT subscription credential storage", ok: false, hint: error.localizedDescription) }
+        }
+
         // MCP routing references (mcp-routing.json routes, agents' mcp_tools
         // patterns): unresolved or malformed entries are kept verbatim by the
         // daemon and only reported here.
@@ -252,7 +261,11 @@ struct Doctor: AsyncParsableCommand {
         if online {
             print("\nOnline probes")
             if !baseURL.isEmpty && !model.isEmpty {
-                let failure = await Probes.chatCompletion(baseURL: baseURL, apiKey: mainKey, model: model)
+                let failure: String?
+                if let context = ResponsesAuxiliary.inheritedSnapshot(lane: .probe(UUID()), effortOverride: ResponsesAdapter.probeEffort(model: model)) {
+                    do { _ = try await ResponsesAuxiliary.text(context: context, messages: [("user", "Reply OK.")], maxOutputTokens: 2048); failure = nil }
+                    catch { failure = error.localizedDescription }
+                } else { failure = await Probes.chatCompletion(baseURL: baseURL, apiKey: mainKey, model: model) }
                 check("main agent responds", ok: failure == nil, hint: failure)
             }
             if !openAIKey.isEmpty {

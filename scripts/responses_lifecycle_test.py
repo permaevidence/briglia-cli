@@ -35,6 +35,13 @@ def main():
                 name = os.fsdecode(raw)
                 (tree / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / name, tree / name, follow_symlinks=False)
+        # P3's standard session_id header contains an underscore. Extend only
+        # this disposable parser; the frozen P0 capture/parser files stay intact.
+        capture_parser = tree / 'TelegramConcierge/CLI/CaptureRequestParser.swift'
+        capture_text = capture_parser.read_text()
+        header_anchor = '(48...57).contains($0) || $0 == 45'
+        assert capture_text.count(header_anchor) == 1
+        capture_parser.write_text(capture_text.replace(header_anchor, header_anchor + ' || $0 == 95'))
         fixture = ROOT / 'scripts/fixtures/responses'
         shutil.copyfile(fixture / 'Driver.swift', tree / 'TelegramConcierge/CLI/ResponsesLifecycleSelftest.swift')
         manager = tree / 'TelegramConcierge/Services/ConversationManager.swift'
@@ -66,12 +73,13 @@ def main():
         # allowlist. Offline lifecycle exercises the full unchanged send path.
         adapter = tree / 'TelegramConcierge/Services/ResponsesAdapter.swift'
         text = adapter.read_text()
-        anchor = '        let request = try request(input: input, tools: tools, maxOutputTokens: maxOutputTokens)'
+        anchor = '        var request = try request(input: input, tools: tools, maxOutputTokens: maxOutputTokens)'
         assert text.count(anchor) == 1
         text = text.replace(anchor, '        let maxOutputTokens = P2Life.liveMode ? 1024 : maxOutputTokens\n' + anchor)
         anchor = '                let bytes = try await ResponsesHTTPTransport().send('
         assert text.count(anchor) == 1
         text = text.replace(anchor, '                try P2Life.claimLiveRequest()\n' + anchor)
+        text = text.replace('.send(request, overallTimeout: request.timeoutInterval, subscription: context.subscriptionGeneration != nil)', '.send(P2Life.route(request), overallTimeout: request.timeoutInterval, subscription: context.subscriptionGeneration != nil)')
         anchor = '        if let error = context.configurationError { throw ResponsesFailure.malformed(error) }'
         assert text.count(anchor) == 1
         text = text.replace(anchor, '        P2Life.recordContext(context)\n' + anchor)

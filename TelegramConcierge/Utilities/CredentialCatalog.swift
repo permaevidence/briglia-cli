@@ -41,11 +41,23 @@ enum CredentialCatalog {
         let treatment: Treatment
     }
 
+    static let subscriptionTokensTreatment: Treatment = .redact
+    static func subscriptionRedactionValues() -> [String: String] {
+        guard subscriptionTokensTreatment == .redact,
+              let credential = (try? SubscriptionAuthStore().read())?.credential else { return [:] }
+        return ["subscription_access": credential.access, "subscription_refresh": credential.refresh]
+    }
+
     static let entries: [Entry] = [
         // Telegram pairing
         Entry(key: KeychainHelper.telegramBotTokenKey, treatment: .redact),
         Entry(key: KeychainHelper.telegramChatIdKey, treatment: .notSecret),
         Entry(key: KeychainHelper.whatsappOwnerPhoneKey, treatment: .notSecret),
+
+        Entry(key: ProviderProfiles.subscriptionModelKey, treatment: .notSecret),
+        Entry(key: ProviderProfiles.subscriptionEffortKey, treatment: .notSecret),
+        Entry(key: ProviderProfiles.subscriptionGenerationKey, treatment: .notSecret),
+        Entry(key: ProviderProfiles.subscriptionTextOnlyKey, treatment: .notSecret),
 
         // Model providers (visible by owner decision)
         Entry(key: KeychainHelper.openRouterApiKeyKey, treatment: .visible),

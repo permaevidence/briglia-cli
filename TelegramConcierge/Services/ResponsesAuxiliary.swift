@@ -26,7 +26,7 @@ extension ProviderExecutionContext {
 }
 
 enum ResponsesAuxiliary {
-    static func inheritedSnapshot(lane: AffinityLane) -> ProviderExecutionContext? {
+    static func inheritedSnapshot(lane: AffinityLane, effortOverride: String? = nil) -> ProviderExecutionContext? {
         let stored = KeychainHelper.loadSnapshot()
         guard stored[KeychainHelper.llmProviderKey] == LLMProvider.openAICompatible.rawValue,
               let wire = stored[ProviderProfiles.runtimeProtocolKey], !wire.isEmpty, wire != "chatCompletions" else { return nil }
@@ -34,7 +34,12 @@ enum ResponsesAuxiliary {
             baseURL: stored[KeychainHelper.openAICompatibleBaseURLKey] ?? "",
             key: stored[KeychainHelper.openAICompatibleApiKeyKey] ?? "",
             model: stored[KeychainHelper.openAICompatibleModelKey] ?? "", lane: lane,
-            effort: stored[KeychainHelper.openAICompatibleReasoningEffortKey])
+            effort: effortOverride ?? stored[KeychainHelper.openAICompatibleReasoningEffortKey])
+        if stored[ProviderProfiles.activeProfileKey] == "chatgpt" {
+            context.profileIdentity = "chatgpt"
+            context.subscriptionGeneration = stored[KeychainHelper.openAICompatibleApiKeyKey] ?? ""
+            context.nativeToolMedia = false
+        }
         context.configurationError = wire == "responses" ? nil : "unsupported explicit provider protocol"
         return context
     }

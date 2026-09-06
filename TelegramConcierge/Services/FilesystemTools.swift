@@ -158,7 +158,8 @@ actor FilesystemTools {
             }
             // Briglia's own secret store is shown with the Telegram bot token masked
             // (HarnessSecretStore); every other value is returned verbatim.
-            let text = HarnessSecretStore.isSecretStore(resolvedPath)
+            let isSubscription = URL(fileURLWithPath: resolvedPath).standardizedFileURL == SubscriptionAuthStore().file.resolvingSymlinksInPath().standardizedFileURL
+            let text = isSubscription ? "[Subscription OAuth credentials omitted; use briglia subscription status]" : HarnessSecretStore.isSecretStore(resolvedPath)
                 ? HarnessSecretStore.maskedForRead(decodedText)
                 : decodedText
 

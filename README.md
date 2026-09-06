@@ -106,6 +106,50 @@ gaps:
   Linux (including Ubuntu Touch); a macOS launchd generator is future
   work — run `briglia daemon` in a terminal there.
 
+## ChatGPT subscription (private preview)
+
+Briglia can connect your own ChatGPT account while keeping its own prompts,
+local history, tools, memory and agent loop. This is a separate provider from
+OpenAI API billing; it never falls back to a paid API key automatically.
+
+```sh
+briglia subscription login             # browser verification with a device code
+briglia subscription login --browser   # local callback on port 1455
+briglia subscription status
+briglia subscription cancel            # also clears an interrupted pending login
+briglia subscription select --model gpt-5.6-luna --effort high
+briglia subscription logout
+```
+
+Stop the daemon before terminal activation or replacement of an active ChatGPT
+login. Login alone saves the profile; `/provider chatgpt` selects it when idle.
+In the paired private Telegram chat, `/subscription login` starts device login,
+`/subscription cancel` cancels it, and `/subscription logout` signs out locally.
+Device login may need enabling in ChatGPT security settings. Do not send access
+or refresh tokens in chat. Browser login expires after five minutes; device
+login after fifteen. Briglia never reads or changes Codex's login cache.
+
+OAuth credentials stay in the owner-only `subscription-auth.json` in Briglia's
+config directory. Refresh is serialized between processes; logout invalidates
+pending login callbacks and future requests. An already-dispatched inference
+may complete after logout. A failed credential-store write is reported; a
+remote refresh followed by a local disk failure can require signing in again.
+
+Token usage is available; subscription quota currently displays as unknown,
+which does not mean unlimited. `subscription models` lists compatibility
+candidates, not a live account-entitlement catalog. Unsupported models fail
+explicitly. Image generation, transcription, web search and independently
+configured services retain their own credentials and may incur API costs.
+Subscription tool media currently uses the labeled synthetic-observation
+fallback. Opaque reasoning is replayed only for the same model/login scope;
+ordinary token refresh preserves it, while logout/reconnect invalidates it.
+
+This preview uses the public OAuth-client compatibility route also used by Pi
+and OpenCode, with Briglia attribution. Public distribution remains subject to
+review of that integration basis and the live capability results. Native UT
+login UI and automatic client upgrades are not included; configure through CLI
+or Telegram only, after the compatible client update where applicable.
+
 ## Development
 
 Read `AGENTS.md` before contributing changes — it records the build/test

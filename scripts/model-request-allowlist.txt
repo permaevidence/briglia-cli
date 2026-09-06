@@ -24,3 +24,4 @@ TelegramConcierge/Services/TelegramBotService.swift :: var request = URLRequest(
 TelegramConcierge/Services/TelegramBotService.swift :: var request = URLRequest(url: urlComponents.url!) :: Telegram Bot API transport, not a model request
 TelegramConcierge/Services/WebOrchestrator+Helpers.swift :: var request = URLRequest(url: url) :: generic JSON POST helper; only forwards the headers it is given — model callers decorate via WebOrchestrator.requestHeaders(for:url:lane:) (plan §7.1 site 8), non-model callers (Serper) pass none
 TelegramConcierge/Services/WebOrchestrator.swift :: var req = URLRequest(url: proxyURL) :: Jina Reader proxy fetch, not a model request
+TelegramConcierge/Services/SubscriptionAuth.swift :: var request = URLRequest(url: URL(string: SubscriptionEndpoint.issuer + path)!) :: Native OAuth POST to three fixed auth.openai.com paths; no inference/session affinity, bounded replies and redirect refusal

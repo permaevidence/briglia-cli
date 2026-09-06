@@ -1325,7 +1325,8 @@ actor OpenRouterService {
                 anthropicCacheControl: false, renderPDFAsImages: true, wireProtocol: .responses,
                 profileIdentity: stored[ProviderProfiles.activeProfileKey] ?? "custom",
                 nativeToolMedia: stored[ProviderProfiles.runtimeNativeMediaKey] != "false",
-                configurationError: wire == "responses" ? nil : "unsupported explicit provider protocol")
+                configurationError: wire == "responses" ? nil : "unsupported explicit provider protocol",
+                subscriptionGeneration: stored[ProviderProfiles.activeProfileKey] == "chatgpt" ? key : nil)
         }
         // Build request — skip OpenRouter-specific fields when using a custom OpenAI-compatible endpoint
         let usingCustomEndpoint = isCustomEndpoint

@@ -56,7 +56,7 @@ struct ResponsesAdapter {
             }
             body["reasoning"] = .object(["effort": .string(effort)])
         }
-        if let maxOutputTokens { body["max_output_tokens"] = .int(maxOutputTokens) }
+        if let maxOutputTokens, context.subscriptionGeneration == nil { body["max_output_tokens"] = .int(maxOutputTokens) }
         if let tools {
             guard Set(tools.map { $0.function.name }).count == tools.count else {
                 throw ResponsesFailure.malformed("duplicate exposed tool name")
@@ -68,12 +68,34 @@ struct ResponsesAdapter {
                     "parameters": Self.filterSchema(parameters), "strict": .bool(false)])
             })
         }
+        if context.subscriptionGeneration != nil {
+            guard context.endpoint == SubscriptionEndpoint.inference else {
+                throw SubscriptionError("Subscription credentials cannot be routed to a custom endpoint")
+            }
+            body.removeValue(forKey: "truncation")
+            body["stream"] = .bool(true)
+            var remaining = input
+            if let first = remaining.first?.responsesObject, first["role"]?.responsesString == "system" {
+                let text = (first["content"]?.responsesArray ?? []).compactMap { $0.responsesObject?["text"]?.responsesString }.joined(separator: "\n")
+                body["instructions"] = .string(text)
+                remaining.removeFirst()
+            } else { body["instructions"] = .string("You are Briglia, the user's assistant.") }
+            body["input"] = .array(remaining)
+            let affinity = try SessionAffinity.wireId(state: SessionAffinity.loadState(),
+                apiKey: "briglia-subscription-v1:" + context.affinityKey, lane: context.lane)
+            body["prompt_cache_key"] = .string(affinity)
+        }
         let normalized = try Self.endpoint(context.endpoint)
         var request = URLRequest(url: URL(string: normalized)!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(stream ? "text/event-stream" : "application/json", forHTTPHeaderField: "Accept")
-        request.setValue(context.authorization, forHTTPHeaderField: "Authorization")
+        if context.subscriptionGeneration == nil {
+            request.setValue(context.authorization, forHTTPHeaderField: "Authorization")
+        } else {
+            request.setValue("briglia", forHTTPHeaderField: "originator")
+            request.setValue(body["prompt_cache_key"]?.responsesString, forHTTPHeaderField: "session_id")
+        }
         try SessionAffinity.decorate(&request, apiKey: context.affinityKey, lane: context.lane)
         request.timeoutInterval = context.usingCustomEndpoint ? 1200 : 360
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
@@ -93,12 +115,24 @@ struct ResponsesAdapter {
 
     func send(input: [JSONValue], tools: [ToolDefinition]?, receipt: PreparedRequestReceipt,
               maxOutputTokens: Int? = nil) async throws -> LLMResponse {
-        let request = try request(input: input, tools: tools, maxOutputTokens: maxOutputTokens)
+        var request = try request(input: input, tools: tools, maxOutputTokens: maxOutputTokens)
         let allowed = Set((tools ?? []).map { $0.function.name })
-        for attempt in 0..<4 {
+        var usedAccess: String?
+        var didRefreshAfter401 = false
+        var attempt = 0
+        while attempt < 4 {
             try Task.checkCancellation()
             do {
-                let bytes = try await ResponsesHTTPTransport().send(request, overallTimeout: request.timeoutInterval)
+                if let generation = context.subscriptionGeneration {
+                    let login = SubscriptionLogin()
+                    let credential = try await login.store.credential(generation: generation, refresh: login.refresh)
+                    try Task.checkCancellation()
+                    try login.store.validate(generation: generation)
+                    request.setValue("Bearer " + credential.access, forHTTPHeaderField: "Authorization")
+                    request.setValue(credential.account, forHTTPHeaderField: "ChatGPT-Account-Id")
+                    usedAccess = credential.access
+                }
+                let bytes = try await ResponsesHTTPTransport().send(request, overallTimeout: request.timeoutInterval, subscription: context.subscriptionGeneration != nil)
                 try Task.checkCancellation()
                 let round = try ResponsesRoundDecoder.decode(bytes, scope: context.responsesScope, receipt: receipt, allowedTools: allowed)
                 DebugTelemetry.log(.info, summary: "Responses usage",
@@ -116,6 +150,16 @@ struct ResponsesAdapter {
                     spendUSD: nil, responses: round.metadata)
             } catch {
                 try Task.checkCancellation()
+                if case ResponsesFailure.http(401, _) = error, let generation = context.subscriptionGeneration {
+                    guard !didRefreshAfter401 else {
+                        try await SubscriptionAuthStore().requireLogin(generation: generation, rejectedAccess: usedAccess)
+                        throw SubscriptionError("ChatGPT rejected the refreshed login; sign in again")
+                    }
+                    didRefreshAfter401 = true
+                    let login = SubscriptionLogin()
+                    _ = try await login.store.credential(generation: generation, rejectedAccess: usedAccess, refresh: login.refresh)
+                    continue
+                }
                 var delay = Double(1 << attempt)
                 let retry: Bool
                 if case ResponsesFailure.http(let code, let after) = error {
@@ -126,6 +170,7 @@ struct ResponsesAdapter {
                 } else { retry = false }
                 guard retry, attempt < 3 else { throw error }
                 try await Task.sleep(nanoseconds: UInt64(min(30, max(0, delay)) * 1_000_000_000))
+                attempt += 1
             }
         }
         throw ResponsesFailure.disconnected

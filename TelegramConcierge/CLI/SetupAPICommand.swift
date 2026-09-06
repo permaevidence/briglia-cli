@@ -227,7 +227,7 @@ enum SetupAPICore {
 
         var profiles: [String: Any] = [:]
         for profile in ProviderProfiles.Profile.allCases {
-            if profile == .openai && !ProviderProfiles.isConfigured(profile) { continue }
+            if (profile == .openai || profile == .chatgpt) && !ProviderProfiles.isConfigured(profile) { continue }
             var entry: [String: Any] = ["configured": ProviderProfiles.isConfigured(profile)]
             if let model = ProviderProfiles.configuredModel(profile) { entry["model"] = model }
             if let endpoint = ProviderProfiles.configuredEndpoint(profile) { entry["endpoint"] = endpoint }
@@ -236,9 +236,9 @@ enum SetupAPICore {
             if let textOnly = ProviderProfiles.textOnly(profile) { entry["text_only"] = textOnly }
             if ProviderProfiles.wireProtocol(profile) == .responses {
                 entry["protocol"] = "responses"
-                entry["capabilities"] = ["auth": "apiKey", "streaming": true,
+                entry["capabilities"] = ["auth": profile == .chatgpt ? "oauth" : "apiKey", "streaming": true,
                     "encrypted_reasoning_replay": true,
-                    "native_tool_media": profile != .custom || KeychainHelper.load(key: ProviderProfiles.customNativeMediaKey) != "false"] as [String: Any]
+                    "native_tool_media": profile != .chatgpt && (profile != .custom || KeychainHelper.load(key: ProviderProfiles.customNativeMediaKey) != "false")] as [String: Any]
             }
             profiles[profile.rawValue] = entry
         }
@@ -630,6 +630,9 @@ enum SetupAPICore {
             throw APIError(code: "invalid_value",
                            message: "provider.profile must be opencode|openrouter|openai|custom|local")
         }
+        if profile == .chatgpt {
+            throw APIError(code: "native_login_required", message: "Configure ChatGPT with briglia subscription login/select. This client cannot edit OAuth profiles.")
+        }
         // Hold the lease through all synchronous profile mutations. A probe
         // of daemonRunning alone has a check/write race with daemon startup.
         let affectsResponses = profile == .openai || section["protocol"] as? String == "responses"
@@ -656,6 +659,7 @@ enum SetupAPICore {
         var apiKey = nonEmptyString(section["api_key"])
         if apiKey == nil {
             switch profile {
+            case .chatgpt: throw APIError(code: "native_login_required", message: "Use subscription login")
             case .opencode: apiKey = nonEmptyString(KeychainHelper.load(key: ProviderProfiles.opencodeApiKeyKey))
             case .openrouter: apiKey = nonEmptyString(KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey))
             case .openai: apiKey = nonEmptyString(KeychainHelper.load(key: ProviderProfiles.openaiApiKeyKey))
@@ -684,6 +688,7 @@ enum SetupAPICore {
             guard baseURL != nil else {
                 throw APIError(code: "missing_field", message: "provider.base_url is required")
             }
+        case .chatgpt: throw APIError(code: "native_login_required", message: "Use subscription login")
         case .opencode, .openrouter, .openai:
             baseURL = nil  // fixed endpoints
         }
@@ -757,6 +762,7 @@ enum SetupAPICore {
         }
         var changes: [String: String?] = [:]
         switch profile {
+        case .chatgpt: throw APIError(code: "native_login_required", message: "Use subscription logout")
         case .openai:
             changes[ProviderProfiles.openaiApiKeyKey] = String?.none
             changes[ProviderProfiles.openaiModelKey] = String?.none

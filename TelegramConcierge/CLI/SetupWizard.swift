@@ -222,6 +222,7 @@ struct SetupWizard {
                 case .opencode: hint = "OpenCode Go (recommended)"
                 case .openrouter: hint = "OpenRouter (pay-per-token, any model)"
                 case .custom: hint = "Custom OpenAI-compatible endpoint (with API key)"
+                case .chatgpt: hint = "ChatGPT subscription — configure with briglia subscription login"
                 case .openai: hint = "OpenAI Platform API — Responses (separate API billing)"
                 case .local: hint = "Local server — vLLM, Ollama, LM Studio (no key)"
                 }
@@ -246,6 +247,7 @@ struct SetupWizard {
             case .opencode: saved = await configureOpenCode()
             case .openrouter: saved = await configureOpenRouter()
             case .custom: saved = await configureCustomEndpoint()
+            case .chatgpt: print("Use briglia subscription login, then /provider chatgpt."); saved = false
             case .openai: saved = await configureOpenAIResponses()
             case .local: saved = await configureLocalEndpoint()
             }

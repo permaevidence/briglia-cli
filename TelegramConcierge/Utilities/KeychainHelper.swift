@@ -540,6 +540,7 @@ extension KeychainHelper {
     /// the model. NOT an injection map — redaction only.
     static func redactionEnvironment() -> [String: String] {
         var candidates = serviceKeyEnvironment()
+        candidates.merge(CredentialCatalog.subscriptionRedactionValues()) { _, oauth in oauth }
         for key in CredentialCatalog.redactedKeys {
             if let value = load(key: key), !value.isEmpty {
                 candidates[key] = value

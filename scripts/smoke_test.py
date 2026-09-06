@@ -411,6 +411,11 @@ def main():
     check("responses-selftest (codec, stream, replay and native/fallback media)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    result = run_selftest([os.path.abspath(ADA), "__subscription-selftest"], capture_output=True,
+                            text=True, timeout=120)
+    check("subscription-selftest (OAuth, refresh concurrency and endpoint isolation)", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
     # Repository invariant: every URLRequest to a model endpoint is decorated
     # by SessionAffinity in the same function, or allowlisted with a reason.
     scan = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "model_request_scan.py")],

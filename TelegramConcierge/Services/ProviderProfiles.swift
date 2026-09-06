@@ -28,6 +28,7 @@ enum ProviderProfiles {
         case custom
         case local
         case openai
+        case chatgpt
 
         var displayName: String {
             switch self {
@@ -36,6 +37,7 @@ enum ProviderProfiles {
             case .custom: return "Custom endpoint"
             case .local: return "Local server"
             case .openai: return "OpenAI API (Responses)"
+            case .chatgpt: return "ChatGPT subscription"
             }
         }
     }
@@ -60,6 +62,11 @@ enum ProviderProfiles {
     static let customReasoningEffortKey = "custom_endpoint_reasoning_effort"
     static let customTextOnlyKey = "custom_endpoint_text_only"
 
+    static let subscriptionModelKey = "subscription_model"
+    static let subscriptionEffortKey = "subscription_effort"
+    static let subscriptionGenerationKey = "subscription_generation"
+    static let subscriptionTextOnlyKey = "subscription_text_only"
+
     static let openaiApiKeyKey = "openai_platform_api_key"
     static let openaiModelKey = "openai_platform_model"
     static let openaiEffortKey = "openai_platform_effort"
@@ -70,7 +77,7 @@ enum ProviderProfiles {
     static let runtimeNativeMediaKey = "responses_native_tool_media"
 
     static func wireProtocol(_ profile: Profile) -> ProviderWireProtocol {
-        if profile == .openai { return .responses }
+        if profile == .openai || profile == .chatgpt { return .responses }
         if profile == .custom { return value(customProtocolKey).flatMap(ProviderWireProtocol.init(rawValue:)) ?? .chatCompletions }
         return .chatCompletions
     }
@@ -103,6 +110,9 @@ enum ProviderProfiles {
     /// model, and Ada.app-heritage installs may have a key without a model.
     static func isConfigured(_ profile: Profile) -> Bool {
         switch profile {
+        case .chatgpt:
+            guard let state = try? SubscriptionAuthStore().read(), state.credential != nil, state.requiresLogin != true else { return false }
+            return value(subscriptionModelKey) != nil && state.generation == value(subscriptionGenerationKey)
         case .openai: return value(openaiApiKeyKey) != nil && value(openaiModelKey) != nil
         case .opencode:
             return value(opencodeApiKeyKey) != nil && value(opencodeModelKey) != nil
@@ -121,6 +131,7 @@ enum ProviderProfiles {
     /// OpenRouter, which reports its runtime default).
     static func configuredModel(_ profile: Profile) -> String? {
         switch profile {
+        case .chatgpt: return value(subscriptionModelKey)
         case .openai: return value(openaiModelKey)
         case .opencode: return value(opencodeModelKey)
         case .openrouter:
@@ -133,6 +144,7 @@ enum ProviderProfiles {
 
     static func configuredEndpoint(_ profile: Profile) -> String? {
         switch profile {
+        case .chatgpt: return isConfigured(.chatgpt) ? SubscriptionEndpoint.inference : nil
         case .openai: return isConfigured(.openai) ? "https://api.openai.com/v1" : nil
         case .opencode: return isConfigured(.opencode) ? OpenCodeGo.baseURL : nil
         case .openrouter: return isConfigured(.openrouter) ? "https://openrouter.ai/api/v1" : nil
@@ -145,6 +157,7 @@ enum ProviderProfiles {
     static func maskedKey(_ profile: Profile) -> String? {
         let raw: String?
         switch profile {
+        case .chatgpt: return nil
         case .openai: raw = value(openaiApiKeyKey)
         case .opencode: raw = value(opencodeApiKeyKey)
         case .openrouter: raw = value(KeychainHelper.openRouterApiKeyKey)
@@ -158,6 +171,7 @@ enum ProviderProfiles {
 
     static func configuredEffort(_ profile: Profile) -> String? {
         switch profile {
+        case .chatgpt: return value(subscriptionEffortKey)
         case .openai: return value(openaiEffortKey)
         case .opencode: return value(opencodeReasoningEffortKey)
         case .openrouter: return value(KeychainHelper.openRouterReasoningEffortKey)
@@ -171,6 +185,7 @@ enum ProviderProfiles {
     static func textOnly(_ profile: Profile) -> Bool? {
         let key: String
         switch profile {
+        case .chatgpt: key = subscriptionTextOnlyKey
         case .openai: key = openaiTextOnlyKey
         case .opencode: key = opencodeTextOnlyKey
         case .openrouter: key = openrouterTextOnlyKey
@@ -208,6 +223,14 @@ enum ProviderProfiles {
         // from the batch instead of recording a deletion.
         var changes: [String: String?] = [:]
         switch profile {
+        case .chatgpt:
+            guard apiKey == nil, baseURL == nil, let state = try SubscriptionAuthStore().read(), state.credential != nil, state.requiresLogin != true else {
+                throw SubscriptionError("Use briglia subscription login to connect ChatGPT; tokens and custom URLs are not accepted")
+            }
+            changes[subscriptionModelKey] = model
+            changes[subscriptionEffortKey] = effort
+            changes[subscriptionTextOnlyKey] = textOnly ? "true" : "false"
+            changes[subscriptionGenerationKey] = state.generation
         case .openai:
             changes[openaiApiKeyKey] = apiKey
             changes[openaiModelKey] = model
@@ -257,6 +280,18 @@ enum ProviderProfiles {
         // "delete this key" in the batch.
         var changes: [String: String?] = [:]
         switch profile {
+        case .chatgpt:
+            let saved = KeychainHelper.loadSnapshot()
+            guard let model = saved[subscriptionModelKey], let generation = saved[subscriptionGenerationKey],
+                  let state = try SubscriptionAuthStore().read(), state.generation == generation, state.credential != nil, state.requiresLogin != true, state.pendingLogin == nil else {
+                throw SubscriptionError("Subscription login changed before activation; retry selection")
+            }
+            changes[KeychainHelper.openAICompatibleBaseURLKey] = SubscriptionEndpoint.inference
+            changes[KeychainHelper.openAICompatibleModelKey] = model
+            // Runtime slot contains only an opaque login generation, never OAuth.
+            changes[KeychainHelper.openAICompatibleApiKeyKey] = generation
+            changes[KeychainHelper.openAICompatibleReasoningEffortKey] = saved[subscriptionEffortKey]
+            changes[KeychainHelper.llmProviderKey] = LLMProvider.openAICompatible.rawValue
         case .openai:
             changes[KeychainHelper.openAICompatibleBaseURLKey] = "https://api.openai.com/v1"
             changes[KeychainHelper.openAICompatibleModelKey] = value(openaiModelKey)!
@@ -288,7 +323,7 @@ enum ProviderProfiles {
             changes[KeychainHelper.textOnlyModelEnabledKey] = profileTextOnly ? "true" : "false"
         }
         changes[runtimeProtocolKey] = wireProtocol(profile) == .responses ? "responses" : String?.none
-        changes[runtimeNativeMediaKey] = profile == .custom && wireProtocol(profile) == .responses ? value(customNativeMediaKey) : String?.none
+        changes[runtimeNativeMediaKey] = profile == .chatgpt ? "false" : profile == .custom && wireProtocol(profile) == .responses ? value(customNativeMediaKey) : String?.none
         changes[activeProfileKey] = profile.rawValue
         try KeychainHelper.saveBatch(changes)
     }
@@ -324,6 +359,7 @@ enum ProviderProfiles {
         let modelKey: String
         let textOnlyKey: String
         switch profile {
+        case .chatgpt: modelKey = subscriptionModelKey; textOnlyKey = subscriptionTextOnlyKey
         case .openai: modelKey = openaiModelKey; textOnlyKey = openaiTextOnlyKey
         case .opencode: modelKey = opencodeModelKey; textOnlyKey = opencodeTextOnlyKey
         case .openrouter: modelKey = KeychainHelper.openRouterModelKey; textOnlyKey = openrouterTextOnlyKey
@@ -341,6 +377,7 @@ enum ProviderProfiles {
         guard let profile = activeProfile() else { return }
         let key: String
         switch profile {
+        case .chatgpt: key = subscriptionEffortKey
         case .openai: key = openaiEffortKey
         case .opencode: key = opencodeReasoningEffortKey
         case .openrouter: key = KeychainHelper.openRouterReasoningEffortKey
@@ -406,7 +443,7 @@ enum ProviderProfiles {
             var line = "• \(profile.rawValue)"
             if profile == active { line += " — ACTIVE" }
             guard isConfigured(profile) else { return line + " — not configured" }
-            var parts: [String] = []
+            var parts: [String] = profile == .chatgpt ? ["billing: subscription; quota unknown (not unlimited)"] : []
             if let model = configuredModel(profile) { parts.append(model) }
             if let endpoint = configuredEndpoint(profile) { parts.append("@ \(endpoint)") }
             if let masked = maskedKey(profile) { parts.append("key \(masked)") }

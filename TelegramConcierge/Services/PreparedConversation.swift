@@ -41,6 +41,8 @@ struct ProviderExecutionContext {
     var nativeToolMedia: Bool = true
     var configurationError: String? = nil
 
+    var subscriptionGeneration: String? = nil
+
     var responsesScope: ResponsesScope {
         ResponsesScope(endpoint: (try? ResponsesAdapter.endpoint(endpoint)) ?? endpoint, profile: profileIdentity, model: model,
             credentialFingerprint: ResponsesReplayEnvelope.hash(Data(("briglia-responses-key-v1:" + affinityKey).utf8)))

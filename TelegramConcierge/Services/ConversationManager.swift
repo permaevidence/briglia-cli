@@ -34,6 +34,8 @@ class ConversationManager: ObservableObject {
     private var isStartingPolling = false
     private var archiveRecoveryTask: Task<Void, Never>?
     private var activeProcessingTask: Task<Void, Never>?
+    private var subscriptionLoginTask: Task<Void, Never>?
+    private var subscriptionLoginRunID: UUID?
     private var activeRunId: UUID? {
         didSet { isTurnActive = activeRunId != nil }
     }
@@ -3158,6 +3160,9 @@ class ConversationManager: ObservableObject {
         case "/show":
             await setPrivacyMode(enabled: false)
             return true
+        case "/subscription":
+            await handleSubscriptionCommand(argument: commandArgument(from: text))
+            return true
         case "/provider":
             await handleProviderCommand(argument: commandArgument(from: text))
             return true
@@ -4481,6 +4486,66 @@ class ConversationManager: ObservableObject {
     /// Hopping is a storage-level activation (runtime slots + per-profile
     /// model/effort/vision restore) plus the in-process reconfiguration the
     /// old /llm_* switches did for OpenRouter's service-held API key.
+    /// Device codes are delivered only to the captured paired private chat;
+    /// never added to model history or parked for delivery after expiration.
+    private func handleSubscriptionCommand(argument: String) async {
+        let action = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if action.isEmpty || action == "status" {
+            do {
+                let state = try SubscriptionAuthStore().read()
+                try? await sendText("ChatGPT subscription: " + (state?.requiresLogin == true ? "sign in again" : state?.credential == nil ? "signed out" : "signed in")
+                    + (subscriptionLoginTask == nil ? "" : "; login pending")
+                    + ". Quota unknown. Separate API tools keep their own billing. Use /subscription login|cancel|logout, then /provider chatgpt.")
+            } catch { try? await sendText(error.localizedDescription) }
+            return
+        }
+        guard action == "login" || action == "cancel" || action == "logout" else {
+            try? await sendText("Use /subscription login|cancel|logout|status."); return
+        }
+        guard let address = replyAddress, address.kind == .telegram,
+              let paired = pairedChatId, paired > 0, address.chatId == String(paired),
+              let channel = channels[.telegram] else {
+            try? await sendText("Use briglia subscription login in a terminal, or the paired private Telegram chat."); return
+        }
+        if action == "cancel" || action == "logout" {
+            subscriptionLoginRunID = nil; subscriptionLoginTask?.cancel(); subscriptionLoginTask = nil
+            do {
+                if action == "logout" { try await SubscriptionAuthStore().logout() }
+                else if let pending = try SubscriptionAuthStore().read()?.pendingLogin { try await SubscriptionAuthStore().cancelLogin(pending) }
+                try? await sendText(action == "logout" ? "ChatGPT signed out locally." : "ChatGPT login cancelled.", to: address)
+            } catch { try? await sendText(error.localizedDescription, to: address) }
+            return
+        }
+        guard ProviderProfiles.activeProfile() != .chatgpt else {
+            try? await sendText("Switch away from ChatGPT before replacing its login, or stop Briglia and use terminal login.", to: address); return
+        }
+        guard subscriptionLoginTask == nil else { try? await sendText("Login is already pending; use /subscription cancel first.", to: address); return }
+        guard activeRunId == nil, activeProcessingTask == nil else { try? await sendText("Start ChatGPT login when Briglia is idle.", to: address); return }
+        let runID = UUID(); subscriptionLoginRunID = runID
+        subscriptionLoginTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.subscriptionLoginRunID == runID { self.subscriptionLoginTask = nil; self.subscriptionLoginRunID = nil }
+            }
+            do {
+                _ = try await SubscriptionLogin().device { url, code in
+                    guard self.subscriptionLoginRunID == runID, self.pairedChatId == paired else { throw CancellationError() }
+                    try await channel.sendText(chatId: address.chatId, text: "Sign in to your own ChatGPT account at " + url + "\nCode: " + code + "\nExpires in 15 minutes. No access or refresh token should be sent in chat.")
+                }
+                try Task.checkCancellation()
+                guard self.subscriptionLoginRunID == runID, self.pairedChatId == paired else { throw CancellationError() }
+                try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil,
+                    model: ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna",
+                    effort: ProviderProfiles.configuredEffort(.chatgpt) ?? "high", textOnly: false)
+                try await channel.sendText(chatId: address.chatId, text: "ChatGPT login saved. Use /provider chatgpt when idle to select it. Current provider unchanged.")
+            } catch {
+                if !Task.isCancelled, self.subscriptionLoginRunID == runID {
+                    try? await channel.sendText(chatId: address.chatId, text: "ChatGPT login failed: " + error.localizedDescription)
+                }
+            }
+        }
+    }
+
     private func handleProviderCommand(argument: String) async {
         guard replyAddress != nil else { return }
         ProviderProfiles.ensureMigrated()
@@ -4499,7 +4564,8 @@ class ConversationManager: ObservableObject {
             try? await sendText("Unknown provider \"\(argument)\" — use one of: \(names).")
             return
         }
-        if ProviderProfiles.activeProfile() == profile {
+        if ProviderProfiles.activeProfile() == profile,
+           !(profile == .chatgpt && KeychainHelper.load(key: KeychainHelper.openAICompatibleApiKeyKey) != KeychainHelper.load(key: ProviderProfiles.subscriptionGenerationKey)) {
             try? await sendText("\(profile.displayName) is already the active provider.")
             return
         }

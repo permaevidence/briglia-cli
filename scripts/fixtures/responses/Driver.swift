@@ -1,9 +1,19 @@
 import Foundation
 import ArgumentParser
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 // UserDefaults reads AND writes are redirected here only in disposable builds.
 enum P2Life {
     static let defaults = UserDefaults(suiteName: "dev.briglia.p2.lifecycle")!
+    static var subscriptionCaptureURL: URL?
+    static func route(_ request: URLRequest) -> URLRequest {
+        guard !liveMode, let target = subscriptionCaptureURL,
+              request.url?.absoluteString == SubscriptionEndpoint.inference else { return request }
+        var routed = request; routed.url = target
+        return routed
+    }
     static var liveMode = false
     static var failFinalSave = false
     static var finalFaults = 0
@@ -75,10 +85,11 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
     @Option var output: String
     @Flag var live = false
     @Flag var resumeLive = false
+    @Flag var subscription = false
     @MainActor func run() async throws {
         let fm = FileManager.default
         let root = URL(fileURLWithPath: output)
-        if !resumeLive { try fm.createDirectory(at: root, withIntermediateDirectories: false) }
+        if !resumeLive && !subscription { try fm.createDirectory(at: root, withIntermediateDirectories: false) }
         for (key, child) in [("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")] {
             setenv(key, root.appendingPathComponent(child).path, 1)
         }
@@ -89,15 +100,21 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         let server = try CaptureServer(); defer { server.stop() }
         var key = "synthetic-p2-key", model = "fixture-model", base = "http://127.0.0.1:\(server.port)/v1"
         P2Life.liveMode = live
-        if live {
+        if live && !subscription {
             let bytes = FileHandle.standardInput.readDataToEndOfFile()
             let input = try JSONSerialization.jsonObject(with: bytes) as! [String: String]
             guard let liveKey = input["api_key"], !liveKey.isEmpty else { throw P2Life.Failure("live key missing") }
             key = liveKey; model = "gpt-5.6-luna"; base = "https://api.openai.com/v1"
         }
-        try ProviderProfiles.saveProfile(.custom, apiKey: key, baseURL: base, model: model,
-            effort: live ? "low" : nil, textOnly: false, wireProtocol: .responses)
-        try ProviderProfiles.activate(.custom)
+        if subscription {
+            guard live else { throw P2Life.Failure("subscription flag requires explicit live mode") }
+            try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil, model: "gpt-5.6-luna", effort: "low", textOnly: false)
+            try ProviderProfiles.activate(.chatgpt)
+        } else {
+            try ProviderProfiles.saveProfile(.custom, apiKey: key, baseURL: base, model: model,
+                effort: live ? "low" : nil, textOnly: false, wireProtocol: .responses)
+            try ProviderProfiles.activate(.custom)
+        }
         let settings = [KeychainHelper.maxContextTokensKey: "10000", KeychainHelper.targetContextTokensKey: "5000",
             KeychainHelper.archiveChunkSizeKey: "1000000", KeychainHelper.assistantNameKey: "Fixture Assistant",
             KeychainHelper.userNameKey: "Fixture User", KeychainHelper.emailCalendarProviderKey: "none"]
@@ -121,8 +138,62 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
             try await runAuxiliary(server: server, root: root)
             try await runSwitching(manager, server: server, file: file)
             await manager.p2ReadOnlyCommands()
+            try await runSubscription(manager, server: server, root: root, file: file)
         }
         print("Responses lifecycle PASS")
+    }
+
+    @MainActor private func runSubscription(_ manager: ConversationManager, server: CaptureServer, root: URL, file: URL) async throws {
+        let store = SubscriptionAuthStore()
+        let pending = try await store.beginLogin()
+        let generation = try await store.commitLogin(SubscriptionSelftest.credential(), pending: pending)
+        try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil, model: "gpt-5.6-luna", effort: "high", textOnly: false)
+        try ProviderProfiles.activate(.chatgpt)
+        try P2Life.require(KeychainHelper.load(key: KeychainHelper.openAICompatibleApiKeyKey) == generation, "runtime slot contains generation, not OAuth token")
+        P2Life.subscriptionCaptureURL = URL(string: "http://127.0.0.1:\(server.port)/v1/responses")!
+        defer { P2Life.subscriptionCaptureURL = nil }
+        server.clear()
+        server.script([try P2Life.body("Read subscription fixture", tool: "read_file", path: file.path), try P2Life.body("SUBSCRIPTION_OK")])
+        let saved = try await manager.p2Turn(human: Message(role: .user, content: "Read the fixture through the subscription provider"))
+        try P2Life.require(await manager.p2Error() == nil && saved.last?.content == "SUBSCRIPTION_OK", "subscription real manager tool continuation completes")
+        try P2Life.require(saved.last?.toolInteractions.last?.results.first?.content.contains("P2_TOOL_READ_OK") == true, "subscription invokes the real local tool")
+        for request in server.completeRequests {
+            let body = try JSONSerialization.jsonObject(with: request.body) as! [String: Any]
+            try P2Life.require(request.headers["authorization"] == "Bearer synthetic-access" && request.headers["chatgpt-account-id"] == "account-A", "subscription dispatch attaches the captured account credentials")
+            try P2Life.require(body["instructions"] != nil && body["truncation"] == nil && body["max_output_tokens"] == nil, "subscription manager uses endpoint field projection")
+        }
+        let identifiers = server.completeRequests.compactMap { $0.headers["session_id"] }
+        try P2Life.require(identifiers.count == 2 && Set(identifiers).count == 1, "subscription tool rounds share stable main affinity")
+        _ = try manager.p2Reload()
+        server.clear(); server.script([try P2Life.body("RESTART_OK")])
+        _ = try await manager.p2Turn(human: Message(role: .user, content: "Continue after reload"))
+        let restartInput = (try JSONSerialization.jsonObject(with: server.completeRequests.last!.body) as! [String: Any])["input"] as! [[String: Any]]
+        try P2Life.require(restartInput.contains { $0["encrypted_content"] != nil }, "subscription reload restores compatible encrypted items")
+        try await runSubagents(server: server, root: root, file: file)
+        try P2Life.require(server.completeRequests.allSatisfy { $0.headers["chatgpt-account-id"] == "account-A" }, "new and resumed subagents retain subscription account")
+        let workerIDs = server.completeRequests.compactMap { $0.headers["session_id"] }
+        try P2Life.require(workerIDs.count == 3 && Set(workerIDs).count == 1 && workerIDs.first != identifiers.first, "subscription subagent session affinity is stable and separate from main")
+        server.clear(); P2Life.contexts = []
+        let summary = String(repeating: "Useful archived fixture facts. ", count: 120)
+        server.script([try P2Life.body(summary), try P2Life.body(summary), try P2Life.body("You prefer concise replies."),
+                       try P2Life.body("Structured subscription context"), try P2Life.body("fixture.png: Description retained.")])
+        let archive = ConversationArchiveService(); await archive.configure(apiKey: "unused")
+        try P2Life.require(try await archive.p2Summary() == summary.trimmingCharacters(in: .whitespacesAndNewlines), "subscription archive summary")
+        try P2Life.require(try await archive.p2Meta() == summary.trimmingCharacters(in: .whitespacesAndNewlines), "subscription historical meta summary")
+        try P2Life.require(await archive.p2Restructure(), "subscription context restructuring")
+        _ = try await UserContextStructurer.structure(assistantName: "Fixture", userName: "User", rawContext: "Concise", existingContext: "", config: .fromKeychain())
+        let service = OpenRouterService(); await service.configure(apiKey: "unused")
+        let descriptions = try await service.generateFileDescriptions(files: [("fixture.png", Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKElEQVR4nO3NsQ0AAAzCMP5/un0CNkuZ41wybXsHAAAAAAAAAAAAxR4yw/wuPL6QkAAAAABJRU5ErkJggg==")!, "image/png")],
+            conversationContext: [Message(role: .assistant, content: "I read the earlier attachment.")])
+        try P2Life.require(descriptions["fixture.png"] == "Description retained.", "subscription file descriptions retain assistant context")
+        try P2Life.require(server.completeRequests.count == 5 && server.completeRequests.allSatisfy { $0.headers["chatgpt-account-id"] == "account-A" }, "all inherited auxiliary owners use subscription credentials")
+        try P2Life.require(P2Life.contexts.prefix(3).allSatisfy { $0.lane == .archive }, "subscription archive lane retained")
+        let scopes = P2Life.contexts.suffix(2).map { $0.lane.laneId }
+        try P2Life.require(Set(scopes).count == 2 && scopes.allSatisfy { $0.hasPrefix("ephemeral:") }, "subscription auxiliary operation lanes distinct")
+        try await store.logout()
+        server.clear()
+        _ = try await manager.p2Turn(human: Message(role: .user, content: "This cannot dispatch after logout"))
+        try P2Life.require(await manager.p2Error() != nil && server.completeRequests.isEmpty, "logout fails closed before another manager request")
     }
 
     @MainActor private func runMain(_ manager: ConversationManager, server: CaptureServer, root: URL, file: URL) async throws {

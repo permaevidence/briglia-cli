@@ -7,6 +7,7 @@ import FoundationNetworking
 /// A bounded final snapshot is authoritative; deltas are checked against it and
 /// are never appended a second time or exposed for execution.
 struct ResponsesStreamAssembler {
+    var subscription = false
     private var line = Data(), record = Data()
     private var total = 0
     private var responseID: String?
@@ -58,7 +59,7 @@ struct ResponsesStreamAssembler {
             guard terminal != nil else { throw ResponsesFailure.disconnected }; return
         }
         guard let event = try JSONDecoder().decode(JSONValue.self, from: record).responsesObject,
-              let type = event["type"]?.responsesString else { throw ResponsesFailure.malformed("SSE event") }
+              let rawType = event["type"]?.responsesString else { throw ResponsesFailure.malformed("SSE event") }
         if let sequence = event["sequence_number"]?.responsesInt {
             let fingerprint = ResponsesReplayEnvelope.hash(record)
             if let seen = sequences[sequence] {
@@ -67,6 +68,7 @@ struct ResponsesStreamAssembler {
             }
             sequences[sequence] = fingerprint
         }
+        let type = subscription && rawType == "response.done" ? "response.completed" : rawType
         // Informational events may evolve independently of output item types.
         // Only the validated terminal snapshot supplies executable work.
         if type == "ping" || type == "keepalive" { return }
@@ -199,12 +201,13 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked
     }
 
     func send(_ request: URLRequest, overallTimeout: TimeInterval = 360,
-              connectTimeout: TimeInterval? = nil, idleTimeout: TimeInterval? = nil) async throws -> Data {
+              connectTimeout: TimeInterval? = nil, idleTimeout: TimeInterval? = nil, subscription: Bool = false) async throws -> Data {
         try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 if completed { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
+                self.assembler.subscription = subscription
                 self.continuation = continuation
                 let config = URLSessionConfiguration.ephemeral
                 // Own the idle clock so its behavior matches FoundationNetworking
@@ -280,6 +283,9 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked
             if let error { throw error }
             guard let response else { throw ResponsesFailure.disconnected }
             guard response.statusCode == 200 else {
+                if assembler.subscription, let failure = SubscriptionEndpoint.providerError(status: response.statusCode, body: data) {
+                    throw failure
+                }
                 let seconds = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
                 throw ResponsesFailure.http(response.statusCode, seconds.map { $0.isFinite ? min(30, max(0, $0)) : 1 })
             }

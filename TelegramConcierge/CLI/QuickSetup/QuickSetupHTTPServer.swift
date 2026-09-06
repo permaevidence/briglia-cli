@@ -58,6 +58,7 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
     nonisolated(unsafe) static var bodyDeadline: TimeInterval = 30
     static let maxConnections = 16
 
+    private let requestedPort: UInt16
     private let handler: (Request) async -> Response
     private var listenFD: Int32 = -1
     private(set) var port: UInt16 = 0
@@ -88,7 +89,8 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
     }
     var activeConnections: Int { lock.lock(); defer { lock.unlock() }; return active }
 
-    init(handler: @escaping (Request) async -> Response) {
+    init(port: UInt16 = 0, handler: @escaping (Request) async -> Response) {
+        self.requestedPort = port
         self.handler = handler
     }
 
@@ -105,7 +107,7 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
         // SO_REUSEADDR deliberately OFF (plan §5.1).
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(0).bigEndian
+        addr.sin_port = requestedPort.bigEndian
         addr.sin_addr = in_addr(s_addr: UInt32(0x7F000001).bigEndian)
         let rc = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }

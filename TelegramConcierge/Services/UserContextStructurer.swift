@@ -20,6 +20,7 @@ struct UserContextStructurer {
         var wireProtocol: ProviderWireProtocol = .chatCompletions
         var nativeEffort: String? = nil
         var nativeConfigurationError: String? = nil
+        var subscriptionGeneration: String? = nil
 
         /// Builds a config from the persisted settings — used by callers that
         /// don't hold the provider fields in local state (onboarding).
@@ -31,7 +32,8 @@ struct UserContextStructurer {
                     openAICompatibleBaseURL: native.endpoint, openAICompatibleModel: native.model,
                     openAICompatibleApiKey: native.affinityKey, lmStudioBaseURL: "", lmStudioModel: "",
                     wireProtocol: .responses, nativeEffort: native.reasoningEffort,
-                    nativeConfigurationError: native.configurationError)
+                    nativeConfigurationError: native.configurationError,
+                    subscriptionGeneration: native.subscriptionGeneration)
             }
             return Config(
                 provider: LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)),
@@ -204,6 +206,11 @@ struct UserContextStructurer {
                 key: config.openAICompatibleApiKey, model: configuredModel,
                 lane: operationLane, effort: config.nativeEffort)
             context.configurationError = config.nativeConfigurationError
+            if let generation = config.subscriptionGeneration {
+                context.subscriptionGeneration = generation
+                context.profileIdentity = "chatgpt"
+                context.nativeToolMedia = false
+            }
             return try await ResponsesAuxiliary.text(context: context, messages: [("user", prompt)])
         }
         let body: [String: Any] = [

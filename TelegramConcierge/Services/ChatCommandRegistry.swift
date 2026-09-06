@@ -51,6 +51,8 @@ enum ChatCommandRegistry {
                     usage: nil, inMenu: false, category: "System"),
         ChatCommand(name: "commands", description: "List standard Briglia commands",
                     usage: nil, inMenu: true, category: "System"),
+        ChatCommand(name: "subscription", description: "Connect or disconnect your ChatGPT subscription",
+                    usage: "[login|cancel|logout|status]", inMenu: false, category: "Account"),
         ChatCommand(name: "setname", description: "Set or change your name (asks for confirmation)",
                     usage: "[name]", inMenu: false, category: "Account"),
         ChatCommand(name: "deleteuserdata", description: "Erase all memory and user data (asks for confirmation)",
