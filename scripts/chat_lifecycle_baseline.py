@@ -60,6 +60,13 @@ def instrument(tree):
             'lane: .ephemeral(UUID(uuidString: "00000000-0000-4000-8000-000000000060")!)')
     # Only request-visible clock and session entropy inputs. Progress/staleness
     # clocks remain real. No encoder, accounting or decision code is replaced.
+    # Tools-disabled subagent summaries use the fallback prompt's day clock.
+    # Both frozen platform fixtures recorded September 5, 2026 for this path
+    # (the explicit main-turn clock remains P0Life.instant). Freeze that input
+    # before either capture; do not normalize dates out of captured wire bytes.
+    replace(tree / "TelegramConcierge/Services/OpenRouterService.swift",
+            "let currentDate = dateFormatter.string(from: Date())",
+            "let currentDate = dateFormatter.string(from: Date(timeIntervalSince1970: 1788609600))")
     path = tree / "TelegramConcierge/Services/SubagentRunner.swift"
     replace(path, "let turnStartDate = Date()", "let turnStartDate = P0Life.instant")
     replace(path, "timestamp: Date()", "timestamp: P0Life.instant", 2)

@@ -41,4 +41,12 @@ class ComparatorTests(unittest.TestCase):
         self.assertNotEqual(main, expected_affinity('subagent:p0001'))
         self.assertNotEqual(main, expected_affinity('archive'))
 
+    def test_calendar_date_bytes_remain_compared(self):
+        expected = copy.deepcopy(self.fixture)
+        actual = copy.deepcopy(self.fixture)
+        expected['captures'][0]['body'] = base64.b64encode(b'Saturday, September 5, 2026 (GMT)').decode()
+        actual['captures'][0]['body'] = base64.b64encode(b'Sunday, September 6, 2026 (GMT)').decode()
+        with self.assertRaises(RuntimeError):
+            compare(expected, actual)
+
 if __name__ == '__main__': unittest.main()
