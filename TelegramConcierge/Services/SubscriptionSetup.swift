@@ -145,7 +145,7 @@ struct SubscriptionSetup {
                     return ok(["state": "pending", "interval": challenge.interval])
                 }
             }
-            if action == "logout" { try await store.logout(); return ok(["state": "signed_out"]) }
+            if action == "logout" { try await store.logout(checkpoint: checkpoint); return ok(["state": "signed_out"]) }
             guard action == "select" || action == "probe" else { throw SubscriptionError("Unknown subscription action") }
             let model = request["model"] as? String ?? ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna"
             let effort = request["effort"] as? String ?? ProviderProfiles.configuredEffort(.chatgpt) ?? "high"

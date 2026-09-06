@@ -27,6 +27,14 @@ extension SubscriptionSelftest {
         let status = await setup.perform(["action": "status"])
         c.check("status exposes only non-secret scope", status["generation"] as? String == (try store.read()?.generation) && status["quota"] as? String == "unknown")
         let oldGeneration = try store.read()!.generation
+        var logoutCheckpoints = 0
+        let revokedLogout = await setup.perform(["action": "logout"]) {
+            logoutCheckpoints += 1
+            if logoutCheckpoints > 1 { throw SubscriptionError("revoked before logout write") }
+        }
+        c.check("logout rechecks authorization under lock before writing", try revokedLogout["ok"] as? Bool == false
+                && logoutCheckpoints == 2 && (try store.read()?.generation == oldGeneration)
+                && (try store.read()?.credential != nil))
         var revoked = false
         var delayed = login
         delayed.post = { path, fields, form in

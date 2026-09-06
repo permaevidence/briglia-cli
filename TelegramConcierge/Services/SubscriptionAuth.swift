@@ -186,10 +186,11 @@ struct SubscriptionAuthStore {
         }
     }
 
-    func logout() async throws {
+    func logout(checkpoint: () throws -> Void = {}) async throws {
         try await locked {
             _ = try read()
             // A durable tombstone prevents late callbacks from recreating auth.
+            try checkpoint()
             try write(SubscriptionAuthState(generation: UUID().uuidString))
         }
     }
