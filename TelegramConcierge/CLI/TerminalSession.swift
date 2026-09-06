@@ -50,7 +50,7 @@ final class TerminalSession {
         printWelcome()
         await inputLoop()
         Self.shutdownChildProcesses()
-        releaseLease()
+        await releaseLease()
     }
 
     func runDaemon() async throws {
@@ -453,21 +453,25 @@ final class TerminalSession {
 
     // MARK: - Shutdown
 
+    private var shutdownRequested = false
+
     private func installSignalHandlers() {
         for sig in [SIGINT, SIGTERM] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler {
-                print("\nShutting down…")
-                // Runs on the main queue: safe to hop onto the MainActor to
-                // close the app-chat socket so clients see EOF, not a stale
-                // socket file that connects nowhere.
-                MainActor.assumeIsolated {
+                Task { @MainActor [self] in
+                    guard !shutdownRequested else { return }
+                    shutdownRequested = true
+                    print("\nShutting down…")
+                    // Revoke settings and await any callback before releasing
+                    // the owner's lease; an old save must not race a new daemon.
+                    await BrowserSettingsHost.stopShared()
                     AppChatSocketServer.shared.stop()
+                    TerminalSession.shutdownChildProcesses()
+                    TerminalSession.releaseLeaseForShutdown()
+                    exit(0)
                 }
-                TerminalSession.shutdownChildProcesses()
-                TerminalSession.releaseLeaseForShutdown()
-                exit(0)
             }
             source.resume()
             signalSources.append(source)
@@ -477,7 +481,8 @@ final class TerminalSession {
     /// Release the instance lease after the poller stopped and the socket
     /// closed. Explicit on every normal path, so the `deinit` fallback of
     /// `InstanceLease` never fires for a session that ended cleanly.
-    private func releaseLease() {
+    private func releaseLease() async {
+        await BrowserSettingsHost.stopShared()
         AppChatSocketServer.shared.stop()
         Self.releaseLeaseForShutdown()
         lease = nil

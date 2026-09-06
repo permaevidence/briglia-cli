@@ -106,3 +106,47 @@ extension SelftestContext {
         check("settings: gate released after save", !manager.isRestoringMind)
     }
 }
+
+
+extension SelftestContext {
+    @MainActor
+    func browserSettingsShutdown() async throws {
+        let lease: InstanceLease
+        switch InstanceLease.acquire(label: "settings shutdown fixture") {
+        case .success(let value): lease = value
+        case .failure(let error): throw error
+        }
+        let host: BrowserSettingsHost
+        do { host = try BrowserSettingsHost(manager: nil, lease: lease) }
+        catch { lease.release(); throw error }
+        var entered = false, wrote = false
+        var release: CheckedContinuation<Void, Never>?
+        host.settings.env.probe = { _ in ["ok": true] }
+        host.settings.env.apply = { _, checkpoint in
+            entered = true
+            await withCheckedContinuation { release = $0 }
+            do { try checkpoint(); wrote = true; return ["ok": true] }
+            catch { return ["ok": false] }
+        }
+        let request: [String: Any] = ["section": "jina", "values": ["api_key": "shutdown-fixture"]]
+        let g = await host.auth.generation
+        _ = await host.settings.handle("verify", body: request, generation: g)
+        let saving = Task { await host.settings.handle("save", body: request, generation: g) }
+        while !entered { await Task.yield() }
+        let stopping = Task { await host.stop() }
+        while await host.auth.generation == g { await Task.yield() }
+        check("settings: shutdown waits for the old callback", !host.stopped)
+        switch InstanceLease.acquire(label: "competing daemon fixture") {
+        case .success(let other): check("settings: shutdown retains lease until callback exits", false); other.release()
+        case .failure: check("settings: shutdown retains lease until callback exits", true)
+        }
+        release?.resume()
+        check("settings: revoked callback cannot write during shutdown", (await saving.value).0 == 404 && !wrote)
+        await stopping.value
+        check("settings: server closes after settlement", host.stopped)
+        switch InstanceLease.acquire(label: "next daemon fixture") {
+        case .success(let other): check("settings: next daemon can acquire lease after settlement", true); other.release()
+        case .failure: check("settings: next daemon can acquire lease after settlement", false)
+        }
+    }
+}

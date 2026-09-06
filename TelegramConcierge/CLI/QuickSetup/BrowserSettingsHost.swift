@@ -7,7 +7,7 @@ import Darwin
 #endif
 
 /// A settings server lives in the conversation owner when one is running.
-/// Otherwise this command holds the same exclusive lease until the page closes.
+/// Otherwise this command holds the same exclusive lease until the server stops.
 /// No competing daemon, restart, or release of the live owner's lease is needed.
 @MainActor
 final class BrowserSettingsHost {
@@ -20,7 +20,7 @@ final class BrowserSettingsHost {
     private var stopping = false
     private(set) var stopped = false
 
-    private init(manager: ConversationManager?, lease: InstanceLease?) throws {
+    init(manager: ConversationManager?, lease: InstanceLease?) throws {
         self.lease = lease
         guard let directory = QuickSetupPreflight.pageDirectory(),
               ["settings.html", "settings.js"].allSatisfy({ FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path) }) else {
