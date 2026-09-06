@@ -7,9 +7,11 @@ struct SubscriptionDeviceChallenge: Codable {
     var expires: Date
     var nextPoll: Date
     var interval: Double
+    var pollAttempt: String?
     var valid: Bool {
         !deviceID.isEmpty && deviceID.count < 4096 && !userCode.isEmpty && userCode.count < 64
             && interval.isFinite && interval >= 1 && interval <= 900
+            && (pollAttempt == nil || UUID(uuidString: pollAttempt!) != nil)
             && expires.timeIntervalSince1970.isFinite && nextPoll.timeIntervalSince1970.isFinite
     }
 }
@@ -80,8 +82,11 @@ struct SubscriptionSetup {
                 let o = try SubscriptionLogin.object(data)
                 guard let device = o["device_auth_id"] as? String, let code = o["user_code"] as? String,
                       let interval = Double(String(describing: o["interval"] ?? "5")) else { throw SubscriptionError("Invalid device authorization response") }
+                let lifetime = Double(String(describing: o["expires_in"] ?? "900")) ?? 0
+                guard lifetime.isFinite, lifetime > 0 else { throw SubscriptionError("Invalid device authorization expiry") }
+                let duration = min(900, lifetime)
                 let challenge = SubscriptionDeviceChallenge(deviceID: device, userCode: code,
-                    expires: Date().addingTimeInterval(900), nextPoll: Date().addingTimeInterval(interval), interval: interval)
+                    expires: Date().addingTimeInterval(duration), nextPoll: Date().addingTimeInterval(interval), interval: interval)
                 guard challenge.valid else { throw SubscriptionError("Invalid device authorization response") }
                 return try await store.locked {
                     try checkpoint(); try Task.checkCancellation()
@@ -89,61 +94,27 @@ struct SubscriptionSetup {
                     state.deviceChallenge = challenge
                     try store.write(state)
                     return ok(["state": "pending", "pending": pending, "url": SubscriptionEndpoint.verificationURL,
-                               "code": code, "interval": interval, "expires_in": 900])
+                               "code": code, "interval": interval, "expires_in": duration])
                 }
                 } catch {
                     try? await store.cancelLogin(pending)
                     throw error
                 }
             }
-            if action == "poll" || action == "cancel" {
+            if action == "cancel" {
                 guard let pending = request["pending"] as? String else { throw SubscriptionError("Missing login handle") }
                 return try await store.locked {
                     try checkpoint(); try Task.checkCancellation()
                     guard var state = try store.read(), state.pendingLogin == pending else {
                         throw SubscriptionError("Login cancelled or superseded; start again")
                     }
-                    if action == "cancel" {
-                        state.pendingLogin = nil; state.deviceChallenge = nil
-                        try store.write(state); return ok(["state": "cancelled"])
-                    }
-                    guard var challenge = state.deviceChallenge else { throw SubscriptionError("Login belongs to another interface") }
-                    if Date() >= challenge.expires {
-                        state.pendingLogin = nil; state.deviceChallenge = nil; try store.write(state)
-                        throw SubscriptionError("Device login expired; start again")
-                    }
-                    if Date() < challenge.nextPoll { return ok(["state": "pending", "interval": challenge.interval]) }
-                    let (data, status) = try await login.post("/api/accounts/deviceauth/token",
-                        ["device_auth_id": challenge.deviceID, "user_code": challenge.userCode], false)
-                    try checkpoint(); try Task.checkCancellation()
-                    if status == 200 {
-                        let o = try SubscriptionLogin.object(data)
-                        guard let code = o["authorization_code"] as? String, let verifier = o["code_verifier"] as? String else {
-                            throw SubscriptionError("Device login omitted authorization fields")
-                        }
-                        let (tokens, tokenStatus) = try await login.post("/oauth/token", ["grant_type": "authorization_code", "code": code,
-                            "code_verifier": verifier, "client_id": SubscriptionEndpoint.clientID, "redirect_uri": SubscriptionEndpoint.deviceCallback], true)
-                        try checkpoint(); try Task.checkCancellation()
-                        guard tokenStatus == 200 else { throw SubscriptionError("Device token exchange failed") }
-                        state.credential = try SubscriptionLogin.token(tokens)
-                        state.generation = UUID().uuidString; state.requiresLogin = nil
-                        state.pendingLogin = nil; state.deviceChallenge = nil
-                        try store.write(state)
-                        return ok(["state": "signed_in"])
-                    }
-                    let reason = (try? SubscriptionLogin.object(data)["error"] as? String) ?? ""
-                    if ["access_denied", "expired_token"].contains(reason) {
-                        state.pendingLogin = nil; state.deviceChallenge = nil; try store.write(state)
-                        throw SubscriptionError("Device login denied or expired")
-                    }
-                    guard [403, 404, 429].contains(status) || ["authorization_pending", "slow_down"].contains(reason) else {
-                        throw SubscriptionError("Device authorization request failed")
-                    }
-                    if status == 429 || reason == "slow_down" { challenge.interval = min(900, challenge.interval + 5) }
-                    challenge.nextPoll = Date().addingTimeInterval(challenge.interval)
-                    state.deviceChallenge = challenge; try store.write(state)
-                    return ok(["state": "pending", "interval": challenge.interval])
+                    state.pendingLogin = nil; state.deviceChallenge = nil
+                    try store.write(state); return ok(["state": "cancelled"])
                 }
+            }
+            if action == "poll" {
+                guard let pending = request["pending"] as? String else { throw SubscriptionError("Missing login handle") }
+                return try await poll(pending, checkpoint: checkpoint)
             }
             if action == "logout" { try await store.logout(checkpoint: checkpoint); return ok(["state": "signed_out"]) }
             guard action == "select" || action == "probe" else { throw SubscriptionError("Unknown subscription action") }
@@ -151,6 +122,7 @@ struct SubscriptionSetup {
             let effort = request["effort"] as? String ?? ProviderProfiles.configuredEffort(.chatgpt) ?? "high"
             guard !model.isEmpty, ResponsesAdapter.allowedEfforts(model: model).contains(effort) else { throw SubscriptionError("Unsupported model/effort") }
             guard let state = try store.read(), state.credential != nil, state.requiresLogin != true else { throw SubscriptionError("Sign in first") }
+            guard state.pendingLogin == nil else { throw SubscriptionError("Finish the pending login or cancel it before selecting or verifying ChatGPT.") }
             if let expected = request["generation"] as? String, expected != state.generation { throw SubscriptionError("Login changed; verify again") }
             if action == "probe" {
                 var context = ProviderExecutionContext.responsesAPI(baseURL: SubscriptionEndpoint.inference,
@@ -175,8 +147,92 @@ struct SubscriptionSetup {
                 return ok(["state": "signed_in", "model": model, "effort": effort])
             }
         } catch {
+            let pending = try? login.store.read()?.pendingLogin
             return ["schema": SetupAPICore.schemaVersion, "ok": false,
-                    "error": ["code": "subscription", "message": error.localizedDescription]]
+                    "error": ["code": "subscription", "message": error.localizedDescription,
+                              "retryable": request["action"] as? String == "poll" && pending != nil
+                                && pending == request["pending"] as? String]]
+        }
+    }
+
+    private func poll(_ pending: String, checkpoint: () throws -> Void) async throws -> [String: Any] {
+        let store = login.store
+        let attempt = UUID().uuidString
+        let challenge = try await store.locked {
+            try checkpoint(); try Task.checkCancellation()
+            guard var state = try store.read(), state.pendingLogin == pending,
+                  var challenge = state.deviceChallenge else { throw SubscriptionError("Login cancelled or superseded; start again") }
+            if Date() >= challenge.expires {
+                state.pendingLogin = nil; state.deviceChallenge = nil; try store.write(state)
+                throw SubscriptionError("Device login expired; start again")
+            }
+            if Date() < challenge.nextPoll { return challenge }
+            // Reserve the two bounded (30 s each) exchanges. A crashed owner
+            // can be superseded after this window; its late result cannot commit.
+            challenge.pollAttempt = attempt
+            challenge.nextPoll = Date().addingTimeInterval(65)
+            state.deviceChallenge = challenge; try store.write(state)
+            return challenge
+        }
+        guard challenge.pollAttempt == attempt else { return ok(["state": "pending", "interval": challenge.interval]) }
+        do {
+            let (data, status) = try await login.post("/api/accounts/deviceauth/token",
+                ["device_auth_id": challenge.deviceID, "user_code": challenge.userCode], false)
+            try checkpoint(); try Task.checkCancellation()
+            var credential: SubscriptionCredential?
+            if status == 200 {
+                let o = try SubscriptionLogin.object(data)
+                guard let code = o["authorization_code"] as? String, let verifier = o["code_verifier"] as? String else {
+                    throw SubscriptionError("Device login omitted authorization fields")
+                }
+                // Avoid a second exchange for a login cancelled during the first.
+                try await store.locked {
+                    try checkpoint(); try Task.checkCancellation()
+                    guard let current = try store.read(), current.pendingLogin == pending,
+                          current.deviceChallenge?.deviceID == challenge.deviceID,
+                          current.deviceChallenge?.pollAttempt == attempt else { throw SubscriptionError("Login cancelled or superseded") }
+                }
+                let (tokens, tokenStatus) = try await login.post("/oauth/token", ["grant_type": "authorization_code", "code": code,
+                    "code_verifier": verifier, "client_id": SubscriptionEndpoint.clientID, "redirect_uri": SubscriptionEndpoint.deviceCallback], true)
+                try checkpoint(); try Task.checkCancellation()
+                guard tokenStatus == 200 else { throw SubscriptionError("Device token exchange failed") }
+                credential = try SubscriptionLogin.token(tokens)
+            }
+            let reason = (try? SubscriptionLogin.object(data)["error"] as? String) ?? ""
+            return try await store.locked {
+                try checkpoint(); try Task.checkCancellation()
+                guard var state = try store.read(), state.pendingLogin == pending,
+                      var current = state.deviceChallenge, current.deviceID == challenge.deviceID,
+                      current.pollAttempt == attempt else { throw SubscriptionError("Login cancelled or superseded; start again") }
+                if Date() >= current.expires || ["access_denied", "expired_token"].contains(reason) {
+                    state.pendingLogin = nil; state.deviceChallenge = nil; try store.write(state)
+                    throw SubscriptionError("Device login denied or expired; start again")
+                }
+                if let credential {
+                    state.credential = credential; state.generation = UUID().uuidString; state.requiresLogin = nil
+                    state.pendingLogin = nil; state.deviceChallenge = nil; try store.write(state)
+                    return ok(["state": "signed_in"])
+                }
+                guard [403, 404, 429].contains(status) || ["authorization_pending", "slow_down"].contains(reason) else {
+                    throw SubscriptionError("Device authorization request failed; retry")
+                }
+                if status == 429 || reason == "slow_down" { current.interval = min(900, current.interval + 5) }
+                current.nextPoll = Date().addingTimeInterval(current.interval); current.pollAttempt = nil
+                state.deviceChallenge = current; try store.write(state)
+                return ok(["state": "pending", "interval": current.interval])
+            }
+        } catch {
+            // Best effort release only our reservation; never change a newer
+            // poll, refreshed credential, cancellation or logout tombstone.
+            try? await store.locked {
+                guard var state = try store.read(), state.pendingLogin == pending,
+                      state.deviceChallenge?.deviceID == challenge.deviceID,
+                      state.deviceChallenge?.pollAttempt == attempt else { return }
+                state.deviceChallenge?.pollAttempt = nil
+                state.deviceChallenge?.nextPoll = Date().addingTimeInterval(challenge.interval)
+                try store.write(state)
+            }
+            throw error
         }
     }
     private func ok(_ payload: [String: Any]) -> [String: Any] {

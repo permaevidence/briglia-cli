@@ -228,11 +228,11 @@ struct SetupWizard {
             }
             guard action == "keep" || action == "login" else { print("Unknown account action."); return false }
             if !signedIn || action == "login" {
-                try SubscriptionSetup.checkLoginReplacement()
                 _ = try await SubscriptionLogin().device { url, code in
                     print("Open \(url) and enter code: \(code). Enable device login in ChatGPT security settings if needed.")
                 }
             }
+            if ProviderProfiles.activeProfile() == .chatgpt { try ProviderProfiles.activate(.chatgpt) }
             let model = WizardIO.ask("Model", default: ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna")
             let effort = WizardIO.ask("Reasoning effort", default: ProviderProfiles.configuredEffort(.chatgpt) ?? "high")
             let request: [String: Any] = ["action": "probe", "model": model, "effort": effort]

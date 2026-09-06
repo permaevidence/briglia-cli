@@ -79,9 +79,20 @@ enum P2Life {
             output.append(["type": "function_call", "id": "fc_" + id, "call_id": "call_" + id,
                            "status": "completed", "name": tool, "arguments": arguments])
         }
-        return String(data: try JSONSerialization.data(withJSONObject: ["id": "resp_" + id,
-            "status": status, "output": output, "usage": ["input_tokens": 100, "output_tokens": 30]],
-            options: .sortedKeys), encoding: .utf8)!
+        let snapshot: [String: Any] = ["id": "resp_" + id, "status": status, "output": output,
+            "usage": ["input_tokens": 100, "output_tokens": 30]]
+        func json(_ value: [String: Any]) throws -> String {
+            String(data: try JSONSerialization.data(withJSONObject: value, options: .sortedKeys), encoding: .utf8)!
+        }
+        guard subscriptionCaptureURL != nil else { return try json(snapshot) }
+        // Model the observed subscription stream, including complete item events
+        // and an empty terminal output. Ordinary API fixtures remain JSON.
+        var events: [[String: Any]] = output.enumerated().map { index, item in
+            ["type": "response.output_item.done", "output_index": index, "item": item]
+        }
+        var terminal = snapshot; terminal["output"] = []
+        events.append(["type": "response.completed", "response": terminal])
+        return try events.map { "data: " + (try json($0)) + "\n\n" }.joined()
     }
     static func input(_ request: CapturedHTTPRequest) throws -> [[String: Any]] {
         let root = try JSONSerialization.jsonObject(with: request.body) as! [String: Any]

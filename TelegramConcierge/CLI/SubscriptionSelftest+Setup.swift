@@ -88,6 +88,8 @@ extension SubscriptionSelftest {
         await c.rejects("device owner observes expiry") { _ = try await deviceLogin.device { _, _ in } }
         c.check("device expiry cannot commit", try raceStore.read()?.credential == nil)
 
+        try await pollConcurrencyTests(root, c)
+
         // R1 active invalid login may recover; valid active login cannot be replaced.
         let defaultStore = SubscriptionAuthStore()
         let activePending = try await defaultStore.beginLogin()
@@ -105,6 +107,57 @@ extension SubscriptionSelftest {
         catch { c.check("active revoked profile can re-login", false) }
         try await defaultStore.logout()
     }
+    func pollConcurrencyTests(_ root: URL, _ c: Checks) async throws {
+        // A gate watchdog makes the old network-under-lock implementation fail
+        // a bounded assertion instead of hanging the suite for 45 seconds.
+        for stage in ["deviceauth/token", "oauth/token"] {
+            for operation in ["refresh", "cancel", "logout", "replace"] {
+                let store = SubscriptionAuthStore(directory: root.appendingPathComponent("poll-" + stage.replacingOccurrences(of: "/", with: "-") + operation))
+                let oldPending = try await store.beginLogin()
+                let generation = try await store.commitLogin(Self.credential(expired: true), pending: oldPending)
+                let gate = SubscriptionTestGate()
+                var login = SubscriptionLogin(store: store)
+                login.post = { path, _, _ in
+                    if path.hasSuffix("usercode") { return (Data(#"{"device_auth_id":"poll-device","user_code":"ABCD","interval":"1","expires_in":60}"#.utf8), 200) }
+                    if path.hasSuffix(stage) { await gate.markStarted(); await gate.wait() }
+                    if path.hasSuffix("deviceauth/token") { return (Data(#"{"authorization_code":"code","code_verifier":"verifier"}"#.utf8), 200) }
+                    return (try Self.tokenData(), 200)
+                }
+                let setup = SubscriptionSetup(login: login)
+                let started = await setup.perform(["action": "start"])
+                let pending = started["pending"] as! String
+                c.check("server expiry and string interval honored", started["expires_in"] as? Double == 60)
+                try await store.locked { var state = try store.read()!; state.deviceChallenge!.nextPoll = .distantPast; try store.write(state) }
+                let polling = Task { await setup.perform(["action": "poll", "pending": pending]) }
+                let deadline = ProcessInfo.processInfo.systemUptime + 5
+                while !(await gate.started), ProcessInfo.processInfo.systemUptime < deadline { try await Task.sleep(nanoseconds: 1_000_000) }
+                guard await gate.started else {
+                    polling.cancel(); await gate.release(); _ = await polling.value
+                    c.check("poll reaches network gate", false); continue
+                }
+                let watchdog = Task { try? await Task.sleep(nanoseconds: 3_000_000_000); if !Task.isCancelled { await gate.release() } }
+                let duplicate = await setup.perform(["action": "poll", "pending": pending])
+                c.check("in-flight poll returns pending without another exchange", duplicate["state"] as? String == "pending")
+                switch operation {
+                case "refresh":
+                    _ = try await store.credential(generation: generation) { _ in Self.credential("refreshed-during-poll") }
+                case "cancel": _ = await setup.perform(["action": "cancel", "pending": pending])
+                case "logout": try await store.logout()
+                default: _ = try await store.beginLogin()
+                }
+                c.check("\(operation) completes while \(stage) is suspended", !(await gate.released))
+                watchdog.cancel(); await gate.release()
+                let result = await polling.value
+                if operation == "refresh" {
+                    c.check("poll merges fresh state and completes after refresh", result["state"] as? String == "signed_in")
+                } else {
+                    c.check("late \(stage) cannot commit after \(operation)", result["ok"] as? Bool == false)
+                    c.check("late poll preserves generation/tombstone", try operation == "logout" ? store.read()?.credential == nil : store.read()?.generation == generation)
+                }
+            }
+        }
+    }
+
 }
 
 private actor SubscriptionTestGate {

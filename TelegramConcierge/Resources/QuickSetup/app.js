@@ -197,7 +197,12 @@
   var subscriptionGeneration = '', subscriptionPending = '', subscriptionTimer = null;
   function subscriptionCall(body) {
     return api('POST', '/api/subscription', body).then(function(r) {
-      if (!r.json.ok) throw new Error((r.json.error && r.json.error.message) || 'ChatGPT login failed; retry.');
+      if (!r.json.ok) {
+        var detail = r.json.error;
+        var error = new Error((typeof detail === 'string' ? detail : detail && detail.message) || 'ChatGPT login failed; retry.');
+        error.retryable = r.status === 409 || r.status >= 500 || !!(detail && detail.retryable);
+        throw error;
+      }
       return r.json;
     });
   }
@@ -215,7 +220,17 @@
       if (id !== subscriptionPending) return;
       if (r.state === 'signed_in') { subscriptionPending = ''; $('subscription-code').textContent = ''; $('subscription-url').hidden = true; $('subscription-cancel').hidden = true; return subscriptionStatus(); }
       subscriptionTimer = setTimeout(subscriptionPoll, Math.max(1, r.interval || 5) * 1000);
-    }).catch(subscriptionError);
+    }).catch(function(e) {
+      if (id !== subscriptionPending) return;
+      subscriptionError(e);
+      // Network failures and busy/transient server replies retain the owned
+      // handle. Definitive denial/expiry clears it so sign-in can restart.
+      if (e.retryable || e instanceof TypeError) subscriptionTimer = setTimeout(subscriptionPoll, 5000);
+      else {
+        subscriptionPending = ''; $('subscription-code').textContent = '';
+        $('subscription-url').hidden = true; $('subscription-cancel').hidden = true;
+      }
+    });
   }
   $('main-provider').addEventListener('change', function() {
     $('subscription-panel').hidden = !usesSubscription(); renderIntro();

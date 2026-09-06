@@ -31,6 +31,12 @@ try:
                 elif action == 'start': result.update(state='pending', pending='opaque-id', code='<b>ABCD</b>', interval=1)
                 elif action == 'poll':
                     state['polls'] += 1
+                    if state['polls'] == 1:
+                        route.fulfill(status=409, content_type='application/json', body=json.dumps({'ok':False,'error':'busy'})); return
+                    if state['polls'] == 2:
+                        route.fulfill(status=503, content_type='application/json', body=json.dumps({'ok':False,'error':{'message':'temporary'}})); return
+                    if state['polls'] == 3:
+                        route.fulfill(status=200, content_type='application/json', body=json.dumps({'ok':False,'error':{'message':'retry transport','retryable':True}})); return
                     state['signed'] = True
                     result.update(state='signed_in')
                 elif action == 'logout': state['signed'] = False; result.update(state='signed_out')
@@ -48,6 +54,7 @@ try:
         page.wait_for_function("document.getElementById('subscription-code').textContent.includes('ABCD')")
         assert page.locator('#subscription-code b').count() == 0, 'code must render as inert text'
         page.wait_for_function("document.getElementById('subscription-status').textContent.startsWith('Signed in')")
+        assert state['polls'] == 4, 'busy and transient polls must resume automatically'
         page.fill('#f-name', 'Fixture')
         for key in ['openai', 'serper', 'jina', 'telegram_token', 'telegram_chat']:
             page.fill('#f-' + key, '123' if key == 'telegram_chat' else 'synthetic')

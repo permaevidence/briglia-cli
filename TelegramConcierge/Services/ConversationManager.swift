@@ -4517,7 +4517,7 @@ class ConversationManager: ObservableObject {
             } catch { try? await sendText(error.localizedDescription, to: address) }
             return
         }
-        guard !isRestoringMind else { return }
+        guard !isRestoringMind else { try? await sendText("Wait until the memory operation finishes before signing in.", to: address); return }
         do { try SubscriptionSetup.checkLoginReplacement() } catch {
             try? await sendText(error.localizedDescription, to: address); return
         }
@@ -4539,7 +4539,7 @@ class ConversationManager: ObservableObject {
                 try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil,
                     model: ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna",
                     effort: ProviderProfiles.configuredEffort(.chatgpt) ?? "high", textOnly: false)
-                try await channel.sendText(chatId: address.chatId, text: "ChatGPT login saved. Use /provider chatgpt when idle to select it. Current provider unchanged.")
+                try await channel.sendText(chatId: address.chatId, text: "ChatGPT login saved. Send /provider chatgpt when idle to activate this login, including if ChatGPT is already selected. Until then, an active ChatGPT profile still uses the previous login.")
             } catch {
                 if !Task.isCancelled, self.subscriptionLoginRunID == runID {
                     try? await channel.sendText(chatId: address.chatId, text: "ChatGPT login failed: " + error.localizedDescription)
