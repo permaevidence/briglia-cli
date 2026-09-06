@@ -4,8 +4,9 @@ import FoundationNetworking
 #endif
 
 /// Incremental byte framing: UTF-8 is decoded only after a complete SSE record.
-/// A bounded final snapshot is authoritative; deltas are checked against it and
-/// are never appended a second time or exposed for execution.
+/// A bounded completed snapshot is authoritative; the subscription transport
+/// can assemble it from item-done records committed by a successful terminal.
+/// Deltas are checked against it and never exposed for execution.
 struct ResponsesStreamAssembler {
     var subscription = false
     private var line = Data(), record = Data()
@@ -13,6 +14,7 @@ struct ResponsesStreamAssembler {
     private var responseID: String?
     private var terminal: Data?
     private var items: [Int: String] = [:]
+    private var completedItems: [Int: JSONValue] = [:]
     private var arguments: [String: String] = [:]
     private var texts: [String: [Int: String]] = [:]
     private var sequences: [Int: String] = [:]
@@ -87,13 +89,19 @@ struct ResponsesStreamAssembler {
             }
             try identify(id)
         case "response.output_item.added", "response.output_item.done":
-            guard let index = event["output_index"]?.responsesInt, index < ResponsesLimits.items,
+            guard let index = event["output_index"]?.responsesInt, index >= 0, index < ResponsesLimits.items,
                   let id = event["item"]?.responsesObject?["id"]?.responsesString else {
                 throw ResponsesFailure.malformed("stream item identity")
             }
             if let old = items[index], old != id { throw ResponsesFailure.malformed("changed stream item identity") }
             if items.contains(where: { $0.key != index && $0.value == id }) { throw ResponsesFailure.malformed("duplicate stream item") }
             items[index] = id
+            if subscription && type == "response.output_item.done", let item = event["item"] {
+                if let previous = completedItems[index], try !sameItem(previous, item) {
+                    throw ResponsesFailure.malformed("conflicting completed stream item")
+                }
+                completedItems[index] = item
+            }
         case "response.function_call_arguments.delta":
             let (id, delta) = try deltaFields(event)
             arguments[id, default: ""] += delta
@@ -105,13 +113,16 @@ struct ResponsesStreamAssembler {
             }
             texts[id, default: [:]][index, default: ""] += delta
         case "response.completed", "response.failed", "response.incomplete":
-            guard let response = event["response"]?.responsesObject,
+            guard var response = event["response"]?.responsesObject,
                   let id = response["id"]?.responsesString,
                   response["status"]?.responsesString == String(type.dropFirst("response.".count)) else {
                 throw ResponsesFailure.malformed("terminal event/status mismatch")
             }
             try identify(id)
-            if type == "response.completed" { try reconcile(response) }
+            if type == "response.completed" {
+                if subscription { try completeSubscriptionOutput(&response) }
+                try reconcile(response)
+            }
             terminal = try JSONEncoder().encode(JSONValue.object(response))
         case "error": throw ResponsesFailure.failed(event["code"]?.responsesString ?? "stream error")
         case "response.content_part.added", "response.content_part.done",
@@ -128,6 +139,34 @@ struct ResponsesStreamAssembler {
     private mutating func identify(_ id: String) throws {
         guard !id.isEmpty, responseID == nil || responseID == id else { throw ResponsesFailure.malformed("mixed response identities") }
         responseID = id
+    }
+
+    private func sameItem(_ lhs: JSONValue, _ rhs: JSONValue) throws -> Bool {
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        return try encoder.encode(lhs) == encoder.encode(rhs)
+    }
+
+    /// The subscription endpoint can finish with output: [] after delivering
+    /// complete output_item.done records. Commit those records only on a
+    /// successful terminal event, never from deltas or an interrupted stream.
+    /// The ordinary API's authoritative terminal snapshot contract is unchanged.
+    private func completeSubscriptionOutput(_ response: inout [String: JSONValue]) throws {
+        guard let output = response["output"]?.responsesArray else {
+            throw ResponsesFailure.malformed("subscription terminal output")
+        }
+        if output.isEmpty && !items.isEmpty {
+            guard completedItems.count == items.count,
+                  Set(completedItems.keys) == Set(0..<items.count) else {
+                throw ResponsesFailure.malformed("subscription stream omitted completed items")
+            }
+            response["output"] = .array((0..<items.count).map { completedItems[$0]! })
+        }
+        let committed = response["output"]!.responsesArray!
+        for (index, item) in completedItems {
+            guard index < committed.count, try sameItem(item, committed[index]) else {
+                throw ResponsesFailure.malformed("subscription terminal disagrees with completed item")
+            }
+        }
     }
 
     private func deltaFields(_ event: [String: JSONValue]) throws -> (String, String) {

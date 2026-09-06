@@ -76,6 +76,7 @@ struct ResponsesSelftest: AsyncParsableCommand {
         }
         try decoderChecks(checks, context: context, receipt: receipt)
         try streamChecks(checks, context: context, receipt: receipt)
+        try subscriptionStreamChecks(checks, context: context, receipt: receipt)
         try persistenceChecks(checks, root: root, context: context, receipt: receipt)
         try await requestChecks(checks, root: root)
         try await transportChecks(checks)
@@ -139,7 +140,8 @@ struct ResponsesSelftest: AsyncParsableCommand {
         defer { capture.stop() }
         request.url = URL(string: "http://127.0.0.1:\(capture.port)/responses")!
         let snapshot = Self.response([Self.message("SUBSCRIPTION_STREAM_OK")])
-        let terminal = String(data: try Self.event(["type": "response.completed", "response": snapshot]), encoding: .utf8)!
+        let terminal = String(data: try Self.event(["type": "response.output_item.done", "output_index": 0,
+            "item": Self.message("SUBSCRIPTION_STREAM_OK")]) + Self.event(["type": "response.completed", "response": Self.response([])]), encoding: .utf8)!
         for contentType in ["", "text/plain", "application/json", "text/event-stream"] {
             capture.contentTypeOverride = contentType
             capture.script([terminal])
@@ -287,6 +289,53 @@ struct ResponsesSelftest: AsyncParsableCommand {
         let split = json.firstIndex(of: ",")!
         let record = "data: " + json[...split] + "\ndata: " + json[json.index(after: split)...] + "\n\n"
         try multiline.append(Data(record.utf8)); c.check("multiline data fields", try multiline.finish().count > 0)
+    }
+
+    private func subscriptionStreamChecks(_ c: Checks, context: ProviderExecutionContext, receipt: PreparedRequestReceipt) throws {
+        func item(_ value: [String: Any], index: Int = 0, type: String = "response.output_item.done") throws -> Data {
+            try Self.event(["type": type, "output_index": index, "item": value])
+        }
+        func end(_ output: [[String: Any]] = [], type: String = "response.completed", status: String = "completed") throws -> Data {
+            try Self.event(["type": type, "response": Self.response(output, status: status)])
+        }
+        func decode(_ bytes: Data, subscription: Bool = true) throws -> ResponsesRound {
+            var parser = ResponsesStreamAssembler(); parser.subscription = subscription
+            try parser.append(bytes)
+            return try ResponsesRoundDecoder.decode(parser.finish(), scope: context.responsesScope, receipt: receipt, allowedTools: ["fixture"])
+        }
+        let done = try item(Self.call())
+        let complete = try done + end()
+        let round = try decode(complete)
+        c.check("subscription commits completed call on empty terminal output", round.calls.count == 1 && round.calls[0].id == "call_1")
+        c.check("subscription response.done alias commits completed call", try decode(done + end(type: "response.done")).calls.count == 1)
+        let mixed = try item(Self.message(), index: 2) + item(Self.call(), index: 1) + item(Self.reasoning()) + end()
+        let ordered = try decode(mixed)
+        c.check("subscription item indices restore text tool and encrypted reasoning order", ordered.text == "Hello 🌍" && ordered.calls.count == 1 && ordered.metadata.envelope.entries.first?.type == "reasoning")
+        c.check("identical completed subscription records do not duplicate calls", try decode(done + done + end()).calls.count == 1)
+        c.check("matching full subscription snapshot remains accepted", try decode(done + end([Self.call()])).calls.count == 1)
+        c.rejects("ordinary API still requires complete terminal output") { _ = try decode(complete, subscription: false) }
+        c.rejects("subscription EOF after completed item cannot execute") { _ = try decode(done) }
+        c.rejects("subscription partial terminal cannot execute") { _ = try decode(complete.dropLast()) }
+        c.rejects("subscription added-only item cannot execute") { _ = try decode(item(Self.call(), type: "response.output_item.added") + end()) }
+        c.rejects("subscription missing one completion cannot execute") { _ = try decode(done + item(Self.message(), index: 1, type: "response.output_item.added") + end()) }
+        c.rejects("subscription output indices must be contiguous") { _ = try decode(item(Self.call(), index: 1) + end()) }
+        c.rejects("subscription negative output index rejected") { _ = try decode(item(Self.call(), index: -1) + end()) }
+        c.rejects("subscription conflicting completed records rejected") { _ = try decode(done + item(Self.call(arguments: "{}")) + end()) }
+        c.rejects("subscription terminal cannot override completed item") { _ = try decode(done + end([Self.call(arguments: "{}")])) }
+        c.rejects("subscription partial nonempty snapshot not silently completed") { _ = try decode(done + item(Self.message(), index: 1) + end([Self.call()])) }
+        c.rejects("subscription deltas must match committed item") {
+            _ = try decode(Self.event(["type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "{}"])
+                + complete)
+        }
+        for status in ["failed", "incomplete"] {
+            c.rejects("subscription \(status) never commits tool work") { _ = try decode(done + end(type: "response." + status, status: status)) }
+        }
+        c.rejects("subscription unknown completed item remains unsupported") { _ = try decode(item(["type": "future_tool", "id": "future"]) + end()) }
+        c.rejects("subscription reconstructed call arguments still validated") { _ = try decode(item(Self.call(arguments: "{")) + end()) }
+        c.rejects("subscription reconstructed tool allowlist still enforced") {
+            var call = Self.call(); call["name"] = "unexposed"
+            _ = try decode(item(call) + end())
+        }
     }
 
     private func persistenceChecks(_ c: Checks, root: URL, context: ProviderExecutionContext, receipt: PreparedRequestReceipt) throws {
