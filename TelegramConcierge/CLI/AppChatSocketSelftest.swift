@@ -1,5 +1,8 @@
 import ArgumentParser
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 #if canImport(Glibc)
 import Glibc
 #endif
@@ -161,6 +164,54 @@ struct AppChatSocketSelftest: AsyncParsableCommand {
         client.sendLine(["type": "ping", "ref": "p2"])
         check("connection survives a malformed line",
               client.readEvent(ofType: "pong")?["ref"] as? String == "p2")
+
+        // Browser settings is control traffic, never a model-visible command.
+        let historyBeforeSettings = await MainActor.run { manager.messages.count }
+        client.sendLine(["type": "browser_settings", "ref": "settings1"])
+        let settingsAck = client.readEvent(ofType: "ack", timeoutSeconds: 20)
+        if let link = settingsAck?["url"] as? String, let url = URL(string: link) {
+            check("settings: socket returns a private loopback launch link", url.host == "127.0.0.1" && url.path == "/start")
+            let config = URLSessionConfiguration.ephemeral
+            let http = URLSession(configuration: config)
+            let (html, response) = try await http.data(from: url)
+            check("settings: running owner serves browser page", (response as? HTTPURLResponse)?.statusCode == 200 && String(data: html, encoding: .utf8)?.contains("Briglia settings") == true)
+            let statusURL = URL(string: "/api/status", relativeTo: url)!
+            let (statusData, _) = try await http.data(from: statusURL)
+            let status = try JSONSerialization.jsonObject(with: statusData) as? [String: Any]
+            check("settings: running owner mode reported", status?["running"] as? Bool == true)
+            client.sendLine(["type": "browser_settings", "ref": "settings2"])
+            let next = client.readEvent(ofType: "ack", timeoutSeconds: 20)
+            check("settings: another launch replaces the URL", next?["url"] as? String != link)
+            let (_, revoked) = try await http.data(from: statusURL)
+            check("settings: old browser cookie revoked", (revoked as? HTTPURLResponse)?.statusCode == 404)
+            http.invalidateAndCancel()
+        } else { check("settings: socket launches browser settings", false) }
+        // The actual command must delegate to the existing owner, rather
+        // than opening a second standalone settings process.
+        try KeychainHelper.save(key: SetupWizard.completeKey, value: "true")
+        let ownerLease: InstanceLease
+        switch InstanceLease.acquire(label: "settings owner fixture") {
+        case .success(let lease): ownerLease = lease
+        case .failure(let error): throw error
+        }
+        let launched = await Task.detached { () -> (Int32, String) in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+            process.arguments = ["quicksetup"]
+            var environment = ProcessInfo.processInfo.environment
+            environment["BRIGLIA_QUICKSETUP_NO_BROWSER"] = "1"
+            environment["BRIGLIA_IGNORE_LEGACY_SETUP_FLAG"] = "1"
+            process.environment = environment
+            let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
+            do { try process.run() } catch { return (-1, error.localizedDescription) }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }.value
+        ownerLease.release()
+        check("settings: real CLI delegates to running owner", launched.0 == 0 && launched.1.contains("Settings are served by the running Briglia"))
+        await BrowserSettingsHost.stopShared()
+        check("settings: opening page does not modify conversation", await MainActor.run { manager.messages.count == historyBeforeSettings })
 
         // unknown type → nack
         client.sendLine(["type": "frobnicate", "ref": "u1"])

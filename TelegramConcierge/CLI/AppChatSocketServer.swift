@@ -521,6 +521,12 @@ final class AppChatSocketServer {
         }
 
         switch type {
+        case "browser_settings":
+            do {
+                let url = try await BrowserSettingsHost.open(manager: manager)
+                ack(["url": url])
+            } catch { nack("Could not open browser settings: \(error.localizedDescription)") }
+
         case "ping":
             var event: [String: Any] = ["type": "pong"]
             if let ref { event["ref"] = ref }

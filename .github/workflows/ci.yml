@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'wip/responses-*', 'wip/subscription-*']
+    branches: [main, 'wip/responses-*', 'wip/subscription-*', 'wip/browser-settings']
   pull_request:
   workflow_dispatch:
 
@@ -71,6 +71,7 @@ jobs:
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish
           python3 scripts/subscription_browser_test.py
+          python3 scripts/browser_settings_test.py .build/debug/briglia
 
   macos:
     name: macOS
@@ -115,3 +116,5 @@ jobs:
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish
           python3 scripts/subscription_browser_test.py
+      - name: Browser settings browser test
+        run: python3 scripts/browser_settings_test.py .build/debug/briglia

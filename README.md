@@ -56,7 +56,8 @@ Commands:
 | command | |
 | --- | --- |
 | `briglia` / `briglia chat` | interactive chat REPL (`/stop`, `/status`, `/prune`, `/attach`, `/quit`) |
-| `briglia setup` | setup wizard; rerun any single section later. Step 1 can configure SEVERAL main-agent providers (OpenCode Go, OpenRouter, custom endpoint, local server) — hop between them anytime with `/provider <name>` in chat |
+| `briglia setup` | setup wizard; rerun any single section later. Step 1 can configure SEVERAL main-agent providers (OpenCode Go, OpenRouter, OpenAI API, ChatGPT subscription, custom endpoint, local server) — hop between them anytime with `/provider <name>` in chat |
+| `briglia quicksetup` | browser Quick Setup on a new installation; provider, model, ChatGPT account and tool-key settings on an existing installation |
 | session affinity | requests to OpenCode Go carry the required `x-opencode-session` header and requests to OpenRouter the optional `x-session-id` (one opaque HMAC-derived value per conversation, subagent session or background run; state in `~/.local/share/briglia/affinity.json`, never exported, wiped by `/deleteuserdata`, refreshed by the hidden `/rotateaffinity`). The header is sent only to `opencode.ai` / `openrouter.ai` hosts directly — a proxy in front of OpenCode must add its own |
 | `briglia daemon` | headless mode — Telegram channel only. One conversation-owning instance at a time: `briglia` and `briglia daemon` share state, so the second refuses to start |
 | `briglia service install` | Linux: systemd user service for the daemon (auto-start at boot via linger; keep-awake support on Ubuntu Touch). `status`/`uninstall` included |
@@ -213,3 +214,32 @@ in `THIRD_PARTY_NOTICES.md`.
 External contributions are not being accepted yet while the contribution
 policy (CLA) is finalized — bug reports and security reports are very
 welcome.
+
+### Browser settings after installation
+
+Run `briglia quicksetup` whenever you want to update a provider, model, reasoning
+effort, or tool API key. Existing installations open a settings page; new ones
+still use the guided installation flow. All six provider profiles are available:
+OpenCode Go, OpenRouter, OpenAI API, ChatGPT subscription, a custom endpoint, and
+a local server. Model IDs can be entered directly; OpenCode choices are also
+suggested from the bundled catalog.
+
+Verify and save one section at a time. A blank provider key keeps the saved key;
+the browser never receives stored keys. Adding a provider keeps the current
+provider active unless you select “Use this as the active provider.” ChatGPT
+sign-in is separate from the API key used by web research, voice, and images.
+
+When Briglia is running, the command asks that process to serve the page. Saving
+waits for user retry if a turn, background subagent, or maintenance task is busy;
+a successful save reloads the affected services before admitting another turn.
+When Briglia is stopped, the settings command holds its instance lease, so a
+second agent cannot start during configuration. Closing the command keeps saved
+changes. A running older version without browser-settings support must be
+updated/restarted or stopped first.
+
+The page listens only on `127.0.0.1`, with a single-use five-minute launch link and
+an HttpOnly session cookie. Opening another link revokes the previous session.
+After 30 minutes without page activity, the server closes. Opening the page on a
+remote machine requires local browser access or an explicitly configured SSH
+tunnel; the listener is never exposed on the network. Telegram pairing, email
+installation and system changes remain in `briglia setup`.

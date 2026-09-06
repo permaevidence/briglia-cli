@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Briglia · Settings</title><link rel="stylesheet" href="/app.css"><script src="/settings.js" defer></script></head>
+<body><main>
+<h1>Briglia settings</h1>
+<p class="lead">Update a provider or tool key. Verify and save each section independently.</p>
+<p id="runtime" class="hint"></p><div id="banner" role="status" hidden></div>
+<section><h2>Providers</h2><p id="active"></p>
+<label class="field">Provider<select id="provider"></select></label>
+<p id="configured" class="hint"></p>
+<div id="account" hidden>
+<p>ChatGPT subscription runs the agent. Web research, voice and image tools use separate API keys.</p>
+<p id="account-status" role="status"></p>
+<p id="login-code" hidden><a id="login-link" target="_blank" rel="noopener noreferrer">Open ChatGPT sign-in</a> · Code: <strong id="code"></strong></p>
+<button id="login" type="button">Sign in</button> <button id="cancel" type="button" hidden>Cancel sign-in</button> <button id="logout" type="button">Sign out locally</button>
+</div>
+<label id="key-row" class="field">API key<input id="key" type="password" autocomplete="off" placeholder="Leave blank to keep the stored key"></label>
+<label id="endpoint-row" class="field" hidden>Server URL<input id="endpoint" type="url" autocomplete="off" placeholder="http://127.0.0.1:1234/v1"></label>
+<label class="field">Model<input type="text" id="model" list="models" autocomplete="off" placeholder="Enter a model ID"><datalist id="models"></datalist></label>
+<label id="effort-row" class="field">Reasoning effort<select id="effort"><option value="">Provider default</option><option>none</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option><option>ultra</option></select></label>
+<label id="protocol-row" class="field" hidden>API protocol<select id="protocol"><option value="chatCompletions">Chat Completions</option><option value="responses">Responses</option></select></label>
+<label id="vision-row" class="field"><span><input id="vision" type="checkbox"> This model can see images</span></label>
+<label id="media-row" class="field" hidden><span><input id="native-media" type="checkbox"> Server supports images in tool results</span></label>
+<label class="field"><span><input id="activate" type="checkbox"> Use this as the active provider</span></label>
+<button id="verify-provider" type="button">Verify provider</button> <button id="save-provider" class="primary" type="button" disabled>Save provider</button>
+</section>
+<section><h2>Tool keys</h2><p class="hint">OpenAI tools have separate API billing, including when the agent uses a ChatGPT subscription. Updating this key configures OpenAI web research, transcription, images and OCR.</p><div id="tools"></div></section>
+<p class="hint">Keys are verified with their provider from this computer. They are never sent to briglia.dev. Telegram pairing and system installation remain available in <code>briglia setup</code>.</p>
+<p class="hint">Close this tab when finished. Run <code>briglia quicksetup</code> again for a new private link.</p>
+</main></body></html>

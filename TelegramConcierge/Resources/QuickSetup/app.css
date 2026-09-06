@@ -55,3 +55,5 @@ button:disabled { opacity: .5; cursor: default; }
 .banner.error { background: #fef2f2; border-color: #fca5a5; color: #7f1d1d; }
 .foot { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); margin-top: 40px; padding-top: 12px; }
 code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.field select, .field input[type="url"] { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: var(--ink); }

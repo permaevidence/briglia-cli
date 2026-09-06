@@ -139,7 +139,7 @@ struct QuickSetupEnvironment {
         }
         return await SetupAPICore.probe($0)
     }
-    var apply: ([String: Any], () throws -> Void) async -> [String: Any] = { await SetupAPICore.apply($0, checkpoint: $1) }
+    var apply: ([String: Any], () throws -> Void) async -> [String: Any] = { await SetupAPICore.apply($0, ownsLease: true, checkpoint: $1) }
     var storedValue: (String) -> String? = { KeychainHelper.load(key: $0) }
     var saveBatch: ([String: String?]) throws -> Void = { try KeychainHelper.saveBatch($0) }
     var fsyncConfigDirectory: () throws -> Void = { try PrivateStorage.fsyncDirectory(StoragePaths.configRoot.path) }
@@ -498,6 +498,8 @@ actor QuickSetupWorkflow {
         }
     }
     var inFlightOperations: Int { inFlight }
+    func beginSettingsOperation(_ g: Int) throws { try checkpoint(g); beginOperation() }
+    func endSettingsOperation() { endOperation() }
 
     func checkpoint(_ g: Int) throws {
         if g != generation { throw Superseded() }
@@ -820,7 +822,7 @@ actor QuickSetupWorkflow {
         func set(_ v: Int) { lock.lock(); value = v; lock.unlock() }
         func get() -> Int { lock.lock(); defer { lock.unlock() }; return value }
     }
-    private nonisolated func checkpointSync(_ g: Int) throws {
+    nonisolated func checkpointSync(_ g: Int) throws {
         if generationBox.get() != g { throw SetupAPICore.CheckpointRevoked("this quick-setup session was replaced") }
     }
 

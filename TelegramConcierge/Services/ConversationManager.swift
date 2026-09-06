@@ -469,8 +469,11 @@ class ConversationManager: ObservableObject {
 
         // The composer bypasses the poll loop, so it needs its own restore gate.
         guard !isRestoringMind else {
-            return .refused("memory restore in progress — try again in a moment")
+            return .refused(browserSettingsMutation ? "browser settings are being updated — try again in a moment" : "memory restore in progress — try again in a moment")
         }
+
+        browserSettingsAppIngress += 1
+        defer { browserSettingsAppIngress -= 1 }
 
         // Typing in the app implies the agent should be running.
         if !isPolling {
@@ -1400,6 +1403,11 @@ class ConversationManager: ObservableObject {
                         try? await Task.sleep(nanoseconds: 200_000_000)
                         continue
                     }
+
+                    // Settings waits for a tick already suspended in a channel
+                    // fetch to finish before it can change runtime credentials.
+                    browserSettingsPollIngress += 1
+                    defer { browserSettingsPollIngress -= 1 }
 
                     // Start deferred ambient turns (email arrivals that landed
                     // while a run was active) as soon as the agent is idle.
@@ -3137,7 +3145,13 @@ class ConversationManager: ObservableObject {
 
     private func handleControlCommandIfNeeded(_ text: String) async -> Bool {
         let token = commandToken(from: text)
+        if browserSettingsMutation, text.hasPrefix("/") {
+            try? await sendText("Browser settings are being applied. Please retry this command in a moment.")
+            return true
+        }
         
+        browserSettingsCommandIngress += 1
+        defer { browserSettingsCommandIngress -= 1 }
         switch token {
         case "/stop":
             await stopActiveExecution()
@@ -9899,6 +9913,62 @@ class ConversationManager: ObservableObject {
     /// turn is running or memory maintenance is in flight — the caller shows
     /// the user why. On success the poll loop idles and new turns are
     /// refused until `endMindRestore()`.
+    private var browserSettingsMutation = false
+    private var browserSettingsPollIngress = 0
+    private var browserSettingsAppIngress = 0
+    private var browserSettingsCommandIngress = 0
+    func _testSetBrowserSettingsPollIngress(_ count: Int) { browserSettingsPollIngress = count }
+
+    /// Shares the existing ingress/maintenance barrier, without cancelling work
+    /// or replacing memory. Only a short mutation + service reload holds it.
+    func beginBrowserSettingsMutation() async -> Bool {
+        guard subscriptionLoginTask == nil, watcherChecksInFlight.isEmpty,
+              triageRunsInFlight.isEmpty, activeProcessingTask == nil,
+              browserSettingsCommandIngress == 0, beginMindRestore() else { return false }
+        browserSettingsMutation = true
+        // An app attachment copy or Telegram long poll may have crossed its
+        // ingress check before we raised the gate. Let it exit, then recheck
+        // every producer. A newly started turn wins; settings returns busy.
+        let deadline = ProcessInfo.processInfo.systemUptime + 35
+        while browserSettingsPollIngress > 0 || browserSettingsAppIngress > 0 {
+            if Task.isCancelled || ProcessInfo.processInfo.systemUptime >= deadline {
+                endBrowserSettingsMutation(); return false
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let subagents = await SubagentBackgroundRegistry.shared.activeRunIds()
+        guard subagents.isEmpty, !isTurnActive, activeProcessingTask == nil,
+              watcherChecksInFlight.isEmpty, triageRunsInFlight.isEmpty,
+              maintenanceActivities.isEmpty, archiveRecoveryTask == nil,
+              subscriptionLoginTask == nil else {
+            endBrowserSettingsMutation(); return false
+        }
+        return true
+    }
+
+    func endBrowserSettingsMutation() {
+        browserSettingsMutation = false
+        endMindRestore()
+    }
+
+    func reloadBrowserSettings() async {
+        let key = KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? ""
+        await openRouterService.configure(apiKey: key)
+        await archiveService.configure(apiKey: key)
+        await toolExecutor.configure(openRouterKey: key,
+            serperKey: KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? "",
+            jinaKey: KeychainHelper.load(key: KeychainHelper.jinaApiKeyKey) ?? "")
+        if let imageKey = KeychainHelper.load(key: KeychainHelper.openAIImageApiKeyKey), !imageKey.isEmpty {
+            await OpenAIImageService.shared.configure(apiKey: imageKey,
+                model: KeychainHelper.load(key: KeychainHelper.openAIImageModelKey),
+                quality: KeychainHelper.load(key: KeychainHelper.openAIImageQualityKey),
+                outputFormat: KeychainHelper.load(key: KeychainHelper.openAIImageOutputFormatKey),
+                moderation: KeychainHelper.load(key: KeychainHelper.openAIImageModerationKey))
+        }
+        NotificationCenter.default.post(name: .adaLLMProviderDidChange, object: nil,
+            userInfo: ["provider": LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)).rawValue])
+    }
+
     func beginMindRestore() -> Bool {
         guard !isRestoringMind,
               !isTurnActive,

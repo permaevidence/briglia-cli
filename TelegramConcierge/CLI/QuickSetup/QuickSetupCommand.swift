@@ -11,14 +11,18 @@ import Darwin
 struct QuickSetup: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "quicksetup",
-        abstract: "Fast setup: verify and save every key from a page in your browser, then install what Briglia needs."
+        abstract: "Open browser settings, or guided Quick Setup on a new installation."
     )
 
     func run() async throws {
         AdaCLI.prepareIO()
         try IdentityMigration.gateMutatingEntry()
         IdentityMigration.warnLegacyEnvironment()
-        try await QuickSetupSession.runInteractive()
+        if SetupWizard.setupComplete() {
+            try await BrowserSettingsHost.runCommand()
+        } else {
+            try await QuickSetupSession.runInteractive()
+        }
     }
 }
 
@@ -135,6 +139,7 @@ final class QuickSetupRouter: @unchecked Sendable {
     let workflow: QuickSetupWorkflow
     let port: () -> UInt16
     let pageDirectory: URL
+    var settings: BrowserSettingsWorkflow?
 
     init(workflow: QuickSetupWorkflow, pageDirectory: URL, port: @escaping () -> UInt16) {
         self.workflow = workflow
@@ -173,6 +178,21 @@ final class QuickSetupRouter: @unchecked Sendable {
         // One actor call: the cookie check and the generation it authorizes.
         guard let g = await workflow.authorizedGeneration(cookie: request.cookieBQS) else { return .status(404) }
 
+        if let settings {
+            switch (request.method, request.path) {
+            case ("GET", "/"): return staticFile("settings.html", type: "text/html; charset=utf-8")
+            case ("GET", "/settings.js"): return staticFile("settings.js", type: "text/javascript; charset=utf-8")
+            case ("GET", "/app.css"): return staticFile("app.css", type: "text/css; charset=utf-8")
+            case ("GET", "/api/status"):
+                let result = await settings.handle("status", body: [:], generation: g)
+                return Self.json(result.0, result.1)
+            case ("POST", "/api/verify"), ("POST", "/api/save"), ("POST", "/api/subscription"):
+                guard let body = parseBody(request) else { return Self.json(400, ["error": "bad_json"]) }
+                let result = await settings.handle(String(request.path.dropFirst(5)), body: body, generation: g)
+                return Self.json(result.0, result.1)
+            default: return .status(404)
+            }
+        }
         switch (request.method, request.path) {
         case ("GET", "/"): return staticFile("index.html", type: "text/html; charset=utf-8")
         case ("GET", "/app.js"): return staticFile("app.js", type: "text/javascript; charset=utf-8")

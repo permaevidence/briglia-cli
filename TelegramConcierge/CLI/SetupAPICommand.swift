@@ -503,14 +503,15 @@ enum SetupAPICore {
     /// authorization was revoked mid-section aborts with nothing further
     /// written. A throw surfaces as `superseded` with `applied` listing what
     /// committed before it. `setup-api` and the UT app pass nothing.
-    static func apply(_ request: [String: Any], checkpoint: () throws -> Void = {}) async -> [String: Any] {
+    static func apply(_ request: [String: Any], ownsLease: Bool = false, checkpoint: () throws -> Void = {}) async -> [String: Any] {
         if let refusal = migrationRefusal() { return refusal }
         ProviderProfiles.ensureMigrated()
         var applied: [String] = []
         var warnings: [String] = []
         do {
+            try checkpoint()
             if let section = request["provider"] as? [String: Any] {
-                try applyProvider(section)
+                try applyProvider(section, ownsLease: ownsLease, checkpoint: checkpoint)
                 applied.append("provider")
             }
             if let section = request["openai"] as? [String: Any] {
@@ -626,7 +627,7 @@ enum SetupAPICore {
         return payload
     }
 
-    private static func applyProvider(_ section: [String: Any]) throws {
+    private static func applyProvider(_ section: [String: Any], ownsLease: Bool = false, checkpoint: () throws -> Void = {}) throws {
         guard let raw = nonEmptyString(section["profile"]),
               let profile = ProviderProfiles.Profile(rawValue: raw.lowercased()) else {
             throw APIError(code: "invalid_value",
@@ -640,7 +641,7 @@ enum SetupAPICore {
         let affectsResponses = profile == .openai || section["protocol"] as? String == "responses"
             || ProviderProfiles.wireProtocol(profile) == .responses || ProviderProfiles.usesResponses
         var lease: InstanceLease?
-        if affectsResponses {
+        if affectsResponses && !ownsLease {
             try StoragePaths.ensureRootsChecked()
             switch InstanceLease.acquire(label: "Responses profile configuration") {
             case .success(let held): lease = held
@@ -649,6 +650,7 @@ enum SetupAPICore {
         }
         defer { lease?.release() }
         if section["remove"] as? Bool == true {
+            try checkpoint()
             try removeProvider(profile)
             return
         }
@@ -730,6 +732,7 @@ enum SetupAPICore {
         // send an effort explicitly requested by the owner; no model-name sniff.
         let effort: String? = profile == .local ? nil
             : (nonEmptyString(section["effort"]) ?? (protocolForSave == .responses ? nil : "high"))
+        try checkpoint()
         do {
             try ProviderProfiles.saveProfile(profile, apiKey: profile == .local ? nil : apiKey,
                                              baseURL: baseURL, model: model,
