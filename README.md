@@ -106,7 +106,7 @@ gaps:
   Linux (including Ubuntu Touch); a macOS launchd generator is future
   work — run `briglia daemon` in a terminal there.
 
-## ChatGPT subscription (private preview)
+## ChatGPT subscription
 
 Briglia can connect your own ChatGPT account while keeping its own prompts,
 local history, tools, memory and agent loop. This is a separate provider from
@@ -160,9 +160,13 @@ a reported zero is a cache miss. The ledger retains at most 1,000 attempts in th
 owner-only `responses_usage.json` (2 MiB ceiling), including main turns, subagents,
 maintenance and the web agent's separate Responses calls. Subscription, OpenAI
 API and custom Responses traffic are reported separately. Chat Completions and
-non-model tool requests are outside this ledger. Prompts, account identifiers,
+non-model tool requests and setup/doctor probes are outside this ledger. Prompts, account identifiers,
 credentials, ciphertext and routing token values are never recorded. Mind exports
-exclude this diagnostic state; `/deleteuserdata` clears it. Recording failures
+exclude this diagnostic state; `/deleteuserdata` clears it, including preserved
+damaged copies. A malformed ledger is preserved beside the original and a fresh
+ledger starts on the next recorded request. Read-only diagnostics report the
+problem without changing files; unsafe permissions or a future format are never
+silently reset. Recording failures
 warn once and never prevent a model request; lost records cannot be reconstructed.
 
 Subscription requests echo the first valid `x-codex-turn-state` response header
@@ -175,11 +179,11 @@ Subscription tool media currently uses the labeled synthetic-observation
 fallback. Opaque reasoning is replayed only for the same model/login scope;
 ordinary token refresh preserves it, while logout/reconnect invalidates it.
 
-This preview uses the public OAuth-client compatibility route also used by Pi
-and OpenCode, with Briglia attribution. Public distribution remains subject to
-review of that integration basis and the live capability results. Native UT
-login UI and automatic client upgrades are not included; configure through CLI
-or Telegram only, after the compatible client update where applicable.
+This integration uses the public OAuth-client compatibility route also used by
+Pi and OpenCode, with Briglia attribution. It is not an official OpenAI client;
+availability depends on your account, workspace permissions and the upstream
+service. The companion Ubuntu Touch login screens require a compatible app
+update; physical Pixel onboarding is not yet verified for this release.
 
 ## Development
 

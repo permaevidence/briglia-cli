@@ -20,7 +20,7 @@ import Darwin
 /// workflow's authorize job checks that this constant, the tag, and the
 /// stamped version agree, and that the sequence is strictly greater than the
 /// last successfully released one. Bump it in the release-prep commit.
-let adaCLIReleaseSequence = 69
+let adaCLIReleaseSequence = 70
 
 /// The canonical release repository this binary trusts artifacts from. The
 /// staging pipeline stamps its own repo here (STAMP-RELEASE-REPO); production

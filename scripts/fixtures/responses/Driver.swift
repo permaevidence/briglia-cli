@@ -413,10 +413,12 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
             let body = try JSONSerialization.jsonObject(with: request.body) as! [String: Any]
             try P2Life.require(body["tools"] == nil && body["messages"] == nil, "auxiliary request has no tools or chat payload")
         }
-        server.script([try P2Life.body("OK")])
+        let usageBeforeProbe = try Data(contentsOf: ResponsesUsageStore().file)
+        server.script(["{}", try P2Life.body("OK")], statuses: [500, 200])
         let probe = await Probes.responses(baseURL: "http://127.0.0.1:\(server.port)/v1", apiKey: "synthetic-p2-key", model: "gpt-5.6-luna")
         let probeBody = try JSONSerialization.jsonObject(with: server.completeRequests.last!.body) as! [String: Any]
         try P2Life.require(probe == nil && probeBody["max_output_tokens"] as? Int == 2048 && (probeBody["reasoning"] as? [String: String])?["effort"] == "low", "reasoning probe uses low effort and adequate cap")
+        try P2Life.require(try Data(contentsOf: ResponsesUsageStore().file) == usageBeforeProbe, "real probe and retry leave existing usage bytes unchanged")
         try P2Life.require(server.remainingResponses == 0 && server.errors.isEmpty, "auxiliary capture script exhausted")
     }
 

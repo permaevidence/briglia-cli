@@ -14,15 +14,18 @@ struct ResponsesCacheSelftest: AsyncParsableCommand {
     @Option(name: .long) var ledgerWorker: String?
 
     func run() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("briglia-cache-test-\(UUID())")
+        for (key, dir) in [("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")] {
+            setenv(key, root.appendingPathComponent(dir).path, 1)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
         if let ledgerWorker {
             let store = ResponsesUsageStore(directory: URL(fileURLWithPath: ledgerWorker))
             for _ in 0..<10 { _ = try store.begin(record()) }
             return
         }
         let c = ResponsesSelftest.Checks()
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("briglia-cache-test-\(UUID())")
         try PrivateStorage.ensureDirectory(root)
-        defer { try? FileManager.default.removeItem(at: root) }
         let context = subscription()
         let state = context.responsesTurn
         c.check("new turn has no routing state", state.value(for: context.responsesScope) == nil)
@@ -48,14 +51,24 @@ struct ResponsesCacheSelftest: AsyncParsableCommand {
         let winner = fresh.value(for: context.responsesScope)
         fresh.receive("replace", scope: context.responsesScope)
         c.check("concurrent headers retain one first value", winner != nil && winner == fresh.value(for: context.responsesScope))
-        for (key, dir) in [("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")] {
-            setenv(key, root.appendingPathComponent(dir).path, 1)
-        }
+        try probes(c, root: root)
         try await transport(c)
         try await webUsage(c)
         try ledger(c, root: root)
         print("Responses cache selftest: \(c.total - c.failures)/\(c.total)")
         if c.failures > 0 { throw ValidationError("Cache/routing checks failed") }
+    }
+
+    private func probes(_ c: ResponsesSelftest.Checks, root: URL) throws {
+        let directory = root.appendingPathComponent("untouched-probe")
+        let store = ResponsesUsageStore(directory: directory)
+        var probe = ProviderExecutionContext.responsesAPI(baseURL: "https://api.openai.com/v1", key: "fixture", model: "fixture", lane: .probe(UUID()))
+        c.check("probe lane creates no receipt", try store.begin(context: probe, requestID: UUID(), attempt: 1, sentRoutingState: false) == nil)
+        probe = ProviderExecutionContext.responsesAPI(baseURL: "https://api.openai.com/v1", key: "fixture", model: "fixture", lane: .main)
+        probe.responsesOperation = .probe
+        c.check("probe operation creates no receipt", try store.begin(context: probe, requestID: UUID(), attempt: 1, sentRoutingState: false) == nil)
+        _ = try store.diagnostic()
+        c.check("probes and fresh diagnostics create no directory or lock", !FileManager.default.fileExists(atPath: directory.path))
     }
 
     private func subscription(key: String = "account-a") -> ProviderExecutionContext {
@@ -146,16 +159,29 @@ struct ResponsesCacheSelftest: AsyncParsableCommand {
         children.forEach { $0.waitUntilExit() }
         c.check("two-process recording has no lost entries", try children.allSatisfy { $0.terminationStatus == 0 } && store.read()?.records.count == 20)
         try PrivateStorage.writeAtomically(Data("malformed sentinel".utf8), to: store.file)
-        c.rejects("corrupt ledger refuses mutation", { _ = try store.begin(record()) })
-        c.check("corrupt ledger bytes preserved", try Data(contentsOf: store.file) == Data("malformed sentinel".utf8))
+        c.check("doctor reports corruption without changing bytes", try store.diagnostic().contains("damaged") && Data(contentsOf: store.file) == Data("malformed sentinel".utf8))
+        let recovered = try store.begin(record())
+        let parked = try store.quarantinedFiles()
+        c.check("corrupt ledger bytes preserved in quarantine", try parked.count == 1 && Data(contentsOf: parked[0]) == Data("malformed sentinel".utf8))
+        c.check("corruption recovery starts a fresh generation", try recovered.generation != ticket.generation && store.read()?.records.count == 1)
+        try store.finish(ticket, outcome: .completed, status: 200, durationMs: 1, counts: counts, receivedRoutingState: false)
+        c.check("pre-recovery receipt cannot update regenerated state", try store.read()?.records.first?.outcome == .pending)
+        try store.finish(recovered, outcome: .completed, status: 200, durationMs: 1, counts: counts, receivedRoutingState: false)
+        c.check("recording resumes after corruption", try store.read()?.records.first?.counts.input == 100)
+        try PrivateStorage.writeAtomically(Data(#"{"version":2}"#.utf8), to: store.file)
+        c.rejects("future ledger version is never reset", { _ = try store.begin(record()) })
+        c.check("future ledger bytes preserved", try Data(contentsOf: store.file) == Data(#"{"version":2}"#.utf8))
         try store.clearForWipe()
+        c.check("wipe removes quarantined diagnostic data", try store.quarantinedFiles().isEmpty)
         let target = root.appendingPathComponent("target")
         try PrivateStorage.writeAtomically(Data("target sentinel".utf8), to: target)
         try FileManager.default.createSymbolicLink(at: store.file, withDestinationURL: target)
         c.rejects("symlink ledger refused", { _ = try store.begin(record()) })
+        c.check("unsafe object never quarantined", try store.quarantinedFiles().isEmpty)
         try store.clearForWipe()
         c.check("wipe removes link without touching target", try Data(contentsOf: target) == Data("target sentinel".utf8))
         _ = try store.begin(record()); chmod(store.file.path, 0o644)
         c.rejects("wide ledger permissions refused", { _ = try store.read() })
+        c.rejects("wide ledger not reset by recording", { _ = try store.begin(record()) })
     }
 }

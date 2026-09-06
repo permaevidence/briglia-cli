@@ -60,12 +60,17 @@ struct ResponsesUsageStore {
     struct Failure: Error, LocalizedError {
         var errorDescription: String? { "Cache statistics unavailable: cannot safely read or write the local usage ledger." }
     }
+    private struct CorruptState: Error {
+        let device: dev_t
+        let inode: ino_t
+    }
     let directory: URL
     init(directory: URL = StoragePaths.dataRoot) { self.directory = directory }
     var file: URL { directory.appendingPathComponent("responses_usage.json") }
     var lockFile: URL { directory.appendingPathComponent("responses_usage.lock") }
     static let capacity = 1000
     static let maxBytes = 2 * 1024 * 1024
+    static let corruptPrefix = "responses_usage.json.corrupt-"
 
     func read() throws -> State? {
         let fd = open(file.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
@@ -81,14 +86,54 @@ struct ResponsesUsageStore {
             data.append(chunk)
             guard data.count <= Self.maxBytes else { throw Failure() }
         }
+        // Never reset a future format written by a newer Briglia installation.
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let version = object["version"] as? NSNumber, version != 1 { throw Failure() }
         guard let state = try? JSONDecoder().decode(State.self, from: data), state.version == 1,
               state.records.count <= Self.capacity,
               state.records.allSatisfy({ record in
                   record.model.utf8.count <= 512 && record.lane.utf8.count <= 32 &&
                   [record.counts.input, record.counts.cachedInput, record.counts.cacheWriteInput,
                    record.counts.output, record.counts.reasoningOutput].allSatisfy { $0 == nil || (0...1_000_000_000).contains($0!) }
-              }) else { throw Failure() }
+              }) else { throw CorruptState(device: info.st_dev, inode: info.st_ino) }
         return state
+    }
+
+    /// Only real recording recovers corruption. Read-only diagnostics and probes
+    /// do not create, quarantine or replace files. Unsafe filesystem objects fail.
+    private func loadForRecording() throws -> State {
+        do { return try read() ?? State() }
+        catch let corrupt as CorruptState {
+            var current = stat()
+            guard lstat(file.path, &current) == 0,
+                  current.st_dev == corrupt.device, current.st_ino == corrupt.inode,
+                  current.st_mode & S_IFMT == S_IFREG else { throw Failure() }
+            let parked = directory.appendingPathComponent(Self.corruptPrefix + UUID().uuidString)
+            try FileManager.default.moveItem(at: file, to: parked)
+            try PrivateStorage.fsyncDirectory(directory.path)
+            print("[Cache statistics] Damaged statistics preserved in \(parked.lastPathComponent); starting a new ledger.")
+            return State()
+        }
+    }
+
+    func quarantinedFiles() throws -> [URL] {
+        var info = stat()
+        if lstat(directory.path, &info) != 0 {
+            if errno == ENOENT { return [] }
+            throw Failure()
+        }
+        return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(Self.corruptPrefix) }
+    }
+
+    func diagnostic() throws -> String {
+        let state: State?
+        do { state = try read() }
+        catch is CorruptState {
+            return "Cache statistics are damaged; the next recorded model request will preserve the damaged file and start fresh statistics."
+        }
+        let parked = try quarantinedFiles().count
+        return "Responses cache statistics: \(state?.records.count ?? 0) attempts, \(parked) preserved damaged file(s)."
     }
 
     private func locked<T>(_ body: () throws -> T) throws -> T {
@@ -119,7 +164,7 @@ struct ResponsesUsageStore {
 
     func begin(_ record: Record) throws -> Ticket {
         try locked {
-            var state = try read() ?? State()
+            var state = try loadForRecording()
             var record = record
             record.id = UUID()
             state.records.append(record)
@@ -127,6 +172,14 @@ struct ResponsesUsageStore {
             try write(state)
             return Ticket(generation: state.generation, recordID: record.id)
         }
+    }
+
+    func begin(context: ProviderExecutionContext, requestID: UUID, attempt: Int,
+               sentRoutingState: Bool) throws -> Ticket? {
+        if case .probe = context.lane { return nil }
+        guard context.responsesOperation != .probe else { return nil }
+        return try begin(Self.record(context: context, requestID: requestID,
+            attempt: attempt, sentRoutingState: sentRoutingState))
     }
 
     func finish(_ ticket: Ticket, outcome: Outcome, status: Int?, durationMs: Int,
@@ -147,6 +200,9 @@ struct ResponsesUsageStore {
         try locked {
             // No decoding needed: even a malformed ledger must be removable.
             if unlink(file.path) != 0 && errno != ENOENT { throw Failure() }
+            for parked in try quarantinedFiles() {
+                if unlink(parked.path) != 0 && errno != ENOENT { throw Failure() }
+            }
             try PrivateStorage.fsyncDirectory(directory.path)
         }
     }

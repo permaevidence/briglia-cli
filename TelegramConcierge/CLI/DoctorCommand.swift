@@ -99,6 +99,10 @@ struct Doctor: AsyncParsableCommand {
             if finding.problem { check(finding.text, ok: false, hint: finding.hint) } else { note(finding.text) }
         }
 
+        print("\nCache diagnostics")
+        do { note(try ResponsesUsageStore().diagnostic()) }
+        catch { check("cache statistics unreadable", ok: false, hint: "Check responses_usage.json ownership, permissions and format; model requests can continue without statistics.") }
+
         // Managed Playwright (Release C): the entry's shape, the referenced
         // install's marker, unreferenced/leftover directories, last bootstrap.
         let playwrightFindings = ManagedPlaywright.doctorFindings(

@@ -141,8 +141,8 @@ struct ResponsesAdapter {
                 let usage = ResponsesUsageStore()
                 let started = ProcessInfo.processInfo.systemUptime
                 let ticket: ResponsesUsageStore.Ticket?
-                do { ticket = try usage.begin(ResponsesUsageStore.record(context: context, requestID: receipt.requestID,
-                    attempt: dispatch, sentRoutingState: request.value(forHTTPHeaderField: ResponsesTurn.header) != nil)) }
+                do { ticket = try usage.begin(context: context, requestID: receipt.requestID,
+                    attempt: dispatch, sentRoutingState: request.value(forHTTPHeaderField: ResponsesTurn.header) != nil) }
                 catch { ticket = nil; ResponsesUsageStore.warn() }
                 var counts = ResponsesUsageCounts()
                 var completed = false
