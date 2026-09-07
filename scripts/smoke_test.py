@@ -406,6 +406,15 @@ def main():
     check("chat-adapter-selftest (origins, snapshot and retry isolation)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    # HTTP 413 in the shared chat request loop: retried with identical bytes on
+    # OpenCode hosts only (six attempts, ~45 s schedule), fatal at once on
+    # OpenRouter and custom hosts, generic four-attempt cap unchanged, the
+    # mid-turn nonce on every attempt, cancellation during the wait.
+    result = run_selftest([os.path.abspath(ADA), "__chat-retry-selftest"], capture_output=True,
+                            text=True, timeout=120)
+    check("chat-retry-selftest (OpenCode-only 413 retry, other hosts fatal)", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
     result = run_selftest([os.path.abspath(ADA), "__responses-selftest"], capture_output=True,
                             text=True, timeout=120)
     check("responses-selftest (codec, stream, replay and native/fallback media)", result.returncode == 0,
