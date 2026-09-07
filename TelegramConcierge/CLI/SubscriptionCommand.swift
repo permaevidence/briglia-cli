@@ -20,7 +20,7 @@ struct SubscriptionCommand: AsyncParsableCommand {
                 print("Billing: subscription. Quota: unknown (not unlimited). API tools keep their separate configuration.")
             } else { print("ChatGPT subscription: signed out") }
         case "models":
-            print("Known compatibility candidates (not live entitlement discovery): gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol, gpt-6-astra. Availability is verified by requests; catalog freshness is unknown.")
+            print("Known compatibility candidates (not live entitlement discovery): \(ResponsesAdapter.subscriptionModelChoices.map(\.id).joined(separator: ", ")). Availability is verified by requests; catalog freshness is unknown.")
         case "login", "select", "cancel", "logout":
             try IdentityMigration.gateMutatingEntry()
             // Profile changes need daemon exclusion. Logout may invalidate an

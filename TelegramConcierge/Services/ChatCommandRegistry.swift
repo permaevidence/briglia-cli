@@ -34,11 +34,11 @@ enum ChatCommandRegistry {
         ChatCommand(name: "continue", description: "Show the rest of a long reply",
                     usage: nil, inMenu: false, category: "Control"),
         ChatCommand(name: "model", description: "Show or switch the main model",
-                    usage: "[id]", inMenu: false, category: "Models"),
-        ChatCommand(name: "provider", description: "List or hop between configured LLM providers",
-                    usage: "[name]", inMenu: false, category: "Models"),
-        ChatCommand(name: "effort", description: "Set the reasoning effort",
-                    usage: "[level]", inMenu: false, category: "Models"),
+                    usage: "[id]", inMenu: true, category: "Models"),
+        ChatCommand(name: "provider", description: "Show or switch the LLM provider",
+                    usage: "[name]", inMenu: true, category: "Models"),
+        ChatCommand(name: "effort", description: "Show or set the reasoning effort",
+                    usage: "[level]", inMenu: true, category: "Models"),
         ChatCommand(name: "websearch", description: "Show or switch the web research backend",
                     usage: "[name]", inMenu: false, category: "Models"),
         ChatCommand(name: "subagentmodels", description: "Show or set the cheap subagent model lanes",
@@ -69,10 +69,20 @@ enum ChatCommandRegistry {
                     usage: "[token]", inMenu: false, category: "Account"),
     ]
 
+    /// Telegram "/" menu order (owner, 2026-09-07): /status first, then the
+    /// three switches that now answer with tap buttons, the everyday
+    /// maintenance commands, /commands as the index to the rest, and /stop
+    /// LAST so it is never the accidental first tap.
+    static let menuOrder = ["status", "provider", "model", "effort", "prune", "upgrade", "commands", "stop"]
+
     /// The trimmed Telegram "/" menu: only the everyday commands a regular
-    /// user needs, plus /commands as the discoverable index to the rest.
+    /// user needs (`inMenu`), in `menuOrder`. A command flagged inMenu but
+    /// missing from menuOrder (or vice versa) is a registry bug the
+    /// command-menu selftest catches.
     static var menuCommands: [(command: String, description: String)] {
-        commands.filter(\.inMenu).map { ($0.name, $0.description) }
+        menuOrder.compactMap { name in
+            commands.first { $0.name == name && $0.inMenu }.map { ($0.name, $0.description) }
+        }
     }
 
     /// Body of the /commands reply: every public command, grouped.

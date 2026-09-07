@@ -11,12 +11,73 @@ struct TelegramResponse<T: Codable>: Codable {
 struct TelegramUpdate: Codable, Identifiable {
     let updateId: Int
     let message: TelegramMessage?
+    /// An inline-keyboard tap (command menus). Delivered only because
+    /// getUpdates asks for it in allowed_updates; nil for message updates.
+    let callbackQuery: TelegramCallbackQuery?
     
     var id: Int { updateId }
     
     enum CodingKeys: String, CodingKey {
         case updateId = "update_id"
         case message
+        case callbackQuery = "callback_query"
+    }
+}
+
+// MARK: - Inline keyboards (command menus)
+
+/// A tap on an inline button. `message` is the menu message the keyboard was
+/// attached to (Bot API ≥ 7 may send an "inaccessible message" carrying only
+/// chat + message_id + date 0, which decodes fine here); `data` is the
+/// button's callback_data, ≤ 64 bytes.
+struct TelegramCallbackQuery: Codable {
+    let id: String
+    let from: TelegramUser
+    let message: TelegramMessage?
+    let data: String?
+}
+
+struct TelegramInlineKeyboardButton: Codable, Equatable {
+    let text: String
+    let callbackData: String
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case callbackData = "callback_data"
+    }
+}
+
+struct TelegramInlineKeyboardMarkup: Codable, Equatable {
+    let inlineKeyboard: [[TelegramInlineKeyboardButton]]
+
+    enum CodingKeys: String, CodingKey {
+        case inlineKeyboard = "inline_keyboard"
+    }
+}
+
+struct TelegramAnswerCallbackQueryRequest: Codable {
+    let callbackQueryId: String
+    let text: String?
+    let showAlert: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case callbackQueryId = "callback_query_id"
+        case text
+        case showAlert = "show_alert"
+    }
+}
+
+/// editMessageText without reply_markup: the new text replaces the old and
+/// the inline keyboard is removed.
+struct TelegramEditMessageTextRequest: Codable {
+    let chatId: Int
+    let messageId: Int
+    let text: String
+
+    enum CodingKeys: String, CodingKey {
+        case chatId = "chat_id"
+        case messageId = "message_id"
+        case text
     }
 }
 
@@ -272,11 +333,15 @@ struct TelegramSendMessageRequest: Codable {
     let chatId: Int
     let text: String
     let parseMode: String?
+    /// Optional inline keyboard (command menus). nil is omitted from the
+    /// JSON, so plain sends encode exactly as before.
+    let replyMarkup: TelegramInlineKeyboardMarkup?
 
     enum CodingKeys: String, CodingKey {
         case chatId = "chat_id"
         case text
         case parseMode = "parse_mode"
+        case replyMarkup = "reply_markup"
     }
 }
 

@@ -479,6 +479,14 @@ def main():
     # 3c7. Chat command catalog: the Telegram menu stays trimmed to the five
     # everyday commands, /commands lists every public command and none of the
     # power/owner commands, terminal /help derives from the same registry.
+    # Telegram inline-keyboard menus: payload codec + bounds, the owner's
+    # button policy (OpenCode catalog + ChatGPT four, text-only elsewhere),
+    # plain sendMessage body unchanged, callback_query decode, pairing gate,
+    # browser-page model pickers in step with the Swift list.
+    result = run_selftest([ADA, "__telegram-menu-selftest"], capture_output=True, text=True, timeout=60)
+    check("telegram-menu-selftest (inline-keyboard menus for /provider, /model, /effort)", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
     result = run_selftest([ADA, "__command-menu-selftest"], capture_output=True, text=True, timeout=60)
     check("command-menu-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
@@ -1155,7 +1163,7 @@ def main():
     home = tempfile.mkdtemp(prefix="ada-smoke-poller-", dir="/tmp")
     try:
         tg_state = {"updates": [], "force": [], "offsets": [], "timeline": [],
-                    "sent": [], "t0": time.time()}
+                    "sent": [], "posts": [], "t0": time.time()}
         tg_lock = threading.Lock()
 
         def tg_timeline():
@@ -1207,12 +1215,19 @@ def main():
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length)
-                if "/sendMessage" in self.path:
-                    try:
+                try:
+                    parsed = json.loads(body)
+                except ValueError:
+                    parsed = None
+                # Every Bot API method call is recorded (method name + body)
+                # so phases can assert on answerCallbackQuery / editMessageText
+                # too; "sent" keeps its sendMessage-only meaning.
+                with tg_lock:
+                    tg_state["posts"].append((self.path.rsplit("/", 1)[-1], parsed))
+                if "/sendMessage" in self.path or "/editMessageText" in self.path:
+                    if "/sendMessage" in self.path and parsed is not None:
                         with tg_lock:
-                            tg_state["sent"].append(json.loads(body))
-                    except ValueError:
-                        pass
+                            tg_state["sent"].append(parsed)
                     self._reply({"ok": True, "result": {
                         "message_id": 1, "date": 0,
                         "chat": {"id": 12345, "type": "private"}}})
@@ -2154,6 +2169,118 @@ def main():
               f"{phase11_state} body2_found={body2 is not None} "
               f"annotation_ok={annotation_ok} ordering_ok={ordering_ok} rc={rc11}\n"
               + tg_timeline() + "\n" + out11[-2500:])
+        # Phase 12: Telegram inline-keyboard menus (owner request 2026-09-07),
+        # end-to-end over the real binary and the mock Bot API. /effort with
+        # no argument answers with buttons; a tap (callback_query) runs the
+        # ordinary /effort handler and freezes the menu; a tap from a foreign
+        # user is dropped silently (not even answered); a tap while a turn is
+        # running is answered with an alert and changes nothing.
+        with tg_lock:
+            tg_state["updates"].clear()
+            tg_state["offsets"].clear()
+            tg_state["sent"].clear()
+            tg_state["posts"].clear()
+            llm_state["marker"] = "sleep-now"
+            llm_state["delay"] = 12
+            llm_state["bodies"].clear()
+
+        def tg_callback(uid, data, from_id=12345, msg_id=77):
+            return {"update_id": uid, "callback_query": {
+                "id": f"cq{uid}", "chat_instance": "-1", "data": data,
+                "from": {"id": from_id, "is_bot": False, "first_name": "T"},
+                "message": {"message_id": msg_id, "date": 0,
+                            "text": "Current reasoning effort: menu",
+                            "chat": {"id": 12345, "type": "private"}}}}
+
+        def tg_posts():
+            with tg_lock:
+                return list(tg_state["posts"])
+
+        def tg_sent():
+            with tg_lock:
+                return list(tg_state["sent"])
+
+        def wait_for(pred, timeout_n=30):
+            deadline = time.time() + timeout_n
+            while time.time() < deadline:
+                if pred():
+                    return True
+                time.sleep(0.2)
+            return pred()
+
+        p12 = {}
+
+        def phase12(pwait, push, pout, proc):
+            push([tg_update(960, "/effort")])
+            wait_for(lambda: any("reply_markup" in m for m in tg_sent()), 30)
+            p12["menu"] = next((m for m in tg_sent() if "reply_markup" in m), None)
+            # Foreign tapper: dropped silently — no answer, no edit, no reply.
+            push([tg_callback(961, "bm1:e:high", from_id=999)])
+            time.sleep(3)
+            p12["posts_after_foreign"] = tg_posts()
+            # The paired user taps "high".
+            push([tg_callback(962, "bm1:e:high")])
+            p12["tap_logged"] = pwait("Menu tap → /effort high", 30)
+            wait_for(lambda: any("Reasoning effort set to high" in (m.get("text") or "")
+                                 for m in tg_sent()), 30)
+            p12["posts_after_tap"] = tg_posts()
+            p12["sent_after_tap"] = tg_sent()
+            # A turn is running (stalled mock): the tap is answered with an
+            # alert, nothing changes, the keyboard stays.
+            push([tg_update(963, "please sleep-now")])
+            wait_for(lambda: any("sleep-now" in b for b in llm_bodies()), 30)
+            push([tg_callback(964, "bm1:e:low")])
+            p12["busy_answered"] = wait_for(
+                lambda: any(name == "answerCallbackQuery" and (body or {}).get("callback_query_id") == "cq964"
+                            for name, body in tg_posts()), 20)
+            p12["posts_after_busy"] = tg_posts()
+            p12["sent_after_busy"] = tg_sent()
+            pwait("Briglia ▸", 60)  # the stalled turn completes
+
+        tg_mark("phase12-start")
+        out12, rc12 = run_poller_phase({}, phase12, timeout_s=150)
+        with tg_lock:
+            llm_state["marker"] = "-- no stall after phase 12 --"
+            llm_state["delay"] = 20
+
+        menu = p12.get("menu") or {}
+        keyboard = ((menu.get("reply_markup") or {}).get("inline_keyboard")) or []
+        menu_data = [b.get("callback_data") for row in keyboard for b in row]
+        check("telegram menus: /effort answers with an inline keyboard of the provider's levels + off",
+              menu_data == ["bm1:e:minimal", "bm1:e:low", "bm1:e:medium", "bm1:e:high", "bm1:e:xhigh", "bm1:e:off"]
+              and "Current reasoning effort" in (menu.get("text") or ""),
+              f"menu={menu}\n" + out12[-1500:])
+        foreign = [(n, b) for n, b in p12.get("posts_after_foreign", [])
+                   if n in ("answerCallbackQuery", "editMessageText")]
+        check("telegram menus: a tap from a foreign sender is dropped silently (no answer, no edit)",
+              not foreign and rc12 == 0, f"{foreign} rc={rc12}\n" + out12[-1500:])
+        tap_posts = p12.get("posts_after_tap", [])
+        answered = [b for n, b in tap_posts if n == "answerCallbackQuery"
+                    and (b or {}).get("callback_query_id") == "cq962"]
+        frozen = [b for n, b in tap_posts if n == "editMessageText" and (b or {}).get("message_id") == 77]
+        applied = any("Reasoning effort set to high" in (m.get("text") or "") for m in p12.get("sent_after_tap", []))
+        check("telegram menus: the paired tap is answered, the menu is frozen with the choice, the handler applies it",
+              p12.get("tap_logged") and answered and not answered[0].get("show_alert")
+              and frozen and "/effort high" in (frozen[0].get("text") or "")
+              and "reply_markup" not in frozen[0] and applied,
+              f"answered={answered} frozen={frozen} applied={applied}\n" + out12[-2000:])
+        busy = [b for n, b in p12.get("posts_after_busy", []) if n == "answerCallbackQuery"
+                and (b or {}).get("callback_query_id") == "cq964"]
+        busy_frozen = [b for n, b in p12.get("posts_after_busy", []) if n == "editMessageText"
+                       and "/effort low" in ((b or {}).get("text") or "")]
+        busy_applied = any("set to low" in (m.get("text") or "") for m in p12.get("sent_after_busy", []))
+        check("telegram menus: a tap while a turn runs gets an alert, no edit, no change",
+              p12.get("busy_answered") and busy and busy[0].get("show_alert") is True
+              and "A turn is running" in (busy[0].get("text") or "") and not busy_frozen and not busy_applied,
+              f"busy={busy} frozen={busy_frozen} applied={busy_applied}\n" + out12[-2000:])
+        try:
+            with open(os.path.join(config_dir, "secrets.json")) as f:
+                effort_saved = json.load(f).get("openai_compatible_reasoning_effort")
+        except (OSError, ValueError):
+            effort_saved = None
+        check("telegram menus: the tapped effort is persisted (high), the busy tap (low) is not",
+              effort_saved == "high", f"saved={effort_saved!r}")
+
         # H2 (b): after every phase ran, nothing under the roots (projects/
         # and toolchain/ excluded) may carry a group/other bit — this catches
         # a writer that bypasses PrivateStorage and creates a wide file after

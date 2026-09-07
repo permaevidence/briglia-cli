@@ -1674,6 +1674,11 @@ class ConversationManager: ObservableObject {
     private func processUpdate(_ update: TelegramUpdate) async {
         // Clear any previous error when starting to process a new message
         error = nil
+
+        if let query = update.callbackQuery {
+            await processCallbackQuery(query)
+            return
+        }
         
         guard let telegramMessage = update.message else {
             return
@@ -3143,6 +3148,87 @@ class ConversationManager: ObservableObject {
         return handled ? capture.lines : nil
     }
 
+    // MARK: - Telegram command menus (inline keyboards)
+
+    /// Telegram-only: send a command menu with inline buttons. Every other
+    /// channel — and the terminal/app command window, whose replies are
+    /// captured rather than wired — gets the plain text, unchanged. A failed
+    /// keyboard send falls back to the ordinary text path (retry + parking).
+    private func sendCommandMenu(_ menu: TelegramCommandMenu.Menu) async {
+        if Self.commandCapture?.isOpen != true,
+           let address = replyAddress, address.kind == .telegram,
+           let chatId = Int(address.chatId),
+           let keyboard = TelegramCommandMenu.keyboard(for: menu) {
+            do {
+                try await telegramService.sendMessage(chatId: chatId, text: menu.text, keyboard: keyboard)
+                return
+            } catch {
+                print("[ConversationManager] Menu send failed (\(error)) — sending plain text")
+            }
+        }
+        try? await sendText(menu.text)
+    }
+
+    /// Inline-keyboard tap (Telegram callback_query). Same fail-closed gate
+    /// as messages — paired private chat AND paired sender, via the menu
+    /// message the button hangs on — and an unpaired tap is dropped without
+    /// even being answered, so a stranger learns nothing. A decoded action
+    /// becomes the exact typed command and runs through
+    /// handleControlCommandIfNeeded: a tap can never do anything typing
+    /// couldn't. While a turn is running the tap is answered with an alert
+    /// and the keyboard stays usable; otherwise the menu message is frozen
+    /// (buttons removed, choice appended) before the handler's own reply.
+    private func processCallbackQuery(_ query: TelegramCallbackQuery) async {
+        guard let menuMessage = query.message,
+              TelegramPairing.acceptsPolledMessage(
+                chatId: menuMessage.chat.id,
+                chatType: menuMessage.chat.type,
+                fromId: query.from.id,
+                pairedChatId: pairedChatId
+              ),
+              !query.from.isBot else {
+            return
+        }
+        if let address = telegramAddress {
+            noteUserActivity(on: address)
+        }
+        guard let action = TelegramCommandMenu.decode(query.data ?? "") else {
+            // A keyboard from another build or a corrupted payload: say so
+            // in place, no chat message.
+            try? await telegramService.answerCallbackQuery(
+                id: query.id, text: "This menu is no longer valid — send the command again.", showAlert: false)
+            return
+        }
+        guard let commandText = TelegramCommandMenu.commandText(for: action) else {
+            try? await telegramService.answerCallbackQuery(id: query.id)
+            await freezeMenu(menuMessage, note: "Send /model <model-id> to use a model that isn't listed.")
+            return
+        }
+        if browserSettingsMutation {
+            try? await telegramService.answerCallbackQuery(
+                id: query.id, text: "Browser settings are being applied — tap again in a moment.", showAlert: true)
+            return
+        }
+        if activeRunId != nil || activeProcessingTask != nil {
+            try? await telegramService.answerCallbackQuery(
+                id: query.id, text: "A turn is running — tap again when Briglia is idle, or /stop first.", showAlert: true)
+            return
+        }
+        try? await telegramService.answerCallbackQuery(id: query.id)
+        await freezeMenu(menuMessage, note: "▸ \(commandText)")
+        print("[ConversationManager] Menu tap → \(commandText)")
+        _ = await handleControlCommandIfNeeded(commandText)
+    }
+
+    private func freezeMenu(_ message: TelegramMessage, note: String) async {
+        let text = TelegramCommandMenu.frozenText(original: message.text ?? "", note: note)
+        do {
+            try await telegramService.editMessageText(chatId: message.chat.id, messageId: message.messageId, text: text)
+        } catch {
+            print("[ConversationManager] Could not freeze menu message \(message.messageId): \(error)")
+        }
+    }
+
     private func handleControlCommandIfNeeded(_ text: String) async -> Bool {
         let token = commandToken(from: text)
         if browserSettingsMutation, text.hasPrefix("/") {
@@ -4296,6 +4382,25 @@ class ConversationManager: ObservableObject {
         let isOpenCode = provider == .openAICompatible && SessionAffinity.isOpenCodeBaseURL(baseURL)
 
         guard !argument.isEmpty else {
+            // Telegram gets buttons for the two curated catalogs (OpenCode
+            // Go, ChatGPT subscription); every other provider, and every
+            // other channel, gets the text listing below.
+            if replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true {
+                let catalog: TelegramCommandMenu.ModelCatalog?
+                if isOpenCode {
+                    catalog = .opencode(OpenCodeGo.choices.map {
+                        TelegramCommandMenu.ModelChoice(id: $0.id, label: $0.label, textOnly: $0.textOnly)
+                    })
+                } else if ProviderProfiles.activeProfile() == .chatgpt {
+                    catalog = .chatgpt
+                } else {
+                    catalog = nil
+                }
+                if let catalog {
+                    await sendCommandMenu(TelegramCommandMenu.modelMenu(catalog: catalog, current: current))
+                    return
+                }
+            }
             var lines = ["Current model: \(current.isEmpty ? "(not set)" : current)"]
             if isOpenCode {
                 lines.append("OpenCode Go catalog:")
@@ -4360,6 +4465,16 @@ class ConversationManager: ObservableObject {
         let current = KeychainHelper.load(key: effortKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
+        if argument.isEmpty, replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true {
+            let levels = ProviderProfiles.usesResponses
+                ? ResponsesAdapter.allowedEfforts(model: KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) ?? "")
+                : Self.validReasoningEfforts
+            await sendCommandMenu(TelegramCommandMenu.effortMenu(
+                levels: levels, current: current,
+                currentDescription: current.isEmpty ? defaultDescription : current,
+                offAllowed: provider == .openAICompatible))
+            return
+        }
         if argument.isEmpty && ProviderProfiles.usesResponses {
             let allowed = ResponsesAdapter.allowedEfforts(model: KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) ?? "")
             try? await sendText("Current reasoning effort: \(current.isEmpty ? defaultDescription : current)\nSet with /effort \(allowed.joined(separator: "|")), or /effort off to use the endpoint default.")
@@ -4571,6 +4686,15 @@ class ConversationManager: ObservableObject {
         ProviderProfiles.ensureMigrated()
 
         guard !argument.isEmpty else {
+            if replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true {
+                let active = ProviderProfiles.activeProfile()
+                let configured = ProviderProfiles.Profile.allCases
+                    .filter { ProviderProfiles.isConfigured($0) }
+                    .map { TelegramCommandMenu.ProviderChoice(id: $0.rawValue, displayName: $0.displayName, active: $0 == active) }
+                await sendCommandMenu(TelegramCommandMenu.providerMenu(
+                    statusLines: ProviderProfiles.statusLines(), configured: configured))
+                return
+            }
             var lines = ["Providers (hop with /provider <name>):"]
             lines.append(contentsOf: ProviderProfiles.statusLines())
             lines.append("Add or edit providers with `briglia setup` (step 1) in a terminal.")

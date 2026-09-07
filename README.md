@@ -56,7 +56,7 @@ Commands:
 | command | |
 | --- | --- |
 | `briglia` / `briglia chat` | interactive chat REPL (`/stop`, `/status`, `/prune`, `/attach`, `/quit`) |
-| `briglia setup` | setup wizard; rerun any single section later. Step 1 can configure SEVERAL main-agent providers (OpenCode Go, OpenRouter, OpenAI API, ChatGPT subscription, custom endpoint, local server) — hop between them anytime with `/provider <name>` in chat |
+| `briglia setup` | setup wizard; rerun any single section later. Step 1 can configure SEVERAL main-agent providers (OpenCode Go, OpenRouter, OpenAI API, ChatGPT subscription, custom endpoint, local server) — hop between them anytime with `/provider <name>` in chat. On Telegram, `/provider`, `/model` and `/effort` sent alone show tap buttons (providers you configured; the OpenCode Go catalog or the four ChatGPT models; the provider's effort levels) — a tap runs the same command as typing it |
 | `briglia quicksetup` | browser Quick Setup on a new installation; provider, model, ChatGPT account and tool-key settings on an existing installation |
 | session affinity | requests to OpenCode Go carry the required `x-opencode-session` header and requests to OpenRouter the optional `x-session-id` (one opaque HMAC-derived value per conversation, subagent session or background run; state in `~/.local/share/briglia/affinity.json`, never exported, wiped by `/deleteuserdata`, refreshed by the hidden `/rotateaffinity`). The header is sent only to `opencode.ai` / `openrouter.ai` hosts directly — a proxy in front of OpenCode must add its own |
 | `briglia daemon` | headless mode — Telegram channel only. One conversation-owning instance at a time: `briglia` and `briglia daemon` share state, so the second refuses to start |

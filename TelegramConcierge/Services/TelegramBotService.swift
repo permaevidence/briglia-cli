@@ -238,7 +238,9 @@ actor TelegramBotService {
         urlComponents.queryItems = [
             URLQueryItem(name: "offset", value: String(max(lastUpdateId, fetchedThroughId) + 1)),
             URLQueryItem(name: "timeout", value: "0"),  // Instant return for 1-second polling
-            URLQueryItem(name: "allowed_updates", value: "[\"message\"]")
+            // callback_query: inline-keyboard taps for the /provider, /model and
+            // /effort menus (TelegramCommandMenu). Everything else stays out.
+            URLQueryItem(name: "allowed_updates", value: "[\"message\",\"callback_query\"]")
         ]
         
         var request = URLRequest(url: urlComponents.url!)
@@ -332,7 +334,10 @@ actor TelegramBotService {
         }
     }
     
-    func sendMessage(chatId: Int, text: String) async throws {
+    /// `keyboard` attaches an inline keyboard (command menus); nil sends a
+    /// plain message with the request body unchanged from before keyboards
+    /// existed.
+    func sendMessage(chatId: Int, text: String, keyboard: TelegramInlineKeyboardMarkup? = nil) async throws {
         guard !botToken.isEmpty else {
             throw TelegramError.notConfigured
         }
@@ -352,7 +357,8 @@ actor TelegramBotService {
         let body = TelegramSendMessageRequest(
             chatId: chatId,
             text: finalText,
-            parseMode: nil
+            parseMode: nil,
+            replyMarkup: keyboard
         )
 
         request.httpBody = try JSONEncoder().encode(body)
@@ -409,6 +415,55 @@ actor TelegramBotService {
     func resetOffset() {
         lastUpdateId = 0
         fetchedThroughId = 0
+    }
+
+    // MARK: - Inline keyboard callbacks (command menus)
+
+    /// Acknowledge a button tap. Telegram shows a spinner on the tapped
+    /// button until the callback_query is answered (up to ~10 s), so every
+    /// accepted tap is answered; `text` surfaces a short notice — as a
+    /// toast, or as a modal alert with `showAlert` — without a chat message.
+    func answerCallbackQuery(id: String, text: String? = nil, showAlert: Bool = false) async throws {
+        try await postJSON(method: "answerCallbackQuery", body: TelegramAnswerCallbackQueryRequest(
+            callbackQueryId: id, text: text, showAlert: showAlert ? true : nil))
+    }
+
+    /// Replace a message's text. No reply_markup in the request means the
+    /// message's inline keyboard is removed — how a menu is frozen after a
+    /// tap so its buttons can't fire twice.
+    func editMessageText(chatId: Int, messageId: Int, text: String) async throws {
+        let cleaned = normalizeTelegramText(text)
+        let finalText = truncateToUTF16Limit(cleaned.isEmpty ? text : cleaned, limit: 4096)
+        try await postJSON(method: "editMessageText", body: TelegramEditMessageTextRequest(
+            chatId: chatId, messageId: messageId, text: finalText))
+    }
+
+    private struct TelegramOkEnvelope: Decodable {
+        let ok: Bool
+        let description: String?
+    }
+
+    /// POST a JSON body to a Bot API method whose result we don't need —
+    /// only the ok flag is checked (the result type differs per method).
+    private func postJSON<Body: Encodable>(method: String, body: Body) async throws {
+        guard !botToken.isEmpty else {
+            throw TelegramError.notConfigured
+        }
+        let url = URL(string: "\(baseURL)\(botToken)/\(method)")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            try throwInvalidResponse(response, data: data)
+        }
+        let decoded = try JSONDecoder().decode(TelegramOkEnvelope.self, from: data)
+        guard decoded.ok else {
+            throw TelegramError.apiError(decoded.description ?? "\(method) failed")
+        }
     }
     
     // MARK: - Voice File Download

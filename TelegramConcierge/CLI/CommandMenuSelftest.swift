@@ -2,8 +2,8 @@ import ArgumentParser
 import Foundation
 
 /// Hidden deterministic test pinning the chat command catalog contract
-/// (owner, 2026-08-21): the Telegram "/" menu stays trimmed to the five
-/// everyday commands, /commands lists every public command and NONE of the
+/// (owner, 2026-08-21; order + the three switches added 2026-09-07): the
+/// Telegram "/" menu stays trimmed to the everyday commands, /commands lists every public command and NONE of the
 /// power/owner commands, and the terminal /help block derives from the same
 /// table. Pure static checks on ChatCommandRegistry — no storage touched.
 struct CommandMenuSelftest: ParsableCommand {
@@ -26,9 +26,14 @@ struct CommandMenuSelftest: ParsableCommand {
         // 1. The trimmed menu: exactly the five everyday commands, in order,
         // with /commands as the discoverable index to the rest.
         let menu = ChatCommandRegistry.menuCommands.map(\.command)
-        check("menu is exactly stop, status, prune, upgrade, commands",
-              menu == ["stop", "status", "prune", "upgrade", "commands"],
+        check("menu is exactly status, provider, model, effort, prune, upgrade, commands, stop — in that order (owner 2026-09-07)",
+              menu == ["status", "provider", "model", "effort", "prune", "upgrade", "commands", "stop"],
               menu.joined(separator: ", "))
+        check("menu order and inMenu flags agree (no command flagged inMenu is left out, none listed is unflagged)",
+              Set(commands.filter(\.inMenu).map(\.name)) == Set(ChatCommandRegistry.menuOrder)
+              && ChatCommandRegistry.menuOrder.count == menu.count)
+        check("/stop is the LAST menu entry, /status the first",
+              menu.first == "status" && menu.last == "stop")
         check("deleteuserdata is NOT one tap away in the menu",
               !menu.contains("deleteuserdata"))
         check("menu descriptions are non-empty",

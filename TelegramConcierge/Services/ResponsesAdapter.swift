@@ -6,6 +6,17 @@ import FoundationNetworking
 struct ResponsesAdapter {
     let context: ProviderExecutionContext
 
+    /// The subscription models Briglia documents (owner list, 2026-09-06):
+    /// Luna, Terra, Sol, Astra. One source for the Telegram /model buttons,
+    /// the `briglia subscription` hint and — drift-checked by the
+    /// telegram-menu selftest — the two browser pages' model pickers.
+    static let subscriptionModelChoices: [(id: String, label: String)] = [
+        ("gpt-5.6-luna", "GPT-5.6 Luna"),
+        ("gpt-5.6-terra", "GPT-5.6 Terra"),
+        ("gpt-5.6-sol", "GPT-5.6 Sol"),
+        ("gpt-6-astra", "GPT-6 Astra"),
+    ]
+
     /// Documented model capabilities, separate from Codex subscription settings.
     /// Unknown models retain the common API enum; max is opt-in for documented models.
     static func allowedEfforts(model: String) -> [String] {
