@@ -3204,6 +3204,14 @@ class ConversationManager: ObservableObject {
             await freezeMenu(menuMessage, note: "Send /model <model-id> to use a model that isn't listed.")
             return
         }
+        // Context binding (Codex R1): a model/effort button is only valid for
+        // the provider (+ model, for effort) it was built for. Checked here
+        // so the common stale case gets an in-place alert and the keyboard
+        // stays…
+        if let stale = staleMenuReason(for: action) {
+            try? await telegramService.answerCallbackQuery(id: query.id, text: stale, showAlert: true)
+            return
+        }
         if browserSettingsMutation {
             try? await telegramService.answerCallbackQuery(
                 id: query.id, text: "Browser settings are being applied — tap again in a moment.", showAlert: true)
@@ -3216,8 +3224,49 @@ class ConversationManager: ObservableObject {
         }
         try? await telegramService.answerCallbackQuery(id: query.id)
         await freezeMenu(menuMessage, note: "▸ \(commandText)")
+        // …and again right before applying: the two awaits above are real
+        // suspension points during which a terminal / app-socket / browser
+        // command may have switched provider or model.
+        if let stale = staleMenuReason(for: action) {
+            await freezeMenu(menuMessage, note: "▸ \(commandText) — not applied: \(stale)")
+            try? await sendText("Not applied — \(stale)", to: telegramAddress)
+            return
+        }
         print("[ConversationManager] Menu tap → \(commandText)")
         _ = await handleControlCommandIfNeeded(commandText)
+    }
+
+    /// The runtime main-model slot of the active provider (the value /model
+    /// shows and changes).
+    private func currentMainModel() -> String {
+        let key: String
+        switch LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)) {
+        case .openRouter: key = KeychainHelper.openRouterModelKey
+        case .lmStudio: key = KeychainHelper.lmStudioModelKey
+        case .openAICompatible: key = KeychainHelper.openAICompatibleModelKey
+        }
+        return KeychainHelper.load(key: key)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    /// nil when the tapped button still matches the active state; otherwise
+    /// the user-facing reason. Provider buttons name a destination and are
+    /// never stale.
+    private func staleMenuReason(for action: TelegramCommandMenu.Action) -> String? {
+        let active = ProviderProfiles.activeProfile()
+        switch action {
+        case .provider, .modelTyped:
+            return nil
+        case .model(let profile, _):
+            guard active?.rawValue != profile else { return nil }
+            let builtFor = ProviderProfiles.Profile(rawValue: profile)?.displayName ?? profile
+            let now = active?.displayName ?? "not set"
+            return "this menu is outdated: it was for \(builtFor) and the active provider is now \(now). Send /model again."
+        case .effort(let context, _):
+            guard let active, TelegramCommandMenu.effortContext(profile: active.rawValue, model: currentMainModel()) != context else {
+                return active == nil ? "this menu is outdated: no active provider profile. Send /effort again." : nil
+            }
+            return "this menu is outdated: the provider or model changed since it was sent. Send /effort again."
+        }
     }
 
     private func freezeMenu(_ message: TelegramMessage, note: String) async {
@@ -4385,19 +4434,20 @@ class ConversationManager: ObservableObject {
             // Telegram gets buttons for the two curated catalogs (OpenCode
             // Go, ChatGPT subscription); every other provider, and every
             // other channel, gets the text listing below.
-            if replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true {
+            if replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true,
+               let active = ProviderProfiles.activeProfile() {
                 let catalog: TelegramCommandMenu.ModelCatalog?
-                if isOpenCode {
+                if isOpenCode, active == .opencode {
                     catalog = .opencode(OpenCodeGo.choices.map {
                         TelegramCommandMenu.ModelChoice(id: $0.id, label: $0.label, textOnly: $0.textOnly)
                     })
-                } else if ProviderProfiles.activeProfile() == .chatgpt {
+                } else if active == .chatgpt {
                     catalog = .chatgpt
                 } else {
                     catalog = nil
                 }
                 if let catalog {
-                    await sendCommandMenu(TelegramCommandMenu.modelMenu(catalog: catalog, current: current))
+                    await sendCommandMenu(TelegramCommandMenu.modelMenu(catalog: catalog, profile: active.rawValue, current: current))
                     return
                 }
             }
@@ -4465,12 +4515,15 @@ class ConversationManager: ObservableObject {
         let current = KeychainHelper.load(key: effortKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-        if argument.isEmpty, replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true {
+        if argument.isEmpty, replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true,
+           let active = ProviderProfiles.activeProfile() {
             let levels = ProviderProfiles.usesResponses
                 ? ResponsesAdapter.allowedEfforts(model: KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) ?? "")
                 : Self.validReasoningEfforts
             await sendCommandMenu(TelegramCommandMenu.effortMenu(
-                levels: levels, current: current,
+                levels: levels,
+                context: TelegramCommandMenu.effortContext(profile: active.rawValue, model: currentMainModel()),
+                current: current,
                 currentDescription: current.isEmpty ? defaultDescription : current,
                 offAllowed: provider == .openAICompatible))
             return

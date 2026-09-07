@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 
 /// Inline-keyboard menus for `/provider`, `/model` and `/effort` on Telegram
 /// (owner request 2026-09-07). Pure: builds each menu's text and button rows
@@ -13,6 +18,14 @@ import Foundation
 /// subscription (`ResponsesAdapter.subscriptionModelChoices`), each with a
 /// final "type a model name" button; every other provider stays text-only.
 /// Non-Telegram channels always receive the plain text.
+///
+/// Context binding (Codex R1, 2026-09-07): a keyboard outlives the state it
+/// was built for — the user can hop providers and tap an old menu later. So
+/// a model button carries the profile it was built for and an effort button
+/// an opaque profile+model context; ConversationManager refuses a tap whose
+/// context no longer matches the active state instead of applying it to
+/// whatever is active now. Provider buttons name their destination and need
+/// no binding.
 enum TelegramCommandMenu {
     struct Button: Equatable {
         let label: String
@@ -28,10 +41,12 @@ enum TelegramCommandMenu {
 
     enum Action: Equatable {
         case provider(String)
-        case model(String)
+        /// `profile`: the provider profile the menu was built for.
+        case model(profile: String, id: String)
         /// "Type a model name…" — informational, no state change.
         case modelTyped
-        case effort(String)
+        /// `context`: `effortContext(profile:model:)` at menu time.
+        case effort(context: String, level: String)
     }
 
     /// Versioned prefix: a keyboard left over from an older build decodes as
@@ -51,34 +66,56 @@ enum TelegramCommandMenu {
             && value.unicodeScalars.allSatisfy { argumentScalars.contains($0) }
     }
 
-    /// nil when the argument can't be carried (charset or 64-byte cap).
+    /// Opaque, compact binding of an effort menu to the state it was built
+    /// for: 8 hex chars of SHA-256(profile ⊕ model). Any model id fits (custom
+    /// endpoints use slashes and capitals that the argument charset refuses),
+    /// and the payload stays well under 64 bytes.
+    static func effortContext(profile: String, model: String) -> String {
+        let digest = SHA256.hash(data: Data("\(profile)\u{0}\(model)".utf8))
+        return digest.prefix(4).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func isValidContext(_ value: String) -> Bool {
+        value.count == 8 && value.unicodeScalars.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) }
+    }
+
+    /// Payloads: `bm1:p:<profile>`, `bm1:m:<profile>:<model-id>`, `bm1:m:?`,
+    /// `bm1:e:<context>:<level>`. nil when a field can't be carried (charset
+    /// or the 64-byte cap).
     static func encode(_ action: Action) -> String? {
-        let code: String
-        let argument: String
+        let data: String
         switch action {
-        case .provider(let value): code = "p"; argument = value
-        case .model(let value): code = "m"; argument = value
-        case .modelTyped: code = "m"; argument = typedModelMarker
-        case .effort(let value): code = "e"; argument = value
+        case .provider(let value):
+            guard isValidArgument(value) else { return nil }
+            data = "\(dataPrefix):p:\(value)"
+        case .model(let profile, let id):
+            guard isValidArgument(profile), isValidArgument(id) else { return nil }
+            data = "\(dataPrefix):m:\(profile):\(id)"
+        case .modelTyped:
+            data = "\(dataPrefix):m:\(typedModelMarker)"
+        case .effort(let context, let level):
+            guard isValidContext(context), isValidArgument(level) else { return nil }
+            data = "\(dataPrefix):e:\(context):\(level)"
         }
-        guard argument == typedModelMarker || isValidArgument(argument) else { return nil }
-        let data = "\(dataPrefix):\(code):\(argument)"
         guard data.utf8.count <= maxDataBytes else { return nil }
         return data
     }
 
     static func decode(_ data: String) -> Action? {
         guard data.utf8.count <= maxDataBytes else { return nil }
-        let parts = data.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
-        guard parts.count == 3, parts[0] == dataPrefix else { return nil }
-        let argument = String(parts[2])
-        switch parts[1] {
-        case "p": return isValidArgument(argument) ? .provider(argument) : nil
-        case "m":
-            if argument == typedModelMarker { return .modelTyped }
-            return isValidArgument(argument) ? .model(argument) : nil
-        case "e": return isValidArgument(argument) ? .effort(argument) : nil
-        default: return nil
+        let parts = data.split(separator: ":", maxSplits: 3, omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 3, parts[0] == dataPrefix else { return nil }
+        switch (parts[1], parts.count) {
+        case ("p", 3):
+            return isValidArgument(parts[2]) ? .provider(parts[2]) : nil
+        case ("m", 3):
+            return parts[2] == typedModelMarker ? .modelTyped : nil
+        case ("m", 4):
+            return isValidArgument(parts[2]) && isValidArgument(parts[3]) ? .model(profile: parts[2], id: parts[3]) : nil
+        case ("e", 4):
+            return isValidContext(parts[2]) && isValidArgument(parts[3]) ? .effort(context: parts[2], level: parts[3]) : nil
+        default:
+            return nil
         }
     }
 
@@ -86,9 +123,9 @@ enum TelegramCommandMenu {
     static func commandText(for action: Action) -> String? {
         switch action {
         case .provider(let value): return "/provider \(value)"
-        case .model(let value): return "/model \(value)"
+        case .model(_, let id): return "/model \(id)"
         case .modelTyped: return nil
-        case .effort(let value): return "/effort \(value)"
+        case .effort(_, let level): return "/effort \(level)"
         }
     }
 
@@ -133,7 +170,9 @@ enum TelegramCommandMenu {
     /// One button per catalog entry (the active one ticked, text-only ones
     /// tagged) plus the "type a model name" button; the text keeps the
     /// typed-command hint so nothing is lost for users who prefer typing.
-    static func modelMenu(catalog: ModelCatalog, current: String) -> Menu {
+    /// `profile` is the provider the menu is built for — bound into every
+    /// model button.
+    static func modelMenu(catalog: ModelCatalog, profile: String, current: String) -> Menu {
         let choices: [ModelChoice]
         let heading: String
         switch catalog {
@@ -143,7 +182,7 @@ enum TelegramCommandMenu {
         var lines = ["Current model: \(current.isEmpty ? "(not set)" : current)", heading]
         var rows: [[Button]] = []
         for choice in choices {
-            guard let data = encode(.model(choice.id)) else { continue }
+            guard let data = encode(.model(profile: profile, id: choice.id)) else { continue }
             var label = (choice.id == current ? "✓ " : "") + choice.label
             if choice.textOnly { label += " · text-only" }
             rows.append([Button(label: label, data: data)])
@@ -158,14 +197,15 @@ enum TelegramCommandMenu {
     // MARK: - /effort
 
     /// `levels` in the order the provider accepts them; `offAllowed` adds the
-    /// "endpoint default" button (`/effort off`).
-    static func effortMenu(levels: [String], current: String, currentDescription: String, offAllowed: Bool) -> Menu {
+    /// "endpoint default" button (`/effort off`); `context` is
+    /// `effortContext(profile:model:)` for the state the menu is built for.
+    static func effortMenu(levels: [String], context: String, current: String, currentDescription: String, offAllowed: Bool) -> Menu {
         var lines = ["Current reasoning effort: \(currentDescription)", "Tap a level, or /effort <level>:"]
         var rows = chunk(levels.compactMap { level -> Button? in
-            guard let data = encode(.effort(level)) else { return nil }
+            guard let data = encode(.effort(context: context, level: level)) else { return nil }
             return Button(label: (level == current ? "✓ " : "") + level, data: data)
         }, perRow: 3)
-        if offAllowed, let data = encode(.effort("off")) {
+        if offAllowed, let data = encode(.effort(context: context, level: "off")) {
             rows.append([Button(label: (current.isEmpty ? "✓ " : "") + "Endpoint default (off)", data: data)])
             lines.append("\"Endpoint default\" sends no effort field (/effort off).")
         }

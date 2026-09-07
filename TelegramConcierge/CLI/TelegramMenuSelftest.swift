@@ -25,11 +25,13 @@ struct TelegramMenuSelftest: ParsableCommand {
         }
         typealias Menu = TelegramCommandMenu
 
-        // ---- 1. Codec: round trip for every id a button can carry.
+        // ---- 1. Codec: round trip for every id a button can carry, bound
+        // to its context (profile for models, profile+model hash for effort).
+        let ctx = Menu.effortContext(profile: "opencode", model: "kimi-k3")
         var roundTrips: [Menu.Action] = ProviderProfiles.Profile.allCases.map { .provider($0.rawValue) }
-        roundTrips += OpenCodeGo.choices.map { .model($0.id) }
-        roundTrips += ResponsesAdapter.subscriptionModelChoices.map { .model($0.id) }
-        roundTrips += ["none", "minimal", "low", "medium", "high", "xhigh", "max", "off"].map { .effort($0) }
+        roundTrips += OpenCodeGo.choices.map { .model(profile: "opencode", id: $0.id) }
+        roundTrips += ResponsesAdapter.subscriptionModelChoices.map { .model(profile: "chatgpt", id: $0.id) }
+        roundTrips += ["none", "minimal", "low", "medium", "high", "xhigh", "max", "off"].map { .effort(context: ctx, level: $0) }
         roundTrips.append(.modelTyped)
         var bad: [String] = []
         for action in roundTrips {
@@ -38,27 +40,40 @@ struct TelegramMenuSelftest: ParsableCommand {
             if Menu.decode(data) != action { bad.append("\(data) → \(String(describing: Menu.decode(data)))") }
         }
         check("codec: every catalog action round-trips within 64 bytes (\(roundTrips.count))", bad.isEmpty, bad.joined(separator: "; "))
-        check("codec: payload shape is bm1:<code>:<argument>",
-              Menu.encode(.effort("high")) == "bm1:e:high" && Menu.encode(.provider("opencode")) == "bm1:p:opencode"
-              && Menu.encode(.model("kimi-k3")) == "bm1:m:kimi-k3" && Menu.encode(.modelTyped) == "bm1:m:?")
+        check("codec: payload shapes bm1:p:<profile>, bm1:m:<profile>:<id>, bm1:m:?, bm1:e:<context>:<level>",
+              Menu.encode(.provider("opencode")) == "bm1:p:opencode"
+              && Menu.encode(.model(profile: "opencode", id: "kimi-k3")) == "bm1:m:opencode:kimi-k3"
+              && Menu.encode(.modelTyped) == "bm1:m:?"
+              && Menu.encode(.effort(context: ctx, level: "high")) == "bm1:e:\(ctx):high")
+        check("codec: the longest catalog model + effort payloads stay under the cap",
+              (Menu.encode(.model(profile: "opencode", id: "deepseek-v4-flash-vision-exp"))?.utf8.count ?? 99) <= 64
+              && (Menu.encode(.effort(context: ctx, level: "minimal"))?.utf8.count ?? 99) <= 64)
 
-        let rejected = ["", "bm1", "bm1:e", "bm1:e:", "bm0:e:high", "BM1:e:high", "bm1:x:high", "bm1:e:hi gh",
-                        "bm1:e:/stop", "bm1:e:high:extra".replacingOccurrences(of: ":extra", with: ":ex tra"),
-                        "bm1:m:" + String(repeating: "a", count: Menu.maxArgumentLength + 1),
-                        "bm1:e:" + String(repeating: "x", count: 70), "bm1:p:Open Code", "bm1:m:glm;rm"]
+        check("effort context: 8 lowercase hex, deterministic, differs by profile and by model",
+              Menu.isValidContext(ctx) && ctx == Menu.effortContext(profile: "opencode", model: "kimi-k3")
+              && ctx != Menu.effortContext(profile: "custom", model: "kimi-k3")
+              && ctx != Menu.effortContext(profile: "opencode", model: "glm-5.3-flash")
+              && Menu.isValidContext(Menu.effortContext(profile: "custom", model: "meta-llama/Llama-4 Maverick")))
+
+        let rejected = ["", "bm1", "bm1:e", "bm1:e:", "bm0:e:\(ctx):high", "BM1:e:\(ctx):high", "bm1:x:\(ctx):high",
+                        "bm1:e:\(ctx):hi gh", "bm1:e:\(ctx):/stop", "bm1:e:high", "bm1:e:zz:high", "bm1:e:1234567:high",
+                        "bm1:e:ABCDEF01:high", "bm1:e:\(ctx):high:extra",
+                        "bm1:m:opencode:" + String(repeating: "a", count: Menu.maxArgumentLength + 1),
+                        "bm1:m:opencode:glm;rm", "bm1:m:Open Code:kimi-k3", "bm1:m:opencode", "bm1:m:?:kimi-k3",
+                        "bm1:p:opencode:extra", "bm1:p:Open Code", "bm1:e:" + String(repeating: "x", count: 70)]
         let accepted = rejected.filter { Menu.decode($0) != nil }
-        check("codec: malformed, foreign-version, whitespace, shell-ish and oversized payloads decode to nil",
+        check("codec: malformed, unbound (pre-context), foreign-version, whitespace, shell-ish, bad-context and oversized payloads decode to nil",
               accepted.isEmpty, accepted.joined(separator: " | "))
-        check("codec: a third colon-separated field is carried into the argument and rejected by the charset",
-              Menu.decode("bm1:e:high:extra") == nil)
         check("codec: unencodable arguments are refused at build time",
-              Menu.encode(.model("has space")) == nil && Menu.encode(.effort("")) == nil
-              && Menu.encode(.model(String(repeating: "m", count: 60))) == nil)
+              Menu.encode(.model(profile: "opencode", id: "has space")) == nil
+              && Menu.encode(.effort(context: "nothex", level: "high")) == nil
+              && Menu.encode(.effort(context: ctx, level: "")) == nil
+              && Menu.encode(.model(profile: "opencode", id: String(repeating: "m", count: 60))) == nil)
 
-        check("commandText: taps map to the exact typed commands, the typed-model button to none",
+        check("commandText: taps map to the exact typed commands (context stripped), the typed-model button to none",
               Menu.commandText(for: .provider("chatgpt")) == "/provider chatgpt"
-              && Menu.commandText(for: .model("glm-5.3-flash")) == "/model glm-5.3-flash"
-              && Menu.commandText(for: .effort("off")) == "/effort off"
+              && Menu.commandText(for: .model(profile: "opencode", id: "glm-5.3-flash")) == "/model glm-5.3-flash"
+              && Menu.commandText(for: .effort(context: ctx, level: "off")) == "/effort off"
               && Menu.commandText(for: .modelTyped) == nil)
 
         // ---- 2. /provider menu: configured profiles only, active ticked.
@@ -78,39 +93,41 @@ struct TelegramMenuSelftest: ParsableCommand {
               Menu.providerMenu(statusLines: status, configured: []).rows.isEmpty
               && Menu.keyboard(for: Menu.providerMenu(statusLines: status, configured: [])) == nil)
 
-        // ---- 3. /model menu: OpenCode catalog in catalog order + typed button;
-        // ChatGPT exactly the owner's four + typed button.
+        // ---- 3. /model menu: OpenCode catalog in catalog order + typed button,
+        // every button bound to the profile; ChatGPT exactly the owner's four.
         let opencodeChoices = OpenCodeGo.choices.map { Menu.ModelChoice(id: $0.id, label: $0.label, textOnly: $0.textOnly) }
-        let ocMenu = Menu.modelMenu(catalog: .opencode(opencodeChoices), current: "kimi-k3")
+        let ocMenu = Menu.modelMenu(catalog: .opencode(opencodeChoices), profile: "opencode", current: "kimi-k3")
         let ocData = ocMenu.rows.map { $0.map(\.data) }
-        check("model menu (OpenCode): one row per catalog entry in catalog order, then the typed-model button",
-              ocData == OpenCodeGo.choices.map { ["bm1:m:\($0.id)"] } + [["bm1:m:?"]], "\(ocData)")
-        let kimiRow = ocMenu.rows.first { $0.first?.data == "bm1:m:kimi-k3" }?.first
-        let textOnlyRow = ocMenu.rows.first { $0.first?.data == "bm1:m:glm-5.3" }?.first
+        check("model menu (OpenCode): one row per catalog entry in catalog order, bound to the profile, then the typed-model button",
+              ocData == OpenCodeGo.choices.map { ["bm1:m:opencode:\($0.id)"] } + [["bm1:m:?"]], "\(ocData)")
+        let kimiRow = ocMenu.rows.first { $0.first?.data == "bm1:m:opencode:kimi-k3" }?.first
+        let textOnlyRow = ocMenu.rows.first { $0.first?.data == "bm1:m:opencode:glm-5.3" }?.first
         check("model menu (OpenCode): active model ticked, text-only models tagged, typed button last",
               kimiRow?.label == "✓ Kimi K3" && textOnlyRow?.label == "GLM 5.3 · text-only"
               && ocMenu.rows.last?.first?.label == "Type a model name…" && ocMenu.text.contains("Current model: kimi-k3"))
-        let gptMenu = Menu.modelMenu(catalog: .chatgpt, current: "gpt-6-astra")
-        check("model menu (ChatGPT): exactly Luna, Terra, Sol, Astra + typed button",
-              gptMenu.rows.map { $0.map(\.data) } == [["bm1:m:gpt-5.6-luna"], ["bm1:m:gpt-5.6-terra"], ["bm1:m:gpt-5.6-sol"], ["bm1:m:gpt-6-astra"], ["bm1:m:?"]]
+        let gptMenu = Menu.modelMenu(catalog: .chatgpt, profile: "chatgpt", current: "gpt-6-astra")
+        check("model menu (ChatGPT): exactly Luna, Terra, Sol, Astra bound to chatgpt + typed button",
+              gptMenu.rows.map { $0.map(\.data) } == [["bm1:m:chatgpt:gpt-5.6-luna"], ["bm1:m:chatgpt:gpt-5.6-terra"], ["bm1:m:chatgpt:gpt-5.6-sol"], ["bm1:m:chatgpt:gpt-6-astra"], ["bm1:m:?"]]
               && gptMenu.rows[3].first?.label == "✓ GPT-6 Astra", "\(gptMenu.rows.map { $0.map(\.label) })")
         check("model menu: keeps the typed-command hint for users who prefer typing",
               ocMenu.text.contains("/model <model-id>") && gptMenu.text.contains("/model <model-id>"))
 
         // ---- 4. /effort menu: provider's levels three per row, off row only
-        // where /effort off is accepted, current ticked (off when unset).
+        // where /effort off is accepted, current ticked (off when unset),
+        // every button bound to the context.
         let astra = ResponsesAdapter.allowedEfforts(model: "gpt-6-astra")
-        let astraMenu = Menu.effortMenu(levels: astra, current: "high", currentDescription: "high", offAllowed: true)
-        check("effort menu (Astra): low…max in three-per-row chunks + the endpoint-default row",
-              astraMenu.rows.map { $0.map(\.data) } == [["bm1:e:low", "bm1:e:medium", "bm1:e:high"], ["bm1:e:xhigh", "bm1:e:max"], ["bm1:e:off"]]
+        let astraCtx = Menu.effortContext(profile: "chatgpt", model: "gpt-6-astra")
+        let astraMenu = Menu.effortMenu(levels: astra, context: astraCtx, current: "high", currentDescription: "high", offAllowed: true)
+        check("effort menu (Astra): low…max in three-per-row chunks + the endpoint-default row, all bound to the context",
+              astraMenu.rows.map { $0.map(\.data) } == [["bm1:e:\(astraCtx):low", "bm1:e:\(astraCtx):medium", "bm1:e:\(astraCtx):high"], ["bm1:e:\(astraCtx):xhigh", "bm1:e:\(astraCtx):max"], ["bm1:e:\(astraCtx):off"]]
               && astraMenu.rows[0][2].label == "✓ high" && astraMenu.rows[2][0].label == "Endpoint default (off)",
               "\(astraMenu.rows)")
         let chatLevels = ["minimal", "low", "medium", "high", "xhigh"]
-        let orMenu = Menu.effortMenu(levels: chatLevels, current: "", currentDescription: "high (default)", offAllowed: false)
+        let orMenu = Menu.effortMenu(levels: chatLevels, context: ctx, current: "", currentDescription: "high (default)", offAllowed: false)
         check("effort menu (OpenRouter): no off row, nothing ticked when unset",
-              orMenu.rows.flatMap { $0 }.map(\.data) == chatLevels.map { "bm1:e:\($0)" }
+              orMenu.rows.flatMap { $0 }.map(\.data) == chatLevels.map { "bm1:e:\(ctx):\($0)" }
               && !orMenu.rows.flatMap { $0 }.contains { $0.label.hasPrefix("✓") } && !orMenu.text.contains("/effort off"))
-        let unsetOff = Menu.effortMenu(levels: chatLevels, current: "", currentDescription: "not sent (endpoint default)", offAllowed: true)
+        let unsetOff = Menu.effortMenu(levels: chatLevels, context: ctx, current: "", currentDescription: "not sent (endpoint default)", offAllowed: true)
         check("effort menu (custom, unset): the endpoint-default row is the ticked one",
               unsetOff.rows.last?.first?.label == "✓ Endpoint default (off)")
 
@@ -127,7 +144,7 @@ struct TelegramMenuSelftest: ParsableCommand {
         let rows = markup?["inline_keyboard"] as? [[[String: Any]]]
         check("wire: keyboard send carries reply_markup.inline_keyboard rows with text + callback_data",
               rows?.count == 3 && rows?[0].count == 3
-              && rows?[0][0]["text"] as? String == "low" && rows?[0][0]["callback_data"] as? String == "bm1:e:low",
+              && rows?[0][0]["text"] as? String == "low" && rows?[0][0]["callback_data"] as? String == "bm1:e:\(astraCtx):low",
               "\(withKeyboard)")
         let answer = json(try encoder.encode(TelegramAnswerCallbackQueryRequest(callbackQueryId: "cq1", text: nil, showAlert: nil)))
         check("wire: a plain answerCallbackQuery carries only callback_query_id", Set(answer.keys) == ["callback_query_id"])
@@ -141,13 +158,13 @@ struct TelegramMenuSelftest: ParsableCommand {
         let tap = """
         {"update_id": 501, "callback_query": {"id": "4382", "from": {"id": 12345, "is_bot": false, "first_name": "M"},
          "message": {"message_id": 77, "date": 1, "text": "Providers", "chat": {"id": 12345, "type": "private"}},
-         "chat_instance": "-1", "data": "bm1:p:chatgpt"}}
+         "chat_instance": "-1", "data": "bm1:m:chatgpt:gpt-6-astra"}}
         """
         let tapUpdate = try? decoder.decode(TelegramUpdate.self, from: Data(tap.utf8))
         check("decode: callback_query update yields id, sender, menu message and data",
               tapUpdate?.message == nil && tapUpdate?.callbackQuery?.id == "4382"
               && tapUpdate?.callbackQuery?.from.id == 12345 && tapUpdate?.callbackQuery?.message?.messageId == 77
-              && tapUpdate?.callbackQuery?.message?.text == "Providers" && tapUpdate?.callbackQuery?.data == "bm1:p:chatgpt")
+              && tapUpdate?.callbackQuery?.message?.text == "Providers" && tapUpdate?.callbackQuery?.data == "bm1:m:chatgpt:gpt-6-astra")
         let inaccessible = """
         {"update_id": 502, "callback_query": {"id": "9", "from": {"id": 12345, "is_bot": false, "first_name": "M"},
          "message": {"message_id": 78, "date": 0, "chat": {"id": 12345, "type": "private"}}, "chat_instance": "-1", "data": "bm1:m:?"}}

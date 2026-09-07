@@ -1224,6 +1224,12 @@ def main():
                 # too; "sent" keeps its sendMessage-only meaning.
                 with tg_lock:
                     tg_state["posts"].append((self.path.rsplit("/", 1)[-1], parsed))
+                    stall = (isinstance(parsed, dict)
+                             and parsed.get("callback_query_id") in tg_state.get("stall_answer_ids", ()))
+                if stall:
+                    # Suspended acknowledgement (phase 13 race): the daemon
+                    # awaits this reply while another surface changes state.
+                    time.sleep(6)
                 if "/sendMessage" in self.path or "/editMessageText" in self.path:
                     if "/sendMessage" in self.path and parsed is not None:
                         with tg_lock:
@@ -2210,16 +2216,33 @@ def main():
 
         p12 = {}
 
+        def menu_button(menu, level_or_id):
+            """callback_data of the button whose payload ends in :<value>."""
+            rows = ((menu or {}).get("reply_markup") or {}).get("inline_keyboard") or []
+            for row in rows:
+                for b in row:
+                    if (b.get("callback_data") or "").endswith(":" + level_or_id):
+                        return b["callback_data"]
+            return None
+
+        def latest_menu():
+            return next((m for m in reversed(tg_sent()) if "reply_markup" in m), None)
+
+        def menus_seen():
+            return sum(1 for m in tg_sent() if "reply_markup" in m)
+
         def phase12(pwait, push, pout, proc):
             push([tg_update(960, "/effort")])
-            wait_for(lambda: any("reply_markup" in m for m in tg_sent()), 30)
-            p12["menu"] = next((m for m in tg_sent() if "reply_markup" in m), None)
+            wait_for(lambda: menus_seen() >= 1, 30)
+            p12["menu"] = latest_menu()
+            high = menu_button(p12["menu"], "high") or "bm1:e:00000000:high"
+            low = menu_button(p12["menu"], "low") or "bm1:e:00000000:low"
             # Foreign tapper: dropped silently — no answer, no edit, no reply.
-            push([tg_callback(961, "bm1:e:high", from_id=999)])
+            push([tg_callback(961, high, from_id=999)])
             time.sleep(3)
             p12["posts_after_foreign"] = tg_posts()
             # The paired user taps "high".
-            push([tg_callback(962, "bm1:e:high")])
+            push([tg_callback(962, high)])
             p12["tap_logged"] = pwait("Menu tap → /effort high", 30)
             wait_for(lambda: any("Reasoning effort set to high" in (m.get("text") or "")
                                  for m in tg_sent()), 30)
@@ -2229,7 +2252,7 @@ def main():
             # alert, nothing changes, the keyboard stays.
             push([tg_update(963, "please sleep-now")])
             wait_for(lambda: any("sleep-now" in b for b in llm_bodies()), 30)
-            push([tg_callback(964, "bm1:e:low")])
+            push([tg_callback(964, low)])
             p12["busy_answered"] = wait_for(
                 lambda: any(name == "answerCallbackQuery" and (body or {}).get("callback_query_id") == "cq964"
                             for name, body in tg_posts()), 20)
@@ -2246,8 +2269,11 @@ def main():
         menu = p12.get("menu") or {}
         keyboard = ((menu.get("reply_markup") or {}).get("inline_keyboard")) or []
         menu_data = [b.get("callback_data") for row in keyboard for b in row]
-        check("telegram menus: /effort answers with an inline keyboard of the provider's levels + off",
-              menu_data == ["bm1:e:minimal", "bm1:e:low", "bm1:e:medium", "bm1:e:high", "bm1:e:xhigh", "bm1:e:off"]
+        menu_ctx = {(d or "").split(":")[2] for d in menu_data}
+        check("telegram menus: /effort answers with an inline keyboard of the provider's levels + off, every button bound to one 8-hex context",
+              [(d or "").split(":")[-1] for d in menu_data] == ["minimal", "low", "medium", "high", "xhigh", "off"]
+              and all((d or "").startswith("bm1:e:") for d in menu_data)
+              and len(menu_ctx) == 1 and re.fullmatch(r"[0-9a-f]{8}", next(iter(menu_ctx), ""))
               and "Current reasoning effort" in (menu.get("text") or ""),
               f"menu={menu}\n" + out12[-1500:])
         foreign = [(n, b) for n, b in p12.get("posts_after_foreign", [])
@@ -2280,6 +2306,153 @@ def main():
             effort_saved = None
         check("telegram menus: the tapped effort is persisted (high), the busy tap (low) is not",
               effort_saved == "high", f"saved={effort_saved!r}")
+
+        # Phase 13: stale-context menus (Codex R1, 2026-09-07). A keyboard
+        # outlives the state it was built for: after a provider hop an old
+        # OpenCode model button must NOT rewrite the custom profile's model;
+        # after a model change an old effort button must not apply; a fresh
+        # menu (positive control) still works; and a provider change that
+        # lands WHILE the tap's acknowledgement is suspended on the network
+        # is caught by the re-check right before the command runs.
+        secrets_path = os.path.join(config_dir, "secrets.json")
+        with open(secrets_path) as f:
+            sec = json.load(f)
+        sec.update({
+            "opencode_api_key": "smoke-oc-key", "opencode_model": "glm-5.3-flash",
+            "custom_endpoint_base_url": f"http://127.0.0.1:{llm_port}/v1",
+            "custom_endpoint_api_key": "smoke-test-key", "custom_endpoint_model": "mock-model",
+        })
+        with open(secrets_path, "w") as f:
+            json.dump(sec, f)
+        os.chmod(secrets_path, 0o600)
+        with tg_lock:
+            tg_state["updates"].clear()
+            tg_state["offsets"].clear()
+            tg_state["sent"].clear()
+            tg_state["posts"].clear()
+            tg_state["stall_answer_ids"] = {"cq981"}
+            llm_state["marker"] = "-- no stall in phase 13 --"
+
+        def read_secrets():
+            try:
+                with open(secrets_path) as f:
+                    return json.load(f)
+            except (OSError, ValueError):
+                return {}
+
+        def sent_contains(needle):
+            return any(needle in (m.get("text") or "") for m in tg_sent())
+
+        def answered(cq):
+            return [b for n, b in tg_posts() if n == "answerCallbackQuery" and (b or {}).get("callback_query_id") == cq]
+
+        p13 = {}
+
+        def phase13(pwait, push, pout, proc):
+            push([tg_update(970, "/provider opencode")])
+            p13["hop1"] = wait_for(lambda: sent_contains("Active provider: OpenCode Go"), 30)
+            push([tg_update(971, "/model")])
+            wait_for(lambda: menus_seen() >= 1, 30)
+            oc_menu = latest_menu()
+            p13["oc_menu_ok"] = menu_button(oc_menu, "glm-5.3-flash") == "bm1:m:opencode:glm-5.3-flash"
+            glm = menu_button(oc_menu, "glm-5.3-flash") or "bm1:m:opencode:glm-5.3-flash"
+            push([tg_update(972, "/provider custom")])
+            p13["hop2"] = wait_for(lambda: sent_contains("Active provider: Custom endpoint"), 30)
+            p13["secrets_before_stale_model"] = read_secrets()
+            # (a) stale OpenCode model button on the custom profile.
+            push([tg_callback(973, glm, msg_id=81)])
+            p13["stale_model_answered"] = wait_for(lambda: bool(answered("cq973")), 20)
+            time.sleep(1.5)
+            p13["stale_model_answer"] = (answered("cq973") or [None])[0]
+            p13["posts_after_stale_model"] = tg_posts()
+            p13["sent_after_stale_model"] = tg_sent()
+            p13["secrets_after_stale_model"] = read_secrets()
+            # (b) stale effort button: menu built for custom+mock-model, then
+            # the model changes by typed command, then the old "high" tap.
+            push([tg_update(974, "/effort")])
+            wait_for(lambda: menus_seen() >= 2, 30)
+            high = menu_button(latest_menu(), "high") or "bm1:e:00000000:high"
+            push([tg_update(975, "/model other-model")])
+            p13["model_typed"] = wait_for(lambda: sent_contains("Model switched to other-model"), 30)
+            push([tg_callback(976, high, msg_id=82)])
+            p13["stale_effort_answered"] = wait_for(lambda: bool(answered("cq976")), 20)
+            time.sleep(1.5)
+            p13["stale_effort_answer"] = (answered("cq976") or [None])[0]
+            p13["sent_after_stale_effort"] = tg_sent()
+            p13["secrets_after_stale_effort"] = read_secrets()
+            # (c) positive control: a fresh OpenCode menu still applies.
+            push([tg_update(977, "/provider opencode")])
+            wait_for(lambda: sum(1 for m in tg_sent() if "Active provider: OpenCode Go" in (m.get("text") or "")) >= 2, 30)
+            push([tg_update(978, "/model")])
+            wait_for(lambda: menus_seen() >= 3, 30)
+            kimi = menu_button(latest_menu(), "kimi-k3") or "bm1:m:opencode:kimi-k3"
+            push([tg_callback(979, kimi, msg_id=83)])
+            p13["fresh_applied"] = wait_for(lambda: sent_contains("Model switched to kimi-k3"), 30)
+            p13["secrets_after_fresh"] = read_secrets()
+            # (d) race: tap a fresh OpenCode button whose acknowledgement the
+            # mock stalls for 6 s; while it is suspended, the terminal hops
+            # to custom. The re-check before applying must refuse the tap.
+            push([tg_update(980, "/model")])
+            wait_for(lambda: menus_seen() >= 4, 30)
+            glm2 = menu_button(latest_menu(), "glm-5.3-flash") or "bm1:m:opencode:glm-5.3-flash"
+            push([tg_callback(981, glm2, msg_id=84)])
+            p13["race_ack_started"] = wait_for(lambda: bool(answered("cq981")), 20)
+            proc.stdin.write(b"/provider custom\n")
+            proc.stdin.flush()
+            p13["race_hop"] = pwait("Active provider: Custom endpoint", 20)
+            p13["race_refused"] = wait_for(lambda: sent_contains("Not applied") and sent_contains("outdated"), 30)
+            time.sleep(1.5)
+            p13["posts_after_race"] = tg_posts()
+            p13["sent_after_race"] = tg_sent()
+            p13["secrets_after_race"] = read_secrets()
+            # Leave the config as the later checks expect it.
+            push([tg_update(982, "/model mock-model")])
+            wait_for(lambda: sent_contains("Model switched to mock-model"), 30)
+
+        tg_mark("phase13-start")
+        out13, rc13 = run_poller_phase({}, phase13, timeout_s=200)
+        with tg_lock:
+            tg_state["stall_answer_ids"] = set()
+
+        before = p13.get("secrets_before_stale_model", {})
+        after_m = p13.get("secrets_after_stale_model", {})
+        sm_answer = p13.get("stale_model_answer") or {}
+        sm_edits = [b for n, b in p13.get("posts_after_stale_model", []) if n == "editMessageText" and (b or {}).get("message_id") == 81]
+        check("stale menus: an OpenCode model button tapped on the custom profile is refused with an alert, no edit, no reply, custom model untouched",
+              p13.get("hop1") and p13.get("oc_menu_ok") and p13.get("hop2") and p13.get("stale_model_answered")
+              and sm_answer.get("show_alert") is True and "outdated" in (sm_answer.get("text") or "")
+              and "OpenCode Go" in (sm_answer.get("text") or "") and "Custom endpoint" in (sm_answer.get("text") or "")
+              and not sm_edits
+              and not any("Model switched" in (m.get("text") or "") for m in p13.get("sent_after_stale_model", []))
+              and after_m.get("custom_endpoint_model") == "mock-model" and after_m.get("openai_compatible_model") == "mock-model"
+              and after_m.get("opencode_model") == "glm-5.3-flash"
+              and {k: v for k, v in after_m.items() if k.startswith("custom_endpoint_")}
+                  == {k: v for k, v in before.items() if k.startswith("custom_endpoint_")}
+              and rc13 == 0,
+              f"{ {k: p13.get(k) for k in ('hop1', 'oc_menu_ok', 'hop2', 'stale_model_answered', 'stale_model_answer')} } "
+              f"edits={sm_edits} custom_model={after_m.get('custom_endpoint_model')!r} rc={rc13}\n" + out13[-2500:])
+        se_answer = p13.get("stale_effort_answer") or {}
+        after_e = p13.get("secrets_after_stale_effort", {})
+        check("stale menus: an effort button from before a model change is refused, effort unchanged",
+              p13.get("model_typed") and p13.get("stale_effort_answered")
+              and se_answer.get("show_alert") is True and "outdated" in (se_answer.get("text") or "")
+              and not any("Reasoning effort set" in (m.get("text") or "") for m in p13.get("sent_after_stale_effort", []))
+              and after_e.get("openai_compatible_reasoning_effort") == after_m.get("openai_compatible_reasoning_effort"),
+              f"model_typed={p13.get('model_typed')} answer={se_answer}\n" + out13[-2000:])
+        after_f = p13.get("secrets_after_fresh", {})
+        check("stale menus: positive control — a fresh OpenCode menu button still applies",
+              p13.get("fresh_applied") and after_f.get("opencode_model") == "kimi-k3",
+              f"fresh_applied={p13.get('fresh_applied')} opencode_model={after_f.get('opencode_model')!r}\n" + out13[-2000:])
+        after_r = p13.get("secrets_after_race", {})
+        race_edits = [b for n, b in p13.get("posts_after_race", []) if n == "editMessageText" and (b or {}).get("message_id") == 84]
+        check("stale menus: a provider hop landing while the tap's acknowledgement is suspended is caught before applying — refused, custom model untouched",
+              p13.get("race_ack_started") and p13.get("race_hop") and p13.get("race_refused")
+              and any("not applied" in ((b or {}).get("text") or "") for b in race_edits)
+              and after_r.get("custom_endpoint_model") == "other-model"
+              and after_r.get("openai_compatible_model") == "other-model"
+              and not any("Model switched to glm-5.3-flash" in (m.get("text") or "") for m in p13.get("sent_after_race", [])),
+              f"{ {k: p13.get(k) for k in ('race_ack_started', 'race_hop', 'race_refused')} } edits={race_edits} "
+              f"custom_model={after_r.get('custom_endpoint_model')!r}\n" + out13[-2500:])
 
         # H2 (b): after every phase ran, nothing under the roots (projects/
         # and toolchain/ excluded) may carry a group/other bit — this catches
