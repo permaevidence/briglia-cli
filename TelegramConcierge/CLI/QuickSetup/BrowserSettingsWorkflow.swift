@@ -117,6 +117,7 @@ final class BrowserSettingsWorkflow {
         func text(_ name: String, fallback: String? = nil, required: Bool = true) throws -> String {
             if let value = values[name], !(value is String) { throw Invalid(text: "Invalid \(name).") }
             let value = ((values[name] as? String) ?? fallback ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if required && value.isEmpty && name == "api_key" { throw Invalid(text: "Enter an API key.") }
             guard (!required || !value.isEmpty), value.utf8.count <= 4096,
                   !value.contains(where: { $0.isNewline || $0.asciiValue.map { $0 < 32 } == true }) else { throw Invalid(text: "Invalid \(name).") }
             return value
@@ -136,6 +137,10 @@ final class BrowserSettingsWorkflow {
                   profile == .custom || parsedWire == ProviderProfiles.wireProtocol(profile) else { throw Invalid(text: "Unsupported provider protocol.") }
             if parsedWire == .responses, !effort.isEmpty, !ResponsesAdapter.allowedEfforts(model: model).contains(effort) {
                 throw Invalid(text: "Unsupported reasoning effort for this model.")
+            }
+            if parsedWire == .chatCompletions, !effort.isEmpty,
+               !["none", "minimal", "low", "medium", "high", "xhigh", "max"].contains(effort) {
+                throw Invalid(text: "Unsupported reasoning effort.")
             }
             var provider: [String: Any] = ["profile": profile.rawValue, "model": model, "effort": effort,
                 "text_only": try boolean("text_only", default: ProviderProfiles.textOnly(profile) ?? true),

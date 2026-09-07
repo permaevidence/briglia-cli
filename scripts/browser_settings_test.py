@@ -64,6 +64,9 @@ def run():
                 page = context.new_page()
                 errors = []
                 page.on('pageerror', lambda e: errors.append(str(e)))
+                if '--negative-control' in sys.argv:
+                    old_js = subprocess.check_output(['git', 'show', 'a28e22b:TelegramConcierge/Resources/QuickSetup/settings.js'], text=True)
+                    page.route('**/settings.js', lambda route: route.fulfill(content_type='application/javascript', body=old_js))
                 page.goto(link)
                 page.locator('#provider option').last.wait_for(state='attached')
                 assert page.title() == 'Briglia · Settings'
@@ -118,24 +121,74 @@ def run():
                 # Mock only account HTTP results to exercise the actual browser
                 # device-poll UI under busy and retryable failures.
                 polls = []
+                mode = ['busy']
                 def account(route):
                     body = route.request.post_data_json
                     action = body['action']
                     data = {'ok': True, 'state': 'signed_out', 'generation': ''}
                     status = 200
-                    if action == 'start': data = {'ok': True, 'state': 'pending', 'pending': 'opaque-fixture', 'code': 'ABCD-EFGH', 'url': 'https://auth.openai.com/codex/device', 'interval': 1}
+                    if action == 'start': data = {'ok': True, 'state': 'pending', 'pending': 'opaque-fixture', 'code': 'ABCD-EFGH', 'url': 'https://auth.openai.com/codex/device', 'interval': 1, 'expires_in': 3 if mode[0] == 'expiry' else 900}
                     elif action == 'poll':
                         polls.append(body['pending'])
-                        if len(polls) == 1: status, data = 409, {'ok': False, 'error': 'agent_busy'}
-                        elif len(polls) == 2: status, data = 400, {'ok': False, 'error': {'message': 'Temporary connection error', 'retryable': True}}
+                        if mode[0] == 'transport': status, data = 400, {'ok': False, 'error': {'message': 'Temporary connection error', 'retryable': True}}
+                        elif mode[0] == 'fatal': status, data = 400, {'ok': False, 'error': {'message': 'Login denied', 'retryable': False}}
+                        elif mode[0] == 'expiry' or len(polls) <= 15:
+                            status, data = 409, {'ok': False, 'error': 'agent_busy' if len(polls) % 2 else 'busy'}
+                        elif len(polls) == 16: status, data = 400, {'ok': False, 'error': {'message': 'Temporary connection error', 'retryable': True}}
                         else: data = {'ok': True, 'state': 'signed_in'}
-                    elif action == 'status' and len(polls) >= 3: data = {'ok': True, 'state': 'signed_in', 'generation': 'fixture-generation'}
+                    elif action == 'status' and mode[0] == 'busy' and len(polls) >= 17: data = {'ok': True, 'state': 'signed_in', 'generation': 'fixture-generation'}
                     route.fulfill(status=status, content_type='application/json', body=json.dumps(data))
+                # The owner is running for this scenario; only account transport
+                # is stubbed. The real workflow/barrier is covered by selftests.
+                def running_status(route):
+                    response = route.fetch()
+                    data = response.json(); data['running'] = True; data['active'] = 'chatgpt'
+                    route.fulfill(response=response, json=data)
+                page.route('**/api/status', running_status)
                 page.route('**/api/subscription', account)
-                page.select_option('#provider', 'chatgpt'); page.click('#login')
-                page.locator('#account-status').filter(has_text='Signed in.').wait_for(timeout=25000)
-                assert polls == ['opaque-fixture'] * 3
-                print('PASS account polling retains handle across busy and retryable errors')
+                page.reload(); page.locator('#provider option').last.wait_for(state='attached')
+                page.select_option('#provider', 'chatgpt')
+                assert 'running' in page.locator('#runtime').inner_text()
+                if '--negative-control' not in sys.argv:
+                    assert page.locator('#logout-warning').is_visible()
+                assert page.locator('#effort option[value="ultra"]').count() == 0
+                page.clock.install()
+                def start_login():
+                    page.click('#login'); page.locator('#login-code').wait_for(state='visible')
+                def tick_until(predicate, limit=100):
+                    for _ in range(limit):
+                        page.clock.run_for(1000)
+                        page.wait_for_timeout(25)
+                        if predicate(): return
+                    raise AssertionError('Polling did not reach expected state: ' + page.locator('#account-status').inner_text())
+                start_login()
+                tick_until(lambda: len(polls) >= 15 or 'Automatic retries stopped' in page.locator('#account-status').inner_text())
+                assert len(polls) >= 15, 'Busy responses exhausted the retry allowance'
+                assert 'Briglia is busy' in page.locator('#account-status').inner_text()
+                tick_until(lambda: 'Signed in.' in page.locator('#account-status').inner_text())
+                assert polls == ['opaque-fixture'] * 17
+                print('PASS running owner busy beyond 12 polls, then transport retry and successful same-handle login')
+                mode[0] = 'transport'; polls.clear(); start_login()
+                tick_until(lambda: 'Automatic retries stopped' in page.locator('#account-status').inner_text())
+                assert polls == ['opaque-fixture'] * 13
+                page.clock.run_for(30000); page.wait_for_timeout(50)
+                assert len(polls) == 13
+                page.click('#cancel'); page.locator('#login:enabled').wait_for()
+                print('PASS persistent connection failures retain the bounded 12-retry allowance')
+                mode[0] = 'expiry'; polls.clear(); start_login()
+                tick_until(lambda: 'Sign-in code expired' in page.locator('#account-status').inner_text())
+                assert len(polls) <= 2
+                assert page.locator('#login').is_enabled()
+                count = len(polls); page.clock.run_for(10000); page.wait_for_timeout(50)
+                assert len(polls) == count
+                print('PASS busy polling stops at code expiry and offers a new login')
+                mode[0] = 'fatal'; polls.clear(); start_login()
+                tick_until(lambda: 'Sign-in failed' in page.locator('#account-status').inner_text())
+                assert len(polls) == 1 and page.locator('#login').is_enabled()
+                page.clock.run_for(10000); page.wait_for_timeout(50)
+                assert len(polls) == 1
+                print('PASS terminal account failure does not retry')
+                page.unroute('**/api/status', running_status)
                 # Re-open command rotates authorization, but never undoes saves.
                 process.stdin.write('\n'); process.stdin.flush()
                 new_link = launch_link(link)

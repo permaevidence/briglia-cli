@@ -115,12 +115,18 @@ final class BrowserSettingsHost {
             printAndOpen(await host.link())
             print("Press Enter for a new link. Ctrl-C closes settings. Saved changes are kept.")
             listener.start()
-            let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-            signal(SIGINT, SIG_IGN)
-            signalSource.setEventHandler { Task { @MainActor in await host.stop() } }
-            signalSource.resume()
+            let shutdown = ShutdownSignalCoordinator(settle: { await host.stop() }, gracefulExit: {}, forceExit: { exit(130) })
+            var signals: [DispatchSourceSignal] = []
+            for sig in [SIGINT, SIGTERM] {
+                let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+                signal(sig, SIG_IGN)
+                source.setEventHandler { Task { @MainActor in shutdown.request() } }
+                source.resume(); signals.append(source)
+            }
             while !host.stopped { try? await Task.sleep(nanoseconds: 250_000_000) }
-            listener.stop(); signalSource.cancel(); signal(SIGINT, SIG_DFL)
+            listener.stop()
+            for source in signals { source.cancel() }
+            signal(SIGINT, SIG_DFL); signal(SIGTERM, SIG_DFL)
             print("Browser settings closed. Run `briglia` or `briglia daemon` to start the agent.")
         }
     }

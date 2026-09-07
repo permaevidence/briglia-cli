@@ -1,6 +1,6 @@
 (function () {
   'use strict';
-  var state, selected, pending = null, loginGeneration = '', timer = null, pollErrors = 0, accountBusy = false, requestBusy = false;
+  var state, selected, pending = null, loginGeneration = '', timer = null, pollErrors = 0, pollDeadline = 0, pollInterval = 5, accountBusy = false, requestBusy = false;
   var $ = function (id) { return document.getElementById(id); };
   function node(tag, text) { var e = document.createElement(tag); if (text !== undefined) e.textContent = text; return e; }
   function message(text, error) { $('banner').hidden = false; $('banner').textContent = text; $('banner').className = error ? 'banner error' : 'banner'; }
@@ -19,13 +19,14 @@
       if (!r.data.ok) throw new Error(reason(r.data));
       state = r.data;
       $('active').textContent = 'Active provider: ' + (state.profiles.find(function (p) { return p.id === state.active; }) || {label: 'None'}).label;
-      $('runtime').textContent = state.running ? 'Briglia is running. Saves become available when its current turn and background work finish; no restart is needed.' : 'Briglia is stopped. Saved settings will be used when you start it.';
+      $('runtime').textContent = state.running ? 'Briglia is running. Saves and sign-in completion wait for its current turn and background work to finish; no restart is needed.' : 'Briglia is stopped. Saved settings will be used when you start it.';
       if (keepSelection && selected) {
         var current = state.profiles.find(function (p) { return p.id === selected; });
         $('configured').textContent = current.configured ? 'Configured. Leave the API key blank to keep it.' : 'Add this provider by verifying and saving its settings.';
         $('activate').disabled = selected === state.active;
         if (selected === state.active) $('activate').checked = true;
       }
+      $('logout-warning').hidden = state.active !== 'chatgpt';
       if (!keepSelection) {
         $('provider').replaceChildren();
         state.profiles.forEach(function (p) { var o = node('option', p.label + (p.configured ? ' · configured' : '')); o.value = p.id; $('provider').appendChild(o); });
@@ -88,7 +89,23 @@
   }
   function failed(e) { message(e.message || 'Connection failed. Retry, or run briglia quicksetup for a new link.', true); }
   function accountControls() { $('login').disabled = !!pending || accountBusy; $('cancel').hidden = !pending; $('logout').disabled = !!pending || accountBusy; $('login-code').hidden = !pending; }
-  function schedule(seconds) { clearTimeout(timer); if (pending) timer = setTimeout(poll, Math.max(1, seconds || 5) * 1000); }
+  function expired() {
+    if (!pending || Date.now() < pollDeadline) return false;
+    pending = null; clearTimeout(timer); accountControls();
+    $('account-status').textContent = 'Sign-in code expired. Sign in again for a new code.';
+    return true;
+  }
+  function schedule(seconds) {
+    clearTimeout(timer);
+    if (pending && !expired()) timer = setTimeout(poll, Math.min(Math.max(1, seconds || pollInterval) * 1000, pollDeadline - Date.now()));
+  }
+  function retryPoll(error) {
+    if (expired()) return;
+    if (++pollErrors <= 12) {
+      $('account-status').textContent = 'Temporary connection problem. Retrying sign-in…'; schedule(pollInterval);
+    } else { $('account-status').textContent = 'Automatic retries stopped. Cancel sign-in and try again.'; }
+    failed(error);
+  }
   function accountStatus() {
     return api('subscription', {action: 'status'}).then(function (r) {
       if (!r.data.ok) throw new Error(reason(r.data));
@@ -98,23 +115,27 @@
     }).catch(failed);
   }
   function poll() {
-    if (!pending) return;
+    if (!pending || expired()) return;
     if (accountBusy || requestBusy) { schedule(2); return; }
     accountBusy = true; accountControls();
     api('subscription', {action: 'poll', pending: pending}).then(function (r) {
       if (!r.data.ok) {
-        var retryable = r.status === 409 || (r.data.error && r.data.error.retryable);
-        if (retryable && ++pollErrors <= 12) { $('account-status').textContent = 'Waiting for Briglia or the connection. Retrying sign-in…'; schedule(5); return; }
-        throw new Error(reason(r.data));
+        var code = typeof r.data.error === 'string' ? r.data.error : (r.data.error && r.data.error.code);
+        if (r.status === 409 && (code === 'agent_busy' || code === 'busy')) {
+          $('account-status').textContent = 'Briglia is busy — sign-in completes when it is idle.';
+          schedule(pollInterval); return;
+        }
+        if (r.data.error && r.data.error.retryable) { retryPoll(new Error(reason(r.data))); return; }
+        pending = null; clearTimeout(timer);
+        $('account-status').textContent = 'Sign-in failed. Start a new sign-in to retry.';
+        failed(new Error(reason(r.data))); return;
       }
       pollErrors = 0;
-      if (r.data.state === 'pending') { schedule(r.data.interval); return; }
+      if (r.data.state === 'pending') {
+        pollInterval = Math.max(1, Number(r.data.interval) || pollInterval); schedule(pollInterval); return;
+      }
       pending = null; invalidate(); accountStatus();
-    }).catch(function (e) {
-      // A transient network failure keeps the handle, with a bounded retry.
-      if (++pollErrors <= 12) { schedule(5); failed(e); }
-      else { $('account-status').textContent = 'Automatic retries stopped. Cancel sign-in and try again.'; failed(e); }
-    }).finally(function () { accountBusy = false; accountControls(); });
+    }).catch(retryPoll).finally(function () { accountBusy = false; accountControls(); });
   }
   function accountAction(action) {
     if (accountBusy) return;
@@ -123,7 +144,12 @@
     api('subscription', body).then(function (r) {
       if (!r.data.ok) throw new Error(reason(r.data));
       if (action === 'start') {
-        pending = r.data.pending; pollErrors = 0; $('code').textContent = r.data.code;
+        pending = r.data.pending; pollErrors = 0;
+        pollInterval = Math.max(1, Number(r.data.interval) || 5);
+        var lifetime = Number(r.data.expires_in);
+        if (!Number.isFinite(lifetime) || lifetime <= 0) { pending = null; throw new Error('Invalid sign-in expiry. Start sign-in again.'); }
+        pollDeadline = Date.now() + lifetime * 1000;
+        $('code').textContent = r.data.code;
         var url = new URL(r.data.url);
         if (url.protocol !== 'https:') throw new Error('Invalid sign-in URL');
         $('login-link').href = url.href; $('account-status').textContent = 'Open the link and approve the code. This page checks automatically.'; schedule(r.data.interval);

@@ -453,25 +453,26 @@ final class TerminalSession {
 
     // MARK: - Shutdown
 
-    private var shutdownRequested = false
-
     private func installSignalHandlers() {
+        let shutdown = ShutdownSignalCoordinator(settle: {
+            print("\nShutting down… (press Ctrl-C again to force exit)")
+            await BrowserSettingsHost.stopShared()
+        }, gracefulExit: {
+            AppChatSocketServer.shared.stop()
+            TerminalSession.shutdownChildProcesses()
+            TerminalSession.releaseLeaseForShutdown()
+            exit(0)
+        }, forceExit: {
+            // Keep the lease until process teardown kills every in-process
+            // callback. Never unlock while an unsettled save can still write.
+            TerminalSession.shutdownChildProcesses()
+            exit(130)
+        })
         for sig in [SIGINT, SIGTERM] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler {
-                Task { @MainActor [self] in
-                    guard !shutdownRequested else { return }
-                    shutdownRequested = true
-                    print("\nShutting down…")
-                    // Revoke settings and await any callback before releasing
-                    // the owner's lease; an old save must not race a new daemon.
-                    await BrowserSettingsHost.stopShared()
-                    AppChatSocketServer.shared.stop()
-                    TerminalSession.shutdownChildProcesses()
-                    TerminalSession.releaseLeaseForShutdown()
-                    exit(0)
-                }
+                Task { @MainActor in shutdown.request() }
             }
             source.resume()
             signalSources.append(source)
@@ -519,5 +520,46 @@ enum TelegramConfig {
         let token = KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) ?? ""
         let chatId = KeychainHelper.load(key: KeychainHelper.telegramChatIdKey) ?? ""
         return !token.isEmpty && !chatId.isEmpty
+    }
+}
+
+
+/// Only for whole-process signal exits. A normal host close still settles all
+/// callbacks before releasing its lease. Forced exit leaves unlocking to the OS.
+@MainActor
+final class ShutdownSignalCoordinator {
+    private let settle: () async -> Void
+    private let gracefulExit: () -> Void
+    private let forceExit: () -> Void
+    private let graceNanoseconds: UInt64
+    private var requested = false
+    private var finished = false
+    private var deadline: Task<Void, Never>?
+
+    init(graceNanoseconds: UInt64 = 5_000_000_000,
+         settle: @escaping () async -> Void,
+         gracefulExit: @escaping () -> Void, forceExit: @escaping () -> Void) {
+        self.graceNanoseconds = graceNanoseconds
+        self.settle = settle; self.gracefulExit = gracefulExit; self.forceExit = forceExit
+    }
+    func request() {
+        guard !finished else { return }
+        if requested { force(); return }
+        requested = true
+        deadline = Task {
+            do { try await Task.sleep(nanoseconds: graceNanoseconds) } catch { return }
+            force()
+        }
+        Task {
+            await settle()
+            guard !finished else { return }
+            finished = true; deadline?.cancel(); deadline = nil
+            gracefulExit()
+        }
+    }
+    private func force() {
+        guard !finished else { return }
+        finished = true; deadline?.cancel(); deadline = nil
+        forceExit()
     }
 }

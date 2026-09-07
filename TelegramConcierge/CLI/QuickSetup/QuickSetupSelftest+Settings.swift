@@ -50,6 +50,8 @@ extension SelftestContext {
         available = false
         let busy = await settings.handle("save", body: req(), generation: g)
         check("settings: running work blocks save, keeps receipt", busy.0 == 409 && busy.1["error"] as? String == "agent_busy")
+        let busyPoll = await settings.handle("subscription", body: ["action": "poll", "pending": "fixture"], generation: g)
+        check("settings: real account poll reports agent_busy before auth transport", busyPoll.0 == 409 && busyPoll.1["error"] as? String == "agent_busy")
         available = true
         let saved = await settings.handle("save", body: req(), generation: g)
         check("settings: Responses save and activation work under owned lease", saved.0 == 200 && ProviderProfiles.activeProfile() == .openai && ProviderProfiles.configuredModel(.openai) == "gpt-5.6-luna")
@@ -65,6 +67,24 @@ extension SelftestContext {
         let status = settings.status()
         let text = String(data: try JSONSerialization.data(withJSONObject: status), encoding: .utf8)!
         check("settings: status includes all six providers but no keys", (status["profiles"] as? [[String: Any]])?.count == 6 && !text.contains("externally-replaced-key") && !text.contains("kept-bot"))
+        let missingKey: [String: Any] = ["section": "provider", "values": ["profile": "custom", "model": "fixture", "base_url": "http://127.0.0.1:1234", "effort": "high"]]
+        let missing = await settings.handle("verify", body: missingKey, generation: g)
+        check("settings: missing key gives an actionable error", missing.0 == 400 && missing.1["message"] as? String == "Enter an API key.")
+        var invalidEffort = missingKey["values"] as! [String: Any]
+        invalidEffort["effort"] = "ultra"; invalidEffort["api_key"] = "fixture"
+        check("settings: unsupported chat effort rejected", (await settings.handle("verify", body: ["section": "provider", "values": invalidEffort], generation: g)).0 == 400)
+        // Fresh Quick Setup already holds its lease. Selecting a Responses
+        // provider earlier in that session must not make a later apply reacquire it.
+        check("settings: Responses runtime active for fresh-setup lease regression", ProviderProfiles.usesResponses)
+        let priorComplete = KeychainHelper.load(key: SetupWizard.completeKey)
+        try KeychainHelper.delete(key: SetupWizard.completeKey)
+        let freshEnvironment = QuickSetupEnvironment()
+        let freshRequest: [String: Any] = ["provider": ["profile": "opencode", "api_key": "fresh-fixture", "model": OpenCodeGo.defaultModel, "effort": "high", "activate": false]]
+        let notOwner = await SetupAPICore.apply(freshRequest)
+        check("settings: ordinary setup-api still refuses another owner's lease", notOwner["ok"] as? Bool == false)
+        let freshApply = await freshEnvironment.apply(freshRequest, {})
+        check("settings: fresh Quick Setup applies with Responses active and its own lease", freshApply["ok"] as? Bool == true && ProviderProfiles.configuredModel(.opencode) == OpenCodeGo.defaultModel && ProviderProfiles.activeProfile() == .openai && KeychainHelper.load(key: SetupWizard.completeKey) == nil)
+        if let priorComplete { try KeychainHelper.save(key: SetupWizard.completeKey, value: priorComplete) }
         let tool: [String: Any] = ["section": "jina", "values": ["api_key": "new-jina"]]
         _ = await settings.handle("verify", body: tool, generation: g)
         check("settings: independent tool-key save", (await settings.handle("save", body: tool, generation: g)).0 == 200 && KeychainHelper.load(key: KeychainHelper.jinaApiKeyKey) == "new-jina" && ProviderProfiles.activeProfile() == .openai)
@@ -153,5 +173,35 @@ extension SelftestContext {
         case .success(let other): check("settings: next daemon can acquire lease after settlement", true); other.release()
         case .failure: check("settings: next daemon can acquire lease after settlement", false)
         }
+    }
+}
+
+
+extension SelftestContext {
+    @MainActor
+    func browserSettingsSignals() async throws {
+        for secondSignal in [true, false] {
+            var release: CheckedContinuation<Void, Never>?
+            var entered = false, graceful = 0, forced = 0
+            let coordinator = ShutdownSignalCoordinator(graceNanoseconds: secondSignal ? 5_000_000_000 : 30_000_000,
+                settle: { entered = true; await withCheckedContinuation { release = $0 } },
+                gracefulExit: { graceful += 1 }, forceExit: { forced += 1 })
+            coordinator.request()
+            while !entered { await Task.yield() }
+            check("settings: first signal waits for callback", forced == 0 && graceful == 0)
+            if secondSignal { coordinator.request() }
+            else { try await Task.sleep(nanoseconds: 100_000_000) }
+            check(secondSignal ? "settings: second signal forces exit immediately" : "settings: signal settlement has a bounded deadline", forced == 1 && graceful == 0)
+            release?.resume()
+            for _ in 0..<20 { await Task.yield() }
+            coordinator.request()
+            check("settings: late callback and later signals cannot exit twice", forced == 1 && graceful == 0)
+        }
+        var graceful = 0, forced = 0
+        let coordinator = ShutdownSignalCoordinator(graceNanoseconds: 30_000_000,
+            settle: {}, gracefulExit: { graceful += 1 }, forceExit: { forced += 1 })
+        coordinator.request()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        check("settings: graceful signal cancels forced-exit deadline", graceful == 1 && forced == 0)
     }
 }

@@ -232,6 +232,9 @@ sign-in is separate from the API key used by web research, voice, and images.
 When Briglia is running, the command asks that process to serve the page. Saving
 waits for user retry if a turn, background subagent, or maintenance task is busy;
 a successful save reloads the affected services before admitting another turn.
+Sign-in polling also waits for idle, up to the device code’s expiry. Busy responses
+do not consume the connection-retry allowance. Signing out of the active ChatGPT
+profile stops new turns until you sign in again or select another provider.
 When Briglia is stopped, the settings command holds its instance lease, so a
 second agent cannot start during configuration. Closing the command keeps saved
 changes. A running older version without browser-settings support must be
