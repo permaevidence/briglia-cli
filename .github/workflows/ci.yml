@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'wip/responses-*', 'wip/subscription-*', 'wip/browser-settings']
+    branches: [main, 'wip/responses-*', 'wip/subscription-*', 'wip/browser-settings', 'wip/413-retry', 'wip/release-*']
   pull_request:
   workflow_dispatch:
 
