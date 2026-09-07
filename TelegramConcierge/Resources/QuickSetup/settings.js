@@ -35,13 +35,34 @@
       }
     });
   }
+  function subscriptionEfforts(model) {
+    if (/^gpt-6-astra(?:-20.*)?$/.test(model)) return ['low', 'medium', 'high', 'xhigh', 'max'];
+    if (/^gpt-5\.6(?:-luna|-terra|-sol)?(?:-20.*)?$/.test(model)) return ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
+    return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+  }
+  function renderEfforts() {
+    var select = $('effort'), current = select.value;
+    var choices = selected === 'chatgpt' ? subscriptionEfforts($('model').value.trim()) : ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    select.replaceChildren();
+    choices.forEach(function (value) { var option = node('option', value || 'Provider default'); option.value = value; select.appendChild(option); });
+    select.value = choices.indexOf(current) >= 0 ? current : 'high';
+  }
+  function renderSubscriptionModel() {
+    var choice = $('subscription-model-choice'), model = $('model').value;
+    var preset = Array.from(choice.options).some(function (option) { return option.value !== 'custom' && option.value === model; });
+    choice.value = preset ? model : 'custom';
+    $('subscription-model-choice-row').hidden = selected !== 'chatgpt';
+    $('model-row').hidden = selected === 'chatgpt' && preset;
+    renderEfforts();
+  }
   function renderProvider() {
     invalidate(); selected = $('provider').value;
     var p = state.profiles.find(function (x) { return x.id === selected; });
     $('configured').textContent = p.configured ? 'Configured. Leave the API key blank to keep it.' : 'Add this provider by verifying and saving its settings.';
     $('key').value = ''; $('key-row').hidden = selected === 'chatgpt' || selected === 'local';
     $('endpoint-row').hidden = selected !== 'custom' && selected !== 'local'; $('endpoint').value = p.endpoint;
-    $('model').value = p.model; $('effort').value = p.effort;
+    $('model').value = p.model;
+    renderSubscriptionModel(); $('effort').value = p.effort; renderEfforts();
     $('effort-row').hidden = selected === 'local'; $('vision-row').hidden = selected === 'chatgpt'; $('vision').checked = !p.text_only;
     $('activate').checked = selected === state.active || !state.active;
     $('activate').disabled = selected === state.active;
@@ -157,6 +178,13 @@
     }).catch(function (e) { if (action === 'cancel') { pending = null; clearTimeout(timer); } failed(e); })
       .finally(function () { accountBusy = false; accountControls(); });
   }
+  $('subscription-model-choice').addEventListener('change', function () {
+    var custom = this.value === 'custom';
+    $('model').value = custom ? '' : this.value;
+    $('model-row').hidden = !custom;
+    renderEfforts(); invalidate();
+  });
+  $('model').addEventListener('input', function () { if (selected === 'chatgpt') renderEfforts(); });
   $('provider').addEventListener('change', renderProvider);
   ['key','endpoint','model','effort','vision','activate','protocol','native-media'].forEach(function (id) { $(id).addEventListener('input', invalidate); });
   $('verify-provider').addEventListener('click', function () { operate('verify', providerRequest(), $('save-provider'), $('key')); });

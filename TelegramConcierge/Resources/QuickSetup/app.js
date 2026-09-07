@@ -133,6 +133,28 @@
     return state.kept.indexOf(k) >= 0 ? k : null;
   }
 
+  function subscriptionEfforts(model) {
+    if (/^gpt-6-astra(?:-20.*)?$/.test(model)) return ['low', 'medium', 'high', 'xhigh', 'max'];
+    if (/^gpt-5\.6(?:-luna|-terra|-sol)?(?:-20.*)?$/.test(model)) return ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
+    return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+  }
+  function renderSubscriptionEfforts() {
+    var select = $('subscription-effort'), current = select.value;
+    clear(select);
+    subscriptionEfforts($('subscription-model').value.trim()).forEach(function (value) {
+      var option = el('option', null, value); option.value = value; select.appendChild(option);
+    });
+    select.value = subscriptionEfforts($('subscription-model').value.trim()).indexOf(current) >= 0 ? current : 'high';
+  }
+  $('subscription-model-choice').addEventListener('change', function () {
+    var custom = this.value === 'custom';
+    $('subscription-custom-model-row').hidden = !custom;
+    $('subscription-model').value = custom ? '' : this.value;
+    renderSubscriptionEfforts();
+  });
+  $('subscription-model').addEventListener('input', renderSubscriptionEfforts);
+  renderSubscriptionEfforts();
+
   function usesSubscription() { return $("main-provider").value === "chatgpt"; }
 
   function updateCount() {

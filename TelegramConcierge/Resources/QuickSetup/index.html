@@ -29,7 +29,8 @@
     </label>
     <div id="subscription-panel" hidden>
       <p>Sign in with your ChatGPT account. Subscription limits apply; quota is currently unknown. The OpenAI API key below is still used for separate tools.</p>
-      <label class="field">Model <input id="subscription-model" value="gpt-5.6-luna" autocomplete="off"></label>
+      <label class="field">Model <select id="subscription-model-choice"><option value="gpt-5.6-luna">GPT-5.6 Luna</option><option value="gpt-5.6-terra">GPT-5.6 Terra</option><option value="gpt-5.6-sol">GPT-5.6 Sol</option><option value="gpt-6-astra">GPT-6 Astra</option><option value="custom">Custom model…</option></select></label>
+      <label id="subscription-custom-model-row" class="field" hidden>Custom model ID <input id="subscription-model" value="gpt-5.6-luna" autocomplete="off"></label>
       <label class="field">Reasoning effort <select id="subscription-effort"><option>low</option><option>medium</option><option selected>high</option><option>xhigh</option><option>max</option></select></label>
       <p id="subscription-status" role="status"></p>
       <a id="subscription-url" href="#" target="_blank" rel="noopener noreferrer" hidden>Open ChatGPT sign-in</a>

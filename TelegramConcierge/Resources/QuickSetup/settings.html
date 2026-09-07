@@ -16,7 +16,8 @@
 </div>
 <label id="key-row" class="field">API key<input id="key" type="password" autocomplete="off" placeholder="Leave blank to keep the stored key"></label>
 <label id="endpoint-row" class="field" hidden>Server URL<input id="endpoint" type="url" autocomplete="off" placeholder="http://127.0.0.1:1234/v1"></label>
-<label class="field">Model<input type="text" id="model" list="models" autocomplete="off" placeholder="Enter a model ID"><datalist id="models"></datalist></label>
+<label id="subscription-model-choice-row" class="field" hidden>Model<select id="subscription-model-choice"><option value="gpt-5.6-luna">GPT-5.6 Luna</option><option value="gpt-5.6-terra">GPT-5.6 Terra</option><option value="gpt-5.6-sol">GPT-5.6 Sol</option><option value="gpt-6-astra">GPT-6 Astra</option><option value="custom">Custom model…</option></select></label>
+<label id="model-row" class="field">Model ID<input type="text" id="model" list="models" autocomplete="off" placeholder="Enter a model ID"><datalist id="models"></datalist></label>
 <label id="effort-row" class="field">Reasoning effort<select id="effort"><option value="">Provider default</option><option>none</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
 <label id="protocol-row" class="field" hidden>API protocol<select id="protocol"><option value="chatCompletions">Chat Completions</option><option value="responses">Responses</option></select></label>
 <label id="vision-row" class="field"><span><input id="vision" type="checkbox"> This model can see images</span></label>

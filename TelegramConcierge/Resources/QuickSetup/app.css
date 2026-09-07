@@ -57,3 +57,6 @@ button:disabled { opacity: .5; cursor: default; }
 code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .field select, .field input[type="url"] { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: var(--ink); }
+
+/* Explicit component display rules must respect conditional form fields. */
+[hidden] { display: none !important; }

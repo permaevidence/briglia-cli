@@ -58,12 +58,27 @@ try:
         page.fill('#f-name', 'Fixture')
         for key in ['openai', 'serper', 'jina', 'telegram_token', 'telegram_chat']:
             page.fill('#f-' + key, '123' if key == 'telegram_chat' else 'synthetic')
+        assert page.locator('#subscription-model-choice').input_value() == 'gpt-5.6-luna'
+        assert page.locator('#subscription-effort').input_value() == 'high'
+        for model in ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra']:
+            page.select_option('#subscription-model-choice', model)
+            assert page.locator('#subscription-model').input_value() == model
+            assert page.locator('#subscription-custom-model-row').is_hidden()
+            efforts = page.locator('#subscription-effort option').evaluate_all('(options) => options.map(o => o.value)')
+            assert 'high' in efforts and 'max' in efforts and 'ultra' not in efforts
+            assert ('none' in efforts) == (model != 'gpt-6-astra')
+        page.select_option('#subscription-model-choice', 'custom')
+        assert page.locator('#subscription-custom-model-row').is_visible()
+        page.fill('#subscription-model', 'custom-fixture-model')
+        assert page.locator('#subscription-effort option[value="max"]').count() == 0
+        page.select_option('#subscription-model-choice', 'gpt-6-astra')
+        page.select_option('#subscription-effort', 'max')
         page.click('#btn-verify')
         page.wait_for_timeout(100)
         req = state['verified']
-        assert req['chatgpt'] == {'model': 'gpt-5.6-luna', 'effort': 'high', 'generation': generation}
+        assert req['chatgpt'] == {'model': 'gpt-6-astra', 'effort': 'max', 'generation': generation}
         assert 'opencode' not in req and req['openai']['value'] == 'synthetic'
         assert not errors, errors
         browser.close()
 finally: server.shutdown()
-print('Subscription browser: login, polling, inert code, alternate provider and API-tool separation PASS')
+print('Subscription browser: login, polling, inert code, model/effort choices, alternate provider and API-tool separation PASS')

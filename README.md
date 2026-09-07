@@ -222,7 +222,9 @@ effort, or tool API key. Existing installations open a settings page; new ones
 still use the guided installation flow. All six provider profiles are available:
 OpenCode Go, OpenRouter, OpenAI API, ChatGPT subscription, a custom endpoint, and
 a local server. Model IDs can be entered directly; OpenCode choices are also
-suggested from the bundled catalog.
+suggested from the bundled catalog. ChatGPT has Luna, Terra, Sol and Astra
+choices with reasoning effort controls in both Quick Setup and settings; a
+custom-model option accepts other model IDs.
 
 Verify and save one section at a time. A blank provider key keeps the saved key;
 the browser never receives stored keys. Adding a provider keeps the current

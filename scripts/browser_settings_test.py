@@ -168,6 +168,35 @@ def run():
                 tick_until(lambda: 'Signed in.' in page.locator('#account-status').inner_text())
                 assert polls == ['opaque-fixture'] * 17
                 print('PASS running owner busy beyond 12 polls, then transport retry and successful same-handle login')
+                verified_models = []
+                def model_verify(route):
+                    verified_models.append(route.request.post_data_json)
+                    route.fulfill(json={'ok': True, 'message': 'Verified fixture'})
+                page.route('**/api/verify', model_verify)
+                for model in ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra']:
+                    page.select_option('#subscription-model-choice', model)
+                    assert page.locator('#model').input_value() == model
+                    assert page.locator('#model-row').is_hidden()
+                    efforts = page.locator('#effort option').evaluate_all('(options) => options.map(o => o.value)')
+                    assert 'max' in efforts and 'ultra' not in efforts
+                    assert ('none' in efforts) == (model != 'gpt-6-astra')
+                    page.select_option('#effort', 'max')
+                    page.click('#verify-provider'); page.locator('#save-provider:enabled').wait_for()
+                    assert verified_models[-1]['values']['model'] == model
+                    assert verified_models[-1]['values']['effort'] == 'max'
+                    assert verified_models[-1]['values']['generation'] == 'fixture-generation'
+                    page.select_option('#effort', 'high')
+                    assert page.locator('#save-provider').is_disabled()
+                page.click('#verify-provider'); page.locator('#save-provider:enabled').wait_for()
+                page.select_option('#subscription-model-choice', 'custom')
+                assert page.locator('#save-provider').is_disabled()
+                assert page.locator('#model-row').is_visible()
+                page.fill('#model', 'custom-fixture-model')
+                assert page.locator('#effort option[value="max"]').count() == 0
+                page.click('#verify-provider'); page.locator('#save-provider:enabled').wait_for()
+                assert verified_models[-1]['values']['model'] == 'custom-fixture-model'
+                page.unroute('**/api/verify', model_verify)
+                print('PASS subscription model presets, effort filtering, custom model and stale-verification invalidation')
                 mode[0] = 'transport'; polls.clear(); start_login()
                 tick_until(lambda: 'Automatic retries stopped' in page.locator('#account-status').inner_text())
                 assert polls == ['opaque-fixture'] * 13
