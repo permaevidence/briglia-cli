@@ -190,7 +190,12 @@ extension SelftestContext {
             while !entered { await Task.yield() }
             check("settings: first signal waits for callback", forced == 0 && graceful == 0)
             if secondSignal { coordinator.request() }
-            else { try await Task.sleep(nanoseconds: 100_000_000) }
+            else {
+                // The forced-exit deadline (30 ms here) fires from a background task; a loaded
+                // CI runner can schedule it late. Wait for it with a bound instead of a fixed sleep.
+                let waitUntil = ProcessInfo.processInfo.systemUptime + 3
+                while forced == 0 && ProcessInfo.processInfo.systemUptime < waitUntil { try await Task.sleep(nanoseconds: 10_000_000) }
+            }
             check(secondSignal ? "settings: second signal forces exit immediately" : "settings: signal settlement has a bounded deadline", forced == 1 && graceful == 0)
             release?.resume()
             for _ in 0..<20 { await Task.yield() }
