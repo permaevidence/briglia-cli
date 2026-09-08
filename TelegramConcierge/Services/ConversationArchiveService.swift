@@ -665,10 +665,18 @@ actor ConversationArchiveService {
 
             for pending in pendingChunks {
                 do {
+                    if chunkIndex.chunks.contains(where: { $0.id == pending.id }) {
+                        try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL)
+                        recoveredIds.insert(pending.id)
+                        continue
+                    }
                     // Load the raw messages
                     let fileURL = archiveFolder.appendingPathComponent(pending.rawContentFileName)
                     let data = try Data(contentsOf: fileURL)
                     let messages = sanitizeMessagesForArchive(try JSONDecoder().decode([Message].self, from: data))
+                    let pinnedReferences = messages.flatMap(\.pruneArchiveReferences)
+                    PruneArchiveStore.pinExisting(pinnedReferences)
+                    defer { for ref in pinnedReferences { PruneArchiveStore.release(ref) } }
                     let sanitizedData = try JSONEncoder().encode(messages)
                     try PrivateStorage.writeAtomically(sanitizedData, to: fileURL)
                     await writeSidecar(forRawFileName: pending.rawContentFileName, messages: messages)
@@ -730,7 +738,7 @@ actor ConversationArchiveService {
                     }
 
                     // Create the completed chunk
-                    let chunk = ConversationChunk(
+                    var chunk = ConversationChunk(
                         id: pending.id,
                         type: .temporary,
                         startDate: pending.startDate,
@@ -741,15 +749,21 @@ actor ConversationArchiveService {
                         rawContentFileName: pending.rawContentFileName
                     )
 
-                    chunkIndex.chunks.append(chunk)
+                    chunk.pruneArchiveReferences = Self.snapshotReferences(in: messages)
+                    chunk.sourceMessageIDs = pending.sourceMessageIDs ?? messages.map(\.id)
+                    if !chunkIndex.chunks.contains(where: { $0.id == chunk.id }) { chunkIndex.chunks.append(chunk) }
+                    try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL)
                     recoveredIds.insert(pending.id)
                     recoveredPendingChunks = true
                     print("[ArchiveService] Recovered pending chunk \(pending.id.uuidString.prefix(8))...")
                 } catch {
-                    // Raw file missing or undecodable — the content is genuinely
-                    // unrecoverable, so drop the record rather than retrying forever.
-                    print("[ArchiveService] Dropping unrecoverable pending chunk \(pending.id): \(error)")
-                    droppedIds.insert(pending.id)
+                    // Preserve recovery evidence on read/write/fsync failures.
+                    // A failed index publication is not evidence that raw history
+                    // is unrecoverable, and must not delete the pending receipt.
+                    await MaintenanceAlertCenter.shared.reportFailure(.conversationSummary,
+                        error: error.localizedDescription, deterministic: false)
+                    passAborted = true
+                    break
                 }
             }
 
@@ -844,13 +858,25 @@ actor ConversationArchiveService {
     
     /// Archive a batch of messages as a temporary chunk
     /// Uses pending chunk pattern: save raw data first, then summarize, for crash safety
-    func archiveMessages(_ messages: [Message], context: SummarizationContext = .empty) async throws -> ConversationChunk {
+    func archiveMessages(_ messages: [Message], context: SummarizationContext = .empty, snapshot: PruneArchiveReference? = nil) async throws -> ConversationChunk {
         guard !messages.isEmpty else {
             throw ArchiveError.emptyMessages
         }
         
-        let chunkId = UUID()
-        let archivedMessages = sanitizeMessagesForArchive(messages)
+        let sourceIDs = Set(messages.map(\.id))
+        if let completed = chunkIndex.chunks.first(where: { sourceIDs.isSubset(of: Set($0.sourceMessageIDs ?? [])) }) {
+            // A previous archive committed but the manager's removal save failed.
+            try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL)
+            return completed
+        }
+        if PruneArchiveStore.needsSnapshot(messages) && snapshot == nil {
+            throw PruneArchiveStore.Failure("Detail-bearing chunk archiving requires a durable conversation snapshot")
+        }
+        let chunkId = pendingIndex.pendingChunks.first { Set($0.sourceMessageIDs ?? []) == sourceIDs }?.id ?? UUID()
+        var archivedMessages = sanitizeMessagesForArchive(messages)
+        if let snapshot, !archivedMessages.isEmpty {
+            archivedMessages[0].pruneArchiveReferences.append(snapshot)
+        }
         let startDate = archivedMessages.first!.timestamp
         let endDate = archivedMessages.last!.timestamp
         let tokenCount = archivedMessages.reduce(0) { $0 + estimateTokens(for: $1) }
@@ -872,10 +898,11 @@ actor ConversationArchiveService {
             tokenCount: tokenCount,
             messageCount: messages.count,
             rawContentFileName: fileName,
-            createdAt: Date()
+            createdAt: Date(), sourceMessageIDs: messages.map(\.id)
         )
+        pendingIndex.pendingChunks.removeAll { $0.id == chunkId }
         pendingIndex.pendingChunks.append(pending)
-        savePendingIndex()
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
 
         // Sidecar only after the pending record is durable: a crash during
         // this derived, best-effort write must not leave raw JSON that no
@@ -915,7 +942,7 @@ actor ConversationArchiveService {
             ))
         }
 
-        let chunk = ConversationChunk(
+        var chunk = ConversationChunk(
             id: chunkId,
             type: .temporary,
             startDate: startDate,
@@ -926,12 +953,15 @@ actor ConversationArchiveService {
             rawContentFileName: fileName
         )
         
+        chunk.pruneArchiveReferences = Self.snapshotReferences(in: archivedMessages)
+        chunk.sourceMessageIDs = messages.map(\.id)
         chunkIndex.chunks.append(chunk)
-        
+        // Publish the chunk index before removing its recovery record.
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL)
+
         // Remove from pending (summarization complete)
         pendingIndex.pendingChunks.removeAll { $0.id == chunkId }
-        savePendingIndex()
-        saveIndex()
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
         
         print("[ArchiveService] Created temporary chunk \(chunkId.uuidString.prefix(8))... (\(tokenCount) tokens, \(messages.count) messages)")
 
@@ -1049,7 +1079,7 @@ actor ConversationArchiveService {
                     endDate: $0.endDate,
                     tokenCount: $0.tokenCount,
                     messageCount: $0.messageCount,
-                    summary: $0.summary,
+                    summary: $0.summaryWithSnapshotReferences,
                     sourceChunkCount: 1,
                     sidecarMissing: missingSidecarIds.contains($0.id)
                 )
@@ -1063,7 +1093,7 @@ actor ConversationArchiveService {
                 endDate: $0.endDate,
                 tokenCount: $0.tokenCount,
                 messageCount: $0.messageCount,
-                summary: $0.summary,
+                summary: $0.summaryWithSnapshotReferences,
                 sourceChunkCount: 1,
                 sidecarMissing: missingSidecarIds.contains($0.id)
             )
@@ -1077,7 +1107,7 @@ actor ConversationArchiveService {
                 endDate: $0.endDate,
                 tokenCount: $0.tokenCount,
                 messageCount: $0.messageCount,
-                summary: $0.summary,
+                summary: $0.summaryWithSnapshotReferences,
                 sourceChunkCount: 1,
                 sidecarMissing: missingSidecarIds.contains($0.id)
             )
@@ -1283,7 +1313,7 @@ actor ConversationArchiveService {
         )
         let summary = try await generateSummary(for: allMessages, startDate: startDate, endDate: endDate, context: consolidationContext)
         
-        let consolidatedChunk = ConversationChunk(
+        var consolidatedChunk = ConversationChunk(
             id: consolidatedId,
             type: .consolidated,
             startDate: startDate,
@@ -1294,22 +1324,25 @@ actor ConversationArchiveService {
             rawContentFileName: fileName
         )
 
+        consolidatedChunk.pruneArchiveReferences = Self.snapshotReferences(in: allMessages)
+        consolidatedChunk.sourceMessageIDs = Array(Set(chunks.flatMap { $0.sourceMessageIDs ?? [] } + allMessages.map(\.id))).sorted { $0.uuidString < $1.uuidString }
+
         // Save consolidated raw content only after summary generation succeeds.
         // If the model call fails, retries should not leave orphan archive files.
         let data = try JSONEncoder().encode(allMessages)
         try PrivateStorage.writeAtomically(data, to: fileURL)
 
-        // Remove temporary chunks and their files
+        // Checked index publication comes before deleting any child file.
+        let previousIndex = chunkIndex
+        chunkIndex.chunks.removeAll { consolidatingIds.contains($0.id) }
+        chunkIndex.chunks.append(consolidatedChunk)
+        do { try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL) }
+        catch { chunkIndex = previousIndex; throw error }
         for chunk in chunks {
-            chunkIndex.chunks.removeAll { $0.id == chunk.id }
             let oldFileURL = archiveFolder.appendingPathComponent(chunk.rawContentFileName)
             try? FileManager.default.removeItem(at: oldFileURL)
             removeSidecar(forRawFileName: chunk.rawContentFileName)
         }
-
-        // Add consolidated chunk
-        chunkIndex.chunks.append(consolidatedChunk)
-        saveIndex()
 
         // Sidecar only after the index transaction commits — same crash
         // discipline as archiveMessages; backfill covers a crash before this.
@@ -2355,6 +2388,12 @@ actor ConversationArchiveService {
     /// Long-term archive chunks intentionally keep the same lightweight shape as
     /// pruned active history: message text plus durable breadcrumbs, never full
     /// tool replay payloads or inline media references.
+    private static func snapshotReferences(in messages: [Message]) -> [PruneArchiveReference]? {
+        var seen: Set<UUID> = []
+        let refs = messages.flatMap(\.pruneArchiveReferences).filter { seen.insert($0.id).inserted }
+        return refs.isEmpty ? nil : refs
+    }
+
     private func sanitizeMessagesForArchive(_ messages: [Message]) -> [Message] {
         messages
             .filter { !isStandaloneToolRunLog($0) }
@@ -2385,7 +2424,8 @@ actor ConversationArchiveService {
                     tokenCount: result.tokenCount,
                     messageCount: chunk.messageCount,
                     summary: chunk.summary,
-                    rawContentFileName: chunk.rawContentFileName
+                    rawContentFileName: chunk.rawContentFileName,
+                    pruneArchiveReferences: chunk.pruneArchiveReferences, sourceMessageIDs: chunk.sourceMessageIDs
                 )
                 updatedChunkIndex = true
             }
@@ -2403,7 +2443,7 @@ actor ConversationArchiveService {
                     tokenCount: result.tokenCount,
                     messageCount: pending.messageCount,
                     rawContentFileName: pending.rawContentFileName,
-                    createdAt: pending.createdAt
+                    createdAt: pending.createdAt, sourceMessageIDs: pending.sourceMessageIDs
                 )
                 updatedPendingIndex = true
             }
@@ -2455,7 +2495,7 @@ actor ConversationArchiveService {
     }
 
     private func sanitizeMessageForArchive(_ message: Message) -> Message {
-        Message(
+        var sanitized = Message(
             id: message.id,
             role: message.role,
             content: message.content,
@@ -2483,6 +2523,8 @@ actor ConversationArchiveService {
             measuredTokens: nil,
             kind: message.kind
         )
+        sanitized.pruneArchiveReferences = message.pruneArchiveReferences
+        return sanitized
     }
     
     private func formatMessagesForSummary(_ messages: [Message]) async -> String {
@@ -2652,7 +2694,7 @@ actor ConversationArchiveService {
     }
 
     private func decorateMessageContentForArchive(_ baseContent: String, message: Message) async -> String {
-        var tags: [String] = []
+        var tags: [String] = message.pruneArchiveReferences.map { "Full context snapshot: " + $0.relativePath }
 
         if !message.accessedProjectIds.isEmpty {
             tags.append("Projects accessed: \(message.accessedProjectIds.joined(separator: ", "))")

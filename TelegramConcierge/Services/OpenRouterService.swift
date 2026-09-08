@@ -1048,6 +1048,8 @@ actor OpenRouterService {
             lines.append("Subagent session events: \(events.joined(separator: "; "))")
         }
 
+        lines.append(contentsOf: message.pruneArchiveReferences.map(\.promptText))
+
         if let summary = message.prunedContextSummary?.trimmingCharacters(in: .whitespacesAndNewlines),
            !summary.isEmpty {
             lines.append("""

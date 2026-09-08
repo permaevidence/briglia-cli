@@ -1,0 +1,13 @@
+{
+  "revision": 3,
+  "reference_source": "4dd86133de03b484bed62fb81ce59935b89a7de8",
+  "frozen_reference": "ci-<platform>-r2.json (unchanged)",
+  "migration": "scripts/prune_lifecycle_migration.py",
+  "allowed": [
+    "Exactly one typed snapshot reference on each existing summary anchor in 11 pruning scenarios (22 observed arrays and 11 saved arrays)",
+    "Existing measuredTokens on those anchors increases by the exact rendered-reference estimate",
+    "Mind inventory adds exactly the 11 deterministic snapshot filenames and their folder"
+  ],
+  "unchanged": "All captured model-request bytes, decisions, unrelated observations and all unchanged saved-file bytes",
+  "saved_array_encoding": "Only arrays gaining the new field may have Foundation object-key reordering; their complete decoded values must equal the exact reviewed additive value."
+}

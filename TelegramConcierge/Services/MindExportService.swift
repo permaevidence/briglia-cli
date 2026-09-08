@@ -50,7 +50,8 @@ actor MindExportService {
     /// original-size images, per-read attachment snapshots, cloned project
     /// repos). Restoring a lite backup follows the normal replacement
     /// semantics: the target's payload folders are CLEARED — the import
-    /// warning discloses exactly which areas arrive empty.
+    /// warning discloses exactly which areas arrive empty. Pruning snapshots
+    /// are memory and included in both scopes; lite is not a size guarantee.
     enum ExportScope: String {
         case full
         case lite
@@ -93,12 +94,27 @@ actor MindExportService {
         // bodies and their $WATCHER_STATE restored nothing runnable.
         for folderName in [
             "archive",
+            "prune-archives",
             "images",
             "documents",
             "tool_attachments",
             "projects",
             "reminder-scripts"
         ] where scope == .full || !ExportScope.payloadFolderNames.contains(folderName) {
+            if folderName == "prune-archives" {
+                let source = appFolder.appendingPathComponent(folderName)
+                let destination = tempDir.appendingPathComponent(folderName)
+                let completed = try PruneArchiveStore.entries(directory: source)
+                if !completed.isEmpty {
+                    try PrivateStorage.ensureDirectory(destination)
+                    for entry in completed {
+                        try copyItemIfExists(from: source.appendingPathComponent(entry.reference.basename),
+                                             to: destination.appendingPathComponent(entry.reference.basename))
+                    }
+                    _ = try PruneArchiveStore.entries(directory: destination, validateComplete: true)
+                }
+                continue
+            }
             try copyItemIfExists(
                 from: appFolder.appendingPathComponent(folderName, isDirectory: true),
                 to: tempDir.appendingPathComponent(folderName, isDirectory: true)
@@ -200,6 +216,7 @@ actor MindExportService {
             if let offender = try Self.unsafeStagedEntry(in: tempDir, restoredInto: appFolder) {
                 throw MindExportError.unsafeArchive(offender)
             }
+            _ = try PruneArchiveStore.entries(directory: tempDir.appendingPathComponent("prune-archives"), validateComplete: true)
             return StagedMind(tempDir: tempDir, config: config)
         } catch {
             try? fm.removeItem(at: tempDir)
@@ -242,6 +259,7 @@ actor MindExportService {
         // semantics (their reminders.json had no runnable watchers anyway).
         for folderName in [
             "archive",
+            "prune-archives",
             "images",
             "documents",
             "tool_attachments",
@@ -259,6 +277,7 @@ actor MindExportService {
 
         // 6. Everything restored in scope is owner-only, checked.
         try validateRestoredPermissions()
+        try PruneArchiveStore.retainLatest(directory: appFolder.appendingPathComponent("prune-archives"))
 
         print("[MindExportService] Applied staged mind from: \(tempDir.path)")
     }
@@ -271,7 +290,7 @@ actor MindExportService {
         "calendar.json", "files_ledger.json", "documents_last_opened.json", "todos.json",
     ]
     static let restoredFolderNames = [
-        "archive", "images", "documents", "tool_attachments", "projects", "reminder-scripts",
+        "archive", "prune-archives", "images", "documents", "tool_attachments", "projects", "reminder-scripts",
         "subagent_sessions",
     ]
 

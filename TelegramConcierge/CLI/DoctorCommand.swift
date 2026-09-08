@@ -66,6 +66,8 @@ struct Doctor: AsyncParsableCommand {
             ?? (openAIKey.isEmpty ? "openrouter (no OpenAI key)" : "openai")
         note("OCR backend: \(ocrBackend)")
         note("data: \(StoragePaths.dataRoot.path)")
+        let snapshotStatus = PruneArchiveStore.statusLine()
+        check(snapshotStatus, ok: !snapshotStatus.hasPrefix("Snapshot storage error:"))
         note("config: \(StoragePaths.configRoot.path)")
 
         if ProviderProfiles.activeProfile() == .chatgpt {

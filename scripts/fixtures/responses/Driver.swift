@@ -317,6 +317,13 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         try P2Life.require(pruned.first { $0.id == protected.id }?.toolInteractions.isEmpty == false, "manual pruning preserves newest tool turn")
         let summaryBody = try JSONSerialization.jsonObject(with: server.completeRequests.last!.body) as! [String: Any]
         try P2Life.require((summaryBody["tools"] as? [Any])?.isEmpty == true, "Responses prune summary mechanically disables tools")
+        let snapshotReference = pruned.first { $0.id == old.id }?.pruneArchiveReferences.first
+        try P2Life.require(snapshotReference != nil, "Responses prune persists typed snapshot reference")
+        _ = try manager.p2Reload()
+        server.script([try P2Life.body("After pruning")])
+        _ = try await manager.p2Turn(human: Message(role: .user, content: "Continue using the concise context"))
+        let linkedRequest = String(decoding: server.completeRequests.last!.body, as: UTF8.self)
+        try P2Life.require(linkedRequest.contains(snapshotReference!.basename), "Responses real manager sends snapshot link after restart")
         // Failed terminal result must preserve queued delivery and completed work.
         try await manager.p2Seed([])
         server.script([try P2Life.body("Reading", tool: "read_file", path: file.path), try P2Life.body("partial", status: "failed")])

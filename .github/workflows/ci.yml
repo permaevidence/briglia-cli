@@ -46,8 +46,11 @@ jobs:
           name: chat-wire-reference-${{ runner.os }}-${{ runner.arch }}
           path: chat-wire-reference.json
       - name: Lifecycle comparator negative tests
-        run: python3 scripts/chat_lifecycle_baseline_test.py
-      - name: Chat Completions lifecycle and shipped-client differential gate
+        run: |
+          python3 scripts/chat_lifecycle_baseline_test.py
+          python3 scripts/prune_lifecycle_migration_test.py
+          python3 scripts/prune_schema_contract_test.py
+      - name: Chat Completions lifecycle r3 and shipped-client differential gate
         run: python3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline scripts/fixtures/chat-lifecycle/ci-linux-x86_64-r2.json
       - name: Preserve pinned lifecycle reference
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -56,6 +59,8 @@ jobs:
           path: chat-lifecycle-reference.json
       - name: Configured subscription shipped-client compatibility
         run: python3 scripts/subscription_client_test.py .build/debug/briglia
+      - name: Snapshot owner transactions and Mind transfer
+        run: python3 scripts/prune_archive_owner_test.py
       - name: Responses real-owner lifecycle
         run: python3 scripts/responses_lifecycle_test.py
       - name: Smoke test
@@ -94,8 +99,11 @@ jobs:
           name: chat-wire-reference-${{ runner.os }}-${{ runner.arch }}
           path: chat-wire-reference.json
       - name: Lifecycle comparator negative tests
-        run: python3 scripts/chat_lifecycle_baseline_test.py
-      - name: Chat Completions lifecycle and shipped-client differential gate
+        run: |
+          python3 scripts/chat_lifecycle_baseline_test.py
+          python3 scripts/prune_lifecycle_migration_test.py
+          python3 scripts/prune_schema_contract_test.py
+      - name: Chat Completions lifecycle r3 and shipped-client differential gate
         run: python3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2.json
       - name: Preserve pinned lifecycle reference
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -104,6 +112,8 @@ jobs:
           path: chat-lifecycle-reference.json
       - name: Configured subscription shipped-client compatibility
         run: python3 scripts/subscription_client_test.py .build/debug/briglia
+      - name: Snapshot owner transactions and Mind transfer
+        run: python3 scripts/prune_archive_owner_test.py
       - name: Responses real-owner lifecycle
         run: python3 scripts/responses_lifecycle_test.py
       - name: Smoke test

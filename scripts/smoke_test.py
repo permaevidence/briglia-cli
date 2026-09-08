@@ -369,6 +369,9 @@ def main():
     check("midturn-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    result = run_selftest([ADA, "__prune-archive-selftest"], capture_output=True, text=True, timeout=120)
+    check("prune archive selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # 3c5-ter. MCP tool surface: server handles, canonical aliases (length,
     # charset, determinism, per-server prefix isolation), escaped
     # descriptions, refused hostile semantic strings, registry-only dispatch

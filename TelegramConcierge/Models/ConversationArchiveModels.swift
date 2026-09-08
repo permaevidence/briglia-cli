@@ -12,6 +12,13 @@ struct ConversationChunk: Codable, Identifiable {
     let messageCount: Int
     let summary: String
     let rawContentFileName: String
+    var pruneArchiveReferences: [PruneArchiveReference]? = nil
+    var sourceMessageIDs: [UUID]? = nil
+    var summaryWithSnapshotReferences: String {
+        let links = (pruneArchiveReferences ?? []).map(\.promptText)
+        return ([summary] + links).joined(separator: "\n")
+    }
+
     
     enum ChunkType: String, Codable {
         case temporary    // Size based on user setting (default 25k)
@@ -272,6 +279,7 @@ struct PendingChunk: Codable, Identifiable {
     let messageCount: Int
     let rawContentFileName: String
     let createdAt: Date
+    var sourceMessageIDs: [UUID]? = nil
 }
 
 struct PendingChunkIndex: Codable {

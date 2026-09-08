@@ -33,7 +33,7 @@ struct AdaCLI: AsyncParsableCommand {
                       AffinitySelftest.self, ChatWireSelftest.self, ChatAdapterSelftest.self, ChatRetrySelftest.self, ResponsesSelftest.self, ResponsesCacheSelftest.self, SubscriptionSelftest.self,
                       WebAgentSelftest.self, ProviderSelftest.self, ServiceSelftest.self,
                       FsToolsSelftest.self, DeleteUserDataSelftest.self,
-                      MidturnAnnotationSelftest.self, MCPSurfaceSelftest.self, StorageSelftest.self,
+                      PruneArchiveSelftest.self, MidturnAnnotationSelftest.self, MCPSurfaceSelftest.self, StorageSelftest.self,
                       PlaywrightSelftest.self,
                       SecretStoreSelftest.self, ReleaseSigningSelftest.self,
                       VerifyEnvelopeCommand.self, TestSignEnvelopeCommand.self,

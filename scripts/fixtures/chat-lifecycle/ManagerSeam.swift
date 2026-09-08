@@ -35,7 +35,7 @@ extension ConversationManager {
             "added": estimatedTokensAddedSinceLastPrompt(currentUserMessageId: history.last?.id, isLMStudio: false)
         ]
         if mode == "midloop" {
-            let decision = await pruneStoredToolInteractionsMidLoop(messagesForLLM: &snapshot,
+            let decision = try await pruneStoredToolInteractionsMidLoop(messagesForLLM: &snapshot,
                 currentTurnInteractions: current, calendarContext: nil, emailContext: nil, chunkSummaries: [],
                 totalChunkCount: 0, currentUserMessageId: history.last?.id, turnStartDate: P0Life.instant,
                 tools: [], deferredMCPSummaries: [])
@@ -45,7 +45,7 @@ extension ConversationManager {
             snapshot = messages
             result["decision"] = "manual"
         } else {
-            let changed = await pruneToolInteractionsIfNeeded(currentUserMessageId: history.last?.id,
+            let changed = try await pruneToolInteractionsIfNeeded(currentUserMessageId: history.last?.id,
                 calendarContext: nil, emailContext: nil, chunkSummaries: [], totalChunkCount: 0,
                 turnStartDate: P0Life.instant, tools: [], deferredMCPSummaries: [])
             snapshot = messages

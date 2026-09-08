@@ -3333,7 +3333,12 @@ class ConversationManager: ObservableObject {
             await switchVoiceTranscriptionProvider(to: .openAI)
             return true
         case "/pulisci", "/prune":
-            await manualPruneToolInteractions()
+            let argument = commandArgument(from: text).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard argument.isEmpty || argument == "nosnapshot" else {
+                try? await sendText("Usage: /prune [nosnapshot]")
+                return true
+            }
+            await manualPruneToolInteractions(noSnapshot: argument == "nosnapshot")
             return true
         case "/status":
             await sendTurnStatus()
@@ -4919,7 +4924,7 @@ class ConversationManager: ObservableObject {
         guard replyAddress != nil else { return }
         let log = currentTurnToolLog
 
-        let contextLine = formatContextGaugeLine()
+        let contextLine = formatContextGaugeLine() + "\n" + PruneArchiveStore.statusLine()
 
         if log.isEmpty {
             let msg = activeRunId != nil
@@ -5027,7 +5032,14 @@ class ConversationManager: ObservableObject {
         await manualPruneToolInteractions(notify: Self.appChannelAddress)
     }
 
-    private func manualPruneToolInteractions(notify address: ChannelAddress? = nil) async {
+    private func manualPruneToolInteractions(notify address: ChannelAddress? = nil, noSnapshot: Bool = false) async {
+        guard activeRunId == nil, activeProcessingTask == nil, !isRestoringMind,
+              maintenanceActivities.isEmpty, archiveRecoveryTask == nil else {
+            try? await sendText("Briglia is busy; retry /prune when idle.", to: address)
+            return
+        }
+        let pruneActivityId = beginMaintenance(.pruning)
+        defer { endMaintenance(pruneActivityId) }
         let targetTokens = configuredTargetContextTokens()
         let protectedIndex = lastAssistantIndexWithTools(in: messages)
         let providerIsLMStudio = currentProviderIsLMStudio()
@@ -5083,7 +5095,8 @@ class ConversationManager: ObservableObject {
             }
         }
 
-        guard prunableToolTokens > 0 else {
+        guard prunableToolTokens > 0 || messages.enumerated().contains(where: { $0.offset != protectedIndex && $0.element.hasUnprunedMedia })
+                || !compressibleUserMessageIndices(upToIndex: max(0, messages.count - 1), in: messages).isEmpty else {
             let msg = "Nothing to compact: the details of the latest reply's work are always protected."
             showMaintenanceNotice(msg)
             try? await sendText(msg, to: address)
@@ -5092,14 +5105,14 @@ class ConversationManager: ObservableObject {
 
         let beforeTokens = totalTokens
 
-        let pruneActivityId = beginMaintenance(.pruning)
-        defer { endMaintenance(pruneActivityId) }
 
+
+        let plannedSource = messages
         let plan = buildPrunePlan(
-            for: messages,
+            for: plannedSource,
             totalTokens: totalTokens,
             targetTokens: targetTokens,
-            protectedIndex: protectedIndex,
+            protectedIndex: lastAssistantIndexWithTools(in: plannedSource),
             providerIsLMStudio: providerIsLMStudio
         )
         let safeBoundary = min(plan.pruningBoundary, max(messages.count - 1, 0))
@@ -5113,15 +5126,18 @@ class ConversationManager: ObservableObject {
         // cache breakpoint 2 on a never-cached message, causing a full
         // cache miss on everything after the system prompt. The protected
         // turn's tools aren't being pruned, so no information is lost.
-        var messagesForSummary = messages
+        var messagesForSummary = plannedSource
         if let last = messagesForSummary.last, last.role == .assistant {
             messagesForSummary.removeLast()
         }
 
-        if let summary = await generatePrunedContextSummary(
+        do {
+            _ = try await commitPrune(plan: plan, compressedIndices: compressedIndices, safeBoundary: safeBoundary,
+                source: plannedSource, summarySource: messagesForSummary, trigger: "manual", noSnapshot: noSnapshot) { snapshotForSummary in
+                return await generatePrunedContextSummary(
             plan: plan,
             compressedIndices: compressedIndices,
-            sourceMessages: messagesForSummary,
+            sourceMessages: snapshotForSummary,
             tools: toolsForSummary,
             calendarContext: frozenContext.calendar,
             emailContext: frozenContext.email,
@@ -5130,48 +5146,25 @@ class ConversationManager: ObservableObject {
             currentUserMessageId: nil,
             turnStartDate: currentSystemPromptTimestamp(),
             deferredMCPSummaries: deferredSummaries
-        ),
-           let anchor = pruneSummaryAnchorIndex(plan: plan, compressedIndices: compressedIndices, messageCount: messages.count) {
-            appendPrunedContextSummary(summary, toMessageAt: anchor)
-            totalTokens += max(summary.count / 4, 1)
-        }
-
-        for action in plan.actions {
-            if case .toolInteractions(let index, _) = action {
-                await generateDescriptionsBeforePruning(
-                    messageIndex: index,
-                    includeInlineMedia: false,
-                    includeToolAttachments: true,
-                    sourceMessages: messages
-                )
-            } else if case .media(let index, _) = action {
-                await generateDescriptionsBeforePruning(
-                    messageIndex: index,
-                    includeInlineMedia: true,
-                    includeToolAttachments: false,
-                    sourceMessages: messages
-                )
+        )
             }
+        } catch {
+            let failure = error.localizedDescription
+            showMaintenanceNotice(failure)
+            try? await sendText(failure, to: address)
+            return
         }
-        applyPrunePlan(plan, to: &messages)
         totalTokens -= plan.savedTokens
-        let compressedCount = pruneCompressibleUserMessages(upToIndex: safeBoundary)
-
         let prunedToolCount = plan.toolActionCount
         let prunedMediaCount = plan.mediaActionCount
-        if prunedToolCount > 0 {
-            pruneOldCompactToolLogs()
-        }
-        if prunedToolCount > 0 || prunedMediaCount > 0 || compressedCount > 0 {
-            saveConversation()
-            cleanupOrphanedToolAttachmentSnapshots()
-            TruncationService.cleanupOldFiles()
-            refreshSystemPromptTimestamp()
-        }
-
-        let msg = (prunedToolCount > 0 || prunedMediaCount > 0)
+        refreshSystemPromptTimestamp()
+        var msg = (prunedToolCount > 0 || prunedMediaCount > 0 || !compressedIndices.isEmpty)
             ? "✂️ Memory freed: I summarized the details of \(prunedToolCount) task\(prunedToolCount == 1 ? "" : "s") and \(prunedMediaCount) media item\(prunedMediaCount == 1 ? "" : "s"). Working memory: from ~\(beforeTokens / 1000)k down to ~\(totalTokens / 1000)k tokens. The latest reply's work stays intact."
             : "Working memory is already tidy (~\(totalTokens / 1000)k tokens, under the \(targetTokens / 1000)k target): nothing to free."
+        if noSnapshot && (!plan.actions.isEmpty || !compressedIndices.isEmpty) {
+            msg += " Detailed history was discarded without a new snapshot, as requested by /prune nosnapshot."
+            print("[ConversationManager] Explicit /prune nosnapshot committed; no new snapshot saved")
+        }
         showMaintenanceNotice(msg)
         try? await sendText(msg, to: address)
     }
@@ -5470,19 +5463,28 @@ class ConversationManager: ObservableObject {
                     currentMessages: contextResult.messagesToSend
                 )
                 let archiveSvc = archiveService
+                let snapshotSource = messages
 
                 try? await sendText("🧠 Summarizing and archiving the oldest part of the conversation…")
 
                 let summarizingActivityId = beginMaintenance(.summarizingHistory)
                 defer { endMaintenance(summarizingActivityId) }
 
-                let archiveTask = Task.detached { () async -> Bool in
+                let archiveTask = Task.detached { () async -> (Bool, PruneArchiveReference?) in
                     var lastError: Error? = nil
+                    let receipt: PruneArchiveReference?
+                    do {
+                        receipt = PruneArchiveStore.needsSnapshot(messagesToArchive)
+                            ? try PruneArchiveStore.write(messages: snapshotSource, trigger: "chunk-archive", removedIDs: messagesToArchive.map(\.id), pin: true) : nil
+                    } catch {
+                        await MaintenanceAlertCenter.shared.reportFailure(.conversationSummary, error: error.localizedDescription, deterministic: true)
+                        return (false, nil)
+                    }
                     for attempt in 1...3 {
                         do {
-                            _ = try await archiveSvc.archiveMessages(messagesToArchive, context: summarizationContext)
+                            _ = try await archiveSvc.archiveMessages(messagesToArchive, context: summarizationContext, snapshot: receipt)
                             print("[ConversationManager] Archived \(messagesToArchive.count) messages successfully")
-                            return true
+                            return (true, receipt)
                         } catch {
                             lastError = error
                             print("[ConversationManager] Archive failed (attempt \(attempt)): \(error)")
@@ -5497,12 +5499,13 @@ class ConversationManager: ObservableObject {
                         error: lastError.map { $0.localizedDescription } ?? "unknown error",
                         deterministic: lastError.map { ArchiveError.isDeterministicFailure($0) } ?? false
                     )
-                    return false
+                    return (false, receipt)
                 }
                 // Wait for the archive task. For Task<Bool, Never>, the await doesn't
                 // throw on parent cancellation — it just waits until the detached work
                 // completes. /stop can't sabotage the archive mid-flight.
-                let archived = await archiveTask.value
+                let (archived, archiveReceipt) = await archiveTask.value
+                defer { PruneArchiveStore.release(archiveReceipt) }
 
                 if archived {
                     await MaintenanceAlertCenter.shared.reportSuccess(.conversationSummary)
@@ -5510,15 +5513,20 @@ class ConversationManager: ObservableObject {
                     // Now back on the main actor — remove archived messages from the
                     // in-memory conversation. This is the ONLY place we mutate `messages`
                     // after archiving, and we're guaranteed the archive finished.
-                    let archivedCount = messagesToArchive.count
-                    if messages.count >= archivedCount {
-                        messages.removeFirst(archivedCount)
-                        lastPromptTokens = nil
-                        lastCompletionTokens = nil
-                        saveConversation()
-                        cleanupOrphanedToolAttachmentSnapshots()
-                        print("[ConversationManager] Removed \(archivedCount) archived messages from active conversation")
+                    let archivedIDs = Set(messagesToArchive.map(\.id))
+                    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                    let stillLive = messages.filter { archivedIDs.contains($0.id) }
+                    guard try encoder.encode(stillLive) == encoder.encode(messagesToArchive) else {
+                        throw PruneArchiveStore.Failure("Archived batch changed before removal; live messages retained")
                     }
+                    let candidate = messages.filter { !archivedIDs.contains($0.id) }
+                    try PrivateStorage.writeAtomically(try encoder.encode(candidate), to: conversationFileURL)
+                    messages = candidate
+                    lastPromptTokens = nil
+                    lastCompletionTokens = nil
+                    cleanupOrphanedToolAttachmentSnapshots()
+                    do { try PruneArchiveStore.retainLatest() }
+                    catch { showMaintenanceNotice("Snapshot retention: \(error.localizedDescription)") }
                     // Refresh the prompt-facing summaries so THIS turn sees the new
                     // chunk summary (and any consolidation/meta-summary changes)
                     // instead of prompting with the pre-archive snapshot.
@@ -5558,7 +5566,7 @@ class ConversationManager: ObservableObject {
         let prePruneSystemPromptDate = currentSystemPromptTimestamp()
 
         // Prune stored tool interactions if full context exceeds budget
-        let didPrune = await pruneToolInteractionsIfNeeded(
+        let didPrune = try await pruneToolInteractionsIfNeeded(
             currentUserMessageId: currentUserMessageId,
             calendarContext: calendarContext,
             emailContext: emailContext,
@@ -5975,7 +5983,7 @@ class ConversationManager: ObservableObject {
                 } else { toolInteractions.append(interaction) }
 
                 // Mid-loop: prune stored tool interactions from older turns if context is growing too large
-                let midLoopResult = await pruneStoredToolInteractionsMidLoop(
+                let midLoopResult = try await pruneStoredToolInteractionsMidLoop(
                     messagesForLLM: &messagesForLLM,
                     currentTurnInteractions: toolInteractions,
                     calendarContext: calendarContext,
@@ -6614,7 +6622,7 @@ class ConversationManager: ObservableObject {
 
     private func estimatedPromptTokens(for message: Message, isLMStudio: Bool? = nil) -> Int {
         var tokens = max(message.content.count / 4 + 1, 1)
-        tokens += prunedContextSummaryTokens(for: message)
+        tokens += prunedContextSummaryTokens(for: message) + message.pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 }
         // Replayed final-response reasoning costs prompt tokens; keep the
         // estimate symmetric with the prune savings that subtract it.
         tokens += estimatedFinalReasoningTokens(message)
@@ -6813,6 +6821,86 @@ class ConversationManager: ObservableObject {
         }
     }
 
+    /// A single checked transaction for manual, pre-request and mid-loop pruning.
+    /// Candidate mutations are synchronous; no stale whole-array assignment crosses an await.
+    private func commitPrune(
+        plan: PrunePlan, compressedIndices: [Int], safeBoundary: Int,
+        source: [Message], summarySource: [Message]? = nil,
+        currentRounds: [ToolInteraction] = [], trigger: String, noSnapshot: Bool = false,
+        summary: ([Message]) async -> String?
+    ) async throws -> [Message] {
+        guard let anchor = pruneSummaryAnchorIndex(plan: plan, compressedIndices: compressedIndices, messageCount: source.count) else {
+            return source
+        }
+        let livePreimage = messages
+        let sourceIDs = Set(source.map(\.id))
+        guard sourceIDs.isSubset(of: Set(livePreimage.map(\.id))) else {
+            throw PruneArchiveStore.Failure("Pruning source changed before snapshot; retry at an idle boundary")
+        }
+        let owner = activeRunId
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let preimageBytes = try encoder.encode(livePreimage)
+        let reference: PruneArchiveReference?
+        do {
+            reference = noSnapshot ? nil : try PruneArchiveStore.write(
+                messages: livePreimage, currentRounds: currentRounds, alternateMessages: source,
+                trigger: trigger, removedIDs: Array(Set(plan.affectedIndices + compressedIndices)).sorted().map { source[$0].id }, pin: true)
+        } catch {
+            let free = (try? FileManager.default.attributesOfFileSystem(forPath: StoragePaths.dataRoot.path)[.systemFreeSize] as? NSNumber)?.int64Value
+            throw PruneArchiveStore.Failure("Cannot preserve context at \(PruneArchiveStore.root.path): \(error.localizedDescription)."
+                + (free.map { " Available space: \($0) bytes." } ?? "")
+                + " Stored conversation is approximately \(preimageBytes.count) bytes; snapshot size may differ. Nothing was pruned. Free space and retry, or explicitly send /prune nosnapshot to discard details for this prune only.")
+        }
+        defer { PruneArchiveStore.release(reference) }
+        let text = await summary(summarySource ?? source)
+        for action in plan.actions {
+            switch action {
+            case .toolInteractions(let index, _):
+                await generateDescriptionsBeforePruning(messageIndex: index, includeInlineMedia: false,
+                    includeToolAttachments: true, sourceMessages: source)
+            case .media(let index, _):
+                await generateDescriptionsBeforePruning(messageIndex: index, includeInlineMedia: true,
+                    includeToolAttachments: false, sourceMessages: source)
+            }
+        }
+        try Task.checkCancellation()
+        guard activeRunId == owner, !isRestoringMind, messages.count >= livePreimage.count,
+              try encoder.encode(Array(messages.prefix(livePreimage.count))) == preimageBytes else {
+            throw PruneArchiveStore.Failure("Conversation changed during pruning; details remain intact. Retry at an idle boundary.")
+        }
+        var candidateView = source
+        applyPrunePlan(plan, to: &candidateView)
+        _ = pruneCompressibleUserMessages(upToIndex: safeBoundary, in: &candidateView)
+        if plan.toolActionCount > 0 { pruneOldCompactToolLogs(in: &candidateView) }
+        var summaryParts = [candidateView[anchor].prunedContextSummary, text].compactMap { $0 }.filter { !$0.isEmpty }
+        if noSnapshot { summaryParts.append("Detailed history discarded by explicit /prune nosnapshot; no new snapshot was saved.") }
+        candidateView[anchor].prunedContextSummary = summaryParts.isEmpty ? nil : summaryParts.joined(separator: "\n\n")
+        if let reference { candidateView[anchor].pruneArchiveReferences.append(reference) }
+        if let measured = candidateView[anchor].measuredTokens {
+            candidateView[anchor].measuredTokens = measured + (reference?.promptText.count ?? 0) / 4
+        }
+        var replacements: [UUID: Message] = [:]
+        for (old, updated) in zip(source, candidateView) {
+            if try encoder.encode(old) != encoder.encode(updated) { replacements[updated.id] = updated }
+        }
+        var candidateLive = messages
+        for i in candidateLive.indices {
+            if let replacement = replacements[candidateLive[i].id] { candidateLive[i] = replacement }
+        }
+        // Failure (including post-rename fsync) leaves a complete old-or-new file.
+        // Keep the full live preimage and the snapshot; do not run cleanup.
+        do { try PrivateStorage.writeAtomically(try encoder.encode(candidateLive), to: conversationFileURL) }
+        catch { throw PruneArchiveStore.Failure("Could not commit pruned conversation: \(error.localizedDescription). Live details and the snapshot remain; the disk file may contain the complete old or new state. No cleanup ran.") }
+        messages = candidateLive
+        var trackerPreimage = source
+        applyPrunePlan(plan, to: &trackerPreimage, clearTrackers: true)
+        cleanupOrphanedToolAttachmentSnapshots(additionalLiveInteractions: currentRounds)
+        TruncationService.cleanupOldFiles()
+        do { try PruneArchiveStore.retainLatest(protecting: Set([reference?.id].compactMap { $0 })) }
+        catch { showMaintenanceNotice("Snapshot retention: \(error.localizedDescription)") }
+        return candidateView
+    }
+
     private func appendPrunedContextSummary(_ summary: String, toMessageAt index: Int) {
         let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, messages.indices.contains(index) else { return }
@@ -6859,7 +6947,7 @@ class ConversationManager: ObservableObject {
         try? await sendText(text)
     }
 
-    private func applyPrunePlan(_ plan: PrunePlan, to targetMessages: inout [Message]) {
+    private func applyPrunePlan(_ plan: PrunePlan, to targetMessages: inout [Message], clearTrackers: Bool = false) {
         for action in plan.actions {
             switch action {
             case .toolInteractions(let index, let savedTokens):
@@ -6867,7 +6955,7 @@ class ConversationManager: ObservableObject {
                 // Project instructions (AGENTS.md/CLAUDE.md) ride inside tool
                 // results; once their carrying interaction leaves context, the
                 // next tool touching that project must re-inject them.
-                for interaction in targetMessages[index].toolInteractions {
+                for interaction in (clearTrackers ? targetMessages[index].toolInteractions : []) {
                     for result in interaction.results {
                         for path in ProjectInstructionsTracker.markerPaths(in: result.content) {
                             toolExecutor.projectInstructions.clearLoaded(instructionFilePath: path)
@@ -7189,7 +7277,7 @@ class ConversationManager: ObservableObject {
         tools: [ToolDefinition],
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)],
         execution: ProviderExecutionContext? = nil
-    ) async -> Bool {
+    ) async throws -> Bool {
         let maxTokens = configuredMaxContextTokens()
         let targetTokens = configuredTargetContextTokens()
         let protectedIndex = lastAssistantIndexWithTools(in: messages)
@@ -7234,7 +7322,7 @@ class ConversationManager: ObservableObject {
         }
 
         // Skip if nothing is prunable
-        guard prunableToolTokens > 0 || prunableMediaTokens > 0 else {
+        guard prunableToolTokens > 0 || prunableMediaTokens > 0 || !compressibleUserMessageIndices(upToIndex: max(0, messages.count - 1), in: messages).isEmpty else {
             print("[ConversationManager] Context budget exceeded (~\(totalTokens) > \(maxTokens)) but nothing prunable — skipping")
             return false
         }
@@ -7244,11 +7332,12 @@ class ConversationManager: ObservableObject {
         let pruneActivityId = beginMaintenance(.pruning)
         defer { endMaintenance(pruneActivityId) }
 
+        let plannedSource = messages
         let plan = buildPrunePlan(
-            for: messages,
+            for: plannedSource,
             totalTokens: totalTokens,
             targetTokens: targetTokens,
-            protectedIndex: protectedIndex,
+            protectedIndex: lastAssistantIndexWithTools(in: plannedSource),
             providerIsLMStudio: providerIsLMStudio
         )
 
@@ -7266,10 +7355,12 @@ class ConversationManager: ObservableObject {
             isMidLoop: false
         )
 
-        if let summary = await generatePrunedContextSummary(
+        _ = try await commitPrune(plan: plan, compressedIndices: compressedIndices, safeBoundary: safeBoundary,
+                source: plannedSource, trigger: "automatic") { snapshotForSummary in
+                await generatePrunedContextSummary(
             plan: plan,
             compressedIndices: compressedIndices,
-            sourceMessages: messages,
+            sourceMessages: snapshotForSummary,
             tools: tools,
             calendarContext: calendarContext,
             emailContext: emailContext,
@@ -7278,47 +7369,9 @@ class ConversationManager: ObservableObject {
             currentUserMessageId: currentUserMessageId,
             turnStartDate: turnStartDate,
             deferredMCPSummaries: deferredMCPSummaries, execution: execution
-        ),
-           let anchor = pruneSummaryAnchorIndex(plan: plan, compressedIndices: compressedIndices, messageCount: messages.count) {
-            appendPrunedContextSummary(summary, toMessageAt: anchor)
-            totalTokens += max(summary.count / 4, 1)
-        }
-
-        for action in plan.actions {
-            if case .toolInteractions(let index, _) = action {
-                await generateDescriptionsBeforePruning(
-                    messageIndex: index,
-                    includeInlineMedia: false,
-                    includeToolAttachments: true,
-                    sourceMessages: messages
-                )
-            } else if case .media(let index, _) = action {
-                await generateDescriptionsBeforePruning(
-                    messageIndex: index,
-                    includeInlineMedia: true,
-                    includeToolAttachments: false,
-                    sourceMessages: messages
-                )
+        )
             }
-        }
-        applyPrunePlan(plan, to: &messages)
-        totalTokens -= plan.savedTokens
-        let compressedCount = pruneCompressibleUserMessages(upToIndex: safeBoundary)
-
-        let prunedToolCount = plan.toolActionCount
-        let prunedMediaCount = plan.mediaActionCount
-        if prunedToolCount > 0 {
-            pruneOldCompactToolLogs()
-        }
-        let anyPruned = prunedToolCount > 0 || prunedMediaCount > 0 || compressedCount > 0
-        if anyPruned {
-            saveConversation()
-            cleanupOrphanedToolAttachmentSnapshots()
-            TruncationService.cleanupOldFiles()
-            print("[ConversationManager] Pruned tools from \(prunedToolCount) turn(s), media from \(prunedMediaCount) message(s), compressed \(compressedCount) synthetic message(s). New estimate: ~\(totalTokens) tokens")
-        }
-
-        return anyPruned
+        return !plan.actions.isEmpty || !compressedIndices.isEmpty
     }
 
     /// Result of a mid-loop pruning attempt.
@@ -7347,7 +7400,7 @@ class ConversationManager: ObservableObject {
         tools: [ToolDefinition],
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)],
         execution: ProviderExecutionContext? = nil
-    ) async -> MidLoopPruneResult {
+    ) async throws -> MidLoopPruneResult {
         let maxTokens = configuredMaxContextTokens()
         let targetTokens = configuredTargetContextTokens()
         let protectedIndex = lastAssistantIndexWithTools(in: messagesForLLM)
@@ -7384,7 +7437,7 @@ class ConversationManager: ObservableObject {
         }
 
         guard totalTokens > maxTokens else { return .underBudget }
-        guard prunableToolTokens > 0 || prunableMediaTokens > 0 else {
+        guard prunableToolTokens > 0 || prunableMediaTokens > 0 || !compressibleUserMessageIndices(upToIndex: max(0, messagesForLLM.count - 1), in: messagesForLLM).isEmpty else {
             print("[ConversationManager] Mid-loop context exceeded (~\(totalTokens) > \(maxTokens)) but nothing prunable — exhausted")
             return .exhausted
         }
@@ -7394,11 +7447,12 @@ class ConversationManager: ObservableObject {
         let pruneActivityId = beginMaintenance(.pruning)
         defer { endMaintenance(pruneActivityId) }
 
+        let plannedSource = messagesForLLM
         let plan = buildPrunePlan(
-            for: messagesForLLM,
+            for: plannedSource,
             totalTokens: totalTokens,
             targetTokens: targetTokens,
-            protectedIndex: protectedIndex,
+            protectedIndex: lastAssistantIndexWithTools(in: plannedSource),
             providerIsLMStudio: providerIsLMStudio
         )
 
@@ -7416,10 +7470,13 @@ class ConversationManager: ObservableObject {
             isMidLoop: true
         )
 
-        if let summary = await generatePrunedContextSummary(
+        let oldMetadataTokens = messagesForLLM.reduce(0) { $0 + prunedContextSummaryTokens(for: $1) + $1.pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 } }
+        messagesForLLM = try await commitPrune(plan: plan, compressedIndices: compressedIndices, safeBoundary: safeBoundary,
+                source: plannedSource, currentRounds: currentTurnInteractions, trigger: "mid-turn") { snapshotForSummary in
+                await generatePrunedContextSummary(
             plan: plan,
             compressedIndices: compressedIndices,
-            sourceMessages: messagesForLLM,
+            sourceMessages: snapshotForSummary,
             currentTurnInteractions: currentTurnInteractions,
             tools: tools,
             calendarContext: calendarContext,
@@ -7429,104 +7486,11 @@ class ConversationManager: ObservableObject {
             currentUserMessageId: currentUserMessageId,
             turnStartDate: turnStartDate,
             deferredMCPSummaries: deferredMCPSummaries, execution: execution
-        ),
-           let anchor = pruneSummaryAnchorIndex(plan: plan, compressedIndices: compressedIndices, messageCount: messagesForLLM.count) {
-            appendPrunedContextSummary(summary, toMessageAt: anchor)
-            // Mid-loop pruning has two live copies: durable `messages` and the
-            // in-flight prompt snapshot. Keep both in sync so the current tool
-            // loop sees the new summary and the summary also survives the turn.
-            if messagesForLLM.indices.contains(anchor) {
-                if let existing = messagesForLLM[anchor].prunedContextSummary?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !existing.isEmpty {
-                    messagesForLLM[anchor].prunedContextSummary = existing + "\n\n" + summary
-                } else {
-                    messagesForLLM[anchor].prunedContextSummary = summary
-                }
+        )
             }
-            totalTokens += max(summary.count / 4, 1)
-        }
-
-        for action in plan.actions {
-            if case .toolInteractions(let index, _) = action {
-                await generateDescriptionsBeforePruning(
-                    messageIndex: index,
-                    includeInlineMedia: false,
-                    includeToolAttachments: true,
-                    sourceMessages: messagesForLLM
-                )
-            } else if case .media(let index, _) = action {
-                await generateDescriptionsBeforePruning(
-                    messageIndex: index,
-                    includeInlineMedia: true,
-                    includeToolAttachments: false,
-                    sourceMessages: messagesForLLM
-                )
-            }
-        }
-        applyPrunePlan(plan, to: &messagesForLLM)
         totalTokens -= plan.savedTokens
-
-        let prunedToolCount = plan.toolActionCount
-        let prunedMediaCount = plan.mediaActionCount
-
-        if prunedToolCount > 0 {
-            // Persist to self.messages (indices correspond since no mutations during the loop)
-            for i in 0..<min(messagesForLLM.count, messages.count) {
-                let toolsPruned = messagesForLLM[i].toolInteractions.isEmpty
-                    && !messages[i].toolInteractions.isEmpty
-                let reasoningPruned = !messagesForLLM[i].hasFinalReasoningPayload
-                    && messages[i].hasFinalReasoningPayload
-                if messagesForLLM[i].id == messages[i].id && (toolsPruned || reasoningPruned) {
-                    messages[i].compactToolLog = messagesForLLM[i].compactToolLog
-                    messages[i].toolInteractions = []
-                    messages[i].finalReasoning = nil
-                    messages[i].finalReasoningDetails = nil
-                    messages[i].finalReasoningModel = nil
-                    messages[i].responsesReplay = nil
-                    messages[i].measuredToolTokens = nil
-                    messages[i].measuredTokens = messagesForLLM[i].measuredTokens
-                }
-            }
-            pruneOldCompactToolLogs()
-            // Also sync log pruning to messagesForLLM
-            for i in 0..<min(messagesForLLM.count, messages.count) {
-                if messagesForLLM[i].id == messages[i].id {
-                    messagesForLLM[i].compactToolLog = messages[i].compactToolLog
-                }
-            }
-        }
-
-        // Persist media pruning to self.messages
-        if prunedMediaCount > 0 {
-            for i in 0..<min(messagesForLLM.count, messages.count) {
-                if messagesForLLM[i].id == messages[i].id
-                    && messagesForLLM[i].mediaPruned
-                    && !messages[i].mediaPruned {
-                    messages[i].mediaPruned = true
-                    messages[i].measuredTokens = messagesForLLM[i].measuredTokens
-                }
-            }
-        }
-
-        let compressedCount = pruneCompressibleUserMessages(upToIndex: safeBoundary)
-        if compressedCount > 0 {
-            // Mirror the compressed content into the in-flight messagesForLLM slice so
-            // the current turn sees the stubbed form too.
-            for i in 0..<min(messagesForLLM.count, messages.count) {
-                if messagesForLLM[i].id == messages[i].id {
-                    messagesForLLM[i] = messages[i]
-                }
-            }
-        }
-
-        let anyPruned = prunedToolCount > 0 || prunedMediaCount > 0 || compressedCount > 0
-        if anyPruned {
-            saveConversation()
-            cleanupOrphanedToolAttachmentSnapshots(additionalLiveInteractions: currentTurnInteractions)
-            TruncationService.cleanupOldFiles()
-            print("[ConversationManager] Mid-loop pruned tools from \(prunedToolCount) turn(s), media from \(prunedMediaCount) message(s), compressed \(compressedCount) synthetic message(s). New estimate: ~\(totalTokens) tokens")
-        }
-
+        totalTokens += messagesForLLM.reduce(0) { $0 + prunedContextSummaryTokens(for: $1) + $1.pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 } } - oldMetadataTokens
+        let anyPruned = !plan.actions.isEmpty || !compressedIndices.isEmpty
         // If we pruned but context is STILL over budget, report exhausted so the
         // caller can force a response rather than looping indefinitely.
         if totalTokens > maxTokens {
@@ -7633,7 +7597,7 @@ class ConversationManager: ObservableObject {
     ///
     /// Returns the number of messages actually rewritten.
     @discardableResult
-    private func pruneCompressibleUserMessages(upToIndex: Int) -> Int {
+    private func pruneCompressibleUserMessages(upToIndex: Int, in messages: inout [Message]) -> Int {
         let stableEnd = min(upToIndex, messages.count)
         guard stableEnd > 0 else { return 0 }
 
@@ -7828,7 +7792,7 @@ class ConversationManager: ObservableObject {
 
     /// Keep at most 5 active compact tool logs (messages where interactions were pruned but log remains).
     /// Clears the oldest logs beyond the limit.
-    private func pruneOldCompactToolLogs() {
+    private func pruneOldCompactToolLogs(in messages: inout [Message]) {
         let maxRetainedCompactLogs = 5
         let activeLogIndices = messages.indices.filter {
             messages[$0].compactToolLog != nil && messages[$0].toolInteractions.isEmpty
@@ -9708,6 +9672,8 @@ class ConversationManager: ObservableObject {
 
         do { if try SubscriptionAuthStore().read() != nil { try await SubscriptionAuthStore().logout() } }
         catch { failures.append("ChatGPT local sign-out: \(error.localizedDescription)") }
+
+        if let failure = UserDataWipe.remove(PruneArchiveStore.root.path, label: "conversation snapshots") { failures.append(failure) }
 
         // 2. Clear all archived chunks
         await archiveService.clearAllArchives()

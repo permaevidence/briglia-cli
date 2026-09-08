@@ -16,8 +16,8 @@ class ContractTests(unittest.TestCase):
         # Exercise the actual P2 fallback, without editing either frozen manifest.
         with tempfile.TemporaryDirectory() as folder:
             alternate = Path(folder) / 'responses.json'
-            actual = json.loads(contract.P2_MANIFEST.read_text())
-            with patch.object(contract, 'P2_MANIFEST', alternate):
+            actual = json.loads(contract.SNAPSHOT_MANIFEST.read_text())
+            with patch.object(contract, 'SNAPSHOT_MANIFEST', alternate):
                 alternate.write_text(json.dumps(actual))
                 verify()
                 for field in ['source', 'sha256']:

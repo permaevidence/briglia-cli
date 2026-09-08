@@ -71,6 +71,12 @@ def instrument(tree):
             "let currentRealTime = postToolTimeFormatter.string(from: P0Life.instant)")
     replace(tree / "TelegramConcierge/Services/UserContextStructurer.swift", "lane: .ephemeral(UUID())",
             'lane: .ephemeral(UUID(uuidString: "00000000-0000-4000-8000-000000000060")!)')
+    snapshot = tree / "TelegramConcierge/Services/PruneArchiveStore.swift"
+    if snapshot.exists():
+        # Entropy inputs only; never replace output, decisions or persistence.
+        with snapshot.open("a") as f:
+            f.write("\nenum P0SnapshotInputs { static var serial = 0; static func next() -> (Date, UUID) { serial += 1; return (P0Life.instant, UUID(uuidString: String(format: \"00000000-0000-4000-9000-%012d\", serial))!) } }\n")
+        replace(snapshot, "identityForTesting?() ?? (Date(), UUID())", "identityForTesting?() ?? P0SnapshotInputs.next()")
     # Only request-visible clock and session entropy inputs. Progress/staleness
     # clocks remain real. No encoder, accounting or decision code is replaced.
     # Tools-disabled subagent summaries use the fallback prompt's day clock.
@@ -258,7 +264,8 @@ def main():
                 raise RuntimeError("Wrong baseline compiler")
             compare(frozen["fixtures"], results.get("reference", results["candidate"]))
         if not args.candidate_only:
-            compare(results["reference"], results["candidate"])
+            from prune_lifecycle_migration import verify_migration
+            verify_migration(results["reference"], results["candidate"], compare)
             # New-binary export MUST open with the pinned release's actual importer.
             imported = root / "cross-import"
             env = dict(os.environ, SWIFT_DETERMINISTIC_HASHING="1", LC_ALL="C", TZ="UTC")

@@ -88,6 +88,7 @@ struct Message: Identifiable, Codable, Equatable {
     // LLM-generated summary of heavy context pruned after this turn (tool
     // calls/results/reasoning, media, or synthetic bodies). Rendered as
     // chronological system context, not as a user/assistant chat message.
+    var pruneArchiveReferences: [PruneArchiveReference] = []
     var prunedContextSummary: String?
 
     // When true, inline multimodal data (images/PDFs) is skipped and replaced
@@ -144,7 +145,7 @@ struct Message: Identifiable, Codable, Equatable {
     /// otherwise a rough estimate (~4 chars/token + media + tool costs).
     var displayTokenCount: Int {
         if let measured = measuredTokens { return measured }
-        var tokens = max(content.count / 4, 1)
+        var tokens = max(content.count / 4, 1) + pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 }
         if let prunedContextSummary, !prunedContextSummary.isEmpty {
             tokens += prunedContextSummary.count / 4
         }
@@ -250,7 +251,7 @@ struct Message: Identifiable, Codable, Equatable {
     // MARK: - Codable (with backward compatibility)
     
     enum CodingKeys: String, CodingKey {
-        case responsesReplay
+        case responsesReplay, pruneArchiveReferences
         case id, role, content, timestamp
         // New array fields
         case imageFileNames, documentFileNames, imageFileSizes, documentFileSizes
@@ -355,6 +356,7 @@ struct Message: Identifiable, Codable, Equatable {
         finalReasoningModel = try? container.decodeIfPresent(String.self, forKey: .finalReasoningModel)
 
         // Pruned context summary (new field, default nil for old messages)
+        pruneArchiveReferences = try container.decodeIfPresent([PruneArchiveReference].self, forKey: .pruneArchiveReferences) ?? []
         prunedContextSummary = try? container.decodeIfPresent(String.self, forKey: .prunedContextSummary)
 
         // Media pruned flag (new field, default false for old messages)
@@ -410,6 +412,7 @@ struct Message: Identifiable, Codable, Equatable {
         try container.encodeIfPresent(finalReasoning, forKey: .finalReasoning)
         try container.encodeIfPresent(finalReasoningDetails, forKey: .finalReasoningDetails)
         try container.encodeIfPresent(finalReasoningModel, forKey: .finalReasoningModel)
+        if !pruneArchiveReferences.isEmpty { try container.encode(pruneArchiveReferences, forKey: .pruneArchiveReferences) }
         try container.encodeIfPresent(prunedContextSummary, forKey: .prunedContextSummary)
         // Only encode mediaPruned when true (non-default)
         if mediaPruned {
@@ -441,6 +444,7 @@ struct Message: Identifiable, Codable, Equatable {
         lhs.editedFilePaths == rhs.editedFilePaths &&
         lhs.generatedFilePaths == rhs.generatedFilePaths &&
         lhs.accessedProjectIds == rhs.accessedProjectIds &&
+        lhs.pruneArchiveReferences == rhs.pruneArchiveReferences &&
         lhs.prunedContextSummary == rhs.prunedContextSummary &&
         lhs.kind == rhs.kind
     }
