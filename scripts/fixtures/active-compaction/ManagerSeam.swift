@@ -189,3 +189,40 @@ extension ConversationManager {
         }
     }
 }
+
+extension ConversationManager {
+    func activeTestCombinedFailure(_ sample: TurnCheckpoint, server: CaptureServer, wire: ProviderWireProtocol) async throws {
+        var raw = TurnCheckpoint(runID: UUID(), taskMessageID: sample.taskMessageID)
+        raw.retainedInteractions = [ToolInteraction(assistantMessage: AssistantToolCallMessage(content: "latest irreversible result", toolCalls: [
+            ToolCall(id: "unpublished-latest", type: "function", function: FunctionCall(name: "read_file", arguments: "{}"))
+        ]), results: [ToolResultMessage(toolCallId: "unpublished-latest", content: "LATEST_RAW_MUST_SURVIVE")], measuredTokenCost: 500000)]
+        activeTurnCheckpoints[raw.runID] = raw
+        PruneArchiveStore.faultForTesting = { if $0 == "write" { throw PruneArchiveStore.Failure("disk full fixture") } }
+        CompactionTestInputs.writeFault = "write"
+        let interrupted = preserveInterruptedCheckpoint(runID: raw.runID)
+        try CompactionTestInputs.check(interrupted?.pendingRecovery == true && activeTurnCheckpoints[raw.runID]?.retainedInteractions.first?.results.first?.content == "LATEST_RAW_MUST_SURVIVE",
+            "combined snapshot/checkpoint failure retains newest raw work in memory")
+        recoverInterruptedTurnSalvageIfNeeded()
+        try CompactionTestInputs.check(recoveryBlocked && activeTurnCheckpoints[raw.runID]?.pendingRecovery == true,
+            "failed in-process recovery retry preserves raw owner")
+        try CompactionTestInputs.check(await exportBusyReason() != nil, "export refuses unpublished recovery")
+        CompactionTestInputs.writeFault = nil; PruneArchiveStore.faultForTesting = nil
+        server.clear(); server.script([try CompactionTestInputs.body(protocol: wire, text: "STORAGE_RECOVERED_OK")])
+        let result = try await activeTestTurn(Message(role: .user, content: "Storage is available; continue"), queued: nil)
+        try CompactionTestInputs.check(result.last?.content == "STORAGE_RECOVERED_OK" && activeTurnCheckpoints[raw.runID] == nil,
+            "next turn flushes unpublished recovery before starting new work")
+        let outcome = result.first { $0.id == raw.outcomeMessageID }
+        try CompactionTestInputs.check(outcome?.toolInteractions.isEmpty == true && outcome?.pruneArchiveReferences.isEmpty == false,
+            "combined-failure recovery publishes bounded outcome exactly once")
+        let path = PruneArchiveStore.root.appendingPathComponent(outcome!.pruneArchiveReferences[0].basename)
+        try CompactionTestInputs.check(try String(contentsOf: path).contains("LATEST_RAW_MUST_SURVIVE"),
+            "unpublished raw result reaches durable snapshot after storage recovers")
+        var discarded = raw; discarded.pendingRecovery = true
+        activeTurnCheckpoints[discarded.runID] = discarded
+        try writeTurnCheckpoint(discarded)
+        try discardTurnRecoveryForReplacement()
+        recoverInterruptedTurnSalvageIfNeeded()
+        try CompactionTestInputs.check(activeTurnCheckpoints.isEmpty && !FileManager.default.fileExists(atPath: turnSalvageFileURL.path),
+            "accepted Mind replacement discards disk and in-memory old recovery")
+    }
+}

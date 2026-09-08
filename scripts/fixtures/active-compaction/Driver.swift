@@ -149,6 +149,7 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
             let recovered = try manager.activeTestRecovery(checkpoint)
             try CompactionTestInputs.check(recovered.last?.activeTurnCompaction != nil && recovered.last!.toolInteractions.isEmpty, "summary-only checkpoint recovers")
             try manager.activeTestStorageFailures(checkpoint)
+            try await manager.activeTestCombinedFailure(checkpoint, server: server, wire: wire)
             var encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(saved.last!)) as! [String: Any]
             var metadata = encoded["activeTurnCompaction"] as! [String: Any]
             metadata["version"] = 99; encoded["activeTurnCompaction"] = metadata

@@ -2761,6 +2761,10 @@ class ConversationManager: ObservableObject {
             return
         }
 
+        // Retry unpublished in-memory recovery before a new owner can replace
+        // its disk record. If storage is still unavailable, the normal local
+        // error path below refuses model work.
+        if recoveryBlocked { recoverInterruptedTurnSalvageIfNeeded() }
         let runId = UUID()
         activeRunId = runId
         activeTurnTriggerMessage = userMessage
@@ -3624,6 +3628,9 @@ class ConversationManager: ObservableObject {
     /// check and the copy); returns a user-facing reason to refuse, nil
     /// when the export may proceed.
     func exportBusyReason(timeoutSeconds: Double = 5) async -> String? {
+        if recoveryBlocked || activeTurnCheckpoints.values.contains(where: { $0.pendingRecovery }) {
+            return "unfinished turn recovery must be saved before a complete backup can be exported — free storage and retry the turn first"
+        }
         let subagents = await SubagentBackgroundRegistry.shared.activeRunIds()
         guard subagents.isEmpty else {
             return "background subagent(s) still running (\(subagents.joined(separator: ", "))) — wait for them to finish"
@@ -9532,6 +9539,24 @@ class ConversationManager: ObservableObject {
     /// the same salvaged-work message the cancellation and error paths
     /// produce, so the next turn's prompt replays the completed rounds.
     private func recoverInterruptedTurnSalvageIfNeeded() {
+        let unpublished = activeTurnCheckpoints.values.filter { $0.pendingRecovery }
+        if !unpublished.isEmpty {
+            guard activeRunId == nil else { return }
+            for checkpoint in unpublished {
+                do {
+                    try writeTurnCheckpoint(checkpoint)
+                    recoverTurnCheckpoint(try JSONEncoder().encode(checkpoint))
+                    guard !recoveryBlocked else { return }
+                    activeTurnCheckpoints.removeValue(forKey: checkpoint.runID)
+                } catch {
+                    activeTurnCheckpoints[checkpoint.runID] = checkpoint
+                    recoveryBlocked = true
+                    showMaintenanceNotice("Unpublished turn work remains in memory: \(error.localizedDescription). Free storage and retry before restarting.")
+                    return
+                }
+            }
+            return
+        }
         let data: Data
         do {
             guard let stored = try TurnCheckpointStore.read(turnSalvageFileURL) else { return }
@@ -9791,6 +9816,11 @@ class ConversationManager: ObservableObject {
         ToolExecutor.clearPendingToolOutputs()
         // Rendered pages of user PDFs must not outlive the wipe in memory.
         RenderedPDFPageCache.shared.removeAll()
+
+        // Quiescence passed: an explicit wipe also discards unpublished
+        // recovery held in memory, so no later retry can resurrect old work.
+        activeTurnCheckpoints.removeAll(); checkpointWriteFailure = nil
+        pendingCompactionCalibration = nil; recoveryBlocked = false
 
         // 1. Clear conversation and images; verify the empty conversation
         //    actually reached disk (clearConversation's own save is silent),
@@ -10169,6 +10199,7 @@ class ConversationManager: ObservableObject {
 
         await discardPreImportBackgroundOutputs()
         do {
+            try discardTurnRecoveryForReplacement()
             try await MindExportService.shared.applyStagedMind(staged)
         } catch {
             return .failedApply(error.localizedDescription)
@@ -10843,7 +10874,15 @@ extension ConversationManager {
                var disk = try? JSONDecoder().decode(TurnCheckpoint.self, from: stored), disk.runID == checkpoint.runID,
                (try? disk.validate(history: messages)) != nil {
                 disk.completionReceipts = checkpoint.completionReceipts
-                activeTurnCheckpoints[disk.runID] = disk
+                if disk.generation == checkpoint.generation && checkpoint.nextRoundSequence >= disk.nextRoundSequence {
+                    // A failed append may contain newer completed work than
+                    // disk. Retain that raw source in the same owner envelope.
+                    var unpublished = checkpoint; unpublished.pendingRecovery = true
+                    activeTurnCheckpoints[checkpoint.runID] = unpublished
+                } else { activeTurnCheckpoints[disk.runID] = disk }
+            } else {
+                var unpublished = checkpoint; unpublished.pendingRecovery = true
+                activeTurnCheckpoints[checkpoint.runID] = unpublished
             }
             throw error
         }
@@ -10900,6 +10939,8 @@ extension ConversationManager {
         let budget = ActiveTurnBudget(maximum: configuredMaxContextTokens())
         let before = try await activeEstimate(original, history: history, tools: tools, calendar: calendar,
             email: email, summaries: summaries, totalChunks: totalChunks, date: date, deferred: deferred)
+        try Task.checkCancellation()
+        guard activeRunId == runID else { throw CancellationError() }
         let fixed = before - original.retainedInteractions.reduce(0) { $0 + ActiveTurnBudget.round($1) } + 16_000
         let count = budget.prefixCount(rounds: original.retainedInteractions, fixed: fixed,
             target: configuredTargetContextTokens(), pendingNonce: inFlightMidTurnBatch?.nonce)
@@ -11107,6 +11148,20 @@ extension ConversationManager {
         return checkpoint
     }
 
+    /// Called only after the accepted Mind import has crossed its validated,
+    /// quiesced discard boundary. Failures are reported as partial apply.
+    private func discardTurnRecoveryForReplacement() throws {
+        guard activeRunId == nil, activeProcessingTask == nil else {
+            throw PruneArchiveStore.Failure("Cannot replace recovery while a turn owns it")
+        }
+        if let failure = UserDataWipe.remove(turnSalvageFileURL.path, label: "pre-import turn recovery") {
+            throw PruneArchiveStore.Failure(failure)
+        }
+        try PrivateStorage.fsyncDirectory(turnSalvageFileURL.deletingLastPathComponent().path)
+        activeTurnCheckpoints.removeAll(); checkpointWriteFailure = nil
+        pendingCompactionCalibration = nil; recoveryBlocked = false
+    }
+
     private func preserveInterruptedCheckpoint(runID: UUID) -> TurnCheckpoint? {
         guard let original = activeTurnCheckpoints.removeValue(forKey: runID) else { return nil }
         do {
@@ -11117,7 +11172,10 @@ extension ConversationManager {
             var pending = original; pending.pendingRecovery = true
             recoveryBlocked = true
             do { try writeTurnCheckpoint(pending) }
-            catch { showMaintenanceNotice("Raw turn recovery could not be saved: \(error.localizedDescription)") }
+            catch {
+                activeTurnCheckpoints[runID] = pending
+                showMaintenanceNotice("Raw turn recovery remains in memory because storage failed: \(error.localizedDescription). Free storage and retry before restarting.")
+            }
             return pending
         }
     }
