@@ -356,7 +356,7 @@ struct Message: Identifiable, Codable, Equatable {
         finalReasoningModel = try? container.decodeIfPresent(String.self, forKey: .finalReasoningModel)
 
         // Pruned context summary (new field, default nil for old messages)
-        pruneArchiveReferences = try container.decodeIfPresent([PruneArchiveReference].self, forKey: .pruneArchiveReferences) ?? []
+        pruneArchiveReferences = PruneArchiveReference.decodeLeniently(from: container, forKey: .pruneArchiveReferences)
         prunedContextSummary = try? container.decodeIfPresent(String.self, forKey: .prunedContextSummary)
 
         // Media pruned flag (new field, default false for old messages)

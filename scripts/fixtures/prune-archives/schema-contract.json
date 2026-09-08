@@ -1,5 +1,5 @@
 {
-  "TelegramConcierge/Models/ConversationArchiveModels.swift#all": "414eafd3e47781cbd0bd2b5005cde2994fe139ed6e7669a45c98b38cc44f2ca3",
+  "TelegramConcierge/Models/ConversationArchiveModels.swift#all": "c3d9bc41e276d07bc217fda98b57eec2746e254740506aab1871fa9f008c1fb7",
   "TelegramConcierge/Services/PruneArchiveStore.swift#header": "c031be1ec412f176c74809c86b0a4bdb845980175afff8e221f183e825ceb024",
-  "TelegramConcierge/Services/PruneArchiveStore.swift#reference": "d3910b3ba1c6e2d3572d50db176f60f0466c04e173cdcedf643e7d939856537f"
+  "TelegramConcierge/Services/PruneArchiveStore.swift#reference": "ef250a49b1a4aabc7bc4c32d7a5d875ad0f5995dd57d24bbae05c5d7d8f8db6a"
 }

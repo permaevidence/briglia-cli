@@ -34,9 +34,29 @@ struct PruneArchiveReference: Codable, Equatable {
                       version: c.decode(Int.self, forKey: .version))
     }
 
+    /// Optional navigation metadata must never prevent the containing history
+    /// from loading after rollback or a malformed edit. Consume one decoder per
+    /// element so a failed element cannot discard later valid references.
+    static func decodeLeniently<K: CodingKey>(from container: KeyedDecodingContainer<K>, forKey key: K) -> [Self] {
+        guard container.contains(key), (try? container.decodeNil(forKey: key)) != true else { return [] }
+        do {
+            var array = try container.nestedUnkeyedContainer(forKey: key)
+            var references: [Self] = []
+            while !array.isAtEnd {
+                let element = try array.superDecoder()
+                do { references.append(try Self(from: element)) }
+                catch { print("[PruneArchiveReference] Dropped invalid or unsupported snapshot reference.") }
+            }
+            return references
+        } catch {
+            print("[PruneArchiveReference] Dropped malformed snapshot reference collection.")
+            return []
+        }
+    }
+
     var relativePath: String { "prune-archives/" + basename }
     var promptText: String {
-        "Full context before this pruning: `\(StoragePaths.dataRoot.appendingPathComponent(relativePath).path)`\nThis folder contains up to the latest 300 conversation snapshots, with filenames sortable chronologically."
+        "Full context snapshot: `\(StoragePaths.dataRoot.appendingPathComponent(relativePath).path)`\nThis folder contains up to the latest 300 conversation snapshots, with filenames sortable chronologically."
     }
 }
 
@@ -80,10 +100,12 @@ enum PruneArchiveStore {
     static var faultForTesting: ((String) throws -> Void)?
     static var identityForTesting: (() -> (Date, UUID))?
 
+    /// Chunk sanitization retains attachment names; snapshots add no media bytes.
+    /// Pruning uses its own trigger and still snapshots media-only prunes.
     static func needsSnapshot(_ messages: [Message]) -> Bool {
         messages.contains {
             !$0.toolInteractions.isEmpty || $0.finalReasoning != nil || $0.finalReasoningDetails != nil
-                || $0.compactToolLog != nil || $0.prunedContextSummary != nil || $0.hasUnprunedMedia
+                || $0.compactToolLog != nil || $0.prunedContextSummary != nil
                 || ($0.role == .assistant && $0.content.hasPrefix("[TOOL RUN LOG - compact]"))
         }
     }

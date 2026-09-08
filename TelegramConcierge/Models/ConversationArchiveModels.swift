@@ -15,8 +15,8 @@ struct ConversationChunk: Codable, Identifiable {
     var pruneArchiveReferences: [PruneArchiveReference]? = nil
     var sourceMessageIDs: [UUID]? = nil
     var summaryWithSnapshotReferences: String {
-        let links = (pruneArchiveReferences ?? []).map(\.promptText)
-        return ([summary] + links).joined(separator: "\n")
+        let names = (pruneArchiveReferences ?? []).map(\.basename)
+        return names.isEmpty ? summary : summary + "\nSnapshots: " + names.joined(separator: ", ")
     }
 
     
@@ -32,6 +32,25 @@ struct ConversationChunk: Codable, Identifiable {
         } else {
             return "\(tokenCount)"
         }
+    }
+}
+
+// Keep the synthesized memberwise initializer and encoder. Only the additive
+// reference collection is lenient; required chunk metadata remains validated.
+extension ConversationChunk {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        type = try c.decode(ChunkType.self, forKey: .type)
+        startDate = try c.decode(Date.self, forKey: .startDate)
+        endDate = try c.decode(Date.self, forKey: .endDate)
+        tokenCount = try c.decode(Int.self, forKey: .tokenCount)
+        messageCount = try c.decode(Int.self, forKey: .messageCount)
+        summary = try c.decode(String.self, forKey: .summary)
+        rawContentFileName = try c.decode(String.self, forKey: .rawContentFileName)
+        let references = PruneArchiveReference.decodeLeniently(from: c, forKey: .pruneArchiveReferences)
+        pruneArchiveReferences = references.isEmpty ? nil : references
+        sourceMessageIDs = try c.decodeIfPresent([UUID].self, forKey: .sourceMessageIDs)
     }
 }
 
@@ -72,6 +91,7 @@ struct ArchivedSummaryItem: Identifiable {
     /// the prompt table so the agent can expand the row into per-chunk
     /// summaries via read_chunk_summaries. Empty for individual chunk rows.
     var childChunkIds: [UUID] = []
+    var hasSnapshotReferences: Bool = false
 
     enum Kind {
         case temporaryChunk

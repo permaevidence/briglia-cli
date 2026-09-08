@@ -1117,7 +1117,8 @@ actor ConversationArchiveService {
                     messageCount: $0.messageCount,
                     summary: $0.summaryWithSnapshotReferences,
                     sourceChunkCount: 1,
-                    sidecarMissing: missingSidecarIds.contains($0.id)
+                    sidecarMissing: missingSidecarIds.contains($0.id),
+                    hasSnapshotReferences: !($0.pruneArchiveReferences ?? []).isEmpty
                 )
             }
 
@@ -1131,7 +1132,8 @@ actor ConversationArchiveService {
                 messageCount: $0.messageCount,
                 summary: $0.summaryWithSnapshotReferences,
                 sourceChunkCount: 1,
-                sidecarMissing: missingSidecarIds.contains($0.id)
+                sidecarMissing: missingSidecarIds.contains($0.id),
+                    hasSnapshotReferences: !($0.pruneArchiveReferences ?? []).isEmpty
             )
         }
 
@@ -1145,7 +1147,8 @@ actor ConversationArchiveService {
                 messageCount: $0.messageCount,
                 summary: $0.summaryWithSnapshotReferences,
                 sourceChunkCount: 1,
-                sidecarMissing: missingSidecarIds.contains($0.id)
+                sidecarMissing: missingSidecarIds.contains($0.id),
+                    hasSnapshotReferences: !($0.pruneArchiveReferences ?? []).isEmpty
             )
         }
 

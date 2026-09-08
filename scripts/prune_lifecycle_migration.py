@@ -24,7 +24,7 @@ def reference(serial):
 
 
 def text(ref):
-    return (f'Full context before this pruning: `{ROOT}prune-archives/{ref["basename"]}`\n'
+    return (f'Full context snapshot: `{ROOT}prune-archives/{ref["basename"]}`\n'
             'This folder contains up to the latest 300 conversation snapshots, with filenames sortable chronologically.')
 
 
