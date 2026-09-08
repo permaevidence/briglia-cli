@@ -41,6 +41,24 @@ extension ConversationManager {
         } catch is PruneArchiveStore.Failure { }
         try SnapshotOwnerInputs.check(messages[0].content == "changed existing message" && !messages[1].toolInteractions.isEmpty, "changed source safely abandons prune")
         try seed()
+        let cancelled = Task { @MainActor in
+            try await self.commitPrune(plan: plan, compressedIndices: [], safeBoundary: 2, source: self.messages, trigger: "automatic") { _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+                return "cancelled summary"
+            }
+        }
+        do { _ = try await cancelled.value; throw SnapshotOwnerInputs.Failure("cancelled prune committed") }
+        catch is CancellationError { }
+        try SnapshotOwnerInputs.check(try Data(contentsOf: conversationFileURL) == untouched && !messages[1].toolInteractions.isEmpty, "cancelled prune preserves live and persisted details")
+        do {
+            _ = try await commitPrune(plan: plan, compressedIndices: [], safeBoundary: 2, source: messages, trigger: "automatic") { _ in
+                self.isRestoringMind = true
+                return "obsolete summary"
+            }
+            throw SnapshotOwnerInputs.Failure("prune crossed restore gate")
+        } catch is PruneArchiveStore.Failure { }
+        isRestoringMind = false
+        try SnapshotOwnerInputs.check(try Data(contentsOf: conversationFileURL) == untouched && !messages[1].toolInteractions.isEmpty, "restore gate prevents late prune commit")
         let parked = conversationFileURL.appendingPathExtension("parked")
         try FileManager.default.moveItem(at: conversationFileURL, to: parked)
         try FileManager.default.createDirectory(at: conversationFileURL, withIntermediateDirectories: false)
@@ -49,6 +67,11 @@ extension ConversationManager {
             throw SnapshotOwnerInputs.Failure("conversation save failure accepted")
         } catch is PruneArchiveStore.Failure { }
         try SnapshotOwnerInputs.check(!messages[1].toolInteractions.isEmpty, "conversation save failure retains live preimage")
+        do {
+            _ = try await commitPrune(plan: plan, compressedIndices: [], safeBoundary: 2, source: messages, trigger: "manual", noSnapshot: true) { _ in nil }
+            throw SnapshotOwnerInputs.Failure("override bypassed conversation save failure")
+        } catch is PruneArchiveStore.Failure { }
+        try SnapshotOwnerInputs.check(!messages[1].toolInteractions.isEmpty, "no-snapshot override still requires successful conversation save")
         try FileManager.default.removeItem(at: conversationFileURL)
         try FileManager.default.moveItem(at: parked, to: conversationFileURL)
         let count = try PruneArchiveStore.entries().count
