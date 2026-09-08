@@ -41,6 +41,7 @@ extension ConversationManager {
         } catch is PruneArchiveStore.Failure { }
         try SnapshotOwnerInputs.check(messages[0].content == "changed existing message" && !messages[1].toolInteractions.isEmpty, "changed source safely abandons prune")
         try seed()
+        let beforeCancellation = try Data(contentsOf: conversationFileURL)
         let cancelled = Task { @MainActor in
             try await self.commitPrune(plan: plan, compressedIndices: [], safeBoundary: 2, source: self.messages, trigger: "automatic") { _ in
                 withUnsafeCurrentTask { $0?.cancel() }
@@ -49,7 +50,7 @@ extension ConversationManager {
         }
         do { _ = try await cancelled.value; throw SnapshotOwnerInputs.Failure("cancelled prune committed") }
         catch is CancellationError { }
-        try SnapshotOwnerInputs.check(try Data(contentsOf: conversationFileURL) == untouched && !messages[1].toolInteractions.isEmpty, "cancelled prune preserves live and persisted details")
+        try SnapshotOwnerInputs.check(try Data(contentsOf: conversationFileURL) == beforeCancellation && !messages[1].toolInteractions.isEmpty, "cancelled prune preserves live and persisted details")
         do {
             _ = try await commitPrune(plan: plan, compressedIndices: [], safeBoundary: 2, source: messages, trigger: "automatic") { _ in
                 self.isRestoringMind = true
@@ -58,7 +59,7 @@ extension ConversationManager {
             throw SnapshotOwnerInputs.Failure("prune crossed restore gate")
         } catch is PruneArchiveStore.Failure { }
         isRestoringMind = false
-        try SnapshotOwnerInputs.check(try Data(contentsOf: conversationFileURL) == untouched && !messages[1].toolInteractions.isEmpty, "restore gate prevents late prune commit")
+        try SnapshotOwnerInputs.check(try Data(contentsOf: conversationFileURL) == beforeCancellation && !messages[1].toolInteractions.isEmpty, "restore gate prevents late prune commit")
         let parked = conversationFileURL.appendingPathExtension("parked")
         try FileManager.default.moveItem(at: conversationFileURL, to: parked)
         try FileManager.default.createDirectory(at: conversationFileURL, withIntermediateDirectories: false)
