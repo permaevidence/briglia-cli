@@ -45,6 +45,10 @@ extension OpenRouterService {
             let historyReasoning = role == "assistant" ? message.finalReasoning : nil
             let historyReasoningDetails = role == "assistant" ? message.finalReasoningDetails : nil
 
+            if message.role == .assistant, let summary = message.activeTurnCompaction {
+                apiMessages.append(OpenRouterAPIMessage(role: "assistant", content: .text(summary.promptText)))
+            }
+
             // For assistant messages with stored tool interactions, emit the interactions
             // BEFORE the final text so the model sees the full reasoning chain
             if message.role == .assistant && !isToolRunLog && !message.toolInteractions.isEmpty {

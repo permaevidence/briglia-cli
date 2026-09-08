@@ -13,11 +13,11 @@ class ContractTests(unittest.TestCase):
         verify()
 
     def test_additive_manifest_is_exact_and_optional(self):
-        # Exercise the actual P2 fallback, without editing either frozen manifest.
+        # Exercise the current additive fallback, without editing either frozen manifest.
         with tempfile.TemporaryDirectory() as folder:
             alternate = Path(folder) / 'responses.json'
-            actual = json.loads(contract.SNAPSHOT_MANIFEST.read_text())
-            with patch.object(contract, 'SNAPSHOT_MANIFEST', alternate):
+            actual = json.loads(contract.ACTIVE_MANIFEST.read_text())
+            with patch.object(contract, 'ACTIVE_MANIFEST', alternate):
                 alternate.write_text(json.dumps(actual))
                 verify()
                 for field in ['source', 'sha256']:
@@ -29,7 +29,7 @@ class ContractTests(unittest.TestCase):
                         verify()
                 alternate.unlink()
                 with self.assertRaisesRegex(RuntimeError, 'nil fields count'):
-                    verify() # P2 cannot silently bypass P0 when its manifest is absent.
+                    verify() # An additive change cannot silently bypass P0 when its manifest is absent.
                 tree = Path(folder) / 'pinned'
                 from chat_wire_baseline import SOURCE
                 for name in FILES + list(REGIONS):

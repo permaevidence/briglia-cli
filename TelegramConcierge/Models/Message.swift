@@ -89,6 +89,7 @@ struct Message: Identifiable, Codable, Equatable {
     // calls/results/reasoning, media, or synthetic bodies). Rendered as
     // chronological system context, not as a user/assistant chat message.
     var pruneArchiveReferences: [PruneArchiveReference] = []
+    var activeTurnCompaction: ActiveTurnCompaction? = nil
     var prunedContextSummary: String?
 
     // When true, inline multimodal data (images/PDFs) is skipped and replaced
@@ -149,6 +150,7 @@ struct Message: Identifiable, Codable, Equatable {
         if let prunedContextSummary, !prunedContextSummary.isEmpty {
             tokens += prunedContextSummary.count / 4
         }
+        if let activeTurnCompaction { tokens += ActiveTurnBudget.text(activeTurnCompaction.promptText) }
         let mediaTokensPerFile = mediaPruned ? 50 : 1500
         tokens += mediaFileCount * mediaTokensPerFile
         if let measuredTools = measuredToolTokens {
@@ -251,7 +253,7 @@ struct Message: Identifiable, Codable, Equatable {
     // MARK: - Codable (with backward compatibility)
     
     enum CodingKeys: String, CodingKey {
-        case responsesReplay, pruneArchiveReferences
+        case responsesReplay, pruneArchiveReferences, activeTurnCompaction
         case id, role, content, timestamp
         // New array fields
         case imageFileNames, documentFileNames, imageFileSizes, documentFileSizes
@@ -357,6 +359,15 @@ struct Message: Identifiable, Codable, Equatable {
 
         // Pruned context summary (new field, default nil for old messages)
         pruneArchiveReferences = PruneArchiveReference.decodeLeniently(from: container, forKey: .pruneArchiveReferences)
+        if container.contains(.activeTurnCompaction), (try? container.decodeNil(forKey: .activeTurnCompaction)) != true {
+            do { activeTurnCompaction = try container.decode(ActiveTurnCompaction.self, forKey: .activeTurnCompaction) }
+            catch {
+                print("[Message] Dropped invalid optional active-turn summary")
+                if let nested = try? container.nestedContainer(keyedBy: ActiveTurnCompaction.CodingKeys.self, forKey: .activeTurnCompaction),
+                   let ref = try? nested.decode(PruneArchiveReference.self, forKey: .latestSnapshotReference),
+                   !pruneArchiveReferences.contains(ref) { pruneArchiveReferences.append(ref) }
+            }
+        }
         prunedContextSummary = try? container.decodeIfPresent(String.self, forKey: .prunedContextSummary)
 
         // Media pruned flag (new field, default false for old messages)
@@ -413,6 +424,7 @@ struct Message: Identifiable, Codable, Equatable {
         try container.encodeIfPresent(finalReasoningDetails, forKey: .finalReasoningDetails)
         try container.encodeIfPresent(finalReasoningModel, forKey: .finalReasoningModel)
         if !pruneArchiveReferences.isEmpty { try container.encode(pruneArchiveReferences, forKey: .pruneArchiveReferences) }
+        try container.encodeIfPresent(activeTurnCompaction, forKey: .activeTurnCompaction)
         try container.encodeIfPresent(prunedContextSummary, forKey: .prunedContextSummary)
         // Only encode mediaPruned when true (non-default)
         if mediaPruned {
@@ -446,6 +458,7 @@ struct Message: Identifiable, Codable, Equatable {
         lhs.accessedProjectIds == rhs.accessedProjectIds &&
         lhs.pruneArchiveReferences == rhs.pruneArchiveReferences &&
         lhs.prunedContextSummary == rhs.prunedContextSummary &&
+        lhs.activeTurnCompaction == rhs.activeTurnCompaction &&
         lhs.kind == rhs.kind
     }
 }

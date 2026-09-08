@@ -204,6 +204,7 @@ enum UpgradeService {
         allowSudo: Bool,
         progress: (String) -> Void
     ) async throws {
+        try TurnCheckpointStore.refuseReplacementWithUnfinishedEnvelope()
         progress("Downloading…")
         let fm = FileManager.default
         let tmp = fm.temporaryDirectory.appendingPathComponent("briglia-upgrade-\(UUID().uuidString)")

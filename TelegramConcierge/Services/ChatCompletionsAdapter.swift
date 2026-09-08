@@ -42,6 +42,11 @@ struct ChatCompletionsAdapter {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         request.httpBody = try encoder.encode(body)
+        if let limit = context.maintenanceOutputTokenLimit {
+            var bounded = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+            bounded[context.endpoint.contains("api.openai.com") ? "max_completion_tokens" : "max_tokens"] = limit
+            request.httpBody = try JSONSerialization.data(withJSONObject: bounded, options: [.sortedKeys])
+        }
 
         return request
     }

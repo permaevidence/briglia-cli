@@ -105,7 +105,7 @@ enum PruneArchiveStore {
     static func needsSnapshot(_ messages: [Message]) -> Bool {
         messages.contains {
             !$0.toolInteractions.isEmpty || $0.finalReasoning != nil || $0.finalReasoningDetails != nil
-                || $0.compactToolLog != nil || $0.prunedContextSummary != nil
+                || $0.activeTurnCompaction != nil || $0.compactToolLog != nil || $0.prunedContextSummary != nil
                 || ($0.role == .assistant && $0.content.hasPrefix("[TOOL RUN LOG - compact]"))
         }
     }
@@ -126,7 +126,7 @@ enum PruneArchiveStore {
 
     static func write(messages: [Message], currentRounds: [ToolInteraction] = [],
                       alternateMessages: [Message] = [], trigger: String,
-                      removedIDs: [UUID], directory: URL = root, pin: Bool = false) throws -> PruneArchiveReference {
+                      removedIDs: [UUID], removedCallIDs: [String] = [], priorActiveSummary: ActiveTurnCompaction? = nil, directory: URL = root, pin: Bool = false) throws -> PruneArchiveReference {
         lock.lock(); defer { lock.unlock() }
         _ = try directoryExists(directory)
         try PrivateStorage.ensureDirectory(directory)
@@ -196,6 +196,13 @@ enum PruneArchiveStore {
         try line("Removed message IDs:")
         for removed in removedIDs { try line(removed.uuidString) }
 
+        try line("Removed active-turn call IDs:")
+        for callID in removedCallIDs { try line(callID) }
+        if let priorActiveSummary {
+            try line("Prior active-turn summary:"); try line(priorActiveSummary.summaryText)
+            try line("Prior snapshot: " + priorActiveSummary.latestSnapshotReference.relativePath)
+        }
+
         func readable(_ value: JSONValue?) throws {
             // Provider-native objects may contain signatures/encrypted data.
             // Only readable text leaves those objects, never arbitrary values.
@@ -249,6 +256,10 @@ enum PruneArchiveStore {
             try line("Edited paths: " + json(message.editedFilePaths)); try line("Generated paths: " + json(message.generatedFilePaths))
             try line("Projects: " + json(message.accessedProjectIds)); try line("Subagent events: " + json(message.subagentSessionEvents))
             for reference in message.pruneArchiveReferences { try line("Prior snapshot: " + reference.relativePath) }
+            if let summary = message.activeTurnCompaction {
+                try line("Active-turn summary:"); try line(summary.summaryText)
+                try line("Prior snapshot: " + summary.latestSnapshotReference.relativePath)
+            }
             if let summary = message.prunedContextSummary { try line("Prior pruning summary:"); try line(summary) }
             if let log = message.compactToolLog { try line("Compact tool log:"); try line(log) }
             try line("Readable final reasoning:"); try readable(message.finalReasoning); try readable(message.finalReasoningDetails)
@@ -306,7 +317,7 @@ enum PruneArchiveStore {
             guard ref.basename.hasSuffix(suffix) else { throw Failure("snapshot ID/name mismatch: \(file.path)") }
             if validateComplete {
                 guard header.messages >= 0, header.rounds >= 0, header.created.timeIntervalSince1970.isFinite,
-                      ["manual", "automatic", "mid-turn", "chunk-archive"].contains(header.trigger) else {
+                      ["manual", "automatic", "mid-turn", "chunk-archive", "active-turn-compaction"].contains(header.trigger) else {
                     throw Failure("invalid snapshot metadata: \(file.path)")
                 }
                 guard lseek(fd, 0, SEEK_SET) >= 0 else { throw error("seek snapshot", file.path) }

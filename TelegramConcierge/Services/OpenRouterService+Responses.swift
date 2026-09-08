@@ -106,6 +106,9 @@ extension OpenRouterService {
 
         for message in conversation.messages {
             if message.role == .assistant {
+                if let summary = message.activeTurnCompaction {
+                    input.append(ResponsesAdapter.message(role: "assistant", text: summary.promptText))
+                }
                 for (index, interaction) in message.toolInteractions.enumerated() {
                     try await appendRound(interaction, identity: "\(message.id):\(index)")
                 }
@@ -173,7 +176,7 @@ extension OpenRouterService {
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
         let receipt = PreparedRequestReceipt(requestID: UUID(),
             historyFingerprint: ResponsesReplayEnvelope.hash(try encoder.encode(input)), deliveryNonces: nonces)
-        return try await ResponsesAdapter(context: context).send(input: input, tools: conversation.tools, receipt: receipt)
+        return try await ResponsesAdapter(context: context).send(input: input, tools: conversation.tools, receipt: receipt, maxOutputTokens: context.maintenanceOutputTokenLimit)
     }
 
     /// Only readable Chat Completions reasoning crosses protocols. Never dump

@@ -2528,6 +2528,7 @@ actor ConversationArchiveService {
             || message.hasFinalReasoningPayload
             || message.compactToolLog != nil
             || message.prunedContextSummary != nil
+            || message.activeTurnCompaction != nil
             || message.measuredToolTokens != nil
             || message.measuredTokens != nil
             || (!message.mediaPruned && message.mediaFileCount > 0)
@@ -2563,6 +2564,8 @@ actor ConversationArchiveService {
             kind: message.kind
         )
         sanitized.pruneArchiveReferences = message.pruneArchiveReferences
+        if let ref = message.activeTurnCompaction?.latestSnapshotReference,
+           !sanitized.pruneArchiveReferences.contains(ref) { sanitized.pruneArchiveReferences.append(ref) }
         return sanitized
     }
     
