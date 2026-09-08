@@ -12,6 +12,8 @@ enum CompactionTestInputs {
     static var dynamicPath = ""
     static var compactions = 0
     static var ordinaryCalls = 0
+    static var requireVioletCorrection = false
+    static var missingCanonical = false
     static func noteCompaction() { lock.lock(); compactions += 1; lock.unlock() }
     static func dynamicReply(_ request: CapturedHTTPRequest) -> String? {
         lock.lock(); defer { lock.unlock() }
@@ -21,12 +23,22 @@ enum CompactionTestInputs {
         if text.contains("ACTIVE TURN COMPACTION") {
             return try! body(protocol: wire, text: "Goal: preserve exact evidence. User correction says use violet. File source.txt verified; phases remain. Running handle bash_7 pending.", tokens: tokens)
         }
+        if compactions > 0 && requireVioletCorrection {
+            let object = try! JSONSerialization.jsonObject(with: request.body) as! [String: Any]
+            let items = object[wire == .responses ? "input" : "messages"] as! [[String: Any]]
+            if !items.contains(where: { $0["role"] as? String == "user" && String(describing: $0["content"] ?? "").contains("VERBATIM_CORRECTION: choose violet; never orange.") }) {
+                missingCanonical = true
+            }
+        }
         if compactions >= 3 || ordinaryCalls >= 50 {
-            return try! body(protocol: wire, text: "FINAL_COMPACTION_OK", tokens: tokens)
+            // The mock decision depends on canonical user input, never the
+            // summary's paraphrase of the same colour preference.
+            return try! body(protocol: wire, text: missingCanonical ? "ORANGE_WRONG" : "FINAL_COMPACTION_OK", tokens: tokens)
         }
         ordinaryCalls += 1
         return try! body(protocol: wire, text: "read", toolID: "c" + String(ordinaryCalls), path: dynamicPath, tokens: tokens)
     }
+    @MainActor static var maintenanceHook: ((ConversationManager) async -> Void)?
     static var writeFault: String?
     static func checkpointFault(_ path: String, phase: String) throws {
         if path.hasSuffix("/turn_salvage.json"), writeFault == phase {
@@ -85,9 +97,11 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
             try await manager.activeTestSeed()
             CompactionTestInputs.dynamicWire = wire; CompactionTestInputs.dynamicPath = file.path
             CompactionTestInputs.compactions = 0; CompactionTestInputs.ordinaryCalls = 0
+            CompactionTestInputs.requireVioletCorrection = true; CompactionTestInputs.missingCanonical = false
             let correction = Message(role: .user, content: "VERBATIM_CORRECTION: choose violet; never orange.")
             let history = try await manager.activeTestTurn(Message(role: .user, content: "Complete all phases without ending the turn."), queued: correction)
-            CompactionTestInputs.dynamicWire = nil
+            CompactionTestInputs.dynamicWire = nil; CompactionTestInputs.requireVioletCorrection = false
+            try CompactionTestInputs.check(!CompactionTestInputs.missingCanonical, "verbatim user role after compaction governs mock decision")
             try CompactionTestInputs.check(history.last?.content == "FINAL_COMPACTION_OK" && CompactionTestInputs.compactions == 3 && history.last?.activeTurnCompaction != nil,
                 "same turn completes three compactions")
             let summaryRequests = server.completeRequests.filter { String(decoding: $0.body, as: UTF8.self).contains("ACTIVE TURN COMPACTION") }
@@ -159,6 +173,8 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
                 await MindExportService.shared.discardStagedMind(staged)
             }
             try await manager.activeTestSoftTarget(server: server, wire: wire)
+            try await manager.activeTestInterrupted(server: server, wire: wire, file: file)
+            try await manager.activeTestOversizedHistory(server: server, wire: wire)
 
         }
         print("Active compaction owner: \(CompactionTestInputs.count) passed; evidence root: \(root.path)")

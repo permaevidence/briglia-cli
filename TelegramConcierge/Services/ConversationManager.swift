@@ -7159,6 +7159,21 @@ class ConversationManager: ObservableObject {
     ) async -> String? {
         guard !plan.isEmpty || !compressedIndices.isEmpty else { return nil }
 
+        // Only the newly unprotected oversized newest tool turn takes the
+        // bounded path. Ordinary historical-prune request bytes stay unchanged.
+        if let newest = sourceMessages.lastIndex(where: { !$0.toolInteractions.isEmpty }),
+           plan.affectedIndices.contains(newest),
+           sourceMessages[newest].toolInteractions.reduce(0, { $0 + ActiveTurnBudget.round($1) }) > ActiveTurnBudget(maximum: configuredMaxContextTokens()).inputCeiling {
+            let affected = Array(Set(plan.affectedIndices + compressedIndices)).sorted()
+            do {
+                return try await summarizeActivePrefix(affected.flatMap { sourceMessages[$0].toolInteractions }, previous: nil,
+                    execution: execution, date: turnStartDate, contextMessages: sourceMessages)
+            } catch {
+                print("[ActiveCompaction] Oversized historical summary unavailable: \(error.localizedDescription)")
+                return fallbackPrunedContextSummary(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
+            }
+        }
+
         let manifest = pruneSummaryManifest(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
         guard !manifest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
 
@@ -10919,8 +10934,9 @@ extension ConversationManager {
         pending.pendingRecovery = true; pending.overflowReference = reference
         try writeTurnCheckpoint(pending)
         activeTurnCheckpoints[runID] = pending
+        let contextIDs = Set([original.taskMessageID] + original.deliveredUserMessageIDs)
         let summary = try await summarizeActivePrefix(prefix, previous: original.activeTurnCompaction?.summaryText,
-            execution: execution, date: date)
+            execution: execution, date: date, contextMessages: messages.filter { contextIDs.contains($0.id) })
         try Task.checkCancellation()
         guard activeRunId == runID,
               activeTurnCheckpoints[runID]?.generation == original.generation,
@@ -10967,13 +10983,14 @@ extension ConversationManager {
     /// Always bounded, including apparently small prefixes. Long single tool
     /// outputs are covered in consecutive fragments; no head/tail omission.
     private func summarizeActivePrefix(_ rounds: [ToolInteraction], previous: String?,
-        execution: ProviderExecutionContext?, date: Date) async throws -> String {
+        execution: ProviderExecutionContext?, date: Date, contextMessages: [Message] = []) async throws -> String {
         let selected: ProviderExecutionContext
         if let execution { selected = execution }
         else { selected = await openRouterService.executionContext(modelOverride: nil, providerOverride: nil,
             reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main) }
         var maintenance = selected.forOperation(.pruneSummary)
         maintenance.maintenanceOutputTokenLimit = 16_384
+        let maintenanceInputCeiling = min(64_000, max(1, (configuredMaxContextTokens() - 16_384) * 85 / 100))
         defer { maintenance.responsesTurn.close() }
         var summary = previous ?? ""
         let instruction = """
@@ -10989,8 +11006,15 @@ extension ConversationManager {
             try Task.checkCancellation()
             let body = "Prior summary:\n" + summary + "\nNext consecutive source fragment:\n" + MarkerNeutralizer.escape(fragment)
             do {
+                let maintenanceMessages = [Message(role: .assistant, content: body)]
+                let estimate = try await openRouterService.activeTurnRequestEstimate(messages: maintenanceMessages, rounds: [],
+                    images: imagesDirectory, documents: documentsDirectory, tools: [], calendar: nil, email: nil,
+                    summaries: [], totalChunks: 0, date: date, deferred: [])
+                guard estimate.tokens + ActiveTurnBudget.text(instruction) <= maintenanceInputCeiling else {
+                    throw PruneArchiveStore.Failure("Compaction summary context exceeds the bounded maintenance input budget")
+                }
                 let response = try await openRouterService.generateResponse(
-                    messages: [Message(role: .assistant, content: body)], imagesDirectory: imagesDirectory,
+                    messages: maintenanceMessages, imagesDirectory: imagesDirectory,
                     documentsDirectory: documentsDirectory, tools: [], turnStartDate: date,
                     tailSystemMessage: instruction, execution: maintenance, lane: .main)
                 if let spend = spendUSD(from: response), spend > 0 {
@@ -11009,22 +11033,31 @@ extension ConversationManager {
                 let detail = error.localizedDescription.lowercased()
                 guard depth < 3, fragment.utf8.count > 4096,
                       detail.contains("context") || detail.contains("too large") || detail.contains("413") else { throw error }
-                let middle = fragment.index(fragment.startIndex, offsetBy: fragment.count / 2)
-                try await consume(String(fragment[..<middle]), depth: depth + 1)
-                try await consume(String(fragment[middle...]), depth: depth + 1)
+                let scalars = fragment.unicodeScalars
+                let middle = scalars.index(scalars.startIndex, offsetBy: scalars.count / 2)
+                try await consume(String(scalars[..<middle]), depth: depth + 1)
+                try await consume(String(scalars[middle...]), depth: depth + 1)
             }
         }
         func add(_ text: String) async throws {
-            // Character slices preserve Unicode, with a conservative 4-byte
-            // bound for each scalar cluster segment added to a batch.
-            var rest = text[...]
+            // Unicode scalar boundaries keep UTF-8 valid even for a single
+            // arbitrarily long combining-character cluster. Every fragment is
+            // byte-bounded; no source characters are omitted.
+            var rest = text.unicodeScalars[...]
             while !rest.isEmpty {
-                let piece = rest.prefix(8192)
+                let scalars = rest.prefix(8192)
+                let piece = String(String.UnicodeScalarView(scalars))
                 if buffer.utf8.count + piece.utf8.count > capacity, !buffer.isEmpty {
                     try await consume(buffer); buffer = ""
                 }
-                buffer += piece; rest = rest.dropFirst(piece.count)
+                buffer += piece; rest = rest.dropFirst(scalars.count)
             }
+        }
+        for message in contextMessages {
+            try await add("\nCANONICAL TASK CONTEXT (historical \(message.role.rawValue))\n" + message.content)
+            if let summary = message.activeTurnCompaction { try await add(summary.summaryText) }
+            if let summary = message.prunedContextSummary { try await add(summary) }
+            for path in message.imageFileNames + message.documentFileNames { try await add("\nAttachment: " + path) }
         }
         for round in rounds {
             try await add("\nCOMPLETE TOOL ROUND\n")

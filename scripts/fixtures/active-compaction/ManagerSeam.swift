@@ -127,3 +127,64 @@ extension ConversationManager {
         try CompactionTestInputs.check(server.completeRequests.count == 1, "missing 70k target does not invoke active compaction")
     }
 }
+
+extension ConversationManager {
+    func activeTestInterrupted(server: CaptureServer, wire: ProviderWireProtocol, file: URL) async throws {
+        for mode in ["cancel", "late-human", "stale-generation"] {
+            try await activeTestSeed(); server.clear()
+            CompactionTestInputs.dynamicWire = wire; CompactionTestInputs.dynamicPath = file.path
+            CompactionTestInputs.compactions = 0; CompactionTestInputs.ordinaryCalls = 0
+            let late = Message(role: .user, content: "LATE_CANONICAL: preserve this new instruction")
+            CompactionTestInputs.maintenanceHook = { manager in
+                if mode == "cancel" { await manager.stopActiveExecution() }
+                else if mode == "late-human" {
+                    manager.pendingMidTurnMessages.append(late)
+                    _ = manager.persistPendingMidTurnQueue()
+                } else if let run = manager.activeRunId {
+                    manager.activeTurnCheckpoints[run]?.nextRoundSequence += 1
+                }
+            }
+            let history = try await activeTestTurn(Message(role: .user, content: "Exercise maintenance boundary"), queued: nil)
+            CompactionTestInputs.dynamicWire = nil; CompactionTestInputs.maintenanceHook = nil
+            if mode == "late-human" {
+                try CompactionTestInputs.check(history.filter { $0.id == late.id }.count == 1, "user arriving during summary persists exactly once")
+                try CompactionTestInputs.check(history.last?.content == "FINAL_COMPACTION_OK", "user arriving during summary does not strand the turn")
+            } else {
+                try CompactionTestInputs.check(CompactionTestInputs.compactions == 0, "no stale compaction after " + mode)
+                try CompactionTestInputs.check(history.last?.toolInteractions.isEmpty == true && history.last?.pruneArchiveReferences.isEmpty == false,
+                    "interrupted maintenance saves snapshot without oversized replay: " + mode)
+                try CompactionTestInputs.check(!FileManager.default.fileExists(atPath: turnSalvageFileURL.path), "interrupted outcome saved before checkpoint clear")
+                server.clear(); server.script([try CompactionTestInputs.body(protocol: wire, text: "NEXT_TURN_OK")])
+                let next = try await activeTestTurn(Message(role: .user, content: "Continue with a small task"), queued: nil)
+                try CompactionTestInputs.check(next.last?.content == "NEXT_TURN_OK", "next turn works after " + mode)
+            }
+        }
+    }
+
+    func activeTestOversizedHistory(server: CaptureServer, wire: ProviderWireProtocol) async throws {
+        for mode in ["manual", "automatic", "midloop"] {
+            try await activeTestSeed(); server.clear()
+            let round = ToolInteraction(assistantMessage: AssistantToolCallMessage(content: "legacy work", toolCalls: [
+                ToolCall(id: "giant-legacy", type: "function", function: FunctionCall(name: "read_file", arguments: "{}"))
+            ]), results: [ToolResultMessage(toolCallId: "giant-legacy", content: "GIANT_EXACT")], measuredTokenCost: 300000)
+            messages = [Message(role: .user, content: "Legacy task"), Message(role: .assistant, content: "Done", toolInteractions: [round]),
+                Message(role: .user, content: "Next task")]
+            guard saveConversation() else { throw CompactionTestInputs.Failure("giant seed") }
+            lastPromptTokens = 310000
+            server.script([try CompactionTestInputs.body(protocol: wire, text: "Legacy finding GIANT_EXACT retained.")])
+            if mode == "manual" { await manualPruneToolInteractions() }
+            else if mode == "automatic" {
+                _ = try await pruneToolInteractionsIfNeeded(currentUserMessageId: messages.last!.id, calendarContext: nil,
+                    emailContext: nil, chunkSummaries: [], totalChunkCount: 0, turnStartDate: Date(), tools: [], deferredMCPSummaries: [])
+            } else {
+                var history = messages
+                _ = try await pruneStoredToolInteractionsMidLoop(messagesForLLM: &history, currentTurnInteractions: [],
+                    calendarContext: nil, emailContext: nil, chunkSummaries: [], totalChunkCount: 0,
+                    currentUserMessageId: messages.last!.id, turnStartDate: Date(), tools: [], deferredMCPSummaries: [])
+            }
+            try CompactionTestInputs.check(messages[1].toolInteractions.isEmpty, "oversized latest historical round pruned in " + mode)
+            try CompactionTestInputs.check(server.completeRequests.count == 1 && String(decoding: server.completeRequests[0].body, as: UTF8.self).contains("ACTIVE TURN COMPACTION"),
+                "oversized historical summary uses bounded builder in " + mode)
+        }
+    }
+}

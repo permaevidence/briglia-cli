@@ -49,6 +49,25 @@ def instrument(tree):
         path = tree / "TelegramConcierge/Services" / target
         with path.open("a") as f:
             f.write((FIXTURES / seam).read_text())
+    if (tree / "TelegramConcierge/Services/ActiveTurnCompaction.swift").exists():
+        # The frozen direct-call exhaustion fixture has no real turn owner. The
+        # new real-owner suite replaces its old forced-final semantics; keep the
+        # first request exact and assert the ownerless call now fails closed.
+        manager = tree / "TelegramConcierge/Services/ConversationManager.swift"
+        replace(manager,
+            'id: activeTurnCheckpoints[runId].flatMap { $0.isEnvelope ? $0.outcomeMessageID : nil } ?? UUID(),',
+            'id: activeTurnCheckpoints[runId].flatMap { $0.isEnvelope ? $0.outcomeMessageID : nil } ?? P0Life.messageID(),')
+        replace(manager,
+            "        let reply = try await generateResponseWithTools(currentUserMessageId: history.last!.id, turnStartDate: P0Life.instant)",
+            '''        let reply: ToolAwareResponse
+        do { reply = try await generateResponseWithTools(currentUserMessageId: history.last!.id, turnStartDate: P0Life.instant) }
+        catch { if error.localizedDescription == "No active-turn checkpoint owner" { return ["ownerRequired": true] }; throw error }''')
+        replace(tree / "TelegramConcierge/CLI/ChatLifecycleSelftest.swift",
+            '            server.script(name == "loop-final" ? [final] : [first, final])',
+            '            server.script(name == "loop-exhausted" ? [first] : (name == "loop-final" ? [final] : [first, final]))')
+        replace(tree / "TelegramConcierge/CLI/ChatLifecycleSelftest.swift",
+            '        P0Life.require((observations["loop-exhausted"] as! [String: Any])["measuredUser"] as? Int == 18900, "legacy exhaustion watermark arithmetic")',
+            '        P0Life.require((observations["loop-exhausted"] as! [String: Any])["ownerRequired"] as? Bool == true, "ownerless exhaustion must fail closed")')
     # Storage input seam: owner preferences must never be read/written by a fixture.
     # XDG handles files; this separately redirects every standard-defaults access.
     for path in (tree / "TelegramConcierge").rglob("*.swift"):
@@ -111,7 +130,7 @@ def expected_affinity(lane):
     return hmac.new(bytes(range(32)), payload, hashlib.sha256).hexdigest()[:32]
 
 
-def run(binary, destination):
+def run(binary, destination, active_compaction=False):
     env = dict(os.environ, SWIFT_DETERMINISTIC_HASHING="1", LC_ALL="C", TZ="UTC")
     proc = subprocess.run([str(binary), "__chat-lifecycle-selftest", "--output", str(destination)],
                           env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
@@ -132,6 +151,7 @@ def run(binary, destination):
         "loop-final": 1, "loop-tools": 2, "loop-exhausted": 2, "loop-spend": 2, "subagent-new": 1, "subagent-resume": 1,
         "subagent-eager": 3, "subagent-midrun": 3, "subagent-forced-retry": 3, "media-rehydrated": 1, "media-missing": 1,
         "media-raw-document": 1, "midturn-carry": 2, "midturn-abort": 5, "midturn-no-tools": 2, "archive": 1, "user-context": 1, "probe": 1}
+    if active_compaction: counts["loop-exhausted"] = 1
     expected_captures = {f"{name}-{i}" for name, count in counts.items() for i in range(count)}
     names = [c["fixture"] for c in captures]
     if len(names) != len(set(names)) or set(names) != expected_captures: raise RuntimeError("Lifecycle request inventory changed")
@@ -245,8 +265,8 @@ def main():
             bindir = subprocess.check_output(["swift", "build", "--scratch-path", str(scratch), "--show-bin-path"], cwd=tree, text=True).strip()
             binary = Path(bindir) / "briglia"
             binaries[label] = binary
-            data = run(binary, root / (label + "-capture"))
-            repeat = run(binary, root / (label + "-repeat"))
+            data = run(binary, root / (label + "-capture"), label == "candidate")
+            repeat = run(binary, root / (label + "-repeat"), label == "candidate")
             compare(data, repeat)
             results[label] = data
             if label == "reference" and args.save_reference:
@@ -264,7 +284,7 @@ def main():
                 raise RuntimeError("Wrong baseline compiler")
             compare(frozen["fixtures"], results.get("reference", results["candidate"]))
         if not args.candidate_only:
-            from prune_lifecycle_migration import verify_migration
+            from active_compaction_lifecycle_migration import verify_migration
             from read_file_description_migration import migrate_lifecycle
             verify_migration(migrate_lifecycle(results["reference"]), results["candidate"], compare)
             # New-binary export MUST open with the pinned release's actual importer.

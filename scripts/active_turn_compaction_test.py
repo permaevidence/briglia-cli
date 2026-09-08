@@ -28,6 +28,8 @@ assert s.count(anchor) == 1
 sources[key] = s.replace(anchor, '        if CompactionTestInputs.disableCompaction { throw PruneArchiveStore.Failure("negative control: old exhaustion") }\n' + anchor)
 sources[key] = sources[key].replace('        activeTurnCheckpoints[runID] = candidate\n        pendingCompactionCalibration',
     '        CompactionTestInputs.noteCompaction()\n        activeTurnCheckpoints[runID] = candidate\n        pendingCompactionCalibration')
+sources[key] = sources[key].replace('        let contextIDs = Set([original.taskMessageID] + original.deliveredUserMessageIDs)',
+    '        if let hook = CompactionTestInputs.maintenanceHook { CompactionTestInputs.maintenanceHook = nil; await hook(self) }\n        let contextIDs = Set([original.taskMessageID] + original.deliveredUserMessageIDs)')
 key = 'TelegramConcierge/CLI/AffinitySelftest.swift'
 sources[key] = sources[key].replace('        let body = scripted ?? (status == 200',
     '        let body = CompactionTestInputs.dynamicReply(completeRequests.last!) ?? scripted ?? (status == 200')
