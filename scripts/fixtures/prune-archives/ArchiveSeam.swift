@@ -20,15 +20,15 @@ extension ConversationArchiveService {
                 && table.contains("Snapshots: " + ref.basename) && !table.contains("Full context snapshot:"),
                 "archive table declares folder/retention once (total \(total))")
         }
-        var repeated = items[0]
+        let repeated = items[0]
         // Identical links in many rows must still share a single header.
         let manyTable = await renderer.formatChunkSummaries(Array(repeating: repeated, count: 20), totalChunkCount: 20)
         try SnapshotOwnerInputs.check(manyTable.components(separatedBy: PruneArchiveStore.root.path).count == 2
             && manyTable.components(separatedBy: "latest 300").count == 2,
             "twenty snapshot rows still share one folder/retention header")
-        repeated.hasSnapshotReferences = false
-        repeated.summary = "plain summary"
-        let plainTable = await renderer.formatChunkSummaries([repeated], totalChunkCount: 1)
+        let plain = ArchivedSummaryItem(id: UUID(), kind: .temporaryChunk, startDate: chunk.startDate,
+            endDate: chunk.endDate, tokenCount: 100, messageCount: 2, summary: "plain summary", sourceChunkCount: 1)
+        let plainTable = await renderer.formatChunkSummaries([plain], totalChunkCount: 1)
         try SnapshotOwnerInputs.check(!plainTable.contains(PruneArchiveStore.root.path) && !plainTable.contains("latest 300"),
             "snapshot-free table has no extra header")
         let before = server.completeRequests.count
