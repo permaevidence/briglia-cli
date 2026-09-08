@@ -198,8 +198,9 @@ def main():
             if instrument(candidate) != evidence:
                 raise RuntimeError("Instrumentation changed during capture")
             actual, _ = build_and_capture(candidate, scratch / "candidate", root / "candidate-captures")
-            compare(fixtures, actual)
-            print(f"Matched {len(fixtures)} pinned-release bodies, targets and full header maps on the same toolchain", flush=True)
+            from read_file_description_migration import migrate_wire_fixtures
+            compare(migrate_wire_fixtures(fixtures), actual)
+            print(f"Matched {len(fixtures)} pinned-release bodies with the reviewed read_file description addition, targets and full header maps", flush=True)
         finally:
             for tree in reversed(trees):
                 command(["git", "worktree", "remove", "--force", str(tree)])

@@ -1,8 +1,8 @@
 {
-  "purpose": "Snapshot extension: optional typed references; no changes to replay/auth fields. Requires independent review.",
+  "purpose": "Snapshot extension: optional typed references; no changes to replay/auth fields. Requires independent review. Includes the isolated read_file description-only addition.",
   "sha256": {
     "TelegramConcierge/Models/Message.swift": "f8611049d51930309005d2ea0097a500b7b69e2f97ff1e4013b758a00fd4b3f2",
-    "TelegramConcierge/Models/ToolModels.swift": "98459da9f82574c84bb4b9fe3ab9735d8e5e20621a45f58e40c3e789415f2135",
+    "TelegramConcierge/Models/ToolModels.swift": "92c7d87dbad67db5cf3c4c2924b19d6e4cc9ec5ea02d58838ac1a8c37d5b5a74",
     "TelegramConcierge/Services/ConversationManager.swift#declaration": "7e8328c639c37cf0d671ca3be4921d917095844e671ff8388b492ac6d515d23a",
     "TelegramConcierge/Services/HarnessAnnotations.swift": "1371f312fe4b0ab0ea4aafc859193cf710cd56e8521b4e243c92356bd11d4440",
     "TelegramConcierge/Services/OpenRouterService.swift#declaration": "51272020cb6063053dc3d5831c878acf9f440945b1925200cc6e5259e6efd804",

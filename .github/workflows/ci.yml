@@ -37,7 +37,9 @@ jobs:
       - name: Persisted model source contract and negative tests
         run: python3 scripts/chat_persistence_contract_test.py
       - name: Wire comparator negative tests
-        run: python3 scripts/chat_wire_baseline_test.py
+        run: |
+          python3 scripts/chat_wire_baseline_test.py
+          python3 scripts/read_file_description_migration_test.py
       - name: Chat Completions pinned-release differential gate
         run: python3 scripts/chat_wire_baseline.py --save-reference chat-wire-reference.json --baseline scripts/fixtures/chat-wire/ci-linux-x86_64-r2.json
       - name: Preserve pinned-release reference
@@ -90,7 +92,9 @@ jobs:
       - name: Persisted model source contract and negative tests
         run: python3 scripts/chat_persistence_contract_test.py
       - name: Wire comparator negative tests
-        run: python3 scripts/chat_wire_baseline_test.py
+        run: |
+          python3 scripts/chat_wire_baseline_test.py
+          python3 scripts/read_file_description_migration_test.py
       - name: Chat Completions pinned-release differential gate
         run: python3 scripts/chat_wire_baseline.py --save-reference chat-wire-reference.json --baseline scripts/fixtures/chat-wire/ci-darwin-arm64-r2.json
       - name: Preserve pinned-release reference

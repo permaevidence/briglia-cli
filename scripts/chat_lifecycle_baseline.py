@@ -265,7 +265,8 @@ def main():
             compare(frozen["fixtures"], results.get("reference", results["candidate"]))
         if not args.candidate_only:
             from prune_lifecycle_migration import verify_migration
-            verify_migration(results["reference"], results["candidate"], compare)
+            from read_file_description_migration import migrate_lifecycle
+            verify_migration(migrate_lifecycle(results["reference"]), results["candidate"], compare)
             # New-binary export MUST open with the pinned release's actual importer.
             imported = root / "cross-import"
             env = dict(os.environ, SWIFT_DETERMINISTIC_HASHING="1", LC_ALL="C", TZ="UTC")
@@ -275,7 +276,7 @@ def main():
                     json.loads((imported / "import.json").read_text()))
             wire.command(["python3", str(ROOT / "scripts/chat_lifecycle_client_test.py"),
                           str(root / "candidate-capture/status.json")])
-        print("DIAGNOSTIC ONLY" if args.candidate_only else "Lifecycle pinned-release differential PASS")
+        print("DIAGNOSTIC ONLY" if args.candidate_only else "Lifecycle r3 migration and shipped-client differential PASS")
     finally:
         print(f"Evidence: {root}", flush=True)
         if not args.keep_trees:
