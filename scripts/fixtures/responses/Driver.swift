@@ -376,10 +376,14 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         _ = try manager.p2Reload(); manager.p2Recover()
         let recovered = try manager.p2Reload()
         try P2Life.require(recovered.flatMap(\.toolInteractions).count == 1 && !FileManager.default.fileExists(atPath: salvage.path), "restart recovers completed rounds once after final-save failure")
-        for corrupt in [Data("not json".utf8), Data("[]".utf8)] {
-            try corrupt.write(to: salvage); manager.p2Recover()
-            try P2Life.require(!FileManager.default.fileExists(atPath: salvage.path), "invalid or empty salvage removed on startup")
-        }
+        let corrupt = Data("not json".utf8)
+        try corrupt.write(to: salvage); manager.p2Recover()
+        try P2Life.require(try Data(contentsOf: salvage) == corrupt && manager.p2RecoveryBlocked(),
+            "invalid salvage preserved byte-for-byte and new work blocked")
+        // An explicitly empty legacy array contains no work to preserve.
+        try Data("[]".utf8).write(to: salvage); manager.p2Recover()
+        try P2Life.require(!FileManager.default.fileExists(atPath: salvage.path) && !manager.p2RecoveryBlocked(),
+            "empty legacy salvage cleared without blocking")
     }
 
     @MainActor private func runAuxiliary(server: CaptureServer, root: URL) async throws {
