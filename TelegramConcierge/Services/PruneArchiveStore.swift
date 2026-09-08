@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 #if canImport(Glibc)
 import Glibc
 #else
@@ -143,8 +148,22 @@ enum PruneArchiveStore {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
             return String(decoding: try encoder.encode(value), as: UTF8.self)
         }
+        // Retain only fixed-size fingerprints, never an aggregate collection
+        // of encoded results. Encoding is transient and limited to one item.
+        func fingerprint<T: Encodable>(_ value: T) throws -> Data {
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            return Data(SHA256.hash(data: try encoder.encode(value)))
+        }
+        var newRounds: [ToolInteraction] = []
+        if !currentRounds.isEmpty {
+            var saved: Set<Data> = []
+            for item in messages { for round in item.toolInteractions { saved.insert(try fingerprint(round)) } }
+            for round in currentRounds {
+                if saved.insert(try fingerprint(round)).inserted { newRounds.append(round) }
+            }
+        }
         let header = Header(version: 1, id: id, created: now, trigger: trigger,
-                            messages: messages.count, rounds: messages.reduce(0) { $0 + $1.toolInteractions.count } + currentRounds.count)
+                            messages: messages.count, rounds: messages.reduce(0) { $0 + $1.toolInteractions.count } + newRounds.count)
         try line("BRIGLIA SNAPSHOT 1 " + json(header))
         let local = ISO8601DateFormatter(); local.timeZone = .current
         try line("Created UTC: " + ISO8601DateFormatter().string(from: now))
@@ -220,11 +239,9 @@ enum PruneArchiveStore {
         // encoded payloads: Message.== intentionally ignores tool interactions.
         let byID = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
         for (index, item) in alternateMessages.enumerated() {
-            if let original = byID[item.id], try json(original) == json(item) { continue }
+            if let original = byID[item.id], try fingerprint(original) == fingerprint(item) { continue }
             try message(item, index: index, view: "in-flight differing view")
         }
-        let savedRounds = try Set(messages.flatMap(\.toolInteractions).map { try json($0) })
-        let newRounds = try currentRounds.filter { !savedRounds.contains(try json($0)) }
         try rounds(newRounds, parent: "current in-flight turn; execution timestamps not recorded")
         try line("\nBRIGLIA SNAPSHOT END " + id.uuidString)
         try faultForTesting?("fsync")

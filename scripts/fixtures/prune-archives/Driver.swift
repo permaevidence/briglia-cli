@@ -55,8 +55,9 @@ struct SnapshotOwnerSelftest: AsyncParsableCommand {
             try SnapshotOwnerInputs.check(!references.isEmpty && references.allSatisfy { $0.promptText.contains(StoragePaths.dataRoot.path) }, "typed links resolve against new process data root")
             try SnapshotOwnerInputs.check(references.allSatisfy { ref in entries.contains { $0.reference == ref } }, "imported links retrieve original snapshot IDs")
             // Model an old valid backup with the optional folder absent.
-            try FileManager.default.removeItem(at: staged.tempDir.appendingPathComponent("prune-archives"))
-            try await MindExportService.shared.applyStagedMind(staged)
+            let oldStaged = try await MindExportService.shared.stageMind(from: URL(fileURLWithPath: importArchive))
+            try FileManager.default.removeItem(at: oldStaged.tempDir.appendingPathComponent("prune-archives"))
+            try await MindExportService.shared.applyStagedMind(oldStaged)
             try SnapshotOwnerInputs.check(try PruneArchiveStore.entries().isEmpty, "old Mind without snapshots clears destination history")
             await MindExportService.shared.discardStagedMind(staged)
             print("Snapshot import integration passed")
