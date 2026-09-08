@@ -169,6 +169,7 @@ extension ConversationManager {
             ]), results: [ToolResultMessage(toolCallId: "giant-legacy", content: "GIANT_EXACT")], measuredTokenCost: 300000)
             messages = [Message(role: .user, content: "Legacy task"), Message(role: .assistant, content: "Done", toolInteractions: [round]),
                 Message(role: .user, content: "Next task")]
+            if mode == "manual" { messages.removeLast() } // trailing affected assistant must remain in summary input
             guard saveConversation() else { throw CompactionTestInputs.Failure("giant seed") }
             lastPromptTokens = 310000
             server.script([try CompactionTestInputs.body(protocol: wire, text: "Legacy finding GIANT_EXACT retained.")])

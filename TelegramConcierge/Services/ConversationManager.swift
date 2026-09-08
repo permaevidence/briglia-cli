@@ -5158,7 +5158,9 @@ class ConversationManager: ObservableObject {
         // cache miss on everything after the system prompt. The protected
         // turn's tools aren't being pruned, so no information is lost.
         var messagesForSummary = plannedSource
-        if let last = messagesForSummary.last, last.role == .assistant {
+        if let last = messagesForSummary.last, last.role == .assistant,
+           !plan.affectedIndices.contains(messagesForSummary.count - 1),
+           !compressedIndices.contains(messagesForSummary.count - 1) {
             messagesForSummary.removeLast()
         }
 
@@ -7165,6 +7167,9 @@ class ConversationManager: ObservableObject {
            plan.affectedIndices.contains(newest),
            sourceMessages[newest].toolInteractions.reduce(0, { $0 + ActiveTurnBudget.round($1) }) > ActiveTurnBudget(maximum: configuredMaxContextTokens()).inputCeiling {
             let affected = Array(Set(plan.affectedIndices + compressedIndices)).sorted()
+            guard affected.allSatisfy({ sourceMessages.indices.contains($0) }) else {
+                return fallbackPrunedContextSummary(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
+            }
             do {
                 return try await summarizeActivePrefix(affected.flatMap { sourceMessages[$0].toolInteractions }, previous: nil,
                     execution: execution, date: turnStartDate, contextMessages: sourceMessages)

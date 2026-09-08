@@ -135,7 +135,10 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
                 effort: live ? "low" : nil, textOnly: false, wireProtocol: .responses)
             try ProviderProfiles.activate(.custom)
         }
-        let settings = [KeychainHelper.maxContextTokensKey: "10000", KeychainHelper.targetContextTokensKey: "5000",
+        // Use a realistic input budget now that native reasoning reserves 8192
+        // tokens per envelope. The explicit manual-prune watermark/target below
+        // still exercise eviction while a normal recent native round fits.
+        let settings = [KeychainHelper.maxContextTokensKey: "250000", KeychainHelper.targetContextTokensKey: "5000",
             KeychainHelper.archiveChunkSizeKey: "1000000", KeychainHelper.assistantNameKey: "Fixture Assistant",
             KeychainHelper.userNameKey: "Fixture User", KeychainHelper.emailCalendarProviderKey: "none"]
         try KeychainHelper.saveBatch(settings.mapValues { Optional($0) })
