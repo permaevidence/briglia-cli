@@ -10866,6 +10866,15 @@ extension ConversationManager {
         guard let original = activeTurnCheckpoints[runID], activeRunId == runID else {
             throw PruneArchiveStore.Failure("Compaction owner unavailable")
         }
+        let knownUsers = Set(history.map(\.id))
+            .union(original.deliveredUserMessageIDs)
+            .union(pendingMidTurnMessages.map(\.id))
+            .union(inFlightMidTurnBatch?.messages.map(\.id) ?? [])
+        guard messages.filter({ $0.role == .user && $0.kind == .userText }).allSatisfy({ knownUsers.contains($0.id) }) else {
+            // Legacy flattened deliveries cannot be promoted by parsing their
+            // text. Stop with raw work preserved instead of losing a correction.
+            throw PruneArchiveStore.Failure("A mid-turn user message has no typed delivery receipt; active compaction stopped to preserve it")
+        }
         let activity = beginMaintenance(.pruning)
         defer { endMaintenance(activity) }
         let budget = ActiveTurnBudget(maximum: configuredMaxContextTokens())

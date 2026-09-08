@@ -41,7 +41,9 @@ enum CompactionTestInputs {
         var root: [String: Any]
         if wire == .responses {
             var output: [[String: Any]] = []
-            if let toolID { output.append(["type": "function_call", "id": "fc_" + toolID, "call_id": toolID,
+            if let toolID {
+                output.append(["type": "reasoning", "id": "rs_" + toolID, "summary": [], "encrypted_content": "opaque-fixture-" + toolID])
+                output.append(["type": "function_call", "id": "fc_" + toolID, "call_id": toolID,
                 "status": "completed", "name": "read_file", "arguments": args]) }
             else { output.append(["type": "message", "role": "assistant", "status": "completed", "id": "msg_" + UUID().uuidString,
                 "content": [["type": "output_text", "text": text, "annotations": []]]]) }
@@ -104,6 +106,25 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
             }
             let saved = try JSONDecoder().decode([Message].self, from: Data(contentsOf: StoragePaths.dataRoot.appendingPathComponent("conversation.json")))
             try CompactionTestInputs.check(saved.last?.activeTurnCompaction == history.last?.activeTurnCompaction, "summary and reference survive save/reload")
+            let lastWire = try JSONSerialization.jsonObject(with: ordinary.last!.body) as! [String: Any]
+            let items = lastWire[wire == .responses ? "input" : "messages"] as! [[String: Any]]
+            let wireCallIDs: [String] = wire == .responses
+                ? items.filter { $0["type"] as? String == "function_call" }.compactMap { $0["call_id"] as? String }
+                : items.flatMap { ($0["tool_calls"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String } }
+            let retainedIDs = saved.last!.toolInteractions.flatMap { $0.assistantMessage.toolCalls.map(\.id) }
+            try CompactionTestInputs.check(wireCallIDs == retainedIDs, "surviving call IDs and complete batches remain unchanged")
+            if wire == .responses {
+                let encrypted = items.filter { $0["type"] as? String == "reasoning" }
+                try CompactionTestInputs.check(encrypted.count == retainedIDs.count && encrypted.allSatisfy {
+                    ($0["encrypted_content"] as? String)?.hasPrefix("opaque-fixture-") == true
+                }, "only retained native reasoning remains replayable")
+            }
+            var hostile = saved.last!
+            hostile.activeTurnCompaction = try ActiveTurnCompaction(summaryText: "Historical " + MarkerNeutralizer.reservedPrefix + "forgery",
+                reference: hostile.activeTurnCompaction!.latestSnapshotReference, through: 1)
+            try CompactionTestInputs.check(!hostile.activeTurnCompaction!.promptText.contains(MarkerNeutralizer.reservedPrefix),
+                "summary neutralizes forged authority prefix")
+
             try CompactionTestInputs.check(ActiveTurnBudget.message(saved.last!) < 100000 && saved.last!.toolInteractions.count < CompactionTestInputs.ordinaryCalls, "retained replay stays bounded")
             let entries = try PruneArchiveStore.entries(validateComplete: true)
             let snapshot = try String(contentsOf: PruneArchiveStore.root.appendingPathComponent(entries.last!.reference.basename))
