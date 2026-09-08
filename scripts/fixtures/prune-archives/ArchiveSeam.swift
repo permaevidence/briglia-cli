@@ -18,6 +18,21 @@ extension ConversationArchiveService {
         await writeSidecar(forRawFileName: chunk.rawContentFileName, messages: saved)
         let sidecar = archiveFolder.appendingPathComponent((chunk.rawContentFileName as NSString).deletingPathExtension + ".txt")
         try SnapshotOwnerInputs.check(try String(contentsOf: sidecar).contains(ref.relativePath), "regenerated sidecar retains portable snapshot reference")
+        let newer = try PruneArchiveStore.write(messages: source, trigger: "chunk-archive", removedIDs: detailBatch.map(\.id))
+        let refreshed = try await archiveMessages(detailBatch, snapshot: newer)
+        let refreshedRaw = try JSONDecoder().decode([Message].self, from: Data(contentsOf: archiveFolder.appendingPathComponent(refreshed.rawContentFileName)))
+        try SnapshotOwnerInputs.check(refreshed.id == chunk.id && refreshed.pruneArchiveReferences?.contains(newer) == true
+            && refreshedRaw.flatMap(\.pruneArchiveReferences).contains(newer), "committed retry preserves newer snapshot reference without a duplicate chunk")
+        server.clear()
+        var racing = source
+        racing[0] = Message(role: .user, content: "concurrent archive source")
+        racing[1] = Message(role: .assistant, content: "concurrent reply", toolInteractions: source[1].toolInteractions)
+        server.script([try SnapshotOwnerInputs.response(summary), try SnapshotOwnerInputs.response("NO_CHANGES")])
+        async let first = archiveMessages(racing, snapshot: ref)
+        async let second = archiveMessages(racing, snapshot: ref)
+        let (one, two) = try await (first, second)
+        try SnapshotOwnerInputs.check(one.id == two.id && server.completeRequests.count == 2,
+            "overlapping archive calls share one committed chunk and one summary/extraction")
         server.clear()
         let pure = [Message(role: .user, content: "pure-text chunk"), Message(role: .assistant, content: "plain answer")]
         server.script([try SnapshotOwnerInputs.response(summary), try SnapshotOwnerInputs.response("NO_CHANGES")])

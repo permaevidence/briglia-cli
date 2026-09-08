@@ -634,6 +634,20 @@ actor ConversationArchiveService {
         onMaintenancePhase = handler
     }
     
+    // Logical async ownership for chunk publication/recovery. This does not
+    // hold a thread or filesystem lock while awaiting the model. /stop may
+    // leave a detached archive alive while the next turn starts another.
+    private var chunkWriterBusy = false
+    private var chunkWriterWaiters: [CheckedContinuation<Void, Never>] = []
+    private func acquireChunkWriter() async {
+        if !chunkWriterBusy { chunkWriterBusy = true; return }
+        await withCheckedContinuation { chunkWriterWaiters.append($0) }
+    }
+    private func releaseChunkWriter() {
+        if chunkWriterWaiters.isEmpty { chunkWriterBusy = false }
+        else { chunkWriterWaiters.removeFirst().resume() }
+    }
+
     // MARK: - Initialization
     
     init() {
@@ -646,6 +660,8 @@ actor ConversationArchiveService {
     /// Called on startup to resume any pending chunks from previous crash.
     /// Uses the provided summarization context so recovery summaries preserve continuity.
     func recoverPendingChunks(defaultContext: SummarizationContext = .empty) async {
+        await acquireChunkWriter()
+        defer { releaseChunkWriter() }
         var recoveredPendingChunks = false
 
         if !pendingIndex.pendingChunks.isEmpty {
@@ -859,14 +875,33 @@ actor ConversationArchiveService {
     /// Archive a batch of messages as a temporary chunk
     /// Uses pending chunk pattern: save raw data first, then summarize, for crash safety
     func archiveMessages(_ messages: [Message], context: SummarizationContext = .empty, snapshot: PruneArchiveReference? = nil) async throws -> ConversationChunk {
+        await acquireChunkWriter()
+        defer { releaseChunkWriter() }
         guard !messages.isEmpty else {
             throw ArchiveError.emptyMessages
         }
         
         let sourceIDs = Set(messages.map(\.id))
-        if let completed = chunkIndex.chunks.first(where: { sourceIDs.isSubset(of: Set($0.sourceMessageIDs ?? [])) }) {
-            // A previous archive committed but the manager's removal save failed.
+        if let index = chunkIndex.chunks.firstIndex(where: { sourceIDs.isSubset(of: Set($0.sourceMessageIDs ?? [])) }) {
+            // A prior chunk committed but the live removal save failed. Preserve
+            // later pruning references as well, without duplicating visible
+            // messages or running another summary/fact extraction.
+            var completed = chunkIndex.chunks[index]
+            let rawURL = archiveFolder.appendingPathComponent(completed.rawContentFileName)
+            var raw = try JSONDecoder().decode([Message].self, from: Data(contentsOf: rawURL))
+            let incoming = messages.flatMap(\.pruneArchiveReferences) + [snapshot].compactMap { $0 }
+            var refs = completed.pruneArchiveReferences ?? []
+            var seen = Set(refs.map(\.id))
+            for ref in incoming where seen.insert(ref.id).inserted { refs.append(ref) }
+            if !refs.isEmpty, let anchor = raw.firstIndex(where: { sourceIDs.contains($0.id) }) {
+                var rawSeen = Set(raw[anchor].pruneArchiveReferences.map(\.id))
+                for ref in incoming where rawSeen.insert(ref.id).inserted { raw[anchor].pruneArchiveReferences.append(ref) }
+                try PrivateStorage.writeAtomically(try JSONEncoder().encode(raw), to: rawURL)
+            }
+            completed.pruneArchiveReferences = refs.isEmpty ? nil : refs
+            chunkIndex.chunks[index] = completed
             try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL)
+            await writeSidecar(forRawFileName: completed.rawContentFileName, messages: raw)
             return completed
         }
         if PruneArchiveStore.needsSnapshot(messages) && snapshot == nil {
@@ -877,6 +912,7 @@ actor ConversationArchiveService {
         if let snapshot, !archivedMessages.isEmpty {
             archivedMessages[0].pruneArchiveReferences.append(snapshot)
         }
+        guard !archivedMessages.isEmpty else { throw ArchiveError.emptyMessages }
         let startDate = archivedMessages.first!.timestamp
         let endDate = archivedMessages.last!.timestamp
         let tokenCount = archivedMessages.reduce(0) { $0 + estimateTokens(for: $1) }
