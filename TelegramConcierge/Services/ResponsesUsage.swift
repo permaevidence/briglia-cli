@@ -65,7 +65,14 @@ struct ResponsesUsageStore {
         let inode: ino_t
     }
     let directory: URL
-    init(directory: URL = StoragePaths.dataRoot) { self.directory = directory }
+    /// Upper bound on waiting for a sibling process's ledger update. The lock
+    /// only ever covers local file I/O, never network work, so a few seconds is
+    /// a ceiling for a loaded machine, not an expected wait.
+    let lockWaitSeconds: TimeInterval
+    init(directory: URL = StoragePaths.dataRoot, lockWaitSeconds: TimeInterval = 5) {
+        self.directory = directory
+        self.lockWaitSeconds = lockWaitSeconds
+    }
     var file: URL { directory.appendingPathComponent("responses_usage.json") }
     var lockFile: URL { directory.appendingPathComponent("responses_usage.lock") }
     static let capacity = 1000
@@ -149,8 +156,9 @@ struct ResponsesUsageStore {
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == getuid(),
               info.st_nlink == 1, info.st_mode & 0o077 == 0 else { throw Failure() }
-        // Diagnostics must not stall a turn behind another process's network work.
-        let deadline = ProcessInfo.processInfo.systemUptime + 0.1
+        // The lock is held only for local reads/writes of a small file; waiting a
+        // bounded few seconds beats dropping a record on a loaded machine.
+        let deadline = ProcessInfo.processInfo.systemUptime + lockWaitSeconds
         while flock(fd, LOCK_EX | LOCK_NB) != 0 {
             guard [EWOULDBLOCK, EAGAIN, EINTR].contains(errno),
                   ProcessInfo.processInfo.systemUptime < deadline else { throw Failure() }

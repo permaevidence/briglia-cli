@@ -158,6 +158,25 @@ struct ResponsesCacheSelftest: AsyncParsableCommand {
         }
         children.forEach { $0.waitUntilExit() }
         c.check("two-process recording has no lost entries", try children.allSatisfy { $0.terminationStatus == 0 } && store.read()?.records.count == 20)
+        // A sibling holding the lock for file I/O on a loaded machine must not
+        // cost a record: the old 100 ms budget did (CI reruns 2026-09-07/08).
+        let holder = open(store.lockFile.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        c.check("contention fixture holds the ledger lock", holder >= 0 && flock(holder, LOCK_EX) == 0)
+        let release = Thread { usleep(400_000); flock(holder, LOCK_UN); close(holder) }
+        let started = ProcessInfo.processInfo.systemUptime
+        release.start()
+        _ = try store.begin(record())
+        let waited = ProcessInfo.processInfo.systemUptime - started
+        c.check("recording waits out a briefly held lock instead of failing", waited >= 0.3 && waited < 5)
+        let impatient = ResponsesUsageStore(directory: root, lockWaitSeconds: 0.2)
+        let blocker = open(store.lockFile.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        c.check("bounded-wait fixture holds the ledger lock", blocker >= 0 && flock(blocker, LOCK_EX) == 0)
+        let began = ProcessInfo.processInfo.systemUptime
+        c.rejects("lock wait stays bounded while the lock is held", { _ = try impatient.begin(record()) })
+        let gaveUp = ProcessInfo.processInfo.systemUptime - began
+        c.check("bounded wait gives up near its budget", gaveUp >= 0.2 && gaveUp < 2)
+        flock(blocker, LOCK_UN); close(blocker)
+        c.check("recording resumes once the lock is released", try store.read()?.records.count == 21 && (try? store.begin(record())) != nil)
         try PrivateStorage.writeAtomically(Data("malformed sentinel".utf8), to: store.file)
         c.check("doctor reports corruption without changing bytes", try store.diagnostic().contains("damaged") && Data(contentsOf: store.file) == Data("malformed sentinel".utf8))
         let recovered = try store.begin(record())
