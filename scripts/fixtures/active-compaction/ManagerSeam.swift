@@ -226,3 +226,104 @@ extension ConversationManager {
             "accepted Mind replacement discards disk and in-memory old recovery")
     }
 }
+
+extension ConversationManager {
+    func activeTestMediaStart(server: CaptureServer, wire: ProviderWireProtocol, root: URL) async throws {
+        try await activeTestSeed(); server.clear()
+        // Valid, portable fifteen-page PDFs: actual rehydration runs through
+        // each serializer instead of substituting a text-only request.
+        let pageIDs = (0..<15).map { 3 + $0 }
+        var objects = ["<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Count 15 /Kids [" + pageIDs.map { "\($0) 0 R" }.joined(separator: " ") + "] >>"]
+        objects += pageIDs.map { _ in "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << >> >>" }
+        var pdf = "%PDF-1.4\n"; var offsets = [0]
+        for (i, object) in objects.enumerated() {
+            offsets.append(pdf.utf8.count); pdf += "\(i + 1) 0 obj\n\(object)\nendobj\n"
+        }
+        let xref = pdf.utf8.count
+        pdf += "xref\n0 \(offsets.count)\n0000000000 65535 f \n"
+        for offset in offsets.dropFirst() { pdf += String(format: "%010d 00000 n \n", offset) }
+        pdf += "trailer\n<< /Size \(offsets.count) /Root 1 0 R >>\nstartxref\n\(xref)\n%%EOF\n"
+        var references: [FileAttachmentReference] = []
+        for name in ["first.pdf", "second.pdf"] {
+            let url = root.appendingPathComponent(name)
+            try Data(pdf.utf8).write(to: url)
+            try CompactionTestInputs.check(AdaPDF(url: url)?.pageCount == 15, "media fixture contains fifteen real PDF pages")
+            references.append(FileAttachmentReference(filename: name, mimeType: "application/pdf", snapshotPath: url.path,
+                byteSize: pdf.utf8.count, pdfPageCount: 15))
+        }
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC")!
+        for i in 0..<3 {
+            let url = root.appendingPathComponent("image-\(i).png")
+            try png.write(to: url)
+            references.append(FileAttachmentReference(filename: url.lastPathComponent, mimeType: "image/png",
+                snapshotPath: url.path, byteSize: png.count, imageWidth: 1, imageHeight: 1))
+        }
+        var result = ToolResultMessage(toolCallId: "media-read", content: "Two fifteen-page documents and three images were inspected.")
+        result.fileAttachmentReferences = references
+        let old = Message(role: .assistant, content: "Documents checked", toolInteractions: [ToolInteraction(
+            assistantMessage: AssistantToolCallMessage(content: nil, toolCalls: [ToolCall(id: "media-read", type: "function",
+                function: FunctionCall(name: "read_file", arguments: "{}"))]), results: [result])])
+        messages = [Message(role: .user, content: "Inspect these documents"), old]
+        try CompactionTestInputs.check(ActiveTurnBudget.message(old) > 250000 && lastPromptTokens == nil,
+            "media allowances exceed budget while ordinary measurement is unknown")
+        server.script([try CompactionTestInputs.body(protocol: wire, text: "MEDIA_CONTEXT_OK", tokens: 60000)])
+        let completed = try await activeTestTurn(Message(role: .user, content: "Continue with the findings"), queued: nil)
+        try CompactionTestInputs.check(completed.last?.content == "MEDIA_CONTEXT_OK" && server.completeRequests.count == 1,
+            "media-heavy history runs without a measurement")
+        let object = try JSONSerialization.jsonObject(with: server.completeRequests[0].body)
+        func strings(_ value: Any) -> [String] {
+            if let s = value as? String { return [s] }
+            if let a = value as? [Any] { return a.flatMap(strings) }
+            if let d = value as? [String: Any] { return d.values.flatMap(strings) }
+            return []
+        }
+        let values = strings(object)
+        let pdfParts = values.filter { $0.hasPrefix("data:application/pdf;") }.count
+        let imageParts = values.filter { $0.hasPrefix("data:image/") }.count
+        try CompactionTestInputs.check(values.contains("media-read") && imageParts >= 3 && (pdfParts == 2 || imageParts >= 33),
+            "media-bearing replay reaches provider without historical pruning")
+        try CompactionTestInputs.check(lastPromptTokens == 60000 && completed[1].toolInteractions.count == 1,
+            "provider measurement calibrates healthy media history")
+        // Chunk archiving/pruning invalidates this measurement; another fresh
+        // turn must still succeed instead of leaving a self-sustaining wedge.
+        lastPromptTokens = nil; server.clear()
+        server.script([try CompactionTestInputs.body(protocol: wire, text: "MEDIA_RETRY_OK", tokens: 61000)])
+        let retried = try await activeTestTurn(Message(role: .user, content: "One more question"), queued: nil)
+        try CompactionTestInputs.check(retried.last?.content == "MEDIA_RETRY_OK" && server.completeRequests.count == 1,
+            "media history continues after measurement invalidation")
+        try await activeTestSeed(); server.clear()
+        _ = try await activeTestTurn(Message(role: .user, content: String(repeating: "oversized fixed input ", count: 60000)), queued: nil)
+        try CompactionTestInputs.check(server.completeRequests.isEmpty && (error ?? "").contains("remaining instructions and message text"),
+            "truly oversized fixed text refuses before provider request")
+        try await activeTestSeed(); server.clear()
+    }
+
+    func activeTestPruneReport(server: CaptureServer, wire: ProviderWireProtocol) async throws {
+        for noSnapshot in [false, true] {
+            try await activeTestSeed(); server.clear()
+            func round(_ id: String, cost: Int) -> ToolInteraction {
+                ToolInteraction(assistantMessage: AssistantToolCallMessage(content: "done", toolCalls: [
+                    ToolCall(id: id, type: "function", function: FunctionCall(name: "read_file", arguments: "{}"))
+                ]), results: [ToolResultMessage(toolCallId: id, content: "Evidence")], measuredTokenCost: cost)
+            }
+            var old = Message(role: .assistant, content: "Earlier answer", toolInteractions: [round("report-old", cost: 140000)])
+            old.prunedContextSummary = String(repeating: "existing summary ", count: 300)
+            messages = [Message(role: .user, content: "Previous task"), old,
+                Message(role: .assistant, content: "Recent answer", toolInteractions: [round("report-recent", cost: 10000)])]
+            guard saveConversation() else { throw CompactionTestInputs.Failure("report seed") }
+            lastPromptTokens = 180000; lastCompletionTokens = 0
+            server.script([try CompactionTestInputs.body(protocol: wire, text: String(repeating: "New findings preserved. ", count: 500))])
+            await manualPruneToolInteractions(noSnapshot: noSnapshot)
+            let oldNotes = old.prunedContextSummary!.count / 4
+            let newNotes = (messages[1].prunedContextSummary?.count ?? 0) / 4
+                + messages[1].pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 }
+            let expected = 180000 - 140000 + newNotes - oldNotes
+            try CompactionTestInputs.check(maintenanceNotice?.contains("down to ~\(expected / 1000)k") == true && expected / 1000 > 40,
+                "manual prune report includes committed summary and reference delta")
+            try CompactionTestInputs.check(messages[1].toolInteractions.isEmpty && messages[2].toolInteractions.count == 1
+                && messages[1].pruneArchiveReferences.count == (noSnapshot ? 0 : 1) && server.completeRequests.count == 1,
+                "report regression preserves pruning and explicit override behavior")
+        }
+    }
+}

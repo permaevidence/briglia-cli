@@ -188,7 +188,7 @@ extension OpenRouterService {
     func activeTurnRequestEstimate(messages: [Message], rounds: [ToolInteraction],
         images: URL, documents: URL, tools: [ToolDefinition], calendar: String?, email: String?,
         summaries: [ArchivedSummaryItem], totalChunks: Int, date: Date,
-        deferred: [(name: String, description: String, toolCount: Int)]) throws -> (tokens: Int, scope: String) {
+        deferred: [(name: String, description: String, toolCount: Int)]) throws -> (tokens: Int, fixedTextTokens: Int, scope: String) {
         let prepared = prepareConversation(messages: messages, imagesDirectory: images,
             documentsDirectory: documents, tools: tools, toolResultMessages: rounds,
             calendarContext: calendar, emailContext: email, chunkSummaries: summaries,
@@ -197,8 +197,12 @@ extension OpenRouterService {
         let schemas = try JSONEncoder().encode(tools)
         let fixed = ActiveTurnBudget.text(prepared.systemPrompt) + (schemas.count + 2) / 3 + 2048
         let scope = ResponsesReplayEnvelope.hash(Data(((activeModelIdentifier() ?? "") + prepared.systemPrompt).utf8) + schemas)
+        // Only irreducible input may refuse a first request locally. Media,
+        // replay and tool history remain conservative selection allowances;
+        // without a provider measurement they cannot establish an overflow.
+        let fixedText = fixed + messages.reduce(0) { $0 + ActiveTurnBudget.text($1.content) + 64 }
         return (fixed + messages.reduce(0) { $0 + ActiveTurnBudget.message($1) }
-                + rounds.reduce(0) { $0 + ActiveTurnBudget.round($1) }, scope)
+                + rounds.reduce(0) { $0 + ActiveTurnBudget.round($1) }, fixedText, scope)
     }
 }
 

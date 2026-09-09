@@ -6,6 +6,8 @@ enum CompactionTestInputs {
     static let defaults = UserDefaults(suiteName: "dev.briglia.active-compaction-test")!
     static var disableCompaction = false
     static var omitCarried = false
+    static var conservativeStartGate = false
+    static var omitPruneNotes = false
     static var count = 0
     private static let lock = NSLock()
     static var dynamicWire: ProviderWireProtocol?
@@ -74,6 +76,8 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "__active-compaction-owner-selftest", shouldDisplay: false)
     @Flag var disableCompaction = false
     @Flag var omitCarried = false
+    @Flag var conservativeStartGate = false
+    @Flag var omitPruneNotes = false
     @MainActor func run() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("briglia-active-test-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -81,6 +85,8 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
             setenv(key, root.appendingPathComponent(dir).path, 1)
         }
         FileDescriptionsStore._testStoreURL = root.appendingPathComponent("descriptions.json")
+        CompactionTestInputs.conservativeStartGate = conservativeStartGate
+        CompactionTestInputs.omitPruneNotes = omitPruneNotes
         CompactionTestInputs.disableCompaction = disableCompaction; CompactionTestInputs.omitCarried = omitCarried
         defer { CompactionTestInputs.defaults.removePersistentDomain(forName: "dev.briglia.active-compaction-test") }
         let server = try CaptureServer(); defer { server.stop() }
@@ -95,6 +101,9 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
                 model: "fixture-model", effort: nil, textOnly: false, wireProtocol: wire)
             try ProviderProfiles.activate(.custom)
             try await manager.activeTestSeed()
+            try await manager.activeTestMediaStart(server: server, wire: wire, root: root)
+            try await manager.activeTestPruneReport(server: server, wire: wire)
+            try await manager.activeTestSeed(); server.clear()
             CompactionTestInputs.dynamicWire = wire; CompactionTestInputs.dynamicPath = file.path
             CompactionTestInputs.compactions = 0; CompactionTestInputs.ordinaryCalls = 0
             CompactionTestInputs.requireVioletCorrection = true; CompactionTestInputs.missingCanonical = false

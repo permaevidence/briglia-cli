@@ -5172,7 +5172,7 @@ class ConversationManager: ObservableObject {
         }
 
         do {
-            _ = try await commitPrune(plan: plan, compressedIndices: compressedIndices, safeBoundary: safeBoundary,
+            let committed = try await commitPrune(plan: plan, compressedIndices: compressedIndices, safeBoundary: safeBoundary,
                 source: plannedSource, summarySource: messagesForSummary, trigger: "manual", noSnapshot: noSnapshot) { snapshotForSummary in
                 return await generatePrunedContextSummary(
             plan: plan,
@@ -5188,6 +5188,16 @@ class ConversationManager: ObservableObject {
             deferredMCPSummaries: deferredSummaries
         )
             }
+            // Count only the summary/reference delta, so existing notes are
+            // not charged twice. Use the committed view, including nil-summary
+            // and explicit no-snapshot outcomes.
+            func noteTokens(_ history: [Message]) -> Int {
+                history.reduce(0) { total, message in
+                    total + (message.prunedContextSummary?.count ?? 0) / 4
+                        + message.pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 }
+                }
+            }
+            totalTokens += noteTokens(committed) - noteTokens(plannedSource)
         } catch {
             let failure = error.localizedDescription
             showMaintenanceNotice(failure)
@@ -5762,8 +5772,8 @@ class ConversationManager: ObservableObject {
             previousPromptScope = scope
             expectedPromptEstimate = estimate.tokens
             if lastPromptTokens == nil, toolInteractions.isEmpty,
-               estimate.tokens > configuredMaxContextTokens() {
-                throw PruneArchiveStore.Failure("The configured context budget cannot fit the remaining instructions and user messages (estimated \(estimate.tokens) tokens). Reduce fixed context or increase the configured budget; no tools ran.")
+               estimate.fixedTextTokens > configuredMaxContextTokens() {
+                throw PruneArchiveStore.Failure("The configured context budget cannot fit the remaining instructions and message text (estimated \(estimate.fixedTextTokens) tokens). Reduce fixed context or increase the configured budget; no tools ran.")
             }
             let response: LLMResponse
             do {
