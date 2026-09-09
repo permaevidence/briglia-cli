@@ -56,6 +56,10 @@ jobs:
       - name: Chat Completions lifecycle r3 and shipped-client differential gate
         run: python3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline scripts/fixtures/chat-lifecycle/ci-linux-x86_64-r2.json
       - name: Preserve pinned lifecycle reference
+        # The reference is built from the pinned SOURCE, never the candidate, so
+        # it is worth keeping when the frozen comparison fails: that is exactly
+        # the evidence needed to review an environmental drift (runner image).
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: chat-lifecycle-reference-${{ runner.os }}-${{ runner.arch }}
@@ -116,6 +120,10 @@ jobs:
       - name: Chat Completions lifecycle r3 and shipped-client differential gate
         run: python3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2.json
       - name: Preserve pinned lifecycle reference
+        # The reference is built from the pinned SOURCE, never the candidate, so
+        # it is worth keeping when the frozen comparison fails: that is exactly
+        # the evidence needed to review an environmental drift (runner image).
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: chat-lifecycle-reference-${{ runner.os }}-${{ runner.arch }}
