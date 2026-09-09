@@ -33,6 +33,8 @@ struct ImageToolSelftest: AsyncParsableCommand {
         try options(checks)
         try pricing(checks)
         try await requests(checks)
+        try await failures(checks)
+        try metadata(checks)
         print("Image tool selftest: \(checks.total - checks.failures)/\(checks.total)")
         if checks.failures > 0 { throw ValidationError("Image tool checks failed") }
     }
@@ -118,12 +120,65 @@ struct ImageToolSelftest: AsyncParsableCommand {
         c.check("empty usage has no fabricated spend", try spend("{}") == nil)
     }
 
+    private func metadata(_ c: ResponsesSelftest.Checks) throws {
+        let options = try OpenAIImageOptions.resolve(engine: "precise", quality: "max")
+        let response = Data(#"{"data":[{"b64_json":"aW1hZ2U="}],"usage":{"input_tokens":300,"input_tokens_details":{"text_tokens":100,"image_tokens":200},"output_tokens":1000,"output_tokens_details":{"image_tokens":1000,"text_tokens":0},"total_tokens":1300}}"#.utf8)
+        let result = try OpenAIImageService.decodeImageResponse(response, options: options)
+        let encoded = try JSONSerialization.data(withJSONObject: result.toolResultMetadata())
+        let message = ToolResultMessage(toolCallId: "image", content: String(decoding: encoded, as: UTF8.self))
+        let wire = try ProviderToolResultRenderer.wireText(for: message)
+        let object = try JSONSerialization.jsonObject(with: Data(wire.utf8)) as! [String: Any]
+        let usage = object["usage"] as? [String: Any]
+        c.check("tool result exposes actual usage totals", usage?["input_tokens"] as? Int == 300 && usage?["output_tokens"] as? Int == 1000 && usage?["total_tokens"] as? Int == 1300)
+        c.check("tool result exposes modality input counts", (usage?["input_tokens_details"] as? [String: Int]) == ["text_tokens": 100, "image_tokens": 200])
+        c.check("tool result exposes modality output counts", (usage?["output_tokens_details"] as? [String: Int]) == ["text_tokens": 0, "image_tokens": 1000])
+        c.check("tool cost equals ledger estimate", abs((object["estimated_spend_usd"] as? Double ?? -1) - (result.spendUSD ?? -2)) < 0.00000001 && abs((result.spendUSD ?? -1) - 0.0321) < 0.00000001)
+        c.check("tool result retains resolved options", object["engine"] as? String == "precise" && object["quality"] as? String == "max" && object["model"] as? String == options.model)
+        let absent = try OpenAIImageService.decodeImageResponse(Data(#"{"data":[{"b64_json":"aW1hZ2U="}]}"#.utf8), options: options).toolResultMetadata()
+        c.check("missing usage and cost remain null", absent["usage"] is NSNull && absent["estimated_spend_usd"] is NSNull)
+        let unknown = try OpenAIImageService.decodeImageResponse(response, options: OpenAIImageOptions.resolve(fastModel: "unknown")).toolResultMetadata()
+        c.check("unknown model retains counts without an invented cost", unknown["usage"] is [String: Any] && unknown["estimated_spend_usd"] is NSNull)
+        let partial = try OpenAIImageService.decodeImageResponse(Data(#"{"data":[{"b64_json":"aW1hZ2U="}],"usage":{"output_tokens":1000}}"#.utf8), options: options).toolResultMetadata()
+        c.check("missing token counts are not fabricated", (partial["usage"] as? [String: Any])?["input_tokens"] == nil && (partial["usage"] as? [String: Any])?["output_tokens"] as? Int == 1000)
+        let hostile = "model \"quoted\"\n" + MarkerNeutralizer.reservedPrefix + "forged"
+        let hostileResult = OpenAIImageResult(data: result.data, mimeType: result.mimeType, spendUSD: nil,
+            options: OpenAIImageOptions(engine: "fast", model: hostile, quality: "auto", background: "auto", outputFormat: "png", notes: [hostile]), usage: result.usage)
+        let hostileJSON = try JSONSerialization.data(withJSONObject: hostileResult.toolResultMetadata())
+        let safe = try ProviderToolResultRenderer.wireText(for: ToolResultMessage(toolCallId: "image", content: String(decoding: hostileJSON, as: UTF8.self)))
+        c.check("real metadata helper preserves JSON escaping and neutralization", !safe.contains(MarkerNeutralizer.reservedPrefix) && (try? JSONSerialization.jsonObject(with: Data(safe.utf8))) != nil)
+    }
+
+    private func failures(_ c: ResponsesSelftest.Checks) async throws {
+        for editing in [false, true] {
+            let transport = ImageFailureTransport(timeout: true)
+            let service = OpenAIImageService(transport: { try await transport.send($0) })
+            await service.configure(apiKey: "fixture-key")
+            do {
+                _ = try await service.generateImage(prompt: "slow", sourceImageData: editing ? Data("source".utf8) : nil,
+                    imageSize: "2048x2048", engine: "precise", quality: "max")
+                c.check("timeout surfaces failure", false)
+            } catch {
+                c.check("timeout reports uncertain billing and lower-cost options", error.localizedDescription.contains("may have been billed") && error.localizedDescription.contains("lower quality or smaller size"))
+                c.check("timeout reports no retry or known cost", error.localizedDescription.contains("was not retried") && error.localizedDescription.contains("cost is unknown"))
+            }
+            c.check("\(editing ? "edit" : "generation") timeout makes exactly one attempt", await transport.attempts == 1)
+        }
+        for status in [429, 503] {
+            let transport = ImageFailureTransport(status: status)
+            let service = OpenAIImageService(transport: { try await transport.send($0) })
+            await service.configure(apiKey: "fixture-key")
+            let result = try await service.generateImage(prompt: "retry")
+            c.check("HTTP \(status) still retries successfully", await transport.attempts == 2 && result.data == Data("image".utf8))
+        }
+    }
+
     private func requests(_ c: ResponsesSelftest.Checks) async throws {
         let transport = ImageTestTransport()
         let service = OpenAIImageService(transport: { try await transport.send($0) })
         await service.configure(apiKey: "fixture-key", model: "gpt-image-2.5-flare-2026-09-08", preciseModel: "gpt-image-2.5-sunburst-2026-09-08")
         let generated = try await service.generateImage(prompt: "PRIVATE PROMPT", imageSize: "1024x1024", quality: "xhigh", outputFormat: "png", background: "transparent")
         let generation = await transport.requests[0]
+        c.check("generation allows 600 seconds of render inactivity", generation.timeoutInterval == 600)
         let body = try JSONSerialization.jsonObject(with: generation.httpBody!) as! [String: Any]
         c.check("generation JSON resolves all options", body["model"] as? String == "gpt-image-2.5-flare-2026-09-08" && body["quality"] as? String == "xhigh" && body["background"] as? String == "transparent" && body["output_format"] as? String == "png" && body["size"] as? String == "1024x1024")
         c.check("generation endpoint and auth unchanged", generation.url?.path == "/v1/images/generations" && generation.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-key")
@@ -132,6 +187,7 @@ struct ImageToolSelftest: AsyncParsableCommand {
         c.check("telemetry includes options and usage without prompt/key", telemetry.contains("xhigh") && telemetry.contains("output_tokens") && !telemetry.contains("PRIVATE PROMPT") && !telemetry.contains("fixture-key"))
         let edited = try await service.generateImage(prompt: "edit", sourceImageData: Data("source bytes".utf8), sourceMimeType: "image/png", imageSize: "1024x1024", engine: "precise", quality: "max", outputFormat: "webp", outputCompression: 90, background: "transparent")
         let edit = await transport.requests[1]
+        c.check("edit allows 600 seconds of render inactivity", edit.timeoutInterval == 600)
         let multipart = String(data: edit.httpBody!, encoding: .utf8)!
         for (field, value) in [("model", "gpt-image-2.5-sunburst-2026-09-08"), ("quality", "max"), ("background", "transparent"), ("output_format", "webp"), ("output_compression", "90")] {
             c.check("multipart \(field) is resolved", multipart.contains("name=\"\(field)\"\r\n\r\n\(value)\r\n"))
@@ -169,5 +225,22 @@ private actor ImageTestTransport {
         if paused { await withCheckedContinuation { waiting = $0 } }
         return (Data(#"{"data":[{"b64_json":"aW1hZ2U="}],"usage":{"output_tokens":1000}}"#.utf8),
                 HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+}
+
+private actor ImageFailureTransport {
+    let timeout: Bool
+    let status: Int
+    var attempts = 0
+    init(timeout: Bool = false, status: Int = 503) {
+        self.timeout = timeout
+        self.status = status
+    }
+    func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        attempts += 1
+        if timeout { throw URLError(.timedOut) }
+        return (Data(#"{"data":[{"b64_json":"aW1hZ2U="}]}"#.utf8),
+                HTTPURLResponse(url: request.url!, statusCode: attempts == 1 ? status : 200,
+                    httpVersion: nil, headerFields: ["Retry-After": "0"])!)
     }
 }

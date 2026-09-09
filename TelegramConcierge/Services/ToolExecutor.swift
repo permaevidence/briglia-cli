@@ -3172,9 +3172,7 @@ extension ToolExecutor {
                     moderation: args.moderation
                 )
                 imageResult = (openAIResult.data, openAIResult.mimeType, openAIResult.spendUSD)
-                imageMetadata = ["engine": openAIResult.options.engine, "model": openAIResult.options.model,
-                                 "quality": openAIResult.options.quality, "background": openAIResult.options.background,
-                                 "output_format": openAIResult.options.outputFormat, "notes": openAIResult.options.notes]
+                imageMetadata = openAIResult.toolResultMetadata()
                 resolvedImageSize = openAIImageSize?.rawValue ?? "default"
             }
 

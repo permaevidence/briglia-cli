@@ -88,6 +88,22 @@ struct OpenAIImageResult {
     let options: OpenAIImageOptions
     let usage: OpenAIImageUsage?
 
+    /// Used by the actual tool result and its tests. Missing usage/cost stays
+    /// unknown; estimates describe reported usage, not an authoritative invoice.
+    func toolResultMetadata() -> [String: Any] {
+        var fields: [String: Any] = [
+            "engine": options.engine, "model": options.model, "quality": options.quality,
+            "background": options.background, "output_format": options.outputFormat,
+            "notes": options.notes, "usage": NSNull(),
+            "estimated_spend_usd": spendUSD as Any? ?? NSNull()
+        ]
+        if let usage, let data = try? JSONEncoder().encode(usage),
+           let object = try? JSONSerialization.jsonObject(with: data) {
+            fields["usage"] = object
+        }
+        return fields
+    }
+
     /// No prompt, reference image, credential or provider response body is logged.
     func telemetry(size: String) -> String {
         let fields: [String: Any] = [

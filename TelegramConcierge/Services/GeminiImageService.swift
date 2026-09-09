@@ -354,7 +354,7 @@ actor OpenAIImageService {
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 180
+        request.timeoutInterval = 600
         request.httpBody = try JSONEncoder().encode(requestBody)
 
         return request
@@ -404,14 +404,15 @@ actor OpenAIImageService {
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 180
+        request.timeoutInterval = 600
         request.httpBody = body
 
         return request
     }
 
     /// Performs the request with bounded retries on transient failures
-    /// (HTTP 429/5xx, timeouts, dropped connections), honoring Retry-After.
+    /// (HTTP 429/5xx, dropped connections), honoring Retry-After.
+    /// Timeouts are never retried: the server may still finish and bill the render.
     /// A single provider hiccup no longer loses the whole generation. /stop
     /// (task cancellation) interrupts immediately and is never retried.
     private func perform(_ request: URLRequest) async throws -> Data {
@@ -452,6 +453,9 @@ actor OpenAIImageService {
                 if urlError.code == .cancelled {
                     throw CancellationError()
                 }
+                if urlError.code == .timedOut {
+                    throw OpenAIImageError.renderTimedOut
+                }
                 lastError = urlError
                 if attempt < maxAttempts, Self.isRetryable(urlError) {
                     let delay = Self.backoffSeconds(attempt: attempt)
@@ -467,7 +471,7 @@ actor OpenAIImageService {
 
     private static func isRetryable(_ error: URLError) -> Bool {
         switch error.code {
-        case .timedOut, .networkConnectionLost, .cannotConnectToHost,
+        case .networkConnectionLost, .cannotConnectToHost,
              .cannotFindHost, .dnsLookupFailed, .notConnectedToInternet,
              .resourceUnavailable:
             return true
@@ -626,9 +630,12 @@ enum OpenAIImageError: LocalizedError {
     case apiError(String)
     case invalidImageData
     case invalidOptions(String)
+    case renderTimedOut
 
     var errorDescription: String? {
         switch self {
+        case .renderTimedOut:
+            return "OpenAI image request timed out and was not retried. The render may have been billed; its cost is unknown because no usage was received. Try a lower quality or smaller size."
         case .invalidOptions(let message):
             return message
         case .notConfigured:
