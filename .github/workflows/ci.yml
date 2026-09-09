@@ -118,7 +118,18 @@ jobs:
           python3 scripts/active_compaction_lifecycle_migration_test.py
           python3 scripts/prune_schema_contract_test.py
       - name: Chat Completions lifecycle r3 and shipped-client differential gate
-        run: python3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2.json
+        # The frozen macOS fixture embeds rendered PDF pages whose Apple ICC
+        # profile comes from the runner's OS image. One reviewed fixture per
+        # runner image (see scripts/fixtures/chat-lifecycle/r2-provenance.json);
+        # an image without a fixture fails closed and needs a reviewed recording.
+        run: |
+          echo "runner image: $ImageOS $ImageVersion"
+          case "$ImageVersion" in
+            20260829.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2.json ;;
+            20260907.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2-image20260907.json ;;
+            *) echo "no frozen lifecycle fixture recorded for runner image '$ImageVersion'"; exit 1 ;;
+          esac
+          python3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline "$fixture"
       - name: Preserve pinned lifecycle reference
         # The reference is built from the pinned SOURCE, never the candidate, so
         # it is worth keeping when the frozen comparison fails: that is exactly
