@@ -933,8 +933,13 @@ actor ConversationArchiveService {
             // a record whose content is already archived.
             let stale = pendingIndex.pendingChunks.filter { $0.id == completed.id || Set($0.sourceMessageIDs ?? []) == sourceIDs }
             if !stale.isEmpty {
-                pendingIndex.pendingChunks.removeAll { record in stale.contains { $0.id == record.id } }
-                try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+                // Candidate index: memory adopts the removal only after the
+                // checked write, so a failed write leaves memory and disk in
+                // agreement and the next retry settles the record again.
+                var settled = pendingIndex
+                settled.pendingChunks.removeAll { record in stale.contains { $0.id == record.id } }
+                try PrivateStorage.writeAtomically(try JSONEncoder().encode(settled), to: pendingIndexFileURL)
+                pendingIndex = settled
                 for record in stale where record.rawContentFileName != completed.rawContentFileName
                     && !chunkIndex.chunks.contains(where: { $0.rawContentFileName == record.rawContentFileName }) {
                     try? FileManager.default.removeItem(at: archiveFolder.appendingPathComponent(record.rawContentFileName))
@@ -998,10 +1003,18 @@ actor ConversationArchiveService {
             // function returns), so the disk copy isn't needed for durability and
             // leaving it would make a later crash-recovery pass resurrect the
             // chunk as a duplicate once the caller retries with a fresh id.
-            pendingIndex.pendingChunks.removeAll { $0.id == chunkId }
-            savePendingIndex()
-            try? FileManager.default.removeItem(at: fileURL)
-            removeSidecar(forRawFileName: fileName)
+            var cleared = pendingIndex
+            cleared.pendingChunks.removeAll { $0.id == chunkId }
+            do {
+                try PrivateStorage.writeAtomically(try JSONEncoder().encode(cleared), to: pendingIndexFileURL)
+                pendingIndex = cleared
+                try? FileManager.default.removeItem(at: fileURL)
+                removeSidecar(forRawFileName: fileName)
+            } catch let saveError {
+                // Keep record, raw file and memory/disk agreement: the retry
+                // reuses this id and startup recovery can still finish it.
+                print("[ArchiveService] Could not clear pending record after summary failure: \(saveError)")
+            }
             throw error
         }
 
@@ -1035,9 +1048,14 @@ actor ConversationArchiveService {
         // Publish the chunk index before removing its recovery record.
         try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL)
 
-        // Remove from pending (summarization complete)
-        pendingIndex.pendingChunks.removeAll { $0.id == chunkId }
-        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+        // Remove from pending (summarization complete). Memory adopts the
+        // removal only after the checked write: if it fails, the record stays
+        // in memory too, so the caller's retry (committed-batch path) finds it
+        // and settles it durably instead of returning without a save.
+        var settled = pendingIndex
+        settled.pendingChunks.removeAll { $0.id == chunkId }
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(settled), to: pendingIndexFileURL)
+        pendingIndex = settled
         
         print("[ArchiveService] Created temporary chunk \(chunkId.uuidString.prefix(8))... (\(tokenCount) tokens, \(messages.count) messages)")
 

@@ -23,6 +23,10 @@ try:
     for source, seam in [('ConversationManager.swift', 'ManagerSeam.swift'), ('ConversationArchiveService.swift', 'ArchiveSeam.swift')]:
         path = tree / 'TelegramConcierge/Services' / source
         path.write_text(path.read_text() + (fixture / seam).read_text())
+    storage = tree / 'TelegramConcierge/Utilities/PrivateStorage.swift'
+    text = storage.read_text(); anchor = '        guard rename(tmp.path, target) == 0 else {'
+    assert text.count(anchor) == 1
+    storage.write_text(text.replace(anchor, '        do { try SnapshotOwnerInputs.storageFault(target) } catch { unlink(tmp.path); throw error }\n' + anchor))
     main = tree / 'TelegramConcierge/CLI/AdaMain.swift'
     source = main.read_text(); assert source.count('PruneArchiveSelftest.self,') == 1
     main.write_text(source.replace('PruneArchiveSelftest.self,', 'PruneArchiveSelftest.self, SnapshotOwnerSelftest.self,'))

@@ -144,3 +144,65 @@ extension ConversationArchiveService {
         server.clear()
     }
 }
+
+extension ConversationArchiveService {
+    /// Bree's follow-up: a failed pending-index write must leave memory and
+    /// disk in agreement so the in-process retry settles the record durably.
+    func injectedPendingWriteChecks(server: CaptureServer) async throws {
+        let summary = String(repeating: "visible message summary ", count: 110)
+        func diskPending() throws -> [UUID] {
+            try JSONDecoder().decode(PendingChunkIndex.self, from: Data(contentsOf: pendingIndexFileURL)).pendingChunks.map(\.id)
+        }
+        func diskChunks() throws -> [UUID] {
+            try JSONDecoder().decode(ChunkIndex.self, from: Data(contentsOf: indexFileURL)).chunks.map(\.id)
+        }
+        let base = Date().addingTimeInterval(-1800)
+        let batch = [Message(role: .user, content: "inject request", timestamp: base),
+                     Message(role: .assistant, content: "inject answer", timestamp: base.addingTimeInterval(1))]
+        server.clear()
+        server.script([try SnapshotOwnerInputs.response(summary), try SnapshotOwnerInputs.response("NO_CHANGES")])
+        // First matching write (the pending record) passes; the completion
+        // write after the chunk-index publication fails once.
+        SnapshotOwnerInputs.faultSuffix = "/" + pendingIndexFileURL.lastPathComponent
+        SnapshotOwnerInputs.faultSkip = 1; SnapshotOwnerInputs.faultRemaining = 1
+        var thrown = false
+        do { _ = try await archiveMessages(batch) } catch { thrown = true }
+        let committed = chunkIndex.chunks.first { Set(batch.map(\.id)).isSubset(of: Set($0.sourceMessageIDs ?? [])) }
+        try SnapshotOwnerInputs.check(thrown && SnapshotOwnerInputs.faultRemaining == 0 && committed != nil
+            && (try diskChunks()).contains(committed!.id), "injected pending-index failure throws after the chunk is published")
+        try SnapshotOwnerInputs.check(pendingIndex.pendingChunks.contains { $0.id == committed!.id } && (try diskPending()).contains(committed!.id),
+            "failed completion write keeps the record in memory and on disk")
+        // Retry hits the committed-batch path; its settle write fails once too.
+        SnapshotOwnerInputs.faultRemaining = 1
+        let requests = server.completeRequests.count
+        thrown = false
+        do { _ = try await archiveMessages(batch) } catch { thrown = true }
+        try SnapshotOwnerInputs.check(thrown && server.completeRequests.count == requests
+            && pendingIndex.pendingChunks.contains { $0.id == committed!.id } && (try diskPending()).contains(committed!.id),
+            "failed settle write on retry keeps memory and disk in agreement without a model call")
+        // Storage recovers: the next in-process retry settles the record durably.
+        let retry = try await archiveMessages(batch)
+        try SnapshotOwnerInputs.check(retry.id == committed!.id && server.completeRequests.count == requests
+            && !pendingIndex.pendingChunks.contains { $0.id == committed!.id } && !(try diskPending()).contains(committed!.id),
+            "in-process retry after storage recovery clears the record durably")
+        // Summary failure with a failing cleanup write keeps record and raw file
+        // consistent; the retry reuses the id and completes.
+        let later = [Message(role: .user, content: "inject-later request", timestamp: base.addingTimeInterval(60)),
+                     Message(role: .assistant, content: "inject-later answer", timestamp: base.addingTimeInterval(61))]
+        server.script([try SnapshotOwnerInputs.response("too short")])
+        SnapshotOwnerInputs.faultSkip = 1; SnapshotOwnerInputs.faultRemaining = 1
+        thrown = false
+        do { _ = try await archiveMessages(later) } catch { thrown = true }
+        let record = pendingIndex.pendingChunks.first { Set($0.sourceMessageIDs ?? []) == Set(later.map(\.id)) }
+        try SnapshotOwnerInputs.check(thrown && SnapshotOwnerInputs.faultRemaining == 0 && record != nil
+            && (try diskPending()).contains(record!.id)
+            && FileManager.default.fileExists(atPath: archiveFolder.appendingPathComponent(record!.rawContentFileName).path),
+            "summary failure with failing cleanup keeps record, raw file and disk agreement")
+        server.script([try SnapshotOwnerInputs.response(summary), try SnapshotOwnerInputs.response("NO_CHANGES")])
+        let finished = try await archiveMessages(later)
+        try SnapshotOwnerInputs.check(finished.id == record!.id && !(try diskPending()).contains(record!.id) && pendingIndex.pendingChunks.isEmpty,
+            "retry after summary failure reuses the record and clears it")
+        SnapshotOwnerInputs.faultSuffix = nil
+        server.clear()
+    }
+}
