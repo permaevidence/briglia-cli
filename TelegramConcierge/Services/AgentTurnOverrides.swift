@@ -24,11 +24,14 @@ enum AgentTurnOverrides {
 
     /// Fallback for the main agent when no override is set on disk.
     ///
-    /// This is a runaway backstop, not a budget: the per-turn tool spend limit
-    /// normally ends a long turn first. It only binds when spend accounting
-    /// fails to advance (provider reports nil/zero cost), which would otherwise
-    /// leave the tool loop with no exit.
-    static let mainAgentDefault: Int = 1000
+    /// This is a runaway backstop, not a budget. Spend caps are off unless the
+    /// user sets one (`/spend`) and active-turn compaction keeps the context
+    /// from running out, so this count is the only automatic stop for a turn
+    /// that loops without progress while nobody is watching. 5000 rounds is
+    /// more than a day of continuous tool use; legitimate long tasks should
+    /// never reach it. Reaching it is graceful: the turn ends with a forced
+    /// final answer and "continue" resumes it (owner decision 2026-09-09).
+    static let mainAgentDefault: Int = 5000
 
     // MARK: - Cache
 
