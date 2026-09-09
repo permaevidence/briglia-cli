@@ -257,6 +257,24 @@ extension ConversationArchiveService {
             "recovery retry after storage recovery settles durably and removes the orphan")
         let openAfterRetry = await MaintenanceAlertCenter.shared.hasOpenEpisode(.conversationSummary)
         try SnapshotOwnerInputs.check(!openAfterRetry, "recovery success is reported only after durable settlement")
+        // Codex N1: a pass that settles only records absorbed by consolidation
+        // must clear the alert once the settlement is durable.
+        let coveredOnlyID = UUID(); let coveredOnlyFile = coveredOnlyID.uuidString + ".json"
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(batch), to: archiveFolder.appendingPathComponent(coveredOnlyFile))
+        pendingIndex.pendingChunks = [PendingChunk(id: coveredOnlyID, startDate: chunk.startDate.addingTimeInterval(10),
+            endDate: chunk.endDate.addingTimeInterval(10), tokenCount: 10, messageCount: 2, rawContentFileName: coveredOnlyFile,
+            createdAt: chunk.startDate, sourceMessageIDs: batch.map(\.id))]
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+        SnapshotOwnerInputs.faultSkip = 0; SnapshotOwnerInputs.faultRemaining = 1
+        await recoverPendingChunks()
+        let openAfterCoveredFailure = await MaintenanceAlertCenter.shared.hasOpenEpisode(.conversationSummary)
+        try SnapshotOwnerInputs.check(openAfterCoveredFailure && pendingIndex.pendingChunks.map(\.id) == [coveredOnlyID]
+            && (try diskPending()) == [coveredOnlyID], "covered-only settlement failure keeps the record and the alert")
+        await recoverPendingChunks()
+        let openAfterCoveredRetry = await MaintenanceAlertCenter.shared.hasOpenEpisode(.conversationSummary)
+        try SnapshotOwnerInputs.check(!openAfterCoveredRetry && pendingIndex.pendingChunks.isEmpty && (try diskPending()).isEmpty
+            && !FileManager.default.fileExists(atPath: archiveFolder.appendingPathComponent(coveredOnlyFile).path)
+            && server.completeRequests.count == requests, "covered-only retry settles durably and clears the alert")
         // S1: a readable but malformed raw file is skipped like an unreadable one.
         let badID = UUID(); let badFile = badID.uuidString + ".json"
         try PrivateStorage.writeAtomically(Data("not json".utf8), to: archiveFolder.appendingPathComponent(badFile))

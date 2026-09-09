@@ -834,7 +834,9 @@ actor ConversationArchiveService {
             }
             saveIndex()
 
-            if !passAborted && !unreadableRecords && pendingIndex.pendingChunks.isEmpty && !recoveredIds.isEmpty {
+            // Durable settlement of either set (recovered, or already archived and
+            // dropped) ends the episode; the guards above still fail closed.
+            if !passAborted && !unreadableRecords && pendingIndex.pendingChunks.isEmpty && (!recoveredIds.isEmpty || !droppedIds.isEmpty) {
                 await MaintenanceAlertCenter.shared.reportSuccess(.conversationSummary)
             }
         }
