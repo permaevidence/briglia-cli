@@ -679,6 +679,7 @@ actor ConversationArchiveService {
             var droppedIds: Set<UUID> = []
             var passAborted = false
             var unreadableRecords = false
+            var orphanFiles: [String] = []
 
             for pending in pendingChunks {
                 do {
@@ -694,8 +695,7 @@ actor ConversationArchiveService {
                         // Settle the stale receipt and its orphan raw file
                         // instead of failing on a file that was deleted on purpose.
                         if !chunkIndex.chunks.contains(where: { $0.rawContentFileName == pending.rawContentFileName }) {
-                            try? FileManager.default.removeItem(at: archiveFolder.appendingPathComponent(pending.rawContentFileName))
-                            removeSidecar(forRawFileName: pending.rawContentFileName)
+                            orphanFiles.append(pending.rawContentFileName)
                         }
                         print("[ArchiveService] Pending chunk \(pending.id.uuidString.prefix(8))... already archived; settling stale record")
                         droppedIds.insert(pending.id)
@@ -703,18 +703,21 @@ actor ConversationArchiveService {
                     }
                     // Load the raw messages
                     let fileURL = archiveFolder.appendingPathComponent(pending.rawContentFileName)
-                    let data: Data
-                    do { data = try Data(contentsOf: fileURL) } catch {
-                        // Evidence stays: the record is kept and reported. A raw
-                        // file only this record needs does not affect the others,
-                        // so the pass continues instead of wedging behind it.
-                        print("[ArchiveService] Pending chunk \(pending.id.uuidString.prefix(8))... raw content unreadable: \(error)")
+                    let messages: [Message]
+                    do {
+                        messages = sanitizeMessagesForArchive(try JSONDecoder().decode([Message].self, from: try Data(contentsOf: fileURL)))
+                    } catch {
+                        // Evidence stays: the record and its bytes are kept and
+                        // reported. A raw file only this record needs does not
+                        // affect the others, so the pass continues instead of
+                        // wedging behind it. Write/publication failures below
+                        // still abort the pass.
+                        print("[ArchiveService] Pending chunk \(pending.id.uuidString.prefix(8))... raw content unreadable or malformed: \(error)")
                         await MaintenanceAlertCenter.shared.reportFailure(.conversationSummary,
-                            error: "pending chunk raw content unreadable: \(error.localizedDescription)", deterministic: false)
+                            error: "pending chunk raw content unreadable or malformed: \(error.localizedDescription)", deterministic: false)
                         unreadableRecords = true
                         continue
                     }
-                    let messages = sanitizeMessagesForArchive(try JSONDecoder().decode([Message].self, from: data))
                     let pinnedReferences = messages.flatMap(\.pruneArchiveReferences)
                     PruneArchiveStore.pinExisting(pinnedReferences)
                     defer { for ref in pinnedReferences { PruneArchiveStore.release(ref) } }
@@ -808,10 +811,27 @@ actor ConversationArchiveService {
                 }
             }
 
-            // Remove only the chunks that were recovered (or are unrecoverable);
-            // failed ones stay pending for the next recovery pass.
-            pendingIndex.pendingChunks.removeAll { recoveredIds.contains($0.id) || droppedIds.contains($0.id) }
-            savePendingIndex()
+            // Remove only the chunks that were recovered (or already archived);
+            // failed ones stay pending for the next recovery pass. Memory adopts
+            // the removal only after the checked write: a failed write keeps the
+            // records in memory and on disk for a retry, reports the failure,
+            // and never clears the alert from a mutated in-memory index.
+            var settled = pendingIndex
+            settled.pendingChunks.removeAll { recoveredIds.contains($0.id) || droppedIds.contains($0.id) }
+            do {
+                try PrivateStorage.writeAtomically(try JSONEncoder().encode(settled), to: pendingIndexFileURL)
+                pendingIndex = settled
+                // Orphan raw files only after their records are durably settled.
+                for file in orphanFiles {
+                    try? FileManager.default.removeItem(at: archiveFolder.appendingPathComponent(file))
+                    removeSidecar(forRawFileName: file)
+                }
+            } catch {
+                print("[ArchiveService] Could not publish recovery settlement: \(error)")
+                await MaintenanceAlertCenter.shared.reportFailure(.conversationSummary,
+                    error: "recovery settlement not saved: \(error.localizedDescription)", deterministic: false)
+                passAborted = true
+            }
             saveIndex()
 
             if !passAborted && !unreadableRecords && pendingIndex.pendingChunks.isEmpty && !recoveredIds.isEmpty {

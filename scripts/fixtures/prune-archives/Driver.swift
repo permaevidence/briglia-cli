@@ -86,6 +86,7 @@ struct SnapshotOwnerSelftest: AsyncParsableCommand {
         try await archive.snapshotArchiveChecks(SnapshotOwnerInputs.history(), server: server)
         try await archive.staleReceiptChecks(server: server)
         try await archive.injectedPendingWriteChecks(server: server)
+        try await archive.recoveryWriteFaultChecks(server: server)
         let bytes = try PruneArchiveStore.entries(validateComplete: true).map { $0.reference.basename }
         for scope in [MindExportService.ExportScope.full, .lite] {
             let destination = output.map { URL(fileURLWithPath: $0) } ?? root

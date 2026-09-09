@@ -206,3 +206,81 @@ extension ConversationArchiveService {
         server.clear()
     }
 }
+
+extension MaintenanceAlertCenter {
+    // Same file as the private store: observable alert state for the owner test.
+    func hasOpenEpisode(_ subsystem: Subsystem) -> Bool { store.episodes[subsystem.rawValue] != nil }
+}
+
+extension ConversationArchiveService {
+    /// Codex R1: recovery must adopt settlements only after the checked
+    /// pending-index write, keep records for a retry when it fails, and never
+    /// report success from a mutated in-memory index.
+    func recoveryWriteFaultChecks(server: CaptureServer) async throws {
+        let summary = String(repeating: "visible message summary ", count: 110)
+        func diskPending() throws -> [UUID] {
+            try JSONDecoder().decode(PendingChunkIndex.self, from: Data(contentsOf: pendingIndexFileURL)).pendingChunks.map(\.id)
+        }
+        _ = await MaintenanceAlertCenter.shared.reportSuccess(.conversationSummary)
+        let base = Date().addingTimeInterval(-900)
+        let batch = [Message(role: .user, content: "recovery request", timestamp: base),
+                     Message(role: .assistant, content: "recovery answer", timestamp: base.addingTimeInterval(1))]
+        server.clear()
+        server.script([try SnapshotOwnerInputs.response(summary), try SnapshotOwnerInputs.response("NO_CHANGES")])
+        let chunk = try await archiveMessages(batch)
+        try SnapshotOwnerInputs.check(pendingIndex.pendingChunks.isEmpty, "recovery fault fixture starts with an empty queue")
+        // Stale receipt for the indexed chunk (already-in-index branch) and a
+        // covered record with its own orphan raw file (subset branch).
+        let stale = PendingChunk(id: chunk.id, startDate: chunk.startDate, endDate: chunk.endDate, tokenCount: chunk.tokenCount,
+            messageCount: chunk.messageCount, rawContentFileName: chunk.rawContentFileName, createdAt: chunk.startDate,
+            sourceMessageIDs: batch.map(\.id))
+        let coveredID = UUID(); let orphanFile = coveredID.uuidString + ".json"
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(batch), to: archiveFolder.appendingPathComponent(orphanFile))
+        let covered = PendingChunk(id: coveredID, startDate: chunk.startDate.addingTimeInterval(5), endDate: chunk.endDate.addingTimeInterval(5),
+            tokenCount: 10, messageCount: 2, rawContentFileName: orphanFile, createdAt: chunk.startDate, sourceMessageIDs: batch.map(\.id))
+        pendingIndex.pendingChunks = [stale, covered]
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+        SnapshotOwnerInputs.faultSuffix = "/" + pendingIndexFileURL.lastPathComponent
+        SnapshotOwnerInputs.faultSkip = 0; SnapshotOwnerInputs.faultRemaining = 1
+        let requests = server.completeRequests.count
+        await recoverPendingChunks()
+        let orphanPath = archiveFolder.appendingPathComponent(orphanFile).path
+        try SnapshotOwnerInputs.check(SnapshotOwnerInputs.faultRemaining == 0 && server.completeRequests.count == requests
+            && Set(pendingIndex.pendingChunks.map(\.id)) == [chunk.id, coveredID] && Set(try diskPending()) == [chunk.id, coveredID],
+            "failed recovery settle write keeps records in memory and on disk")
+        let openAfterFailure = await MaintenanceAlertCenter.shared.hasOpenEpisode(.conversationSummary)
+        try SnapshotOwnerInputs.check(openAfterFailure && FileManager.default.fileExists(atPath: orphanPath),
+            "failed recovery settle write reports failure and defers orphan cleanup")
+        await recoverPendingChunks()
+        try SnapshotOwnerInputs.check(pendingIndex.pendingChunks.isEmpty && (try diskPending()).isEmpty
+            && !FileManager.default.fileExists(atPath: orphanPath) && server.completeRequests.count == requests,
+            "recovery retry after storage recovery settles durably and removes the orphan")
+        let openAfterRetry = await MaintenanceAlertCenter.shared.hasOpenEpisode(.conversationSummary)
+        try SnapshotOwnerInputs.check(!openAfterRetry, "recovery success is reported only after durable settlement")
+        // S1: a readable but malformed raw file is skipped like an unreadable one.
+        let badID = UUID(); let badFile = badID.uuidString + ".json"
+        try PrivateStorage.writeAtomically(Data("not json".utf8), to: archiveFolder.appendingPathComponent(badFile))
+        let later = [Message(role: .user, content: "after malformed request", timestamp: base.addingTimeInterval(120)),
+                     Message(role: .assistant, content: "after malformed answer", timestamp: base.addingTimeInterval(121))]
+        let laterID = UUID(); let laterFile = laterID.uuidString + ".json"
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(later), to: archiveFolder.appendingPathComponent(laterFile))
+        pendingIndex.pendingChunks = [
+            PendingChunk(id: badID, startDate: base.addingTimeInterval(30), endDate: base.addingTimeInterval(31), tokenCount: 10, messageCount: 2,
+                rawContentFileName: badFile, createdAt: base.addingTimeInterval(30), sourceMessageIDs: [UUID(), UUID()]),
+            PendingChunk(id: laterID, startDate: later[0].timestamp, endDate: later[1].timestamp, tokenCount: 10, messageCount: 2,
+                rawContentFileName: laterFile, createdAt: later[0].timestamp, sourceMessageIDs: later.map(\.id))]
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+        server.script([try SnapshotOwnerInputs.response(summary)])
+        await recoverPendingChunks()
+        let openAfterMalformed = await MaintenanceAlertCenter.shared.hasOpenEpisode(.conversationSummary)
+        try SnapshotOwnerInputs.check(pendingIndex.pendingChunks.map(\.id) == [badID] && (try diskPending()) == [badID]
+            && chunkIndex.chunks.contains { $0.id == laterID }
+            && (try Data(contentsOf: archiveFolder.appendingPathComponent(badFile))) == Data("not json".utf8)
+            && openAfterMalformed,
+            "malformed raw file keeps its record and bytes without blocking later records")
+        pendingIndex.pendingChunks = []
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+        SnapshotOwnerInputs.faultSuffix = nil
+        server.clear()
+    }
+}
