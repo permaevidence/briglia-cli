@@ -29,11 +29,24 @@ struct ImageToolSelftest: AsyncParsableCommand {
             return
         }
         let checks = ResponsesSelftest.Checks()
+        try schema(checks)
         try options(checks)
         try pricing(checks)
         try await requests(checks)
         print("Image tool selftest: \(checks.total - checks.failures)/\(checks.total)")
         if checks.failures > 0 { throw ValidationError("Image tool checks failed") }
+    }
+
+    private func schema(_ c: ResponsesSelftest.Checks) throws {
+        try KeychainHelper.save(key: KeychainHelper.imageGenerationProviderKey, value: "openai")
+        let properties = AvailableTools.generateImage.function.parameters.properties
+        c.check("schema engines match service", Set(properties["engine"]?.enumValues ?? []) == OpenAIImageOptions.engines)
+        c.check("schema qualities match service", Set(properties["quality"]?.enumValues ?? []) == OpenAIImageOptions.supportedQualities(model: "gpt-image-2.5-flare"))
+        c.check("schema backgrounds match service", Set(properties["background"]?.enumValues ?? []) == OpenAIImageOptions.supportedBackgrounds(model: "gpt-image-2.5-sunburst"))
+        c.check("schema formats match service", Set(properties["output_format"]?.enumValues ?? []) == OpenAIImageOptions.formats)
+        c.check("expensive quality requires an explicit user request in tool text", properties["quality"]?.description.contains("explicit user requests") == true)
+        try KeychainHelper.save(key: KeychainHelper.imageGenerationProviderKey, value: "gemini")
+        c.check("Gemini schema has no OpenAI engine", AvailableTools.generateImage.function.parameters.properties["engine"] == nil)
     }
 
     private func options(_ c: ResponsesSelftest.Checks) throws {

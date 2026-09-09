@@ -1,0 +1,164 @@
+{
+  "source": "1b9c1f6",
+  "before": {
+    "function": {
+      "description": "Generate an image using OpenAI GPT Image, or generate a new image using one stored source image as a reference/input. Use when the user asks you to create, generate, draw, make, edit, transform, restyle, or use an image as inspiration. If source_image is provided, this tool uses OpenAI's image edit/reference endpoint; it can either edit the original or create a new image inspired by it depending on the prompt and source_image_role.",
+      "name": "generate_image",
+      "parameters": {
+        "properties": {
+          "background": {
+            "description": "Optional GPT Image 2 background handling. Use 'auto' by default or 'opaque'. GPT Image 2 does not support transparent backgrounds.",
+            "enum": [
+              "auto",
+              "opaque"
+            ],
+            "type": "string"
+          },
+          "moderation": {
+            "description": "Optional content moderation strictness. Use 'auto' by default; 'low' is less restrictive where allowed.",
+            "enum": [
+              "auto",
+              "low"
+            ],
+            "type": "string"
+          },
+          "output_compression": {
+            "description": "Optional compression level from 0 to 100 for JPEG or WebP outputs. Ignored for PNG.",
+            "type": "integer"
+          },
+          "output_format": {
+            "description": "Optional output file format. Use 'png' by default, 'jpeg' for faster/lighter photos, or 'webp' for compressed web assets.",
+            "enum": [
+              "png",
+              "jpeg",
+              "webp"
+            ],
+            "type": "string"
+          },
+          "prompt": {
+            "description": "A detailed description of the desired image. If using a source image, explicitly say what should be preserved, changed, or merely used as inspiration.",
+            "type": "string"
+          },
+          "quality": {
+            "description": "Optional rendering quality. Use 'auto' by default; use 'high' when detail and fidelity matter more than latency.",
+            "enum": [
+              "auto",
+              "low",
+              "medium",
+              "high"
+            ],
+            "type": "string"
+          },
+          "size": {
+            "description": "Optional GPT Image 2 output size. Use 'auto' by default, or any valid WIDTHxHEIGHT where both edges are multiples of 16, max edge is 3840px, aspect ratio is at most 3:1, and total pixels are 655,360 through 8,294,400. Good choices: 1024x1024, 1536x1024, 1024x1536, 2048x2048, 2048x1152, 3840x2160, 2160x3840.",
+            "type": "string"
+          },
+          "source_image": {
+            "description": "Optional. Stored image filename in the Briglia images store, e.g. 'abc123.jpg'. Use the exact basename from recent image/file metadata; do not pass an absolute path. Leave empty to generate a new image from scratch.",
+            "type": "string"
+          },
+          "source_image_role": {
+            "description": "Optional. How to treat source_image when provided. Use 'reference' when the image is inspiration/style/composition only, 'edit' when preserving and directly changing the original, and 'transform' when restyling or reimagining the original subject.",
+            "enum": [
+              "reference",
+              "edit",
+              "transform"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  "after": {
+    "function": {
+      "description": "Generate an image using OpenAI GPT Image 2.5, or generate a new image using one stored source image as a reference/input. Use when the user asks you to create, generate, draw, make, edit, transform, restyle, or use an image as inspiration. If source_image is provided, this tool uses OpenAI's image edit/reference endpoint; it can either edit the original or create a new image inspired by it depending on the prompt and source_image_role.",
+      "name": "generate_image",
+      "parameters": {
+        "properties": {
+          "background": {
+            "description": "Optional background behavior. GPT Image 2.5 supports 'transparent' with png or webp; transparent with jpeg is rejected. Older configured models use 'auto' instead of transparent, with a note in the result.",
+            "enum": [
+              "auto",
+              "opaque",
+              "transparent"
+            ],
+            "type": "string"
+          },
+          "moderation": {
+            "description": "Optional content moderation strictness. Use 'auto' by default; 'low' is less restrictive where allowed.",
+            "enum": [
+              "auto",
+              "low"
+            ],
+            "type": "string"
+          },
+          "output_compression": {
+            "description": "Optional compression level from 0 to 100 for JPEG or WebP outputs. Ignored for PNG.",
+            "type": "integer"
+          },
+          "output_format": {
+            "description": "Optional output file format. Use 'png' by default, 'jpeg' for faster/lighter photos, or 'webp' for compressed web assets.",
+            "enum": [
+              "png",
+              "jpeg",
+              "webp"
+            ],
+            "type": "string"
+          },
+          "prompt": {
+            "description": "A detailed description of the desired image. If using a source image, explicitly say what should be preserved, changed, or merely used as inspiration.",
+            "type": "string"
+          },
+          "quality": {
+            "description": "Optional rendering quality. Use 'auto' by default; use 'high' when detail and fidelity matter more than latency. 'xhigh' and 'max' cost more and are for explicit user requests for maximum detail. On older configured models they are reduced to 'high', with a note in the result.",
+            "enum": [
+              "auto",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "size": {
+            "description": "Optional GPT Image 2.5 output size. Use 'auto' by default, or any valid WIDTHxHEIGHT where both edges are multiples of 16, max edge is 3840px, aspect ratio is at most 3:1, and total pixels are 655,360 through 8,294,400. Good choices: 1024x1024, 1536x1024, 1024x1536, 2048x2048, 2048x1152, 3840x2160, 2160x3840.",
+            "type": "string"
+          },
+          "source_image": {
+            "description": "Optional. Stored image filename in the Briglia images store, e.g. 'abc123.jpg'. Use the exact basename from recent image/file metadata; do not pass an absolute path. Leave empty to generate a new image from scratch.",
+            "type": "string"
+          },
+          "source_image_role": {
+            "description": "Optional. How to treat source_image when provided. Use 'reference' when the image is inspiration/style/composition only, 'edit' when preserving and directly changing the original, and 'transform' when restyling or reimagining the original subject.",
+            "enum": [
+              "reference",
+              "edit",
+              "transform"
+            ],
+            "type": "string"
+          },
+          "engine": {
+            "type": "string",
+            "description": "Optional image engine. Use 'fast' by default. Choose 'precise' for careful edits that must preserve subjects, faces, text, or layout. Configured model overrides are respected.",
+            "enum": [
+              "fast",
+              "precise"
+            ]
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  }
+}

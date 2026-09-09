@@ -834,7 +834,7 @@ enum AvailableTools {
     private static let openAIGenerateImage = ToolDefinition(
         function: FunctionDefinition(
             name: "generate_image",
-            description: "Generate an image using OpenAI GPT Image, or generate a new image using one stored source image as a reference/input. Use when the user asks you to create, generate, draw, make, edit, transform, restyle, or use an image as inspiration. If source_image is provided, this tool uses OpenAI's image edit/reference endpoint; it can either edit the original or create a new image inspired by it depending on the prompt and source_image_role.",
+            description: "Generate an image using OpenAI GPT Image 2.5, or generate a new image using one stored source image as a reference/input. Use when the user asks you to create, generate, draw, make, edit, transform, restyle, or use an image as inspiration. If source_image is provided, this tool uses OpenAI's image edit/reference endpoint; it can either edit the original or create a new image inspired by it depending on the prompt and source_image_role.",
             parameters: FunctionParameters(
                 properties: [
                     "prompt": ParameterProperty(
@@ -850,14 +850,19 @@ enum AvailableTools {
                         description: "Optional. How to treat source_image when provided. Use 'reference' when the image is inspiration/style/composition only, 'edit' when preserving and directly changing the original, and 'transform' when restyling or reimagining the original subject.",
                         enumValues: ["reference", "edit", "transform"]
                     ),
+                    "engine": ParameterProperty(
+                        type: "string",
+                        description: "Optional image engine. Use 'fast' by default. Choose 'precise' for careful edits that must preserve subjects, faces, text, or layout. Configured model overrides are respected.",
+                        enumValues: ["fast", "precise"]
+                    ),
                     "size": ParameterProperty(
                         type: "string",
-                        description: "Optional GPT Image 2 output size. Use 'auto' by default, or any valid WIDTHxHEIGHT where both edges are multiples of 16, max edge is 3840px, aspect ratio is at most 3:1, and total pixels are 655,360 through 8,294,400. Good choices: 1024x1024, 1536x1024, 1024x1536, 2048x2048, 2048x1152, 3840x2160, 2160x3840."
+                        description: "Optional GPT Image 2.5 output size. Use 'auto' by default, or any valid WIDTHxHEIGHT where both edges are multiples of 16, max edge is 3840px, aspect ratio is at most 3:1, and total pixels are 655,360 through 8,294,400. Good choices: 1024x1024, 1536x1024, 1024x1536, 2048x2048, 2048x1152, 3840x2160, 2160x3840."
                     ),
                     "quality": ParameterProperty(
                         type: "string",
-                        description: "Optional rendering quality. Use 'auto' by default; use 'high' when detail and fidelity matter more than latency.",
-                        enumValues: ["auto", "low", "medium", "high"]
+                        description: "Optional rendering quality. Use 'auto' by default; use 'high' when detail and fidelity matter more than latency. 'xhigh' and 'max' cost more and are for explicit user requests for maximum detail. On older configured models they are reduced to 'high', with a note in the result.",
+                        enumValues: ["auto", "low", "medium", "high", "xhigh", "max"]
                     ),
                     "output_format": ParameterProperty(
                         type: "string",
@@ -870,8 +875,8 @@ enum AvailableTools {
                     ),
                     "background": ParameterProperty(
                         type: "string",
-                        description: "Optional GPT Image 2 background handling. Use 'auto' by default or 'opaque'. GPT Image 2 does not support transparent backgrounds.",
-                        enumValues: ["auto", "opaque"]
+                        description: "Optional background behavior. GPT Image 2.5 supports 'transparent' with png or webp; transparent with jpeg is rejected. Older configured models use 'auto' instead of transparent, with a note in the result.",
+                        enumValues: ["auto", "opaque", "transparent"]
                     ),
                     "moderation": ParameterProperty(
                         type: "string",
