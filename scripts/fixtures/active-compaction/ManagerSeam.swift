@@ -281,7 +281,7 @@ extension ConversationManager {
         let values = strings(object)
         let pdfParts = values.filter { $0.hasPrefix("data:application/pdf;") }.count
         let imageParts = values.filter { $0.hasPrefix("data:image/") }.count
-        try CompactionTestInputs.check(values.contains("media-read") && imageParts >= 3 && (pdfParts == 2 || imageParts >= 33),
+        try CompactionTestInputs.check(values.contains(result.content) && imageParts >= 3 && (pdfParts == 2 || imageParts >= 33),
             "media-bearing replay reaches provider without historical pruning")
         try CompactionTestInputs.check(lastPromptTokens == 60000 && completed[1].toolInteractions.count == 1,
             "provider measurement calibrates healthy media history")
