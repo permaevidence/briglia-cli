@@ -98,6 +98,7 @@ enum CredentialCatalog {
         Entry(key: KeychainHelper.geminiImageOutputTextCostPerMillionTokensUSDKey, treatment: .notSecret),
         Entry(key: KeychainHelper.geminiImageOutputImageCostPerMillionTokensUSDKey, treatment: .notSecret),
         Entry(key: KeychainHelper.openAIImageModelKey, treatment: .notSecret),
+        Entry(key: KeychainHelper.openAIImagePreciseModelKey, treatment: .notSecret),
         Entry(key: KeychainHelper.openAIImageQualityKey, treatment: .notSecret),
         Entry(key: KeychainHelper.openAIImageOutputFormatKey, treatment: .notSecret),
         Entry(key: KeychainHelper.openAIImageModerationKey, treatment: .notSecret),

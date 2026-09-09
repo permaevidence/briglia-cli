@@ -486,6 +486,9 @@ def main():
     # button policy (OpenCode catalog + ChatGPT four, text-only elsewhere),
     # plain sendMessage body unchanged, callback_query decode, pairing gate,
     # browser-page model pickers in step with the Swift list.
+    result = run_selftest([ADA, "__image-tool-selftest"], capture_output=True, text=True, timeout=120)
+    check("Image tool models, options, request bodies and spend", result.returncode == 0, result.stdout + result.stderr)
+
     result = run_selftest([ADA, "__telegram-menu-selftest"], capture_output=True, text=True, timeout=60)
     check("telegram-menu-selftest (inline-keyboard menus for /provider, /model, /effort)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])

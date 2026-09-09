@@ -1323,6 +1323,7 @@ class ConversationManager: ObservableObject {
             await OpenAIImageService.shared.configure(
                 apiKey: openAIImageApiKey,
                 model: KeychainHelper.load(key: KeychainHelper.openAIImageModelKey),
+                preciseModel: KeychainHelper.load(key: KeychainHelper.openAIImagePreciseModelKey),
                 quality: KeychainHelper.load(key: KeychainHelper.openAIImageQualityKey),
                 outputFormat: KeychainHelper.load(key: KeychainHelper.openAIImageOutputFormatKey),
                 moderation: KeychainHelper.load(key: KeychainHelper.openAIImageModerationKey)
@@ -10282,6 +10283,7 @@ class ConversationManager: ObservableObject {
         if let imageKey = KeychainHelper.load(key: KeychainHelper.openAIImageApiKeyKey), !imageKey.isEmpty {
             await OpenAIImageService.shared.configure(apiKey: imageKey,
                 model: KeychainHelper.load(key: KeychainHelper.openAIImageModelKey),
+                preciseModel: KeychainHelper.load(key: KeychainHelper.openAIImagePreciseModelKey),
                 quality: KeychainHelper.load(key: KeychainHelper.openAIImageQualityKey),
                 outputFormat: KeychainHelper.load(key: KeychainHelper.openAIImageOutputFormatKey),
                 moderation: KeychainHelper.load(key: KeychainHelper.openAIImageModerationKey))

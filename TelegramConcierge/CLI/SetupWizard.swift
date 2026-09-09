@@ -488,7 +488,7 @@ struct SetupWizard {
         One OpenAI API key powers four things:
           • web research (planning, reading, and writing answers)
           • voice message transcription (gpt-transcribe)
-          • image generation (gpt-image-2)
+          • image generation (GPT Image 2.5)
           • OCR of scanned documents
         Create a key at https://platform.openai.com/api-keys
         """)

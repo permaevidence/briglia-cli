@@ -3096,6 +3096,7 @@ extension ToolExecutor {
         do {
             let imageResult: (data: Data, mimeType: String, spendUSD: Double?)
             let resolvedImageSize: String
+            var imageMetadata: [String: Any] = [:]
 
             switch provider {
             case .gemini:
@@ -3153,21 +3154,27 @@ extension ToolExecutor {
                 await OpenAIImageService.shared.configure(
                     apiKey: openAIAPIKey,
                     model: KeychainHelper.load(key: KeychainHelper.openAIImageModelKey),
+                    preciseModel: KeychainHelper.load(key: KeychainHelper.openAIImagePreciseModelKey),
                     quality: KeychainHelper.load(key: KeychainHelper.openAIImageQualityKey),
                     outputFormat: KeychainHelper.load(key: KeychainHelper.openAIImageOutputFormatKey),
                     moderation: KeychainHelper.load(key: KeychainHelper.openAIImageModerationKey)
                 )
-                imageResult = try await OpenAIImageService.shared.generateImage(
+                let openAIResult = try await OpenAIImageService.shared.generateImage(
                     prompt: openAIPrompt,
                     sourceImageData: sourceImageData,
                     sourceMimeType: sourceMimeType,
                     imageSize: openAIImageSize?.rawValue,
+                    engine: args.engine,
                     quality: args.quality,
                     outputFormat: args.outputFormat,
                     outputCompression: args.outputCompression,
                     background: args.background,
                     moderation: args.moderation
                 )
+                imageResult = (openAIResult.data, openAIResult.mimeType, openAIResult.spendUSD)
+                imageMetadata = ["engine": openAIResult.options.engine, "model": openAIResult.options.model,
+                                 "quality": openAIResult.options.quality, "background": openAIResult.options.background,
+                                 "output_format": openAIResult.options.outputFormat, "notes": openAIResult.options.notes]
                 resolvedImageSize = openAIImageSize?.rawValue ?? "default"
             }
 
@@ -3212,10 +3219,16 @@ extension ToolExecutor {
             print("[ToolExecutor] Created FileAttachment for generated image: \(fileName) (\(mimeType), \(imageData.count) bytes)")
             
             // Result text (image will be injected as multimodal content)
-            let result = """
+            var result = """
             {"success": true, "provider": "\(provider.toolName)", "filename": "\(fileName)", "mimeType": "\(mimeType)", "sizeBytes": \(imageData.count), "resolution": "\(resolvedImageSize)", "message": "\(isEdit ? "Image transformed" : "Image generated") successfully. You can now see and analyze the result."}
             """
             
+            if !imageMetadata.isEmpty, let data = result.data(using: .utf8),
+               var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                object.merge(imageMetadata) { _, new in new }
+                result = jsonObjectString(object)
+            }
+
             await ToolServiceHealth.shared.recordSuccess(.imageGeneration)
             return ToolResultMessage(
                 toolCallId: call.id,
@@ -3223,6 +3236,8 @@ extension ToolExecutor {
                 fileAttachment: attachment,
                 spendUSD: spendUSD
             )
+        } catch OpenAIImageError.invalidOptions(let message) {
+            return ToolResultMessage(toolCallId: call.id, content: jsonObjectString(["error": message]))
         } catch {
             await ToolServiceHealth.shared.recordFailure(.imageGeneration, error: error.localizedDescription)
             return ToolResultMessage(toolCallId: call.id, content: jsonObjectString(["error": "Image generation failed: \(error.localizedDescription)"]))
@@ -3821,6 +3836,7 @@ extension ToolExecutor {
 // MARK: - Image Generation Argument Types
 
 struct GenerateImageArguments: Codable {
+    let engine: String?
     let prompt: String
     let sourceImage: String?
     let sourceImageRole: String?
@@ -3832,6 +3848,7 @@ struct GenerateImageArguments: Codable {
     let moderation: String?
     
     enum CodingKeys: String, CodingKey {
+        case engine
         case prompt
         case sourceImage = "source_image"
         case sourceImageRole = "source_image_role"
