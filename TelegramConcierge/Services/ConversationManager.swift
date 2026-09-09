@@ -6177,6 +6177,11 @@ class ConversationManager: ObservableObject {
         }
 
         try Task.checkCancellation()
+        // The forced final pass must see exactly what the tool loop saw: after
+        // an active-turn compaction the summary note and the carried verbatim
+        // user messages live only in the checkpoint projection, not in
+        // messagesForLLM. Computed once so every retry replays the same history.
+        let finalHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
         var finalResponse: LLMResponse?
         var finalForceInteractions = toolInteractions
         var finalForceSpendUSD: Double = 0
@@ -6193,7 +6198,7 @@ class ConversationManager: ObservableObject {
             let response: LLMResponse
             do {
                 response = try await openRouterService.generateResponse(
-                    messages: messagesForLLM,
+                    messages: finalHistory,
                     imagesDirectory: imagesDirectory,
                     documentsDirectory: documentsDirectory,
                     tools: lastToolsForRound,

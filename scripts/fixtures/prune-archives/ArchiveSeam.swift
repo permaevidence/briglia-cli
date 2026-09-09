@@ -70,3 +70,77 @@ extension ConversationArchiveService {
             "media-only archive keeps attachment names without new snapshot")
     }
 }
+
+extension ConversationArchiveService {
+    /// Bree's 0.2.13/0.2.14 finding: a chunk committed to the index whose
+    /// pending-index write then failed leaves a stale recovery record. The
+    /// retry must settle it, and startup recovery must not wedge behind one
+    /// whose raw file consolidation deleted on purpose.
+    func staleReceiptChecks(server: CaptureServer) async throws {
+        let summary = String(repeating: "visible message summary ", count: 110)
+        func batch(_ tag: String, at date: Date) -> [Message] {
+            [Message(role: .user, content: tag + " request", timestamp: date),
+             Message(role: .assistant, content: tag + " answer", timestamp: date.addingTimeInterval(1))]
+        }
+        func diskPending() throws -> [UUID] {
+            try JSONDecoder().decode(PendingChunkIndex.self, from: Data(contentsOf: pendingIndexFileURL)).pendingChunks.map(\.id)
+        }
+        let base = Date().addingTimeInterval(-3600)
+        server.clear()
+        let first = batch("stale-first", at: base)
+        server.script([try SnapshotOwnerInputs.response(summary), try SnapshotOwnerInputs.response("NO_CHANGES")])
+        let chunk = try await archiveMessages(first)
+        // Exact on-disk state archiveMessages leaves when the chunk-index write
+        // succeeds and the pending-index write right after it fails.
+        let stale = PendingChunk(id: chunk.id, startDate: chunk.startDate, endDate: chunk.endDate, tokenCount: chunk.tokenCount,
+            messageCount: chunk.messageCount, rawContentFileName: chunk.rawContentFileName, createdAt: chunk.startDate,
+            sourceMessageIDs: first.map(\.id))
+        pendingIndex.pendingChunks.append(stale)
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+        let before = server.completeRequests.count
+        let retry = try await archiveMessages(first)
+        try SnapshotOwnerInputs.check(retry.id == chunk.id && server.completeRequests.count == before
+            && !pendingIndex.pendingChunks.contains { $0.id == chunk.id } && !(try diskPending()).contains(chunk.id),
+            "committed retry settles the stale pending record on disk")
+        try SnapshotOwnerInputs.check(FileManager.default.fileExists(atPath: archiveFolder.appendingPathComponent(chunk.rawContentFileName).path),
+            "settling the stale record keeps the committed raw file")
+
+        // A record left by an earlier build, after consolidation absorbed the
+        // chunk (new id, merged source IDs) and deleted its raw file.
+        pendingIndex.pendingChunks.append(stale)
+        var consolidated = ConversationChunk(id: UUID(), type: .consolidated, startDate: chunk.startDate, endDate: chunk.endDate,
+            tokenCount: chunk.tokenCount, messageCount: chunk.messageCount, summary: summary, rawContentFileName: UUID().uuidString + ".json")
+        consolidated.sourceMessageIDs = first.map(\.id) + [UUID()]
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(first), to: archiveFolder.appendingPathComponent(consolidated.rawContentFileName))
+        chunkIndex.chunks.removeAll { $0.id == chunk.id }
+        chunkIndex.chunks.append(consolidated)
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL)
+        try FileManager.default.removeItem(at: archiveFolder.appendingPathComponent(chunk.rawContentFileName))
+        removeSidecar(forRawFileName: chunk.rawContentFileName)
+        // An uncovered record whose raw file is gone: evidence must stay, but
+        // nothing may wait behind it.
+        let orphanID = UUID()
+        pendingIndex.pendingChunks.append(PendingChunk(id: orphanID, startDate: base.addingTimeInterval(60), endDate: base.addingTimeInterval(61),
+            tokenCount: 10, messageCount: 2, rawContentFileName: orphanID.uuidString + ".json", createdAt: base.addingTimeInterval(60),
+            sourceMessageIDs: [UUID(), UUID()]))
+        // A genuine later pending chunk, ordered after both.
+        let later = batch("stale-later", at: base.addingTimeInterval(600))
+        let laterID = UUID(); let laterFile = laterID.uuidString + ".json"
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(later), to: archiveFolder.appendingPathComponent(laterFile))
+        pendingIndex.pendingChunks.append(PendingChunk(id: laterID, startDate: later[0].timestamp, endDate: later[1].timestamp,
+            tokenCount: 10, messageCount: 2, rawContentFileName: laterFile, createdAt: later[0].timestamp, sourceMessageIDs: later.map(\.id)))
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+        server.script([try SnapshotOwnerInputs.response(summary)])
+        await recoverPendingChunks()
+        try SnapshotOwnerInputs.check(pendingIndex.pendingChunks.map(\.id) == [orphanID] && (try diskPending()) == [orphanID],
+            "recovery settles the absorbed record and keeps only the unreadable one")
+        try SnapshotOwnerInputs.check(chunkIndex.chunks.contains { $0.id == laterID && $0.summary.hasPrefix("visible message summary") },
+            "later pending chunk recovers behind a stale record")
+        let reloaded = try JSONDecoder().decode(ChunkIndex.self, from: Data(contentsOf: indexFileURL))
+        try SnapshotOwnerInputs.check(reloaded.chunks.contains { $0.id == laterID } && !reloaded.chunks.contains { $0.id == chunk.id },
+            "recovered later chunk is published to the index")
+        pendingIndex.pendingChunks.removeAll { $0.id == orphanID }
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+        server.clear()
+    }
+}

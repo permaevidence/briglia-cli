@@ -8,6 +8,8 @@ enum CompactionTestInputs {
     static var omitCarried = false
     static var conservativeStartGate = false
     static var omitPruneNotes = false
+    static var unprojectedFinal = false
+    static var forcedFinalMode = false
     static var count = 0
     private static let lock = NSLock()
     static var dynamicWire: ProviderWireProtocol?
@@ -24,6 +26,19 @@ enum CompactionTestInputs {
         let tokens = request.body.count / 3
         if text.contains("ACTIVE TURN COMPACTION") {
             return try! body(protocol: wire, text: "Goal: preserve exact evidence. User correction says use violet. File source.txt verified; phases remain. Running handle bash_7 pending.", tokens: tokens)
+        }
+        if forcedFinalMode {
+            // Never volunteer a final answer: only the harness's round backstop
+            // ends this turn. The forced pass is judged on what it can see.
+            if text.contains("[ROUND LIMIT]") {
+                let object = try! JSONSerialization.jsonObject(with: request.body) as! [String: Any]
+                let items = object[wire == .responses ? "input" : "messages"] as! [[String: Any]]
+                let hasSummary = items.contains { String(describing: $0).contains("Summary of earlier completed work") }
+                let humans = items.filter { $0["role"] as? String == "user" && String(describing: $0["content"] ?? "").contains("VERBATIM_CORRECTION: choose violet; never orange.") }
+                return try! body(protocol: wire, text: hasSummary && humans.count == 1 ? "FINAL_FORCED_OK" : "FORCED_MISSING_CONTEXT", tokens: tokens)
+            }
+            ordinaryCalls += 1
+            return try! body(protocol: wire, text: "read", toolID: "f" + String(ordinaryCalls), path: dynamicPath, tokens: tokens)
         }
         if compactions > 0 && requireVioletCorrection {
             let object = try! JSONSerialization.jsonObject(with: request.body) as! [String: Any]
@@ -78,6 +93,7 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
     @Flag var omitCarried = false
     @Flag var conservativeStartGate = false
     @Flag var omitPruneNotes = false
+    @Flag var unprojectedFinal = false
     @MainActor func run() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("briglia-active-test-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -87,6 +103,7 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
         FileDescriptionsStore._testStoreURL = root.appendingPathComponent("descriptions.json")
         CompactionTestInputs.conservativeStartGate = conservativeStartGate
         CompactionTestInputs.omitPruneNotes = omitPruneNotes
+        CompactionTestInputs.unprojectedFinal = unprojectedFinal
         CompactionTestInputs.disableCompaction = disableCompaction; CompactionTestInputs.omitCarried = omitCarried
         defer { CompactionTestInputs.defaults.removePersistentDomain(forName: "dev.briglia.active-compaction-test") }
         let server = try CaptureServer(); defer { server.stop() }
@@ -185,6 +202,7 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
             try await manager.activeTestSoftTarget(server: server, wire: wire)
             try await manager.activeTestInterrupted(server: server, wire: wire, file: file)
             try await manager.activeTestOversizedHistory(server: server, wire: wire)
+            try await manager.activeTestForcedFinal(server: server, wire: wire, file: file)
 
         }
         print("Active compaction owner: \(CompactionTestInputs.count) passed; evidence root: \(root.path)")

@@ -678,6 +678,7 @@ actor ConversationArchiveService {
             var recoveredIds: Set<UUID> = []
             var droppedIds: Set<UUID> = []
             var passAborted = false
+            var unreadableRecords = false
 
             for pending in pendingChunks {
                 do {
@@ -686,9 +687,33 @@ actor ConversationArchiveService {
                         recoveredIds.insert(pending.id)
                         continue
                     }
+                    if let sourceIDs = pending.sourceMessageIDs, !sourceIDs.isEmpty,
+                       chunkIndex.chunks.contains(where: { Set(sourceIDs).isSubset(of: Set($0.sourceMessageIDs ?? [])) }) {
+                        // Content already archived under another chunk id: a
+                        // retry committed it, then consolidation absorbed it.
+                        // Settle the stale receipt and its orphan raw file
+                        // instead of failing on a file that was deleted on purpose.
+                        if !chunkIndex.chunks.contains(where: { $0.rawContentFileName == pending.rawContentFileName }) {
+                            try? FileManager.default.removeItem(at: archiveFolder.appendingPathComponent(pending.rawContentFileName))
+                            removeSidecar(forRawFileName: pending.rawContentFileName)
+                        }
+                        print("[ArchiveService] Pending chunk \(pending.id.uuidString.prefix(8))... already archived; settling stale record")
+                        droppedIds.insert(pending.id)
+                        continue
+                    }
                     // Load the raw messages
                     let fileURL = archiveFolder.appendingPathComponent(pending.rawContentFileName)
-                    let data = try Data(contentsOf: fileURL)
+                    let data: Data
+                    do { data = try Data(contentsOf: fileURL) } catch {
+                        // Evidence stays: the record is kept and reported. A raw
+                        // file only this record needs does not affect the others,
+                        // so the pass continues instead of wedging behind it.
+                        print("[ArchiveService] Pending chunk \(pending.id.uuidString.prefix(8))... raw content unreadable: \(error)")
+                        await MaintenanceAlertCenter.shared.reportFailure(.conversationSummary,
+                            error: "pending chunk raw content unreadable: \(error.localizedDescription)", deterministic: false)
+                        unreadableRecords = true
+                        continue
+                    }
                     let messages = sanitizeMessagesForArchive(try JSONDecoder().decode([Message].self, from: data))
                     let pinnedReferences = messages.flatMap(\.pruneArchiveReferences)
                     PruneArchiveStore.pinExisting(pinnedReferences)
@@ -789,7 +814,7 @@ actor ConversationArchiveService {
             savePendingIndex()
             saveIndex()
 
-            if !passAborted && pendingIndex.pendingChunks.isEmpty && !recoveredIds.isEmpty {
+            if !passAborted && !unreadableRecords && pendingIndex.pendingChunks.isEmpty && !recoveredIds.isEmpty {
                 await MaintenanceAlertCenter.shared.reportSuccess(.conversationSummary)
             }
         }
@@ -901,6 +926,21 @@ actor ConversationArchiveService {
             completed.pruneArchiveReferences = refs.isEmpty ? nil : refs
             chunkIndex.chunks[index] = completed
             try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL)
+            // The prior attempt may have committed the chunk and then failed to
+            // clear its recovery record (the pending-index write follows the
+            // index write). Settle that receipt here, or a later consolidation
+            // deletes the raw file underneath it and startup recovery wedges on
+            // a record whose content is already archived.
+            let stale = pendingIndex.pendingChunks.filter { $0.id == completed.id || Set($0.sourceMessageIDs ?? []) == sourceIDs }
+            if !stale.isEmpty {
+                pendingIndex.pendingChunks.removeAll { record in stale.contains { $0.id == record.id } }
+                try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+                for record in stale where record.rawContentFileName != completed.rawContentFileName
+                    && !chunkIndex.chunks.contains(where: { $0.rawContentFileName == record.rawContentFileName }) {
+                    try? FileManager.default.removeItem(at: archiveFolder.appendingPathComponent(record.rawContentFileName))
+                    removeSidecar(forRawFileName: record.rawContentFileName)
+                }
+            }
             await writeSidecar(forRawFileName: completed.rawContentFileName, messages: raw)
             return completed
         }

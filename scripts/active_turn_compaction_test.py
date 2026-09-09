@@ -34,6 +34,9 @@ sources[key] = sources[key].replace('               estimate.fixedTextTokens > c
     '               (CompactionTestInputs.conservativeStartGate ? estimate.tokens : estimate.fixedTextTokens) > configuredMaxContextTokens() {')
 sources[key] = sources[key].replace('            totalTokens += noteTokens(committed) - noteTokens(plannedSource)',
     '            if !CompactionTestInputs.omitPruneNotes { totalTokens += noteTokens(committed) - noteTokens(plannedSource) }')
+anchor = '                    messages: finalHistory,'
+assert sources[key].count(anchor) == 1
+sources[key] = sources[key].replace(anchor, '                    messages: CompactionTestInputs.unprojectedFinal ? messagesForLLM : finalHistory,')
 key = 'TelegramConcierge/CLI/AffinitySelftest.swift'
 sources[key] = sources[key].replace('        let body = scripted ?? (status == 200',
     '        let body = CompactionTestInputs.dynamicReply(completeRequests.last!) ?? scripted ?? (status == 200')
@@ -63,10 +66,10 @@ build = Path('/tmp/briglia-active-owner-scratch')
 wire.command(['swift', 'build', '--scratch-path', str(build)], cwd=tree)
 binary = Path(subprocess.check_output(['swift', 'build', '--scratch-path', str(build), '--show-bin-path'], cwd=tree, text=True).strip()) / 'briglia'
 wire.command([str(binary), '__active-compaction-owner-selftest'], cwd=tree, timeout=240)
-for control in ['--disable-compaction', '--omit-carried', '--conservative-start-gate', '--omit-prune-notes']:
+for control in ['--disable-compaction', '--omit-carried', '--conservative-start-gate', '--omit-prune-notes', '--unprojected-final']:
     result = subprocess.run([str(binary), '__active-compaction-owner-selftest', control], cwd=tree, capture_output=True, text=True, timeout=240)
     (root / (control[2:] + '.log')).write_text(result.stdout + result.stderr)
     if result.returncode == 0: raise RuntimeError('Negative control unexpectedly passed: ' + control)
-    expected = {'--disable-compaction': 'same turn completes three compactions', '--omit-carried': 'verbatim user role after compaction', '--conservative-start-gate': 'media-heavy history runs without a measurement', '--omit-prune-notes': 'manual prune report includes committed summary and reference delta'}[control]
+    expected = {'--disable-compaction': 'same turn completes three compactions', '--omit-carried': 'verbatim user role after compaction', '--conservative-start-gate': 'media-heavy history runs without a measurement', '--omit-prune-notes': 'manual prune report includes committed summary and reference delta', '--unprojected-final': 'forced final answer keeps compaction summary and verbatim correction'}[control]
     if expected not in result.stdout + result.stderr: raise RuntimeError('Negative control failed for unrelated reason: ' + control)
     print('PASS negative control', control, flush=True)

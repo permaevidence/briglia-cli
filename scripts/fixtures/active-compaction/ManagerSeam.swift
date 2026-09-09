@@ -327,3 +327,35 @@ extension ConversationManager {
         }
     }
 }
+
+extension ConversationManager {
+    /// Bree's 0.2.14 finding: the forced final pass (round backstop, spend
+    /// cap, context fallback) must replay the checkpoint projection — the
+    /// compaction summary and the carried verbatim user messages — exactly as
+    /// the tool loop did, otherwise the wrap-up loses the compacted context.
+    func activeTestForcedFinal(server: CaptureServer, wire: ProviderWireProtocol, file: URL) async throws {
+        try await activeTestSeed(); server.clear()
+        try AgentTurnOverrides.setOverride(30, forAgent: "main")
+        defer { try? AgentTurnOverrides.setOverride(nil, forAgent: "main") }
+        CompactionTestInputs.dynamicWire = wire; CompactionTestInputs.dynamicPath = file.path
+        CompactionTestInputs.compactions = 0; CompactionTestInputs.ordinaryCalls = 0
+        CompactionTestInputs.forcedFinalMode = true
+        let correction = Message(role: .user, content: "VERBATIM_CORRECTION: choose violet; never orange.")
+        let history = try await activeTestTurn(Message(role: .user, content: "Keep working until the harness stops you."), queued: correction)
+        CompactionTestInputs.forcedFinalMode = false; CompactionTestInputs.dynamicWire = nil
+        try CompactionTestInputs.check(CompactionTestInputs.compactions >= 1 && CompactionTestInputs.ordinaryCalls == 30,
+            "round backstop reached after at least one compaction")
+        let forced = server.completeRequests.filter { String(decoding: $0.body, as: UTF8.self).contains("[ROUND LIMIT]") }
+        try CompactionTestInputs.check(forced.count == 1, "exactly one forced final request")
+        let object = try JSONSerialization.jsonObject(with: forced[0].body) as! [String: Any]
+        let items = object[wire == .responses ? "input" : "messages"] as! [[String: Any]]
+        let summaryIndex = items.firstIndex { String(describing: $0).contains("Summary of earlier completed work") }
+        let userIndex = items.firstIndex { ($0["role"] as? String) == "user" && String(describing: $0["content"] ?? "").contains(correction.content) }
+        let ordered = summaryIndex != nil && userIndex != nil && summaryIndex! < userIndex!
+        try CompactionTestInputs.check(ordered && history.last?.content == "FINAL_FORCED_OK",
+            "forced final answer keeps compaction summary and verbatim correction")
+        try CompactionTestInputs.check(history.last?.activeTurnCompaction != nil && history.filter { $0.id == correction.id }.count == 1,
+            "forced final outcome persists summary and canonical correction once")
+        try CompactionTestInputs.check(server.errors.isEmpty, "forced final pass leaves no provider errors")
+    }
+}
