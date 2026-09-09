@@ -71,6 +71,22 @@ class Tests(unittest.TestCase):
         candidate["function"]["parameters"]["properties"]["prompt"]["description"] += " unrelated"
         self.assertNotEqual(expected, candidate)
 
+    def test_manifest_and_source_change_only_openai_schema(self):
+        folder = ROOT / "scripts/fixtures/chat-lifecycle"
+        old = json.loads((folder / "active-compaction-persistence-contract.json").read_text())
+        new = json.loads((folder / "image-schema-persistence-contract.json").read_text())
+        self.assertEqual(old["source"], new["source"])
+        self.assertEqual({k for k in old["sha256"] if old["sha256"][k] != new["sha256"].get(k)},
+                         {"TelegramConcierge/Models/ToolModels.swift"})
+        path = "TelegramConcierge/Models/ToolModels.swift"
+        before = subprocess.check_output(["git", "show", "1b9c1f6:" + path], cwd=ROOT).decode()
+        after = (ROOT / path).read_text()
+        def outside_schema(text):
+            start = text.index("    private static let openAIGenerateImage")
+            end = text.index("\n    // MARK:", start)
+            return text[:start] + text[end:]
+        self.assertEqual(outside_schema(before), outside_schema(after))
+
     def test_historical_p0_image_tools_are_gemini(self):
         for platform in ["darwin-arm64", "linux-x86_64"]:
             for kind, count in [("chat-wire", 35), ("chat-lifecycle", 17)]:

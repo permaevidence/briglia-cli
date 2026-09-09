@@ -1,0 +1,12 @@
+{
+  "purpose": "OpenAI image tool schema only: ToolModels.swift is whole-file guarded. Persisted declarations and earlier manifests remain unchanged. Pending independent review.",
+  "source": "4dd86133de03b484bed62fb81ce59935b89a7de8",
+  "sha256": {
+    "TelegramConcierge/Models/Message.swift": "eb96f44b0cad44f69c74639fd2dd29c40d196007138be066103a5c68b256f186",
+    "TelegramConcierge/Models/ToolModels.swift": "95687fca95e8a774ca831b67397379b476b99f65b33658cd8ef9b78b7b58a421",
+    "TelegramConcierge/Services/HarnessAnnotations.swift": "1371f312fe4b0ab0ea4aafc859193cf710cd56e8521b4e243c92356bd11d4440",
+    "TelegramConcierge/Services/ConversationManager.swift#declaration": "7e8328c639c37cf0d671ca3be4921d917095844e671ff8388b492ac6d515d23a",
+    "TelegramConcierge/Services/SubagentSessionRegistry.swift#declaration": "6db5a10fec90cb42d7d83723b56f377eae1692bf278c1aba82c1c953b4470156",
+    "TelegramConcierge/Services/OpenRouterService.swift#declaration": "51272020cb6063053dc3d5831c878acf9f440945b1925200cc6e5259e6efd804"
+  }
+}

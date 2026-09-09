@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / 'scripts/fixtures/chat-lifecycle/persistence-contract.json'
 SNAPSHOT_MANIFEST = ROOT / 'scripts/fixtures/chat-lifecycle/prune-persistence-contract.json'
 ACTIVE_MANIFEST = ROOT / 'scripts/fixtures/chat-lifecycle/active-compaction-persistence-contract.json'
+IMAGE_MANIFEST = ROOT / 'scripts/fixtures/chat-lifecycle/image-schema-persistence-contract.json'
 P2_MANIFEST = ROOT / 'scripts/fixtures/chat-lifecycle/responses-persistence-contract.json'
 FILES = ['TelegramConcierge/Models/Message.swift', 'TelegramConcierge/Models/ToolModels.swift',
          'TelegramConcierge/Services/HarnessAnnotations.swift']
@@ -48,7 +49,7 @@ def verify(root=ROOT):
     # P0 remains immutable. P2's additive optional fields have a separate exact
     # candidate manifest, reviewed with the P2 implementation, never a rewritten
     # baseline. Raw no-Responses fixture bytes must still match the old binary.
-    for manifest in (P2_MANIFEST, SNAPSHOT_MANIFEST, ACTIVE_MANIFEST):
+    for manifest in (P2_MANIFEST, SNAPSHOT_MANIFEST, ACTIVE_MANIFEST, IMAGE_MANIFEST):
         if current != frozen['sha256'] and manifest.exists():
             additive = json.loads(manifest.read_text())
             if additive.get('source') == SOURCE and current == additive.get('sha256'):
