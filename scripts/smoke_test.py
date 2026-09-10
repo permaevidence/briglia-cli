@@ -511,6 +511,15 @@ def main():
     check("telegram-transport-selftest (bot token never in rendered transport errors)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    # 3c8c. Parked-reply queue reentrancy: the poll loop's success path and
+    # any successful send can both flush while a redelivery is suspended.
+    # Pre-fix both took the same item and the second removeFirst() on an
+    # empty array trapped the process (mac2 crash, 2026-09-10) after a double
+    # delivery. Overlap, mid-flush park, failure stop, capacity trim. Pure.
+    result = run_selftest([ADA, "__parked-outbound-selftest"], capture_output=True, text=True, timeout=120)
+    check("parked-outbound-selftest (overlapping flushes deliver once, never trap)", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
     # 3c9. Email/calendar providers: resolution (explicit choice wins, unset
     # falls back to legacy gws-if-installed inference), the manage_calendar
     # tool gate (agentmail only), provider-aware prompt strings (guidance

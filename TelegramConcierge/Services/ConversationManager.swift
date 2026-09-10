@@ -296,41 +296,31 @@ class ConversationManager: ObservableObject {
     }
 
     /// Replies whose delivery failed after retries, awaiting redelivery.
-    /// In-memory only: the text also survives in conversation history, so an
-    /// app restart loses nothing the user can't ask for again.
-    private struct ParkedOutbound {
-        let text: String
-        let address: ChannelAddress
-        let parkedAt: Date
-    }
-    private var parkedOutbound: [ParkedOutbound] = []
+    /// See `ParkedOutboundQueue` for the reentrancy contract (two callers
+    /// can overlap on the main actor: the poll loop's success path and any
+    /// successful send).
+    private let parkedOutbound = ParkedOutboundQueue()
 
     private func parkOutbound(_ text: String, address: ChannelAddress) {
-        parkedOutbound.append(ParkedOutbound(text: text, address: address, parkedAt: Date()))
-        if parkedOutbound.count > 20 {
-            parkedOutbound.removeFirst(parkedOutbound.count - 20)
-        }
-        print("[ConversationManager] Parked undeliverable reply (\(parkedOutbound.count) queued) — will retry when the channel recovers")
+        let queued = parkedOutbound.park(text, address: address)
+        print("[ConversationManager] Parked undeliverable reply (\(queued) queued) — will retry when the channel recovers")
     }
 
     /// Re-attempt parked replies in order; stops at the first failure so a
     /// still-broken channel isn't hammered. Called from the poll loop's
-    /// success path and after any successful send.
+    /// success path and after any successful send; a flush already in
+    /// progress makes this a no-op (the running flush drains new items too).
     private func flushParkedOutbound() async {
-        guard !parkedOutbound.isEmpty else { return }
-        while let item = parkedOutbound.first {
-            guard let channel = channels[item.address.kind] else {
-                parkedOutbound.removeFirst()
-                continue
-            }
-            do {
+        await parkedOutbound.flush(
+            deliver: { [weak self] item in
+                guard let self, let channel = self.channels[item.address.kind] else { return false }
                 try await channel.sendText(chatId: item.address.chatId, text: item.text)
-                parkedOutbound.removeFirst()
-                print("[ConversationManager] Delivered parked reply (\(parkedOutbound.count) left)")
-            } catch {
-                return
+                return true
+            },
+            onDelivered: { _, left in
+                print("[ConversationManager] Delivered parked reply (\(left) left)")
             }
-        }
+        )
     }
 
     /// Immediate delivery for the mid_turn_message_user tool. The message is
