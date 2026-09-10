@@ -279,6 +279,12 @@ actor OpenAIImageService {
             throw OpenAIImageError.notConfigured
         }
 
+        // The operation is bound to the configuration it started with. Every
+        // value below is captured before the first suspension; `configure`
+        // running while a request is in flight cannot change the key that is
+        // billed, the options that are sent, or the key a refusal is
+        // remembered against — including on the fallback attempt.
+        let operationKey = apiKey
         let resolvedSize = OpenAIImageSize.parse(imageSize)?.rawValue
         let options = try OpenAIImageOptions.resolve(
             engine: engine, fastModel: model, preciseModel: preciseModel,
@@ -291,6 +297,20 @@ actor OpenAIImageService {
             defaultValue: self.moderation,
             allowedValues: ["auto", "low"]
         )
+        // Verification fallback: only a GPT Image 2.5 target, only the
+        // organisation-verification refusal (HTTP 403 "must be verified"),
+        // exactly one retry on the fallback model. Every other failure, and a
+        // refusal on any other model (including the fallback itself), surfaces.
+        // The fallback options are resolved here, from the same configured
+        // defaults as the primary options, never after an await.
+        let fallbackEligible = OpenAIImageOptions.isImage25Family(options.model)
+            && options.model != KeychainHelper.fallbackOpenAIImageModel
+        let fallbackOptions: OpenAIImageOptions? = fallbackEligible
+            ? try OpenAIImageOptions.verificationFallback(from: options,
+                quality: quality, defaultQuality: self.quality,
+                outputFormat: outputFormat, defaultOutputFormat: self.outputFormat,
+                background: background)
+            : nil
 
         func render(_ options: OpenAIImageOptions) async throws -> OpenAIImageResult {
             // output_compression is only valid for jpeg/webp. OpenAI rejects it
@@ -299,6 +319,7 @@ actor OpenAIImageService {
             let request: URLRequest
             if let sourceImageData {
                 request = try editRequest(
+                    apiKey: operationKey,
                     model: options.model,
                     prompt: prompt,
                     sourceImageData: sourceImageData,
@@ -312,6 +333,7 @@ actor OpenAIImageService {
                 )
             } else {
                 request = try generationRequest(
+                    apiKey: operationKey,
                     model: options.model,
                     prompt: prompt,
                     imageSize: resolvedSize,
@@ -326,30 +348,18 @@ actor OpenAIImageService {
             return try Self.decodeImageResponse(response, options: options)
         }
 
-        // Verification fallback: only a GPT Image 2.5 target, only the
-        // organisation-verification refusal (HTTP 403 "must be verified"),
-        // exactly one retry on the fallback model. Every other failure, and a
-        // refusal on any other model (including the fallback itself), surfaces.
-        let fallbackEligible = OpenAIImageOptions.isImage25Family(options.model)
-            && options.model != KeychainHelper.fallbackOpenAIImageModel
-        func fallbackOptions() throws -> OpenAIImageOptions {
-            try OpenAIImageOptions.verificationFallback(from: options,
-                quality: quality, defaultQuality: self.quality,
-                outputFormat: outputFormat, defaultOutputFormat: self.outputFormat,
-                background: background)
-        }
         let result: OpenAIImageResult
-        if fallbackEligible, verificationGateActive() {
-            result = try await render(try fallbackOptions())
+        if let fallbackOptions, verificationGateActive(key: operationKey) {
+            result = try await render(fallbackOptions)
         } else {
             do {
                 result = try await render(options)
             } catch let error as OpenAIImageError {
-                guard fallbackEligible, case .organizationNotVerified(let refusedModel, _) = error else { throw error }
-                rememberVerificationGate()
+                guard let fallbackOptions, case .organizationNotVerified(let refusedModel, _) = error else { throw error }
+                rememberVerificationGate(key: operationKey)
                 DebugTelemetry.log(.info, summary: "OpenAI image verification fallback",
                     detail: "\(refusedModel) refused (organisation not verified); rendering with \(KeychainHelper.fallbackOpenAIImageModel)")
-                result = try await render(try fallbackOptions())
+                result = try await render(fallbackOptions)
             }
         }
         DebugTelemetry.log(.info, summary: "OpenAI image usage",
@@ -357,18 +367,19 @@ actor OpenAIImageService {
         return result
     }
 
-    private func verificationGateActive() -> Bool {
-        guard let until = verificationGateUntil[apiKey] else { return false }
+    private func verificationGateActive(key: String) -> Bool {
+        guard let until = verificationGateUntil[key] else { return false }
         if now() < until { return true }
-        verificationGateUntil[apiKey] = nil
+        verificationGateUntil[key] = nil
         return false
     }
 
-    private func rememberVerificationGate() {
-        verificationGateUntil[apiKey] = now().addingTimeInterval(OpenAIImageOptions.verificationGateDuration)
+    private func rememberVerificationGate(key: String) {
+        verificationGateUntil[key] = now().addingTimeInterval(OpenAIImageOptions.verificationGateDuration)
     }
 
     private func generationRequest(
+        apiKey: String,
         model: String,
         prompt: String,
         imageSize: String?,
@@ -404,6 +415,7 @@ actor OpenAIImageService {
     }
 
     private func editRequest(
+        apiKey: String,
         model: String,
         prompt: String,
         sourceImageData: Data,

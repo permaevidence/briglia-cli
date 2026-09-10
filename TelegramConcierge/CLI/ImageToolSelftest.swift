@@ -184,6 +184,11 @@ struct ImageToolSelftest: AsyncParsableCommand {
         func body(_ request: URLRequest) -> [String: Any] {
             (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any]) ?? [:]
         }
+        func multipartField(_ request: URLRequest, _ name: String) -> String {
+            let text = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+            guard let range = text.range(of: "name=\"\(name)\"\r\n\r\n") else { return "" }
+            return text[range.upperBound...].components(separatedBy: "\r\n").first ?? ""
+        }
         let fallbackModel = KeychainHelper.fallbackOpenAIImageModel
         c.check("fallback model is gpt-image-2 and never a 2.5 model", fallbackModel == "gpt-image-2" && !OpenAIImageOptions.isImage25Family(fallbackModel))
 
@@ -288,6 +293,40 @@ struct ImageToolSelftest: AsyncParsableCommand {
             c.check("edit fallback reports provenance and format", edited.options.fallbackFromModel == "gpt-image-2.5-sunburst" && edited.mimeType == "image/webp")
         }
 
+        // Reconfiguration while the primary attempt is suspended (Codex R1):
+        // the fallback stays bound to the key and configured defaults the
+        // operation started with; the other key is never gated by that refusal.
+        for editing in [false, true] {
+            let transport = ImageGateTransport(gatedModels: ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"])
+            let service = makeService(transport)
+            await service.configure(apiKey: "key-A", quality: "low", outputFormat: "png")
+            await transport.pause()
+            let source = editing ? Data("source bytes".utf8) : nil
+            let pending = Task { try await service.generateImage(prompt: "started under A", sourceImageData: source, sourceMimeType: "image/png") }
+            for _ in 0..<200 {
+                if await transport.isWaiting { break }
+                try await Task.sleep(nanoseconds: 5_000_000)
+            }
+            c.check("\(editing ? "edit" : "generation") suspended in transport", await transport.isWaiting)
+            await service.configure(apiKey: "key-B", quality: "high", outputFormat: "webp")
+            await transport.resume()
+            let result = try await pending.value
+            let requests = await transport.requests
+            func model(_ request: URLRequest) -> String { editing ? multipartField(request, "model") : (body(request)["model"] as? String ?? "") }
+            func quality(_ request: URLRequest) -> String { editing ? multipartField(request, "quality") : (body(request)["quality"] as? String ?? "") }
+            func format(_ request: URLRequest) -> String { editing ? multipartField(request, "output_format") : (body(request)["output_format"] as? String ?? "") }
+            c.check("\(editing ? "edit" : "generation") fallback keeps the original key", requests.count == 2 && requests[1].value(forHTTPHeaderField: "Authorization") == "Bearer key-A" && requests[0].value(forHTTPHeaderField: "Authorization") == "Bearer key-A")
+            c.check("\(editing ? "edit" : "generation") fallback keeps the original configured quality and format", model(requests[1]) == fallbackModel && quality(requests[1]) == "low" && format(requests[1]) == "png" && quality(requests[0]) == "low" && format(requests[0]) == "png")
+            c.check("\(editing ? "edit" : "generation") fallback result reflects the original operation", result.options.quality == "low" && result.options.outputFormat == "png" && result.options.fallbackFromModel == "gpt-image-2.5-flare" && result.options.notes.count == 1)
+            let underB = try await service.generateImage(prompt: "B is not gated", sourceImageData: source, sourceMimeType: "image/png")
+            let afterB = await transport.requests
+            c.check("\(editing ? "edit" : "generation") key B is not gated by A's refusal", afterB.count == 4 && afterB[2].value(forHTTPHeaderField: "Authorization") == "Bearer key-B" && model(afterB[2]) == "gpt-image-2.5-flare" && quality(afterB[2]) == "high" && format(afterB[2]) == "webp" && underB.options.fallbackFromModel == "gpt-image-2.5-flare")
+            await service.configure(apiKey: "key-A", quality: "low", outputFormat: "png")
+            _ = try await service.generateImage(prompt: "A observes its gate", sourceImageData: source, sourceMimeType: "image/png")
+            let afterA = await transport.requests
+            c.check("\(editing ? "edit" : "generation") returning to key A observes A's gate", afterA.count == 5 && afterA[4].value(forHTTPHeaderField: "Authorization") == "Bearer key-A" && model(afterA[4]) == fallbackModel)
+        }
+
         // /stop during the fallback attempt is a cancellation, not a retry.
         do {
             let transport = ImageGateTransport(gatedModels: ["gpt-image-2.5-flare"], cancelOnFallback: true)
@@ -383,6 +422,11 @@ private actor ImageGateTransport {
     let fixedFailure: (Int, String)?
     let cancelOnFallback: Bool
     var requests: [URLRequest] = []
+    private var paused = false
+    private var waiting: CheckedContinuation<Void, Never>?
+    var isWaiting: Bool { waiting != nil }
+    func pause() { paused = true }
+    func resume() { paused = false; waiting?.resume(); waiting = nil }
     init(gatedModels: Set<String>, fixedFailure: (Int, String)? = nil, cancelOnFallback: Bool = false) {
         self.gatedModels = gatedModels
         self.fixedFailure = fixedFailure
@@ -391,6 +435,7 @@ private actor ImageGateTransport {
     func setGatedModels(_ models: Set<String>) { gatedModels = models }
     func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
         requests.append(request)
+        if paused { await withCheckedContinuation { waiting = $0 } }
         let text = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
         let model: String
         if let object = try? JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any], let json = object["model"] as? String {
