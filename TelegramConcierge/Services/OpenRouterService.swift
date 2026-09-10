@@ -290,7 +290,7 @@ actor OpenRouterService {
         }
     }()
 
-    private static func isOpenCodeReasoningContentModel(_ model: String) -> Bool {
+    static func isOpenCodeReasoningContentModel(_ model: String) -> Bool {
         let normalized = model.lowercased()
         // Any Kimi K2.x (k2.6, k2.7-code, ...) or K3.x; "p" covers providers
         // that normalize the dot (kimi-k2p6).
@@ -300,6 +300,9 @@ actor OpenRouterService {
             // Covers -pro and -flash; both verified to emit/replay
             // reasoning_content identically (2026-08-05).
             || normalized.contains("deepseek-v4")
+            // V4.1 Flash ships as the unversioned "deepseek-flash" on the Go
+            // gateway; same emit/replay behavior (verified 2026-09-10).
+            || normalized.contains("deepseek-flash")
             || Self.isOpenCodeGLMReasoningModel(normalized)
             || normalized.contains("minimax-")
             // Qwen 3.x on the Go gateway emits/replays reasoning_content and

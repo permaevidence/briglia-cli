@@ -1110,6 +1110,17 @@ enum OpenCodeGo {
         // caching — verified 2026-08-22. "-exp" = experimental upstream:
         // may be renamed, repriced, or gated later.
         ("deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision (experimental)", false),
+        // OpenCode's id for DeepSeek V4.1 Flash (models.dev opencode-go, released
+        // 2026-09-10) is the unversioned "deepseek-flash". Same contract as the
+        // V4 entries, verified live 2026-09-10 side by side with
+        // deepseek-v4-flash-vision-exp: reasoning_content on plain and
+        // tool-call turns, replay with/without reasoning_content accepted,
+        // all six effort levels unchanged, thinking:{enabled} honored,
+        // prefix caching (cached_tokens), full vision through data-URL image
+        // parts, reasoning_tokens in usage. $0.15/$0.60 per M tokens, 1M
+        // context. Region gating unverified: probed from a workspace that
+        // already has the "Chinese models" opt-in.
+        ("deepseek-flash", "DeepSeek V4.1 Flash", false),
         // Multimodal upstream, but the Go gateway short-circuits image parts
         // (empty synthetic completion, no usage) as of 2026-08-02.
         ("gpt-5.6-luna", "GPT 5.6 Luna", true),

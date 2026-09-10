@@ -464,6 +464,8 @@ actor ConversationArchiveService {
             || normalized.contains("kimi-k3")
             // Covers -pro and -flash (same reasoning_content behavior).
             || normalized.contains("deepseek-v4")
+            // V4.1 Flash = unversioned "deepseek-flash" (2026-09-10).
+            || normalized.contains("deepseek-flash")
             || isOpenCodeGLMReasoningModel(normalized)
             || normalized.contains("minimax-")
             // Qwen 3.x: reasoning_content + all effort levels (2026-08-11).

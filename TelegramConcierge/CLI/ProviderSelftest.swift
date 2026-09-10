@@ -126,6 +126,17 @@ struct ProviderSelftest: AsyncParsableCommand {
                   !encoded.isEmpty && !encoded.contains("reasoning_history"))
         }
 
+        // 5c. Every curated OpenCode model except Luna emits/replays
+        // reasoning_content; a catalog entry the predicate does not recognize
+        // would be driven without reasoning_history and with its reasoning
+        // dropped from replay (the shape that would have missed the
+        // unversioned "deepseek-flash" id).
+        for choice in OpenCodeGo.choices {
+            let expected = !choice.id.hasPrefix("gpt-")
+            check("curated OpenCode model \(choice.id) reasoning_content recognition is \(expected)",
+                  OpenRouterService.isOpenCodeReasoningContentModel(choice.id) == expected)
+        }
+
         // 6. Multi-profile world: save all four, hop between them, verify the
         //    runtime slots and vision state follow each hop.
         wipe(allKeys)
