@@ -46,6 +46,15 @@ executes the vendored, hash-checked UT 0.8.4 Python bridge on actual status. The
 bridge also receives hypothetical additive profile fields; that is **not** proof
 of P2 status compatibility. The actual P2 payload must pass this test later.
 
+Frozen macOS fixtures are **per runner image**: the rendered PDF pages in the
+media captures are JPEGs carrying the Apple ICC profile of the runner's OS image,
+which changes when GitHub rolls the image. CI picks the fixture by `$ImageVersion`
+and fails closed on an image without a reviewed fixture. Refresh procedure: record
+from the pinned SOURCE on the new image (a macOS-only run with the upload-on-failure
+artifact), run `scripts/chat_lifecycle_fixture_diff.py OLD NEW` and require that the
+only differences are inside the ICC profile, then add the fixture and its provenance
+in a separate reviewed commit. Never regenerate because a candidate differs.
+
 `--candidate-only` is a development diagnostic and cannot create a frozen
 reference. `--baseline` additionally compares a previously retained reference;
 never update it simply because a new implementation differs. `--keep-trees`
