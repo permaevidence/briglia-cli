@@ -611,6 +611,13 @@ actor ConversationArchiveService {
     /// that stands in for one it failed to read.
     private var indexLoadFailed = false
     private var pendingIndexLoadFailed = false
+    /// Set when the on-disk index was a regular file that decoded at the last
+    /// load. A missing index (or a symlink, dangling or not, or any other
+    /// non-regular entry) is not evidence that the raw files are disposable:
+    /// the empty in-memory index that stands in for it must never drive
+    /// untracked-file reconciliation either (Codex F1 review, 2026-09-10).
+    private var indexPresentAtLoad = false
+    private var pendingIndexPresentAtLoad = false
     private var pendingMetaIndex: PendingMetaSummaryIndex = .empty()
     private var pendingExtractions: [PendingContextExtraction] = []
     
@@ -2940,7 +2947,9 @@ actor ConversationArchiveService {
     ///
     /// Reconciled once per startup, after recovery and consolidation, under
     /// the chunk writer. Fail closed: nothing is removed unless both indexes
-    /// decoded at load AND decode again from disk now, and a file is dropped
+    /// were regular files that decoded at load AND decode again from disk now
+    /// (a missing or non-regular index is missing metadata, never an empty
+    /// one: the raw files stay as recoverable history), and a file is dropped
     /// only when neither the in-memory nor the on-disk index, nor a pending
     /// context extraction, references it. A grace hour on the modification
     /// date keeps a raw file another archive-service instance wrote moments
@@ -2950,13 +2959,24 @@ actor ConversationArchiveService {
             print("[ArchiveService] Untracked-file reconciliation skipped: an index failed to load")
             return
         }
+        // A missing index is missing metadata, not an empty one: the raw
+        // files it would have named are still recoverable history. Nothing
+        // is removed unless both indexes were regular files that decoded at
+        // load AND are regular files that decode again from disk now.
+        guard indexPresentAtLoad, pendingIndexPresentAtLoad else {
+            print("[ArchiveService] Untracked-file reconciliation skipped: an index was absent at load")
+            return
+        }
         let diskChunks: ChunkIndex
         let diskPending: PendingChunkIndex
         do {
-            diskChunks = FileManager.default.fileExists(atPath: indexFileURL.path)
-                ? try JSONDecoder().decode(ChunkIndex.self, from: Data(contentsOf: indexFileURL)) : .empty()
-            diskPending = FileManager.default.fileExists(atPath: pendingIndexFileURL.path)
-                ? try JSONDecoder().decode(PendingChunkIndex.self, from: Data(contentsOf: pendingIndexFileURL)) : .empty()
+            guard Self.metadataFileType(at: indexFileURL) == .typeRegular,
+                  Self.metadataFileType(at: pendingIndexFileURL) == .typeRegular else {
+                print("[ArchiveService] Untracked-file reconciliation skipped: an index is no longer a regular file on disk")
+                return
+            }
+            diskChunks = try JSONDecoder().decode(ChunkIndex.self, from: Data(contentsOf: indexFileURL))
+            diskPending = try JSONDecoder().decode(PendingChunkIndex.self, from: Data(contentsOf: pendingIndexFileURL))
         } catch {
             print("[ArchiveService] Untracked-file reconciliation skipped: could not re-read an index: \(error)")
             return
@@ -2993,12 +3013,21 @@ actor ConversationArchiveService {
         }
     }
 
+    /// The entry's own type (lstat semantics: a symlink reports as a symlink,
+    /// dangling or not), or nil when nothing exists at the path.
+    private static func metadataFileType(at url: URL) -> FileAttributeType? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+        return attributes[.type] as? FileAttributeType
+    }
+
     private func loadIndex() {
         indexLoadFailed = false
-        guard FileManager.default.fileExists(atPath: indexFileURL.path) else { return }
+        indexPresentAtLoad = false
+        guard let type = Self.metadataFileType(at: indexFileURL) else { return }
         do {
             let data = try Data(contentsOf: indexFileURL)
             chunkIndex = try JSONDecoder().decode(ChunkIndex.self, from: data)
+            indexPresentAtLoad = type == .typeRegular
             print("[ArchiveService] Loaded \(chunkIndex.chunks.count) chunks from index")
         } catch {
             indexLoadFailed = true
@@ -3017,10 +3046,12 @@ actor ConversationArchiveService {
     
     private func loadPendingIndex() {
         pendingIndexLoadFailed = false
-        guard FileManager.default.fileExists(atPath: pendingIndexFileURL.path) else { return }
+        pendingIndexPresentAtLoad = false
+        guard let type = Self.metadataFileType(at: pendingIndexFileURL) else { return }
         do {
             let data = try Data(contentsOf: pendingIndexFileURL)
             pendingIndex = try JSONDecoder().decode(PendingChunkIndex.self, from: data)
+            pendingIndexPresentAtLoad = type == .typeRegular
             if !pendingIndex.pendingChunks.isEmpty {
                 print("[ArchiveService] Loaded \(pendingIndex.pendingChunks.count) pending chunk(s) awaiting recovery")
             }

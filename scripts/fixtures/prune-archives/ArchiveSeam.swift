@@ -388,6 +388,54 @@ extension ConversationArchiveService {
         await restartedAgain.recoverPendingChunks()
         try SnapshotOwnerInputs.check(!exists(orphanFile) && exists(healthy.rawContentFileName) && server.completeRequests.count == requests,
             "restart after a post-rename settlement failure removes the deferred orphan without a model call")
+
+        // (3) Missing metadata is not a deletion receipt (Codex F1 review):
+        // a tracked raw file whose index has disappeared before the restart,
+        // an untracked-but-recoverable file with the pending index gone, a
+        // dangling index symlink, and an index that vanishes between load and
+        // reconciliation must all leave the raw files in place.
+        let survivor = healthy.rawContentFileName
+        func restartAndReconcile() async {
+            let instance = ConversationArchiveService(); await instance.configure(apiKey: "fixture-key")
+            await instance.recoverPendingChunks()
+        }
+        let chunkIndexBytes = try Data(contentsOf: indexFileURL)
+        let pendingIndexBytes = try Data(contentsOf: pendingIndexFileURL)
+        try FileManager.default.removeItem(at: indexFileURL)
+        await restartAndReconcile()
+        try SnapshotOwnerInputs.check(exists(survivor) && exists(sidecarName(survivor)),
+            "a missing chunk index at restart preserves the archived raw file and sidecar")
+        try PrivateStorage.writeAtomically(chunkIndexBytes, to: indexFileURL)
+
+        let strandedID = UUID(); let stranded = strandedID.uuidString + ".json"
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(batch), to: archiveFolder.appendingPathComponent(stranded))
+        try age(stranded, seconds: 2 * 3600)
+        try FileManager.default.removeItem(at: pendingIndexFileURL)
+        await restartAndReconcile()
+        try SnapshotOwnerInputs.check(exists(stranded) && exists(survivor),
+            "a missing pending index at restart preserves untracked raw files too")
+        try PrivateStorage.writeAtomically(pendingIndexBytes, to: pendingIndexFileURL)
+
+        try FileManager.default.removeItem(at: indexFileURL)
+        try FileManager.default.createSymbolicLink(at: indexFileURL, withDestinationURL: archiveFolder.appendingPathComponent("no-such-index.json"))
+        await restartAndReconcile()
+        try SnapshotOwnerInputs.check(exists(stranded) && exists(survivor),
+            "a dangling chunk-index symlink at restart is not an empty index")
+        try FileManager.default.removeItem(at: indexFileURL)
+        try PrivateStorage.writeAtomically(chunkIndexBytes, to: indexFileURL)
+
+        let loadedThenLost = ConversationArchiveService(); await loadedThenLost.configure(apiKey: "fixture-key")
+        try FileManager.default.removeItem(at: pendingIndexFileURL)
+        await loadedThenLost.recoverPendingChunks()
+        try SnapshotOwnerInputs.check(exists(stranded) && exists(survivor),
+            "an index that vanishes between load and reconciliation blocks removal")
+        try PrivateStorage.writeAtomically(pendingIndexBytes, to: pendingIndexFileURL)
+
+        // With both indexes back, the same stranded file is reconciled away
+        // and the tracked file survives: the guards did not disable cleanup.
+        await restartAndReconcile()
+        try SnapshotOwnerInputs.check(!exists(stranded) && exists(survivor) && exists(sidecarName(survivor)),
+            "restored indexes reconcile the stranded file and keep the tracked one")
         reloadFromDisk()
         server.clear()
     }
