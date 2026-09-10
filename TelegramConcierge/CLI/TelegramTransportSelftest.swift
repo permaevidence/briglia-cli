@@ -63,7 +63,10 @@ struct TelegramTransportSelftest: AsyncParsableCommand {
                   { if case .transport = error as? TelegramError { return true } else { return false } }(),
                   String(describing: type(of: error)))
             check("rendered getUpdates error carries no token", !rendered.contains(secret), rendered)
-            check("rendered getUpdates error carries no URL", !rendered.contains("telegram-transport-selftest.invalid"), rendered)
+            // Linux's FoundationNetworking (curl) names the HOST in its
+            // description ("Could not resolve host: …"); that is not a
+            // secret. The invariant is the token-bearing PATH never appears.
+            check("rendered getUpdates error carries no token path", !rendered.contains("/bot") && !rendered.contains("getUpdates"), rendered)
             check("localizedDescription carries no token", !error.localizedDescription.contains(secret), error.localizedDescription)
             check("rendered error is readable", rendered.hasPrefix("Telegram network error ("), rendered)
         }
