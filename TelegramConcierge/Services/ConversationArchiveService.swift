@@ -2309,7 +2309,6 @@ actor ConversationArchiveService {
             let reasoning: ReasoningConfig?
             let reasoning_effort: String?
             let thinking: ThinkingConfig?
-            let reasoning_history: String?
         }
         
         struct Response: Decodable {
@@ -2344,13 +2343,11 @@ actor ConversationArchiveService {
         let archiveReasoningConfig: Request.ReasoningConfig?
         let archiveReasoningEffort: String?
         let archiveThinking: Request.ThinkingConfig?
-        let archiveReasoningHistory: String?
         switch currentProvider {
         case .openRouter:
             archiveReasoningConfig = reasoningEffort.map { .init(effort: $0) }
             archiveReasoningEffort = nil
             archiveThinking = nil
-            archiveReasoningHistory = nil
         case .openAICompatible:
             archiveReasoningConfig = nil
             if let thinkingType = openCodeThinkingType {
@@ -2362,13 +2359,10 @@ actor ConversationArchiveService {
                     : reasoningEffort
                 archiveThinking = nil
             }
-            archiveReasoningHistory = usesOpenCodeReasoningContent
-                ? OpenRouterService.openCodeReasoningHistory(forReasoningContentModel: model) : nil
         case .lmStudio:
             archiveReasoningConfig = nil
             archiveReasoningEffort = nil
             archiveThinking = nil
-            archiveReasoningHistory = nil
         }
 
         for attempt in 0...4 {
@@ -2378,8 +2372,7 @@ actor ConversationArchiveService {
                 max_tokens: maxTokens,
                 reasoning: archiveReasoningConfig,
                 reasoning_effort: archiveReasoningEffort,
-                thinking: archiveThinking,
-                reasoning_history: archiveReasoningHistory
+                thinking: archiveThinking
             )
 
             var request = URLRequest(url: baseURL)

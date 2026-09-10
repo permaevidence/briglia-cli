@@ -111,15 +111,19 @@ struct ProviderSelftest: AsyncParsableCommand {
               ProviderProfiles.activeProfile() == .local
               && ProviderProfiles.isConfigured(.local))
 
-        // 5b. OpenCode `reasoning_history`: Fireworks/Kimi-only parameter.
-        // Kimi K3 on the Go gateway rejects it with HTTP 400 on every request
-        // since 2026-09-01; the other reasoning_content models still take it.
-        for (model, expected) in [("kimi-k3", nil), ("kimi-k3-0901", nil), ("KIMI-K3", nil),
-                                  ("kimi-k2.6", "preserved"), ("kimi-k2.7-code", "preserved"),
-                                  ("glm-5.3-flash", "preserved"), ("minimax-m3", "preserved"),
-                                  ("qwen3.8-max", "preserved"), ("deepseek-v4-flash", "preserved")] as [(String, String?)] {
-            check("reasoning_history for \(model) is \(expected.map { "\"\($0)\"" } ?? "omitted")",
-                  OpenRouterService.openCodeReasoningHistory(forReasoningContentModel: model) == expected)
+        // 5b. `reasoning_history` is gone from the wire: the Fireworks/Kimi flag
+        // was inert on every OpenCode backend (measured 2026-09-10 on kimi-k2.6,
+        // glm-5.3-flash, qwen3.8-max, deepseek-flash: identical behaviour and
+        // billing with or without it) and rejected outright by the backends
+        // that serve Kimi K3 (since 2026-09-01) and GLM ("Console Go", since
+        // 2026-09-10). The request type has no such field any more, so no
+        // model-specific rule can bring it back.
+        for model in ["kimi-k2.6", "kimi-k2.7-code", "kimi-k3", "glm-5.3-flash", "qwen3.8-max", "deepseek-flash", "minimax-m3"] {
+            let body = OpenRouterRequest(model: model, messages: [], tools: nil, provider: nil,
+                                         reasoning: nil, reasoningEffort: "high", thinking: nil)
+            let encoded = String(decoding: (try? JSONEncoder().encode(body)) ?? Data(), as: UTF8.self)
+            check("no reasoning_history in the encoded request for \(model)",
+                  !encoded.isEmpty && !encoded.contains("reasoning_history"))
         }
 
         // 6. Multi-profile world: save all four, hop between them, verify the

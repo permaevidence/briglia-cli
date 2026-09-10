@@ -123,7 +123,7 @@ struct ChatAdapterSelftest: AsyncParsableCommand {
         let routerContext = ProviderExecutionContext(provider: .openRouter, model: "synthetic-model",
             endpoint: endpoint, authorization: "Bearer synthetic-router", affinityKey: "synthetic-router",
             lane: .main, provenance: "synthetic-model#openrouter", providerPreferences: nil,
-            reasoning: nil, reasoningEffort: nil, thinkingType: nil, reasoningHistory: nil,
+            reasoning: nil, reasoningEffort: nil, thinkingType: nil,
             useReasoningContent: false, textOnly: false, anthropicCacheControl: false,
             renderPDFAsImages: true)
         let routerRequest = try ChatCompletionsAdapter(context: routerContext).makeRequest(messages: [], tools: nil)

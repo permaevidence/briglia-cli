@@ -308,21 +308,6 @@ actor OpenRouterService {
             || normalized.contains("qwen3.")
     }
 
-    /// Fireworks/Kimi `reasoning_history: "preserved"` — sent with every
-    /// OpenCode reasoning_content model EXCEPT Kimi K3: since 2026-09-01 the
-    /// Go gateway serves K3 from an upstream that answers OpenRouter-style
-    /// (`reasoning` + `reasoning_details`, no `reasoning_content`) and
-    /// rejects the parameter outright — HTTP 400 "Unsupported request
-    /// parameter(s): reasoning_history" on EVERY request, plain or replay.
-    /// K3 accepts every replay shape (reasoning_content, reasoning_details,
-    /// none) and `thinking`/`reasoning_effort` unchanged (verified live
-    /// against kimi-k3, kimi-k2.6, glm-5.3-flash, minimax-m3, qwen3.8-max:
-    /// only K3 rejects it). One rule for the main loop AND the archive
-    /// summarizer — the two used to duplicate the string.
-    static func openCodeReasoningHistory(forReasoningContentModel model: String) -> String? {
-        model.lowercased().contains("kimi-k3") ? nil : "preserved"
-    }
-
     private static func isOpenCodeGLMReasoningModel(_ normalizedModel: String) -> Bool {
         normalizedModel.contains("glm-5.1") || normalizedModel.contains("glm-5.2")
             // Emits/replays reasoning_content like 5.1/5.2 (plain + tool-call
@@ -1325,7 +1310,7 @@ actor OpenRouterService {
                 authorization: "Bearer " + key, affinityKey: key, lane: lane,
                 provenance: model + "#responses", providerPreferences: nil, reasoning: nil,
                 reasoningEffort: selectedEffort.flatMap { $0.isEmpty ? nil : $0 } ?? stored[KeychainHelper.openAICompatibleReasoningEffortKey],
-                thinkingType: nil, reasoningHistory: nil, useReasoningContent: false,
+                thinkingType: nil, useReasoningContent: false,
                 textOnly: textOnlyOverride ?? (stored[KeychainHelper.textOnlyModelEnabledKey] == "true"),
                 anthropicCacheControl: false, renderPDFAsImages: true, wireProtocol: .responses,
                 profileIdentity: stored[ProviderProfiles.activeProfileKey] ?? "custom",
@@ -1395,8 +1380,6 @@ actor OpenRouterService {
             lane: lane, provenance: effectiveProvenance,
             providerPreferences: providerPrefs, reasoning: reasoningConfig,
             reasoningEffort: reasoningEffortField, thinkingType: openCodeThinkingType,
-            reasoningHistory: useReasoningContent
-                ? Self.openCodeReasoningHistory(forReasoningContentModel: effectiveModel) : nil,
             useReasoningContent: useReasoningContent,
             textOnly: textOnlyOverride ?? isTextOnlyModel,
             anthropicCacheControl: isAnthropicModel,
@@ -2941,8 +2924,6 @@ struct OpenRouterRequest: Codable {
     /// Fireworks/Kimi thinking toggle. Used for Kimi K2.x on OpenCode Go; must not
     /// be sent together with `reasoning_effort`.
     var thinking: ThinkingConfig? = nil
-    /// Fireworks/Kimi prompt-formatting control for historical reasoning content.
-    var reasoningHistory: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case model
@@ -2952,7 +2933,6 @@ struct OpenRouterRequest: Codable {
         case reasoning
         case reasoningEffort = "reasoning_effort"
         case thinking
-        case reasoningHistory = "reasoning_history"
     }
 }
 

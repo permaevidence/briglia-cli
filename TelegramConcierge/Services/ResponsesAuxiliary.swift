@@ -19,7 +19,7 @@ extension ProviderExecutionContext {
         var context = ProviderExecutionContext(provider: .openAICompatible, model: model, endpoint: baseURL,
             authorization: "Bearer \(key)", affinityKey: key, lane: lane, provenance: model + "#responses",
             providerPreferences: nil, reasoning: nil, reasoningEffort: effort, thinkingType: nil,
-            reasoningHistory: nil, useReasoningContent: false, textOnly: false,
+            useReasoningContent: false, textOnly: false,
             anthropicCacheControl: false, renderPDFAsImages: true, wireProtocol: .responses,
             profileIdentity: "explicit-api")
         switch lane {

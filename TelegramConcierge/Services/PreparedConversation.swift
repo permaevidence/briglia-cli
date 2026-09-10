@@ -31,7 +31,6 @@ struct ProviderExecutionContext {
     let reasoning: ReasoningConfig?
     let reasoningEffort: String?
     let thinkingType: String?
-    let reasoningHistory: String?
     let useReasoningContent: Bool
     let textOnly: Bool
     let anthropicCacheControl: Bool

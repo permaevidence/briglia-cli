@@ -26,8 +26,7 @@ struct ChatCompletionsAdapter {
             provider: context.providerPreferences,
             reasoning: context.reasoning,
             reasoningEffort: context.reasoningEffort,
-            thinking: context.thinkingType.map { ThinkingConfig(type: $0) },
-            reasoningHistory: context.reasoningHistory
+            thinking: context.thinkingType.map { ThinkingConfig(type: $0) }
         )
 
         let url = URL(string: context.endpoint)!
