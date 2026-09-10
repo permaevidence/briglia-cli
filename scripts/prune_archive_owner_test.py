@@ -27,6 +27,9 @@ try:
     text = storage.read_text(); anchor = '        guard rename(tmp.path, target) == 0 else {'
     assert text.count(anchor) == 1
     storage.write_text(text.replace(anchor, '        do { try SnapshotOwnerInputs.storageFault(target) } catch { unlink(tmp.path); throw error }\n' + anchor))
+    text = storage.read_text(); flush = '        try fsyncDirectory(dir.path)\n'
+    assert text.count(flush) == 1
+    storage.write_text(text.replace(flush, flush + '        try SnapshotOwnerInputs.postRenameFault(target)\n'))
     main = tree / 'TelegramConcierge/CLI/AdaMain.swift'
     source = main.read_text(); assert source.count('PruneArchiveSelftest.self,') == 1
     main.write_text(source.replace('PruneArchiveSelftest.self,', 'PruneArchiveSelftest.self, SnapshotOwnerSelftest.self,'))

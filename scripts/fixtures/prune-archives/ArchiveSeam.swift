@@ -302,3 +302,95 @@ extension ConversationArchiveService {
         server.clear()
     }
 }
+
+extension ConversationArchiveService {
+    /// Bree's 0.2.15 follow-up (F1): a pending-index write that fails AFTER
+    /// the rename leaves the replaced index on disk while the caller keeps
+    /// the raw file for a retry. A restart before that retry must reconcile
+    /// the untracked file instead of leaving it behind forever.
+    func postRenameFaultChecks(server: CaptureServer) async throws {
+        let summary = String(repeating: "visible message summary ", count: 110)
+        func diskPending() throws -> [UUID] {
+            try JSONDecoder().decode(PendingChunkIndex.self, from: Data(contentsOf: pendingIndexFileURL)).pendingChunks.map(\.id)
+        }
+        func exists(_ name: String) -> Bool { FileManager.default.fileExists(atPath: archiveFolder.appendingPathComponent(name).path) }
+        func sidecarName(_ name: String) -> String { (name as NSString).deletingPathExtension + ".txt" }
+        func age(_ name: String, seconds: TimeInterval) throws {
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-seconds)],
+                                                  ofItemAtPath: archiveFolder.appendingPathComponent(name).path)
+        }
+        try SnapshotOwnerInputs.check(pendingIndex.pendingChunks.isEmpty && (try diskPending()).isEmpty, "post-rename fixture starts with an empty queue")
+        let base = Date().addingTimeInterval(-600)
+
+        // (1) Summary-failure cleanup: the record write passes, the cleanup
+        // write is replaced on disk and then throws.
+        let batch = [Message(role: .user, content: "post-rename request", timestamp: base),
+                     Message(role: .assistant, content: "post-rename answer", timestamp: base.addingTimeInterval(1))]
+        server.clear()
+        server.script([try SnapshotOwnerInputs.response("too short")])
+        SnapshotOwnerInputs.postRenameSuffix = "/" + pendingIndexFileURL.lastPathComponent
+        SnapshotOwnerInputs.postRenameSkip = 1; SnapshotOwnerInputs.postRenameRemaining = 1
+        var thrown = false
+        do { _ = try await archiveMessages(batch) } catch { thrown = true }
+        SnapshotOwnerInputs.postRenameSuffix = nil
+        let record = pendingIndex.pendingChunks.first { Set($0.sourceMessageIDs ?? []) == Set(batch.map(\.id)) }
+        try SnapshotOwnerInputs.check(thrown && SnapshotOwnerInputs.postRenameRemaining == 0 && record != nil
+            && (try diskPending()).isEmpty && exists(record!.rawContentFileName) && exists(sidecarName(record!.rawContentFileName)),
+            "post-rename cleanup failure leaves the record in memory only, raw file and sidecar kept")
+        // The in-process retry still settles it (memory carries the record).
+        // Here the process "restarts" instead: a fresh instance loads the
+        // replaced index and finds nothing to recover.
+        let rawAfterCleanup = record!.rawContentFileName
+        pendingIndex.pendingChunks = []
+        let restarted = ConversationArchiveService(); await restarted.configure(apiKey: "fixture-key")
+        let restartedPending = await restarted.pendingRecordCount()
+        try SnapshotOwnerInputs.check(restartedPending == 0 && exists(rawAfterCleanup), "restarted instance sees no record for the kept raw file")
+        // Fresh files are outside the grace window: untouched.
+        await restarted.recoverPendingChunks()
+        try SnapshotOwnerInputs.check(exists(rawAfterCleanup) && exists(sidecarName(rawAfterCleanup)), "reconciliation keeps untracked files younger than the grace hour")
+        try age(rawAfterCleanup, seconds: 2 * 3600)
+        // A tracked file of the same age must survive: archive a healthy chunk and age it too.
+        server.script([try SnapshotOwnerInputs.response(summary), try SnapshotOwnerInputs.response("NO_CHANGES")])
+        let healthy = try await restarted.archiveMessages([Message(role: .user, content: "healthy request", timestamp: base.addingTimeInterval(30)),
+                                                           Message(role: .assistant, content: "healthy answer", timestamp: base.addingTimeInterval(31))])
+        try age(healthy.rawContentFileName, seconds: 2 * 3600)
+        // Fail-closed guard: an unreadable chunk index on disk blocks reconciliation.
+        let indexBytes = try Data(contentsOf: indexFileURL)
+        try PrivateStorage.writeAtomically(Data("not json".utf8), to: indexFileURL)
+        await restarted.recoverPendingChunks()
+        try SnapshotOwnerInputs.check(exists(rawAfterCleanup), "reconciliation skips when an index cannot be re-read from disk")
+        try PrivateStorage.writeAtomically(indexBytes, to: indexFileURL)
+        await restarted.recoverPendingChunks()
+        try SnapshotOwnerInputs.check(!exists(rawAfterCleanup) && !exists(sidecarName(rawAfterCleanup))
+            && exists(healthy.rawContentFileName) && exists(sidecarName(healthy.rawContentFileName)),
+            "restart reconciliation removes the untracked raw file and sidecar, keeps tracked files")
+
+        // (2) Recovery settlement: the settle write is replaced on disk and
+        // then throws; orphan cleanup is deferred, then the process restarts.
+        reloadFromDisk()
+        let coveredID = UUID(); let orphanFile = coveredID.uuidString + ".json"
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(batch), to: archiveFolder.appendingPathComponent(orphanFile))
+        let coveringSource = healthy.sourceMessageIDs ?? []
+        pendingIndex.pendingChunks = [PendingChunk(id: coveredID, startDate: healthy.startDate.addingTimeInterval(5), endDate: healthy.endDate.addingTimeInterval(5),
+            tokenCount: 10, messageCount: 2, rawContentFileName: orphanFile, createdAt: healthy.startDate, sourceMessageIDs: coveringSource)]
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(pendingIndex), to: pendingIndexFileURL)
+        SnapshotOwnerInputs.postRenameSuffix = "/" + pendingIndexFileURL.lastPathComponent
+        SnapshotOwnerInputs.postRenameSkip = 0; SnapshotOwnerInputs.postRenameRemaining = 1
+        let requests = server.completeRequests.count
+        await recoverPendingChunks()
+        SnapshotOwnerInputs.postRenameSuffix = nil
+        try SnapshotOwnerInputs.check(SnapshotOwnerInputs.postRenameRemaining == 0 && server.completeRequests.count == requests
+            && pendingIndex.pendingChunks.map(\.id) == [coveredID] && (try diskPending()).isEmpty && exists(orphanFile),
+            "post-rename settlement failure keeps the record in memory only and defers the orphan")
+        pendingIndex.pendingChunks = []
+        let restartedAgain = ConversationArchiveService(); await restartedAgain.configure(apiKey: "fixture-key")
+        try age(orphanFile, seconds: 2 * 3600)
+        await restartedAgain.recoverPendingChunks()
+        try SnapshotOwnerInputs.check(!exists(orphanFile) && exists(healthy.rawContentFileName) && server.completeRequests.count == requests,
+            "restart after a post-rename settlement failure removes the deferred orphan without a model call")
+        reloadFromDisk()
+        server.clear()
+    }
+
+    func pendingRecordCount() -> Int { pendingIndex.pendingChunks.count }
+}

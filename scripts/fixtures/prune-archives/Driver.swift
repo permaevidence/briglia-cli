@@ -16,6 +16,18 @@ enum SnapshotOwnerInputs {
         faultRemaining -= 1
         throw PruneArchiveStore.Failure("injected write failure: " + faultSuffix)
     }
+    static var postRenameSuffix: String?
+    static var postRenameSkip = 0
+    static var postRenameRemaining = 0
+    /// Injected by the runner AFTER the rename and directory flush: the new
+    /// file is in place, the write still throws — the directory-fsync
+    /// failure shape of `PrivateStorage.replaceContents`.
+    static func postRenameFault(_ target: String) throws {
+        guard let postRenameSuffix, target.hasSuffix(postRenameSuffix), postRenameRemaining > 0 else { return }
+        if postRenameSkip > 0 { postRenameSkip -= 1; return }
+        postRenameRemaining -= 1
+        throw PruneArchiveStore.Failure("injected post-rename failure: " + postRenameSuffix)
+    }
     static func check(_ okay: Bool, _ label: String) throws {
         guard okay else { throw Failure(label) }; count += 1; print("PASS: " + label)
     }
@@ -87,6 +99,7 @@ struct SnapshotOwnerSelftest: AsyncParsableCommand {
         try await archive.staleReceiptChecks(server: server)
         try await archive.injectedPendingWriteChecks(server: server)
         try await archive.recoveryWriteFaultChecks(server: server)
+        try await archive.postRenameFaultChecks(server: server)
         let bytes = try PruneArchiveStore.entries(validateComplete: true).map { $0.reference.basename }
         for scope in [MindExportService.ExportScope.full, .lite] {
             let destination = output.map { URL(fileURLWithPath: $0) } ?? root

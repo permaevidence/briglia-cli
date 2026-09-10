@@ -606,6 +606,11 @@ actor ConversationArchiveService {
 
     private var chunkIndex: ChunkIndex = .empty()
     private var pendingIndex: PendingChunkIndex = .empty()
+    /// Set when the on-disk index could not be decoded at the last load.
+    /// Untracked-file reconciliation must never run against an empty index
+    /// that stands in for one it failed to read.
+    private var indexLoadFailed = false
+    private var pendingIndexLoadFailed = false
     private var pendingMetaIndex: PendingMetaSummaryIndex = .empty()
     private var pendingExtractions: [PendingContextExtraction] = []
     
@@ -849,6 +854,7 @@ actor ConversationArchiveService {
         if recoveredPendingChunks {
             await checkAndConsolidate(notifyStatus: false)
         }
+        reconcileUntrackedRawFiles()
         await recoverPendingMetaSummaries()
         // Drain queues left by past give-ups. This whole recovery pass runs in a
         // background task (scheduleArchiveRecovery), so a restart with a healthy
@@ -2916,13 +2922,86 @@ actor ConversationArchiveService {
 
     // MARK: - Persistence
     
+    // MARK: - Untracked raw files
+
+    /// Raw chunk files that no index references any more.
+    ///
+    /// `PrivateStorage.writeAtomically` moves the new index into place and
+    /// THEN flushes its directory; when that flush fails the write throws with
+    /// the replaced index already on disk. The summary-failure cleanup in
+    /// `archiveMessages` and the settlement in `recoverPendingChunks` treat
+    /// that throw as "the record is still there" and keep (or skip deleting)
+    /// the raw file so a retry can finish — correct while the process lives,
+    /// because memory still carries the record. After a restart nothing does:
+    /// the record is gone from disk, no chunk names the file, and the sidecar
+    /// pruner keeps the .txt while its .json sibling exists. The file is
+    /// harmless to the live conversation (its messages were never removed, or
+    /// were archived under another chunk) but keeps old text on disk forever.
+    ///
+    /// Reconciled once per startup, after recovery and consolidation, under
+    /// the chunk writer. Fail closed: nothing is removed unless both indexes
+    /// decoded at load AND decode again from disk now, and a file is dropped
+    /// only when neither the in-memory nor the on-disk index, nor a pending
+    /// context extraction, references it. A grace hour on the modification
+    /// date keeps a raw file another archive-service instance wrote moments
+    /// before its pending record. Never triggered by a failed save.
+    private func reconcileUntrackedRawFiles(graceInterval: TimeInterval = 3600) {
+        guard !indexLoadFailed, !pendingIndexLoadFailed else {
+            print("[ArchiveService] Untracked-file reconciliation skipped: an index failed to load")
+            return
+        }
+        let diskChunks: ChunkIndex
+        let diskPending: PendingChunkIndex
+        do {
+            diskChunks = FileManager.default.fileExists(atPath: indexFileURL.path)
+                ? try JSONDecoder().decode(ChunkIndex.self, from: Data(contentsOf: indexFileURL)) : .empty()
+            diskPending = FileManager.default.fileExists(atPath: pendingIndexFileURL.path)
+                ? try JSONDecoder().decode(PendingChunkIndex.self, from: Data(contentsOf: pendingIndexFileURL)) : .empty()
+        } catch {
+            print("[ArchiveService] Untracked-file reconciliation skipped: could not re-read an index: \(error)")
+            return
+        }
+        var referenced = Set(chunkIndex.chunks.map(\.rawContentFileName))
+        referenced.formUnion(diskChunks.chunks.map(\.rawContentFileName))
+        referenced.formUnion(pendingIndex.pendingChunks.map(\.rawContentFileName))
+        referenced.formUnion(diskPending.pendingChunks.map(\.rawContentFileName))
+        referenced.formUnion(pendingExtractions.map(\.rawContentFileName))
+
+        let fileManager = FileManager.default
+        guard let names = try? fileManager.contentsOfDirectory(atPath: archiveFolder.path) else { return }
+        let cutoff = Date().addingTimeInterval(-graceInterval)
+        var removed = 0
+        for name in names where name.hasSuffix(".json") && !referenced.contains(name) {
+            // Raw chunk files are named by their chunk UUID; the index files
+            // and any other bookkeeping never match this shape.
+            guard UUID(uuidString: (name as NSString).deletingPathExtension) != nil else { continue }
+            let url = archiveFolder.appendingPathComponent(name)
+            guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+                  (attributes[.type] as? FileAttributeType) == .typeRegular,
+                  let modified = attributes[.modificationDate] as? Date,
+                  modified < cutoff else { continue }
+            do {
+                try fileManager.removeItem(at: url)
+                removeSidecar(forRawFileName: name)
+                removed += 1
+            } catch {
+                print("[ArchiveService] Could not remove untracked raw file \(name): \(error)")
+            }
+        }
+        if removed > 0 {
+            print("[ArchiveService] Removed \(removed) untracked raw archive file(s) left by an interrupted index write")
+        }
+    }
+
     private func loadIndex() {
+        indexLoadFailed = false
         guard FileManager.default.fileExists(atPath: indexFileURL.path) else { return }
         do {
             let data = try Data(contentsOf: indexFileURL)
             chunkIndex = try JSONDecoder().decode(ChunkIndex.self, from: data)
             print("[ArchiveService] Loaded \(chunkIndex.chunks.count) chunks from index")
         } catch {
+            indexLoadFailed = true
             print("[ArchiveService] Failed to load index: \(error)")
         }
     }
@@ -2937,6 +3016,7 @@ actor ConversationArchiveService {
     }
     
     private func loadPendingIndex() {
+        pendingIndexLoadFailed = false
         guard FileManager.default.fileExists(atPath: pendingIndexFileURL.path) else { return }
         do {
             let data = try Data(contentsOf: pendingIndexFileURL)
@@ -2945,6 +3025,7 @@ actor ConversationArchiveService {
                 print("[ArchiveService] Loaded \(pendingIndex.pendingChunks.count) pending chunk(s) awaiting recovery")
             }
         } catch {
+            pendingIndexLoadFailed = true
             print("[ArchiveService] Failed to load pending index: \(error)")
         }
     }
