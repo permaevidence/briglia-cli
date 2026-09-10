@@ -1,0 +1,10 @@
+{
+  "revision": 1,
+  "removed": ",\"reasoning_history\":\"preserved\"",
+  "scope": "every request that carried the field at SOURCE, whatever the model",
+  "max_occurrences_per_request": 1,
+  "reason": "Briglia no longer sends the Fireworks/Kimi-only reasoning_history flag. Measured 2026-09-10 on OpenCode Go (kimi-k2.6, glm-5.3-flash, qwen3.8-max, deepseek-flash): identical behaviour, reasoning visibility and billing with or without it; the backends serving Kimi K3 (since 2026-09-01) and GLM (\"Console Go\", since 2026-09-10) reject requests that carry it with HTTP 400. Reasoning replay (reasoning_content on assistant messages) is unchanged.",
+  "source_change": "OpenRouterRequest, ProviderExecutionContext and the archive summariser request no longer have the field (wip/drop-reasoning-history)",
+  "requests_without_the_field": "requests that never carried it at SOURCE (kimi-k3, custom-model, local-model and OpenRouter wire fixtures; the lifecycle setup probe probe-0 and user-context call user-context-0) pass through unchanged and are still compared byte for byte",
+  "review": "private-docs docs/review/GLM_REASONING_HISTORY_CONSOLE_GO_2026-09-10.md"
+}

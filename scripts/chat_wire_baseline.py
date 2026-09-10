@@ -199,8 +199,9 @@ def main():
                 raise RuntimeError("Instrumentation changed during capture")
             actual, _ = build_and_capture(candidate, scratch / "candidate", root / "candidate-captures")
             from read_file_description_migration import migrate_wire_fixtures
-            compare(migrate_wire_fixtures(fixtures), actual)
-            print(f"Matched {len(fixtures)} pinned-release bodies with the reviewed read_file description addition, targets and full header maps", flush=True)
+            from reasoning_history_removal_migration import migrate_wire_fixtures as migrate_reasoning_history_removal
+            compare(migrate_reasoning_history_removal(migrate_wire_fixtures(fixtures)), actual)
+            print(f"Matched {len(fixtures)} pinned-release bodies with the reviewed read_file description addition and reasoning_history removal, targets and full header maps", flush=True)
         finally:
             for tree in reversed(trees):
                 command(["git", "worktree", "remove", "--force", str(tree)])
