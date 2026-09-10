@@ -52,10 +52,9 @@ struct Doctor: AsyncParsableCommand {
         check("main agent endpoint configured (\(model.isEmpty ? "—" : model))",
               ok: !baseURL.isEmpty && !model.isEmpty && (provider == .lmStudio || !(mainKey ?? "").isEmpty),
               hint: "run `briglia setup`, section 1")
-        if provider != .lmStudio, let canonical = OpenCodeGo.legacyAliases[model.lowercased()],
-           let entry = OpenCodeGo.catalogEntry(for: model) {
-            // Not a failure: OpenCode still serves the alias. Nudge only.
-            note("model id \"\(model)\" is OpenCode's legacy alias for \(entry.label) (canonical id \"\(canonical)\"); pick the model again with /model or `briglia setup` before the alias is retired")
+        if let advisory = Self.legacyOpenCodeAliasAdvisory(model: model, baseURL: baseURL,
+                                                            activeProfile: ProviderProfiles.activeProfile()) {
+            note(advisory)
         }
         let openAIKey = KeychainHelper.load(key: KeychainHelper.openAITranscriptionApiKeyKey) ?? ""
         check("OpenAI key present", ok: !openAIKey.isEmpty, hint: "run `briglia setup`, section 2")
@@ -312,5 +311,22 @@ struct Doctor: AsyncParsableCommand {
 
         print(problems == 0 ? "\nAll good." : "\n\(problems) problem(s) found.")
         if problems > 0 { throw ExitCode(1) }
+    }
+}
+
+extension Doctor {
+    /// OpenCode-only advisory (Codex S1, 2026-09-10): a custom or local
+    /// endpoint may legitimately serve a model called "deepseek-flash", so the
+    /// legacy-alias nudge fires only when the main agent is positively on
+    /// OpenCode — the active profile is OpenCode, or the configured base URL
+    /// is an OpenCode endpoint. Never a failing check.
+    static func legacyOpenCodeAliasAdvisory(model: String, baseURL: String,
+                                            activeProfile: ProviderProfiles.Profile?) -> String? {
+        let onOpenCode = activeProfile == .opencode || SessionAffinity.isOpenCodeBaseURL(baseURL)
+        guard onOpenCode,
+              let canonical = OpenCodeGo.legacyAliases[model.lowercased()],
+              let entry = OpenCodeGo.catalogEntry(for: model) else { return nil }
+        // Not a failure: OpenCode still serves the alias. Nudge only.
+        return "model id \"\(model)\" is OpenCode's legacy alias for \(entry.label) (canonical id \"\(canonical)\"); pick the model again with /model or `briglia setup` before the alias is retired"
     }
 }

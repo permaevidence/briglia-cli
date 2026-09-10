@@ -154,6 +154,21 @@ struct ProviderSelftest: AsyncParsableCommand {
         check("catalogEntry(for:) is exact for non-aliased ids",
               OpenCodeGo.catalogEntry(for: "deepseek-v4.1-flash")?.id == "deepseek-v4.1-flash"
               && OpenCodeGo.catalogEntry(for: "not-a-model") == nil)
+        // 5e. The doctor's legacy-alias nudge is OpenCode-only (Codex S1): a
+        // custom or local server may serve its own "deepseek-flash".
+        let opencodeURL = OpenCodeGo.baseURL
+        check("doctor alias advisory fires on the OpenCode profile",
+              Doctor.legacyOpenCodeAliasAdvisory(model: "deepseek-flash", baseURL: opencodeURL, activeProfile: .opencode)?.contains("deepseek-v4.1-flash") == true)
+        check("doctor alias advisory fires for a custom profile pointed at OpenCode",
+              Doctor.legacyOpenCodeAliasAdvisory(model: "deepseek-flash", baseURL: opencodeURL, activeProfile: .custom) != nil)
+        check("doctor alias advisory is silent for a custom endpoint serving its own deepseek-flash",
+              Doctor.legacyOpenCodeAliasAdvisory(model: "deepseek-flash", baseURL: "https://llm.example.net/v1", activeProfile: .custom) == nil)
+        check("doctor alias advisory is silent for a local server",
+              Doctor.legacyOpenCodeAliasAdvisory(model: "deepseek-flash", baseURL: "http://127.0.0.1:1234/v1", activeProfile: .local) == nil)
+        check("doctor alias advisory is silent without a profile and a non-OpenCode URL",
+              Doctor.legacyOpenCodeAliasAdvisory(model: "deepseek-flash", baseURL: "", activeProfile: nil) == nil)
+        check("doctor alias advisory is silent for the canonical id on OpenCode",
+              Doctor.legacyOpenCodeAliasAdvisory(model: "deepseek-v4.1-flash", baseURL: opencodeURL, activeProfile: .opencode) == nil)
 
         // 6. Multi-profile world: save all four, hop between them, verify the
         //    runtime slots and vision state follow each hop.
