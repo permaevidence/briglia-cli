@@ -704,7 +704,7 @@ enum SetupAPICore {
         if let explicit = section["text_only"] as? Bool {
             textOnly = explicit
         } else if profile == .opencode,
-                  let entry = OpenCodeGo.choices.first(where: { $0.id == model }) {
+                  let entry = OpenCodeGo.catalogEntry(for: model) {
             textOnly = entry.textOnly
         } else {
             throw APIError(code: "missing_field",

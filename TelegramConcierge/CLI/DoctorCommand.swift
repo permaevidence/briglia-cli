@@ -52,6 +52,11 @@ struct Doctor: AsyncParsableCommand {
         check("main agent endpoint configured (\(model.isEmpty ? "—" : model))",
               ok: !baseURL.isEmpty && !model.isEmpty && (provider == .lmStudio || !(mainKey ?? "").isEmpty),
               hint: "run `briglia setup`, section 1")
+        if provider != .lmStudio, let canonical = OpenCodeGo.legacyAliases[model.lowercased()],
+           let entry = OpenCodeGo.catalogEntry(for: model) {
+            // Not a failure: OpenCode still serves the alias. Nudge only.
+            note("model id \"\(model)\" is OpenCode's legacy alias for \(entry.label) (canonical id \"\(canonical)\"); pick the model again with /model or `briglia setup` before the alias is retired")
+        }
         let openAIKey = KeychainHelper.load(key: KeychainHelper.openAITranscriptionApiKeyKey) ?? ""
         check("OpenAI key present", ok: !openAIKey.isEmpty, hint: "run `briglia setup`, section 2")
         let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""

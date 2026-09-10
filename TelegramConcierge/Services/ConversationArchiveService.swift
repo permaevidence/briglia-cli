@@ -462,9 +462,10 @@ actor ConversationArchiveService {
         return normalized.contains("kimi-k2.")
             || normalized.contains("kimi-k2p")
             || normalized.contains("kimi-k3")
-            // Covers -pro and -flash (same reasoning_content behavior).
+            // Covers -pro, -flash and "deepseek-v4.1-flash" (same
+            // reasoning_content behavior).
             || normalized.contains("deepseek-v4")
-            // V4.1 Flash = unversioned "deepseek-flash" (2026-09-10).
+            // Legacy alias for V4.1 Flash (v0.2.17 catalog id, still served).
             || normalized.contains("deepseek-flash")
             || isOpenCodeGLMReasoningModel(normalized)
             || normalized.contains("minimax-")

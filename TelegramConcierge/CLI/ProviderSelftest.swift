@@ -118,7 +118,7 @@ struct ProviderSelftest: AsyncParsableCommand {
         // that serve Kimi K3 (since 2026-09-01) and GLM ("Console Go", since
         // 2026-09-10). The request type has no such field any more, so no
         // model-specific rule can bring it back.
-        for model in ["kimi-k2.6", "kimi-k2.7-code", "kimi-k3", "glm-5.3-flash", "qwen3.8-max", "deepseek-flash", "minimax-m3"] {
+        for model in ["kimi-k2.6", "kimi-k2.7-code", "kimi-k3", "glm-5.3-flash", "qwen3.8-max", "deepseek-v4.1-flash", "deepseek-flash", "minimax-m3"] {
             let body = OpenRouterRequest(model: model, messages: [], tools: nil, provider: nil,
                                          reasoning: nil, reasoningEffort: "high", thinking: nil)
             let encoded = String(decoding: (try? JSONEncoder().encode(body)) ?? Data(), as: UTF8.self)
@@ -136,6 +136,24 @@ struct ProviderSelftest: AsyncParsableCommand {
             check("curated OpenCode model \(choice.id) reasoning_content recognition is \(expected)",
                   OpenRouterService.isOpenCodeReasoningContentModel(choice.id) == expected)
         }
+        // 5d. The catalog now carries the canonical "deepseek-v4.1-flash"
+        // (models.dev rename, 2026-09-10), but installs that selected DeepSeek
+        // V4.1 Flash on v0.2.17 keep the legacy alias "deepseek-flash" stored
+        // and OpenCode still serves it. The alias must stay recognized even
+        // though it is no longer a catalog entry (5c would not catch its loss).
+        check("catalog carries the canonical DeepSeek V4.1 Flash id",
+              OpenCodeGo.choices.contains(where: { $0.id == "deepseek-v4.1-flash" && !$0.textOnly })
+              && !OpenCodeGo.choices.contains(where: { $0.id == "deepseek-flash" }))
+        for legacy in ["deepseek-flash", "DeepSeek-Flash"] {
+            check("legacy OpenCode alias \(legacy) still recognized as a reasoning_content model",
+                  OpenRouterService.isOpenCodeReasoningContentModel(legacy))
+            check("legacy OpenCode alias \(legacy) resolves to the canonical catalog entry (vision)",
+                  OpenCodeGo.catalogEntry(for: legacy)?.id == "deepseek-v4.1-flash"
+                  && OpenCodeGo.catalogEntry(for: legacy)?.textOnly == false)
+        }
+        check("catalogEntry(for:) is exact for non-aliased ids",
+              OpenCodeGo.catalogEntry(for: "deepseek-v4.1-flash")?.id == "deepseek-v4.1-flash"
+              && OpenCodeGo.catalogEntry(for: "not-a-model") == nil)
 
         // 6. Multi-profile world: save all four, hop between them, verify the
         //    runtime slots and vision state follow each hop.

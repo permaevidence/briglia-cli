@@ -297,11 +297,13 @@ actor OpenRouterService {
         return normalized.contains("kimi-k2.")
             || normalized.contains("kimi-k2p")
             || normalized.contains("kimi-k3")
-            // Covers -pro and -flash; both verified to emit/replay
-            // reasoning_content identically (2026-08-05).
+            // Covers -pro, -flash and the canonical V4.1 id
+            // "deepseek-v4.1-flash"; all verified to emit/replay
+            // reasoning_content identically (2026-08-05, 2026-09-10).
             || normalized.contains("deepseek-v4")
-            // V4.1 Flash ships as the unversioned "deepseek-flash" on the Go
-            // gateway; same emit/replay behavior (verified 2026-09-10).
+            // Legacy alias: V4.1 Flash first shipped as the unversioned
+            // "deepseek-flash" (catalog id in v0.2.17) and OpenCode still
+            // serves it; installs that selected it keep the id stored.
             || normalized.contains("deepseek-flash")
             || Self.isOpenCodeGLMReasoningModel(normalized)
             || normalized.contains("minimax-")
