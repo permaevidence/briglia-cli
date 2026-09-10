@@ -1555,7 +1555,9 @@ class ConversationManager: ObservableObject {
                         // reaches the app UI) — a silently failing poll loop
                         // is indistinguishable from a deaf agent. Deduped so
                         // a persistent failure prints once, not every 5s.
-                        let errText = "\(error)"
+                        // Foreign (non-Telegram) errors could still render a
+                        // request URL; scrub token shapes before printing.
+                        let errText = TelegramBotService.redactBotTokens(in: "\(error)")
                         if errText != lastLoggedPollError {
                             lastLoggedPollError = errText
                             print("[ConversationManager] Poll tick failed: \(errText)")
@@ -3116,7 +3118,7 @@ class ConversationManager: ObservableObject {
             do {
                 try await sendText(errText, to: userMessage.originChannel ?? replyAddress)
             } catch {
-                print("[ConversationManager] Also failed to send error reply: \(error)")
+                print("[ConversationManager] Also failed to send error reply: \(TelegramBotService.redactBotTokens(in: "\(error)"))")
             }
         }
     }

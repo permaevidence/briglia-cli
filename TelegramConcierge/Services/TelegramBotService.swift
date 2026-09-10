@@ -205,7 +205,7 @@ actor TelegramBotService {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -246,7 +246,7 @@ actor TelegramBotService {
         var request = URLRequest(url: urlComponents.url!)
         request.timeoutInterval = 10
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -363,7 +363,7 @@ actor TelegramBotService {
 
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -399,7 +399,7 @@ actor TelegramBotService {
         )
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -455,7 +455,7 @@ actor TelegramBotService {
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
             try throwInvalidResponse(response, data: data)
@@ -481,7 +481,7 @@ actor TelegramBotService {
         var request = URLRequest(url: urlComponents.url!)
         request.timeoutInterval = 30
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -513,7 +513,7 @@ actor TelegramBotService {
         var request = URLRequest(url: downloadURL)
         request.timeoutInterval = 60
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -544,7 +544,7 @@ actor TelegramBotService {
         var request = URLRequest(url: downloadURL)
         request.timeoutInterval = 60
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -571,7 +571,7 @@ actor TelegramBotService {
         var request = URLRequest(url: downloadURL)
         request.timeoutInterval = 120  // Longer timeout for larger files
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -628,7 +628,7 @@ actor TelegramBotService {
         
         request.httpBody = body
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -688,7 +688,7 @@ actor TelegramBotService {
         
         request.httpBody = body
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await transportData(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
@@ -700,6 +700,48 @@ actor TelegramBotService {
         guard decoded.ok else {
             throw TelegramError.apiError(decoded.description ?? "Failed to send document")
         }
+    }
+
+    // MARK: - Transport
+
+    /// Every Bot API request goes through here so a transport failure can
+    /// never carry the request URL — and with it the bot token — out of this
+    /// actor. NSURLError's userInfo embeds NSErrorFailingURLStringKey
+    /// verbatim, and `"\(error)"` renderings (poll-tick diagnostics, the
+    /// error-reply log line) print userInfo in full: a DNS outage printed
+    /// `https://api.telegram.org/bot<token>/getUpdates?...` to the terminal.
+    /// The rethrown error keeps only the URLError code and the localized
+    /// description (token-scrubbed as a belt-and-braces measure). Cancellation
+    /// is preserved as a bare `URLError(.cancelled)` so the caller's
+    /// cancellation predicate still recognises it.
+    private func transportData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await URLSession.shared.data(for: request)
+        } catch let urlError as URLError {
+            if urlError.code == .cancelled { throw URLError(.cancelled) }
+            throw TelegramError.transport(code: urlError.code.rawValue,
+                                          description: scrubToken(urlError.localizedDescription))
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let nsError = error as NSError
+            throw TelegramError.transport(code: nsError.code,
+                                          description: scrubToken(error.localizedDescription))
+        }
+    }
+
+    private func scrubToken(_ text: String) -> String {
+        var out = text
+        if !botToken.isEmpty { out = out.replacingOccurrences(of: botToken, with: "[REDACTED]") }
+        return TelegramBotService.redactBotTokens(in: out)
+    }
+
+    /// Replace anything shaped like a Bot API token (`bot<id>:<secret>` or a
+    /// bare `<id>:<secret>`) in free text. Used for the transport error path
+    /// and available to log sites that render foreign errors.
+    static func redactBotTokens(in text: String) -> String {
+        text.replacingRegexMatches(of: #"(?<![A-Za-z0-9_-])(bot)?[0-9]{6,}:[A-Za-z0-9_-]{25,}"#,
+                                   with: "$1[REDACTED]")
     }
 }
 
@@ -713,10 +755,12 @@ private extension String {
     }
 }
 
-enum TelegramError: LocalizedError {
+enum TelegramError: LocalizedError, CustomStringConvertible {
     case notConfigured
     case invalidResponse(statusCode: Int, body: String?)
     case apiError(String)
+    /// URLSession failure with the URL (and token) deliberately dropped.
+    case transport(code: Int, description: String)
     
     var errorDescription: String? {
         switch self {
@@ -729,6 +773,10 @@ enum TelegramError: LocalizedError {
             return "Telegram API error (HTTP \(statusCode))"
         case .apiError(let message):
             return "Telegram API error: \(message)"
+        case .transport(let code, let description):
+            return "Telegram network error (\(code)): \(description)"
         }
     }
+
+    var description: String { errorDescription ?? "Telegram error" }
 }

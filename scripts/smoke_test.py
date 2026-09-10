@@ -502,6 +502,15 @@ def main():
     check("botswitch-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    # 3c8b. Telegram transport errors never carry the bot token: every Bot API
+    # URLSession failure is rethrown as TelegramError.transport (code +
+    # localized description only) — NSURLError's userInfo embeds the full
+    # request URL, and the poll-tick diagnostic printed it verbatim during a
+    # DNS outage. Unresolvable `.invalid` host, XDG-isolated, no real endpoint.
+    result = run_selftest([ADA, "__telegram-transport-selftest"], capture_output=True, text=True, timeout=120)
+    check("telegram-transport-selftest (bot token never in rendered transport errors)", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
     # 3c9. Email/calendar providers: resolution (explicit choice wins, unset
     # falls back to legacy gws-if-installed inference), the manage_calendar
     # tool gate (agentmail only), provider-aware prompt strings (guidance
