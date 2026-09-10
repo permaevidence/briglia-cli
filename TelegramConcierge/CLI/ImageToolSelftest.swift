@@ -34,6 +34,7 @@ struct ImageToolSelftest: AsyncParsableCommand {
         try pricing(checks)
         try await requests(checks)
         try await failures(checks)
+        try await verificationFallback(checks)
         try metadata(checks)
         print("Image tool selftest: \(checks.total - checks.failures)/\(checks.total)")
         if checks.failures > 0 { throw ValidationError("Image tool checks failed") }
@@ -172,6 +173,136 @@ struct ImageToolSelftest: AsyncParsableCommand {
         }
     }
 
+    /// OpenAI's organisation-verification refusal (HTTP 403, `code: null`,
+    /// "must be verified") on a GPT Image 2.5 model falls back once to
+    /// gpt-image-2 with adapted options and a visible note; nothing else does.
+    private func verificationFallback(_ c: ResponsesSelftest.Checks) async throws {
+        let clock = ImageTestClock()
+        func makeService(_ transport: ImageGateTransport) -> OpenAIImageService {
+            OpenAIImageService(transport: { try await transport.send($0) }, now: { clock.now })
+        }
+        func body(_ request: URLRequest) -> [String: Any] {
+            (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any]) ?? [:]
+        }
+        let fallbackModel = KeychainHelper.fallbackOpenAIImageModel
+        c.check("fallback model is gpt-image-2 and never a 2.5 model", fallbackModel == "gpt-image-2" && !OpenAIImageOptions.isImage25Family(fallbackModel))
+
+        // Flare, max quality, transparent: falls back once with both downgrades noted.
+        do {
+            let transport = ImageGateTransport(gatedModels: ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"])
+            let service = makeService(transport)
+            await service.configure(apiKey: "gated-key")
+            let result = try await service.generateImage(prompt: "PRIVATE PROMPT", imageSize: "1024x1024", quality: "max", outputFormat: "png", background: "transparent")
+            let requests = await transport.requests
+            c.check("verification refusal makes exactly one fallback attempt", requests.count == 2)
+            c.check("first attempt targets Flare with the requested options", body(requests[0])["model"] as? String == "gpt-image-2.5-flare" && body(requests[0])["quality"] as? String == "max" && body(requests[0])["background"] as? String == "transparent")
+            c.check("fallback request targets gpt-image-2 with adapted options", body(requests[1])["model"] as? String == fallbackModel && body(requests[1])["quality"] as? String == "high" && body(requests[1])["background"] as? String == "auto" && body(requests[1])["size"] as? String == "1024x1024")
+            c.check("fallback request keeps endpoint, auth and inactivity timeout", requests[1].url?.path == "/v1/images/generations" && requests[1].value(forHTTPHeaderField: "Authorization") == "Bearer gated-key" && requests[1].timeoutInterval == 600)
+            c.check("result reports the model that rendered", result.options.model == fallbackModel && result.options.fallbackFromModel == "gpt-image-2.5-flare")
+            c.check("fallback note names both models and the verification page", result.options.notes.first?.contains("gpt-image-2.5-flare") == true && result.options.notes.first?.contains(fallbackModel) == true && result.options.notes.first?.contains("not verified") == true && result.options.notes.first?.contains("platform.openai.com/settings/organization") == true)
+            c.check("fallback keeps the quality and background downgrade notes", result.options.notes.count == 3 && result.options.quality == "high" && result.options.background == "auto")
+            c.check("fallback spend is priced for the rendering model", result.spendUSD == 0.03 && result.data == Data("image".utf8))
+            let metadata = result.toolResultMetadata()
+            c.check("tool result exposes the fallback provenance", metadata["fallback_from_model"] as? String == "gpt-image-2.5-flare" && metadata["model"] as? String == fallbackModel)
+            let telemetry = result.telemetry(size: "1024x1024")
+            c.check("telemetry records the fallback without prompt or key", telemetry.contains("\"fallback_from_model\":\"gpt-image-2.5-flare\"") && !telemetry.contains("PRIVATE PROMPT") && !telemetry.contains("gated-key"))
+
+            // Memory: within the gate window the whole 2.5 family goes straight to the fallback.
+            let precise = try await service.generateImage(prompt: "edit", sourceImageData: Data("source bytes".utf8), sourceMimeType: "image/png", engine: "precise", quality: "xhigh")
+            let afterPrecise = await transport.requests
+            c.check("gate memory covers the whole 2.5 family for that key", afterPrecise.count == 3)
+            let multipart = String(decoding: afterPrecise[2].httpBody ?? Data(), as: UTF8.self)
+            c.check("remembered fallback edit targets gpt-image-2 with adapted quality", afterPrecise[2].url?.path == "/v1/images/edits" && multipart.contains("name=\"model\"\r\n\r\n\(fallbackModel)\r\n") && multipart.contains("name=\"quality\"\r\n\r\nhigh\r\n") && multipart.contains("source bytes"))
+            c.check("remembered fallback still reports provenance", precise.options.fallbackFromModel == "gpt-image-2.5-sunburst" && precise.options.engine == "precise" && precise.options.notes.first?.contains("gpt-image-2.5-sunburst") == true)
+
+            // Gate expiry: 2.5 is tried again, and a now-verified organisation gets 2.5 with no note.
+            clock.advance(by: OpenAIImageOptions.verificationGateDuration - 1)
+            _ = try await service.generateImage(prompt: "still gated")
+            let stillGated = await transport.requests
+            c.check("gate holds until the window elapses", stillGated.count == 4 && body(stillGated[3])["model"] as? String == fallbackModel)
+            clock.advance(by: 2)
+            await transport.setGatedModels([])
+            let verified = try await service.generateImage(prompt: "verified now", quality: "max", background: "transparent")
+            let afterExpiry = await transport.requests
+            c.check("after the window 2.5 is tried again", afterExpiry.count == 5 && body(afterExpiry[4])["model"] as? String == "gpt-image-2.5-flare")
+            c.check("a verified organisation gets 2.5 with full options and no note", verified.options.model == "gpt-image-2.5-flare" && verified.options.quality == "max" && verified.options.background == "transparent" && verified.options.fallbackFromModel == nil && verified.options.notes.isEmpty)
+
+            // A refusal is re-learned after expiry, and a different key is never pre-judged.
+            await transport.setGatedModels(["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"])
+            _ = try await service.generateImage(prompt: "gated again")
+            c.check("refusal after expiry falls back again", await transport.requests.count == 7)
+            await service.configure(apiKey: "other-org-key")
+            let other = try await service.generateImage(prompt: "other org")
+            c.check("another key tries 2.5 first", await transport.requests.count == 9 && other.options.fallbackFromModel == "gpt-image-2.5-flare")
+        }
+
+        // Only that error: other 403s, 400s and 401s surface without any fallback.
+        for (status, message) in [(403, "You do not have access to this model."), (400, "Your organization must be verified to use the model `gpt-image-2.5-flare`."), (401, "Incorrect API key provided."), (403, "Country, region, or territory not supported")] {
+            let transport = ImageGateTransport(gatedModels: [], fixedFailure: (status, message))
+            let service = makeService(transport)
+            await service.configure(apiKey: "gated-key")
+            do {
+                _ = try await service.generateImage(prompt: "fail")
+                c.check("HTTP \(status) '\(message.prefix(20))' surfaces", false)
+            } catch {
+                c.check("HTTP \(status) '\(message.prefix(20))' surfaces without fallback", await transport.requests.count == 1 && error.localizedDescription.contains("HTTP \(status)") && error.localizedDescription.contains(message))
+            }
+        }
+
+        // Only 2.5 targets: a refused gpt-image-2 (or custom model) request is an error, not a loop.
+        for configured in ["gpt-image-2", "custom-image-model"] {
+            let transport = ImageGateTransport(gatedModels: [configured, "gpt-image-2.5-flare"])
+            let service = makeService(transport)
+            await service.configure(apiKey: "gated-key", model: configured)
+            do {
+                _ = try await service.generateImage(prompt: "fail")
+                c.check("refused \(configured) surfaces", false)
+            } catch {
+                c.check("refused \(configured) surfaces without fallback", await transport.requests.count == 1 && error.localizedDescription.contains("HTTP 403") && error.localizedDescription.contains("must be verified") && error.localizedDescription.contains("no automatic fallback"))
+            }
+        }
+
+        // Exactly one retry: a refused fallback model surfaces the fallback's own refusal.
+        do {
+            let transport = ImageGateTransport(gatedModels: ["gpt-image-2.5-flare", "gpt-image-2"])
+            let service = makeService(transport)
+            await service.configure(apiKey: "gated-key")
+            do {
+                _ = try await service.generateImage(prompt: "fail")
+                c.check("refused fallback surfaces", false)
+            } catch {
+                c.check("refused fallback surfaces after exactly two attempts", await transport.requests.count == 2 && error.localizedDescription.contains("model gpt-image-2;"))
+            }
+        }
+
+        // Edits fall back too, with the verification refusal recognised from the multipart body.
+        do {
+            let transport = ImageGateTransport(gatedModels: ["gpt-image-2.5-sunburst"])
+            let service = makeService(transport)
+            await service.configure(apiKey: "gated-key")
+            let edited = try await service.generateImage(prompt: "edit", sourceImageData: Data("source bytes".utf8), sourceMimeType: "image/png", engine: "precise", outputFormat: "webp", background: "transparent")
+            let requests = await transport.requests
+            let first = String(decoding: requests[0].httpBody ?? Data(), as: UTF8.self)
+            let second = String(decoding: requests[1].httpBody ?? Data(), as: UTF8.self)
+            c.check("edit refusal falls back once", requests.count == 2 && first.contains("name=\"model\"\r\n\r\ngpt-image-2.5-sunburst\r\n") && second.contains("name=\"model\"\r\n\r\n\(fallbackModel)\r\n") && second.contains("name=\"background\"\r\n\r\nauto\r\n"))
+            c.check("edit fallback reports provenance and format", edited.options.fallbackFromModel == "gpt-image-2.5-sunburst" && edited.mimeType == "image/webp")
+        }
+
+        // /stop during the fallback attempt is a cancellation, not a retry.
+        do {
+            let transport = ImageGateTransport(gatedModels: ["gpt-image-2.5-flare"], cancelOnFallback: true)
+            let service = makeService(transport)
+            await service.configure(apiKey: "gated-key")
+            do {
+                _ = try await service.generateImage(prompt: "stop")
+                c.check("cancelled fallback surfaces", false)
+            } catch {
+                let attempts = await transport.requests.count
+                c.check("cancelled fallback surfaces as cancellation after two attempts", error is CancellationError && attempts == 2)
+            }
+        }
+    }
+
     private func requests(_ c: ResponsesSelftest.Checks) async throws {
         let transport = ImageTestTransport()
         let service = OpenAIImageService(transport: { try await transport.send($0) })
@@ -243,4 +374,49 @@ private actor ImageFailureTransport {
                 HTTPURLResponse(url: request.url!, statusCode: attempts == 1 ? status : 200,
                     httpVersion: nil, headerFields: ["Retry-After": "0"])!)
     }
+}
+
+/// Refuses gated models with OpenAI's real organisation-verification body
+/// (HTTP 403, `code: null`) and renders anything else.
+private actor ImageGateTransport {
+    private(set) var gatedModels: Set<String>
+    let fixedFailure: (Int, String)?
+    let cancelOnFallback: Bool
+    var requests: [URLRequest] = []
+    init(gatedModels: Set<String>, fixedFailure: (Int, String)? = nil, cancelOnFallback: Bool = false) {
+        self.gatedModels = gatedModels
+        self.fixedFailure = fixedFailure
+        self.cancelOnFallback = cancelOnFallback
+    }
+    func setGatedModels(_ models: Set<String>) { gatedModels = models }
+    func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        requests.append(request)
+        let text = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+        let model: String
+        if let object = try? JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any], let json = object["model"] as? String {
+            model = json
+        } else if let range = text.range(of: "name=\"model\"\r\n\r\n") {
+            model = text[range.upperBound...].components(separatedBy: "\r\n").first ?? ""
+        } else {
+            model = ""
+        }
+        func failure(_ status: Int, _ message: String) -> (Data, URLResponse) {
+            let body = try! JSONSerialization.data(withJSONObject: ["error": ["message": message, "type": "invalid_request_error", "param": NSNull(), "code": NSNull()]])
+            return (body, HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+        }
+        if let fixedFailure { return failure(fixedFailure.0, fixedFailure.1) }
+        if cancelOnFallback, requests.count == 2 { throw URLError(.cancelled) }
+        if gatedModels.contains(model) {
+            return failure(403, "Your organization must be verified to use the model `\(model)`. Please go to: https://platform.openai.com/settings/organization/general and click on Verify Organization. If you just verified, it can take up to 15 minutes for access to propagate.")
+        }
+        return (Data(#"{"data":[{"b64_json":"aW1hZ2U="}],"usage":{"output_tokens":1000}}"#.utf8),
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+}
+
+private final class ImageTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = Date(timeIntervalSince1970: 1_800_000_000)
+    var now: Date { lock.lock(); defer { lock.unlock() }; return current }
+    func advance(by seconds: TimeInterval) { lock.lock(); current = current.addingTimeInterval(seconds); lock.unlock() }
 }

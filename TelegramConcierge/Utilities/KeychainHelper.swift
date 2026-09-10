@@ -287,6 +287,9 @@ extension KeychainHelper {
     static let defaultImageGenerationProvider = "gemini"
     static let defaultOpenAIImageModel = "gpt-image-2.5-flare"
     static let defaultOpenAIImagePreciseModel = "gpt-image-2.5-sunburst"
+    /// Used only when OpenAI refuses a GPT Image 2.5 model because the
+    /// organisation is not verified; never configurable, never a default.
+    static let fallbackOpenAIImageModel = "gpt-image-2"
     static let defaultOpenAIImageQuality = "auto"
     static let defaultOpenAIImageOutputFormat = "png"
     static let defaultOpenAIImageModeration = "auto"

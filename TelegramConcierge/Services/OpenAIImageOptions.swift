@@ -12,7 +12,32 @@ struct OpenAIImageOptions {
     let quality: String
     let background: String
     let outputFormat: String
-    let notes: [String]
+    var notes: [String]
+    /// Set when the render was redirected to the fallback model after the
+    /// organisation-verification refusal; the original request target.
+    var fallbackFromModel: String? = nil
+
+    static let verificationGateDuration: TimeInterval = 15 * 60
+
+    /// Options for the same request re-targeted at the verification fallback
+    /// model. Quality/background are re-resolved against that model, so the
+    /// usual clamps (and their notes) apply; the fallback note comes first.
+    static func verificationFallback(from original: Self, quality: String?, defaultQuality: String,
+                                     outputFormat: String?, defaultOutputFormat: String,
+                                     background: String?) throws -> Self {
+        let fallback = KeychainHelper.fallbackOpenAIImageModel
+        var options = try resolve(engine: original.engine, fastModel: fallback, preciseModel: fallback,
+                                  quality: quality, defaultQuality: defaultQuality,
+                                  outputFormat: outputFormat, defaultOutputFormat: defaultOutputFormat,
+                                  background: background)
+        options.fallbackFromModel = original.model
+        options.notes.insert(verificationFallbackNote(requested: original.model, fallback: fallback), at: 0)
+        return options
+    }
+
+    static func verificationFallbackNote(requested: String, fallback: String) -> String {
+        "Rendered with \(fallback): this OpenAI organisation is not verified for \(requested). Verify it at https://platform.openai.com/settings/organization/general (GPT Image 2.5 is tried again automatically after 15 minutes)."
+    }
 
     static func isImage25Family(_ model: String) -> Bool {
         let model = clean(model)
@@ -97,6 +122,9 @@ struct OpenAIImageResult {
             "notes": options.notes, "usage": NSNull(),
             "estimated_spend_usd": spendUSD as Any? ?? NSNull()
         ]
+        if let fallbackFromModel = options.fallbackFromModel {
+            fields["fallback_from_model"] = fallbackFromModel
+        }
         if let usage, let data = try? JSONEncoder().encode(usage),
            let object = try? JSONSerialization.jsonObject(with: data) {
             fields["usage"] = object
@@ -108,6 +136,7 @@ struct OpenAIImageResult {
     func telemetry(size: String) -> String {
         let fields: [String: Any] = [
             "model": options.model, "engine": options.engine, "quality": options.quality, "size": size,
+            "fallback_from_model": options.fallbackFromModel as Any? ?? NSNull(),
             "input_tokens": usage?.inputTokens as Any? ?? NSNull(),
             "text_input_tokens": usage?.inputTokensDetails?.textTokens as Any? ?? NSNull(),
             "image_input_tokens": usage?.inputTokensDetails?.imageTokens as Any? ?? NSNull(),

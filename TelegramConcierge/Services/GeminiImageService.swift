@@ -209,9 +209,17 @@ actor OpenAIImageService {
     private var model: String = KeychainHelper.defaultOpenAIImageModel
     private var preciseModel: String = KeychainHelper.defaultOpenAIImagePreciseModel
     private let transport: @Sendable (URLRequest) async throws -> (Data, URLResponse)
+    private let now: @Sendable () -> Date
+    /// Organisation verification is per OpenAI organisation, so one refusal
+    /// gates the whole GPT Image 2.5 family for the key that received it,
+    /// for `OpenAIImageOptions.verificationGateDuration`; a different key
+    /// (another organisation) is never pre-judged. Process memory only.
+    private var verificationGateUntil: [String: Date] = [:]
 
-    init(transport: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }) {
+    init(transport: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) },
+         now: @escaping @Sendable () -> Date = { Date() }) {
         self.transport = transport
+        self.now = now
     }
 
     private var quality: String = KeychainHelper.defaultOpenAIImageQuality
@@ -278,51 +286,86 @@ actor OpenAIImageService {
             outputFormat: outputFormat, defaultOutputFormat: self.outputFormat,
             background: background
         )
-        let resolvedQuality = options.quality
-        let resolvedOutputFormat = options.outputFormat
-        let resolvedBackground = options.background
         let resolvedModeration = Self.normalized(
             moderation,
             defaultValue: self.moderation,
             allowedValues: ["auto", "low"]
         )
-        // output_compression is only valid for jpeg/webp. OpenAI rejects it
-        // with a 400 for png (the default format), so drop it when png.
-        let resolvedCompression = resolvedOutputFormat == "png"
-            ? nil
-            : Self.normalizedCompression(outputCompression)
 
-        let request: URLRequest
-        if let sourceImageData {
-            request = try editRequest(
-                model: options.model,
-                prompt: prompt,
-                sourceImageData: sourceImageData,
-                sourceMimeType: sourceMimeType ?? "image/png",
-                imageSize: resolvedSize,
-                quality: resolvedQuality,
-                outputFormat: resolvedOutputFormat,
-                outputCompression: resolvedCompression,
-                background: resolvedBackground,
-                moderation: resolvedModeration
-            )
-        } else {
-            request = try generationRequest(
-                model: options.model,
-                prompt: prompt,
-                imageSize: resolvedSize,
-                quality: resolvedQuality,
-                outputFormat: resolvedOutputFormat,
-                outputCompression: resolvedCompression,
-                background: resolvedBackground,
-                moderation: resolvedModeration
-            )
+        func render(_ options: OpenAIImageOptions) async throws -> OpenAIImageResult {
+            // output_compression is only valid for jpeg/webp. OpenAI rejects it
+            // with a 400 for png (the default format), so drop it when png.
+            let compression = options.outputFormat == "png" ? nil : Self.normalizedCompression(outputCompression)
+            let request: URLRequest
+            if let sourceImageData {
+                request = try editRequest(
+                    model: options.model,
+                    prompt: prompt,
+                    sourceImageData: sourceImageData,
+                    sourceMimeType: sourceMimeType ?? "image/png",
+                    imageSize: resolvedSize,
+                    quality: options.quality,
+                    outputFormat: options.outputFormat,
+                    outputCompression: compression,
+                    background: options.background,
+                    moderation: resolvedModeration
+                )
+            } else {
+                request = try generationRequest(
+                    model: options.model,
+                    prompt: prompt,
+                    imageSize: resolvedSize,
+                    quality: options.quality,
+                    outputFormat: options.outputFormat,
+                    outputCompression: compression,
+                    background: options.background,
+                    moderation: resolvedModeration
+                )
+            }
+            let response = try await perform(request)
+            return try Self.decodeImageResponse(response, options: options)
         }
-        let response = try await perform(request)
-        let result = try Self.decodeImageResponse(response, options: options)
+
+        // Verification fallback: only a GPT Image 2.5 target, only the
+        // organisation-verification refusal (HTTP 403 "must be verified"),
+        // exactly one retry on the fallback model. Every other failure, and a
+        // refusal on any other model (including the fallback itself), surfaces.
+        let fallbackEligible = OpenAIImageOptions.isImage25Family(options.model)
+            && options.model != KeychainHelper.fallbackOpenAIImageModel
+        func fallbackOptions() throws -> OpenAIImageOptions {
+            try OpenAIImageOptions.verificationFallback(from: options,
+                quality: quality, defaultQuality: self.quality,
+                outputFormat: outputFormat, defaultOutputFormat: self.outputFormat,
+                background: background)
+        }
+        let result: OpenAIImageResult
+        if fallbackEligible, verificationGateActive() {
+            result = try await render(try fallbackOptions())
+        } else {
+            do {
+                result = try await render(options)
+            } catch let error as OpenAIImageError {
+                guard fallbackEligible, case .organizationNotVerified(let refusedModel, _) = error else { throw error }
+                rememberVerificationGate()
+                DebugTelemetry.log(.info, summary: "OpenAI image verification fallback",
+                    detail: "\(refusedModel) refused (organisation not verified); rendering with \(KeychainHelper.fallbackOpenAIImageModel)")
+                result = try await render(try fallbackOptions())
+            }
+        }
         DebugTelemetry.log(.info, summary: "OpenAI image usage",
             detail: result.telemetry(size: resolvedSize ?? "auto"))
         return result
+    }
+
+    private func verificationGateActive() -> Bool {
+        guard let until = verificationGateUntil[apiKey] else { return false }
+        if now() < until { return true }
+        verificationGateUntil[apiKey] = nil
+        return false
+    }
+
+    private func rememberVerificationGate() {
+        verificationGateUntil[apiKey] = now().addingTimeInterval(OpenAIImageOptions.verificationGateDuration)
     }
 
     private func generationRequest(
@@ -442,6 +485,11 @@ actor OpenAIImageService {
 
                 // Non-retryable, or attempts exhausted: surface the real error.
                 if let errorResponse = try? JSONDecoder().decode(OpenAIErrorResponse.self, from: data) {
+                    if httpResponse.statusCode == 403,
+                       Self.isVerificationRefusal(errorResponse.error.message) {
+                        throw OpenAIImageError.organizationNotVerified(
+                            model: Self.requestedModel(of: request), message: errorResponse.error.message)
+                    }
                     throw OpenAIImageError.apiError("HTTP \(httpResponse.statusCode): \(errorResponse.error.message)")
                 }
                 throw OpenAIImageError.httpError(httpResponse.statusCode)
@@ -467,6 +515,27 @@ actor OpenAIImageService {
         }
 
         throw lastError ?? OpenAIImageError.invalidResponse
+    }
+
+    /// OpenAI's organisation-verification refusal has `code: null`, so it can
+    /// only be recognised by status (403, checked by the caller) and message.
+    static func isVerificationRefusal(_ message: String) -> Bool {
+        message.lowercased().contains("must be verified")
+    }
+
+    private static func requestedModel(of request: URLRequest) -> String {
+        guard let body = request.httpBody else { return "" }
+        if let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+           let model = object["model"] as? String {
+            return model
+        }
+        // Multipart edit body: the model field is a plain text part.
+        let text = String(decoding: body, as: UTF8.self)
+        if let range = text.range(of: "name=\"model\"\r\n\r\n") {
+            // "\r\n" is a single Character in Swift; split on the sequence, not on "\r".
+            return text[range.upperBound...].components(separatedBy: "\r\n").first ?? ""
+        }
+        return ""
     }
 
     private static func isRetryable(_ error: URLError) -> Bool {
@@ -631,9 +700,12 @@ enum OpenAIImageError: LocalizedError {
     case invalidImageData
     case invalidOptions(String)
     case renderTimedOut
+    case organizationNotVerified(model: String, message: String)
 
     var errorDescription: String? {
         switch self {
+        case .organizationNotVerified(let model, let message):
+            return "OpenAI image API error: HTTP 403: \(message) (model \(model); OpenAI requires organisation verification for it, and no automatic fallback applies to this model)"
         case .renderTimedOut:
             return "OpenAI image request timed out and was not retried. The render may have been billed; its cost is unknown because no usage was received. Try a lower quality or smaller size."
         case .invalidOptions(let message):
