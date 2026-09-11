@@ -28,10 +28,6 @@ extension ConversationManager {
         try CompactionTestInputs.check(!FileManager.default.fileExists(atPath: turnSalvageFileURL.path), "checkpoint cleared after recovered save")
         return messages
     }
-    func activeTestProtection(_ giant: Message, small: Message) throws {
-        try CompactionTestInputs.check(lastAssistantIndexWithTools(in: [giant]) == nil, "oversized newest turn loses protection")
-        try CompactionTestInputs.check(lastAssistantIndexWithTools(in: [small]) == 0, "normal newest turn stays protected")
-    }
 }
 
 extension ConversationManager {
@@ -99,8 +95,6 @@ extension ConversationManager {
         let bounded = try boundInterruptedCheckpoint(huge)
         try CompactionTestInputs.check(bounded.retainedInteractions.isEmpty && bounded.overflowReference != nil && bounded.overflowLog != nil,
             "controlled stop preserves overflow through snapshot only")
-        try activeTestProtection(Message(role: .assistant, content: "old", toolInteractions: huge.retainedInteractions),
-            small: Message(role: .assistant, content: "small", toolInteractions: legacy))
     }
 }
 
@@ -122,9 +116,13 @@ extension ConversationManager {
         let decision = try await pruneStoredToolInteractionsMidLoop(messagesForLLM: &history,
             currentTurnInteractions: [], calendarContext: nil, emailContext: nil, chunkSummaries: [], totalChunkCount: 0,
             currentUserMessageId: messages.last!.id, turnStartDate: Date(), tools: [], deferredMCPSummaries: [])
-        try CompactionTestInputs.check(decision == .pruned && !history[2].toolInteractions.isEmpty,
-            "100k recent work survives historical prune above soft target")
-        try CompactionTestInputs.check(server.completeRequests.count == 1, "missing 70k target does not invoke active compaction")
+        // Since 0.2.19 the previous turn is ordinary history: it is pruned toward
+        // the 70k target before the running turn's own rounds are ever compacted.
+        try CompactionTestInputs.check(decision == .pruned && history[1].toolInteractions.isEmpty && history[2].toolInteractions.isEmpty,
+            "previous turn is pruned toward the target like older history")
+        let bodies = server.completeRequests.map { String(decoding: $0.body, as: UTF8.self) }
+        try CompactionTestInputs.check(bodies.count == 1 && bodies[0].contains("[PRUNE SUMMARY REQUEST") && !bodies[0].contains("ACTIVE TURN COMPACTION"),
+            "historical prune above the target uses one summary request and no active compaction")
     }
 }
 
@@ -357,5 +355,52 @@ extension ConversationManager {
         try CompactionTestInputs.check(history.last?.activeTurnCompaction != nil && history.filter { $0.id == correction.id }.count == 1,
             "forced final outcome persists summary and canonical correction once")
         try CompactionTestInputs.check(server.errors.isEmpty, "forced final pass leaves no provider errors")
+    }
+}
+
+extension ConversationManager {
+    /// 0.2.18 field failure ("Compacted context still exceeds configured input
+    /// budget (estimated 211512, allowed 210254)"): the irreducible input alone
+    /// estimates above the 90% selection ceiling but under the 250k budget, so
+    /// every compaction shrank the context and was still refused, ending the turn.
+    func activeTestIrreducibleContext(server: CaptureServer, wire: ProviderWireProtocol, file: URL) async throws {
+        try await activeTestSeed(); server.clear()
+        CompactionTestInputs.dynamicWire = wire; CompactionTestInputs.dynamicPath = file.path
+        CompactionTestInputs.compactions = 0; CompactionTestInputs.ordinaryCalls = 0
+        let bulk = String(repeating: "irreducible context ", count: 31_800) // ~212k estimated tokens of plain user text
+        let task = Message(role: .user, content: "Work through this material without ending the turn.\n" + bulk)
+        let budget = ActiveTurnBudget(maximum: 250_000)
+        try CompactionTestInputs.check(ActiveTurnBudget.message(task) > budget.inputCeiling && ActiveTurnBudget.message(task) < budget.maximum,
+            "irreducible fixture sits between the selection ceiling and the budget")
+        let history = try await activeTestTurn(task, queued: nil)
+        CompactionTestInputs.dynamicWire = nil
+        try CompactionTestInputs.check(history.last?.content == "FINAL_COMPACTION_OK" && CompactionTestInputs.compactions >= 1,
+            "irreducible context above the ceiling continues after compaction")
+        try CompactionTestInputs.check(error == nil && server.errors.isEmpty && history.last?.activeTurnCompaction != nil,
+            "irreducible context turn ends with a summary and no failure")
+    }
+
+    /// Ordering: a large previous turn is ordinary history and is pruned first;
+    /// the running turn's own rounds are compacted only once history is exhausted.
+    func activeTestPreviousTurnFirst(server: CaptureServer, wire: ProviderWireProtocol, file: URL) async throws {
+        try await activeTestSeed(); server.clear()
+        let evidence = String(repeating: "PREVIOUS_EVIDENCE ", count: 20_000) // ~120k tokens replayed from the previous turn
+        let previous = Message(role: .assistant, content: "Previous task done", toolInteractions: [ToolInteraction(
+            assistantMessage: AssistantToolCallMessage(content: "collected", toolCalls: [
+                ToolCall(id: "prev-1", type: "function", function: FunctionCall(name: "read_file", arguments: "{}"))
+            ]), results: [ToolResultMessage(toolCallId: "prev-1", content: evidence)])])
+        messages = [Message(role: .user, content: "Previous task"), previous]
+        guard saveConversation() else { throw CompactionTestInputs.Failure("previous turn seed") }
+        CompactionTestInputs.dynamicWire = wire; CompactionTestInputs.dynamicPath = file.path
+        CompactionTestInputs.compactions = 0; CompactionTestInputs.ordinaryCalls = 0
+        let history = try await activeTestTurn(Message(role: .user, content: "Next long task; keep working."), queued: nil)
+        CompactionTestInputs.dynamicWire = nil
+        let maintenance = server.completeRequests.map { String(decoding: $0.body, as: UTF8.self) }
+            .filter { $0.contains("[PRUNE SUMMARY REQUEST") || $0.contains("ACTIVE TURN COMPACTION") }
+        try CompactionTestInputs.check(maintenance.first?.contains("[PRUNE SUMMARY REQUEST") == true && history[1].toolInteractions.isEmpty
+            && !history[1].pruneArchiveReferences.isEmpty,
+            "previous turn is pruned before the current turn is compacted")
+        try CompactionTestInputs.check(history.last?.content == "FINAL_COMPACTION_OK" && CompactionTestInputs.compactions >= 1 && error == nil,
+            "turn continues into its own compaction after the previous turn is pruned")
     }
 }

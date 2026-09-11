@@ -10,6 +10,8 @@ enum CompactionTestInputs {
     static var omitPruneNotes = false
     static var unprojectedFinal = false
     static var forcedFinalMode = false
+    static var oldCeilingGate = false
+    static var protectNewestTurn = false
     static var count = 0
     private static let lock = NSLock()
     static var dynamicWire: ProviderWireProtocol?
@@ -26,6 +28,9 @@ enum CompactionTestInputs {
         let tokens = request.body.count / 3
         if text.contains("ACTIVE TURN COMPACTION") {
             return try! body(protocol: wire, text: "Goal: preserve exact evidence. User correction says use violet. File source.txt verified; phases remain. Running handle bash_7 pending.", tokens: tokens)
+        }
+        if text.contains("[PRUNE SUMMARY REQUEST") {
+            return try! body(protocol: wire, text: "Earlier turn: evidence collected and verified; nothing pending.", tokens: tokens)
         }
         if forcedFinalMode {
             // Never volunteer a final answer: only the harness's round backstop
@@ -94,6 +99,8 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
     @Flag var conservativeStartGate = false
     @Flag var omitPruneNotes = false
     @Flag var unprojectedFinal = false
+    @Flag var oldCeilingGate = false
+    @Flag var protectNewestTurn = false
     @MainActor func run() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("briglia-active-test-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -104,6 +111,8 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
         CompactionTestInputs.conservativeStartGate = conservativeStartGate
         CompactionTestInputs.omitPruneNotes = omitPruneNotes
         CompactionTestInputs.unprojectedFinal = unprojectedFinal
+        CompactionTestInputs.oldCeilingGate = oldCeilingGate
+        CompactionTestInputs.protectNewestTurn = protectNewestTurn
         CompactionTestInputs.disableCompaction = disableCompaction; CompactionTestInputs.omitCarried = omitCarried
         defer { CompactionTestInputs.defaults.removePersistentDomain(forName: "dev.briglia.active-compaction-test") }
         let server = try CaptureServer(); defer { server.stop() }
@@ -203,6 +212,8 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
             try await manager.activeTestInterrupted(server: server, wire: wire, file: file)
             try await manager.activeTestOversizedHistory(server: server, wire: wire)
             try await manager.activeTestForcedFinal(server: server, wire: wire, file: file)
+            try await manager.activeTestIrreducibleContext(server: server, wire: wire, file: file)
+            try await manager.activeTestPreviousTurnFirst(server: server, wire: wire, file: file)
 
         }
         print("Active compaction owner: \(CompactionTestInputs.count) passed; evidence root: \(root.path)")

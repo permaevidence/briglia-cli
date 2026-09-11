@@ -34,6 +34,11 @@ sources[key] = sources[key].replace('               estimate.fixedTextTokens > c
     '               (CompactionTestInputs.conservativeStartGate ? estimate.tokens : estimate.fixedTextTokens) > configuredMaxContextTokens() {')
 sources[key] = sources[key].replace('            totalTokens += noteTokens(committed) - noteTokens(plannedSource)',
     '            if !CompactionTestInputs.omitPruneNotes { totalTokens += noteTokens(committed) - noteTokens(plannedSource) }')
+sources[key] = sources[key].replace('        guard after < before, after <= budget.maximum else {',
+    '        guard after < before, after <= (CompactionTestInputs.oldCeilingGate ? budget.inputCeiling : budget.maximum) else {')
+anchor = '        for message in messagesForLLM {\n            if message.role == .assistant'
+assert sources[key].count(anchor) == 1
+sources[key] = sources[key].replace(anchor, '        for (i, message) in messagesForLLM.enumerated() {\n            if (!CompactionTestInputs.protectNewestTurn || i != lastAssistantIndexWithTools(in: messagesForLLM, mandatoryTokens: mandatoryEstimate.tokens)) && message.role == .assistant')
 anchor = '                    messages: finalHistory,'
 assert sources[key].count(anchor) == 1
 sources[key] = sources[key].replace(anchor, '                    messages: CompactionTestInputs.unprojectedFinal ? messagesForLLM : finalHistory,')
@@ -66,10 +71,10 @@ build = Path('/tmp/briglia-active-owner-scratch')
 wire.command(['swift', 'build', '--scratch-path', str(build)], cwd=tree)
 binary = Path(subprocess.check_output(['swift', 'build', '--scratch-path', str(build), '--show-bin-path'], cwd=tree, text=True).strip()) / 'briglia'
 wire.command([str(binary), '__active-compaction-owner-selftest'], cwd=tree, timeout=240)
-for control in ['--disable-compaction', '--omit-carried', '--conservative-start-gate', '--omit-prune-notes', '--unprojected-final']:
+for control in ['--disable-compaction', '--omit-carried', '--conservative-start-gate', '--omit-prune-notes', '--unprojected-final', '--old-ceiling-gate', '--protect-newest-turn']:
     result = subprocess.run([str(binary), '__active-compaction-owner-selftest', control], cwd=tree, capture_output=True, text=True, timeout=240)
     (root / (control[2:] + '.log')).write_text(result.stdout + result.stderr)
     if result.returncode == 0: raise RuntimeError('Negative control unexpectedly passed: ' + control)
-    expected = {'--disable-compaction': 'same turn completes three compactions', '--omit-carried': 'verbatim user role after compaction', '--conservative-start-gate': 'media-heavy history runs without a measurement', '--omit-prune-notes': 'manual prune report includes committed summary and reference delta', '--unprojected-final': 'forced final answer keeps compaction summary and verbatim correction'}[control]
+    expected = {'--disable-compaction': 'same turn completes three compactions', '--omit-carried': 'verbatim user role after compaction', '--conservative-start-gate': 'media-heavy history runs without a measurement', '--omit-prune-notes': 'manual prune report includes committed summary and reference delta', '--unprojected-final': 'forced final answer keeps compaction summary and verbatim correction', '--old-ceiling-gate': 'irreducible context above the ceiling continues after compaction', '--protect-newest-turn': 'previous turn is pruned before the current turn is compacted'}[control]
     if expected not in result.stdout + result.stderr: raise RuntimeError('Negative control failed for unrelated reason: ' + control)
     print('PASS negative control', control, flush=True)

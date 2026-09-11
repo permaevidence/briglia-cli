@@ -5098,7 +5098,6 @@ class ConversationManager: ObservableObject {
             images: imagesDirectory, documents: documentsDirectory, tools: toolsForSummary,
             calendar: frozenContext.calendar, email: frozenContext.email, summaries: chunkSummaries,
             totalChunks: totalChunkCount, date: currentSystemPromptTimestamp(), deferred: deferredSummaries)
-        let protectedIndex = lastAssistantIndexWithTools(in: messages, mandatoryTokens: mandatoryEstimate?.tokens ?? 1024)
 
         // Use real prompt_tokens from API when available, fall back to estimation
         var totalTokens: Int
@@ -5117,8 +5116,8 @@ class ConversationManager: ObservableObject {
         }
 
         var prunableToolTokens = 0
-        for (i, message) in messages.enumerated() {
-            if i != protectedIndex && message.role == .assistant
+        for message in messages {
+            if message.role == .assistant
                 && (!message.toolInteractions.isEmpty || message.hasFinalReasoningPayload || message.activeTurnCompaction != nil) {
                 prunableToolTokens += toolInteractionTokens(message.toolInteractions, isLMStudio: providerIsLMStudio)
                     + estimatedFinalReasoningTokens(message)
@@ -5126,9 +5125,9 @@ class ConversationManager: ObservableObject {
             }
         }
 
-        guard prunableToolTokens > 0 || messages.enumerated().contains(where: { $0.offset != protectedIndex && $0.element.hasUnprunedMedia })
+        guard prunableToolTokens > 0 || messages.contains(where: \.hasUnprunedMedia)
                 || !compressibleUserMessageIndices(upToIndex: max(0, messages.count - 1), in: messages).isEmpty else {
-            let msg = "Nothing to compact: the details of the latest reply's work are always protected."
+            let msg = "Nothing to compact: no tool details, media or synthetic messages are left to summarize."
             showMaintenanceNotice(msg)
             try? await sendText(msg, to: address)
             return
@@ -5143,7 +5142,7 @@ class ConversationManager: ObservableObject {
             for: plannedSource,
             totalTokens: totalTokens,
             targetTokens: targetTokens,
-            protectedIndex: protectedIndex,
+            protectedIndex: nil,
             providerIsLMStudio: providerIsLMStudio
         )
         let safeBoundary = min(plan.pruningBoundary, max(messages.count - 1, 0))
@@ -5155,8 +5154,8 @@ class ConversationManager: ObservableObject {
         // responded), so the last cached message is the user's triggering
         // message. Including the assistant response would place Anthropic
         // cache breakpoint 2 on a never-cached message, causing a full
-        // cache miss on everything after the system prompt. The protected
-        // turn's tools aren't being pruned, so no information is lost.
+        // cache miss on everything after the system prompt. A trailing
+        // assistant message is excluded only when nothing of it is pruned.
         var messagesForSummary = plannedSource
         if let last = messagesForSummary.last, last.role == .assistant,
            !plan.affectedIndices.contains(messagesForSummary.count - 1),
@@ -5202,7 +5201,7 @@ class ConversationManager: ObservableObject {
         let prunedMediaCount = plan.mediaActionCount
         refreshSystemPromptTimestamp()
         var msg = (prunedToolCount > 0 || prunedMediaCount > 0 || !compressedIndices.isEmpty)
-            ? "✂️ Memory freed: I summarized the details of \(prunedToolCount) task\(prunedToolCount == 1 ? "" : "s") and \(prunedMediaCount) media item\(prunedMediaCount == 1 ? "" : "s"). Working memory: from ~\(beforeTokens / 1000)k down to ~\(totalTokens / 1000)k tokens. The latest reply's work stays intact."
+            ? "✂️ Memory freed: I summarized the details of \(prunedToolCount) task\(prunedToolCount == 1 ? "" : "s") and \(prunedMediaCount) media item\(prunedMediaCount == 1 ? "" : "s"). Working memory: from ~\(beforeTokens / 1000)k down to ~\(totalTokens / 1000)k tokens."
             : "Working memory is already tidy (~\(totalTokens / 1000)k tokens, under the \(targetTokens / 1000)k target): nothing to free."
         if noSnapshot && (!plan.actions.isEmpty || !compressedIndices.isEmpty) {
             msg += " Detailed history was discarded without a new snapshot, as requested by /prune nosnapshot."
@@ -6849,7 +6848,9 @@ class ConversationManager: ObservableObject {
         return chars / 4
     }
 
-    /// Index of the most recent assistant message with tool interactions (protected from pruning).
+    /// Former protection rule for the newest tool-bearing turn. Production pruning
+    /// no longer uses it (since 0.2.19 the newest historical turn is eligible like any
+    /// other); retained because the frozen lifecycle seam observes it.
     private func lastAssistantIndexWithTools(in msgs: [Message], mandatoryTokens: Int = 1024) -> Int? {
         guard let index = msgs.indices.last(where: { msgs[$0].role == .assistant && (!msgs[$0].toolInteractions.isEmpty || msgs[$0].activeTurnCompaction != nil) }) else { return nil }
         let budget = ActiveTurnBudget(maximum: configuredMaxContextTokens())
@@ -7388,7 +7389,8 @@ class ConversationManager: ObservableObject {
     }
 
     /// Prune stored tool interactions from oldest turns to stay under context budget.
-    /// The most recent turn with tools is always protected.
+    /// Every historical turn is eligible, newest last; the running turn is not in
+    /// `messages`' replay here and is compacted separately only when this cannot help.
     /// Returns true if any pruning occurred (cache was broken).
     private func pruneToolInteractionsIfNeeded(
         currentUserMessageId: UUID?,
@@ -7407,7 +7409,6 @@ class ConversationManager: ObservableObject {
             images: imagesDirectory, documents: documentsDirectory, tools: tools,
             calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
             totalChunks: totalChunkCount, date: turnStartDate, deferred: deferredMCPSummaries)
-        let protectedIndex = lastAssistantIndexWithTools(in: messages, mandatoryTokens: mandatoryEstimate.tokens)
         let providerIsLMStudio = currentProviderIsLMStudio()
 
         // Use real prompt_tokens from API when available, fall back to estimation
@@ -7428,14 +7429,14 @@ class ConversationManager: ObservableObject {
         // Calculate prunable savings — use measured data when available
         var prunableToolTokens = 0
         var prunableMediaTokens = 0
-        for (i, message) in messages.enumerated() {
-            if i != protectedIndex && message.role == .assistant
+        for message in messages {
+            if message.role == .assistant
                 && (!message.toolInteractions.isEmpty || message.hasFinalReasoningPayload || message.activeTurnCompaction != nil) {
                 prunableToolTokens += toolTokensForMessage(message, isLMStudio: providerIsLMStudio)
                     + estimatedFinalReasoningTokens(message)
                     + (message.activeTurnCompaction.map { ActiveTurnBudget.text($0.promptText) } ?? 0)
             }
-            if i != protectedIndex && message.hasUnprunedMedia {
+            if message.hasUnprunedMedia {
                 prunableMediaTokens += mediaSavingsForMessage(message, isLMStudio: providerIsLMStudio)
             }
         }
@@ -7461,7 +7462,7 @@ class ConversationManager: ObservableObject {
             for: plannedSource,
             totalTokens: totalTokens,
             targetTokens: targetTokens,
-            protectedIndex: protectedIndex,
+            protectedIndex: nil,
             providerIsLMStudio: providerIsLMStudio
         )
 
@@ -7511,7 +7512,8 @@ class ConversationManager: ObservableObject {
     /// Mid-loop variant: prunes stored tool interactions from historical turns when the
     /// current turn's growing context would exceed the budget. Only touches historical
     /// messages (messagesForLLM), never the current turn's in-memory toolInteractions.
-    /// The most recent historical turn with tools is always protected.
+    /// Every historical turn is eligible, oldest first; the previous turn goes before
+    /// the running turn's own rounds are compacted (see compactActiveTurn).
     private func pruneStoredToolInteractionsMidLoop(
         messagesForLLM: inout [Message],
         currentTurnInteractions: [ToolInteraction],
@@ -7531,7 +7533,6 @@ class ConversationManager: ObservableObject {
             images: imagesDirectory, documents: documentsDirectory, tools: tools,
             calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
             totalChunks: totalChunkCount, date: turnStartDate, deferred: deferredMCPSummaries)
-        let protectedIndex = lastAssistantIndexWithTools(in: messagesForLLM, mandatoryTokens: mandatoryEstimate.tokens)
         let providerIsLMStudio = currentProviderIsLMStudio()
 
         // Use real prompt_tokens when available, fall back to estimation
@@ -7549,14 +7550,14 @@ class ConversationManager: ObservableObject {
         }
         var prunableToolTokens = 0
         var prunableMediaTokens = 0
-        for (i, message) in messagesForLLM.enumerated() {
-            if i != protectedIndex && message.role == .assistant
+        for message in messagesForLLM {
+            if message.role == .assistant
                 && (!message.toolInteractions.isEmpty || message.hasFinalReasoningPayload || message.activeTurnCompaction != nil) {
                 prunableToolTokens += toolTokensForMessage(message, isLMStudio: providerIsLMStudio)
                     + estimatedFinalReasoningTokens(message)
                     + (message.activeTurnCompaction.map { ActiveTurnBudget.text($0.promptText) } ?? 0)
             }
-            if i != protectedIndex && message.hasUnprunedMedia {
+            if message.hasUnprunedMedia {
                 prunableMediaTokens += mediaSavingsForMessage(message, isLMStudio: providerIsLMStudio)
             }
         }
@@ -7577,7 +7578,7 @@ class ConversationManager: ObservableObject {
             for: plannedSource,
             totalTokens: totalTokens,
             targetTokens: targetTokens,
-            protectedIndex: protectedIndex,
+            protectedIndex: nil,
             providerIsLMStudio: providerIsLMStudio
         )
 
@@ -10950,7 +10951,7 @@ extension ConversationManager {
             email: email, summaries: summaries, totalChunks: totalChunks, date: date, deferred: deferred)
         try Task.checkCancellation()
         guard activeRunId == runID else { throw CancellationError() }
-        let fixed = before - original.retainedInteractions.reduce(0) { $0 + ActiveTurnBudget.round($1) } + 16_000
+        let fixed = before - original.retainedInteractions.reduce(0) { $0 + ActiveTurnBudget.round($1) } + ActiveTurnBudget.summaryAllowance
         let count = budget.prefixCount(rounds: original.retainedInteractions, fixed: fixed,
             target: configuredTargetContextTokens(), pendingNonce: inFlightMidTurnBatch?.nonce)
         guard count > 0 else { throw PruneArchiveStore.Failure("Context is full and no completed prefix can be compacted safely; work retained") }
@@ -11007,8 +11008,12 @@ extension ConversationManager {
         candidate.overflowReference = nil; candidate.overflowLog = nil
         let after = try await activeEstimate(candidate, history: history, tools: tools, calendar: calendar,
             email: email, summaries: summaries, totalChunks: totalChunks, date: date, deferred: deferred)
-        guard after < before, after <= budget.inputCeiling else {
-            throw PruneArchiveStore.Failure("Compacted context still exceeds configured input budget (estimated \(after), allowed \(budget.inputCeiling)); snapshot retained")
+        // Same yardstick as the trigger: the configured budget. The 90% input
+        // ceiling steers selection only. Refusing a shrunken context that the
+        // pessimistic estimator still placed above the ceiling ended real turns
+        // (0.2.18: estimated 211,512 vs allowed 210,254, budget 250,000).
+        guard after < before, after <= budget.maximum else {
+            throw PruneArchiveStore.Failure("Compacted context still exceeds configured input budget (estimated \(after), allowed \(budget.maximum)); snapshot retained")
         }
         try Task.checkCancellation()
         guard activeRunId == runID else { throw CancellationError() }

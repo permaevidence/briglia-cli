@@ -164,19 +164,24 @@ struct ActiveTurnBudget {
         n += message.pruneArchiveReferences.reduce(0) { $0 + text($1.promptText) }
         return n
     }
+    /// Allowance for the summary that replaces a compacted prefix (bounded at
+    /// 36,000 bytes by the maintenance policy); `fixed` includes it.
+    static let summaryAllowance = 16_000
     func prefixCount(rounds: [ToolInteraction], fixed: Int, target: Int, pendingNonce: String?) -> Int {
         guard !rounds.isEmpty else { return 0 }
         let costs = rounds.map(Self.round)
         let desired = min(inputCeiling, max(target, fixed + min(20_000, inputCeiling / 3)))
         var total = fixed + costs.reduce(0, +)
-        var count = 0
+        var count = 0, removed = 0
         for index in rounds.indices {
             if index == rounds.count - 1 && costs[index] + fixed < inputCeiling { break }
             if let nonce = pendingNonce, rounds[index].results.contains(where: {
                 $0.harnessAnnotations.contains { $0.deliveryNonce == nonce }
             }) { break }
-            count += 1; total -= costs[index]
-            if total <= desired { break }
+            count += 1; total -= costs[index]; removed += costs[index]
+            // Reaching the target with a prefix cheaper than its own summary
+            // would grow the context; keep taking completed rounds.
+            if total <= desired && removed >= Self.summaryAllowance { break }
         }
         return count
     }
