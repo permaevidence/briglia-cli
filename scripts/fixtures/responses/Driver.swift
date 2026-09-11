@@ -311,16 +311,19 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         try P2Life.require(replay.filter { $0["type"] as? String == "function_call_output" }.count == 1, "restart replays one result")
         try P2Life.require(replay.contains { $0["encrypted_content"] != nil }, "restart carries matching ciphertext")
         let old = saved.last!
-        let protected = Message(role: .assistant, content: "Protected recent work", toolInteractions: old.toolInteractions)
+        // Since 0.2.19 the newest tool turn is ordinary history: with the 5k
+        // target it is evicted in the same plan as the older one.
+        let recent = Message(role: .assistant, content: "Recent work with tools", toolInteractions: old.toolInteractions)
         server.script([try P2Life.body("Useful details retained by summary")])
         let pruned = try await manager.p2Prune([Message(role: .user, content: "Earlier work"), old,
-            Message(role: .user, content: "Recent work"), protected])
+            Message(role: .user, content: "Recent work"), recent])
         try P2Life.require(pruned.first { $0.id == old.id }?.responsesReplay == nil
             && pruned.first { $0.id == old.id }?.toolInteractions.isEmpty == true, "manual pruning removes evicted native replay")
-        try P2Life.require(pruned.first { $0.id == protected.id }?.toolInteractions.isEmpty == false, "manual pruning preserves newest tool turn")
+        try P2Life.require(pruned.first { $0.id == recent.id }?.toolInteractions.isEmpty == true
+            && pruned.first { $0.id == recent.id }?.responsesReplay == nil, "manual pruning evicts the newest tool turn toward the target")
         let summaryBody = try JSONSerialization.jsonObject(with: server.completeRequests.last!.body) as! [String: Any]
         try P2Life.require((summaryBody["tools"] as? [Any])?.isEmpty == true, "Responses prune summary mechanically disables tools")
-        let snapshotReference = pruned.first { $0.id == old.id }?.pruneArchiveReferences.first
+        let snapshotReference = pruned.first { $0.id == recent.id }?.pruneArchiveReferences.first
         try P2Life.require(snapshotReference != nil, "Responses prune persists typed snapshot reference")
         _ = try manager.p2Reload()
         server.script([try P2Life.body("After pruning")])
@@ -524,17 +527,20 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         // Drive actual pruning, then serialize its result: no sidecar note can
         // outlive the canonical reasoning that the pruner cleared.
         server.clear(); server.script([try P2Life.body("Pruned summary")])
-        let protected = Message(role: .assistant, content: "Recent protected turn", toolInteractions: chatFinal.toolInteractions)
+        // Since 0.2.19 the newest tool turn is ordinary history; with the 5k
+        // target both turns are cleared, and no sidecar note may outlive either.
+        let recent = Message(role: .assistant, content: "Recent turn with tools", toolInteractions: chatFinal.toolInteractions)
         let pruned = try await manager.p2Prune([Message(role: .user, content: "Old task"), chatFinal,
-            Message(role: .user, content: "Recent task"), protected])
+            Message(role: .user, content: "Recent task"), recent])
         try P2Life.require(pruned.first { $0.id == chatFinal.id }?.finalReasoningDetails == nil
             && pruned.first { $0.id == chatFinal.id }?.toolInteractions.isEmpty == true,
             "pruning clears old textual reasoning at its canonical owner")
+        try P2Life.require(pruned.first { $0.id == recent.id }?.toolInteractions.isEmpty == true, "pruning evicts the newest tool turn toward the target")
         server.script([try P2Life.body("After pruning")])
         _ = try await OpenRouterService().generateResponse(messages: pruned, imagesDirectory: file.deletingLastPathComponent(),
             documentsDirectory: file.deletingLastPathComponent(), tools: [], lane: .main)
         let afterPrune = try P2Life.input(server.completeRequests.last!)
-        try P2Life.require(notes(afterPrune).count == 1, "pruned reasoning note disappears; recent protected reasoning remains")
+        try P2Life.require(notes(afterPrune).isEmpty, "pruned reasoning notes disappear with their cleared canonical owners")
         P2Life.captureDelivery = true; defer { P2Life.captureDelivery = false }
         try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "low")
         await manager.p2Effort("ultra")

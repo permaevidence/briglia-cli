@@ -151,7 +151,10 @@ def run(binary, destination, active_compaction=False):
         "loop-final": 1, "loop-tools": 2, "loop-exhausted": 2, "loop-spend": 2, "subagent-new": 1, "subagent-resume": 1,
         "subagent-eager": 3, "subagent-midrun": 3, "subagent-forced-retry": 3, "media-rehydrated": 1, "media-missing": 1,
         "media-raw-document": 1, "midturn-carry": 2, "midturn-abort": 5, "midturn-no-tools": 2, "archive": 1, "user-context": 1, "probe": 1}
-    if active_compaction: counts["loop-exhausted"] = 1
+    if active_compaction:
+        counts["loop-exhausted"] = 1
+        # r5: the newest historical turn is prunable, so these two scenarios now send a summary request
+        counts["exhausted-protected"] = 1; counts["automatic-protected"] = 1
     expected_captures = {f"{name}-{i}" for name, count in counts.items() for i in range(count)}
     names = [c["fixture"] for c in captures]
     if len(names) != len(set(names)) or set(names) != expected_captures: raise RuntimeError("Lifecycle request inventory changed")
@@ -284,7 +287,7 @@ def main():
                 raise RuntimeError("Wrong baseline compiler")
             compare(frozen["fixtures"], results.get("reference", results["candidate"]))
         if not args.candidate_only:
-            from active_compaction_lifecycle_migration import verify_migration
+            from newest_turn_protection_lifecycle_migration import verify_migration
             from read_file_description_migration import migrate_lifecycle
             from reasoning_history_removal_migration import migrate_lifecycle as migrate_reasoning_history_removal_lifecycle
             verify_migration(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"])), results["candidate"], compare)
