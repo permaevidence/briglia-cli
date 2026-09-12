@@ -48,6 +48,7 @@ button:disabled { opacity: .5; cursor: default; }
 .rows .title { font-weight: 600; }
 .rows .detail { color: var(--muted); font-size: 13px; margin-left: 32px; }
 .rows .reason { color: var(--bad); font-size: 14px; margin: 6px 0 4px 32px; }
+.rows .output { background: #111827; color: #e5e7eb; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px 10px; border-radius: 8px; margin: 4px 0 6px 32px; max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 .rows .edit { margin: 6px 0 0 32px; display: flex; gap: 8px; flex-wrap: wrap; }
 .rows .edit input { font: inherit; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 8px; min-width: 240px; }
 .log { background: #111827; color: #e5e7eb; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 10px 12px; border-radius: 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; }

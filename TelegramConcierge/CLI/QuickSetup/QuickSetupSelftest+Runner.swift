@@ -26,6 +26,17 @@ extension SelftestContext {
             check("journal deleted after conclusive reaping", !FileManager.default.fileExists(atPath: journal.path))
             let bad = await r.run(job("exit 7"))
             check("exit 7 → failed with the status", !bad.ok && bad.failureReason == "exited with status 7")
+            // lastLines is scoped to the job: a step never reports its predecessor's output.
+            r.appendLine("▶ marker written between jobs")
+            let second = await r.run(job("echo second-only; echo 'Error: boom' 1>&2; exit 2"))
+            check("lastLines holds only the job's own lines", second.lastLines == ["second-only", "Error: boom"] || second.lastLines == ["Error: boom", "second-only"], "\(second.lastLines)")
+            check("lastLines excludes earlier jobs and inter-job markers", !second.lastLines.contains("hello") && !second.lastLines.contains { $0.hasPrefix("▶") }, "\(second.lastLines)")
+            let silent = await r.run(job("exit 4"))
+            check("a job that prints nothing has empty lastLines", silent.lastLines.isEmpty, "\(silent.lastLines)")
+            let long = String(repeating: "x", count: 500)
+            let excerpt = SetupJobRunner.Result.excerpt(of: ["", "  ", "a", "b", "c", "d", "e", "f", "g", "h", "i", long])
+            check("excerpt drops blank lines and keeps the last \(SetupJobRunner.Result.excerptMaxLines)", excerpt.count == SetupJobRunner.Result.excerptMaxLines && excerpt.first == "c" && !excerpt.contains(""), "\(excerpt)")
+            check("excerpt cuts over-long lines to \(SetupJobRunner.Result.excerptMaxChars) chars + ellipsis", excerpt.last?.count == SetupJobRunner.Result.excerptMaxChars + 1 && excerpt.last?.hasSuffix("…") == true)
         }
         // Start gate ordering: the child cannot execute before the journal is durable.
         do {

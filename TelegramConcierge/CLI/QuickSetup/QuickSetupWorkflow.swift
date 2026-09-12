@@ -347,6 +347,8 @@ actor QuickSetupWorkflow {
         var reason: String?
         var detail: String?
         var offer: String?
+        /// Last output lines of the failed step's command (redacted), shown under the reason.
+        var output: [String]?
         var info: [String: Any] = [:]
     }
 
@@ -601,6 +603,7 @@ actor QuickSetupWorkflow {
         if let r = row.reason { d["reason"] = r }
         if let r = row.detail { d["detail"] = r }
         if let o = row.offer { d["offer"] = o }
+        if let out = row.output, !out.isEmpty { d["output"] = out }
         for (k, v) in row.info { d[k] = v }
         return d
     }
@@ -884,6 +887,7 @@ actor QuickSetupWorkflow {
         systemRows[index].state = "running"
         systemRows[index].reason = nil
         systemRows[index].offer = nil
+        systemRows[index].output = nil
         let task = Task { [self] in await executeRow(index: index, option: option, generation: g) }
         rowTask = task
         return (202, ["row": rowDict(systemRows[index])])
@@ -893,6 +897,8 @@ actor QuickSetupWorkflow {
         defer { rowTask = nil }
         let id = systemRows[index].id
         var outcome: (ok: Bool, reason: String?, offer: String?, detail: String?) = (false, nil, nil, nil)
+        /// Excerpt of the failed command's output, so the page shows WHY (e.g. brew's `Error:` line).
+        var output: [String] = []
         switch id {
         case "agentmail_cli":
             if env.agentMailInstalled() {
@@ -922,7 +928,7 @@ actor QuickSetupWorkflow {
                     let r = await runner.run(spec)
                     if r.ok { verdict = env.autoSuspendVerdict() }
                     else if r.survivors != nil || r.enumerationFailed { outcome = (false, r.failureReason, nil, nil); break }
-                    else { outcome = (false, "sudo was declined in the terminal or masking failed (\(r.failureReason ?? "?"))", "mask", nil); break }
+                    else { output = r.excerpt; outcome = (false, "sudo was declined in the terminal or masking failed (\(r.failureReason ?? "?"))", "mask", nil); break }
                 }
                 outcome = verdict.isOK
                     ? (true, nil, nil, verdict.summary)
@@ -950,6 +956,7 @@ actor QuickSetupWorkflow {
                         let r = await runner.run(job)
                         if !r.ok {
                             failure = "\(job.label): \(r.failureReason ?? "failed")"
+                            output = r.excerpt
                             if r.survivors != nil || r.enumerationFailed { break }
                             if job.mode == .terminalHandoff, case .exited = r.outcome { failure = "\(job.label): \(r.failureReason ?? "") (sudo declined in the terminal?)" }
                             break
@@ -974,6 +981,7 @@ actor QuickSetupWorkflow {
         systemRows[index].reason = outcome.reason
         systemRows[index].offer = outcome.offer
         systemRows[index].detail = outcome.detail
+        systemRows[index].output = (outcome.ok || output.isEmpty) ? nil : output
         if outcome.ok, systemRows.allSatisfy({ $0.state == "ok" }) {
             phase = .systemComplete
             finishSteps = Self.buildFinishSteps(linux: env.isLinux)

@@ -73,8 +73,18 @@ final class SetupJobRunner: @unchecked Sendable {
         /// Reaping could not be confirmed: the runner is now poisoned.
         var survivors: [Survivor]?
         var enumerationFailed = false
+        /// The last lines this job wrote (redacted), never another job's.
         var lastLines: [String]
         var ok: Bool { outcome == .exited(0) && survivors == nil && !enumerationFailed }
+        /// A short, page-sized excerpt of `lastLines` for a failed row: blank
+        /// lines dropped, at most `excerptMaxLines`, each cut to `excerptMaxChars`.
+        var excerpt: [String] { Result.excerpt(of: lastLines) }
+        static let excerptMaxLines = 8
+        static let excerptMaxChars = 240
+        static func excerpt(of lines: [String]) -> [String] {
+            let kept = lines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            return kept.suffix(excerptMaxLines).map { $0.count > excerptMaxChars ? String($0.prefix(excerptMaxChars)) + "…" : $0 }
+        }
         var failureReason: String? {
             if survivors != nil || enumerationFailed { return "the step's processes could not be confirmed gone — see the survivors" }
             switch outcome {
@@ -154,6 +164,9 @@ final class SetupJobRunner: @unchecked Sendable {
     private var ringBytes = 0
     /// Absolute offset of ring[0].
     private var ringStart = 0
+    /// Absolute offset of the first line written after the current job started;
+    /// `lastLines` is scoped to it so a step never reports its predecessor's output.
+    private var jobStartOffset = 0
     private let extraSecrets: [String: String]
 
     /// `secrets`: the keys of this run (label → value), redacted from every
@@ -229,6 +242,7 @@ final class SetupJobRunner: @unchecked Sendable {
         }
         cancelRequested = false
         running = RunningJob(row: spec.row, label: spec.label, pid: 0, startedAt: Date())
+        jobStartOffset = ringStart + ring.count
         lock.unlock()
 
         let result: Result = await withTaskCancellationHandler {
@@ -582,7 +596,9 @@ final class SetupJobRunner: @unchecked Sendable {
 
     private func snapshotLines() -> [String] {
         lock.lock(); defer { lock.unlock() }
-        return Array(ring.suffix(20))
+        let from = max(jobStartOffset, ringStart) - ringStart
+        guard from < ring.count else { return [] }
+        return Array(ring[from...].suffix(20))
     }
 
     private static func readLine(fd: Int32, deadline: TimeInterval) -> String? {

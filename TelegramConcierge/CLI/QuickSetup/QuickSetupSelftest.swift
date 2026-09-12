@@ -750,16 +750,26 @@ final class SelftestContext: @unchecked Sendable {
             check("GNOME auto-suspend → no-sudo fix applied first, then ok", store.gnomeDisabled && rows[0]["state"] as? String == "ok")
             // Mask path through a (stub) handoff job would need a tty; the job itself is exercised in the runner section.
             store.toolchain = ToolchainService.DesktopStatus(doctorRan: true, missing: ["pandoc"], libreOffice: false, mandatoryMissing: ["pandoc"])
-            store.toolchainJobs = [SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "exit 3"], mode: .detached, timeout: 30, label: "failing install")]
+            // Two steps: the first succeeds and prints; the second fails the way brew does
+            // (progress on stdout, an `Error:` line on stderr, non-zero exit). The row must
+            // carry the failing step's own last lines, not the first step's or the ▶ markers.
+            store.toolchainJobs = [
+                SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "echo first-step-line"], mode: .detached, timeout: 30, label: "first install"),
+                SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "echo '==> Downloading LibreOffice'; echo; echo \"Error: It seems there is already an App at '/Applications/LibreOffice.app'.\" >&2; exit 3"], mode: .detached, timeout: 30, label: "failing install"),
+            ]
             _ = try await wf.systemRun(row: "toolchain", option: nil, generation: g)
             for _ in 0..<50 { try? await Task.sleep(nanoseconds: 100_000_000); let rs = await wf.systemRows; if rs[1].state != "running" { break } }
             rows = (await wf.status())["system_rows"] as? [[String: Any]] ?? []
             check("failing installer → toolchain row failed with the exit status", rows[1]["state"] as? String == "failed" && (rows[1]["reason"] as? String ?? "").contains("status 3"), "\(rows[1])")
+            let output = rows[1]["output"] as? [String] ?? []
+            check("failed row carries the step's last output lines (brew's Error: line)", output.contains { $0.hasPrefix("Error: It seems there is already an App") } && output.contains("==> Downloading LibreOffice"), "\(output)")
+            check("output excerpt is scoped to the failing step (no earlier step, no ▶ marker, no blank line)", !output.contains("first-step-line") && !output.contains { $0.hasPrefix("▶") } && !output.contains(""), "\(output)")
             store.toolchainJobs = [SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "echo ok"], mode: .detached, timeout: 30, label: "install")]
             _ = try await wf.systemRun(row: "toolchain", option: nil, generation: g)
             for _ in 0..<50 { try? await Task.sleep(nanoseconds: 100_000_000); let rs = await wf.systemRows; if rs[1].state != "running" { break } }
             rows = (await wf.status())["system_rows"] as? [[String: Any]] ?? []
             check("installer ok but doctor still missing → row failed (evidence-based)", rows[1]["state"] as? String == "failed" && (rows[1]["reason"] as? String ?? "").contains("still missing"), "\(rows[1])")
+            check("a Retry clears the previous step's output excerpt (installer exited 0)", rows[1]["output"] == nil, "\(rows[1])")
         }
     }
 

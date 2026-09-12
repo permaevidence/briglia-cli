@@ -395,6 +395,7 @@
       li.appendChild(head);
       if (row.detail) li.appendChild(el('div', 'detail', row.detail));
       if (row.state === 'failed') li.appendChild(el('div', 'reason', row.reason || 'failed'));
+      if (row.state === 'failed' && row.output && row.output.length) li.appendChild(el('pre', 'output', row.output.join('\n')));
       if (row.id === 'toolchain' && row.state !== 'ok') li.appendChild(el('div', 'detail', 'Downloads about 1.5 GB and can take up to 40 minutes on a slow connection; LibreOffice is most of it.'));
       if (row.id === 'keepawake' && st.platform === 'macos' && row.state !== 'ok') li.appendChild(el('div', 'detail', 'Briglia prevents idle system sleep while it runs. A closed lid or a manual sleep still stops it.'));
       if (row.id === 'fda' && row.state !== 'ok') li.appendChild(el('div', 'detail', 'In System Settings → Privacy & Security → Full Disk Access, click “+”, add ' + (st.terminal_app || 'your terminal app') + ' (or turn it on), and choose “Quit & Reopen” if asked. Then run `briglia quicksetup` again — it continues from here.'));
