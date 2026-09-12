@@ -75,35 +75,34 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         check("1.1 nothing to sweep → empty report", empty.isEmpty, "\(empty)")
         check("1.2 nothing to sweep → no log line", logged.isEmpty, "\(logged)")
 
-        // 1b. plant: one zombie, one shim+server tree in a private session,
-        //     one SIGTERM-ignoring child.
+        // 1b. plant, sweep A — every DIRECT child obeys SIGTERM: one zombie,
+        //     one shim+server tree in a private session, and (Codex R2) an
+        //     obedient parent whose descendant sits in its own session and
+        //     ignores SIGTERM. No SIGTERM-resistant direct child here, so the
+        //     escalation can only be triggered by the descendant tracking.
         let zombie = try Self.rawSpawn(["/bin/sh", "-c", ":"], newGroup: false)
         let shim = try Self.rawSpawn([selfPath, "__setsid-exec", "--", "/bin/sleep", "300"], newGroup: true)
-        let stubborn = try Self.rawSpawn(["/bin/sh", "-c", "trap '' TERM; exec /bin/sleep 300"], newGroup: false)
-        // Codex R2 topology: the direct child obeys SIGTERM, its descendant
-        // sits in its own session and ignores it.
         let detachedIgnoringTerm = "import os,signal,time; os.setsid(); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)"
         let obedient = try Self.rawSpawn(["/bin/sh", "-c", "\(python) -c '\(detachedIgnoringTerm)' & exec /bin/sleep 300"], newGroup: false)
         usleep(400_000)
         let server = Self.waitForChild(of: shim, seconds: 3)
         let detached = Self.waitForChild(of: obedient, seconds: 3)
-        check("1.3b planted obedient parent has its detached descendant (own session, ignores SIGTERM)",
-              detached.map { getpgid($0) == $0 } ?? false, "parent=\(obedient) \(Self.describeTree(obedient))")
         check("1.3 planted shim took the posix_spawn fallback (server is the shim's child)", server != nil,
               "shim=\(shim) table=\(Self.describeTree(shim))")
         check("1.4 planted server sits in its own session/group", server.map { getpgid($0) == $0 } ?? false)
         check("1.5 planted zombie is a zombie", Self.isZombie(zombie), "pid \(zombie)")
+        check("1.5b planted obedient parent has its detached descendant (own session, ignores SIGTERM)",
+              detached.map { getpgid($0) == $0 } ?? false, "parent=\(obedient) \(Self.describeTree(obedient))")
 
         logged = []
         if skipStartupSweep {
             print("· negative control: startup sweep skipped")
         } else {
             let report = LeftoverChildSweep.run(graceNanos: 1_000_000_000) { logged.append($0) }
-            check("1.6 report: 1 zombie reaped", report.reaped == 1, "\(report)")
-            check("1.7 report: 3 live children ended", report.terminated == 3, "\(report)")
-            check("1.8 report: the SIGTERM-ignoring child needed SIGKILL, the shim and the obedient parent did not", report.killed == 1, "\(report)")
-            check("1.8b report: the detached descendant of the obedient parent needed SIGKILL", report.descendantsKilled == 1, "\(report)")
-            check("1.9 report: nothing left uncollected, no descendant surviving",
+            check("1.6 sweep A report: 1 zombie reaped", report.reaped == 1, "\(report)")
+            check("1.7 sweep A report: 2 live children ended, none needed SIGKILL", report.terminated == 2 && report.killed == 0, "\(report)")
+            check("1.8 sweep A report: the detached descendant of the obedient parent needed SIGKILL", report.descendantsKilled == 1, "\(report)")
+            check("1.9 sweep A report: nothing left uncollected, no descendant surviving",
                   report.unreaped.isEmpty && report.survivingDescendants.isEmpty, "\(report)")
             check("1.10 one startup log line", logged.count == 1 && logged[0].hasPrefix("startup: "), "\(logged)")
         }
@@ -111,14 +110,24 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         check("1.12 shim gone and collected", Self.reapedByUs(shim) && !Self.exists(shim), "pid \(shim) \(Self.describeTree(shim))")
         check("1.13 server in the private session gone", server.map { !Self.waitGone($0, seconds: 3) } ?? false,
               "pid \(server.map(String.init) ?? "?")")
-        check("1.14 SIGTERM-ignoring child gone and collected", Self.reapedByUs(stubborn) && !Self.exists(stubborn), "pid \(stubborn)")
-        check("1.15 obedient parent gone and collected", Self.reapedByUs(obedient) && !Self.exists(obedient), "pid \(obedient)")
-        check("1.16 its detached SIGTERM-ignoring descendant gone (escalated although its parent was collected)",
+        check("1.14 obedient parent gone and collected", Self.reapedByUs(obedient) && !Self.exists(obedient), "pid \(obedient)")
+        check("1.15 its detached SIGTERM-ignoring descendant gone (escalated although its parent was collected)",
               detached.map { !Self.waitGone($0, seconds: 3) } ?? false, "pid \(detached.map(String.init) ?? "?")")
-        // Whatever the verdict, leave nothing behind.
-        for pid in [zombie, shim, stubborn, obedient] + (server.map { [$0] } ?? []) + (detached.map { [$0] } ?? []) {
+        for pid in [zombie, shim, obedient] + (server.map { [$0] } ?? []) + (detached.map { [$0] } ?? []) {
             _ = Darwin.kill(pid, SIGKILL); var st: Int32 = 0; _ = waitpid(pid, &st, WNOHANG)
         }
+
+        // 1c. sweep B — a SIGTERM-ignoring DIRECT child alone.
+        let stubborn = try Self.rawSpawn(["/bin/sh", "-c", "trap '' TERM; exec /bin/sleep 300"], newGroup: false)
+        usleep(200_000)
+        logged = []
+        if !skipStartupSweep {
+            let report = LeftoverChildSweep.run(graceNanos: 1_000_000_000) { logged.append($0) }
+            check("1.16 sweep B report: 1 child ended, it needed SIGKILL, nothing else", report.terminated == 1 && report.killed == 1
+                  && report.reaped == 0 && report.descendantsKilled == 0 && report.unreaped.isEmpty && report.survivingDescendants.isEmpty, "\(report)")
+        }
+        check("1.17 SIGTERM-ignoring child gone and collected", Self.reapedByUs(stubborn) && !Self.exists(stubborn), "pid \(stubborn)")
+        _ = Darwin.kill(stubborn, SIGKILL); do { var st: Int32 = 0; _ = waitpid(stubborn, &st, WNOHANG) }
 
         // MARK: 2. Pre-exec shutdown reaches MCP servers
 

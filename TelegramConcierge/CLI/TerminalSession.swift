@@ -544,7 +544,7 @@ final class TerminalSession {
         Task.detached {
             await BackgroundProcessRegistry.shared.terminateAll()
             await LSPRegistry.shared.shutdownAll()
-            if includeMCP { await MCPRegistry.shared.shutdownAll() }
+            if includeMCP { await MCPRegistry.shared.shutdownForExit() }
             sem.signal()
         }
         if sem.wait(timeout: .now() + budgetSeconds) == .timedOut {

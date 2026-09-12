@@ -48,8 +48,11 @@ actor MCPRegistry {
     /// a non-answering server blocks bootstrap for up to 30 s; the old
     /// teardown awaited that before it could touch anything).
     private var inFlight: [ObjectIdentifier: MCPClient] = [:]
-    /// Set by `shutdownAll()`: no bootstrap or spawn starts after it. Re-armed
-    /// only by an explicit `reloadFromDisk()` (a deliberate new generation).
+    /// Set by `shutdownForExit()`: no bootstrap or spawn starts after it —
+    /// the process is about to exec or exit, and a server spawned now would
+    /// be an orphan. Re-armed only by an explicit `reloadFromDisk()` (a
+    /// deliberate new generation; selftests and the managed-Playwright
+    /// bootstrap use it).
     private var isShuttingDown = false
     /// Bumped by every teardown (`reloadFromDisk`, `shutdownAll`). A
     /// bootstrap publishes its clients only if the generation it started in
@@ -212,17 +215,27 @@ actor MCPRegistry {
     }
 
     /// Terminal shutdown: end every server this registry owns — published
-    /// AND still bootstrapping — and wait until each is gone and reaped.
-    /// Called from the CLI's pre-exec / exit shutdown
-    /// (`TerminalSession.shutdownChildProcesses`).
+    /// AND still bootstrapping — wait until each is gone and reaped, and
+    /// refuse any further bootstrap/spawn work (the process is about to exec
+    /// or exit; a server spawned after this would be an orphan). Called from
+    /// the CLI's pre-exec / exit shutdown (`TerminalSession.shutdownChildProcesses`).
+    func shutdownForExit() async {
+        isShuttingDown = true
+        await shutdownAll()
+    }
+
+    /// End every server this registry owns — published AND still
+    /// bootstrapping — and wait until each is gone and reaped. The registry
+    /// stays usable afterwards (a later tool-list request bootstraps again);
+    /// selftests use it as a reset.
     ///
     /// Unlike `reloadFromDisk`, this does not wait for an in-flight bootstrap
-    /// to finish: it refuses further bootstrap/spawn work, takes ownership of
-    /// the in-flight clients, and shuts every client down CONCURRENTLY, so
-    /// the total is bounded by one client's grace + collection budget rather
-    /// than the server count or a stuck initialize.
+    /// to finish: it takes ownership of the in-flight clients and shuts every
+    /// client down CONCURRENTLY, so the total is bounded by one client's
+    /// grace + collection budget rather than the server count or a stuck
+    /// initialize. The in-flight bootstrap sees the generation change and
+    /// discards (re-shuts, idempotently) what it spawned.
     func shutdownAll() async {
-        isShuttingDown = true
         generation += 1
         let owned = entries.values.map(\.client) + Array(inFlight.values)
         entries.removeAll()
