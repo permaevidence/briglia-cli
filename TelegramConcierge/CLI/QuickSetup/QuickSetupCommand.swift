@@ -494,7 +494,9 @@ enum QuickSetupSession {
         #if os(macOS)
         if let held = leaseBox.take() {
             if WizardIO.askYesNo("Start Briglia now?", default: true) {
-                let session = await TerminalSession()
+                // Same process image, no exec behind us: nothing to sweep, and
+                // the setup's own children are journaled, not leftovers.
+                let session = await TerminalSession(sweepLeftoversAtEntry: false)
                 try await session.runChat(adopting: held)
             } else {
                 held.release()

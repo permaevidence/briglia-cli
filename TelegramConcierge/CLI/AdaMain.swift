@@ -519,7 +519,7 @@ struct Chat: AsyncParsableCommand {
         AdaCLI.prepareIO()
         try IdentityMigration.gateMutatingEntry()
         IdentityMigration.warnLegacyEnvironment()
-        let session = await TerminalSession()
+        let session = await TerminalSession(sweepLeftoversAtEntry: true)
         try await session.runChat()
     }
 }
@@ -533,7 +533,7 @@ struct Daemon: AsyncParsableCommand {
         AdaCLI.prepareIO()
         try IdentityMigration.gateMutatingEntry()
         IdentityMigration.warnLegacyEnvironment()
-        let session = await TerminalSession()
+        let session = await TerminalSession(sweepLeftoversAtEntry: true)
         try await session.runDaemon()
     }
 }

@@ -194,39 +194,42 @@ actor MCPClient {
     /// server tree per restart leaked in its own session (see
     /// LeftoverChildSweep).
     func shutdown() async {
-        // MCP has no dedicated shutdown method — servers are expected to exit
-        // on stdin close or process terminate.
-        try? stdinHandle?.close()
-        stdinHandle = nil
+        // Fail anything parked on the server first: a bootstrap suspended in
+        // initialize() must not wait out its 30 s timeout once we're leaving.
+        for (_, cont) in pendingRequests { cont.resume(throwing: MCPClientError.terminated) }
+        pendingRequests.removeAll()
         if let proc = process {
             process = nil
             let pid = proc.processIdentifier
-            // Same sweep as ProcessTree.terminate (groups + every descendant
-            // pid, SIGTERM then SIGKILL), but the grace is a poll, not a
-            // fixed sleep: a server that dies on SIGTERM — every one we ship —
-            // costs milliseconds, not a second per server on every reload,
-            // upgrade and exit.
-            let kids = proc.isRunning ? ProcessTree.descendants(of: pid) : []
-            let groups = ProcessTree.processGroups(rootPid: pid, descendants: kids)
+            // Capture the tree BEFORE anything that can end the server. Closing
+            // stdin is itself a termination request (MCP has no shutdown
+            // method; servers exit on EOF): a well-behaved server exits at
+            // once, its shim follows, and a detached descendant reparents to
+            // init before we could learn its pid (Codex R1). The table is read
+            // through sysctl/procfs — no spawn, no delay.
+            let tree = Self.captureTree(pid)
+            try? stdinHandle?.close()
+            stdinHandle = nil
             if proc.isRunning { proc.terminate() }
-            for g in groups { _ = Darwin.kill(-g, SIGTERM) }
-            for kid in kids { _ = Darwin.kill(kid, SIGTERM) }
-            var collected = await Self.awaitCollected(proc, budgetNanos: Self.shutdownGraceNanos)
-            if !collected {
+            for g in tree.groups { _ = Darwin.kill(-g, SIGTERM) }
+            for kid in tree.descendants { _ = Darwin.kill(kid, SIGTERM) }
+            // Grace: the shim collected AND every captured descendant gone —
+            // a poll, not a fixed sleep, so a server that dies on SIGTERM
+            // costs milliseconds.
+            var state = await Self.settle(proc, descendants: tree.descendants, budgetNanos: Self.shutdownGraceNanos)
+            if !state.collected || !state.survivors.isEmpty {
                 if proc.isRunning { _ = Darwin.kill(pid, SIGKILL) }
-                for g in groups where Darwin.kill(-g, 0) == 0 { _ = Darwin.kill(-g, SIGKILL) }
-                for kid in kids where Darwin.kill(kid, 0) == 0 { _ = Darwin.kill(kid, SIGKILL) }
-                collected = await Self.awaitCollected(proc, budgetNanos: Self.shutdownReapBudgetNanos)
-            } else {
-                // The shim is gone; anything in its private session that
-                // ignored SIGTERM is not our child and would never be seen
-                // again — kill it now while we still know its pid.
-                for kid in kids where Darwin.kill(kid, 0) == 0 { _ = Darwin.kill(kid, SIGKILL) }
+                for g in tree.groups where Darwin.kill(-g, 0) == 0 { _ = Darwin.kill(-g, SIGKILL) }
+                for kid in state.survivors { _ = Darwin.kill(kid, SIGKILL) }
+                state = await Self.settle(proc, descendants: state.survivors, budgetNanos: Self.shutdownReapBudgetNanos)
             }
-            if !collected {
+            if !state.collected || !state.survivors.isEmpty {
                 FileHandle.standardError.write(Data(
-                    "[MCP] \(serverName): child \(proc.processIdentifier) still not collected after shutdown budget\n".utf8))
+                    "[MCP] \(serverName): shutdown budget exhausted — shim \(pid) \(state.collected ? "collected" : "NOT collected"), descendants still alive: \(state.survivors)\n".utf8))
             }
+        } else {
+            try? stdinHandle?.close()
+            stdinHandle = nil
         }
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
@@ -239,19 +242,36 @@ actor MCPClient {
         isInitialized = false
     }
 
-    /// True once Foundation has observed the child's exit (its reaper ran).
-    /// On Linux corelibs `isRunning` can stay true while an orphaned
-    /// descendant holds the exit-detection socket; a zombie or vanished pid
-    /// in /proc is the truth there.
-    private static func awaitCollected(_ proc: Process, budgetNanos: UInt64) async -> Bool {
+    /// Descendants and process groups of the tracked child, from a
+    /// spawn-free table snapshot; `pgrep`-based fallback when the table
+    /// cannot be read.
+    private static func captureTree(_ pid: Int32) -> (descendants: [Int32], groups: [Int32]) {
+        if let table = LeftoverChildSweep.snapshot() {
+            return LeftoverChildSweep.tree(rootPid: pid, table: table)
+        }
+        let kids = ProcessTree.descendants(of: pid)
+        return (kids, ProcessTree.processGroups(rootPid: pid, descendants: kids))
+    }
+
+    /// Poll until the child is COLLECTED and every descendant is gone, or the
+    /// budget is spent. Collected means Foundation's reaper ran (`isRunning`
+    /// false) — on Linux corelibs that happens only once the exit-detection
+    /// socket the child inherited to its descendants is closed, which is
+    /// exactly why the descendants are ended here rather than assumed dead:
+    /// a `/proc` zombie is exited, not reaped (Codex R5). Never `waitpid`s
+    /// the Foundation-managed pid itself.
+    private static func settle(_ proc: Process, descendants: [Int32],
+                               budgetNanos: UInt64) async -> (collected: Bool, survivors: [Int32]) {
+        var survivors = descendants
         let step: UInt64 = 50_000_000
         var elapsed: UInt64 = 0
         while true {
-            if !proc.isRunning { return true }
-            #if os(Linux)
-            if ProcessTree.linuxPeekExited(pid: proc.processIdentifier).exited { return true }
-            #endif
-            if elapsed >= budgetNanos { return false }
+            let collected = !proc.isRunning
+            if !survivors.isEmpty {
+                let table = LeftoverChildSweep.snapshot()
+                survivors = survivors.filter { !LeftoverChildSweep.isGone($0, table: table) }
+            }
+            if (collected && survivors.isEmpty) || elapsed >= budgetNanos { return (collected, survivors) }
             try? await Task.sleep(nanoseconds: step)
             elapsed += step
         }

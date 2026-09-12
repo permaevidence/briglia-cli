@@ -42,6 +42,15 @@ actor MCPRegistry {
     private var entries: [String: Entry] = [:]   // key = server name
     private var bootstrapTask: Task<Void, Never>?
     private var didBootstrap: Bool = false
+    /// Clients a bootstrap has spawned but not yet published (or shut down).
+    /// Owned by the registry from the moment they are created, so a terminal
+    /// shutdown reaches a server whose initialize is still pending (Codex R3:
+    /// a non-answering server blocks bootstrap for up to 30 s; the old
+    /// teardown awaited that before it could touch anything).
+    private var inFlight: [ObjectIdentifier: MCPClient] = [:]
+    /// Set by `shutdownAll()`: no bootstrap or spawn starts after it. Re-armed
+    /// only by an explicit `reloadFromDisk()` (a deliberate new generation).
+    private var isShuttingDown = false
     /// Bumped by every teardown (`reloadFromDisk`, `shutdownAll`). A
     /// bootstrap publishes its clients only if the generation it started in
     /// is still current; otherwise it shuts them down (Codex, Release C
@@ -202,12 +211,31 @@ actor MCPRegistry {
         return out.sorted { $0.0 < $1.0 }
     }
 
-    /// Kill every spawned server and wait until each tracked child is gone
-    /// and reaped. Called from the CLI's pre-exec / exit shutdown
-    /// (`TerminalSession.shutdownChildProcesses`) and the app's termination
-    /// delegate.
+    /// Terminal shutdown: end every server this registry owns — published
+    /// AND still bootstrapping — and wait until each is gone and reaped.
+    /// Called from the CLI's pre-exec / exit shutdown
+    /// (`TerminalSession.shutdownChildProcesses`).
+    ///
+    /// Unlike `reloadFromDisk`, this does not wait for an in-flight bootstrap
+    /// to finish: it refuses further bootstrap/spawn work, takes ownership of
+    /// the in-flight clients, and shuts every client down CONCURRENTLY, so
+    /// the total is bounded by one client's grace + collection budget rather
+    /// than the server count or a stuck initialize.
     func shutdownAll() async {
-        await teardown()
+        isShuttingDown = true
+        generation += 1
+        let owned = entries.values.map(\.client) + Array(inFlight.values)
+        entries.removeAll()
+        inFlight.removeAll()
+        didBootstrap = false
+        bootstrapTask = nil
+        surface = .empty
+        surfaceBuilt = false
+        await withTaskGroup(of: Void.self) { group in
+            for client in owned {
+                group.addTask { await client.shutdown() }
+            }
+        }
     }
 
     /// The tracked child pid of every connected server (selftests and
@@ -220,11 +248,25 @@ actor MCPRegistry {
         return out
     }
 
+    /// Every tracked child pid the registry owns right now: published
+    /// servers and clients still bootstrapping (selftests).
+    func ownedProcessIdentifiers() async -> [Int32] {
+        var out: [Int32] = []
+        for entry in entries.values {
+            if let pid = await entry.client.processIdentifier { out.append(pid) }
+        }
+        for client in inFlight.values {
+            if let pid = await client.processIdentifier { out.append(pid) }
+        }
+        return out.sorted()
+    }
+
     /// Tear down every running client and re-bootstrap from the current
     /// on-disk config. Called after mcp.json is rewritten (managed Playwright
     /// switch, profile import) so changes take effect without a restart.
     func reloadFromDisk() async {
         await teardown()
+        isShuttingDown = false
         loggedRefusalServers.removeAll()
         await ensureBootstrapped()
         await rebuildSurface()
@@ -388,7 +430,7 @@ actor MCPRegistry {
     // MARK: - Bootstrap
 
     private func ensureBootstrapped() async {
-        if didBootstrap { return }
+        if isShuttingDown || didBootstrap { return }
         if let existing = bootstrapTask {
             await existing.value
             return
@@ -417,29 +459,39 @@ actor MCPRegistry {
         await withTaskGroup(of: (String, Entry).self) { group in
             for cfg in configs {
                 group.addTask {
-                    await Self.spawnOne(config: cfg)
+                    await self.spawnOne(config: cfg)
                 }
             }
             for await (name, entry) in group {
                 spawned[name] = entry
             }
         }
-        if startedIn == generation {
+        // The clients leave `inFlight` only here: published, or shut down
+        // because a teardown/shutdown happened meanwhile (in which case
+        // shutdownAll already ended them; shutdown() is idempotent).
+        for entry in spawned.values { inFlight.removeValue(forKey: ObjectIdentifier(entry.client)) }
+        if startedIn == generation && !isShuttingDown {
             entries = spawned
         } else {
             for entry in spawned.values { await entry.client.shutdown() }
         }
     }
 
-    private static func spawnOne(config: MCPServerConfig) async -> (String, Entry) {
+    private func spawnOne(config: MCPServerConfig) async -> (String, Entry) {
         if config.disabled {
             let client = MCPClient(config: config, resolvedEnvironment: [:])
             return (config.name, Entry(client: client, config: config, failed: true, failureReason: "disabled in mcp.json"))
         }
 
-        let env = resolveEnvironment(for: config)
-        let resolved = resolveExecutable(config: config)
+        let env = Self.resolveEnvironment(for: config)
+        let resolved = Self.resolveExecutable(config: config)
         let client = MCPClient(config: resolved, resolvedEnvironment: env)
+        // Owned before it is started: a terminal shutdown that lands while
+        // start()/initialize() is pending finds it in `inFlight`.
+        guard !isShuttingDown else {
+            return (config.name, Entry(client: client, config: config, failed: true, failureReason: "shutting down"))
+        }
+        inFlight[ObjectIdentifier(client)] = client
 
         do {
             try await client.start()

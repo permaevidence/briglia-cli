@@ -62,6 +62,9 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         guard let selfPath = BashTools.selfExecutablePath else {
             print("✖ cannot resolve own executable path"); throw ExitCode(1)
         }
+        let fm = FileManager.default
+        let python = ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/bin/python3"]
+            .first { fm.isExecutableFile(atPath: $0) } ?? "python3"
 
         // MARK: 1. Startup sweep
 
@@ -77,8 +80,15 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         let zombie = try Self.rawSpawn(["/bin/sh", "-c", ":"], newGroup: false)
         let shim = try Self.rawSpawn([selfPath, "__setsid-exec", "--", "/bin/sleep", "300"], newGroup: true)
         let stubborn = try Self.rawSpawn(["/bin/sh", "-c", "trap '' TERM; exec /bin/sleep 300"], newGroup: false)
+        // Codex R2 topology: the direct child obeys SIGTERM, its descendant
+        // sits in its own session and ignores it.
+        let detachedIgnoringTerm = "import os,signal,time; os.setsid(); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)"
+        let obedient = try Self.rawSpawn(["/bin/sh", "-c", "\(python) -c '\(detachedIgnoringTerm)' & exec /bin/sleep 300"], newGroup: false)
         usleep(400_000)
         let server = Self.waitForChild(of: shim, seconds: 3)
+        let detached = Self.waitForChild(of: obedient, seconds: 3)
+        check("1.3b planted obedient parent has its detached descendant (own session, ignores SIGTERM)",
+              detached.map { getpgid($0) == $0 } ?? false, "parent=\(obedient) \(Self.describeTree(obedient))")
         check("1.3 planted shim took the posix_spawn fallback (server is the shim's child)", server != nil,
               "shim=\(shim) table=\(Self.describeTree(shim))")
         check("1.4 planted server sits in its own session/group", server.map { getpgid($0) == $0 } ?? false)
@@ -90,9 +100,11 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         } else {
             let report = LeftoverChildSweep.run(graceNanos: 1_000_000_000) { logged.append($0) }
             check("1.6 report: 1 zombie reaped", report.reaped == 1, "\(report)")
-            check("1.7 report: 2 live children ended", report.terminated == 2, "\(report)")
-            check("1.8 report: the SIGTERM-ignoring child needed SIGKILL, the shim did not", report.killed == 1, "\(report)")
-            check("1.9 report: nothing left uncollected", report.unreaped.isEmpty, "\(report)")
+            check("1.7 report: 3 live children ended", report.terminated == 3, "\(report)")
+            check("1.8 report: the SIGTERM-ignoring child needed SIGKILL, the shim and the obedient parent did not", report.killed == 1, "\(report)")
+            check("1.8b report: the detached descendant of the obedient parent needed SIGKILL", report.descendantsKilled == 1, "\(report)")
+            check("1.9 report: nothing left uncollected, no descendant surviving",
+                  report.unreaped.isEmpty && report.survivingDescendants.isEmpty, "\(report)")
             check("1.10 one startup log line", logged.count == 1 && logged[0].hasPrefix("startup: "), "\(logged)")
         }
         check("1.11 zombie collected (waitpid → ECHILD)", Self.reapedByUs(zombie), "pid \(zombie)")
@@ -100,22 +112,27 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         check("1.13 server in the private session gone", server.map { !Self.waitGone($0, seconds: 3) } ?? false,
               "pid \(server.map(String.init) ?? "?")")
         check("1.14 SIGTERM-ignoring child gone and collected", Self.reapedByUs(stubborn) && !Self.exists(stubborn), "pid \(stubborn)")
+        check("1.15 obedient parent gone and collected", Self.reapedByUs(obedient) && !Self.exists(obedient), "pid \(obedient)")
+        check("1.16 its detached SIGTERM-ignoring descendant gone (escalated although its parent was collected)",
+              detached.map { !Self.waitGone($0, seconds: 3) } ?? false, "pid \(detached.map(String.init) ?? "?")")
         // Whatever the verdict, leave nothing behind.
-        for pid in [zombie, shim, stubborn] + (server.map { [$0] } ?? []) {
+        for pid in [zombie, shim, stubborn, obedient] + (server.map { [$0] } ?? []) + (detached.map { [$0] } ?? []) {
             _ = Darwin.kill(pid, SIGKILL); var st: Int32 = 0; _ = waitpid(pid, &st, WNOHANG)
         }
 
         // MARK: 2. Pre-exec shutdown reaches MCP servers
 
         print("— §2 shutdownChildProcesses vs live MCP servers")
-        let fm = FileManager.default
-        let python = ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/bin/python3"]
-            .first { fm.isExecutableFile(atPath: $0) } ?? "python3"
         let script = tempRoot.appendingPathComponent("fake_mcp.py")
         try Self.fakeServerSource.write(to: script, atomically: true, encoding: .utf8)
+        let forkedPidFile = tempRoot.appendingPathComponent("forked.pid")
         let servers: [String: Any] = [
             "plain": ["command": python, "args": [script.path, "plain"]],
             "stubborn": ["command": python, "args": [script.path, "stubborn", "ignore-term"]],
+            // Codex R1: forks a detached SIGTERM-ignoring child at start, then
+            // exits the instant stdin closes — the tree must be captured
+            // before EOF or the child is orphaned under pid 1 unseen.
+            "forker": ["command": python, "args": [script.path, "forker", "fork-detached", forkedPidFile.path]],
         ]
         try fm.createDirectory(at: StoragePaths.configRoot, withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: ["mcpServers": servers], options: [.prettyPrinted])
@@ -125,16 +142,19 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         await registry.reloadFromDisk()
         let status = await registry.status()
         let connected = Set(status.filter { $0.connected && !$0.failed }.map(\.name))
-        check("2.1 both fake servers connected", connected == ["plain", "stubborn"],
+        check("2.1 all three fake servers connected", connected == ["plain", "stubborn", "forker"],
               "connected=\(connected.sorted()) failures=\(status.filter { $0.failed }.map { "\($0.name): \($0.reason ?? "?")" })")
         let shims = await registry.spawnedProcessIdentifiers()
-        check("2.2 both servers have a tracked child", shims.count == 2, "\(shims)")
+        check("2.2 every server has a tracked child", shims.count == 3, "\(shims)")
+        let forkedPid = Self.waitForPidFile(forkedPidFile, seconds: 3)
+        check("2.2b the forker's detached descendant is alive in its own session",
+              forkedPid.map { Self.exists($0) && getpgid($0) == $0 } ?? false, "pid \(forkedPid.map(String.init) ?? "?")")
         var serverPids: [String: Int32] = [:]
         for (name, pid) in shims {
             if let child = Self.waitForChild(of: pid, seconds: 3) { serverPids[name] = child }
         }
         check("2.3 each tracked child is a shim with the server in a private session (production topology)",
-              serverPids.count == 2 && serverPids.values.allSatisfy { getpgid($0) == $0 },
+              serverPids.count == 3 && serverPids.values.allSatisfy { getpgid($0) == $0 },
               "shims=\(shims) servers=\(serverPids)")
 
         if skipMcpShutdown {
@@ -146,10 +166,17 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
             let took = Date().timeIntervalSince(t0)
             check("2.4 shutdown returned within the budget", took < TerminalSession.childShutdownBudgetSeconds, "\(took) s")
         }
+        // Collection is asserted AT RETURN (a snapshot taken now), not after
+        // a polling grace: "exited" is not "reaped" (Codex R5).
+        let atReturn = LeftoverChildSweep.snapshot() ?? []
         for (name, pid) in shims.sorted(by: { $0.key < $1.key }) {
-            check("2.5 \(name): tracked shim gone", !Self.waitGone(pid, seconds: 3), "pid \(pid) \(Self.describeTree(pid))")
-            check("2.6 \(name): tracked shim collected (no zombie under us)", !Self.isZombie(pid), "pid \(pid)")
+            check("2.5 \(name): tracked shim gone at shutdown return", !atReturn.contains { $0.pid == pid && !$0.zombie },
+                  "pid \(pid) \(Self.describeTree(pid))")
+            check("2.6 \(name): tracked shim collected at shutdown return (no zombie under us)",
+                  !atReturn.contains { $0.pid == pid && $0.zombie }, "pid \(pid)")
         }
+        check("2.7b forker's detached descendant gone (tree captured before EOF)",
+              forkedPid.map { !Self.waitGone($0, seconds: 3) } ?? false, "pid \(forkedPid.map(String.init) ?? "?")")
         for (name, pid) in serverPids.sorted(by: { $0.key < $1.key }) {
             check("2.7 \(name): server in its private session gone", !Self.waitGone(pid, seconds: 3), "pid \(pid)")
         }
@@ -161,6 +188,64 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
               "\(stragglers.map { "\($0.pid)\($0.zombie ? "Z" : "")" })")
         // Negative-control hygiene: end what the old body left.
         if skipMcpShutdown { await registry.shutdownAll() }
+
+        // MARK: 3. Terminal shutdown while a bootstrap is in flight (Codex R3)
+
+        print("— §3 shutdownChildProcesses vs a bootstrap blocked in initialize")
+        let blockedServers: [String: Any] = [
+            "plain": ["command": python, "args": [script.path, "plain"]],
+            "stubborn": ["command": python, "args": [script.path, "stubborn", "ignore-term"]],
+            // never answers initialize: bootstrap stays in flight up to the
+            // 30 s initialize timeout, its clients unpublished.
+            "blocked": ["command": python, "args": [script.path, "blocked", "blocked"]],
+        ]
+        try JSONSerialization.data(withJSONObject: ["mcpServers": blockedServers], options: [.prettyPrinted])
+            .write(to: StoragePaths.configRoot.appendingPathComponent("mcp.json"))
+        for (variant, budget) in [("pre-exec budget", TerminalSession.childShutdownBudgetSeconds), ("forced-exit budget", 3.0)] {
+            // Kick a reload WITHOUT awaiting it: it re-arms the registry and
+            // starts a bootstrap that the blocked server keeps in flight.
+            let reload = Task { await registry.reloadFromDisk() }
+            var owned: [Int32] = []
+            let deadline = Date().addingTimeInterval(8)
+            while Date() < deadline {
+                owned = await registry.ownedProcessIdentifiers()
+                if owned.count == 3 { break }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            check("3.1 [\(variant)] three servers spawned and owned while bootstrap is in flight", owned.count == 3, "\(owned)")
+            let published = await registry.spawnedProcessIdentifiers()
+            check("3.2 [\(variant)] nothing published yet (bootstrap blocked)", published.isEmpty, "\(published)")
+            var blockedServerPids: [Int32] = []
+            for pid in owned { if let c = Self.waitForChild(of: pid, seconds: 3) { blockedServerPids.append(c) } }
+            check("3.2b [\(variant)] every owned shim has its server in a private session", blockedServerPids.count == 3, "\(blockedServerPids)")
+            let t0 = Date()
+            if skipMcpShutdown {
+                await MainActor.run { TerminalSession.shutdownChildProcesses(includeMCP: false, budgetSeconds: budget) }
+            } else {
+                await MainActor.run { TerminalSession.shutdownChildProcesses(budgetSeconds: budget) }
+            }
+            let took = Date().timeIntervalSince(t0)
+            check("3.3 [\(variant)] returned within the budget (\(Int(budget)) s)", took < budget, "\(took) s")
+            let table = LeftoverChildSweep.snapshot() ?? []
+            for pid in owned {
+                check("3.4 [\(variant)] owned shim \(pid) gone and collected at return",
+                      !table.contains { $0.pid == pid }, Self.describeTree(pid))
+            }
+            for pid in blockedServerPids {
+                check("3.5 [\(variant)] server \(pid) in its private session gone", !Self.waitGone(pid, seconds: 3))
+            }
+            _ = await reload.value
+            let stillOwned = await registry.ownedProcessIdentifiers()
+            check("3.6 [\(variant)] registry owns nothing after the in-flight bootstrap settles", stillOwned.isEmpty, "\(stillOwned)")
+            let defsAfter = await registry.allToolDefinitions()
+            let ownedAfter = await registry.ownedProcessIdentifiers()
+            let kidsAfter = (LeftoverChildSweep.snapshot() ?? []).filter { $0.ppid == getpid() }
+            check("3.7 [\(variant)] a tool-list request after the terminal shutdown spawns nothing",
+                  defsAfter.isEmpty && ownedAfter.isEmpty && kidsAfter.isEmpty,
+                  "defs=\(defsAfter.count) owned=\(ownedAfter) kids=\(kidsAfter.map { "\($0.pid)\($0.zombie ? "Z" : "")" })")
+            if skipMcpShutdown { await registry.shutdownAll() }
+            for pid in kidsAfter.map(\.pid) + blockedServerPids { _ = Darwin.kill(pid, SIGKILL) }
+        }
         let stragglersAfterCleanup = (LeftoverChildSweep.snapshot() ?? []).filter { $0.ppid == getpid() && !$0.zombie }
         for pid in stragglersAfterCleanup.map(\.pid) { _ = Darwin.kill(pid, SIGKILL) }
 
@@ -208,14 +293,37 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         #endif
         posix_spawnattr_init(&attr)
         defer { posix_spawnattr_destroy(&attr) }
+        // Clean signal state, as Foundation's Process gives real children: a
+        // raw posix_spawn inherits this process's signal mask and ignored
+        // dispositions, and an "obedient" plant that silently inherited an
+        // ignored SIGTERM would test the wrong thing (seen: the obedient
+        // parent needed SIGKILL until this reset was added).
+        var defaultSigs = sigset_t()
+        sigfillset(&defaultSigs)
+        posix_spawnattr_setsigdefault(&attr, &defaultSigs)
+        var emptyMask = sigset_t()
+        sigemptyset(&emptyMask)
+        posix_spawnattr_setsigmask(&attr, &emptyMask)
+        var flags = Int16(POSIX_SPAWN_SETSIGDEF) | Int16(POSIX_SPAWN_SETSIGMASK)
         if newGroup {
-            posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
+            flags |= Int16(POSIX_SPAWN_SETPGROUP)
             posix_spawnattr_setpgroup(&attr, 0)
         }
+        posix_spawnattr_setflags(&attr, flags)
         var pid: pid_t = 0
         let rc = posix_spawn(&pid, argv[0], nil, &attr, cargs, environ)
         guard rc == 0 else { throw ExitCode(1) }
         return pid
+    }
+
+    private static func waitForPidFile(_ url: URL, seconds: Double) -> Int32? {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if let text = try? String(contentsOf: url, encoding: .utf8),
+               let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) { return pid }
+            usleep(50_000)
+        }
+        return nil
     }
 
     private static func children(of parent: Int32) -> [Int32] {
@@ -266,15 +374,27 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
     }
 
     /// Minimal stdio MCP server: answers initialize and tools/list, then
-    /// keeps reading. With `ignore-term` it ignores SIGTERM AND keeps
-    /// running on stdin EOF, like a wedged real server would.
+    /// keeps reading and exits on stdin EOF. Modes: `ignore-term` ignores
+    /// SIGTERM AND keeps running on EOF, like a wedged real server;
+    /// `fork-detached` forks a SIGTERM-ignoring child in its own session
+    /// (pid written to argv[3]) and exits on EOF like a well-behaved server;
+    /// `blocked` reads requests but never answers, so initialize hangs.
     private static var fakeServerSource: String {
         """
-        import sys, json, signal, time
+        import sys, json, signal, time, os
         label = sys.argv[1]
-        stubborn = len(sys.argv) > 2 and sys.argv[2] == "ignore-term"
+        mode = sys.argv[2] if len(sys.argv) > 2 else "plain"
+        stubborn = mode == "ignore-term"
         if stubborn:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        if mode == "fork-detached":
+            if os.fork() == 0:
+                os.setsid()
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                with open(sys.argv[3], "w") as f:
+                    f.write(str(os.getpid()))
+                while True:
+                    time.sleep(3600)
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -284,6 +404,8 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
             except Exception:
                 continue
             if "id" not in msg:
+                continue
+            if mode == "blocked":
                 continue
             method = msg.get("method")
             if method == "initialize":

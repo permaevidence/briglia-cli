@@ -17,7 +17,21 @@ import Glibc
 /// deliberately no-ops; history is the UI).
 @MainActor
 final class TerminalSession {
-    private let manager = ConversationManager()
+    private let manager: ConversationManager
+
+    /// `sweepLeftoversAtEntry: true` for the entry commands (`chat`,
+    /// `daemon`): this image may be the product of an in-place `execv`
+    /// (`/restart`, `/upgrade`), so `LeftoverChildSweep.run()` runs HERE,
+    /// before the manager exists — its initializer already schedules polling,
+    /// channel bridges and other background work when configured, and the
+    /// sweep's "every child is a leftover" invariant holds only before any of
+    /// that can spawn. `false` for a same-image handoff (`briglia quicksetup`
+    /// → chat): no exec happened, so there is nothing to inherit, and the
+    /// setup's own journaled children must not be treated as leftovers.
+    init(sweepLeftoversAtEntry: Bool) {
+        if sweepLeftoversAtEntry { LeftoverChildSweep.run() }
+        manager = ConversationManager()
+    }
     private var cancellables = Set<AnyCancellable>()
     private var printedMessageIds = Set<UUID>()
     private var lastActivityDescription: String?
@@ -71,10 +85,6 @@ final class TerminalSession {
     // MARK: - Startup
 
     private func start(headless: Bool, adopting adopted: InstanceLease?) async throws {
-        // FIRST, before this image spawns anything: collect what the previous
-        // image (an in-place /restart or /upgrade exec) left as children of
-        // this pid — zombies, and servers its shutdown never reached.
-        LeftoverChildSweep.run()
         if let adopted {
             precondition(adopted.held, "adopted lease must be held")
             lease = adopted
@@ -516,11 +526,15 @@ final class TerminalSession {
     /// browser tree). `includeMCP` exists only for the lifecycle selftest's
     /// negative control.
     ///
-    /// The wait budget covers the MCP path's grace + collection
-    /// (`MCPClient.shutdownGraceNanos` + `shutdownReapBudgetNanos` per
-    /// server, sequential) with room for a few servers; a budget overrun is
-    /// reported, not silent, because whatever is still alive at exec is a
-    /// leak the next image's LeftoverChildSweep has to clean.
+    /// The MCP shutdown is terminal and concurrent: it owns servers still
+    /// bootstrapping, refuses new spawns, and ends every server in parallel,
+    /// so its cost is one client's grace + collection budget
+    /// (`MCPClient.shutdownGraceNanos` + `shutdownReapBudgetNanos`), not the
+    /// server count or a stuck initialize. The wait budget here leaves room
+    /// above that; an overrun is reported, not silent. After an exec the next
+    /// image's LeftoverChildSweep collects what was still dying; after a real
+    /// exit nothing can, which is why termination is INITIATED for every
+    /// owned server before any waiting happens.
     static let childShutdownBudgetSeconds: Double = 15
 
     static func shutdownChildProcesses(includeMCP: Bool = true,
