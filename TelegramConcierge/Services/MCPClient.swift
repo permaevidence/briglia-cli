@@ -58,6 +58,18 @@ actor MCPClient {
     private var nextRequestId: Int = 1
     private var pendingRequests: [Int: CheckedContinuation<[String: Any], Error>] = [:]
 
+    // Shutdown ownership. The first `shutdown()` caller creates the task
+    // that performs the cleanup; every later caller joins THAT task (and may
+    // tighten its plan), so "shutdown returned" means the same thing for all
+    // of them: the shim is collected and the captured tree is gone, or the
+    // caller's deadline passed. Codex round 2 R-A: the previous code cleared
+    // `process` first, so a second caller saw nil, skipped the wait and
+    // returned in ~0.1 ms while the first was still escalating descendants —
+    // reachable whenever a bootstrap-failure cleanup or a registry reset
+    // begins before the terminal shutdown arrives.
+    private var shutdownTask: Task<Void, Never>?
+    private var shutdownPlan: ShutdownPlan?
+
     // Status
     private(set) var isAlive: Bool = false
     /// The tracked child's pid (the `__setsid-exec` shim on the spawn path
@@ -82,6 +94,10 @@ actor MCPClient {
     // MARK: - Lifecycle
 
     func start() throws {
+        // A client whose cleanup has begun stays down: a queued/late start
+        // (a bootstrap racing a terminal shutdown) must not spawn a server
+        // that the shutdown no longer knows about (Codex round 2 R-A).
+        guard shutdownTask == nil else { throw MCPClientError.terminated }
         guard process == nil else { return }
         let proc = Process()
 
@@ -180,20 +196,47 @@ actor MCPClient {
     /// How long to wait for Foundation to collect the child after it died.
     static let shutdownReapBudgetNanos: UInt64 = 2_000_000_000
 
+    /// True once a shutdown has begun (selftests: the overlap scenarios wait
+    /// for this before the second caller arrives).
+    var shutdownBegun: Bool { shutdownTask != nil }
+
     /// End the server and every process it spawned, and wait until the
-    /// tracked child is actually gone and reaped.
+    /// tracked child is actually gone and reaped — or until `deadline`.
     ///
     /// "terminate() returned" is not "the process is gone": the tracked pid
     /// is the `__setsid-exec` shim, the server lives in the private session
     /// the shim spawned, and a Playwright server may hold a browser tree. So
     /// this SIGTERMs the shim, the tree's process groups and every
     /// descendant pid, waits up to the grace period for the shim to be
-    /// collected, SIGKILLs survivors, then waits for the exit to be
-    /// collected. Before this, the pre-exec restart path
-    /// (`/upgrade`, `/restart`) never reached MCP servers at all, and one
-    /// server tree per restart leaked in its own session (see
+    /// collected and the descendants to be gone, SIGKILLs survivors, then
+    /// waits for the exit to be collected. Before this, the pre-exec restart
+    /// path (`/upgrade`, `/restart`) never reached MCP servers at all, and
+    /// one server tree per restart leaked in its own session (see
     /// LeftoverChildSweep).
-    func shutdown() async {
+    ///
+    /// Every wait is bounded by the monotonic `deadline` when one is given
+    /// (the exit path's): SIGKILL is sent no later than
+    /// `deadline − ShutdownPlan.collectionReserveNanos`, so termination is
+    /// initiated with time left for collection, however slow the polls run
+    /// (Codex round 2 R-C: nominal sleep counting overran a 3 s budget under
+    /// load). Overlapping callers all await the same cleanup; a later caller
+    /// with an earlier deadline tightens it (R-A).
+    func shutdown(deadline: ShutdownDeadline? = nil) async {
+        if let running = shutdownTask {
+            shutdownPlan?.tighten(to: deadline)
+            await running.value
+            return
+        }
+        let plan = ShutdownPlan(graceNanos: Self.shutdownGraceNanos,
+                                reapNanos: Self.shutdownReapBudgetNanos,
+                                deadline: deadline)
+        shutdownPlan = plan
+        let task = Task { await self.performShutdown(plan: plan) }
+        shutdownTask = task
+        await task.value
+    }
+
+    private func performShutdown(plan: ShutdownPlan) async {
         // Fail anything parked on the server first: a bootstrap suspended in
         // initialize() must not wait out its 30 s timeout once we're leaving.
         for (_, cont) in pendingRequests { cont.resume(throwing: MCPClientError.terminated) }
@@ -214,14 +257,16 @@ actor MCPClient {
             for g in tree.groups { _ = Darwin.kill(-g, SIGTERM) }
             for kid in tree.descendants { _ = Darwin.kill(kid, SIGTERM) }
             // Grace: the shim collected AND every captured descendant gone —
-            // a poll, not a fixed sleep, so a server that dies on SIGTERM
-            // costs milliseconds.
-            var state = await Self.settle(proc, descendants: tree.descendants, budgetNanos: Self.shutdownGraceNanos)
+            // a poll against the plan's kill instant (re-read every step, a
+            // joiner may have tightened it), so a server that dies on
+            // SIGTERM costs milliseconds and a stubborn one is SIGKILLed on
+            // time whatever the machine load.
+            var state = await Self.settle(proc, descendants: tree.descendants, until: { plan.killAt })
             if !state.collected || !state.survivors.isEmpty {
                 if proc.isRunning { _ = Darwin.kill(pid, SIGKILL) }
                 for g in tree.groups where Darwin.kill(-g, 0) == 0 { _ = Darwin.kill(-g, SIGKILL) }
                 for kid in state.survivors { _ = Darwin.kill(kid, SIGKILL) }
-                state = await Self.settle(proc, descendants: state.survivors, budgetNanos: Self.shutdownReapBudgetNanos)
+                state = await Self.settle(proc, descendants: state.survivors, until: { plan.giveUpAt })
             }
             if !state.collected || !state.survivors.isEmpty {
                 FileHandle.standardError.write(Data(
@@ -253,27 +298,27 @@ actor MCPClient {
         return (kids, ProcessTree.processGroups(rootPid: pid, descendants: kids))
     }
 
-    /// Poll until the child is COLLECTED and every descendant is gone, or the
-    /// budget is spent. Collected means Foundation's reaper ran (`isRunning`
-    /// false) — on Linux corelibs that happens only once the exit-detection
-    /// socket the child inherited to its descendants is closed, which is
-    /// exactly why the descendants are ended here rather than assumed dead:
-    /// a `/proc` zombie is exited, not reaped (Codex R5). Never `waitpid`s
-    /// the Foundation-managed pid itself.
+    /// Poll until the child is COLLECTED and every descendant is gone, or
+    /// the instant `until()` returns has passed on the monotonic clock (not
+    /// a count of nominal sleeps). Collected means Foundation's reaper ran
+    /// (`isRunning` false) — on Linux corelibs that happens only once the
+    /// exit-detection socket the child inherited to its descendants is
+    /// closed, which is exactly why the descendants are ended here rather
+    /// than assumed dead: a `/proc` zombie is exited, not reaped (Codex R5).
+    /// Never `waitpid`s the Foundation-managed pid itself.
     private static func settle(_ proc: Process, descendants: [Int32],
-                               budgetNanos: UInt64) async -> (collected: Bool, survivors: [Int32]) {
+                               until deadline: () -> ShutdownDeadline) async -> (collected: Bool, survivors: [Int32]) {
         var survivors = descendants
         let step: UInt64 = 50_000_000
-        var elapsed: UInt64 = 0
         while true {
             let collected = !proc.isRunning
             if !survivors.isEmpty {
                 let table = LeftoverChildSweep.snapshot()
                 survivors = survivors.filter { !LeftoverChildSweep.isGone($0, table: table) }
             }
-            if (collected && survivors.isEmpty) || elapsed >= budgetNanos { return (collected, survivors) }
-            try? await Task.sleep(nanoseconds: step)
-            elapsed += step
+            let limit = deadline()
+            if (collected && survivors.isEmpty) || limit.hasPassed { return (collected, survivors) }
+            await limit.sleepStep(step)
         }
     }
 

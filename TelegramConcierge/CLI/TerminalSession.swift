@@ -537,17 +537,31 @@ final class TerminalSession {
     /// owned server before any waiting happens.
     static let childShutdownBudgetSeconds: Double = 15
 
+    /// One monotonic deadline for the whole call (Codex round 2 R-C). The
+    /// three registries shut down CONCURRENTLY — background bash jobs,
+    /// language servers and MCP servers are independent process trees, and
+    /// running them in sequence let the first two spend part of a 3 s
+    /// forced-exit budget before an MCP server had even been signalled. The
+    /// MCP layer receives the deadline and SIGKILLs no later than
+    /// `deadline − ShutdownPlan.collectionReserveNanos`, so termination is
+    /// initiated for every owned server with time left for collection; the
+    /// semaphore below waits until that same instant, not a fresh budget.
     static func shutdownChildProcesses(includeMCP: Bool = true,
                                        budgetSeconds: Double = childShutdownBudgetSeconds) {
+        let deadline = ShutdownDeadline.after(seconds: budgetSeconds)
         ToolExecutor.terminateAllRegisteredProcesses()
         let sem = DispatchSemaphore(value: 0)
         Task.detached {
-            await BackgroundProcessRegistry.shared.terminateAll()
-            await LSPRegistry.shared.shutdownAll()
-            if includeMCP { await MCPRegistry.shared.shutdownForExit() }
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await BackgroundProcessRegistry.shared.terminateAll() }
+                group.addTask { await LSPRegistry.shared.shutdownAll() }
+                if includeMCP {
+                    group.addTask { await MCPRegistry.shared.shutdownForExit(deadline: deadline) }
+                }
+            }
             sem.signal()
         }
-        if sem.wait(timeout: .now() + budgetSeconds) == .timedOut {
+        if sem.wait(timeout: deadline.dispatchTime) == .timedOut {
             FileHandle.standardError.write(Data(
                 "⚠ child shutdown did not finish within \(Int(budgetSeconds)) s — a server may outlive this process; the next start sweeps leftovers\n".utf8))
         }

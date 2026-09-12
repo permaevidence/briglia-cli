@@ -16,6 +16,15 @@ import Darwin
 ///      against real `MCPClient`-spawned servers: the tracked shim is gone
 ///      AND reaped, the server in its private session is gone, including a
 ///      server that ignores SIGTERM; the registry publishes nothing after.
+///   §3 the same shutdown while a bootstrap is blocked in initialize, on the
+///      pre-exec, forced-exit and a tight budget: every owned server gone
+///      and collected at return, within the budget (Codex R3, round 2 R-C).
+///   §4 overlapping shutdown callers: a second caller — at the client and at
+///      the registry layer — returns only when the cleanup the FIRST caller
+///      started is complete; a late `start()` is refused (round 2 R-A).
+///   §5 a reload that began before the exit shutdown and resumes after it
+///      spawns nothing; a reload after the exit shutdown spawns nothing
+///      (round 2 R-B).
 ///
 /// Negative controls (each must FAIL): `--skip-startup-sweep` skips the
 /// sweep in §1, `--skip-mcp-shutdown` runs §2 with the pre-v0.2.21
@@ -210,7 +219,15 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         ]
         try JSONSerialization.data(withJSONObject: ["mcpServers": blockedServers], options: [.prettyPrinted])
             .write(to: StoragePaths.configRoot.appendingPathComponent("mcp.json"))
-        for (variant, budget) in [("pre-exec budget", TerminalSession.childShutdownBudgetSeconds), ("forced-exit budget", 3.0)] {
+        // The tight budget is below the SIGTERM grace: the plan must SIGKILL
+        // at once (`deadline − collectionReserve` is already now) and still
+        // return with everything collected. The pre-round-2 code, which
+        // waited out its nominal grace before escalating, cannot pass it.
+        for (variant, budget) in [("pre-exec budget", TerminalSession.childShutdownBudgetSeconds), ("forced-exit budget", 3.0), ("tight budget", 1.0)] {
+            // The exit shutdown of the previous section/variant closed the
+            // registry for good (round 2 R-B); a selftest is the one place
+            // that re-arms it.
+            await registry.reopenAfterExitShutdownForSelftest()
             // Kick a reload WITHOUT awaiting it: it re-arms the registry and
             // starts a bootstrap that the blocked server keeps in flight.
             let reload = Task { await registry.reloadFromDisk() }
@@ -255,6 +272,151 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
             if skipMcpShutdown { await registry.shutdownAll() }
             for pid in kidsAfter.map(\.pid) + blockedServerPids { _ = Darwin.kill(pid, SIGKILL) }
         }
+        // MARK: 4. Overlapping shutdown callers (Codex round 2 R-A)
+
+        print("— §4 overlapping shutdown callers")
+        func liveChildren() -> [Int32] {
+            (LeftoverChildSweep.snapshot() ?? []).filter { $0.ppid == getpid() && !$0.zombie }.map(\.pid).sorted()
+        }
+        // 4a — client layer. A shutdown is already running (a bootstrap-failure
+        // cleanup, a registry reset); the terminal caller arrives while it is
+        // still waiting on the EOF-forker's detached descendant. Its return
+        // must mean the shim is collected and the descendant is gone.
+        do {
+            let forked4 = tempRoot.appendingPathComponent("forked4.pid")
+            let client = MCPClient(
+                config: MCPServerConfig(name: "forker4", command: python,
+                                        arguments: [script.path, "forker", "fork-detached", forked4.path]),
+                resolvedEnvironment: ProcessInfo.processInfo.environment)
+            try await client.start()
+            try await client.initialize()
+            let shim4 = await client.processIdentifier ?? -1
+            let forked4Pid = Self.waitForPidFile(forked4, seconds: 3) ?? -1
+            check("4.1 direct client up: shim alive, detached descendant alive",
+                  shim4 > 0 && Self.exists(shim4) && forked4Pid > 0 && Self.exists(forked4Pid), "shim \(shim4) forked \(forked4Pid)")
+            let first = Task { await client.shutdown() }
+            let begunBy = Date().addingTimeInterval(2)
+            var begun = false
+            while Date() < begunBy {
+                if await client.shutdownBegun { begun = true; break }
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+            check("4.2 first caller's cleanup has begun", begun)
+            let t0 = Date()
+            await client.shutdown(deadline: .after(seconds: 3))
+            let took = Date().timeIntervalSince(t0)
+            let atReturn = LeftoverChildSweep.snapshot() ?? []
+            check("4.3 second caller returned within its 3 s deadline", took < 3, "\(took) s")
+            check("4.4 shim gone and collected at the second caller's return", !atReturn.contains { $0.pid == shim4 },
+                  Self.describeTree(shim4))
+            check("4.5 detached descendant gone at the second caller's return",
+                  LeftoverChildSweep.isGone(forked4Pid, table: atReturn), "pid \(forked4Pid)")
+            await first.value
+            var refused = false
+            do { try await client.start() } catch { refused = true }
+            let kids = liveChildren()
+            check("4.6 a late start() on a client whose cleanup began is refused", refused)
+            check("4.7 …and spawned nothing", kids.isEmpty, "\(kids)")
+            _ = Darwin.kill(forked4Pid, SIGKILL)
+        }
+        // 4b — registry layer. An ordinary reset (`shutdownAll`) has already
+        // cleared the ownership maps and is ending its servers; the exit
+        // shutdown then finds nothing to own. Its return must still cover
+        // the reset's servers (the registry joins its in-flight shutdown).
+        do {
+            let forked4b = tempRoot.appendingPathComponent("forked4b.pid")
+            let overlapServers: [String: Any] = [
+                "forker": ["command": python, "args": [script.path, "forker", "fork-detached", forked4b.path]],
+                "stubborn": ["command": python, "args": [script.path, "stubborn", "ignore-term"]],
+            ]
+            try JSONSerialization.data(withJSONObject: ["mcpServers": overlapServers], options: [.prettyPrinted])
+                .write(to: StoragePaths.configRoot.appendingPathComponent("mcp.json"))
+            await registry.reopenAfterExitShutdownForSelftest()
+            await registry.reloadFromDisk()
+            let shims4b = await registry.spawnedProcessIdentifiers()
+            var servers4b: [Int32] = []
+            for pid in shims4b.values { if let c = Self.waitForChild(of: pid, seconds: 3) { servers4b.append(c) } }
+            let forked4bPid = Self.waitForPidFile(forked4b, seconds: 3) ?? -1
+            check("4.8 two servers published, detached descendant alive",
+                  shims4b.count == 2 && servers4b.count == 2 && forked4bPid > 0 && Self.exists(forked4bPid),
+                  "shims \(shims4b) servers \(servers4b) forked \(forked4bPid)")
+            let reset = Task { await registry.shutdownAll() }
+            let clearedBy = Date().addingTimeInterval(2)
+            var cleared = false
+            while Date() < clearedBy {
+                if await registry.ownedProcessIdentifiers().isEmpty { cleared = true; break }
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+            check("4.9 the reset has taken the servers out of the ownership maps", cleared)
+            let t0 = Date()
+            await MainActor.run { TerminalSession.shutdownChildProcesses(budgetSeconds: 3) }
+            let took = Date().timeIntervalSince(t0)
+            let atReturn = LeftoverChildSweep.snapshot() ?? []
+            check("4.10 exit shutdown returned within its 3 s budget", took < 3, "\(took) s")
+            for (name, pid) in shims4b.sorted(by: { $0.key < $1.key }) {
+                check("4.11 \(name): shim of the reset's server gone and collected at the exit shutdown's return",
+                      !atReturn.contains { $0.pid == pid }, Self.describeTree(pid))
+            }
+            for pid in servers4b {
+                check("4.12 server \(pid) of the reset gone at the exit shutdown's return",
+                      LeftoverChildSweep.isGone(pid, table: atReturn))
+            }
+            check("4.13 the reset's detached descendant gone at the exit shutdown's return",
+                  LeftoverChildSweep.isGone(forked4bPid, table: atReturn), "pid \(forked4bPid)")
+            await reset.value
+            _ = Darwin.kill(forked4bPid, SIGKILL)
+        }
+
+        // MARK: 5. A reload in flight across the exit shutdown (Codex round 2 R-B)
+
+        print("— §5 reload across the exit shutdown")
+        do {
+            let reloadServers: [String: Any] = [
+                "plain": ["command": python, "args": [script.path, "plain"]],
+                "blocked": ["command": python, "args": [script.path, "blocked", "blocked"]],
+            ]
+            try JSONSerialization.data(withJSONObject: ["mcpServers": reloadServers], options: [.prettyPrinted])
+                .write(to: StoragePaths.configRoot.appendingPathComponent("mcp.json"))
+            await registry.reopenAfterExitShutdownForSelftest()
+            let first = Task { await registry.reloadFromDisk() }
+            var owned: [Int32] = []
+            let deadline = Date().addingTimeInterval(8)
+            while Date() < deadline {
+                owned = await registry.ownedProcessIdentifiers()
+                if owned.count == 2 { break }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            check("5.1 first reload's bootstrap is in flight with two owned servers", owned.count == 2, "\(owned)")
+            // The second reload parks in teardown(), awaiting the blocked
+            // bootstrap — the shape of BrowserAutomationBootstrap's
+            // background configure resuming during the exit.
+            let second = Task { await registry.reloadFromDisk() }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            let ownedWhileParked = await registry.ownedProcessIdentifiers()
+            check("5.2 second reload is parked behind the blocked bootstrap (same two servers, nothing published)",
+                  ownedWhileParked == owned, "\(ownedWhileParked)")
+            await MainActor.run { TerminalSession.shutdownChildProcesses() }
+            let atReturn = LeftoverChildSweep.snapshot() ?? []
+            for pid in owned {
+                check("5.3 owned shim \(pid) gone and collected at the exit shutdown's return",
+                      !atReturn.contains { $0.pid == pid }, Self.describeTree(pid))
+            }
+            _ = await first.value
+            _ = await second.value
+            let ownedAfter = await registry.ownedProcessIdentifiers()
+            let kidsAfter = liveChildren()
+            check("5.4 registry owns nothing after both reloads settle", ownedAfter.isEmpty, "\(ownedAfter)")
+            check("5.5 the reload that resumed after the exit shutdown spawned nothing", kidsAfter.isEmpty, "\(kidsAfter)")
+            let defs = await registry.allToolDefinitions()
+            await registry.reloadFromDisk()
+            let ownedAfterReload = await registry.ownedProcessIdentifiers()
+            let kidsAfterReload = liveChildren()
+            check("5.6 tool list after the exit shutdown is empty and spawns nothing", defs.isEmpty && ownedAfterReload.isEmpty,
+                  "defs=\(defs.count) owned=\(ownedAfterReload)")
+            check("5.7 a reload issued after the exit shutdown spawns nothing", kidsAfterReload.isEmpty, "\(kidsAfterReload)")
+            for pid in kidsAfterReload { _ = Darwin.kill(pid, SIGKILL) }
+        }
+
         let stragglersAfterCleanup = (LeftoverChildSweep.snapshot() ?? []).filter { $0.ppid == getpid() && !$0.zombie }
         for pid in stragglersAfterCleanup.map(\.pid) { _ = Darwin.kill(pid, SIGKILL) }
 

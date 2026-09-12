@@ -241,7 +241,9 @@ enum LeftoverChildSweep {
         var pending = children
         var live = descendants
         let step: UInt64 = 50_000_000
-        var elapsed: UInt64 = 0
+        // Wall-clock budget (monotonic), not a count of nominal sleeps: a
+        // table snapshot per poll costs real time on a loaded machine.
+        let deadline = ShutdownDeadline.after(nanos: budgetNanos)
         while true {
             for pid in pending {
                 var status: Int32 = 0
@@ -252,9 +254,9 @@ enum LeftoverChildSweep {
                 let table = snapshot()
                 live = live.filter { !isGone($0, table: table) }
             }
-            if (pending.isEmpty && live.isEmpty) || elapsed >= budgetNanos { break }
-            usleep(UInt32(step / 1_000))
-            elapsed += step
+            if (pending.isEmpty && live.isEmpty) || deadline.hasPassed { break }
+            let remaining = deadline.remainingNanos
+            usleep(UInt32(min(step, remaining) / 1_000))
         }
         return (pending, live)
     }

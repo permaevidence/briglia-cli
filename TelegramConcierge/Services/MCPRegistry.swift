@@ -50,10 +50,17 @@ actor MCPRegistry {
     private var inFlight: [ObjectIdentifier: MCPClient] = [:]
     /// Set by `shutdownForExit()`: no bootstrap or spawn starts after it —
     /// the process is about to exec or exit, and a server spawned now would
-    /// be an orphan. Re-armed only by an explicit `reloadFromDisk()` (a
-    /// deliberate new generation; selftests and the managed-Playwright
-    /// bootstrap use it).
+    /// be an orphan. Sticky for the process lifetime: `reloadFromDisk()`
+    /// checks it and never clears it (Codex round 2 R-B); only the
+    /// selftest-only `reopenAfterExitShutdownForSelftest()` re-arms it.
     private var isShuttingDown = false
+    /// The most recent `shutdownAll` in flight. Each new call captures what
+    /// it owns NOW, ends it, and joins the previous shutdown before
+    /// returning, so an exit that lands while an earlier reset is still
+    /// escalating descendants awaits that work too (Codex round 2 R-A: the
+    /// ownership maps were cleared before the group wait, so an overlapping
+    /// call captured nothing and returned at once).
+    private var shutdownInProgress: Task<Void, Never>?
     /// Bumped by every teardown (`reloadFromDisk`, `shutdownAll`). A
     /// bootstrap publishes its clients only if the generation it started in
     /// is still current; otherwise it shuts them down (Codex, Release C
@@ -219,9 +226,20 @@ actor MCPRegistry {
     /// refuse any further bootstrap/spawn work (the process is about to exec
     /// or exit; a server spawned after this would be an orphan). Called from
     /// the CLI's pre-exec / exit shutdown (`TerminalSession.shutdownChildProcesses`).
-    func shutdownForExit() async {
+    func shutdownForExit(deadline: ShutdownDeadline? = nil) async {
         isShuttingDown = true
-        await shutdownAll()
+        await shutdownAll(deadline: deadline)
+    }
+
+    /// Selftests only: re-arm a registry that `shutdownForExit()` closed, so
+    /// one process can exercise several exit lifecycles. Production never
+    /// calls this — after the exit shutdown the process execs or exits, and
+    /// an ordinary `reloadFromDisk()` must NOT reopen the gate (Codex round
+    /// 2 R-B: a background reload that began before the exit and resumed
+    /// during the shutdown wait cleared the flag and spawned servers outside
+    /// the captured set, orphans no later sweep could find).
+    func reopenAfterExitShutdownForSelftest() {
+        isShuttingDown = false
     }
 
     /// End every server this registry owns — published AND still
@@ -235,7 +253,7 @@ actor MCPRegistry {
     /// grace + collection budget rather than the server count or a stuck
     /// initialize. The in-flight bootstrap sees the generation change and
     /// discards (re-shuts, idempotently) what it spawned.
-    func shutdownAll() async {
+    func shutdownAll(deadline: ShutdownDeadline? = nil) async {
         generation += 1
         let owned = entries.values.map(\.client) + Array(inFlight.values)
         entries.removeAll()
@@ -244,11 +262,25 @@ actor MCPRegistry {
         bootstrapTask = nil
         surface = .empty
         surfaceBuilt = false
-        await withTaskGroup(of: Void.self) { group in
-            for client in owned {
-                group.addTask { await client.shutdown() }
+        let previous = shutdownInProgress
+        let task = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for client in owned {
+                    group.addTask { await client.shutdown(deadline: deadline) }
+                }
+                // Join the earlier shutdown as one more member: its clients
+                // are not in `owned` any more, but this caller's "returned"
+                // must cover them too. A client-level join honours this
+                // caller's deadline (ShutdownPlan.tighten), so the previous
+                // shutdown's own budget cannot stretch this one.
+                if let previous {
+                    group.addTask { await previous.value }
+                }
             }
         }
+        shutdownInProgress = task
+        await task.value
+        if shutdownInProgress == task { shutdownInProgress = nil }
     }
 
     /// The tracked child pid of every connected server (selftests and
@@ -277,11 +309,19 @@ actor MCPRegistry {
     /// Tear down every running client and re-bootstrap from the current
     /// on-disk config. Called after mcp.json is rewritten (managed Playwright
     /// switch, profile import) so changes take effect without a restart.
+    ///
+    /// A no-op once `shutdownForExit()` ran: the flag is sticky for the
+    /// process lifetime, and it is re-checked after every suspension point
+    /// because the reload that matters is the one that STARTED before the
+    /// exit (BrowserAutomationBootstrap's background configure, a profile
+    /// import) and resumes during the shutdown wait.
     func reloadFromDisk() async {
+        guard !isShuttingDown else { return }
         await teardown()
-        isShuttingDown = false
+        guard !isShuttingDown else { return }
         loggedRefusalServers.removeAll()
         await ensureBootstrapped()
+        guard !isShuttingDown else { return }
         await rebuildSurface()
     }
 
@@ -293,6 +333,9 @@ actor MCPRegistry {
         if let inFlight = bootstrapTask {
             await inFlight.value
         }
+        // A terminal shutdown that landed during the wait above already
+        // owns everything; `shutdown()` joins its cleanup rather than
+        // skipping it, and `reloadFromDisk` re-checks the flag on return.
         for entry in entries.values {
             await entry.client.shutdown()
         }
