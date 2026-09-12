@@ -16,7 +16,9 @@ struct ChatCompletionsAdapter {
             apiMessages,
             provider: currentProvider,
             useReasoningContent: context.useReasoningContent,
-            effectiveProvenance: effectiveProvenance
+            effectiveProvenance: effectiveProvenance,
+            requiresReasoningContent: context.useReasoningContent
+                && OpenRouterService.isOpenCodeDeepSeekReasoningModel(effectiveModel)
         )
 
         let body = OpenRouterRequest(

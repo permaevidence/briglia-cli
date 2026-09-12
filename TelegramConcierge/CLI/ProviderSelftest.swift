@@ -459,6 +459,104 @@ struct ProviderSelftest: AsyncParsableCommand {
               && !OpenCodeGo.probeFallbacks.contains("deepseek-v4-flash")
               && OpenCodeGo.probeFallbacks.allSatisfy { id in OpenCodeGo.choices.contains { $0.id == id } })
 
+        // 17. DeepSeek requires `reasoning_content` on EVERY current-turn
+        // assistant message (OpenCode "Console Go", verified 2026-09-12:
+        // missing → HTTP 400, null → 400, "" → 200). The harness-authored
+        // active-turn compaction note has nothing to replay and killed real
+        // turns. DeepSeek targets get "" where nothing is stored; every
+        // other model/provider and every non-assistant role are byte-identical.
+        for id in ["deepseek-v4.1-flash", "deepseek-flash", "deepseek-v4-pro", "DeepSeek-V4-Flash-Vision-Exp"] {
+            check("deepseek predicate: \(id) requires reasoning_content",
+                  OpenRouterService.isOpenCodeDeepSeekReasoningModel(id))
+        }
+        for id in ["kimi-k3", "kimi-k2.6", "glm-5.3-flash", "qwen3.8-max", "minimax-m3", "gpt-5.6-luna"] {
+            check("deepseek predicate: \(id) does not",
+                  !OpenRouterService.isOpenCodeDeepSeekReasoningModel(id))
+        }
+        func rc(_ value: JSONValue?) -> String? {
+            switch value {
+            case nil: return nil
+            case .string(let text)?: return text
+            case .null?: return "<null>"
+            default: return "<other>"
+            }
+        }
+        let bareNote = OpenRouterAPIMessage(role: "assistant", content: .text("[compaction summary]"),
+                                            toolCalls: nil, toolCallId: nil)
+        let (dsNote, dsNoteNote) = bareNote.sanitizedForProvider(
+            .openAICompatible, useReasoningContent: true, reasoningFromCurrentModel: true,
+            requiresReasoningContent: true)
+        check("deepseek: bare assistant message gets reasoning_content \"\"",
+              rc(dsNote.reasoningContent) == "" && dsNoteNote == nil)
+        let (otherNote, _) = bareNote.sanitizedForProvider(
+            .openAICompatible, useReasoningContent: true, reasoningFromCurrentModel: true)
+        check("non-deepseek: bare assistant message stays without the field",
+              rc(otherNote.reasoningContent) == nil)
+        let storedReasoning = OpenRouterAPIMessage(role: "assistant", content: .text("x"), toolCalls: nil,
+                                                   toolCallId: nil, reasoning: .string("thought"))
+        check("deepseek: stored reasoning replays unchanged",
+              rc(storedReasoning.sanitizedForProvider(.openAICompatible, useReasoningContent: true,
+                  requiresReasoningContent: true).message.reasoningContent) == "thought")
+        let storedEmpty = OpenRouterAPIMessage(role: "assistant", content: .text("x"), toolCalls: nil,
+                                               toolCallId: nil, reasoning: .string(""))
+        check("deepseek: stored empty reasoning replays as \"\" (was already so)",
+              rc(storedEmpty.sanitizedForProvider(.openAICompatible, useReasoningContent: true,
+                  requiresReasoningContent: true).message.reasoningContent) == "")
+        let storedNull = OpenRouterAPIMessage(role: "assistant", content: .text("x"), toolCalls: nil,
+                                              toolCallId: nil, reasoning: .null)
+        check("deepseek: stored JSON null becomes \"\" (null is rejected too)",
+              rc(storedNull.sanitizedForProvider(.openAICompatible, useReasoningContent: true,
+                  requiresReasoningContent: true).message.reasoningContent) == "")
+        check("non-deepseek: stored JSON null still replays as null (unchanged shape)",
+              rc(storedNull.sanitizedForProvider(.openAICompatible, useReasoningContent: true)
+                  .message.reasoningContent) == "<null>")
+        for role in ["user", "tool", "system"] {
+            let other = OpenRouterAPIMessage(role: role, content: .text("t"), toolCalls: nil,
+                                             toolCallId: role == "tool" ? "c" : nil)
+            check("deepseek: \(role) message never gets the field",
+                  rc(other.sanitizedForProvider(.openAICompatible, useReasoningContent: true,
+                      requiresReasoningContent: true).message.reasoningContent) == nil)
+        }
+        let (dsDowngraded, dsDowngradeNote) = reasoned.sanitizedForProvider(
+            .openAICompatible, useReasoningContent: true, reasoningFromCurrentModel: false,
+            requiresReasoningContent: true)
+        check("deepseek: foreign-provenance downgrade keeps the note and carries \"\"",
+              rc(dsDowngraded.reasoningContent) == "" && dsDowngraded.reasoning == nil
+              && dsDowngradeNote?.contains("secret chain of thought") == true)
+        check("openrouter/lmstudio: flag is inert",
+              rc(bareNote.sanitizedForProvider(.openRouter, useReasoningContent: false,
+                  requiresReasoningContent: true).message.reasoningContent) == nil
+              && rc(bareNote.sanitizedForProvider(.lmStudio, useReasoningContent: true,
+                  requiresReasoningContent: true).message.reasoningContent) == nil)
+        // The field shape that failed live: user task → compaction note →
+        // retained tool round → tool result. Asserted on the ENCODED wire.
+        let compactionShape: [OpenRouterAPIMessage] = [
+            OpenRouterAPIMessage(role: "system", content: .text("prompt"), toolCalls: nil, toolCallId: nil),
+            OpenRouterAPIMessage(role: "user", content: .text("task"), toolCalls: nil, toolCallId: nil),
+            bareNote,
+            OpenRouterAPIMessage(role: "assistant", content: nil,
+                                 toolCalls: [ToolCall(id: "c1", type: "function",
+                                                      function: FunctionCall(name: "read_file", arguments: "{}"))],
+                                 toolCallId: nil, reasoning: .string("call it"),
+                                 producedByModel: "deepseek-v4.1-flash#opencode"),
+            OpenRouterAPIMessage(role: "tool", content: .text("result"), toolCalls: nil, toolCallId: "c1"),
+        ]
+        func wireKeys(_ messages: [OpenRouterAPIMessage]) throws -> [String?] {
+            let data = try JSONEncoder().encode(messages)
+            let wire = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] ?? []
+            return wire.map { $0["reasoning_content"] as? String }
+        }
+        let dsWire = try wireKeys(OpenRouterService.assembleRequestMessages(
+            compactionShape, provider: .openAICompatible, useReasoningContent: true,
+            effectiveProvenance: "deepseek-v4.1-flash#opencode", requiresReasoningContent: true))
+        check("deepseek compaction shape: note carries \"\", round keeps its reasoning, others untouched",
+              dsWire == [nil, nil, "", "call it", nil])
+        let otherWire = try wireKeys(OpenRouterService.assembleRequestMessages(
+            compactionShape, provider: .openAICompatible, useReasoningContent: true,
+            effectiveProvenance: "deepseek-v4.1-flash#opencode"))
+        check("same shape without the flag is byte-identical to before (note has no field)",
+              otherWire == [nil, nil, nil, "call it", nil])
+
         print(failures == 0
               ? "\nAll provider-profile checks passed."
               : "\n\(failures) provider-profile check(s) FAILED.")

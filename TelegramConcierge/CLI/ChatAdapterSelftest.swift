@@ -129,6 +129,37 @@ struct ChatAdapterSelftest: AsyncParsableCommand {
         let routerRequest = try ChatCompletionsAdapter(context: routerContext).makeRequest(messages: [], tools: nil)
         check("OpenRouter chat request retains POST and 360-second timeout",
               routerRequest.httpMethod == "POST" && routerRequest.timeoutInterval == 360)
+
+        // DeepSeek end-to-end: the adapter derives the reasoning_content
+        // requirement from the context's model, so a harness-authored
+        // assistant note reaches the wire with "" for DeepSeek and without
+        // the field for every other OpenCode model (Console Go 400, 2026-09-12).
+        func noteWire(model: String, provenance: String) throws -> [String?] {
+            let deepSeekContext = ProviderExecutionContext(provider: .openAICompatible, model: model,
+                endpoint: endpoint, authorization: "Bearer synthetic-opencode", affinityKey: "synthetic-opencode",
+                lane: .main, provenance: provenance, providerPreferences: nil,
+                reasoning: nil, reasoningEffort: nil, thinkingType: nil,
+                useReasoningContent: true, textOnly: false, anthropicCacheControl: false,
+                renderPDFAsImages: true)
+            let shape: [OpenRouterAPIMessage] = [
+                OpenRouterAPIMessage(role: "user", content: .text("task"), toolCalls: nil, toolCallId: nil),
+                OpenRouterAPIMessage(role: "assistant", content: .text("[compaction summary]"), toolCalls: nil, toolCallId: nil),
+                OpenRouterAPIMessage(role: "assistant", content: nil,
+                    toolCalls: [ToolCall(id: "c1", type: "function", function: FunctionCall(name: "read_file", arguments: "{}"))],
+                    toolCallId: nil, reasoning: .string("call it"), producedByModel: provenance),
+                OpenRouterAPIMessage(role: "tool", content: .text("result"), toolCalls: nil, toolCallId: "c1"),
+            ]
+            let request = try ChatCompletionsAdapter(context: deepSeekContext).makeRequest(messages: shape, tools: nil)
+            let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any]
+            let messages = body?["messages"] as? [[String: Any]] ?? []
+            return messages.map { $0["reasoning_content"] as? String }
+        }
+        check("deepseek adapter: compaction note reaches the wire with reasoning_content \"\"",
+              try noteWire(model: "deepseek-v4.1-flash", provenance: "deepseek-v4.1-flash#opencode") == [nil, "", "call it", nil])
+        check("deepseek adapter: legacy alias id gets the same shim",
+              try noteWire(model: "deepseek-flash", provenance: "deepseek-flash#opencode") == [nil, "", "call it", nil])
+        check("kimi adapter: same shape unchanged (no field on the note)",
+              try noteWire(model: "kimi-k3", provenance: "kimi-k3#opencode") == [nil, nil, "call it", nil])
         let zeroUsage = try adapter.decodeResponse(Data(#"{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":0,"completion_tokens":0}}"#.utf8))
         if case .text(_, _, _, let prompt, let completion, let spend, _) = zeroUsage {
             check("zero usage is preserved, absent spend remains nil", prompt == 0 && completion == 0 && spend == nil)

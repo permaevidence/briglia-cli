@@ -215,11 +215,23 @@ actor OpenRouterService {
     /// (long-standing behavior); legacy bare-model records are requalified
     /// at load when defensible, so a surviving mismatch here is a genuine
     /// model/gateway change (or an unattributable legacy record).
+    ///
+    /// `requiresReasoningContent` (DeepSeek through an OpenAI-compatible
+    /// gateway): every assistant message is sent WITH a `reasoning_content`
+    /// field, `""` when nothing is stored. DeepSeek's thinking mode rejects
+    /// an assistant message after the last user message that lacks the
+    /// field (`The reasoning_content in the thinking mode must be passed
+    /// back to the API`, HTTP 400); an empty string is accepted. OpenCode's
+    /// own client applies the same shim. Verified live on the OpenCode
+    /// "Console Go" backend 2026-09-12 (8/8 sessions): missing → 400,
+    /// null → 400, "" → 200. The harness-authored active-turn compaction
+    /// note was the shape that hit it in the field.
     static func assembleRequestMessages(
         _ apiMessages: [OpenRouterAPIMessage],
         provider: LLMProvider,
         useReasoningContent: Bool,
-        effectiveProvenance: String
+        effectiveProvenance: String,
+        requiresReasoningContent: Bool = false
     ) -> [OpenRouterAPIMessage] {
         var requestMessages: [OpenRouterAPIMessage] = []
         requestMessages.reserveCapacity(apiMessages.count)
@@ -229,7 +241,8 @@ actor OpenRouterService {
             let (sanitized, note) = message.sanitizedForProvider(
                 provider,
                 useReasoningContent: useReasoningContent,
-                reasoningFromCurrentModel: reasoningFromCurrentModel
+                reasoningFromCurrentModel: reasoningFromCurrentModel,
+                requiresReasoningContent: requiresReasoningContent
             )
             if let note {
                 requestMessages.append(OpenRouterAPIMessage(
@@ -289,6 +302,15 @@ actor OpenRouterService {
             return false
         }
     }()
+
+    /// DeepSeek ids served with `reasoning_content` (V4 Pro/Flash, the
+    /// canonical "deepseek-v4.1-flash" and its legacy "deepseek-flash"
+    /// alias). These models REQUIRE the field on every current-turn
+    /// assistant message; see `assembleRequestMessages`.
+    static func isOpenCodeDeepSeekReasoningModel(_ model: String) -> Bool {
+        let normalized = model.lowercased()
+        return normalized.contains("deepseek-v4") || normalized.contains("deepseek-flash")
+    }
 
     static func isOpenCodeReasoningContentModel(_ model: String) -> Bool {
         let normalized = model.lowercased()
@@ -3039,10 +3061,18 @@ struct OpenRouterAPIMessage: Codable {
     /// that arrives in their own voice (seen live 2026-08-16 when the
     /// provenance upgrade downgraded whole conversations at once), and the
     /// splice also misrepresented what the user actually received that turn.
+    ///
+    /// `requiresReasoningContent`: the target model rejects a current-turn
+    /// assistant message without `reasoning_content` (DeepSeek), so an
+    /// assistant message that has nothing to replay — harness-authored
+    /// notes such as the active-turn compaction summary, downgraded
+    /// foreign-provenance reasoning, a stored JSON null — carries `""`.
+    /// Non-assistant roles and every other provider/model are unchanged.
     func sanitizedForProvider(
         _ provider: LLMProvider,
         useReasoningContent: Bool,
-        reasoningFromCurrentModel: Bool = true
+        reasoningFromCurrentModel: Bool = true,
+        requiresReasoningContent: Bool = false
     ) -> (message: OpenRouterAPIMessage, reasoningNote: String?) {
         switch provider {
         case .openRouter:
@@ -3058,20 +3088,24 @@ struct OpenRouterAPIMessage: Codable {
         case .lmStudio:
             return (self, nil)
         case .openAICompatible:
+            let placeholder: JSONValue? = (requiresReasoningContent && role == "assistant") ? .string("") : nil
             if useReasoningContent && reasoningFromCurrentModel {
+                var replayed = reasoningContent ?? reasoning
+                if requiresReasoningContent, case .null? = replayed { replayed = nil }  // DeepSeek rejects null too
                 return (OpenRouterAPIMessage(
                     role: role,
                     content: content,
                     toolCalls: toolCalls,
                     toolCallId: toolCallId,
-                    reasoningContent: reasoningContent ?? reasoning
+                    reasoningContent: replayed ?? placeholder
                 ), nil)
             }
             return (OpenRouterAPIMessage(
                 role: role,
                 content: content,
                 toolCalls: toolCalls,
-                toolCallId: toolCallId
+                toolCallId: toolCallId,
+                reasoningContent: placeholder
             ), reasoningNoteBlock())
         }
     }
