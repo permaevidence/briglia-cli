@@ -202,9 +202,22 @@ actor MCPRegistry {
         return out.sorted { $0.0 < $1.0 }
     }
 
-    /// Kill every spawned server. Called on app termination.
+    /// Kill every spawned server and wait until each tracked child is gone
+    /// and reaped. Called from the CLI's pre-exec / exit shutdown
+    /// (`TerminalSession.shutdownChildProcesses`) and the app's termination
+    /// delegate.
     func shutdownAll() async {
         await teardown()
+    }
+
+    /// The tracked child pid of every connected server (selftests and
+    /// diagnostics; nil for servers that never spawned).
+    func spawnedProcessIdentifiers() async -> [String: Int32] {
+        var out: [String: Int32] = [:]
+        for (name, entry) in entries {
+            if let pid = await entry.client.processIdentifier { out[name] = pid }
+        }
+        return out
     }
 
     /// Tear down every running client and re-bootstrap from the current

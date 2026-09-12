@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#endif
 
 /// One decoded image content block from an MCP tool-call result.
 struct MCPImageContent: Sendable {
@@ -57,6 +60,9 @@ actor MCPClient {
 
     // Status
     private(set) var isAlive: Bool = false
+    /// The tracked child's pid (the `__setsid-exec` shim on the spawn path
+    /// Foundation takes; the real server is its child in a private session).
+    var processIdentifier: Int32? { process.map(\.processIdentifier) }
     private(set) var isInitialized: Bool = false
 
     // Cached tool list from `tools/list`. Populated during initialize().
@@ -168,13 +174,60 @@ actor MCPClient {
         try await refreshTools(timeout: timeout)
     }
 
+    /// Grace between SIGTERM and SIGKILL. A Playwright server closes its
+    /// browser on SIGTERM; give it a second before the whole tree is killed.
+    static let shutdownGraceNanos: UInt64 = 1_000_000_000
+    /// How long to wait for Foundation to collect the child after it died.
+    static let shutdownReapBudgetNanos: UInt64 = 2_000_000_000
+
+    /// End the server and every process it spawned, and wait until the
+    /// tracked child is actually gone and reaped.
+    ///
+    /// "terminate() returned" is not "the process is gone": the tracked pid
+    /// is the `__setsid-exec` shim, the server lives in the private session
+    /// the shim spawned, and a Playwright server may hold a browser tree. So
+    /// this SIGTERMs the shim, the tree's process groups and every
+    /// descendant pid, waits up to the grace period for the shim to be
+    /// collected, SIGKILLs survivors, then waits for the exit to be
+    /// collected. Before this, the pre-exec restart path
+    /// (`/upgrade`, `/restart`) never reached MCP servers at all, and one
+    /// server tree per restart leaked in its own session (see
+    /// LeftoverChildSweep).
     func shutdown() async {
         // MCP has no dedicated shutdown method — servers are expected to exit
         // on stdin close or process terminate.
         try? stdinHandle?.close()
-        process?.terminate()
-        process = nil
         stdinHandle = nil
+        if let proc = process {
+            process = nil
+            let pid = proc.processIdentifier
+            // Same sweep as ProcessTree.terminate (groups + every descendant
+            // pid, SIGTERM then SIGKILL), but the grace is a poll, not a
+            // fixed sleep: a server that dies on SIGTERM — every one we ship —
+            // costs milliseconds, not a second per server on every reload,
+            // upgrade and exit.
+            let kids = proc.isRunning ? ProcessTree.descendants(of: pid) : []
+            let groups = ProcessTree.processGroups(rootPid: pid, descendants: kids)
+            if proc.isRunning { proc.terminate() }
+            for g in groups { _ = Darwin.kill(-g, SIGTERM) }
+            for kid in kids { _ = Darwin.kill(kid, SIGTERM) }
+            var collected = await Self.awaitCollected(proc, budgetNanos: Self.shutdownGraceNanos)
+            if !collected {
+                if proc.isRunning { _ = Darwin.kill(pid, SIGKILL) }
+                for g in groups where Darwin.kill(-g, 0) == 0 { _ = Darwin.kill(-g, SIGKILL) }
+                for kid in kids where Darwin.kill(kid, 0) == 0 { _ = Darwin.kill(kid, SIGKILL) }
+                collected = await Self.awaitCollected(proc, budgetNanos: Self.shutdownReapBudgetNanos)
+            } else {
+                // The shim is gone; anything in its private session that
+                // ignored SIGTERM is not our child and would never be seen
+                // again — kill it now while we still know its pid.
+                for kid in kids where Darwin.kill(kid, 0) == 0 { _ = Darwin.kill(kid, SIGKILL) }
+            }
+            if !collected {
+                FileHandle.standardError.write(Data(
+                    "[MCP] \(serverName): child \(proc.processIdentifier) still not collected after shutdown budget\n".utf8))
+            }
+        }
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         chunkContinuation?.finish()
@@ -184,6 +237,24 @@ actor MCPClient {
         stderrPipe = nil
         isAlive = false
         isInitialized = false
+    }
+
+    /// True once Foundation has observed the child's exit (its reaper ran).
+    /// On Linux corelibs `isRunning` can stay true while an orphaned
+    /// descendant holds the exit-detection socket; a zombie or vanished pid
+    /// in /proc is the truth there.
+    private static func awaitCollected(_ proc: Process, budgetNanos: UInt64) async -> Bool {
+        let step: UInt64 = 50_000_000
+        var elapsed: UInt64 = 0
+        while true {
+            if !proc.isRunning { return true }
+            #if os(Linux)
+            if ProcessTree.linuxPeekExited(pid: proc.processIdentifier).exited { return true }
+            #endif
+            if elapsed >= budgetNanos { return false }
+            try? await Task.sleep(nanoseconds: step)
+            elapsed += step
+        }
     }
 
     // MARK: - Tools

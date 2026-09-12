@@ -80,6 +80,17 @@ def check(label, ok, detail=""):
         failed += 1
 
 
+def pid_exists(pid):
+    """kill(pid, 0): True while the pid exists (a zombie still counts)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def run_selftest(*args, **kwargs):
     """Retain the complete failed suite in CI logs, including timeout output."""
     def emit(stdout, stderr):
@@ -444,6 +455,35 @@ def main():
                             text=True, timeout=300)
     check("mcp-surface-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
+
+    # Child-process lifecycle across /restart and /upgrade (v0.2.21): the
+    # pre-exec shutdown tears MCP servers down (shim gone AND reaped, server
+    # in its private session gone, SIGTERM-ignoring server included) and the
+    # startup sweep collects what a previous image left. Two negative
+    # controls must fail.
+    result = run_selftest([os.path.abspath(ADA), "__mcp-lifecycle-selftest"], capture_output=True,
+                            text=True, timeout=300)
+    check("mcp-lifecycle-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+    for flag in ("--skip-mcp-shutdown", "--skip-startup-sweep"):
+        result = run_selftest([os.path.abspath(ADA), "__mcp-lifecycle-selftest", flag], capture_output=True,
+                                text=True, timeout=300)
+        check("mcp-lifecycle-selftest %s fails (negative control)" % flag, result.returncode != 0,
+              (result.stdout + result.stderr)[-1500:])
+    # Wiring: the driver plants a zombie and a shim+server tree, then execv's
+    # into `briglia chat` (isolated roots, unconfigured) exactly like /restart.
+    # The REAL startup path must sweep them before stopping at "not configured".
+    with tempfile.TemporaryDirectory(prefix="briglia-mcp-lifecycle-exec-") as iso:
+        env = dict(os.environ, XDG_CONFIG_HOME=iso, XDG_DATA_HOME=iso, TMPDIR=iso + "/")
+        result = run_selftest([os.path.abspath(ADA), "__mcp-lifecycle-selftest", "--exec-into-chat"],
+                                capture_output=True, text=True, timeout=120, env=env, stdin=subprocess.DEVNULL)
+        out = result.stdout + result.stderr
+        planted = re.search(r"LEFTOVER zombie=(\d+) shim=(\d+) server=(\d+)", out)
+        swept = re.search(r"^startup: 1 leftover child process from the previous process image ended; 1 zombie reaped$", out, re.M)
+        gone = planted is not None and all(not pid_exists(int(p)) for p in planted.groups() if int(p) > 0)
+        check("startup sweep runs on the real chat path after an exec (leftover shim+server and zombie collected)",
+              planted is not None and swept is not None and gone,
+              "planted=%s swept=%s gone=%s\n%s" % (bool(planted), bool(swept), gone, out[-1500:]))
 
     # 3c6. /deleteuserdata confirmation barrier: bare command teaches, only
     # the stored name (or CONFIRM when none) wipes, everything else refuses.

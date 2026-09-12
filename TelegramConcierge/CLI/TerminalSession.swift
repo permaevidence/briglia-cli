@@ -71,6 +71,10 @@ final class TerminalSession {
     // MARK: - Startup
 
     private func start(headless: Bool, adopting adopted: InstanceLease?) async throws {
+        // FIRST, before this image spawns anything: collect what the previous
+        // image (an in-place /restart or /upgrade exec) left as children of
+        // this pid — zombies, and servers its shutdown never reached.
+        LeftoverChildSweep.run()
         if let adopted {
             precondition(adopted.held, "adopted lease must be held")
             lease = adopted
@@ -465,7 +469,9 @@ final class TerminalSession {
         }, forceExit: {
             // Keep the lease until process teardown kills every in-process
             // callback. Never unlock while an unsettled save can still write.
-            TerminalSession.shutdownChildProcesses()
+            // Second Ctrl-C: the user wants out now — signals go out
+            // immediately either way, only the wait is shortened.
+            TerminalSession.shutdownChildProcesses(budgetSeconds: 3)
             exit(130)
         })
         for sig in [SIGINT, SIGTERM] {
@@ -498,18 +504,39 @@ final class TerminalSession {
         leaseForSignalHandler = nil
     }
 
-    /// Same contract as the app's AppShutdownDelegate: kill every child the
-    /// agent spawned (background bash, foreground subprocesses, language
-    /// servers) so nothing outlives the CLI as an orphan.
-    static func shutdownChildProcesses() {
+    /// Kill every child the agent spawned (background bash, foreground
+    /// subprocesses, language servers, MCP servers) so nothing outlives the
+    /// CLI as an orphan. Runs on every exit path AND immediately before the
+    /// in-place `execv` of `/restart` and `/upgrade` — where an orphan is not
+    /// merely untidy: it stays a child of this pid forever, in its own
+    /// session, with no `Process` object left to signal or reap it.
+    ///
+    /// MCP servers were missing from this list until v0.2.21; every restart
+    /// leaked the previous Playwright server (shim + node, sometimes a
+    /// browser tree). `includeMCP` exists only for the lifecycle selftest's
+    /// negative control.
+    ///
+    /// The wait budget covers the MCP path's grace + collection
+    /// (`MCPClient.shutdownGraceNanos` + `shutdownReapBudgetNanos` per
+    /// server, sequential) with room for a few servers; a budget overrun is
+    /// reported, not silent, because whatever is still alive at exec is a
+    /// leak the next image's LeftoverChildSweep has to clean.
+    static let childShutdownBudgetSeconds: Double = 15
+
+    static func shutdownChildProcesses(includeMCP: Bool = true,
+                                       budgetSeconds: Double = childShutdownBudgetSeconds) {
         ToolExecutor.terminateAllRegisteredProcesses()
         let sem = DispatchSemaphore(value: 0)
         Task.detached {
             await BackgroundProcessRegistry.shared.terminateAll()
             await LSPRegistry.shared.shutdownAll()
+            if includeMCP { await MCPRegistry.shared.shutdownAll() }
             sem.signal()
         }
-        _ = sem.wait(timeout: .now() + 2)
+        if sem.wait(timeout: .now() + budgetSeconds) == .timedOut {
+            FileHandle.standardError.write(Data(
+                "⚠ child shutdown did not finish within \(Int(budgetSeconds)) s — a server may outlive this process; the next start sweeps leftovers\n".utf8))
+        }
     }
 }
 
