@@ -196,7 +196,7 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         check("2.7b forker's detached descendant gone (tree captured before EOF)",
               forkedPid.map { !Self.waitGone($0, seconds: 3) } ?? false, "pid \(forkedPid.map(String.init) ?? "?")")
         for (name, pid) in serverPids.sorted(by: { $0.key < $1.key }) {
-            check("2.7 \(name): server in its private session gone", !Self.waitGone(pid, seconds: 3), "pid \(pid)")
+            check("2.7 \(name): server in its private session gone", !Self.waitGone(pid, seconds: 3), "pid \(pid) \(Self.describeTree(pid))")
         }
         // (not status(): that re-bootstraps on demand, which would spawn a new pair)
         let after = await registry.spawnedProcessIdentifiers()
@@ -258,7 +258,7 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
                       !table.contains { $0.pid == pid }, Self.describeTree(pid))
             }
             for pid in blockedServerPids {
-                check("3.5 [\(variant)] server \(pid) in its private session gone", !Self.waitGone(pid, seconds: 3))
+                check("3.5 [\(variant)] server \(pid) in its private session gone", !Self.waitGone(pid, seconds: 3), Self.describeTree(pid))
             }
             _ = await reload.value
             let stillOwned = await registry.ownedProcessIdentifiers()
@@ -566,15 +566,24 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         Darwin.kill(pid, 0) == 0 || errno != ESRCH
     }
 
-    /// True while the pid exists (a zombie still "exists" for kill(2)); polls
-    /// until gone or the deadline. Returns whether it is STILL there.
+    /// Polls until the pid is gone by the product's own definition
+    /// (`LeftoverChildSweep.isGone`: absent from the table or a zombie) or
+    /// the deadline. Returns whether it is STILL there (alive, not a zombie).
+    ///
+    /// Not `kill(pid, 0)`: that succeeds for a zombie, and a zombie is dead —
+    /// only its parent can collect it. For the pids checked here (a server in
+    /// its private session, a detached descendant) the parent is gone by
+    /// then, so collection is up to whatever adopted the orphan: launchd and
+    /// systemd reap at once, but a container whose PID 1 never waits (GitHub's
+    /// `tail -f /dev/null`) keeps the zombie in the table for good, which is
+    /// the environment's doing, not the shutdown's.
     private static func waitGone(_ pid: Int32, seconds: Double) -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
-            if !exists(pid) { return false }
+            if LeftoverChildSweep.isGone(pid, table: LeftoverChildSweep.snapshot()) { return false }
             usleep(50_000)
         }
-        return exists(pid)
+        return !LeftoverChildSweep.isGone(pid, table: LeftoverChildSweep.snapshot())
     }
 
     private static func isZombie(_ pid: Int32) -> Bool {
