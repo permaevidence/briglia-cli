@@ -366,6 +366,58 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
             await reset.value
             _ = Darwin.kill(forked4bPid, SIGKILL)
         }
+        // 4c — registry layer, SHORT remaining budget (Codex round 3). The
+        // reset is draining its servers on their own 1 s grace; the exit
+        // arrives with 0.5 s left. Joining the reset's task is not enough:
+        // the reset's clients must be addressed again with the exit's
+        // deadline so their plans tighten (kill instant = now) and everything
+        // is collected before the semaphore expires.
+        do {
+            let forked4c = tempRoot.appendingPathComponent("forked4c.pid")
+            let shortServers: [String: Any] = [
+                "forker": ["command": python, "args": [script.path, "forker", "fork-detached", forked4c.path]],
+                "stubborn": ["command": python, "args": [script.path, "stubborn", "ignore-term"]],
+            ]
+            try JSONSerialization.data(withJSONObject: ["mcpServers": shortServers], options: [.prettyPrinted])
+                .write(to: StoragePaths.configRoot.appendingPathComponent("mcp.json"))
+            await registry.reopenAfterExitShutdownForSelftest()
+            await registry.reloadFromDisk()
+            let shims4c = await registry.spawnedProcessIdentifiers()
+            var servers4c: [Int32] = []
+            for pid in shims4c.values { if let c = Self.waitForChild(of: pid, seconds: 3) { servers4c.append(c) } }
+            let forked4cPid = Self.waitForPidFile(forked4c, seconds: 3) ?? -1
+            check("4.14 two servers published, detached descendant alive",
+                  shims4c.count == 2 && servers4c.count == 2 && forked4cPid > 0 && Self.exists(forked4cPid),
+                  "shims \(shims4c) servers \(servers4c) forked \(forked4cPid)")
+            let reset = Task { await registry.shutdownAll() }
+            let clearedBy = Date().addingTimeInterval(2)
+            var cleared = false
+            while Date() < clearedBy {
+                if await registry.ownedProcessIdentifiers().isEmpty { cleared = true; break }
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+            let drainingCount = await registry.drainingCount()
+            check("4.15 the reset is draining both servers, maps empty", cleared && drainingCount == 2, "draining \(drainingCount)")
+            let t0 = Date()
+            await MainActor.run { TerminalSession.shutdownChildProcesses(budgetSeconds: 0.5) }
+            let took = Date().timeIntervalSince(t0)
+            let atReturn = LeftoverChildSweep.snapshot() ?? []
+            check("4.16 exit shutdown with 0.5 s left returned within that budget", took < 0.5, "\(took) s")
+            for (name, pid) in shims4c.sorted(by: { $0.key < $1.key }) {
+                check("4.17 \(name): shim of the draining server gone and collected at the exit shutdown's return",
+                      !atReturn.contains { $0.pid == pid }, Self.describeTree(pid))
+            }
+            for pid in servers4c {
+                check("4.18 server \(pid) of the reset gone at the exit shutdown's return",
+                      LeftoverChildSweep.isGone(pid, table: atReturn))
+            }
+            check("4.19 the reset's detached descendant gone at the exit shutdown's return",
+                  LeftoverChildSweep.isGone(forked4cPid, table: atReturn), "pid \(forked4cPid)")
+            await reset.value
+            let drainingAfter = await registry.drainingCount()
+            check("4.20 nothing left draining once the reset settles", drainingAfter == 0, "draining \(drainingAfter)")
+            _ = Darwin.kill(forked4cPid, SIGKILL)
+        }
 
         // MARK: 5. A reload in flight across the exit shutdown (Codex round 2 R-B)
 

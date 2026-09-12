@@ -217,10 +217,11 @@ actor MCPClient {
     /// Every wait is bounded by the monotonic `deadline` when one is given
     /// (the exit path's): SIGKILL is sent no later than
     /// `deadline − ShutdownPlan.collectionReserveNanos`, so termination is
-    /// initiated with time left for collection, however slow the polls run
-    /// (Codex round 2 R-C: nominal sleep counting overran a 3 s budget under
-    /// load). Overlapping callers all await the same cleanup; a later caller
-    /// with an earlier deadline tightens it (R-A).
+    /// initiated with a collection reserve left on the caller's budget — a
+    /// monotonic-clock policy, not a real-time guarantee (Codex round 2
+    /// R-C: nominal sleep counting overran a 3 s budget under load).
+    /// Overlapping callers all await the same cleanup; a later caller with an
+    /// earlier deadline tightens it (R-A).
     func shutdown(deadline: ShutdownDeadline? = nil) async {
         if let running = shutdownTask {
             shutdownPlan?.tighten(to: deadline)
@@ -259,8 +260,8 @@ actor MCPClient {
             // Grace: the shim collected AND every captured descendant gone —
             // a poll against the plan's kill instant (re-read every step, a
             // joiner may have tightened it), so a server that dies on
-            // SIGTERM costs milliseconds and a stubborn one is SIGKILLed on
-            // time whatever the machine load.
+            // SIGTERM costs milliseconds and a stubborn one is SIGKILLed at
+            // the plan's instant, measured on the monotonic clock.
             var state = await Self.settle(proc, descendants: tree.descendants, until: { plan.killAt })
             if !state.collected || !state.survivors.isEmpty {
                 if proc.isRunning { _ = Darwin.kill(pid, SIGKILL) }

@@ -61,6 +61,15 @@ actor MCPRegistry {
     /// ownership maps were cleared before the group wait, so an overlapping
     /// call captured nothing and returned at once).
     private var shutdownInProgress: Task<Void, Never>?
+    /// Clients whose shutdown this registry started and which have not
+    /// finished draining. They left `entries`/`inFlight` when their
+    /// shutdown began, but a LATER shutdown with an earlier deadline must
+    /// still reach them: `client.shutdown(deadline:)` on a draining client
+    /// joins its cleanup AND tightens its plan, which awaiting the previous
+    /// shutdown task alone never does (Codex round 3: an exit with 0.5 s
+    /// left joined a reset and waited out the reset's full 1 s grace).
+    /// Released as each client's cleanup completes.
+    private var draining: [ObjectIdentifier: MCPClient] = [:]
     /// Bumped by every teardown (`reloadFromDisk`, `shutdownAll`). A
     /// bootstrap publishes its clients only if the generation it started in
     /// is still current; otherwise it shuts them down (Codex, Release C
@@ -262,17 +271,23 @@ actor MCPRegistry {
         bootstrapTask = nil
         surface = .empty
         surfaceBuilt = false
+        // Every client still draining from an earlier shutdown is addressed
+        // again with THIS caller's deadline: the client-level join tightens
+        // its plan (never loosens it), so an exit that lands on a reset in
+        // flight escalates the reset's servers by the exit's deadline instead
+        // of waiting out their original grace. The earlier shutdown task is
+        // joined too, as a barrier for anything it still covers.
         let previous = shutdownInProgress
+        for client in owned { draining[ObjectIdentifier(client)] = client }
+        let addressed = Array(draining.values)
         let task = Task {
             await withTaskGroup(of: Void.self) { group in
-                for client in owned {
-                    group.addTask { await client.shutdown(deadline: deadline) }
+                for client in addressed {
+                    group.addTask {
+                        await client.shutdown(deadline: deadline)
+                        await self.releaseDrained(client)
+                    }
                 }
-                // Join the earlier shutdown as one more member: its clients
-                // are not in `owned` any more, but this caller's "returned"
-                // must cover them too. A client-level join honours this
-                // caller's deadline (ShutdownPlan.tighten), so the previous
-                // shutdown's own budget cannot stretch this one.
                 if let previous {
                     group.addTask { await previous.value }
                 }
@@ -282,6 +297,13 @@ actor MCPRegistry {
         await task.value
         if shutdownInProgress == task { shutdownInProgress = nil }
     }
+
+    private func releaseDrained(_ client: MCPClient) {
+        draining.removeValue(forKey: ObjectIdentifier(client))
+    }
+
+    /// Selftests: clients whose registry-started shutdown is still draining.
+    func drainingCount() -> Int { draining.count }
 
     /// The tracked child pid of every connected server (selftests and
     /// diagnostics; nil for servers that never spawned).
