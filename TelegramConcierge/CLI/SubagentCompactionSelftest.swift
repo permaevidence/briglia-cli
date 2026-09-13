@@ -61,6 +61,10 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
         }
         func tag(_ m: Message) -> String { String(m.content.dropFirst().prefix { $0 != ">" }) }
         func tag(_ r: ToolInteraction) -> String { String(r.assistantMessage.toolCalls[0].id.dropFirst(5)) }
+        func ordered(_ text: String, _ first: String, _ second: String) -> Bool {
+            guard let a = text.range(of: first), let b = text.range(of: second) else { return false }
+            return a.lowerBound < b.lowerBound
+        }
         let total50 = 50_000
         let dialogue30 = SubagentRunner.dialogueKeepTokens(totalKeepTokens: total50)
         func plan(_ messages: [Message], _ rounds: [ToolInteraction], dialogue: Int? = nil, total: Int = 50_000) -> SubagentRunner.CompactionPlan {
@@ -205,8 +209,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                   p.priorSummaries.map { $0.content } == [older.content, old.content] && !p.keptMessages.contains(where: SubagentRunner.isCompactionSummary))
             check("5.3 a plan with only summaries to fold is not empty", !plan([old, message("ask", .user, tokens: 10)], []).isEmpty)
             let transcript = SubagentRunner.compactionTranscript(priorSummaries: p.priorSummaries, dialogue: [message("ask", .user, tokens: 20), message("rep", .assistant, tokens: 20)], work: p.evictedWork)
-            let prior = transcript.range(of: "=== PRIOR SUMMARY")!, dial = transcript.range(of: "=== DIALOGUE WITH THE MAIN AGENT")!, work = transcript.range(of: "=== WORK")!
-            check("5.4 transcript blocks ordered prior → dialogue → work", prior.lowerBound < dial.lowerBound && dial.lowerBound < work.lowerBound)
+            check("5.4 transcript blocks ordered prior → dialogue → work", ordered(transcript, "=== PRIOR SUMMARY", "=== DIALOGUE WITH THE MAIN AGENT") && ordered(transcript, "=== DIALOGUE WITH THE MAIN AGENT", "=== WORK"))
             check("5.5 dialogue roles labelled MAIN AGENT / SUBAGENT", transcript.contains("[MAIN AGENT] <ask>") && transcript.contains("[SUBAGENT] <rep>"))
             check("5.6 prior summary text carried into the transcript", transcript.contains("OLD_DIALOGUE") && transcript.contains("OLDER"))
             check("5.7 evicted work rendered with call and result", transcript.contains("[TOOL CALL] read_file") && transcript.contains("[TOOL RESULT] <w0>"))
@@ -334,9 +337,9 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             if bodies.count == 2 {
                 check("8.9 summarizer: prior summary block, then the evicted dialogue oldest first, no work block",
                       bodies[0].contains("=== PRIOR SUMMARY") && bodies[0].contains("EAGER_SUMMARY_TEXT")
-                      && bodies[0].range(of: "=== PRIOR SUMMARY")!.lowerBound < bodies[0].range(of: "=== DIALOGUE WITH THE MAIN AGENT")!.lowerBound
+                      && ordered(bodies[0], "=== PRIOR SUMMARY", "=== DIALOGUE WITH THE MAIN AGENT")
                       && bodies[0].contains("[MAIN AGENT] <ask0>") && bodies[0].contains("[SUBAGENT] <reply11>") && bodies[0].contains("[SUBAGENT] first answer") && !bodies[0].contains("[SUBAGENT] eager answer")
-                      && bodies[0].range(of: "<ask0>")!.lowerBound < bodies[0].range(of: "<reply11>")!.lowerBound && !bodies[0].contains("=== WORK"))
+                      && ordered(bodies[0], "<ask0>", "<reply11>") && !bodies[0].contains("=== WORK"))
                 check("8.10 continuation carries exactly one summary (the new one), the newest two messages, the three rounds",
                       bodies[1].contains("FOLDED_SUMMARY_TEXT") && !bodies[1].contains("EAGER_SUMMARY_TEXT") && !bodies[1].contains("<ask0>")
                       && !bodies[1].contains("<reply11>") && bodies[1].contains("<w7>") && bodies[1].contains("First task for the selftest worker"))
