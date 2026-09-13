@@ -241,6 +241,40 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             loggedOnly.compactToolLog = "ONLY_LOG"
             let r3c = plan([message("t0", .user, tokens: 5_000), loggedOnly, message("t1", .user, tokens: 30_100), message("a1", .assistant, tokens: 10), message("t2", .user, tokens: 10)], [])
             check("4.18 a dialogue-evicted message hands its earlier log to the summarizer", r3c.evictedDialogue.map(tag) == ["t0", "oldreply", "t1"] && r3c.evictedLogs == ["ONLY_LOG"])
+            // 4i. (Codex R-A) Many long replies each carrying one small round:
+            // pins must yield to dialogue pressure down to the genuine floors.
+            var longReplies: [Message] = []
+            for i in 0..<25 {
+                longReplies.append(message("task\(i)", .user, tokens: 50))
+                longReplies.append(message("reply\(i)", .assistant, tokens: 10_000, rounds: [round("small\(i)", tokens: 60)], replay: true))
+            }
+            longReplies.append(message("resume", .user, tokens: 50))
+            let ra = plan(longReplies, [])
+            let raEstimate = SubagentRunner.estimatedContextTokens(messages: ra.keptMessages, interactions: ra.keptInteractions)
+            let raRounds = ra.keptMessages.reduce(0) { $0 + $1.toolInteractions.count }
+            check("4.19 pins yield: only the newest three rounds' carriers stay, estimate lands at the floors (~30k), rounds evicted oldest first",
+                  raRounds == 3 && raEstimate <= 32_000 && ra.keptMessages.map(tag) == ["reply22", "reply23", "reply24", "resume"]
+                  && ra.evictedWork.map(tag) == (0..<22).map { "small\($0)" } && ra.evictedDialogue.count == 47,
+                  "rounds \(raRounds) estimate \(raEstimate) kept \(ra.keptMessages.map(tag))")
+            let raAgain = plan(ra.keptMessages, ra.keptInteractions)
+            check("4.20 a second compaction on the kept set has nothing left to do (no silent no-progress)", raAgain.isEmpty)
+            let raFinal = ra.keptMessages[0]
+            check("4.21 released carriers keep text, envelope and their newest rounds intact in position", raFinal.toolInteractions.map(tag) == ["small22"] && raFinal.responsesReplay != nil && tag(raFinal) == "reply22")
+            // 4j. (Codex S2) A protected round must not stop the scan: logs in
+            // LATER messages are still evictable.
+            var protectedFirst: [Message] = [message("t", .user, tokens: 10), message("holder", .assistant, tokens: 10, rounds: (0..<3).map { round("h\($0)", tokens: 60) })]
+            for i in 0..<25 {
+                protectedFirst.append(message("lt\(i)", .user, tokens: 10))
+                var m = message("lr\(i)", .assistant, tokens: 10)
+                m.compactToolLog = "LATERLOG\(i) " + String(repeating: "read_file(x) → y\n", count: 500)
+                protectedFirst.append(m)
+            }
+            protectedFirst.append(message("resume", .user, tokens: 10))
+            let s2 = plan(protectedFirst, [])
+            let s2Estimate = SubagentRunner.estimatedContextTokens(messages: s2.keptMessages, interactions: s2.keptInteractions)
+            check("4.22 later logs are evicted past a floor-protected reply; the three rounds stay",
+                  s2.evictedLogs.count > 0 && s2Estimate <= 52_000 && s2.keptMessages[1].toolInteractions.count == 3 && s2.evictedWork.isEmpty,
+                  "logs \(s2.evictedLogs.count) estimate \(s2Estimate)")
         }
 
         print("5. Summary anchoring and transcript shape")

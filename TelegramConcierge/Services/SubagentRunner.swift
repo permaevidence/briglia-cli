@@ -817,7 +817,11 @@ actor SubagentRunner {
     ///   even when those two alone exceed the budget. A reply that still
     ///   carries kept rounds is pinned in place — text and rounds — and the
     ///   eviction continues past it, so the newest rounds survive wherever
-    ///   they live and never move behind a later task.
+    ///   they live and never move behind a later task. Pins are reconciled
+    ///   with dialogue pressure: while the dialogue stays over budget because
+    ///   pinned carriers block it, the oldest carrier's work is retired (floor
+    ///   permitting) and the carrier evicted, so overshoot reflects the
+    ///   genuine floors, never every round that fit the work allowance.
     ///
     /// Earlier summaries at the front are always folded into the new one.
     static func planCompaction(
@@ -856,45 +860,83 @@ actor SubagentRunner {
             return tokens
         }
 
-        // 1–2. Chronological work queue (see above).
+        // 1–2. Chronological work queue (see above). One unit at a time,
+        //      oldest first: a message's earlier compact log, then its rounds;
+        //      then the pending list. Rounds stop at the floor; logs never do,
+        //      so a protected round is skipped, not a wall (later logs are
+        //      still reached).
         var totalRounds = keptInteractions.count
         for msg in kept { totalRounds += msg.toolInteractions.count }
-        var touched = Set<Int>()
-        var messageIndex = 0
-        while workTokens() > workKeepTokens {
-            if messageIndex < kept.count {
-                if let log = kept[messageIndex].compactToolLog, !log.isEmpty {
-                    evictedLogs.append(log)
-                    kept[messageIndex].compactToolLog = nil
-                    touched.insert(messageIndex)
-                    continue
-                }
-                if kept[messageIndex].toolInteractions.isEmpty { messageIndex += 1; continue }
-                guard totalRounds > minKeepInteractions else { break }
-                evictedWork.append(kept[messageIndex].toolInteractions.removeFirst())
-                touched.insert(messageIndex)
-            } else {
-                guard totalRounds > minKeepInteractions, !keptInteractions.isEmpty else { break }
-                evictedWork.append(keptInteractions.removeFirst())
-            }
-            totalRounds -= 1
-        }
-        for index in touched {
+        func touch(_ index: Int) {
             // Measured costs described the full message; estimates take over.
             kept[index].measuredToolTokens = nil
             kept[index].measuredTokens = nil
         }
+        func evictOldestWorkUnit() -> Bool {
+            for index in kept.indices {
+                if let log = kept[index].compactToolLog, !log.isEmpty {
+                    evictedLogs.append(log)
+                    kept[index].compactToolLog = nil
+                    touch(index)
+                    return true
+                }
+                if !kept[index].toolInteractions.isEmpty, totalRounds > minKeepInteractions {
+                    evictedWork.append(kept[index].toolInteractions.removeFirst())
+                    totalRounds -= 1
+                    touch(index)
+                    return true
+                }
+            }
+            if !keptInteractions.isEmpty, totalRounds > minKeepInteractions {
+                evictedWork.append(keptInteractions.removeFirst())
+                totalRounds -= 1
+                return true
+            }
+            return false
+        }
+        while workTokens() > workKeepTokens {
+            guard evictOldestWorkUnit() else { break }
+        }
 
-        // 3. Dialogue from the front, floor two; replies still carrying kept
-        //    rounds are pinned and skipped. A message evicted here can carry
+        // 3. Dialogue from the front, floor two; a reply still carrying kept
+        //    rounds is pinned and skipped. A message evicted here can carry
         //    an earlier compact log (no rounds): it joins the evicted logs.
         var evictedDialogue: [Message] = []
-        var dialogueIndex = 0
-        while dialogueTokens(kept) > dialogueKeepTokens, dialogueIndex < kept.count - minKeepMessages {
-            if !kept[dialogueIndex].toolInteractions.isEmpty { dialogueIndex += 1; continue }
-            let message = kept.remove(at: dialogueIndex)
-            if let log = message.compactToolLog, !log.isEmpty { evictedLogs.append(log) }
-            evictedDialogue.append(message)
+        func evictDialogue() {
+            var index = 0
+            while dialogueTokens(kept) > dialogueKeepTokens, index < kept.count - minKeepMessages {
+                if !kept[index].toolInteractions.isEmpty { index += 1; continue }
+                let message = kept.remove(at: index)
+                if let log = message.compactToolLog, !log.isEmpty { evictedLogs.append(log) }
+                evictedDialogue.append(message)
+            }
+        }
+        // 4. Reconcile: pins are only as strong as the work floor. While the
+        //    dialogue is still over budget because pinned carriers block it,
+        //    retire the OLDEST carrier's work (its log, its rounds, oldest
+        //    first, never below the newest three rounds overall) so the
+        //    carrier becomes evictable, and evict again. Overshoot then
+        //    reflects the genuine floors only.
+        while true {
+            evictDialogue()
+            guard dialogueTokens(kept) > dialogueKeepTokens else { break }
+            let evictable = kept.indices.dropLast(minKeepMessages)
+            guard let carrier = evictable.first(where: { !kept[$0].toolInteractions.isEmpty }) else { break }
+            // Older work units first (logs of earlier messages, this carrier's
+            // own log), then the carrier's rounds, oldest first, floor permitting.
+            for index in 0...carrier {
+                if let log = kept[index].compactToolLog, !log.isEmpty {
+                    evictedLogs.append(log)
+                    kept[index].compactToolLog = nil
+                    touch(index)
+                }
+            }
+            while !kept[carrier].toolInteractions.isEmpty, totalRounds > minKeepInteractions {
+                evictedWork.append(kept[carrier].toolInteractions.removeFirst())
+                totalRounds -= 1
+                touch(carrier)
+            }
+            guard kept[carrier].toolInteractions.isEmpty else { break }  // floor reached: genuine overshoot
         }
 
         return CompactionPlan(
