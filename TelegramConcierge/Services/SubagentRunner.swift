@@ -780,8 +780,8 @@ actor SubagentRunner {
     /// What one compaction keeps verbatim and what it hands to the summarizer.
     /// Pure (no network, no persistence) so the selftest drives it directly.
     struct CompactionPlan {
-        /// Dialogue messages kept verbatim, oldest first. Old replies whose
-        /// embedded rounds were evicted keep their text and a compact log.
+        /// Dialogue messages kept verbatim, oldest first. A reply that still
+        /// carries kept rounds is pinned whole (text and rounds, in place).
         var keptMessages: [Message]
         /// Pending (current-run) rounds kept verbatim, oldest first.
         var keptInteractions: [ToolInteraction]
@@ -792,22 +792,32 @@ actor SubagentRunner {
         /// Rounds evicted into the summary, oldest first: rounds embedded in
         /// completed replies precede rounds from the pending list.
         var evictedWork: [ToolInteraction]
+        /// Compact tool logs of earlier prunes evicted into the summary,
+        /// oldest first (each is itself a lossy record of evicted rounds).
+        var evictedLogs: [String]
         /// Work share of the kept tail after the dialogue took its part.
         var workKeepTokens: Int
-        var isEmpty: Bool { priorSummaries.isEmpty && evictedDialogue.isEmpty && evictedWork.isEmpty }
+        var isEmpty: Bool { priorSummaries.isEmpty && evictedDialogue.isEmpty && evictedWork.isEmpty && evictedLogs.isEmpty }
     }
 
     /// Decide a compaction. Two budgets over one kept tail:
     ///
+    /// - work: the newest `totalKeepTokens - dialogueUsed` of work stay
+    ///   verbatim. One chronological queue over both stores: for each
+    ///   completed reply (oldest first) its compact log, if any, then its
+    ///   embedded rounds (oldest first); then the pending list from the
+    ///   front. Evicted while over budget, never below the newest three
+    ///   ROUNDS overall, whichever store holds them (logs have no floor). A
+    ///   reply whose rounds were partly or wholly evicted keeps its text and
+    ///   its final replay envelope (that envelope is keyed to the reply text
+    ///   and zero calls, not to round positions; each round carries its own).
     /// - dialogue: the newest `dialogueKeepTokens` of the messages exchanged
-    ///   with the main agent stay verbatim; older exchanges are evicted from
-    ///   the front, never below the last two (current prompt + previous
-    ///   reply), even when those two alone exceed the budget;
-    /// - work: the newest `totalKeepTokens - dialogueUsed` of rounds stay
-    ///   verbatim. One chronological queue over both stores: rounds embedded
-    ///   in completed replies (Responses mode) are the oldest and go first,
-    ///   round by round, then the pending list from the front; never below
-    ///   the newest three rounds overall, whichever store holds them.
+    ///   with the main agent stay verbatim; older ones are evicted from the
+    ///   front, never below the last two (current prompt + previous reply),
+    ///   even when those two alone exceed the budget. A reply that still
+    ///   carries kept rounds is pinned in place — text and rounds — and the
+    ///   eviction continues past it, so the newest rounds survive wherever
+    ///   they live and never move behind a later task.
     ///
     /// Earlier summaries at the front are always folded into the new one.
     static func planCompaction(
@@ -835,52 +845,55 @@ actor SubagentRunner {
 
         var keptInteractions = interactions
         var evictedWork: [ToolInteraction] = []
-        var embeddedEvicted = 0
+        var evictedLogs: [String] = []
         func workTokens() -> Int {
             var tokens = 0
-            for msg in kept { for round in msg.toolInteractions { tokens += estimatedInteractionTokens(round) } }
+            for msg in kept {
+                if let log = msg.compactToolLog { tokens += log.count / 4 }
+                for round in msg.toolInteractions { tokens += estimatedInteractionTokens(round) }
+            }
             for round in keptInteractions { tokens += estimatedInteractionTokens(round) }
             return tokens
         }
 
-        // 1–2. One chronological work queue over both stores: rounds embedded
-        //      in completed replies (oldest message first, oldest round first)
-        //      come before the pending list. Evict from the front while over
-        //      budget, never below the newest three rounds overall. A reply
-        //      whose rounds are (partly) evicted keeps its text; the evicted
-        //      rounds are replaced by a compact log and the native replay
-        //      envelope is dropped (it described positions that moved).
+        // 1–2. Chronological work queue (see above).
         var totalRounds = keptInteractions.count
         for msg in kept { totalRounds += msg.toolInteractions.count }
-        var strippedByMessage: [Int: [ToolInteraction]] = [:]
+        var touched = Set<Int>()
         var messageIndex = 0
-        while workTokens() > workKeepTokens, totalRounds > minKeepInteractions {
+        while workTokens() > workKeepTokens {
             if messageIndex < kept.count {
+                if let log = kept[messageIndex].compactToolLog, !log.isEmpty {
+                    evictedLogs.append(log)
+                    kept[messageIndex].compactToolLog = nil
+                    touched.insert(messageIndex)
+                    continue
+                }
                 if kept[messageIndex].toolInteractions.isEmpty { messageIndex += 1; continue }
-                let round = kept[messageIndex].toolInteractions.removeFirst()
-                strippedByMessage[messageIndex, default: []].append(round)
-                evictedWork.append(round)
-                embeddedEvicted += 1
+                guard totalRounds > minKeepInteractions else { break }
+                evictedWork.append(kept[messageIndex].toolInteractions.removeFirst())
+                touched.insert(messageIndex)
             } else {
+                guard totalRounds > minKeepInteractions, !keptInteractions.isEmpty else { break }
                 evictedWork.append(keptInteractions.removeFirst())
             }
             totalRounds -= 1
         }
-        for (index, stripped) in strippedByMessage {
-            kept[index] = strippingRounds(kept[index], stripped: stripped)
+        for index in touched {
+            // Measured costs described the full message; estimates take over.
+            kept[index].measuredToolTokens = nil
+            kept[index].measuredTokens = nil
         }
 
-        // 3. Dialogue from the front, floor two. A message evicted here that
-        //    still carries rounds (the work budget did not need them) hands
-        //    them to the summarizer too, in chronological position: after the
-        //    stripped embedded rounds, before anything from the pending list.
+        // 3. Dialogue from the front, floor two; replies still carrying kept
+        //    rounds are pinned and skipped. A message evicted here can carry
+        //    an earlier compact log (no rounds): it joins the evicted logs.
         var evictedDialogue: [Message] = []
-        while dialogueTokens(kept) > dialogueKeepTokens, kept.count > minKeepMessages {
-            let message = kept.removeFirst()
-            if !message.toolInteractions.isEmpty {
-                evictedWork.insert(contentsOf: message.toolInteractions, at: embeddedEvicted)
-                embeddedEvicted += message.toolInteractions.count
-            }
+        var dialogueIndex = 0
+        while dialogueTokens(kept) > dialogueKeepTokens, dialogueIndex < kept.count - minKeepMessages {
+            if !kept[dialogueIndex].toolInteractions.isEmpty { dialogueIndex += 1; continue }
+            let message = kept.remove(at: dialogueIndex)
+            if let log = message.compactToolLog, !log.isEmpty { evictedLogs.append(log) }
             evictedDialogue.append(message)
         }
 
@@ -890,51 +903,9 @@ actor SubagentRunner {
             priorSummaries: priorSummaries,
             evictedDialogue: evictedDialogue,
             evictedWork: evictedWork,
+            evictedLogs: evictedLogs,
             workKeepTokens: workKeepTokens
         )
-    }
-
-    /// A completed reply after some or all of its embedded rounds were
-    /// evicted: text kept, the evicted rounds described by a compact log
-    /// (appended to any earlier log), remaining rounds untouched, native
-    /// replay envelope dropped (it described rounds that no longer exist at
-    /// those positions), measured costs cleared so estimates are recomputed.
-    /// `message.toolInteractions` must already exclude `stripped`.
-    static func strippingRounds(_ message: Message, stripped: [ToolInteraction]) -> Message {
-        var result = message
-        let log = compactToolLog(for: stripped)
-        if let existing = result.compactToolLog, !existing.isEmpty {
-            result.compactToolLog = log.isEmpty ? existing : existing + "\n" + log
-        } else {
-            result.compactToolLog = log
-        }
-        result.responsesReplay = nil
-        result.measuredToolTokens = nil
-        result.measuredTokens = nil
-        return result
-    }
-
-    /// All embedded rounds evicted at once.
-    static func strippingRounds(_ message: Message) -> Message {
-        var bare = message
-        bare.toolInteractions = []
-        return strippingRounds(bare, stripped: message.toolInteractions)
-    }
-
-    /// One line per tool call: name, argument preview, result preview.
-    static func compactToolLog(for rounds: [ToolInteraction]) -> String {
-        func preview(_ text: String, _ limit: Int) -> String {
-            let flat = text.replacingOccurrences(of: "\n", with: " ")
-            return flat.count <= limit ? flat : String(flat.prefix(limit)) + "…"
-        }
-        var lines: [String] = []
-        for round in rounds {
-            for call in round.assistantMessage.toolCalls {
-                let result = round.results.first { $0.toolCallId == call.id }?.content ?? ""
-                lines.append("\(call.function.name)(\(preview(call.function.arguments, 80))) → \(preview(result, 80))")
-            }
-        }
-        return lines.joined(separator: "\n")
     }
 
     /// Compact a working context per `planCompaction`, summarize the evicted
@@ -968,6 +939,7 @@ actor SubagentRunner {
             priorSummaries: plan.priorSummaries,
             dialogue: plan.evictedDialogue,
             work: plan.evictedWork,
+            logs: plan.evictedLogs,
             openRouterService: openRouterService,
             imagesDirectory: imagesDirectory,
             documentsDirectory: documentsDirectory,
@@ -1016,13 +988,20 @@ actor SubagentRunner {
     static func compactionTranscript(
         priorSummaries: [Message],
         dialogue: [Message],
-        work: [ToolInteraction]
+        work: [ToolInteraction],
+        logs: [String] = []
     ) -> String {
         var transcript = ""
         if !priorSummaries.isEmpty {
-            transcript += "=== PRIOR SUMMARY (carry its dialogue section forward unchanged, merge the rest) ===\n"
+            transcript += "=== PRIOR SUMMARY (its dialogue section is the starting point for section 0; merge the rest) ===\n"
             for summary in priorSummaries {
                 transcript += summary.content + "\n\n"
+            }
+        }
+        if !logs.isEmpty {
+            transcript += "=== EARLIER COMPACT TOOL LOGS (evicted, oldest first) ===\n"
+            for log in logs {
+                transcript += log + "\n\n"
             }
         }
         if !dialogue.isEmpty {
@@ -1057,6 +1036,7 @@ actor SubagentRunner {
         priorSummaries: [Message],
         dialogue: [Message],
         work: [ToolInteraction],
+        logs: [String],
         openRouterService: OpenRouterService,
         imagesDirectory: URL,
         documentsDirectory: URL,
@@ -1069,7 +1049,7 @@ actor SubagentRunner {
     ) async -> String? {
         let execution = execution?.forOperation(.subagentCompaction)
         defer { execution?.responsesTurn.close() }
-        let transcript = Self.compactionTranscript(priorSummaries: priorSummaries, dialogue: dialogue, work: work)
+        let transcript = Self.compactionTranscript(priorSummaries: priorSummaries, dialogue: dialogue, work: work, logs: logs)
 
         guard !transcript.isEmpty else { return nil }
 
