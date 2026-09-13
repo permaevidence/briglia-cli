@@ -287,12 +287,15 @@ actor SubagentRunner {
         // 5. Context budget + compaction parameters. Mid-run compaction fires
         // when the real prompt token count crosses the threshold: everything
         // except the newest ~compactionKeepTokens is summarized and replaced
-        // by a [SESSION HISTORY SUMMARY] message, and the run continues. On
-        // summarization failure the run falls back to force-finish, so the
+        // by a [SESSION HISTORY SUMMARY] message, and the run continues. The
+        // kept tail is split: up to dialogueKeepTokens of the dialogue with
+        // the main agent, the rest for the newest rounds (see planCompaction).
+        // On summarization failure the run falls back to force-finish, so the
         // worst case is identical to the pre-compaction behavior.
         let turnTokenBudget = Self.turnTokenBudget()
         let compactionThreshold = max(1, (turnTokenBudget * Self.compactionThresholdPercent) / 100)
         let compactionKeepTokens = min(Self.compactionKeepTokensCap, max(1, turnTokenBudget / 4))
+        let dialogueKeepTokens = Self.dialogueKeepTokens(totalKeepTokens: compactionKeepTokens)
         var compactionsUsed = 0
 
         // Eager compaction on resume. Sessions normally stay under the budget
@@ -315,7 +318,7 @@ actor SubagentRunner {
            let compacted = await compactContext(
                messages: messagesForLLM,
                interactions: priorToolInteractions,
-               keepTokens: compactionKeepTokens,
+               dialogueKeepTokens: dialogueKeepTokens, totalKeepTokens: compactionKeepTokens,
                openRouterService: openRouterService,
                imagesDirectory: imagesDirectory,
                documentsDirectory: documentsDirectory,
@@ -368,7 +371,7 @@ actor SubagentRunner {
                    let compacted = await compactContext(
                        messages: messagesForLLM,
                        interactions: toolInteractions,
-                       keepTokens: compactionKeepTokens,
+                       dialogueKeepTokens: dialogueKeepTokens, totalKeepTokens: compactionKeepTokens,
                        openRouterService: openRouterService,
                        imagesDirectory: imagesDirectory,
                        documentsDirectory: documentsDirectory,
@@ -567,7 +570,7 @@ actor SubagentRunner {
                                let compacted = await compactContext(
                                    messages: messagesForLLM,
                                    interactions: toolInteractions,
-                                   keepTokens: compactionKeepTokens,
+                                   dialogueKeepTokens: dialogueKeepTokens, totalKeepTokens: compactionKeepTokens,
                                    openRouterService: openRouterService,
                                    imagesDirectory: imagesDirectory,
                                    documentsDirectory: documentsDirectory,
@@ -739,9 +742,32 @@ actor SubagentRunner {
     /// at a quarter of the turn budget so small custom budgets still compact.
     private static let compactionKeepTokensCap = 50_000
 
+    /// At most this much of the kept tail goes to the dialogue with the main
+    /// agent (task/continuation prompts and final replies). A cap, not a
+    /// reservation: whatever the dialogue does not use stays with the work
+    /// tail, so a single long run with one small prompt keeps as much of its
+    /// recent work verbatim as before the split existed (owner, 2026-09-13).
+    static let dialogueKeepTokensCap = 30_000
+
+    /// Dialogue share of `totalKeepTokens`: 30k at the default budget, three
+    /// fifths of a smaller custom tail so both parts stay non-trivial.
+    static func dialogueKeepTokens(totalKeepTokens: Int) -> Int {
+        min(dialogueKeepTokensCap, max(1, totalKeepTokens * 3 / 5))
+    }
+
     /// Thrash guard: after this many compactions in a single run, fall back to
     /// force-finish instead of compacting again.
     private static let maxCompactionsPerRun = 3
+
+    /// Header of the summary message a compaction leaves at the front of the
+    /// session. Byte-stable: the next compaction recognizes it by this prefix
+    /// and folds it into the new summary, so a session carries ONE anchored
+    /// summary instead of a stack.
+    static let compactionSummaryHeader = "[SESSION HISTORY SUMMARY — Earlier work in this session was summarized to free context space. Details below are from the evicted portion.]"
+
+    static func isCompactionSummary(_ message: Message) -> Bool {
+        message.role == .user && message.content.hasPrefix(compactionSummaryHeader)
+    }
 
     /// Result of a successful compaction: the summary is already inserted as
     /// the first message and the evicted items are gone.
@@ -751,17 +777,175 @@ actor SubagentRunner {
         let estimatedTokens: Int
     }
 
-    /// Compact a working context: evict the oldest tool interactions (then the
-    /// oldest messages) until the kept tail fits under `keepTokens`, summarize
-    /// the evicted content, and prepend the summary as the first message.
-    /// A previous compaction summary sitting at the front gets evicted into the
-    /// new summarizer input, so summaries are anchored rather than lost.
+    /// What one compaction keeps verbatim and what it hands to the summarizer.
+    /// Pure (no network, no persistence) so the selftest drives it directly.
+    struct CompactionPlan {
+        /// Dialogue messages kept verbatim, oldest first. Old replies whose
+        /// embedded rounds were evicted keep their text and a compact log.
+        var keptMessages: [Message]
+        /// Pending (current-run) rounds kept verbatim, oldest first.
+        var keptInteractions: [ToolInteraction]
+        /// Earlier compaction summaries folded into the new one, oldest first.
+        var priorSummaries: [Message]
+        /// Dialogue messages evicted into the summary, oldest first.
+        var evictedDialogue: [Message]
+        /// Rounds evicted into the summary, oldest first: rounds embedded in
+        /// completed replies precede rounds from the pending list.
+        var evictedWork: [ToolInteraction]
+        /// Work share of the kept tail after the dialogue took its part.
+        var workKeepTokens: Int
+        var isEmpty: Bool { priorSummaries.isEmpty && evictedDialogue.isEmpty && evictedWork.isEmpty }
+    }
+
+    /// Decide a compaction. Two budgets over one kept tail:
+    ///
+    /// - dialogue: the newest `dialogueKeepTokens` of the messages exchanged
+    ///   with the main agent stay verbatim; older exchanges are evicted from
+    ///   the front, never below the last two (current prompt + previous
+    ///   reply), even when those two alone exceed the budget;
+    /// - work: the newest `totalKeepTokens - dialogueUsed` of rounds stay
+    ///   verbatim. One chronological queue over both stores: rounds embedded
+    ///   in completed replies (Responses mode) are the oldest and go first,
+    ///   round by round, then the pending list from the front; never below
+    ///   the newest three rounds overall, whichever store holds them.
+    ///
+    /// Earlier summaries at the front are always folded into the new one.
+    static func planCompaction(
+        messages: [Message],
+        interactions: [ToolInteraction],
+        dialogueKeepTokens: Int,
+        totalKeepTokens: Int
+    ) -> CompactionPlan {
+        let minKeepInteractions = 3
+        let minKeepMessages = 2
+
+        var kept = messages
+        var priorSummaries: [Message] = []
+        while let first = kept.first, isCompactionSummary(first) {
+            priorSummaries.append(kept.removeFirst())
+        }
+
+        func dialogueTokens(_ list: [Message]) -> Int {
+            var chars = 0
+            for msg in list { chars += msg.content.count }
+            return chars / 4
+        }
+        let dialogueUsed = min(dialogueTokens(kept), dialogueKeepTokens)
+        let workKeepTokens = max(1, totalKeepTokens - dialogueUsed)
+
+        var keptInteractions = interactions
+        var evictedWork: [ToolInteraction] = []
+        var embeddedEvicted = 0
+        func workTokens() -> Int {
+            var tokens = 0
+            for msg in kept { for round in msg.toolInteractions { tokens += estimatedInteractionTokens(round) } }
+            for round in keptInteractions { tokens += estimatedInteractionTokens(round) }
+            return tokens
+        }
+
+        // 1–2. One chronological work queue over both stores: rounds embedded
+        //      in completed replies (oldest message first, oldest round first)
+        //      come before the pending list. Evict from the front while over
+        //      budget, never below the newest three rounds overall. A reply
+        //      whose rounds are (partly) evicted keeps its text; the evicted
+        //      rounds are replaced by a compact log and the native replay
+        //      envelope is dropped (it described positions that moved).
+        var totalRounds = keptInteractions.count
+        for msg in kept { totalRounds += msg.toolInteractions.count }
+        var strippedByMessage: [Int: [ToolInteraction]] = [:]
+        var messageIndex = 0
+        while workTokens() > workKeepTokens, totalRounds > minKeepInteractions {
+            if messageIndex < kept.count {
+                if kept[messageIndex].toolInteractions.isEmpty { messageIndex += 1; continue }
+                let round = kept[messageIndex].toolInteractions.removeFirst()
+                strippedByMessage[messageIndex, default: []].append(round)
+                evictedWork.append(round)
+                embeddedEvicted += 1
+            } else {
+                evictedWork.append(keptInteractions.removeFirst())
+            }
+            totalRounds -= 1
+        }
+        for (index, stripped) in strippedByMessage {
+            kept[index] = strippingRounds(kept[index], stripped: stripped)
+        }
+
+        // 3. Dialogue from the front, floor two. A message evicted here that
+        //    still carries rounds (the work budget did not need them) hands
+        //    them to the summarizer too, in chronological position: after the
+        //    stripped embedded rounds, before anything from the pending list.
+        var evictedDialogue: [Message] = []
+        while dialogueTokens(kept) > dialogueKeepTokens, kept.count > minKeepMessages {
+            let message = kept.removeFirst()
+            if !message.toolInteractions.isEmpty {
+                evictedWork.insert(contentsOf: message.toolInteractions, at: embeddedEvicted)
+                embeddedEvicted += message.toolInteractions.count
+            }
+            evictedDialogue.append(message)
+        }
+
+        return CompactionPlan(
+            keptMessages: kept,
+            keptInteractions: keptInteractions,
+            priorSummaries: priorSummaries,
+            evictedDialogue: evictedDialogue,
+            evictedWork: evictedWork,
+            workKeepTokens: workKeepTokens
+        )
+    }
+
+    /// A completed reply after some or all of its embedded rounds were
+    /// evicted: text kept, the evicted rounds described by a compact log
+    /// (appended to any earlier log), remaining rounds untouched, native
+    /// replay envelope dropped (it described rounds that no longer exist at
+    /// those positions), measured costs cleared so estimates are recomputed.
+    /// `message.toolInteractions` must already exclude `stripped`.
+    static func strippingRounds(_ message: Message, stripped: [ToolInteraction]) -> Message {
+        var result = message
+        let log = compactToolLog(for: stripped)
+        if let existing = result.compactToolLog, !existing.isEmpty {
+            result.compactToolLog = log.isEmpty ? existing : existing + "\n" + log
+        } else {
+            result.compactToolLog = log
+        }
+        result.responsesReplay = nil
+        result.measuredToolTokens = nil
+        result.measuredTokens = nil
+        return result
+    }
+
+    /// All embedded rounds evicted at once.
+    static func strippingRounds(_ message: Message) -> Message {
+        var bare = message
+        bare.toolInteractions = []
+        return strippingRounds(bare, stripped: message.toolInteractions)
+    }
+
+    /// One line per tool call: name, argument preview, result preview.
+    static func compactToolLog(for rounds: [ToolInteraction]) -> String {
+        func preview(_ text: String, _ limit: Int) -> String {
+            let flat = text.replacingOccurrences(of: "\n", with: " ")
+            return flat.count <= limit ? flat : String(flat.prefix(limit)) + "…"
+        }
+        var lines: [String] = []
+        for round in rounds {
+            for call in round.assistantMessage.toolCalls {
+                let result = round.results.first { $0.toolCallId == call.id }?.content ?? ""
+                lines.append("\(call.function.name)(\(preview(call.function.arguments, 80))) → \(preview(result, 80))")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Compact a working context per `planCompaction`, summarize the evicted
+    /// content, and prepend the summary as the first message.
     /// Returns nil when nothing could be evicted or summarization failed — the
     /// caller then falls back to force-finish, never worse than the old behavior.
     private func compactContext(
         messages: [Message],
         interactions: [ToolInteraction],
-        keepTokens: Int,
+        dialogueKeepTokens: Int,
+        totalKeepTokens: Int,
         openRouterService: OpenRouterService,
         imagesDirectory: URL,
         documentsDirectory: URL,
@@ -772,30 +956,18 @@ actor SubagentRunner {
         execution: ProviderExecutionContext? = nil,
         lane: AffinityLane
     ) async -> CompactionOutcome? {
-        var keptMessages = messages
-        var keptInteractions = interactions
-        var evictedMessages: [Message] = []
-        var evictedInteractions: [ToolInteraction] = []
-
-        let minKeepInteractions = 3
-        let minKeepMessages = 2
-
-        // Evict tool interactions from the front first (the biggest), then
-        // older messages, until the kept tail fits.
-        while Self.estimatedContextTokens(messages: keptMessages, interactions: keptInteractions) > keepTokens,
-              keptInteractions.count > minKeepInteractions {
-            evictedInteractions.append(keptInteractions.removeFirst())
-        }
-        while Self.estimatedContextTokens(messages: keptMessages, interactions: keptInteractions) > keepTokens,
-              keptMessages.count > minKeepMessages {
-            evictedMessages.append(keptMessages.removeFirst())
-        }
-
-        guard !evictedMessages.isEmpty || !evictedInteractions.isEmpty else { return nil }
+        let plan = Self.planCompaction(
+            messages: messages,
+            interactions: interactions,
+            dialogueKeepTokens: dialogueKeepTokens,
+            totalKeepTokens: totalKeepTokens
+        )
+        guard !plan.isEmpty else { return nil }
 
         guard let summary = await summarizeEvicted(
-            messages: evictedMessages,
-            interactions: evictedInteractions,
+            priorSummaries: plan.priorSummaries,
+            dialogue: plan.evictedDialogue,
+            work: plan.evictedWork,
             openRouterService: openRouterService,
             imagesDirectory: imagesDirectory,
             documentsDirectory: documentsDirectory,
@@ -806,34 +978,85 @@ actor SubagentRunner {
             execution: execution, lane: lane
         ) else { return nil }
 
+        var keptMessages = plan.keptMessages
         let summaryMsg = Message(role: .user, content: summary, timestamp: Date(timeIntervalSince1970: 0))
         keptMessages.insert(summaryMsg, at: 0)
         return CompactionOutcome(
             messages: keptMessages,
-            interactions: keptInteractions,
-            estimatedTokens: Self.estimatedContextTokens(messages: keptMessages, interactions: keptInteractions)
+            interactions: plan.keptInteractions,
+            estimatedTokens: Self.estimatedContextTokens(messages: keptMessages, interactions: plan.keptInteractions)
         )
     }
 
-    /// Rough token estimate (~4 chars/token) for a message + interaction set.
-    /// Used for compaction decisions and the post-compaction counter reset;
-    /// the next real API response replaces it with the exact prompt count.
-    private static func estimatedContextTokens(messages: [Message], interactions: [ToolInteraction]) -> Int {
+    /// Rough token estimate (~4 chars/token) for a message + interaction set,
+    /// rounds embedded in completed replies included (or their compact log
+    /// once stripped). Used for compaction decisions and the post-compaction
+    /// counter reset; the next real API response replaces it with the exact
+    /// prompt count.
+    static func estimatedContextTokens(messages: [Message], interactions: [ToolInteraction]) -> Int {
         var chars = 0
         for msg in messages { chars += msg.content.count }
         var tokens = chars / 4
+        for msg in messages {
+            if msg.toolInteractions.isEmpty {
+                if let log = msg.compactToolLog { tokens += log.count / 4 }
+            } else {
+                for round in msg.toolInteractions { tokens += estimatedInteractionTokens(round) }
+            }
+        }
         for interaction in interactions {
             tokens += estimatedInteractionTokens(interaction)
         }
         return tokens
     }
 
+    /// The summarizer's input for one compaction: prior summaries, evicted
+    /// dialogue and evicted work as three labelled blocks. Pure, so the
+    /// selftest can assert its shape without a provider.
+    static func compactionTranscript(
+        priorSummaries: [Message],
+        dialogue: [Message],
+        work: [ToolInteraction]
+    ) -> String {
+        var transcript = ""
+        if !priorSummaries.isEmpty {
+            transcript += "=== PRIOR SUMMARY (carry its dialogue section forward unchanged, merge the rest) ===\n"
+            for summary in priorSummaries {
+                transcript += summary.content + "\n\n"
+            }
+        }
+        if !dialogue.isEmpty {
+            transcript += "=== DIALOGUE WITH THE MAIN AGENT (evicted exchanges, oldest first) ===\n"
+            for msg in dialogue {
+                let role = msg.role == .user ? "MAIN AGENT" : "SUBAGENT"
+                transcript += "[\(role)] \(msg.content)\n\n"
+            }
+        }
+        if !work.isEmpty {
+            transcript += "=== WORK (evicted rounds, oldest first) ===\n"
+            for interaction in work {
+                if let reasoning = interaction.assistantMessage.reasoning {
+                    transcript += "[THINKING] \(reasoning)\n"
+                }
+                for tc in interaction.assistantMessage.toolCalls {
+                    transcript += "[TOOL CALL] \(tc.function.name)(\(tc.function.arguments))\n"
+                }
+                for result in interaction.results {
+                    transcript += "[TOOL RESULT] \(result.content)\n"
+                }
+                transcript += "\n"
+            }
+        }
+        return transcript
+    }
+
     /// Summarize content evicted from a subagent context (mid-run compaction
     /// or eager compaction of an oversized session at resume).
     /// Returns a structured summary string, or nil if summarization fails.
     private func summarizeEvicted(
-        messages: [Message],
-        interactions: [ToolInteraction],
+        priorSummaries: [Message],
+        dialogue: [Message],
+        work: [ToolInteraction],
         openRouterService: OpenRouterService,
         imagesDirectory: URL,
         documentsDirectory: URL,
@@ -846,35 +1069,24 @@ actor SubagentRunner {
     ) async -> String? {
         let execution = execution?.forOperation(.subagentCompaction)
         defer { execution?.responsesTurn.close() }
-        // Build a text representation of the evicted content.
-        var transcript = ""
-
-        for msg in messages {
-            let role = msg.role == .user ? "USER" : "ASSISTANT"
-            transcript += "[\(role)] \(msg.content)\n\n"
-        }
-
-        for interaction in interactions {
-            if let reasoning = interaction.assistantMessage.reasoning {
-                transcript += "[THINKING] \(reasoning)\n"
-            }
-            for tc in interaction.assistantMessage.toolCalls {
-                transcript += "[TOOL CALL] \(tc.function.name)(\(tc.function.arguments))\n"
-            }
-            for result in interaction.results {
-                transcript += "[TOOL RESULT] \(result.content)\n"
-            }
-            transcript += "\n"
-        }
+        let transcript = Self.compactionTranscript(priorSummaries: priorSummaries, dialogue: dialogue, work: work)
 
         guard !transcript.isEmpty else { return nil }
 
         let summaryPrompt = """
         You are summarizing the earlier portion of a coding agent's work session that is being \
-        evicted from context to free up space. The agent will continue working with only this \
-        summary as reference for what happened before.
+        evicted from context to free up space. The agent is a subagent working for a main agent; \
+        it will continue working with only this summary as reference for what happened before.
 
         Produce a detailed, structured summary that preserves:
+        0. DIALOGUE WITH THE MAIN AGENT — under a header that reads exactly "## Dialogue with the \
+        main agent". This section is the contract between the two agents. Keep, in order and \
+        near-verbatim (quote when short): every instruction from the main agent that is still in \
+        force, every correction it made, every commitment the subagent made, and every question \
+        still unresolved. When a newer instruction supersedes an older one, keep only the newer \
+        and note what it supersedes. Drop pleasantries and restatements. When a PRIOR SUMMARY \
+        block is present, start from its dialogue section and apply the same rules to it together \
+        with the newly evicted exchanges. Keep this section under about 1,200 words.
         1. WHAT was accomplished — every significant action, decision, and outcome
         2. FILES touched — exact file paths and what was done to each (created, edited, read, deleted)
         3. KEY findings — errors encountered, solutions applied, important values/configs discovered
@@ -915,7 +1127,7 @@ actor SubagentRunner {
 
                 switch response {
                 case .text(let content, _, _, _, _, _, _):
-                    return "[SESSION HISTORY SUMMARY — Earlier work in this session was summarized to free context space. Details below are from the evicted portion.]\n\n\(content)"
+                    return Self.compactionSummaryHeader + "\n\n" + content
                 case .toolCalls(let assistantMessage, let calls, _, _, _):
                     refusalInteractions.append(disabledToolInteraction(
                         assistantMessage: assistantMessage,
@@ -1031,6 +1243,10 @@ actor SubagentRunner {
     /// Used by the pre-flight budget check to decide if the interaction fits.
     private static func estimatedInteractionTokens(_ interaction: ToolInteraction) -> Int {
         var tokens = (interaction.assistantMessage.content?.count ?? 0) / 4
+        // Replayed reasoning is part of the round's cost (Codex, plan v2 §3.4).
+        if case .string(let reasoning)? = interaction.assistantMessage.reasoning {
+            tokens += reasoning.count / 4
+        }
         for call in interaction.assistantMessage.toolCalls {
             tokens += call.function.arguments.count / 4
             tokens += call.function.name.count / 4 + 20
