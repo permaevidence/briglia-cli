@@ -275,6 +275,46 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             check("4.22 later logs are evicted past a floor-protected reply; the three rounds stay",
                   s2.evictedLogs.count > 0 && s2Estimate <= 52_000 && s2.keptMessages[1].toolInteractions.count == 3 && s2.evictedWork.isEmpty,
                   "logs \(s2.evictedLogs.count) estimate \(s2Estimate)")
+            // 4k. (Codex round 3) The evicted dialogue reaches the summarizer in
+            // SOURCE order even though the dialogue pass stepped over the
+            // pinned carriers (removing newer tasks first) and the reconcile
+            // pass released those carriers afterwards. Same shape as 4.19.
+            let keptTags = Set(ra.keptMessages.map(tag))
+            let expectedDialogue = longReplies.map(tag).filter { !keptTags.contains($0) }
+            let raTranscript = SubagentRunner.compactionTranscript(priorSummaries: [], dialogue: ra.evictedDialogue, work: ra.evictedWork)
+            let transcriptDialogue = raTranscript.split(separator: "\n").compactMap { line -> String? in
+                let role: String
+                if line.hasPrefix("[MAIN AGENT] <") { role = "task" } else if line.hasPrefix("[SUBAGENT] <") { role = "reply" } else { return nil }
+                let t = String(line.drop { $0 != "<" }.dropFirst().prefix { $0 != ">" })
+                return t.hasPrefix(role) ? t : "MISLABELLED:\(t)"
+            }
+            check("4.23 (Codex R-3) evicted dialogue is the source-order subset (task0, reply0, …, task21, reply21, task22, task23, task24) and the transcript renders it in that order",
+                  ra.evictedDialogue.map(tag) == expectedDialogue && transcriptDialogue == expectedDialogue
+                  && expectedDialogue.prefix(4) == ["task0", "reply0", "task1", "reply1"] && expectedDialogue.suffix(3) == ["task22", "task23", "task24"],
+                  "first \(ra.evictedDialogue.prefix(3).map(tag)) transcript first \(transcriptDialogue.prefix(3))")
+            // 4l. Logs assembled across passes: a pinned carrier's log (LOGA,
+            // oldest) is released by the reconcile pass AFTER the dialogue pass
+            // already evicted the logs of newer replies (LOGB, LOGC). The
+            // summarizer must still see LOGA first; the dialogue too keeps
+            // the carrier at its source position.
+            var crossPass: [Message] = [message("x0", .user, tokens: 50)]
+            var carrierA = message("holderA", .assistant, tokens: 10_000, rounds: [round("hA", tokens: 60)])
+            carrierA.compactToolLog = "LOGA"
+            crossPass.append(carrierA)
+            for (i, name) in ["LOGB", "LOGC"].enumerated() {
+                crossPass.append(message("x\(i + 1)", .user, tokens: 50))
+                var m = message("logged\(i + 1)", .assistant, tokens: 10_000)
+                m.compactToolLog = name
+                crossPass.append(m)
+            }
+            crossPass.append(message("x3", .user, tokens: 50))
+            crossPass.append(message("big", .assistant, tokens: 25_000))
+            crossPass.append(message("resume", .user, tokens: 50))
+            let cp = plan(crossPass, (0..<3).map { round("p\($0)", tokens: 60) })
+            check("4.24 logs and dialogue released across passes come back in source order (LOGA, LOGB, LOGC; holderA right after x0)",
+                  cp.evictedLogs == ["LOGA", "LOGB", "LOGC"] && cp.evictedDialogue.map(tag) == ["x0", "holderA", "x1", "logged1", "x2", "logged2", "x3"]
+                  && cp.keptMessages.map(tag) == ["big", "resume"] && cp.evictedWork.map(tag) == ["hA"] && cp.keptInteractions.count == 3,
+                  "logs \(cp.evictedLogs) dialogue \(cp.evictedDialogue.map(tag)) kept \(cp.keptMessages.map(tag))")
         }
 
         print("5. Summary anchoring and transcript shape")
@@ -335,6 +375,42 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             let allMessages = (a.evictedDialogue + a.keptMessages).map(tag)
             check("7.2 every dialogue message is either kept or evicted, order preserved", allMessages == messages.map(tag))
             check("7.3 every round is either kept or evicted, order preserved", (a.evictedWork + a.keptInteractions).map(tag) == rounds.map(tag))
+            // 7.4 Same invariants when reconciliation runs (carriers released
+            // after newer tasks were evicted) and the pending list is evicted
+            // too: evicted ∪ kept, each in source order, equals the source.
+            var mixed: [Message] = []
+            for i in 0..<12 {
+                mixed.append(message("mt\(i)", .user, tokens: 3_000))
+                mixed.append(message("mr\(i)", .assistant, tokens: 3_000, rounds: [round("e\(i)a", tokens: 300), round("e\(i)b", tokens: 300)]))
+            }
+            mixed.append(message("mresume", .user, tokens: 100))
+            let pending = (0..<20).map { round("pp\($0)", tokens: 4_000) }
+            let m = plan(mixed, pending)
+            let allRounds = mixed.flatMap { $0.toolInteractions } + pending
+            let keptEmbedded = m.keptMessages.flatMap { $0.toolInteractions }
+            let keptSet = Set(m.keptMessages.map(tag))
+            check("7.4 embedded then pending eviction: evicted dialogue = source-order subset; evicted work = source-order subset (all embedded, then the oldest pending); kept set is the complement",
+                  m.evictedDialogue.map(tag) == mixed.map(tag).filter { !keptSet.contains($0) }
+                  && m.evictedWork.map(tag) == allRounds.map(tag).filter { r in !(keptEmbedded + m.keptInteractions).map(tag).contains(r) }
+                  && keptEmbedded.isEmpty && !m.evictedDialogue.isEmpty && m.keptInteractions.count > 0 && m.evictedWork.count > 24,
+                  "dialogue \(m.evictedDialogue.prefix(4).map(tag)) work \(m.evictedWork.prefix(4).map(tag))")
+            // 7.5 Reconcile shape: the work fits, so carriers survive the work
+            // pass; the dialogue pass evicts every task (stepping over the
+            // carriers), then reconciliation releases the oldest carriers one
+            // by one. Removal order is mt0..mt11, mr0, mr1, mr2; source order
+            // must come back.
+            let small = (0..<3).map { round("pp\($0)", tokens: 4_000) }
+            let r = plan(mixed, small)
+            let rKept = Set(r.keptMessages.map(tag))
+            let rAll = mixed.flatMap { $0.toolInteractions } + small
+            let rKeptRounds = (r.keptMessages.flatMap { $0.toolInteractions } + r.keptInteractions).map(tag)
+            check("7.5 reconcile shape: released carriers return at their source positions (mt0, mr0, mt1, mr1, …) and their rounds oldest first; nothing pending evicted",
+                  r.evictedDialogue.map(tag) == mixed.map(tag).filter { !rKept.contains($0) }
+                  && r.evictedDialogue.prefix(4).map(tag) == ["mt0", "mr0", "mt1", "mr1"]
+                  && r.evictedWork.map(tag) == rAll.map(tag).filter { !rKeptRounds.contains($0) }
+                  && r.evictedWork.prefix(4).map(tag) == ["e0a", "e0b", "e1a", "e1b"]
+                  && r.keptInteractions.count == 3 && r.evictedWork.count >= 2,
+                  "dialogue \(r.evictedDialogue.prefix(6).map(tag)) work \(r.evictedWork.map(tag))")
         }
 
         print("8. Real runner: eager compaction at resume, then a folded second compaction")

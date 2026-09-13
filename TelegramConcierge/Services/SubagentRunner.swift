@@ -787,13 +787,17 @@ actor SubagentRunner {
         var keptInteractions: [ToolInteraction]
         /// Earlier compaction summaries folded into the new one, oldest first.
         var priorSummaries: [Message]
-        /// Dialogue messages evicted into the summary, oldest first.
+        /// Dialogue messages evicted into the summary, in their ORIGINAL
+        /// order (source position, not removal order: the dialogue pass and
+        /// the reconcile pass remove messages out of sequence).
         var evictedDialogue: [Message]
-        /// Rounds evicted into the summary, oldest first: rounds embedded in
-        /// completed replies precede rounds from the pending list.
+        /// Rounds evicted into the summary, oldest first by source position:
+        /// rounds embedded in completed replies (message order, then round
+        /// order) precede rounds from the pending list.
         var evictedWork: [ToolInteraction]
-        /// Compact tool logs of earlier prunes evicted into the summary,
-        /// oldest first (each is itself a lossy record of evicted rounds).
+        /// Compact tool logs of earlier prunes evicted into the summary, in
+        /// the order of the messages that carried them (each is itself a
+        /// lossy record of evicted rounds).
         var evictedLogs: [String]
         /// Work share of the kept tail after the dialogue took its part.
         var workKeepTokens: Int
@@ -824,6 +828,11 @@ actor SubagentRunner {
     ///   genuine floors, never every round that fit the work allowance.
     ///
     /// Earlier summaries at the front are always folded into the new one.
+    /// Everything evicted is returned in SOURCE order (original position in
+    /// the session, then round position), never in removal order: the
+    /// dialogue pass steps over pinned replies and the reconcile pass
+    /// releases them later, so removal order would put newer tasks before
+    /// the older replies that answered them.
     static func planCompaction(
         messages: [Message],
         interactions: [ToolInteraction],
@@ -838,6 +847,29 @@ actor SubagentRunner {
         while let first = kept.first, isCompactionSummary(first) {
             priorSummaries.append(kept.removeFirst())
         }
+        // Source position of every kept message, parallel to `kept`. Evicted
+        // items are keyed by it and returned in source order whatever pass
+        // removed them; timestamps are not used (they tie and can be
+        // synthetic). The only removal site is `evictDialogue`.
+        var origins = Array(priorSummaries.count..<messages.count)   // indices into `messages`
+        let pendingOrigin = Int.max   // the pending list is newer than every completed reply
+        struct EvictedMessage { let origin: Int; let message: Message }
+        struct EvictedLog { let origin: Int; let log: String }
+        struct EvictedRound { let origin: Int; let position: Int; let round: ToolInteraction }
+        var evictedDialogueKeyed: [EvictedMessage] = []
+        var evictedLogsKeyed: [EvictedLog] = []
+        var evictedWorkKeyed: [EvictedRound] = []
+        func evictLog(at index: Int) {
+            guard let log = kept[index].compactToolLog, !log.isEmpty else { return }
+            evictedLogsKeyed.append(EvictedLog(origin: origins[index], log: log))
+            kept[index].compactToolLog = nil
+        }
+        func evictOldestRound(at index: Int) {
+            // Rounds leave a message oldest first, so the round's original
+            // position is the number already removed from that message.
+            let removed = messages[origins[index]].toolInteractions.count - kept[index].toolInteractions.count
+            evictedWorkKeyed.append(EvictedRound(origin: origins[index], position: removed, round: kept[index].toolInteractions.removeFirst()))
+        }
 
         func dialogueTokens(_ list: [Message]) -> Int {
             var chars = 0
@@ -848,8 +880,7 @@ actor SubagentRunner {
         let workKeepTokens = max(1, totalKeepTokens - dialogueUsed)
 
         var keptInteractions = interactions
-        var evictedWork: [ToolInteraction] = []
-        var evictedLogs: [String] = []
+        var pendingRemoved = 0
         func workTokens() -> Int {
             var tokens = 0
             for msg in kept {
@@ -875,20 +906,20 @@ actor SubagentRunner {
         func evictOldestWorkUnit() -> Bool {
             for index in kept.indices {
                 if let log = kept[index].compactToolLog, !log.isEmpty {
-                    evictedLogs.append(log)
-                    kept[index].compactToolLog = nil
+                    evictLog(at: index)
                     touch(index)
                     return true
                 }
                 if !kept[index].toolInteractions.isEmpty, totalRounds > minKeepInteractions {
-                    evictedWork.append(kept[index].toolInteractions.removeFirst())
+                    evictOldestRound(at: index)
                     totalRounds -= 1
                     touch(index)
                     return true
                 }
             }
             if !keptInteractions.isEmpty, totalRounds > minKeepInteractions {
-                evictedWork.append(keptInteractions.removeFirst())
+                evictedWorkKeyed.append(EvictedRound(origin: pendingOrigin, position: pendingRemoved, round: keptInteractions.removeFirst()))
+                pendingRemoved += 1
                 totalRounds -= 1
                 return true
             }
@@ -901,14 +932,14 @@ actor SubagentRunner {
         // 3. Dialogue from the front, floor two; a reply still carrying kept
         //    rounds is pinned and skipped. A message evicted here can carry
         //    an earlier compact log (no rounds): it joins the evicted logs.
-        var evictedDialogue: [Message] = []
         func evictDialogue() {
             var index = 0
             while dialogueTokens(kept) > dialogueKeepTokens, index < kept.count - minKeepMessages {
                 if !kept[index].toolInteractions.isEmpty { index += 1; continue }
+                evictLog(at: index)
                 let message = kept.remove(at: index)
-                if let log = message.compactToolLog, !log.isEmpty { evictedLogs.append(log) }
-                evictedDialogue.append(message)
+                let origin = origins.remove(at: index)
+                evictedDialogueKeyed.append(EvictedMessage(origin: origin, message: message))
             }
         }
         // 4. Reconcile: pins are only as strong as the work floor. While the
@@ -924,21 +955,28 @@ actor SubagentRunner {
             guard let carrier = evictable.first(where: { !kept[$0].toolInteractions.isEmpty }) else { break }
             // Older work units first (logs of earlier messages, this carrier's
             // own log), then the carrier's rounds, oldest first, floor permitting.
-            for index in 0...carrier {
-                if let log = kept[index].compactToolLog, !log.isEmpty {
-                    evictedLogs.append(log)
-                    kept[index].compactToolLog = nil
-                    touch(index)
-                }
+            for index in 0...carrier where kept[index].compactToolLog != nil {
+                evictLog(at: index)
+                touch(index)
             }
             while !kept[carrier].toolInteractions.isEmpty, totalRounds > minKeepInteractions {
-                evictedWork.append(kept[carrier].toolInteractions.removeFirst())
+                evictOldestRound(at: carrier)
                 totalRounds -= 1
                 touch(carrier)
             }
             guard kept[carrier].toolInteractions.isEmpty else { break }  // floor reached: genuine overshoot
         }
 
+        // 5. Source order, not removal order: the dialogue pass steps over
+        //    pinned replies and the reconcile pass releases them later, so
+        //    removal order interleaves newer tasks before older replies. Keys
+        //    are unique (one per message; message + position per round), so
+        //    the sort is total.
+        let evictedDialogue = evictedDialogueKeyed.sorted { $0.origin < $1.origin }.map(\.message)
+        let evictedLogs = evictedLogsKeyed.sorted { $0.origin < $1.origin }.map(\.log)
+        let evictedWork = evictedWorkKeyed
+            .sorted { ($0.origin, $0.position) < ($1.origin, $1.position) }
+            .map(\.round)
         return CompactionPlan(
             keptMessages: kept,
             keptInteractions: keptInteractions,
