@@ -290,7 +290,8 @@ def main():
             from newest_turn_protection_lifecycle_migration import verify_migration
             from read_file_description_migration import migrate_lifecycle
             from reasoning_history_removal_migration import migrate_lifecycle as migrate_reasoning_history_removal_lifecycle
-            verify_migration(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"])), results["candidate"], compare)
+            from subagent_dialogue_compaction_lifecycle_migration import migrate_lifecycle as migrate_subagent_dialogue_lifecycle
+            verify_migration(migrate_subagent_dialogue_lifecycle(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"]))), results["candidate"], compare)
             # New-binary export MUST open with the pinned release's actual importer.
             imported = root / "cross-import"
             env = dict(os.environ, SWIFT_DETERMINISTIC_HASHING="1", LC_ALL="C", TZ="UTC")

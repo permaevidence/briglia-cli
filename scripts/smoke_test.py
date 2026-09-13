@@ -383,6 +383,13 @@ def main():
     result = run_selftest([ADA, "__prune-archive-selftest"], capture_output=True, text=True, timeout=120)
     check("prune archive selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # Subagent compaction: dialogue with the main agent preserved under a
+    # capped budget, chronological work eviction across both stores, one
+    # folded summary; drives the real runner against a scripted local
+    # provider under an isolated XDG root.
+    result = run_selftest([ADA, "__subagent-compaction-selftest"], capture_output=True, text=True, timeout=300)
+    check("subagent compaction selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # 3c5-ter. MCP tool surface: server handles, canonical aliases (length,
     # charset, determinism, per-server prefix isolation), escaped
     # descriptions, refused hostile semantic strings, registry-only dispatch

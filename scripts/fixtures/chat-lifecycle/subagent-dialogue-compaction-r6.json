@@ -1,0 +1,33 @@
+{
+ "purpose": "r6: subagent compaction summarizer requests changed on 2026-09-13 (dialogue-preserving compaction). Applied to the pinned-SOURCE lifecycle fixtures before the r5 verification. Only the three subagent summarizer requests change; every other body byte stays exact.",
+ "recorded": "2026-09-13 briglia-cli-private wip/subagent-dialogue-compaction",
+ "captures": [
+  "subagent-eager-0",
+  "subagent-eager-1",
+  "subagent-midrun-1"
+ ],
+ "intro_old": "The agent will continue working with only this summary as reference for what happened before.",
+ "intro_new": "The agent is a subagent working for a main agent; it will continue working with only this summary as reference for what happened before.",
+ "section_anchor": "Produce a detailed, structured summary that preserves:\n",
+ "section_zero": "0. DIALOGUE WITH THE MAIN AGENT — under a header that reads exactly \"## Dialogue with the main agent\". This section is the contract between the two agents. Keep, in order and near-verbatim (quote when short): every instruction from the main agent that is still in force, every correction it made, every commitment the subagent made, and every question still unresolved. When a newer instruction supersedes an older one, keep only the newer and note what it supersedes. Drop pleasantries and restatements. When a PRIOR SUMMARY block is present, start from its dialogue section and apply the same rules to it together with the newly evicted exchanges. Keep this section under about 1,200 words.\n",
+ "transcript_marker": "=== TRANSCRIPT TO SUMMARIZE ===\n",
+ "dialogue_header": "=== DIALOGUE WITH THE MAIN AGENT (evicted exchanges, oldest first) ===\n",
+ "role_old": {
+  "user": "[USER] ",
+  "assistant": "[ASSISTANT] "
+ },
+ "role_new": {
+  "user": "[MAIN AGENT] ",
+  "assistant": "[SUBAGENT] "
+ },
+ "work_markers": [
+  "[THINKING] ",
+  "[TOOL CALL] ",
+  "[TOOL RESULT] "
+ ],
+ "expected_role_counts": {
+  "subagent-eager-0": 6,
+  "subagent-eager-1": 6,
+  "subagent-midrun-1": 4
+ }
+}
