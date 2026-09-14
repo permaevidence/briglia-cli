@@ -23,6 +23,28 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
 
     struct Failure: Error, CustomStringConvertible { let description: String }
 
+    /// Cancel from the capture server's request boundary, without sleeps or a
+    /// race between starting the worker task and installing its handle.
+    final class CancelRun: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: Task<SubagentRunner.RunResult, Never>?
+        private var requested = false
+        func install(_ task: Task<SubagentRunner.RunResult, Never>) {
+            lock.lock(); self.task = task; let cancel = requested; lock.unlock()
+            if cancel { task.cancel() }
+        }
+        func cancel() {
+            lock.lock(); requested = true; let task = task; lock.unlock()
+            task?.cancel()
+        }
+    }
+
+    // JSON may escape the slash in the n/N label. Decode that spelling for
+    // observer routing only; captures and production request bytes stay intact.
+    private static func observerText(_ request: CapturedHTTPRequest) -> String {
+        String(decoding: request.body, as: UTF8.self).replacingOccurrences(of: "\\/", with: "/")
+    }
+
     func run() async throws {
         guard adaCLIVersion.hasSuffix("-dev") else { throw ValidationError("Needs a development build") }
         var total = 0
@@ -497,12 +519,12 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                 KeychainHelper.subagentTurnTokenBudgetKey: "1000",   // tail 250: dialogue 150, work 100
             ]
             for (key, value) in settings { try KeychainHelper.save(key: key, value: value) }
-            func response(_ text: String, prompt: Int = 1) throws -> String {
+            @Sendable func response(_ text: String, prompt: Int = 1) throws -> String {
                 let body: [String: Any] = ["id": "s", "choices": [["message": ["role": "assistant", "content": text], "finish_reason": "stop"]],
                     "usage": ["prompt_tokens": prompt, "completion_tokens": 1, "total_tokens": prompt + 1]]
                 return String(data: try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]), encoding: .utf8)!
             }
-            func requestBodies() -> [String] { server.completeRequests.map { String(decoding: $0.body, as: UTF8.self) } }
+            func requestBodies() -> [String] { server.completeRequests.map { Self.observerText($0) } }
             let runner = SubagentRunner()
             let service = OpenRouterService(); await service.configure(apiKey: "synthetic-selftest-key")
             let executor = ToolExecutor(outputMode: .subagent)
@@ -708,7 +730,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                 let completion = try response("OVERSIZED_COMPLETE")
                 server.clear()
                 server.requestObserver = { request in
-                    let wire = String(decoding: request.body, as: UTF8.self)
+                    let wire = Self.observerText(request)
                     if server.completeRequests.count == 1 { server.script([batch]) }
                     else if wire.contains("[OVERSIZED BATCH SUMMARY") {
                         let found = ["MARKER_ALPHA", "MARKER_OMEGA"].filter { wire.contains($0) }.joined(separator: " ")
@@ -733,7 +755,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                 // Failure after one successful fragment must never commit a partial summary.
                 server.clear()
                 server.requestObserver = { request in
-                    let wire = String(decoding: request.body, as: UTF8.self)
+                    let wire = Self.observerText(request)
                     if server.completeRequests.count == 1 { server.script([batch]) }
                     else if wire.contains("[OVERSIZED BATCH SUMMARY 1/") { server.script([try! response("PARTIAL_MUST_NOT_COMMIT")]) }
                     else if wire.contains("[OVERSIZED BATCH SUMMARY") { server.script([try! response("")]) }
@@ -745,9 +767,81 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                 let failedSaved = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf:
                     StoragePaths.dataRoot.appendingPathComponent("subagent_sessions/\(failed.sessionId).json")))
                 check("8.28 budget \(budget): partial summary failure preserves explicit cutoff", failed.error == nil && failed.finalMessage == "SAFE_CUTOFF"
+                      && requestBodies().filter { $0.contains("[OVERSIZED BATCH SUMMARY") }.count == 2
                       && requestBodies().last?.contains("[CONTEXT LIMIT]") == true
                       && failedSaved.messages.filter(SubagentRunner.isCompactionSummary).isEmpty
                       && !failedSaved.messages.contains { $0.content.contains("PARTIAL_MUST_NOT_COMMIT") })
+
+                if budget == 60_000 {
+                    // Same replacement (~2k locally), opposite sides of the
+                    // hard ceiling once the previous request overhead is added.
+                    // Dropping +requestOverhead must break the rejection case.
+                    let overheadSummary = try response("OVERHEAD_SUMMARY " + String(repeating: "s", count: 8_000))
+                    for (promptTokens, shouldFit) in [(59_000, false), (55_000, true)] {
+                        var object = try JSONSerialization.jsonObject(with: Data(batch.utf8)) as! [String: Any]
+                        object["usage"] = ["prompt_tokens": promptTokens, "completion_tokens": 1]
+                        let overheadBatch = String(data: try JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
+                        server.clear()
+                        server.requestObserver = { request in
+                            let wire = Self.observerText(request)
+                            if server.completeRequests.count == 1 { server.script([overheadBatch]) }
+                            else if wire.contains("[OVERSIZED BATCH SUMMARY") { server.script([overheadSummary]) }
+                            else { server.script([completion]) }
+                        }
+                        let result = await runner.run(invocation: breeInvocation, sessionId: nil, openRouterService: service,
+                            toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+                        server.requestObserver = nil
+                        let wire = requestBodies()
+                        let stored = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf:
+                            StoragePaths.dataRoot.appendingPathComponent("subagent_sessions/\(result.sessionId).json")))
+                        check("8.29 overhead \(promptTokens): completed summary accepted only when total request fits", result.error == nil
+                              && wire.filter { $0.contains("[OVERSIZED BATCH SUMMARY") }.count > 1
+                              && wire.last?.contains("[CONTEXT LIMIT]") == !shouldFit
+                              && wire.last?.contains("OVERHEAD_SUMMARY") == shouldFit)
+                        check("8.30 overhead \(promptTokens): rejected replacement never committed",
+                              stored.messages.contains(where: SubagentRunner.isCompactionSummary) == shouldFit)
+                    }
+
+                    // Stop after one fragment succeeded. Preserve the raw,
+                    // executed call/result pairs, never the partial summary.
+                    let cancellation = CancelRun()
+                    server.clear()
+                    server.requestObserver = { request in
+                        let wire = Self.observerText(request)
+                        if server.completeRequests.count == 1 { server.script([batch]) }
+                        else {
+                            server.script([try! response("CANCELLED_PARTIAL_SUMMARY")])
+                            if wire.contains("[OVERSIZED BATCH SUMMARY 2/") { cancellation.cancel() }
+                        }
+                    }
+                    let task = Task {
+                        await runner.run(invocation: breeInvocation, sessionId: nil, openRouterService: service,
+                            toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+                    }
+                    cancellation.install(task)
+                    let cancelled = await task.value
+                    server.requestObserver = nil
+                    let stoppedRequests = requestBodies()
+                    let stored = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf:
+                        StoragePaths.dataRoot.appendingPathComponent("subagent_sessions/\(cancelled.sessionId).json")))
+                    check("8.31 stop in fragment two ends cancelled without another request", cancelled.error == "Subagent cancelled"
+                          && cancelled.finalMessage.isEmpty && cancelled.sessionPersisted && stoppedRequests.count == 3
+                          && stoppedRequests.last?.contains("[OVERSIZED BATCH SUMMARY 2/") == true)
+                    check("8.32 cancelled chat run retains every executed result and no partial summary",
+                          stored.toolInteractions.count == 1
+                          && stored.toolInteractions[0].assistantMessage.toolCalls.map(\.id) == (0..<reads).map { "oversized_\($0)" }
+                          && stored.toolInteractions[0].results.count == reads
+                          && stored.toolInteractions[0].results.allSatisfy { $0.content.contains("MARKER_ALPHA") && $0.content.contains("MARKER_OMEGA") }
+                          && !stored.messages.contains { SubagentRunner.isCompactionSummary($0) || $0.content.contains("CANCELLED_PARTIAL_SUMMARY") })
+                    try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "250000")
+                    await SubagentSessionRegistry.shared.reloadFromDisk()
+                    server.clear(); server.script([completion])
+                    let resumed = await runner.run(invocation: breeInvocation, sessionId: cancelled.sessionId, openRouterService: service,
+                        toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+                    check("8.33 cancelled chat session resumes with its complete batch", resumed.error == nil && requestBodies().count == 1
+                          && (0..<reads).allSatisfy { requestBodies()[0].contains("oversized_\($0)") }
+                          && requestBodies()[0].contains("MARKER_ALPHA") && requestBodies()[0].contains("MARKER_OMEGA"))
+                }
             }
         }
 
@@ -903,7 +997,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             let persistedDuringContinue = root.appendingPathComponent("emergency-checkpoint.json")
             server.clear()
             server.requestObserver = { request in
-                let wire = String(decoding: request.body, as: UTF8.self)
+                let wire = Self.observerText(request)
                 if server.completeRequests.count == 1 { server.script([nativeBatch]) }
                 else if wire.contains("[OVERSIZED BATCH SUMMARY") { server.script([nativeSummary]) }
                 else {
@@ -945,6 +1039,74 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             check("9.20 reload/resume keeps summary and final reasoning, never raw retired batch", nativeResumed.error == nil
                   && nativeResumed.finalMessage == "NATIVE_RESUMED" && nativeResumeWire.contains("NATIVE_ALPHA")
                   && nativeResumeWire.contains("opaque_native_done") && !nativeResumeWire.contains("opaque_native_large") && !nativeResumeWire.contains("call_native_large"))
+
+            // Cancellation on fragment two and on the final fragment must
+            // preserve the exact Responses recovery payload (including native
+            // reasoning) when commitRun moves it into the interrupted reply.
+            let fragmentCount = nativeRequests.filter { String(decoding: $0.body, as: UTF8.self).contains("[OVERSIZED BATCH SUMMARY") }.count
+            for stopAt in [2, fragmentCount] {
+                let cancellation = CancelRun()
+                let checkpointFile = root.appendingPathComponent("cancel-checkpoint-\(stopAt).json")
+                server.clear()
+                server.requestObserver = { request in
+                    let wire = Self.observerText(request)
+                    if server.completeRequests.count == 1 { server.script([nativeBatch]) }
+                    else {
+                        server.script([nativeSummary])
+                        if wire.contains("[OVERSIZED BATCH SUMMARY \(stopAt)/") {
+                            let sessions = StoragePaths.dataRoot.appendingPathComponent("subagent_sessions")
+                            for url in (try? FileManager.default.contentsOfDirectory(at: sessions, includingPropertiesForKeys: nil)) ?? [] {
+                                if let bytes = try? Data(contentsOf: url),
+                                   let session = try? sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: bytes),
+                                   session.toolInteractions.contains(where: { $0.assistantMessage.toolCalls.contains { $0.id == "call_native_large" } }) {
+                                    try? bytes.write(to: checkpointFile)
+                                }
+                            }
+                            cancellation.cancel()
+                        }
+                    }
+                }
+                let task = Task {
+                    await runner.run(invocation: invocation, sessionId: nil, openRouterService: service, toolExecutor: executor,
+                        imagesDirectory: root, documentsDirectory: root, parentTools: [AvailableTools.readFile])
+                }
+                cancellation.install(task)
+                let cancelled = await task.value
+                server.requestObserver = nil
+                let stoppedRequests = server.completeRequests
+                check("9.21 stop at fragment \(stopAt): cancelled without continuation or forced answer", cancelled.error == "Subagent cancelled"
+                      && cancelled.finalMessage.isEmpty && cancelled.sessionPersisted && stoppedRequests.count == stopAt + 1
+                      && stoppedRequests.last.map { Self.observerText($0).contains("[OVERSIZED BATCH SUMMARY \(stopAt)/") } == true,
+                      cancelled.error ?? "requests \(stoppedRequests.count)")
+                let saved = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf:
+                    StoragePaths.dataRoot.appendingPathComponent("subagent_sessions/\(cancelled.sessionId).json")))
+                let retainedRounds = saved.messages.last?.toolInteractions ?? []
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                if let checkpointBytes = try? Data(contentsOf: checkpointFile),
+                   let before = try? sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: checkpointBytes) {
+                    let roundsUnchanged = try encoder.encode(before.toolInteractions) == encoder.encode(retainedRounds)
+                    let messagesUnchanged = try encoder.encode(before.messages) == encoder.encode(Array(saved.messages.dropLast()))
+                    check("9.22 stop at fragment \(stopAt): interrupted reply preserves byte-identical checkpoint payload",
+                          before.id == saved.id && !retainedRounds.isEmpty && saved.toolInteractions.isEmpty
+                          && roundsUnchanged && messagesUnchanged)
+                } else { check("9.22 stop at fragment \(stopAt): original checkpoint captured", false) }
+                check("9.23 stop at fragment \(stopAt): no partial summary; complete native call/result retained",
+                      !saved.messages.contains(where: SubagentRunner.isCompactionSummary)
+                      && retainedRounds.count == 1 && retainedRounds[0].assistantMessage.responsesReplay != nil
+                      && retainedRounds[0].results.count == 1
+                      && retainedRounds[0].results[0].content.contains("NATIVE_OMEGA"))
+                try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "250000")
+                await SubagentSessionRegistry.shared.reloadFromDisk()
+                server.clear(); server.script([nativeDone])
+                let resumed = await runner.run(invocation: invocation, sessionId: cancelled.sessionId, openRouterService: service,
+                    toolExecutor: executor, imagesDirectory: root, documentsDirectory: root, parentTools: [AvailableTools.readFile])
+                let resume = server.completeRequests.last.map { String(decoding: $0.body, as: UTF8.self) } ?? ""
+                check("9.24 stop at fragment \(stopAt): reload/resume replays reasoning and complete call/result", resumed.error == nil
+                      && server.completeRequests.count == 1 && resume.contains("opaque_native_large")
+                      && resume.contains("call_native_large") && resume.contains("NATIVE_ALPHA") && resume.contains("NATIVE_OMEGA")
+                      && !resume.contains("[CONTEXT LIMIT]"))
+                try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "60000")
+            }
 
 
         }

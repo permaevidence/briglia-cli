@@ -408,6 +408,7 @@ actor SubagentRunner {
                 // exhausted, or unavailable), force a final response. Tools and
                 // system prompt stay identical to preserve prompt cache; the
                 // stop instruction goes in a tail system message instead.
+                try Task.checkCancellation()
                 let forceFinish = lastPromptTokens.map { $0 >= turnTokenBudget } ?? false
                 let response = try await openRouterService.generateResponse(
                     messages: messagesForLLM,
@@ -605,6 +606,9 @@ actor SubagentRunner {
                                 print("[SubagentRunner] Compacted context after tool batch (\(compactionsUsed)/\(Self.maxCompactionsPerRun)): ~\(projected) → ~\(compacted.estimatedTokens) tokens")
                                 compactedNow = true
                             }
+                            // A cancelled summary is not a failed compaction: preserve
+                            // the executed batch and let the cancellation handler commit it.
+                            try Task.checkCancellation()
                             // Last resort before discarding an executed batch: summarize
                             // even the newest round, in bounded text fragments. Preserve
                             // the measured request overhead when deciding whether it fits.
@@ -640,6 +644,7 @@ actor SubagentRunner {
                                     compactedNow = true
                                 }
                             }
+                            try Task.checkCancellation()
                             if !compactedNow && projected >= turnTokenBudget {
                                 stoppedForContext = true
                                 let dropped = toolInteractions.removeLast()
@@ -1095,7 +1100,7 @@ actor SubagentRunner {
         )
         // Folding a prior summary alone removes no additional history. Do not
         // call the model or consume a successful-compaction slot for that.
-        guard plan.hasNewEvictions else { return nil }
+        guard !Task.isCancelled, plan.hasNewEvictions else { return nil }
         // Native media and typed deliveries cannot be faithfully represented
         // by the text-only emergency transcript. Preserve the existing cutoff
         // rather than claim to have summarized content the summarizer never saw.
@@ -1133,7 +1138,7 @@ actor SubagentRunner {
             reasoningEffortOverride: reasoningEffortOverride,
             textOnlyOverride: textOnlyOverride,
             execution: execution, lane: lane
-        ) else { return nil }
+        ), !Task.isCancelled else { return nil }
 
         var keptMessages = plan.keptMessages
         let summaryMsg = Message(role: .user, content: summary, timestamp: Date(timeIntervalSince1970: 0))
