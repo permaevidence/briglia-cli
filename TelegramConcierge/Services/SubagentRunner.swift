@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 
 // MARK: - Subagent Runner
 
@@ -297,6 +302,7 @@ actor SubagentRunner {
         let compactionKeepTokens = min(Self.compactionKeepTokensCap, max(1, turnTokenBudget / 4))
         let dialogueKeepTokens = Self.dialogueKeepTokens(totalKeepTokens: compactionKeepTokens)
         var compactionsUsed = 0
+        var compactionAttempts = Set<Data>()
 
         // Eager compaction on resume. Sessions normally stay under the budget
         let snapshot = await openRouterService.executionContext(modelOverride: effectiveModelOverride,
@@ -319,6 +325,7 @@ actor SubagentRunner {
                messages: messagesForLLM,
                interactions: priorToolInteractions,
                dialogueKeepTokens: dialogueKeepTokens, totalKeepTokens: compactionKeepTokens,
+               attemptedContexts: &compactionAttempts,
                openRouterService: openRouterService,
                imagesDirectory: imagesDirectory,
                documentsDirectory: documentsDirectory,
@@ -349,6 +356,7 @@ actor SubagentRunner {
         var totalSpendUSD: Double = 0
         var turnsUsed = 0
         var runError: String? = nil
+        var stoppedForContext = false
         var finalText: String = ""
         var finalReplay: ResponsesReplayEnvelope? = nil
 
@@ -372,6 +380,7 @@ actor SubagentRunner {
                        messages: messagesForLLM,
                        interactions: toolInteractions,
                        dialogueKeepTokens: dialogueKeepTokens, totalKeepTokens: compactionKeepTokens,
+                       attemptedContexts: &compactionAttempts,
                        openRouterService: openRouterService,
                        imagesDirectory: imagesDirectory,
                        documentsDirectory: documentsDirectory,
@@ -571,6 +580,7 @@ actor SubagentRunner {
                                    messages: messagesForLLM,
                                    interactions: toolInteractions,
                                    dialogueKeepTokens: dialogueKeepTokens, totalKeepTokens: compactionKeepTokens,
+                                   attemptedContexts: &compactionAttempts,
                                    openRouterService: openRouterService,
                                    imagesDirectory: imagesDirectory,
                                    documentsDirectory: documentsDirectory,
@@ -595,6 +605,7 @@ actor SubagentRunner {
                                 compactedNow = true
                             }
                             if !compactedNow && projected >= turnTokenBudget {
+                                stoppedForContext = true
                                 let dropped = toolInteractions.removeLast()
                                 let droppedTools = dropped.assistantMessage.toolCalls.map { $0.function.name }.joined(separator: ", ")
                                 print("[SubagentRunner] Dropped overflowing tool interaction (\(droppedTools)) — context (~\(pt) + ~\(interactionTokens)) exceeds turn budget (\(turnTokenBudget)) and compaction was unavailable")
@@ -637,7 +648,7 @@ actor SubagentRunner {
                         currentUserMessageId: syntheticUser.id,
                         turnStartDate: turnStartDate,
                         finalResponseInstruction: subagentType.systemPromptSuffix,
-                        tailSystemMessage: """
+                        tailSystemMessage: stoppedForContext ? "[CONTEXT LIMIT] The newest tool round was omitted because the context budget could not accommodate it and compaction was unavailable or insufficient. Its tools already executed; do not claim to have inspected their omitted results. Do NOT call more tools. Give your final answer with progress and unfinished work." : """
                             [ROUND LIMIT SUMMARY REQUEST \(attempt + 1)/5] You have reached the maximum number of tool rounds for this run. \
                             Do NOT call any more tools. Provide your final answer NOW — summarize everything \
                             you accomplished, what files were touched, and what remains to be done.
@@ -801,7 +812,8 @@ actor SubagentRunner {
         var evictedLogs: [String]
         /// Work share of the kept tail after the dialogue took its part.
         var workKeepTokens: Int
-        var isEmpty: Bool { priorSummaries.isEmpty && evictedDialogue.isEmpty && evictedWork.isEmpty && evictedLogs.isEmpty }
+        var hasNewEvictions: Bool { !evictedDialogue.isEmpty || !evictedWork.isEmpty || !evictedLogs.isEmpty }
+        var isEmpty: Bool { priorSummaries.isEmpty && !hasNewEvictions }
     }
 
     /// Decide a compaction. Two budgets over one kept tail:
@@ -810,8 +822,9 @@ actor SubagentRunner {
     ///   verbatim. One chronological queue over both stores: for each
     ///   completed reply (oldest first) its compact log, if any, then its
     ///   embedded rounds (oldest first); then the pending list from the
-    ///   front. Evicted while over budget, never below the newest three
-    ///   ROUNDS overall, whichever store holds them (logs have no floor). A
+    ///   front. Evicted while over budget, keeping up to the newest three
+    ///   ROUNDS that fit the work allowance (always the newest round),
+    ///   whichever store holds them (logs have no floor). A
     ///   reply whose rounds were partly or wholly evicted keeps its text and
     ///   its final replay envelope (that envelope is keyed to the reply text
     ///   and zero calls, not to round positions; each round carries its own).
@@ -839,7 +852,6 @@ actor SubagentRunner {
         dialogueKeepTokens: Int,
         totalKeepTokens: Int
     ) -> CompactionPlan {
-        let minKeepInteractions = 3
         let minKeepMessages = 2
 
         var kept = messages
@@ -878,6 +890,20 @@ actor SubagentRunner {
         }
         let dialogueUsed = min(dialogueTokens(kept), dialogueKeepTokens)
         let workKeepTokens = max(1, totalKeepTokens - dialogueUsed)
+
+        // Three rounds are a preference, not permission to exceed the work
+        // allowance indefinitely. Keep the newest complete round even if it
+        // alone is oversized; add up to two preceding rounds only if they fit.
+        // This single suffix spans embedded and pending rounds in source order.
+        let allRounds = kept.flatMap(\.toolInteractions) + interactions
+        var minKeepInteractions = 0
+        var recentTokens = 0
+        for round in allRounds.suffix(3).reversed() {
+            let cost = estimatedInteractionTokens(round)
+            if minKeepInteractions > 0 && recentTokens + cost > workKeepTokens { break }
+            recentTokens += cost
+            minKeepInteractions += 1
+        }
 
         var keptInteractions = interactions
         var pendingRemoved = 0
@@ -945,7 +971,7 @@ actor SubagentRunner {
         // 4. Reconcile: pins are only as strong as the work floor. While the
         //    dialogue is still over budget because pinned carriers block it,
         //    retire the OLDEST carrier's work (its log, its rounds, oldest
-        //    first, never below the newest three rounds overall) so the
+        //    first, never below the token-aware recent-round floor) so the
         //    carrier becomes evictable, and evict again. Overshoot then
         //    reflects the genuine floors only.
         while true {
@@ -997,6 +1023,7 @@ actor SubagentRunner {
         interactions: [ToolInteraction],
         dialogueKeepTokens: Int,
         totalKeepTokens: Int,
+        attemptedContexts: inout Set<Data>,
         openRouterService: OpenRouterService,
         imagesDirectory: URL,
         documentsDirectory: URL,
@@ -1013,7 +1040,24 @@ actor SubagentRunner {
             dialogueKeepTokens: dialogueKeepTokens,
             totalKeepTokens: totalKeepTokens
         )
-        guard !plan.isEmpty else { return nil }
+        // Folding a prior summary alone removes no additional history. Do not
+        // call the model or consume a successful-compaction slot for that.
+        guard plan.hasNewEvictions else { return nil }
+        let before = Self.estimatedContextTokens(messages: messages, interactions: interactions)
+        // A failed/expanding summary must not cause another paid attempt on
+        // exactly the same context at the next loop check. New work or dialogue
+        // changes this run-local key and permits a fresh attempt.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let messageBytes = try? encoder.encode(messages),
+              let roundBytes = try? encoder.encode(interactions) else { return nil }
+        // Hash every byte: Foundation Data's ordinary hash may sample large
+        // buffers, so its hash value alone cannot identify a context.
+        var signature = SHA256()
+        signature.update(data: messageBytes)
+        signature.update(data: Data([0]))
+        signature.update(data: roundBytes)
+        guard attemptedContexts.insert(Data(signature.finalize())).inserted else { return nil }
 
         guard let summary = await summarizeEvicted(
             priorSummaries: plan.priorSummaries,
@@ -1033,11 +1077,18 @@ actor SubagentRunner {
         var keptMessages = plan.keptMessages
         let summaryMsg = Message(role: .user, content: summary, timestamp: Date(timeIntervalSince1970: 0))
         keptMessages.insert(summaryMsg, at: 0)
-        return CompactionOutcome(
-            messages: keptMessages,
-            interactions: plan.keptInteractions,
-            estimatedTokens: Self.estimatedContextTokens(messages: keptMessages, interactions: plan.keptInteractions)
-        )
+        let after = Self.estimatedContextTokens(messages: keptMessages, interactions: plan.keptInteractions)
+        guard Self.compactionMakesProgress(before: before, after: after) else {
+            print("[SubagentRunner] Compaction declined: no material reduction (~\(before) → ~\(after) tokens); original context retained")
+            return nil
+        }
+        return CompactionOutcome(messages: keptMessages, interactions: plan.keptInteractions, estimatedTokens: after)
+    }
+
+    /// Compare like-for-like local estimates, never an API input count with a
+    /// partial local estimate. Require 1% reduction, capped at 1,024 tokens.
+    static func compactionMakesProgress(before: Int, after: Int) -> Bool {
+        before - after >= max(1, min(1_024, before / 100))
     }
 
     /// Rough token estimate (~4 chars/token) for a message + interaction set,

@@ -30,7 +30,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
         func check(_ name: String, _ value: Bool, _ detail: String = "") {
             total += 1
             if !value { failures += 1 }
-            print("\(value ? "✔" : "✖") \(name)\(value || detail.isEmpty ? "" : " — \(detail)")")
+            print("\(value ? "✔" : "✖") \(name)\(value || detail.isEmpty ? "" : " — \(String(detail.prefix(500)))")")
         }
 
         // ---- Builders. Content sized so that ~4 chars/token estimates land
@@ -112,18 +112,42 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             check("2.6 kept tail is about 50k", keptTokens >= 49_000 && keptTokens <= 51_000, "\(keptTokens)")
         }
 
-        print("3. Floors: oversized items go over budget rather than orphaning")
+        print("3. Floors: oversized rounds yield oldest first, preserving the newest complete round")
         do {
             let two = plan([message("spec", .user, tokens: 40_000), message("reply", .assistant, tokens: 1_000)], [])
             check("3.1 the last two dialogue messages stay even at 41k", two.keptMessages.count == 2 && two.isEmpty)
             let three = plan([message("old", .user, tokens: 5_000), message("spec", .user, tokens: 40_000), message("reply", .assistant, tokens: 1_000)], [])
             check("3.2 with a third message only that one is evicted", three.keptMessages.map(tag) == ["spec", "reply"] && three.evictedDialogue.map(tag) == ["old"])
             let big3 = plan([message("task", .user, tokens: 100)], (0..<3).map { round("w\($0)", tokens: 15_000) }, total: 5_000)
-            check("3.3 newest three rounds stay even at 45k over a 5k tail", big3.keptInteractions.count == 3 && big3.isEmpty)
+            check("3.3 oversized floor yields: newest round stays intact", big3.keptInteractions.map(tag) == ["w2"] && big3.evictedWork.map(tag) == ["w0", "w1"])
             let big4 = plan([message("task", .user, tokens: 100)], (0..<4).map { round("w\($0)", tokens: 15_000) }, total: 5_000)
-            check("3.4 a fourth round is evicted", big4.keptInteractions.count == 3 && big4.evictedWork.map(tag) == ["w0"])
+            check("3.4 older rounds yield before the newest result", big4.keptInteractions.map(tag) == ["w3"] && big4.evictedWork.map(tag) == ["w0", "w1", "w2"])
             let tiny = plan([message("task", .user, tokens: 100)], [round("w0", tokens: 100)])
             check("3.5 nothing to evict → empty plan (caller falls back)", tiny.isEmpty && tiny.keptInteractions.count == 1)
+        }
+
+        print("3b. Bree regression: floor, progress, and summary-only plans")
+        do {
+            let task = message("RETENTION-KEY", .user, tokens: 300)
+            let large = (0..<3).map { round("bree\($0)", tokens: 22_000) }
+            let p = plan([task], large, total: 20_000)
+            check("3.6 Bree's 66k floor becomes one 22k round plus task", p.keptInteractions.map(tag) == ["bree2"]
+                  && p.evictedWork.map(tag) == ["bree0", "bree1"]
+                  && SubagentRunner.estimatedContextTokens(messages: p.keptMessages, interactions: p.keptInteractions) < 23_000)
+            let two = plan([task], Array(large.suffix(2)), total: 20_000)
+            check("3.7 even two rounds can compact; newest call and result stay paired", two.evictedWork.map(tag) == ["bree1"]
+                  && two.keptInteractions[0].results[0].toolCallId == two.keptInteractions[0].assistantMessage.toolCalls[0].id)
+            let mixed = plan([task, message("reply", .assistant, tokens: 200, rounds: Array(large.prefix(2)), replay: true)], [large[2]], total: 20_000)
+            check("3.8 floor spans embedded then pending, preserving final replay", mixed.evictedWork.map(tag) == ["bree0", "bree1"]
+                  && mixed.keptInteractions.map(tag) == ["bree2"] && mixed.keptMessages[1].responsesReplay != nil)
+            let summary = Message(role: .user, content: SubagentRunner.compactionSummaryHeader + " old summary")
+            let same = plan([summary, task], [large[2]], total: 20_000)
+            check("3.9 summary alone is not new eviction work", !same.priorSummaries.isEmpty && !same.hasNewEvictions)
+            check("3.10 growing or trivially smaller summaries are not progress", !SubagentRunner.compactionMakesProgress(before: 69_972, after: 69_982)
+                  && !SubagentRunner.compactionMakesProgress(before: 69_972, after: 69_970)
+                  && SubagentRunner.compactionMakesProgress(before: 69_972, after: 23_000))
+            let fit = plan([task], (0..<4).map { round("fit\($0)", tokens: 6_000) }, total: 20_000)
+            check("3.11 three recent rounds still retained when they fit", fit.keptInteractions.map(tag) == ["fit1", "fit2", "fit3"])
         }
 
         print("4. Responses mode: completed replies keep their text, lose old embedded rounds")
@@ -152,7 +176,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                 fingerprint: ResponsesReplayEnvelope.fingerprint(text: valid.content, calls: []), entries: [
                     ResponsesReplayEntry(type: "reasoning", id: "rs-final", callIndex: nil, encryptedContent: "ENCRYPTED_FINAL", summary: [], textParts: nil, refusalParts: nil),
                     ResponsesReplayEntry(type: "message", id: "msg-final", callIndex: nil, encryptedContent: nil, summary: nil, textParts: [valid.content.utf8.count], refusalParts: [false])])
-            let after = plan([message("task", .user, tokens: 10), valid], [], total: 5_000).keptMessages[1]
+            let after = plan([message("task", .user, tokens: 10), valid], [], total: 7_500).keptMessages[1]
             let native = ResponsesAdapter.nativeItems(envelope: after.responsesReplay, scope: scope, text: after.content, calls: [])
             check("4.3 valid final envelope survives a partial strip and still renders its encrypted reasoning",
                   after.toolInteractions.count == 3 && native != nil && (native ?? []).contains { ($0.responsesObject?["encrypted_content"]?.responsesString) == "ENCRYPTED_FINAL" })
@@ -177,7 +201,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             // 4c. The newest three rounds stay wherever they live: a reply's
             // embedded rounds are stripped round by round down to the floor.
             let last = [message("ask0", .user, tokens: 100), message("reply0", .assistant, tokens: 100, rounds: (0..<30).map { round("z\($0)", tokens: 2_000) }, replay: true)]
-            let s = plan(last, [], total: 5_000)
+            let s = plan(last, [], total: 6_500)
             let reply = s.keptMessages[1]
             check("4.9 embedded rounds stripped down to the newest three, text kept, replay retained, no log",
                   reply.toolInteractions.map(tag) == ["z27", "z28", "z29"] && tag(reply) == "reply0" && reply.responsesReplay != nil
@@ -199,7 +223,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             // 4e. Floor across stores: embedded 10 + pending 2 over a tiny budget
             // keeps exactly the newest three: one embedded, two pending.
             let mixed = plan([message("ask0", .user, tokens: 100), message("reply0", .assistant, tokens: 100, rounds: (0..<10).map { round("e\($0)", tokens: 2_000) }, replay: true)],
-                             (0..<2).map { round("p\($0)", tokens: 2_000) }, total: 5_000)
+                             (0..<2).map { round("p\($0)", tokens: 2_000) }, total: 6_500)
             check("4.13 floor counts rounds across stores: newest embedded round + both pending rounds stay",
                   mixed.keptMessages[1].toolInteractions.map(tag) == ["e9"] && mixed.keptInteractions.map(tag) == ["p0", "p1"] && mixed.evictedWork.map(tag) == (0..<9).map { "e\($0)" })
             // 4f. (Codex R1) The newest three rounds live in an OLD reply, followed
@@ -354,7 +378,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             check("6.2 embedded rounds counted (1k + 1k + 2×2k)", embedded >= 5_900 && embedded <= 6_100, "\(embedded)")
             check("6.3 a message without rounds counts its compact log (1k + 1k + 1k)", logged >= 2_900 && logged <= 3_100, "\(logged)")
             var measured = message("m", .assistant, tokens: 100, rounds: (0..<5).map { round("mr\($0)", tokens: 2_000) }); measured.measuredTokens = 99; measured.measuredToolTokens = 98
-            let touched = plan([message("t", .user, tokens: 10), measured, message("p", .user, tokens: 10)], [], total: 3_000).keptMessages[1]
+            let touched = plan([message("t", .user, tokens: 10), measured, message("p", .user, tokens: 10)], [], total: 6_500).keptMessages[1]
             check("6.4 a touched message loses its measured costs (estimates take over)", touched.toolInteractions.count == 3 && touched.measuredTokens == nil && touched.measuredToolTokens == nil)
             let untouched = plan([message("t", .user, tokens: 10), measured, message("p", .user, tokens: 10)], []).keptMessages[1]
             check("6.5 an untouched message keeps its measured costs", untouched.measuredTokens == 99 && untouched.measuredToolTokens == 98)
@@ -459,7 +483,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             // 100-token rounds (1090 ≥ the 850 threshold). At resume the newest
             // two dialogue messages are the re-injected reply and the new
             // prompt; the planted exchanges fit the 150-token dialogue budget,
-            // so only rounds are evicted (floor: newest three stay).
+            // so only rounds are evicted (floor: newest round stay).
             let exchanges = (0..<6).map { message($0 % 2 == 0 ? "ask\($0)" : "reply\($0)", $0 % 2 == 0 ? .user : .assistant, tokens: 15) }
             let rounds = (0..<10).map { round("w\($0)", tokens: 100) }
             await SubagentSessionRegistry.shared.applyCompaction(sessionId: first.sessionId, messages: exchanges, toolInteractions: rounds)
@@ -470,25 +494,25 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             var bodies = requestBodies()
             check("8.3 two requests: summarizer, then the continuation", bodies.count == 2, "\(bodies.count)")
             if bodies.count == 2 {
-                check("8.4 summarizer sees the seven oldest rounds and no dialogue block",
-                      bodies[0].contains("=== WORK") && bodies[0].contains("[TOOL RESULT] <w0>") && bodies[0].contains("<w6>")
-                      && !bodies[0].contains("<w7>") && !bodies[0].contains("=== DIALOGUE WITH THE MAIN AGENT") && !bodies[0].contains("=== PRIOR SUMMARY"))
+                check("8.4 summarizer sees the nine oldest rounds and no dialogue block",
+                      bodies[0].contains("=== WORK") && bodies[0].contains("[TOOL RESULT] <w0>") && bodies[0].contains("<w8>")
+                      && !bodies[0].contains("<w9>") && !bodies[0].contains("=== DIALOGUE WITH THE MAIN AGENT") && !bodies[0].contains("=== PRIOR SUMMARY"))
                 check("8.5 summarizer prompt asks for the dialogue section first", bodies[0].contains("0. DIALOGUE WITH THE MAIN AGENT") && bodies[0].contains("## Dialogue with the main agent"))
-                check("8.6 continuation replays the summary, every planted exchange, the newest three rounds and the prompt",
+                check("8.6 continuation replays the summary, every planted exchange, the newest round rounds and the prompt",
                       bodies[1].contains("EAGER_SUMMARY_TEXT") && bodies[1].contains("<ask0>") && bodies[1].contains("<reply5>")
-                      && bodies[1].contains("<w7>") && bodies[1].contains("<w9>") && !bodies[1].contains("<w6>") && bodies[1].contains("First task for the selftest worker"))
+                      && bodies[1].contains("<w9>") && !bodies[1].contains("<w8>") && bodies[1].contains("First task for the selftest worker"))
             }
             let sessionFile = StoragePaths.dataRoot.appendingPathComponent("subagent_sessions/\(first.sessionId).json")
             let sessionDecoder = JSONDecoder(); sessionDecoder.dateDecodingStrategy = .iso8601
             let stored = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf: sessionFile))
-            check("8.7 persisted session: one summary first, dialogue intact after it, three rounds kept",
+            check("8.7 persisted session: one summary first, dialogue intact after it, one round kept",
                   stored.messages.count >= 3 && SubagentRunner.isCompactionSummary(stored.messages[0]) && stored.messages[0].content.contains("EAGER_SUMMARY_TEXT")
                   && tag(stored.messages[1]) == "ask0" && stored.messages.filter(SubagentRunner.isCompactionSummary).count == 1
-                  && stored.toolInteractions.count == 3 && stored.toolInteractions.map(tag) == ["w7", "w8", "w9"])
+                  && stored.toolInteractions.count == 1 && stored.toolInteractions.map(tag) == ["w9"])
             server.clear()
             // 8b. Oversized by DIALOGUE: six 350-token exchanges appended. The
             // earlier summary is folded, the planted dialogue is evicted down
-            // to the newest two messages, the three rounds stay (floor).
+            // to the newest two messages, the one round stay (floor).
             var again = stored.messages
             again.append(contentsOf: (6..<12).map { message($0 % 2 == 0 ? "ask\($0)" : "reply\($0)", $0 % 2 == 0 ? .user : .assistant, tokens: 350) })
             await SubagentSessionRegistry.shared.applyCompaction(sessionId: first.sessionId, messages: again, toolInteractions: stored.toolInteractions)
@@ -503,16 +527,16 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                       && ordered(bodies[0], "=== PRIOR SUMMARY", "=== DIALOGUE WITH THE MAIN AGENT")
                       && bodies[0].contains("[MAIN AGENT] <ask0>") && bodies[0].contains("[SUBAGENT] <reply11>") && bodies[0].contains("[SUBAGENT] first answer") && !bodies[0].contains("[SUBAGENT] eager answer")
                       && ordered(bodies[0], "<ask0>", "<reply11>") && !bodies[0].contains("=== WORK"))
-                check("8.10 continuation carries exactly one summary (the new one), the newest two messages, the three rounds",
+                check("8.10 continuation carries exactly one summary (the new one), the newest two messages, the one round",
                       bodies[1].contains("FOLDED_SUMMARY_TEXT") && !bodies[1].contains("EAGER_SUMMARY_TEXT") && !bodies[1].contains("<ask0>")
-                      && !bodies[1].contains("<reply11>") && bodies[1].contains("<w7>") && bodies[1].contains("First task for the selftest worker"))
+                      && !bodies[1].contains("<reply11>") && bodies[1].contains("<w9>") && bodies[1].contains("First task for the selftest worker"))
             } else {
                 check("8.9 two requests on the folded run", false, "\(bodies.count)")
             }
             let restored = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf: sessionFile))
-            check("8.11 persisted session carries one summary (folded), not a stack, and the three rounds",
+            check("8.11 persisted session carries one summary (folded), not a stack, and the one round",
                   restored.messages.filter(SubagentRunner.isCompactionSummary).count == 1 && restored.messages[0].content.contains("FOLDED_SUMMARY_TEXT")
-                  && restored.toolInteractions.count == 3)
+                  && restored.toolInteractions.count == 1)
             server.clear()
             // 8c. Third compaction: the summarizer input must carry the previous
             // summary AND every newly evicted exchange verbatim, so nothing is
@@ -536,6 +560,102 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             let final = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf: sessionFile))
             check("8.15 still exactly one summary after three compactions", final.messages.filter(SubagentRunner.isCompactionSummary).count == 1 && final.messages[0].content.contains("THIRD_SUMMARY_TEXT"))
             check("8.16 no capture errors", server.errors.isEmpty, server.errors.joined(separator: "; "))
+
+            // Bree's two large reads per round, with accurate-scale scripted
+            // usage, through the real runner. No external model or live settings.
+            server.clear()
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "80000")
+            let fixture = root.appendingPathComponent("bree.txt")
+            try Data((String(repeating: String(repeating: "x", count: 430) + "\n", count: 105) + "BREE_NEWEST_MARKER\n").utf8).write(to: fixture)
+            func readResponse(_ id: Int, prompt: Int) throws -> String {
+                let args = String(data: try JSONSerialization.data(withJSONObject: ["path": fixture.path]), encoding: .utf8)!
+                let calls = (0..<2).map { i -> [String: Any] in
+                    ["id": "bree_\(id)_\(i)", "type": "function", "function": ["name": "read_file", "arguments": args]]
+                }
+                return String(data: try JSONSerialization.data(withJSONObject: [
+                    "id": "bree_\(id)", "choices": [["message": ["role": "assistant", "content": "", "tool_calls": calls], "finish_reason": "tool_calls"]],
+                    "usage": ["prompt_tokens": prompt, "completion_tokens": 1]], options: .sortedKeys), encoding: .utf8)!
+            }
+            var script: [String] = []
+            for (i, prompt) in [100, 23_000, 46_000, 24_000, 47_000, 24_000, 47_000, 24_000].enumerated() {
+                script.append(try readResponse(i, prompt: prompt))
+                if [2, 4, 6].contains(i) { script.append(try response("BREE_SUMMARY_\(i): task key retained; earlier reads completed.")) }
+            }
+            script.append(try response("BREE_DONE RETENTION-KEY-5521 BREE_NEWEST_MARKER", prompt: 47_000))
+            server.script(script)
+            let breeInvocation = SubagentRunner.Invocation(subagentType: "general-purpose", description: "Bree budget reproduction",
+                taskPrompt: "Read repeatedly; preserve RETENTION-KEY-5521 and report BREE_NEWEST_MARKER.", modelOverride: nil, runInBackground: false)
+            let bree = await runner.run(invocation: breeInvocation, sessionId: nil, openRouterService: service, toolExecutor: executor,
+                                       imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+            let breeBodies = requestBodies()
+            check("8.17 Bree run completes eight two-read rounds across three useful compactions", bree.error == nil && bree.turnsUsed == 9
+                  && bree.finalMessage == "BREE_DONE RETENTION-KEY-5521 BREE_NEWEST_MARKER" && server.remainingResponses == 0,
+                  "rounds \(bree.turnsUsed), remaining \(server.remainingResponses), error \(bree.error ?? bree.finalMessage)")
+            let summaries = breeBodies.filter { $0.contains("0. DIALOGUE WITH THE MAIN AGENT") }
+            check("8.18 exactly three summaries, each evicts new work", summaries.count == 3 && summaries.allSatisfy { $0.contains("=== WORK") }, "\(summaries.count)")
+            let continued = [4, 7, 10].compactMap { $0 < breeBodies.count ? breeBodies[$0] : nil }
+            func hasNewestResults(_ body: String, id: Int) -> Bool {
+                guard let object = try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any],
+                      let messages = object["messages"] as? [[String: Any]] else { return false }
+                let results = messages.filter { ($0["role"] as? String) == "tool" }
+                return Set(results.compactMap { $0["tool_call_id"] as? String }) == ["bree_\(id)_0", "bree_\(id)_1"]
+                    && results.allSatisfy { ($0["content"] as? String)?.contains("BREE_NEWEST_MARKER") == true }
+            }
+            check("8.19 newest call/results and task survive each compaction", continued.count == 3 && zip(continued, [2,4,6]).allSatisfy { body, id in
+                hasNewestResults(body, id: id) && body.contains("RETENTION-KEY-5521")
+                    && !body.contains("bree_\(id - 1)_0") && !body.contains("[CONTEXT LIMIT]")
+            })
+            let breeFile = StoragePaths.dataRoot.appendingPathComponent("subagent_sessions/\(bree.sessionId).json")
+            let breeStored = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf: breeFile))
+            check("8.20 saved state has one summary and newest rounds six and seven", breeStored.messages.filter(SubagentRunner.isCompactionSummary).count == 1
+                  && breeStored.toolInteractions.count == 2 && breeStored.toolInteractions.last?.assistantMessage.toolCalls.first?.id == "bree_7_0")
+
+            // A floor-only resume must not rewrite its prior summary, spend a
+            // slot, or force-finish while still below the hard budget.
+            server.clear()
+            let oldSummary = Message(role: .user, content: SubagentRunner.compactionSummaryHeader + " PRIOR_UNCHANGED")
+            await SubagentSessionRegistry.shared.applyCompaction(sessionId: bree.sessionId, messages: [oldSummary, message("task", .user, tokens: 100)],
+                                                                toolInteractions: [round("oversized-newest", tokens: 70_000)])
+            server.script([try response("FLOOR_ONLY_DONE", prompt: 71_000)])
+            let floorOnly = await runner.run(invocation: breeInvocation, sessionId: bree.sessionId, openRouterService: service, toolExecutor: executor,
+                                            imagesDirectory: images, documentsDirectory: documents, parentTools: [])
+            check("8.21 floor-only resume makes one normal request, preserving the summary and usable headroom",
+                  floorOnly.error == nil && floorOnly.finalMessage == "FLOOR_ONLY_DONE" && server.completeRequests.count == 1
+                  && requestBodies()[0].contains("PRIOR_UNCHANGED") && !requestBodies()[0].contains("[CONTEXT LIMIT]"))
+
+            // An expanding summary is rejected without replacing context or
+            // using one of the three productive slots. Its ~73k result is still
+            // below the 80k hard limit, so this tests progress, not that limit.
+            server.clear()
+            var rejectingScript: [String] = []
+            for (i, prompt) in [100, 23_000, 46_000, 69_000, 24_000, 47_000, 24_000, 47_000].enumerated() {
+                rejectingScript.append(try readResponse(i, prompt: prompt))
+                if i == 2 { rejectingScript.append(try response("EXPANDING_SUMMARY" + String(repeating: "s", count: 200_000))) }
+                if [3, 5, 7].contains(i) { rejectingScript.append(try response("USEFUL_SUMMARY_\(i)")) }
+            }
+            rejectingScript.append(try response("RECOVERED_WITH_THREE_SLOTS", prompt: 24_000))
+            server.script(rejectingScript)
+            let recovered = await runner.run(invocation: breeInvocation, sessionId: nil, openRouterService: service, toolExecutor: executor,
+                                            imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+            let recoveredBodies = requestBodies()
+            check("8.22 expanding summary costs no productive slot; all three later compactions and final answer succeed",
+                  recovered.error == nil && recovered.turnsUsed == 9 && recovered.finalMessage == "RECOVERED_WITH_THREE_SLOTS"
+                  && server.remainingResponses == 0, "\(recovered.error ?? recovered.finalMessage) rounds \(recovered.turnsUsed) remaining \(server.remainingResponses)")
+            check("8.23 declined summary leaves original rounds and task in the next request",
+                  recoveredBodies.count > 4 && recoveredBodies[4].contains("bree_0_0") && recoveredBodies[4].contains("bree_2_1")
+                  && recoveredBodies[4].contains("RETENTION-KEY-5521") && !recoveredBodies[4].contains("EXPANDING_SUMMARY"))
+
+            // If there is no older work to sacrifice and the request still
+            // cannot fit, the final instruction explains the context cutoff.
+            server.clear()
+            server.script([try readResponse(0, prompt: 100_000), try response("CONTEXT_STOP_REPORTED")])
+            let stopped = await runner.run(invocation: breeInvocation, sessionId: nil, openRouterService: service, toolExecutor: executor,
+                                          imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+            let stoppedBodies = requestBodies()
+            check("8.24 unavoidable cutoff names the omitted executed result, not an exhausted round limit",
+                  stopped.error == nil && stopped.finalMessage == "CONTEXT_STOP_REPORTED" && stoppedBodies.count == 2
+                  && stoppedBodies[1].contains("[CONTEXT LIMIT]") && stoppedBodies[1].contains("Its tools already executed")
+                  && !stoppedBodies[1].contains("[ROUND LIMIT SUMMARY REQUEST") && !stoppedBodies[1].contains("bree_0_0"))
         }
 
         print("9. Responses mode: captured request after compaction, save/reload")
@@ -587,7 +707,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             check("9.2 final reply owns the five rounds and a replay envelope", stored.messages.last?.toolInteractions.count == 5 && stored.messages.last?.responsesReplay != nil)
             server.clear()
             // Resume: the session (≈2.3k tokens) is over the 850 threshold → eager
-            // compaction: the two oldest rounds go, the newest three stay
+            // compaction: the four oldest rounds go, the newest round stay
             // (floor), the final text and its envelope stay untouched.
             server.script([try body("RESPONSES_SUMMARY_TEXT", id: "sum"), try body("Resumed worker", id: "resumed")])
             let resumed = await runner.run(invocation: invocation, sessionId: first.sessionId, openRouterService: service, toolExecutor: executor,
@@ -597,9 +717,9 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             check("9.4 two Responses requests: summarizer, then continuation", requests.count == 2, "\(requests.count)")
             if requests.count == 2 {
                 let summarizer = String(decoding: requests[0].body, as: UTF8.self)
-                check("9.5 summarizer input carries exactly the two evicted rounds (calls + results) and no dialogue",
-                      summarizer.contains("=== WORK") && summarizer.components(separatedBy: "[TOOL CALL] read_file").count == 3
-                      && summarizer.components(separatedBy: "[TOOL RESULT]").count == 3 && summarizer.contains("<FILE_BODY>")
+                check("9.5 summarizer input carries exactly the four evicted rounds (calls + results) and no dialogue",
+                      summarizer.contains("=== WORK") && summarizer.components(separatedBy: "[TOOL CALL] read_file").count == 5
+                      && summarizer.components(separatedBy: "[TOOL RESULT]").count == 5 && summarizer.contains("<FILE_BODY>")
                       && !summarizer.contains("=== DIALOGUE WITH THE MAIN AGENT") && !summarizer.contains("=== PRIOR SUMMARY"))
                 let items = try input(requests[1])
                 let encrypted = items.compactMap { $0["encrypted_content"] as? String }
@@ -610,19 +730,19 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                     return content.compactMap { $0["text"] as? String }.joined()
                 }
                 check("9.6 retained rounds replay natively (their reasoning, calls and outputs), evicted rounds are absent",
-                      Set(encrypted).isSuperset(of: ["opaque_r2", "opaque_r3", "opaque_r4"]) && !encrypted.contains("opaque_r0") && !encrypted.contains("opaque_r1")
-                      && Set(callIDs).isSuperset(of: ["call_r2", "call_r3", "call_r4"]) && !callIDs.contains("call_r0") && !callIDs.contains("call_r1")
-                      && Set(outputs) == ["call_r2", "call_r3", "call_r4"], "encrypted \(encrypted) calls \(callIDs) outputs \(outputs)")
+                      Set(encrypted).isSuperset(of: ["opaque_r4"]) && !encrypted.contains("opaque_r0") && !encrypted.contains("opaque_r1") && !encrypted.contains("opaque_r2") && !encrypted.contains("opaque_r3")
+                      && Set(callIDs).isSuperset(of: ["call_r4"]) && !callIDs.contains("call_r0") && !callIDs.contains("call_r1") && !callIDs.contains("call_r2") && !callIDs.contains("call_r3")
+                      && Set(outputs) == ["call_r4"], "encrypted \(encrypted) calls \(callIDs) outputs \(outputs)")
                 check("9.7 the final reply's encrypted reasoning replays natively after the partial strip", encrypted.contains("opaque_final"))
                 check("9.8 the summary precedes the retained work and the reply text follows it verbatim",
                       texts.contains { $0.hasPrefix(SubagentRunner.compactionSummaryHeader) && $0.contains("RESPONSES_SUMMARY_TEXT") } && texts.contains("Worker completed")
                       && (items.firstIndex { (($0["content"] as? [[String: Any]])?.first?["text"] as? String)?.contains("RESPONSES_SUMMARY_TEXT") == true } ?? Int.max)
-                         < (items.firstIndex { ($0["call_id"] as? String) == "call_r2" } ?? -1))
+                         < (items.firstIndex { ($0["call_id"] as? String) == "call_r4" } ?? -1))
             }
             let reloaded = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf: sessionFile))
             let finalReply = reloaded.messages.first { $0.role == .assistant && $0.content == "Worker completed" }
-            check("9.9 save/reload: one summary first, the final reply keeps three rounds, its text and its envelope",
-                  reloaded.messages.first.map(SubagentRunner.isCompactionSummary) == true && finalReply?.toolInteractions.count == 3
+            check("9.9 save/reload: one summary first, the final reply keeps its newest round, its text and its envelope",
+                  reloaded.messages.first.map(SubagentRunner.isCompactionSummary) == true && finalReply?.toolInteractions.count == 1
                   && finalReply?.responsesReplay != nil && finalReply?.compactToolLog == nil)
             check("9.10 no capture errors, script exhausted", server.errors.isEmpty && server.remainingResponses == 0, server.errors.joined(separator: "; "))
         }
