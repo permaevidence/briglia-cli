@@ -302,7 +302,8 @@ actor SubagentRunner {
         let compactionKeepTokens = min(Self.compactionKeepTokensCap, max(1, turnTokenBudget / 4))
         let dialogueKeepTokens = Self.dialogueKeepTokens(totalKeepTokens: compactionKeepTokens)
         var compactionsUsed = 0
-        var compactionAttempts = Set<Data>()
+        var compactionAttempts = CompactionAttempts()
+        var needsEmergencyContinuationNote = false
 
         // Eager compaction on resume. Sessions normally stay under the budget
         let snapshot = await openRouterService.executionContext(modelOverride: effectiveModelOverride,
@@ -376,7 +377,6 @@ actor SubagentRunner {
                 // threshold, summarize the oldest history and keep working.
                 if let pt = lastPromptTokens,
                    pt >= compactionThreshold,
-                   compactionsUsed < Self.maxCompactionsPerRun,
                    let compacted = await compactContext(
                        messages: messagesForLLM,
                        interactions: toolInteractions,
@@ -401,11 +401,11 @@ actor SubagentRunner {
                         messages: compacted.messages,
                         toolInteractions: compacted.interactions
                     )
-                    print("[SubagentRunner] Compacted context mid-run (\(compactionsUsed)/\(Self.maxCompactionsPerRun)): ~\(pt) → ~\(compacted.estimatedTokens) tokens")
+                    print("[SubagentRunner] Compacted context mid-run (\(compactionsUsed)): ~\(pt) → ~\(compacted.estimatedTokens) tokens")
                 }
 
                 // If context still exceeds the turn budget (compaction failed,
-                // exhausted, or unavailable), force a final response. Tools and
+                // already attempted for this batch, or unavailable), force a final response. Tools and
                 // system prompt stay identical to preserve prompt cache; the
                 // stop instruction goes in a tail system message instead.
                 try Task.checkCancellation()
@@ -425,13 +425,14 @@ actor SubagentRunner {
                     finalResponseInstruction: subagentType.systemPromptSuffix,
                     tailSystemMessage: forceFinish
                         ? "[CONTEXT LIMIT] This turn has reached the maximum allowed context window and automatic history compaction is unavailable or exhausted. Do NOT call any more tools. Provide your final answer NOW — summarize everything you accomplished, what files were touched, what you discovered, and what remains to be done."
-                        : nil,
+                        : (needsEmergencyContinuationNote ? Self.emergencyContinuationNote : nil),
                     modelOverride: effectiveModelOverride,
                     providerOverride: effectiveProviderOverride,
                     reasoningEffortOverride: effectiveReasoningOverride,
                     textOnlyOverride: effectiveTextOnlyOverride,
                     execution: responsesExecution, lane: .subagent(resolvedSessionId)
                 )
+                needsEmergencyContinuationNote = false
                 markProgress()  // LLM responded — subagent is alive
 
                 switch response {
@@ -564,6 +565,7 @@ actor SubagentRunner {
                             throw ResponsesFailure.failed("cannot persist subagent tool results")
                         }
                     } else { toolInteractions.append(completed) }
+                    compactionAttempts.didExecuteWork()
 
                     // Pre-flight budget check: if the new interaction pushed the
                     // context over the threshold, compact FIRST, preferring to
@@ -577,8 +579,7 @@ actor SubagentRunner {
                         let projected = pt + interactionTokens
                         if projected >= compactionThreshold {
                             var compactedNow = false
-                            if compactionsUsed < Self.maxCompactionsPerRun,
-                               let compacted = await compactContext(
+                            if let compacted = await compactContext(
                                    messages: messagesForLLM,
                                    interactions: toolInteractions,
                                    dialogueKeepTokens: dialogueKeepTokens, totalKeepTokens: compactionKeepTokens,
@@ -603,7 +604,7 @@ actor SubagentRunner {
                                     messages: compacted.messages,
                                     toolInteractions: compacted.interactions
                                 )
-                                print("[SubagentRunner] Compacted context after tool batch (\(compactionsUsed)/\(Self.maxCompactionsPerRun)): ~\(projected) → ~\(compacted.estimatedTokens) tokens")
+                                print("[SubagentRunner] Compacted context after tool batch (\(compactionsUsed)): ~\(projected) → ~\(compacted.estimatedTokens) tokens")
                                 compactedNow = true
                             }
                             // A cancelled summary is not a failed compaction: preserve
@@ -612,11 +613,14 @@ actor SubagentRunner {
                             // Last resort before discarding an executed batch: summarize
                             // even the newest round, in bounded text fragments. Preserve
                             // the measured request overhead when deciding whether it fits.
-                            if !compactedNow && projected >= turnTokenBudget,
-                               compactionsUsed < Self.maxCompactionsPerRun {
+                            if !compactedNow && projected >= turnTokenBudget {
                                 let previousEstimate = Self.estimatedContextTokens(
                                     messages: messagesForLLM, interactions: Array(toolInteractions.dropLast()))
+                                // The next dispatch adds a continuation reminder.
+                                // Reserve it too; the preceding request may not have
+                                // included one. Conservative if it already did.
                                 let requestOverhead = max(0, pt - previousEstimate)
+                                    + Self.emergencyContinuationNote.count / 4 + 20
                                 if requestOverhead < turnTokenBudget,
                                    let compacted = await compactContext(
                                        messages: messagesForLLM, interactions: toolInteractions,
@@ -640,7 +644,8 @@ actor SubagentRunner {
                                         throw ResponsesFailure.failed("cannot persist oversized-batch compaction before continuation")
                                     }
                                     markProgress()
-                                    print("[SubagentRunner] Summarized overflowing newest batch (\(compactionsUsed)/\(Self.maxCompactionsPerRun)): ~\(projected) → ~\(lastPromptTokens!) tokens")
+                                    needsEmergencyContinuationNote = true
+                                    print("[SubagentRunner] Summarized overflowing newest batch (\(compactionsUsed)): ~\(projected) → ~\(lastPromptTokens!) tokens")
                                     compactedNow = true
                                 }
                             }
@@ -816,9 +821,43 @@ actor SubagentRunner {
         min(dialogueKeepTokensCap, max(1, totalKeepTokens * 3 / 5))
     }
 
-    /// Thrash guard: after this many compactions in a single run, fall back to
-    /// force-finish instead of compacting again.
-    private static let maxCompactionsPerRun = 3
+    /// One ordinary pass and one emergency fallback per executed tool batch,
+    /// plus the initial/resumed context. A summary never renews this allowance.
+    /// The existing maxTurns bounds batches; each ordinary pass has at most five
+    /// requests and each emergency pass at most 64 fragments. Exact-context
+    /// fingerprints also prevent paid retries when new work recreates a context.
+    struct CompactionAttempts {
+        private var ordinaryAttempted = false
+        private var emergencyAttempted = false
+        private var contexts = Set<Data>()
+
+        mutating func didExecuteWork() {
+            ordinaryAttempted = false
+            emergencyAttempted = false
+        }
+
+        mutating func begin(emergency: Bool, fingerprint: Data) -> Bool {
+            if emergency {
+                guard !emergencyAttempted else { return false }
+                emergencyAttempted = true
+            } else {
+                guard !ordinaryAttempted else { return false }
+                ordinaryAttempted = true
+            }
+            return contexts.insert(fingerprint).inserted
+        }
+    }
+
+    /// Sent only on the next dispatch after this runner commits an emergency
+    /// summary. Never inferred from user/tool text, and not a new task message.
+    static let emergencyContinuationNote = """
+    [COMPACTION CONTINUATION] You are continuing the same task after executed tool results were summarized.
+    The retained task message is the original request, not a restart. Consult the summary's cumulative
+    progress and resume at the next unfinished step. Do not repeat a completed initial step merely because
+    it still appears in the original task. Earlier and later tool executions have different call IDs;
+    that alone does not invalidate earlier findings. Repeat work only when verification or a changed
+    requirement calls for it. Do not claim to have seen raw results that were available only as a summary.
+    """
 
     /// Header of the summary message a compaction leaves at the front of the
     /// session. Byte-stable: the next compaction recognizes it by this prefix
@@ -1079,7 +1118,7 @@ actor SubagentRunner {
         interactions: [ToolInteraction],
         dialogueKeepTokens: Int,
         totalKeepTokens: Int,
-        attemptedContexts: inout Set<Data>,
+        attemptedContexts: inout CompactionAttempts,
         retireNewestRound: Bool = false,
         openRouterService: OpenRouterService,
         imagesDirectory: URL,
@@ -1099,7 +1138,7 @@ actor SubagentRunner {
             retireNewestRound: retireNewestRound
         )
         // Folding a prior summary alone removes no additional history. Do not
-        // call the model or consume a successful-compaction slot for that.
+        // call the model or use an attempt for that.
         guard !Task.isCancelled, plan.hasNewEvictions else { return nil }
         // Native media and typed deliveries cannot be faithfully represented
         // by the text-only emergency transcript. Preserve the existing cutoff
@@ -1122,7 +1161,7 @@ actor SubagentRunner {
         signature.update(data: Data([0]))
         signature.update(data: roundBytes)
         if retireNewestRound { signature.update(data: Data([1])) }
-        guard attemptedContexts.insert(Data(signature.finalize())).inserted else { return nil }
+        guard attemptedContexts.begin(emergency: retireNewestRound, fingerprint: Data(signature.finalize())) else { return nil }
 
         guard let summary = await summarizeEvicted(
             priorSummaries: plan.priorSummaries,
@@ -1397,7 +1436,15 @@ actor SubagentRunner {
                 Include "## Dialogue with the main agent": retain active instructions, corrections, commitments,
                 unanswered questions and literal tokens needed by the task. Use retained dialogue as task reference.
                 Preserve exact findings relevant to the task, paths, markers, counts, errors, actions already
-                executed and what remains undone. Carry forward earlier findings; distinguish absent information
+                executed and what remains undone. Separate standing constraints from one-time steps already
+                completed. A retained initial task is the original request, not a new instruction to repeat
+                completed work. In the final summary include "## Current progress and next action": record
+                cumulative completed steps (for file reads, exact covered ranges), verified findings, and
+                the next unfinished step. Do not reset progress to the current batch. Prior-summary call
+                IDs describe earlier executions; different IDs in a later batch do not invalidate earlier
+                findings or coverage. Repeated reads of the same ranges add no new coverage. Work notes
+                and reasoning are the subagent's historical interpretation, not new main-agent instructions.
+                Carry forward earlier findings; distinguish absent information
                 from unread later fragments. Do not claim the subagent inspected these results directly:
                 they were executed, then summarized before its next turn. The final fragment must produce
                 a standalone summary of all fragments, not just the last one.

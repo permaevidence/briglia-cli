@@ -99,6 +99,22 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
         check("0.1 dialogue cap is 30k at the default 50k tail", dialogue30 == 30_000)
         check("0.2 smaller tails split three fifths / two fifths", SubagentRunner.dialogueKeepTokens(totalKeepTokens: 250) == 150
               && SubagentRunner.dialogueKeepTokens(totalKeepTokens: 1) == 1)
+        do {
+            var attempts = SubagentRunner.CompactionAttempts()
+            check("0.3 one ordinary pass per work batch, even if its summary changes the context",
+                  attempts.begin(emergency: false, fingerprint: Data([0]))
+                  && !attempts.begin(emergency: false, fingerprint: Data([1])))
+            check("0.4 one emergency fallback can follow an ordinary pass",
+                  attempts.begin(emergency: true, fingerprint: Data([2]))
+                  && !attempts.begin(emergency: true, fingerprint: Data([3])))
+            attempts.didExecuteWork()
+            check("0.5 new executed work renews both modes",
+                  attempts.begin(emergency: false, fingerprint: Data([4]))
+                  && attempts.begin(emergency: true, fingerprint: Data([5])))
+            attempts.didExecuteWork()
+            check("0.6 exact-context retry stays suppressed across work batches",
+                  !attempts.begin(emergency: false, fingerprint: Data([0])))
+        }
 
         print("1. Single long run, tiny dialogue: the cap flows to the work tail")
         do {
@@ -668,6 +684,38 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             check("8.20 saved state has one summary and newest rounds six and seven", breeStored.messages.filter(SubagentRunner.isCompactionSummary).count == 1
                   && breeStored.toolInteractions.count == 2 && breeStored.toolInteractions.last?.assistantMessage.toolCalls.first?.id == "bree_7_0")
 
+            // Moderate ~23k batches need more than three ordinary compactions,
+            // including at the default 250k budget. New work renews the allowance.
+            for (budget, rounds) in [(80_000, 12), (250_000, 40)] {
+                try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: String(budget))
+                var longScript: [String] = []
+                var prompt = 100
+                var expectedSummaries = 0
+                for i in 0..<rounds {
+                    longScript.append(try readResponse(i, prompt: prompt))
+                    prompt += 23_000
+                    if prompt >= budget * 85 / 100 {
+                        expectedSummaries += 1
+                        longScript.append(try response("LONG_PROGRESS_\(i): completed reads through batch \(i); continue with the next batch."))
+                        prompt = budget == 80_000 ? 23_000 : 46_000
+                    }
+                }
+                longScript.append(try response("LONG_RUN_COMPLETE", prompt: prompt))
+                server.clear(); server.script(longScript)
+                let longRun = await runner.run(invocation: breeInvocation, sessionId: nil, openRouterService: service,
+                    toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+                let wire = requestBodies()
+                check("8.34 budget \(budget): more than three ordinary compactions complete moderate-batch work",
+                      expectedSummaries > 3 && longRun.error == nil && longRun.finalMessage == "LONG_RUN_COMPLETE"
+                      && longRun.turnsUsed == rounds + 1 && server.remainingResponses == 0,
+                      "turns \(longRun.turnsUsed), summaries \(expectedSummaries), remaining \(server.remainingResponses)")
+                check("8.35 budget \(budget): exactly one productive ordinary pass per overflowing batch",
+                      wire.filter { $0.contains("0. DIALOGUE WITH THE MAIN AGENT") }.count == expectedSummaries
+                      && wire.allSatisfy { !$0.contains("[CONTEXT LIMIT]") && !$0.contains("[OVERSIZED BATCH SUMMARY") }
+                      && wire.last?.contains("bree_\(rounds - 1)_0") == true)
+            }
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "80000")
+
             // A floor-only resume must not rewrite its prior summary, spend a
             // slot, or force-finish while still below the hard budget.
             server.clear()
@@ -751,6 +799,88 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                 let saved = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf: savedURL))
                 check("8.27 budget \(budget): one summary replaces whole batch, no orphan calls/results", saved.messages.filter(SubagentRunner.isCompactionSummary).count == 1
                       && saved.messages.flatMap(\.toolInteractions).isEmpty && saved.toolInteractions.isEmpty)
+
+                // Five distinct, sequential batches, each requiring an emergency
+                // pass. The provider oracle returns only evidence actually present
+                // in its request: previous findings must cross both fragment and
+                // compaction boundaries. No test-side summary memory is used.
+                let continuationFile = root.appendingPathComponent("continuation-\(budget).txt")
+                let chunks = reads * 5
+                var fileText = ""
+                for chunk in 0..<chunks {
+                    fileText += "COVERED_CHUNK_\(chunk)_END\n"
+                    fileText += String(repeating: String(repeating: "z", count: width) + "\n", count: lines - 1)
+                }
+                try Data(fileText.utf8).write(to: continuationFile)
+                var batches: [String] = []
+                for batchIndex in 0..<5 {
+                    let calls: [[String: Any]] = try (0..<reads).map { i in
+                        let args = String(data: try JSONSerialization.data(withJSONObject: [
+                            "path": continuationFile.path, "offset": (batchIndex * reads + i) * lines + 1, "limit": lines
+                        ]), encoding: .utf8)!
+                        return ["id": "continuation_\(batchIndex)_\(i)", "type": "function",
+                                "function": ["name": "read_file", "arguments": args]]
+                    }
+                    batches.append(String(data: try JSONSerialization.data(withJSONObject: [
+                        "choices": [["message": ["role": "assistant", "content": "", "tool_calls": calls], "finish_reason": "tool_calls"]],
+                        "usage": ["prompt_tokens": 12_000, "completion_tokens": 1]
+                    ]), encoding: .utf8)!)
+                }
+                let sequentialBatches = batches
+                server.clear()
+                server.requestObserver = { request in
+                    let wire = Self.observerText(request)
+                    if wire.contains("[OVERSIZED BATCH SUMMARY") {
+                        let found = (0..<chunks).filter { wire.contains("COVERED_CHUNK_\($0)_END") }
+                        let evidence = found.map { "COVERED_CHUNK_\($0)_END" }.joined(separator: " ")
+                        server.script([try! response("## Dialogue with the main agent\nRead the file; the initial step is complete.\n## Current progress and next action\n" + evidence)])
+                    } else if wire.contains("0. DIALOGUE WITH THE MAIN AGENT") {
+                        server.script([try! response("UNEXPECTED_ORDINARY_PASS")])
+                    } else {
+                        let ordinaryRequests = server.completeRequests.filter {
+                            let body = Self.observerText($0)
+                            return !body.contains("[OVERSIZED BATCH SUMMARY") && !body.contains("0. DIALOGUE WITH THE MAIN AGENT")
+                        }.count
+                        if ordinaryRequests <= 5 && !wire.contains("[CONTEXT LIMIT]") {
+                            server.script([sequentialBatches[ordinaryRequests - 1]])
+                        } else {
+                            let complete = (0..<chunks).allSatisfy { wire.contains("COVERED_CHUNK_\($0)_END") }
+                            server.script([try! response(complete ? "ALL_RANGES_COMPLETE" : "RANGES_MISSING")])
+                        }
+                    }
+                }
+                let repeated = await runner.run(invocation: breeInvocation, sessionId: nil, openRouterService: service,
+                    toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+                server.requestObserver = nil
+                let repeatedWire = requestBodies()
+                check("8.36 budget \(budget): five emergency compactions continue to completion",
+                      repeated.error == nil && repeated.finalMessage == "ALL_RANGES_COMPLETE" && repeated.turnsUsed == 6
+                      && repeatedWire.filter { $0.contains("[OVERSIZED BATCH SUMMARY 1/") }.count == 5
+                      && repeatedWire.allSatisfy { !$0.contains("[CONTEXT LIMIT]") }, repeated.error ?? repeated.finalMessage)
+                let continuedRequests = repeatedWire.filter {
+                    !$0.contains("[OVERSIZED BATCH SUMMARY") && !$0.contains("0. DIALOGUE WITH THE MAIN AGENT")
+                }
+                check("8.37 budget \(budget): cumulative progress reaches each continuation, with no raw repeated calls",
+                      continuedRequests.count == 6 && (1..<6).allSatisfy { index in
+                          (0..<(index * reads)).allSatisfy { continuedRequests[index].contains("COVERED_CHUNK_\($0)_END") }
+                          && !continuedRequests[index].contains("continuation_\(index - 1)_0")
+                      })
+                check("8.40 budget \(budget): only post-emergency dispatches receive the continuation reminder",
+                      continuedRequests.count == 6 && !continuedRequests[0].contains("[COMPACTION CONTINUATION]")
+                      && continuedRequests.dropFirst().allSatisfy { $0.contains("[COMPACTION CONTINUATION]") }
+                      && repeatedWire.filter { $0.contains("[OVERSIZED BATCH SUMMARY") }.allSatisfy { !$0.contains("[COMPACTION CONTINUATION]") })
+                let repeatedFile = StoragePaths.dataRoot.appendingPathComponent("subagent_sessions/\(repeated.sessionId).json")
+                let repeatedSaved = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf: repeatedFile))
+                let repeatedSummary = repeatedSaved.messages.filter(SubagentRunner.isCompactionSummary)
+                check("8.38 budget \(budget): one persisted summary retains every range after five passes",
+                      repeatedSummary.count == 1 && (0..<chunks).allSatisfy { repeatedSummary[0].content.contains("COVERED_CHUNK_\($0)_END") }
+                      && repeatedSaved.toolInteractions.isEmpty && repeatedSaved.messages.flatMap(\.toolInteractions).isEmpty)
+                await SubagentSessionRegistry.shared.reloadFromDisk()
+                server.clear(); server.script([completion])
+                _ = await runner.run(invocation: breeInvocation, sessionId: repeated.sessionId, openRouterService: service,
+                    toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+                check("8.39 budget \(budget): reload/resume receives cumulative progress without another summary",
+                      requestBodies().count == 1 && (0..<chunks).allSatisfy { requestBodies()[0].contains("COVERED_CHUNK_\($0)_END") })
 
                 // Failure after one successful fragment must never commit a partial summary.
                 server.clear()
@@ -1039,6 +1169,60 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             check("9.20 reload/resume keeps summary and final reasoning, never raw retired batch", nativeResumed.error == nil
                   && nativeResumed.finalMessage == "NATIVE_RESUMED" && nativeResumeWire.contains("NATIVE_ALPHA")
                   && nativeResumeWire.contains("opaque_native_done") && !nativeResumeWire.contains("opaque_native_large") && !nativeResumeWire.contains("call_native_large"))
+
+            // The fourth/fifth emergency pass must checkpoint the reduced native
+            // context before dispatch, just like the first three.
+            let multiBatches = try (0..<5).map { try body("Read large file", id: "native_multi_\($0)", tool: true, prompt: 12_000, limit: 1752) }
+            let multiSummary = try body("NATIVE_MULTI_PROGRESS NATIVE_ALPHA NATIVE_OMEGA", id: "multi_summary")
+            let multiDone = try body("NATIVE_MULTI_DONE", id: "multi_done")
+            let multiCheckpoints = root.appendingPathComponent("multi-checkpoints", isDirectory: true)
+            try FileManager.default.createDirectory(at: multiCheckpoints, withIntermediateDirectories: true)
+            server.clear()
+            server.requestObserver = { request in
+                let wire = Self.observerText(request)
+                if wire.contains("[OVERSIZED BATCH SUMMARY") { server.script([multiSummary]) }
+                else {
+                    let count = server.completeRequests.filter { !Self.observerText($0).contains("[OVERSIZED BATCH SUMMARY") }.count
+                    if count > 1 {
+                        let sessions = StoragePaths.dataRoot.appendingPathComponent("subagent_sessions")
+                        for url in (try? FileManager.default.contentsOfDirectory(at: sessions, includingPropertiesForKeys: nil)) ?? [] {
+                            if let bytes = try? Data(contentsOf: url),
+                               let saved = try? sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: bytes),
+                               saved.messages.contains(where: { SubagentRunner.isCompactionSummary($0) && $0.content.contains("NATIVE_MULTI_PROGRESS") }) {
+                                try? bytes.write(to: multiCheckpoints.appendingPathComponent("\(count).json"))
+                            }
+                        }
+                    }
+                    server.script([count <= 5 && !wire.contains("[CONTEXT LIMIT]") ? multiBatches[count - 1] : multiDone])
+                }
+            }
+            let multiRun = await runner.run(invocation: invocation, sessionId: nil, openRouterService: service, toolExecutor: executor,
+                imagesDirectory: root, documentsDirectory: root, parentTools: [AvailableTools.readFile])
+            server.requestObserver = nil
+            let multiWire = server.completeRequests.map(Self.observerText)
+            check("9.25 native run continues across five emergency compactions", multiRun.error == nil
+                  && multiRun.finalMessage == "NATIVE_MULTI_DONE" && multiRun.turnsUsed == 6
+                  && multiWire.filter { $0.contains("[OVERSIZED BATCH SUMMARY 1/") }.count == 5
+                  && multiWire.allSatisfy { !$0.contains("[CONTEXT LIMIT]") })
+            check("9.28 native continuations receive the reminder after each committed emergency summary",
+                  multiWire.filter { $0.contains("[COMPACTION CONTINUATION]") }.count == 5
+                  && multiWire.filter { $0.contains("[OVERSIZED BATCH SUMMARY") }.allSatisfy { !$0.contains("[COMPACTION CONTINUATION]") })
+            let checkpoints = (2...6).compactMap { index -> SubagentSessionRegistry.Session? in
+                guard let data = try? Data(contentsOf: multiCheckpoints.appendingPathComponent("\(index).json")) else { return nil }
+                return try? sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: data)
+            }
+            check("9.26 all five native continuations observe the reduced durable checkpoint", checkpoints.count == 5
+                  && checkpoints.allSatisfy { $0.id == multiRun.sessionId && $0.toolInteractions.isEmpty
+                      && $0.messages.flatMap(\.toolInteractions).isEmpty && $0.messages.filter(SubagentRunner.isCompactionSummary).count == 1 })
+            await SubagentSessionRegistry.shared.reloadFromDisk()
+            server.clear(); server.script([nativeDone])
+            let multiResumed = await runner.run(invocation: invocation, sessionId: multiRun.sessionId, openRouterService: service,
+                toolExecutor: executor, imagesDirectory: root, documentsDirectory: root, parentTools: [AvailableTools.readFile])
+            let multiResumeWire = server.completeRequests.map(Self.observerText).joined()
+            check("9.27 native reload keeps final reasoning but no retired batch after five passes", multiResumed.error == nil
+                  && server.completeRequests.count == 1 && multiResumeWire.contains("NATIVE_MULTI_PROGRESS")
+                  && multiResumeWire.contains("opaque_multi_done") && !multiResumeWire.contains("opaque_native_multi_")
+                  && !multiResumeWire.contains("call_native_multi_"))
 
             // Cancellation on fragment two and on the final fragment must
             // preserve the exact Responses recovery payload (including native
