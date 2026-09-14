@@ -357,6 +357,7 @@ actor SubagentRunner {
         var turnsUsed = 0
         var runError: String? = nil
         var stoppedForContext = false
+        var omittedToolNames = ""
         var finalText: String = ""
         var finalReplay: ResponsesReplayEnvelope? = nil
 
@@ -608,6 +609,15 @@ actor SubagentRunner {
                                 stoppedForContext = true
                                 let dropped = toolInteractions.removeLast()
                                 let droppedTools = dropped.assistantMessage.toolCalls.map { $0.function.name }.joined(separator: ", ")
+                                omittedToolNames = MarkerNeutralizer.escape(droppedTools)
+                                // Persist the same tail the forced answer will see, before
+                                // dispatch: recovery during that request must not resurrect
+                                // an executed round whose results were omitted.
+                                if responsesExecution != nil {
+                                    guard await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: toolInteractions) else {
+                                        throw ResponsesFailure.failed("cannot persist subagent context cutoff before final response")
+                                    }
+                                }
                                 print("[SubagentRunner] Dropped overflowing tool interaction (\(droppedTools)) — context (~\(pt) + ~\(interactionTokens)) exceeds turn budget (\(turnTokenBudget)) and compaction was unavailable")
                                 break loop
                             }
@@ -648,7 +658,7 @@ actor SubagentRunner {
                         currentUserMessageId: syntheticUser.id,
                         turnStartDate: turnStartDate,
                         finalResponseInstruction: subagentType.systemPromptSuffix,
-                        tailSystemMessage: stoppedForContext ? "[CONTEXT LIMIT] The newest tool round was omitted because the context budget could not accommodate it and compaction was unavailable or insufficient. Its tools already executed; do not claim to have inspected their omitted results. Do NOT call more tools. Give your final answer with progress and unfinished work." : """
+                        tailSystemMessage: stoppedForContext ? "[CONTEXT LIMIT] The newest tool round was omitted because the context budget could not accommodate it and compaction was unavailable or insufficient. Its tools already executed (omitted results from: \(omittedToolNames)); do not claim to have inspected their omitted results. Do NOT call more tools. Give your final answer with progress and unfinished work." : """
                             [ROUND LIMIT SUMMARY REQUEST \(attempt + 1)/5] You have reached the maximum number of tool rounds for this run. \
                             Do NOT call any more tools. Provide your final answer NOW — summarize everything \
                             you accomplished, what files were touched, and what remains to be done.

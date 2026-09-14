@@ -654,7 +654,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             let stoppedBodies = requestBodies()
             check("8.24 unavoidable cutoff names the omitted executed result, not an exhausted round limit",
                   stopped.error == nil && stopped.finalMessage == "CONTEXT_STOP_REPORTED" && stoppedBodies.count == 2
-                  && stoppedBodies[1].contains("[CONTEXT LIMIT]") && stoppedBodies[1].contains("Its tools already executed")
+                  && stoppedBodies[1].contains("[CONTEXT LIMIT]") && stoppedBodies[1].contains("Its tools already executed (omitted results from: read_file, read_file)")
                   && !stoppedBodies[1].contains("[ROUND LIMIT SUMMARY REQUEST") && !stoppedBodies[1].contains("bree_0_0"))
         }
 
@@ -674,7 +674,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "1000")
             let file = root.appendingPathComponent("read.txt")
             try Data(("<FILE_BODY>" + String(repeating: "f", count: 1_600)).utf8).write(to: file)
-            func body(_ text: String, id: String, tool: Bool = false) throws -> String {
+            func body(_ text: String, id: String, tool: Bool = false, prompt: Int = 100) throws -> String {
                 var output: [[String: Any]] = [
                     ["type": "reasoning", "id": "rs_" + id, "summary": [], "encrypted_content": "opaque_" + id],
                     ["type": "message", "role": "assistant", "status": "completed", "id": "msg_" + id,
@@ -684,7 +684,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                     output.append(["type": "function_call", "id": "fc_" + id, "call_id": "call_" + id, "status": "completed", "name": "read_file", "arguments": arguments])
                 }
                 let snapshot: [String: Any] = ["id": "resp_" + id, "status": "completed", "output": output,
-                    "usage": ["input_tokens": 100, "input_tokens_details": ["cached_tokens": 0], "output_tokens": 30, "output_tokens_details": ["reasoning_tokens": 20]]]
+                    "usage": ["input_tokens": prompt, "input_tokens_details": ["cached_tokens": 0], "output_tokens": 30, "output_tokens_details": ["reasoning_tokens": 20]]]
                 return String(data: try JSONSerialization.data(withJSONObject: snapshot, options: .sortedKeys), encoding: .utf8)!
             }
             func input(_ request: CapturedHTTPRequest) throws -> [[String: Any]] {
@@ -745,6 +745,58 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                   reloaded.messages.first.map(SubagentRunner.isCompactionSummary) == true && finalReply?.toolInteractions.count == 1
                   && finalReply?.responsesReplay != nil && finalReply?.compactToolLog == nil)
             check("9.10 no capture errors, script exhausted", server.errors.isEmpty && server.remainingResponses == 0, server.errors.joined(separator: "; "))
+
+            // Inspect persisted recovery state at the final request boundary, then
+            // verify final ownership and replay on a subsequent resume.
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "80000")
+            let observedCheckpoint = root.appendingPathComponent("cutoff-checkpoint.json")
+            server.requestObserver = { request in
+                if String(decoding: request.body, as: UTF8.self).contains("[CONTEXT LIMIT]"),
+                   let bytes = try? Data(contentsOf: sessionFile) {
+                    try? bytes.write(to: observedCheckpoint)
+                }
+            }
+            server.clear()
+            server.script([try body("Keep this result", id: "kept", tool: true),
+                           try body("Overflow this result", id: "dropped", tool: true, prompt: 100_000),
+                           try body("CUTOFF_FINAL", id: "cutoff_final")])
+            let cutoff = await runner.run(invocation: invocation, sessionId: first.sessionId, openRouterService: service,
+                                          toolExecutor: executor, imagesDirectory: root, documentsDirectory: root,
+                                          parentTools: [AvailableTools.readFile])
+            server.requestObserver = nil
+            let cutoffRequests = server.completeRequests
+            check("9.11 Responses cutoff completes and saves", cutoff.error == nil && cutoff.sessionPersisted
+                  && cutoff.finalMessage == "CUTOFF_FINAL" && cutoffRequests.count == 3, cutoff.error ?? cutoff.finalMessage)
+            if let bytes = try? Data(contentsOf: observedCheckpoint),
+               let checkpoint = try? sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: bytes) {
+                let ids = checkpoint.toolInteractions.flatMap { $0.assistantMessage.toolCalls.map(\.id) }
+                check("9.12 disk checkpoint before forced answer contains only retained pending rounds", ids == ["call_kept"], "\(ids)")
+            } else {
+                check("9.12 disk checkpoint before forced answer contains only retained pending rounds", false, "No checkpoint observed")
+            }
+            if let finalRequest = cutoffRequests.last {
+                let wire = String(decoding: finalRequest.body, as: UTF8.self)
+                check("9.13 forced answer names omitted tools and sees retained results only",
+                      wire.contains("omitted results from: read_file") && wire.contains("call_kept")
+                      && !wire.contains("call_dropped") && !wire.contains("opaque_dropped"))
+            }
+            let cutoffStored = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf: sessionFile))
+            check("9.14 final reply embeds exactly the rounds it saw",
+                  cutoffStored.toolInteractions.isEmpty && cutoffStored.messages.last?.content == "CUTOFF_FINAL"
+                  && cutoffStored.messages.last?.toolInteractions.flatMap { $0.assistantMessage.toolCalls.map(\.id) } == ["call_kept"])
+            await SubagentSessionRegistry.shared.reloadFromDisk()
+            server.clear()
+            server.script([try body("CUTOFF_RESUMED", id: "cutoff_resumed")])
+            let cutoffResumed = await runner.run(invocation: invocation, sessionId: first.sessionId, openRouterService: service,
+                                                 toolExecutor: executor, imagesDirectory: root, documentsDirectory: root,
+                                                 parentTools: [AvailableTools.readFile])
+            let resumeWire = server.completeRequests.map { String(decoding: $0.body, as: UTF8.self) }.joined()
+            check("9.15 reload and resume preserve retained work without resurrecting the dropped round",
+                  cutoffResumed.error == nil && cutoffResumed.finalMessage == "CUTOFF_RESUMED" && server.completeRequests.count == 1
+                  && resumeWire.contains("call_kept") && resumeWire.contains("opaque_cutoff_final")
+                  && !resumeWire.contains("call_dropped") && !resumeWire.contains("opaque_dropped"))
+            check("9.16 cutoff capture completed without errors", server.errors.isEmpty && server.remainingResponses == 0)
+
         }
 
         print("Subagent compaction selftest: \(total - failures)/\(total) passed")

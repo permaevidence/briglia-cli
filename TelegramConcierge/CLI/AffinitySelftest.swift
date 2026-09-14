@@ -756,6 +756,12 @@ final class CaptureServer: @unchecked Sendable {
         precondition(statuses.isEmpty || statuses.count == bodies.count)
         lock.lock(); responseQueue = bodies; statusQueue = statuses; lock.unlock()
     }
+    // Observe a complete request before replying, for durable-checkpoint assertions.
+    private var _requestObserver: (@Sendable (CapturedHTTPRequest) -> Void)?
+    var requestObserver: (@Sendable (CapturedHTTPRequest) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _requestObserver }
+        set { lock.lock(); _requestObserver = newValue; lock.unlock() }
+    }
     var remainingResponses: Int { lock.lock(); defer { lock.unlock() }; return responseQueue.count }
 
     var requests: [[String: String]] { completeRequests.map(\.headers) }
@@ -826,7 +832,8 @@ final class CaptureServer: @unchecked Sendable {
                 if n < 0 && errno == EINTR { continue }
                 guard n > 0 else { throw CaptureRequestParser.Invalid("EOF or timeout before complete request") }
                 if let request = try parser.append(Data(chunk[0..<n])) {
-                    lock.lock(); recorded.append(request); lock.unlock()
+                    lock.lock(); recorded.append(request); let observer = _requestObserver; lock.unlock()
+                    observer?(request)
                     break
                 }
             }
