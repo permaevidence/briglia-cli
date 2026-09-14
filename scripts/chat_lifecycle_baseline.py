@@ -105,6 +105,13 @@ def instrument(tree):
     freeze_fallback_prompt_day(tree)
     path = tree / "TelegramConcierge/Services/SubagentRunner.swift"
     replace(path, "let turnStartDate = Date()", "let turnStartDate = P0Life.instant")
+    # The emergency summarizer adds one ephemeral request message. Freeze its
+    # exact new site independently; still require the two original sites below.
+    # The pinned release has no emergency method and keeps its original seam.
+    if "private func summarizeOversizedTranscript(" in path.read_text():
+        replace(path,
+                "messages: [Message(role: .user, content: prompt, timestamp: Date())],",
+                "messages: [Message(role: .user, content: prompt, timestamp: P0Life.instant)],")
     replace(path, "timestamp: Date()", "timestamp: P0Life.instant", 2)
     path = tree / "TelegramConcierge/Services/SubagentSessionRegistry.swift"
     replace(path, "timestamp: Date()", "timestamp: P0Life.instant", 3)
