@@ -706,6 +706,72 @@ enum AvailableTools {
         )
     )
     
+    // MARK: - Web subagent research tools (WEB_SUBAGENT_PLAN §4.2, R1a)
+    //
+    // Only the `Web` subagent preset receives these two. They are the
+    // pipeline's internal `search` / `fetch_and_extract` tools promoted to
+    // first-class tools: same shapes, same per-call caps, same in-tool
+    // compression. They never enter the main agent's list.
+    static let webQueryMaxQueries = 4
+    static let webExtractMaxRequests = 3
+
+    static let webQuery = ToolDefinition(
+        function: FunctionDefinition(
+            name: "web_query",
+            description: "Run web searches. Provide up to \(webQueryMaxQueries) distinct queries per call; they run concurrently and return organic results (title, snippet, link, date), answer boxes and knowledge panels. Vary phrasing and angle rather than repeating one query. A result already retrieved in this session is listed again with the time it was retrieved and whether its extract is still in your context — nothing is hidden. Extra queries beyond the cap are dropped and reported.",
+            parameters: FunctionParameters(
+                properties: [
+                    "queries": ParameterProperty(
+                        type: "array",
+                        description: "Search query strings, at most \(webQueryMaxQueries).",
+                        items: ArrayItemsSchema(type: "string")
+                    )
+                ],
+                required: ["queries"]
+            )
+        )
+    )
+
+    static let webExtract = ToolDefinition(
+        function: FunctionDefinition(
+            name: "web_extract",
+            description: "Read web pages and extract the content relevant to a focus. Provide up to \(webExtractMaxRequests) url+focus requests per call; they run concurrently. Every call makes a new reader request for each URL (no local cache): the result reports fetched_at = the time of that request, and, for a URL read earlier in this session, when it was previously fetched and whether that extract is still in your context. Use it for time-sensitive re-checks. Pages are compressed inside the tool: short pages come back whole, long pages as focused excerpts (payload bounded per call; excerpts_truncated marks a cut).",
+            parameters: FunctionParameters(
+                properties: [
+                    "requests": ParameterProperty(
+                        type: "array",
+                        description: "Up to \(webExtractMaxRequests) url+focus requests. Extra requests beyond the cap are dropped and reported.",
+                        items: ArrayItemsSchema(
+                            type: "object",
+                            description: "One page to read.",
+                            properties: [
+                                "url": ParameterProperty(type: "string", description: "The page URL to fetch."),
+                                "focus": ParameterProperty(type: "string", description: "What to look for on this page. The extractor reads the full page and returns only excerpts relevant to this instruction — make it specific ('exact pricing tiers and limits', not 'info about pricing').")
+                            ],
+                            required: ["url", "focus"]
+                        )
+                    )
+                ],
+                required: ["requests"]
+            )
+        )
+    )
+
+    /// `web_fetch` with the `refresh` field (WEB_SUBAGENT_PLAN §4.2, O12).
+    /// Exists only while the Web switch is on: with the switch off every
+    /// surface gets `webFetch` (the legacy schema) byte for byte.
+    static let webFetchWithRefresh: ToolDefinition = {
+        var properties = webFetch.function.parameters.properties
+        properties["refresh"] = ParameterProperty(
+            type: "boolean",
+            description: "Optional. This tool caches a page and its excerpt for 15 minutes; a cache hit returns served_from_cache: true with the ORIGINAL fetched_at. Pass true to discard the cached page and make a new reader request (fresh fetched_at) when the answer must reflect the page as it is now."
+        )
+        return ToolDefinition(function: FunctionDefinition(
+            name: webFetch.function.name,
+            description: webFetch.function.description,
+            parameters: FunctionParameters(properties: properties, required: webFetch.function.parameters.required)))
+    }()
+
     // Computed so the two Agent-tool references (triage-session resume, lane
     // parity note) drop out of the schema when /subagents is off.
     static var manageReminders: ToolDefinition {
@@ -1490,8 +1556,17 @@ enum AvailableTools {
     /// on the next tool-list build without a restart. Per-subagent descriptions are injected
     /// into the tool's free-text description so the LLM knows what each one does, not just
     /// that it exists.
-    static var agentTool: ToolDefinition {
-        let allSubagents = SubagentTypes.all()
+    static var agentTool: ToolDefinition { agentTool(webSearchAvailable: true) }
+
+    /// `webSearchAvailable` is the SAME argument `all(includeWebSearch:)`
+    /// receives (true iff the Serper key is set on the live surfaces): the
+    /// Web preset, its `deliverable` parameter and the provenance guidance
+    /// appear in the schema only when web search is available AND the Web
+    /// switch is on, so the wire/lifecycle drivers stay deterministic and the
+    /// two gates can never disagree (WEB_SUBAGENT_PLAN §4.1, §4.3).
+    static func agentTool(webSearchAvailable: Bool) -> ToolDefinition {
+        let allSubagents = SubagentTypes.all(webSearchAvailable: webSearchAvailable)
+        let webPresent = allSubagents.contains { $0.isWebResearcher }
         let subagentNames = allSubagents.map { $0.name }
         // The main agent picks a model INTENT, never a concrete model id:
         // "inherit" or one of the user-configured cheap lanes
@@ -1551,7 +1626,7 @@ enum AvailableTools {
         - **Foreground vs background**: Use foreground (default) when you need the subagent's results before you can proceed. Use background when you have genuinely independent work to do in parallel.
         - To continue a previously spawned subagent, pass its session_id — that resumes it with full context. A new Agent call starts a fresh subagent with no memory of prior runs. Resume is useful to ask follow up or qualifying questions to a subagent that has already done the work.
         - Clearly tell the subagent whether you expect it to write code or just do research (search, file reads, web fetches), since it is not aware of the user's intent.
-        - Subagents CANNOT spawn other subagents. Provide a self-contained prompt — the subagent sees none of your conversation history.
+        - Subagents CANNOT spawn other subagents. Provide a self-contained prompt — the subagent sees none of your conversation history.\(webPresent ? "\n" + webResearcherUsageNotes : "")
 
         ## Writing the prompt
 
@@ -1597,17 +1672,38 @@ enum AvailableTools {
                             description: modelDescription,
                             enumValues: modelEnumValues
                         )
-                    ],
+                    ].merging(webPresent ? ["deliverable": ParameterProperty(
+                            type: "string",
+                            description: "Only for subagent_type=Web. How much to return: short = a few sentences, standard = one or two screens, report = a complete written report. Ignored for other types.",
+                            enumValues: ["short", "standard", "report"]
+                        )] : [:]) { current, _ in current },
                     required: ["subagent_type", "description", "prompt"]
                 )
             )
         )
     }
 
-    static let subagentManage = ToolDefinition(
+    /// Agent-description bullets present only when the Web preset is in the
+    /// enum (WEB_SUBAGENT_PLAN §4.3, §4.5, §4.7).
+    static let webResearcherUsageNotes = "- Web research: use subagent_type=Web instead of searching yourself. State the expected deliverable (short | standard | report). Its result carries evidence_provenance, queries_used and sources_consulted: carry the provenance into your answer — say when an answer relies on evidence retained from earlier runs, when the searches found nothing, and what could not be verified. A [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim. Resume the same Web session (session_id) for follow-ups; web sessions are listed in their own section of subagent_manage(list_sessions)."
+
+    static var subagentManage: ToolDefinition { subagentManage(webSearchAvailable: true) }
+
+    static func subagentManage(webSearchAvailable: Bool) -> ToolDefinition {
+        let webPresent = webSearchAvailable && webSubagentActive
+        let listSessionsNote = webPresent
+            ? " Output has two sections: 'sessions' (general pool, paged by limit/offset) and 'web_sessions' (Web research sessions, newest 5 by default; pass kind='web' to page the whole web pool)."
+            : ""
+        let kindProperty: [String: ParameterProperty] = webPresent
+            ? ["kind": ParameterProperty(
+                type: "string",
+                description: "For mode='list_sessions' only. 'all' (default) = general page plus the newest web sessions; 'general' = general pool only; 'web' = page the web pool with limit/offset.",
+                enumValues: ["all", "general", "web"])]
+            : [:]
+        return ToolDefinition(
         function: FunctionDefinition(
             name: "subagent_manage",
-            description: "Manage background subagents. Three modes: (1) 'list_running' — list every subagent currently running in the background. Returns {handle, subagent_type, description, started_at, running_seconds} for each. (2) 'list_sessions' — list all subagent sessions from this app run, sorted by most-recently-used. Each session is resumable by passing its session_id to the Agent tool. (3) 'cancel' — cancel a running background subagent by handle. Cancellation is best-effort at the next turn boundary.",
+            description: "Manage background subagents. Three modes: (1) 'list_running' — list every subagent currently running in the background. Returns {handle, subagent_type, description, started_at, running_seconds} for each. (2) 'list_sessions' — list all subagent sessions from this app run, sorted by most-recently-used. Each session is resumable by passing its session_id to the Agent tool.\(listSessionsNote) (3) 'cancel' — cancel a running background subagent by handle. Cancellation is best-effort at the next turn boundary.",
             parameters: FunctionParameters(
                 properties: [
                     "mode": ParameterProperty(
@@ -1627,11 +1723,11 @@ enum AvailableTools {
                         type: "integer",
                         description: "For mode='list_sessions' only. Number of sessions to skip for pagination. Default 0."
                     )
-                ],
+                ].merging(kindProperty) { current, _ in current },
                 required: ["mode"]
             )
         )
-    )
+    ) }
 
     // MARK: - Skills
 
@@ -1783,12 +1879,36 @@ enum AvailableTools {
         return stored ?? true
     }
 
+    /// Test seam for the Web-subagent flag (same contract as
+    /// `subagentsStoredFlagOverrideForTesting`).
+    static var webSubagentStoredFlagOverrideForTesting: (() -> Bool?)?
+
+    /// Single source of truth for the `/websubagent` flag
+    /// (`ada.webSubagentEnabled`, default OFF in R1 — WEB_SUBAGENT_PLAN §4.8).
+    static var webSubagentEnabled: Bool {
+        let stored: Bool?
+        if let override = webSubagentStoredFlagOverrideForTesting {
+            stored = override()
+        } else {
+            stored = UserDefaults.standard.object(forKey: "ada.webSubagentEnabled") as? Bool
+        }
+        return stored ?? false
+    }
+
+    /// The Web researcher is active only while BOTH switches are on (O5:
+    /// with subagents off the main agent would have no web capability, so
+    /// the legacy tools stay). Web-search availability (the Serper key) is
+    /// a separate argument on every surface, never a second lookup here.
+    static var webSubagentActive: Bool { subagentsEnabled && webSubagentEnabled }
+
     /// When `ada.subagentsEnabled` is false in UserDefaults, the Agent
     /// tool and its management tool (subagent_manage) are omitted — gives a
     /// fully local setup a way to disable cloud-delegating tools in one switch.
-    static var coreToolsWithoutWebSearch: [ToolDefinition] {
+    static var coreToolsWithoutWebSearch: [ToolDefinition] { coreTools(webSearchAvailable: false) }
+
+    static func coreTools(webSearchAvailable: Bool) -> [ToolDefinition] {
         let subagentTools: [ToolDefinition] = subagentsEnabled
-            ? [agentTool, subagentManage]
+            ? [agentTool(webSearchAvailable: webSearchAvailable), subagentManage(webSearchAvailable: webSearchAvailable)]
             : []
         let textOnlyTools: [ToolDefinition] = KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey) == "true"
             ? [inspectMedia]
@@ -1803,10 +1923,26 @@ enum AvailableTools {
     /// tools for on-demand MCP discovery. Email/calendar/contacts tools have
     /// been fully removed from the agent surface in favor of the gws CLI.
     static func all(includeWebSearch: Bool, hasDeferredMCPs: Bool = false) -> [ToolDefinition] {
-        let webTools = includeWebSearch ? [webSearch, webResearchSweep, webFetch] : []
+        // Web switch on (and web search available): the two research tools
+        // leave the main agent's list — research goes through Agent(Web) —
+        // and web_fetch gains `refresh`. Off: the legacy list, byte for byte
+        // (WEB_SUBAGENT_PLAN §4.6.1, §4.8).
+        let webTools: [ToolDefinition]
+        if !includeWebSearch {
+            webTools = []
+        } else if webSubagentActive {
+            webTools = [webFetchWithRefresh]
+        } else {
+            webTools = [webSearch, webResearchSweep, webFetch]
+        }
         let deferredTools: [ToolDefinition] = hasDeferredMCPs ? [toolSearch, mcpCall] : []
-        return webTools + coreToolsWithoutWebSearch + deferredTools
+        return webTools + coreTools(webSearchAvailable: includeWebSearch) + deferredTools
     }
+
+    /// The legacy research tools an ordinary subagent keeps while the Web
+    /// switch is on (matrix §4.6.1, R1a): they are no longer in the main
+    /// list, so `SubagentRunner` re-adds them to the child inventory.
+    static var legacyResearchTools: [ToolDefinition] { [webSearch, webResearchSweep] }
 
     /// Backward-compatible default: include web search
     static var all: [ToolDefinition] {

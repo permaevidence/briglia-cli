@@ -35,8 +35,18 @@ actor ToolExecutor {
     /// contract as projectInstructions).
     nonisolated let gitCheckpoints = GitCheckpointTracker()
 
-    private let webOrchestrator = WebOrchestrator()
+    let webOrchestrator = WebOrchestrator()
     private let archiveService = ConversationArchiveService()
+
+    /// The Web researcher's evidence ledger, set by SubagentRunner on the
+    /// child executor of a Web run before its first tool batch and read
+    /// back after (WEB_SUBAGENT_PLAN §4.2). nil on every other executor:
+    /// the web tools then behave as the legacy surface.
+    private(set) var webEvidenceLedger: WebEvidenceLedger?
+
+    func setWebEvidenceLedger(_ ledger: WebEvidenceLedger?) {
+        webEvidenceLedger = ledger
+    }
     private var openRouterService: OpenRouterService?
     private var subagentImagesDirectory: URL?
     private var subagentDocumentsDirectory: URL?
@@ -457,6 +467,10 @@ actor ToolExecutor {
             return try await executeWebSearch(call)
         case "web_research_sweep":
             return try await executeDeepResearch(call)
+        case "web_query":
+            return await executeWebQuery(call)
+        case "web_extract":
+            return await executeWebExtract(call)
         case "Agent":
             return await executeAgentToolResult(call)
         case "inspect_media":
@@ -1261,7 +1275,7 @@ actor ToolExecutor {
         return InspectableMediaData(data: data, mimeType: "application/pdf", pageRange: pageRange, totalPages: totalPages)
     }
 
-    private func jsonObjectString(_ object: [String: Any]) -> String {
+    func jsonObjectString(_ object: [String: Any]) -> String {
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]),
               let text = String(data: data, encoding: .utf8) else {
@@ -3925,17 +3939,54 @@ extension ToolExecutor {
         }
 
         do {
-            let result = try await webOrchestrator.readUrlContent(
+            // Switch off: the legacy call and the legacy result shape.
+            guard AvailableTools.webSubagentActive else {
+                let result = try await webOrchestrator.readUrlContent(
+                    url: args.url,
+                    prompt: promptTrim,
+                    sectionOffset: args.section_offset ?? 0
+                )
+                // Returns a prompt-compressed excerpt plus image metadata (captions, URLs)
+                // LLM can use bash curl + read_file to download and view specific images
+                return result.asJSON()
+            }
+            // Switch on (WEB_SUBAGENT_PLAN §4.2, O12): `refresh` honoured,
+            // fetched_at / served_from_cache reported, the Web researcher's
+            // ledger extended when this executor serves one.
+            let normalized = await webOrchestrator.normalizedURL(args.url)
+            let prior = webEvidenceLedger?.priorRetrievals(of: normalized).last
+            let fetched = try await webOrchestrator.readUrlContentWithMetadata(
                 url: args.url,
                 prompt: promptTrim,
-                sectionOffset: args.section_offset ?? 0
+                sectionOffset: args.section_offset ?? 0,
+                refresh: args.refresh ?? false
             )
-            // Returns a prompt-compressed excerpt plus image metadata (captions, URLs)
-            // LLM can use bash curl + read_file to download and view specific images
+            var result = fetched.result
+            result.fetched_at = Self.webTimestamp(fetched.fetchedAt)
+            result.served_from_cache = fetched.servedFromCache
+            if let prior {
+                result.previously_fetched = "\(Self.webTimestamp(prior.fetchedAt)) (in context: \(prior.inContext ? "yes" : "no"))"
+            }
+            let usable = !result.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if let ledger = webEvidenceLedger {
+                ledger.append([WebEvidenceRecord(url: normalized, fetchedAt: fetched.fetchedAt, toolCallId: call.id,
+                                                 servedFromCache: fetched.servedFromCache, isExtract: true, usable: usable)])
+                ledger.recordAttempt(usable: usable, allFailed: false, failures: [])
+            }
             return result.asJSON()
         } catch {
+            if let ledger = webEvidenceLedger {
+                ledger.recordAttempt(usable: false, allFailed: true, failures: ["fetch — \(args.url): \(error.localizedDescription)"])
+            }
             return jsonObjectString(["error": webPipelineFailureText("Failed to fetch URL", error: error)])
         }
+    }
+
+    /// `fetched_at` / ledger timestamps: local time with offset, to the
+    /// second, so a freshness claim can be read against the conversation
+    /// chronology (which is a different clock: delivery, not retrieval).
+    static func webTimestamp(_ date: Date) -> String {
+        Chronology.transcriptClock(date)
     }
 
 }
@@ -3946,6 +3997,8 @@ struct WebFetchArguments: Codable {
     let url: String
     let prompt: String
     let section_offset: Int?
+    /// Web switch on only (WEB_SUBAGENT_PLAN §4.2, O12); ignored otherwise.
+    var refresh: Bool? = nil
 }
 
 // MARK: - Send Document to Chat Tool
@@ -4249,6 +4302,8 @@ struct SubagentInvocationArguments: Decodable {
     let close_session: String?
     let run_in_background: Bool?
     let model: String?
+    /// Web preset only (WEB_SUBAGENT_PLAN §4.3): short | standard | report.
+    let deliverable: String?
 
     enum CodingKeys: String, CodingKey {
         case subagent_type
@@ -4258,6 +4313,7 @@ struct SubagentInvocationArguments: Decodable {
         case close_session
         case run_in_background
         case model
+        case deliverable
     }
 
     init(from decoder: Decoder) throws {
@@ -4268,6 +4324,7 @@ struct SubagentInvocationArguments: Decodable {
         session_id = try container.decodeIfPresent(String.self, forKey: .session_id)
         close_session = try container.decodeIfPresent(String.self, forKey: .close_session)
         model = try container.decodeIfPresent(String.self, forKey: .model)
+        deliverable = try container.decodeIfPresent(String.self, forKey: .deliverable)
 
         if let boolValue = try? container.decodeIfPresent(Bool.self, forKey: .run_in_background) {
             run_in_background = boolValue
@@ -4307,6 +4364,23 @@ extension ToolExecutor {
         }
     }
 
+    /// Validate the Web-only `deliverable` argument BEFORE the run
+    /// (WEB_SUBAGENT_PLAN §4.3): present with a non-Web type → tool error;
+    /// Web without it → standard. Returns (error JSON, resolved deliverable).
+    static func agentDeliverable(_ raw: String?, subagentType: String) -> (error: String?, deliverable: WebDeliverable?) {
+        let isWeb = subagentType.lowercased() == SubagentTypes.webResearcherName.lowercased()
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !raw.isEmpty else {
+            return (nil, isWeb ? .standard : nil)
+        }
+        guard isWeb else {
+            return ("{\"error\": \"deliverable is only valid for subagent_type=Web\"}", nil)
+        }
+        guard let parsed = WebDeliverable(rawValue: raw) else {
+            return ("{\"error\": \"Unknown deliverable '\(raw)'. Valid values: short, standard, report.\"}", nil)
+        }
+        return (nil, parsed)
+    }
+
     /// Wraps executeAgent and surfaces subagent spend on the ToolResultMessage so
     /// ConversationManager's toolSpendUSD pass rolls it into the parent's cumulative
     /// daily/monthly counters and spend-limit enforcement. Background spawns still
@@ -4320,6 +4394,10 @@ extension ToolExecutor {
 
         if let laneError = Self.agentModelHintError(args.model) {
             return ToolResultMessage(toolCallId: call.id, content: laneError)
+        }
+        let deliverable = Self.agentDeliverable(args.deliverable, subagentType: args.subagent_type)
+        if let deliverableError = deliverable.error {
+            return ToolResultMessage(toolCallId: call.id, content: deliverableError)
         }
 
         guard let openRouter = openRouterService else {
@@ -4335,7 +4413,8 @@ extension ToolExecutor {
             description: args.description,
             taskPrompt: args.prompt,
             modelOverride: args.model,
-            runInBackground: runInBg
+            runInBackground: runInBg,
+            deliverable: deliverable.deliverable
         )
 
         let childExecutor = await makeChildExecutor()
@@ -4343,19 +4422,21 @@ extension ToolExecutor {
         if runInBg {
             let handle = await SubagentBackgroundRegistry.shared.spawn(
                 invocation: invocation,
+                sessionId: args.session_id,
                 parentTools: parentTools,
                 openRouterService: openRouter,
                 toolExecutor: childExecutor,
                 imagesDirectory: imagesDir,
                 documentsDirectory: documentsDir
             )
-            let payload: [String: Any] = [
+            var payload: [String: Any] = [
                 "background": true,
                 "handle": handle.id,
                 "subagent_type": handle.subagentType,
                 "description": handle.description,
                 "note": "Subagent is running in the background. You will receive a synthetic [SUBAGENT COMPLETE] user message when it finishes. Continue with other work or wait."
             ]
+            if let sessionId = handle.sessionId { payload["session_id"] = sessionId }
             let content = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes]))
                 .flatMap { String(data: $0, encoding: .utf8) }
                 ?? "{\"error\": \"Failed to encode background handle response\"}"
@@ -4388,6 +4469,10 @@ extension ToolExecutor {
         if let laneError = Self.agentModelHintError(args.model) {
             return laneError
         }
+        let deliverable = Self.agentDeliverable(args.deliverable, subagentType: args.subagent_type)
+        if let deliverableError = deliverable.error {
+            return deliverableError
+        }
 
         guard let openRouter = openRouterService else {
             return "{\"error\": \"Agent tool not configured: OpenRouterService missing. ConversationManager must call toolExecutor.configureOpenRouter(...).\"}"
@@ -4405,7 +4490,8 @@ extension ToolExecutor {
             description: args.description,
             taskPrompt: args.prompt,
             modelOverride: args.model,
-            runInBackground: runInBg
+            runInBackground: runInBg,
+            deliverable: deliverable.deliverable
         )
 
         let childExecutor = await makeChildExecutor()
@@ -4413,6 +4499,7 @@ extension ToolExecutor {
         if runInBg {
             let handle = await SubagentBackgroundRegistry.shared.spawn(
                 invocation: invocation,
+                sessionId: args.session_id,
                 parentTools: parentTools,
                 openRouterService: openRouter,
                 toolExecutor: childExecutor,
@@ -4447,13 +4534,13 @@ extension ToolExecutor {
     }
 
     func executeSubagentManage(_ call: ToolCall) async -> String {
-        struct Args: Decodable { let mode: String?; let handle: String?; let limit: Int?; let offset: Int? }
+        struct Args: Decodable { let mode: String?; let handle: String?; let limit: Int?; let offset: Int?; let kind: String? }
         let args: Args
         if let data = call.function.arguments.data(using: .utf8),
            let decoded = try? JSONDecoder().decode(Args.self, from: data) {
             args = decoded
         } else {
-            args = Args(mode: nil, handle: nil, limit: nil, offset: nil)
+            args = Args(mode: nil, handle: nil, limit: nil, offset: nil, kind: nil)
         }
         guard let mode = args.mode else {
             return "{\"error\": \"subagent_manage requires 'mode' (list_running, list_sessions, or cancel)\"}"
@@ -4498,11 +4585,10 @@ extension ToolExecutor {
         case "list_sessions":
             let limit = args.limit ?? 20
             let offset = args.offset ?? 0
-            let (sessions, total) = await SubagentSessionRegistry.shared.list(limit: limit, offset: offset)
             let iso = ISO8601DateFormatter()
             iso.formatOptions = [.withInternetDateTime]
-            let rows: [[String: Any]] = sessions.map { s in
-                [
+            func row(_ s: SubagentSessionRegistry.Session, includeTopic: Bool = true) -> [String: Any] {
+                var out: [String: Any] = [
                     "session_id": s.id,
                     "subagent_type": s.subagentType,
                     "description": s.description,
@@ -4512,8 +4598,42 @@ extension ToolExecutor {
                     "message_count": s.messages.count,
                     "spend_usd": s.totalSpendUSD
                 ]
+                if includeTopic, let topic = s.topic { out["topic"] = topic }
+                return out
             }
-            let payload: [String: Any] = ["sessions": rows, "total": total, "has_more": offset + limit < total]
+            // Switch off: the legacy single-pool listing, byte for byte.
+            guard AvailableTools.webSubagentActive else {
+                let (sessions, total) = await SubagentSessionRegistry.shared.list(limit: limit, offset: offset)
+                let payload: [String: Any] = ["sessions": sessions.map { row($0, includeTopic: false) }, "total": total, "has_more": offset + limit < total]
+                if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes]),
+                   let str = String(data: data, encoding: .utf8) {
+                    return str
+                }
+                return "{\"error\": \"failed to encode subagent_manage list_sessions result\"}"
+            }
+            // Two pools, two sections (WEB_SUBAGENT_PLAN §4.7).
+            let kind = (args.kind ?? "all").lowercased()
+            var payload: [String: Any] = [:]
+            if kind == "all" || kind == "general" {
+                let (sessions, total) = await SubagentSessionRegistry.shared.list(limit: limit, offset: offset, kind: .general)
+                payload["sessions"] = sessions.map { row($0) }
+                payload["total"] = total
+                payload["has_more"] = offset + limit < total
+            }
+            if kind == "all" || kind == "web" {
+                let webLimit = kind == "web" ? limit : 5
+                let webOffset = kind == "web" ? offset : 0
+                let (web, webTotal) = await SubagentSessionRegistry.shared.list(limit: webLimit, offset: webOffset, kind: .web)
+                payload["web_sessions"] = web.map { s -> [String: Any] in
+                    ["session_id": s.id, "topic": s.topic ?? s.description, "last_used": iso.string(from: s.lastUsed),
+                     "total_turns": s.totalTurns, "spend_usd": s.totalSpendUSD]
+                }
+                payload["web_total"] = webTotal
+                payload["web_has_more"] = webOffset + webLimit < webTotal
+            }
+            if kind != "all" && kind != "general" && kind != "web" {
+                return "{\"error\": \"Unknown kind '\(kind)'. Use 'all', 'general', or 'web'.\"}"
+            }
             if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes]),
                let str = String(data: data, encoding: .utf8) {
                 return str

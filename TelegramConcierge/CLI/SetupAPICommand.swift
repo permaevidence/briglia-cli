@@ -253,6 +253,14 @@ enum SetupAPICore {
             ["id": $0.id, "label": $0.label, "text_only": $0.textOnly] as [String: Any]
         }
         payload["opencode_default_model"] = OpenCodeGo.defaultModel
+        // Web research subagent switch (WEB_SUBAGENT_PLAN §4.8): `enabled` is
+        // the stored flag, `active` whether it currently applies (subagents
+        // on too), `preset_available` whether the Web preset would appear
+        // (web search configured).
+        let serperConfigured = !(KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? "").isEmpty
+        payload["web_subagent"] = ["enabled": AvailableTools.webSubagentEnabled,
+                                   "active": AvailableTools.webSubagentActive,
+                                   "preset_available": serperConfigured && AvailableTools.webSubagentActive] as [String: Any]
 
         func keyStatus(_ storageKey: String) -> [String: Any] {
             guard let value = KeychainHelper.load(key: storageKey), !value.isEmpty else {

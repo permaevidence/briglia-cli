@@ -398,6 +398,16 @@ def main():
     result = run_selftest([ADA, "__chronology-selftest"], capture_output=True, text=True, timeout=300)
     check("chronology selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # Web researcher subagent (WEB_SUBAGENT_PLAN §6, R1a): schema gating on
+    # the /websubagent switch (byte-identical legacy surface when off), the
+    # Web-only web_query/web_extract tools, the immutable web provider
+    # context carried through every request of a run, provenance labels and
+    # the evidence ledger, deliverable rendering, the second session pool,
+    # background resume. Scripted loopback fixtures for every endpoint,
+    # isolated XDG roots, flag seams, HarnessClock pinned.
+    result = run_selftest([ADA, "__web-subagent-selftest"], capture_output=True, text=True, timeout=300)
+    check("web subagent selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # 3c5-ter. MCP tool surface: server handles, canonical aliases (length,
     # charset, determinism, per-server prefix isolation), escaped
     # descriptions, refused hostile semantic strings, registry-only dispatch

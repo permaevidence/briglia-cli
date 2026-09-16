@@ -44,6 +44,10 @@ struct ProviderExecutionContext {
     var subscriptionGeneration: String? = nil
     var responsesTurn = ResponsesTurn()
     var responsesOperation: ResponsesOperation = .conversation
+    /// Lane label recorded by `/cachestats` in place of the affinity lane's
+    /// generic name (the Web researcher records "subagent:web",
+    /// WEB_SUBAGENT_PLAN §4.4). nil = derive from `lane` as before.
+    var usageLaneLabel: String? = nil
 
     var responsesScope: ResponsesScope {
         ResponsesScope(endpoint: (try? ResponsesAdapter.endpoint(endpoint)) ?? endpoint, profile: profileIdentity, model: model,

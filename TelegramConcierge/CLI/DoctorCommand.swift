@@ -66,6 +66,7 @@ struct Doctor: AsyncParsableCommand {
         let backendSource = WebSearchBackend.explicitlyStored != nil
             ? "explicit" : "inferred from keys — set with /websearch"
         note("web search backend: \(WebSearchBackend.active.rawValue) (\(backendSource))")
+        note("web subagent: \(AvailableTools.webSubagentEnabled ? "on" : "off"); Web preset available: \(serperKey.isEmpty ? "no (Serper key missing)" : (AvailableTools.webSubagentActive ? "yes" : "no (switch off)"))")
         let ocrBackend = KeychainHelper.load(key: KeychainHelper.visionPreprocessorBackendKey)
             ?? (openAIKey.isEmpty ? "openrouter (no OpenAI key)" : "openai")
         note("OCR backend: \(ocrBackend)")

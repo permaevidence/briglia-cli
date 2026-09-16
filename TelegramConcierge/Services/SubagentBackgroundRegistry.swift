@@ -17,6 +17,9 @@ actor SubagentBackgroundRegistry {
         let subagentType: String
         let description: String
         let startedAt: Date
+        /// The session being resumed, when the spawn resumed one
+        /// (WEB_SUBAGENT_PLAN §4.7: background AND resumable).
+        var sessionId: String? = nil
     }
 
     struct Completion {
@@ -37,6 +40,7 @@ actor SubagentBackgroundRegistry {
     /// Returns the Handle immediately.
     func spawn(
         invocation: SubagentRunner.Invocation,
+        sessionId: String? = nil,
         parentTools: [ToolDefinition],
         openRouterService: OpenRouterService,
         toolExecutor: ToolExecutor,
@@ -50,7 +54,8 @@ actor SubagentBackgroundRegistry {
             id: id,
             subagentType: invocation.subagentType,
             description: invocation.description,
-            startedAt: Date()
+            startedAt: Date(),
+            sessionId: sessionId
         )
         running[id] = handle
 
@@ -64,9 +69,11 @@ actor SubagentBackgroundRegistry {
 
         let task = Task.detached { [weak self] in
             let runner = SubagentRunner()
+            // A resumed session is serialized by the runner's FIFO session
+            // lock against a concurrent foreground resume.
             let result = await runner.run(
                 invocation: invocation,
-                sessionId: nil,
+                sessionId: sessionId,
                 openRouterService: openRouterService,
                 toolExecutor: toolExecutor,
                 imagesDirectory: imagesDirectory,

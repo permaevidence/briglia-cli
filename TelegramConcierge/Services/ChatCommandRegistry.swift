@@ -45,6 +45,8 @@ enum ChatCommandRegistry {
                     usage: nil, inMenu: false, category: "Models"),
         ChatCommand(name: "subagents", description: "Turn the Agent delegation tools on or off",
                     usage: "[on|off]", inMenu: false, category: "Models"),
+        ChatCommand(name: "websubagent", description: "Turn the resumable Web research subagent on or off (trial)",
+                    usage: "[on|off]", inMenu: false, category: "Models"),
         ChatCommand(name: "upgrade", description: "Update Briglia to the latest release",
                     usage: nil, inMenu: true, category: "System"),
         ChatCommand(name: "restart", description: "Restart Briglia (reloads mcp.json and skills)",

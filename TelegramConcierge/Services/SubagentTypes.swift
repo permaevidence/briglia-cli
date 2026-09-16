@@ -11,15 +11,32 @@ enum SubagentModelChoice {
     case inherit
     case cheapVision
     case cheapText
+    /// The Web researcher's lane: the configured web research backend
+    /// (`WebSearchBackend`), resolved by SubagentRunner into an immutable
+    /// provider context for the whole run (WEB_SUBAGENT_PLAN §4.4). Not a
+    /// user-configurable cheap lane, so `lane` is nil.
+    case web
 
-    /// The lane this choice targets, nil for `.inherit`.
+    /// The lane this choice targets, nil for `.inherit` and `.web`.
     var lane: SubagentModelLane? {
         switch self {
-        case .inherit: return nil
+        case .inherit, .web: return nil
         case .cheapVision: return .cheapVision
         case .cheapText: return .cheapText
         }
     }
+}
+
+/// How a subagent type's system prompt is assembled
+/// (`OpenRouterService+Preparation`).
+enum SubagentPromptStyle {
+    /// The shared messaging-app persona prompt (every type until R1a).
+    case messaging
+    /// The Web researcher's prompt: persona, date, the trust and
+    /// untrusted-content sections verbatim, web-tool guidance and the
+    /// research discipline — without the messaging brevity / no-Markdown
+    /// rules that contradict a report (WEB_SUBAGENT_PLAN §4.3).
+    case research
 }
 
 /// Describes a subagent kind (built-in or user-defined).
@@ -41,6 +58,12 @@ struct SubagentType {
     /// routing file — the watcher-triage profile processes untrusted external
     /// event payloads and must stay read-only no matter how MCP is routed.
     let forbidMCP: Bool
+    /// System-prompt style (WEB_SUBAGENT_PLAN §4.3). Every type but `Web`
+    /// keeps `.messaging`, so their prompt bytes are unchanged.
+    let promptStyle: SubagentPromptStyle
+
+    /// The built-in Web researcher (WEB_SUBAGENT_PLAN §4.1).
+    var isWebResearcher: Bool { name == SubagentTypes.webResearcherName }
 
     init(
         name: String,
@@ -50,7 +73,8 @@ struct SubagentType {
         defaultMaxTurns: Int,
         preferredModel: SubagentModelChoice,
         mcpToolPatterns: [String]? = nil,
-        forbidMCP: Bool = false
+        forbidMCP: Bool = false,
+        promptStyle: SubagentPromptStyle = .messaging
     ) {
         self.name = name
         self.description = description
@@ -60,6 +84,7 @@ struct SubagentType {
         self.preferredModel = preferredModel
         self.mcpToolPatterns = mcpToolPatterns
         self.forbidMCP = forbidMCP
+        self.promptStyle = promptStyle
     }
 }
 
@@ -108,6 +133,27 @@ enum SubagentTypes {
         forbidMCP: true
     )
 
+    static let webResearcherName = "Web"
+
+    /// Web researcher (WEB_SUBAGENT_PLAN §4.1–4.5, R1a). Dynamic built-in:
+    /// present only when web search is available and the Web switch is on.
+    /// Owns the pipeline's tools directly (`web_query`, `web_extract`, plus
+    /// `web_fetch`), runs on the configured web research backend, is
+    /// resumable like every other subagent, and has no bash, files or MCP.
+    /// The per-call `deliverable` is rendered into the task message by the
+    /// runner, never into this suffix (which is part of the cached prefix).
+    static let webResearcher = SubagentType(
+        name: webResearcherName,
+        description: "web research: searches, reads pages, answers or writes a report; resumable for follow-ups (deliverable: short | standard | report)",
+        systemPromptSuffix: "",
+        allowedToolNames: ["web_query", "web_extract", "web_fetch"],
+        defaultMaxTurns: 200,
+        preferredModel: .web,
+        mcpToolPatterns: nil,
+        forbidMCP: true,
+        promptStyle: .research
+    )
+
     static let staticBuiltIns: [SubagentType] = [generalPurpose, watcherTriage]
 
     /// Built-ins that should appear only when a matching MCP server is
@@ -127,16 +173,27 @@ enum SubagentTypes {
     }
 
     /// All currently-visible built-ins (static + active dynamic).
-    static var builtIns: [SubagentType] {
-        staticBuiltIns + activeDynamicBuiltIns()
+    /// `webSearchAvailable` is the caller's web-search availability (the
+    /// `includeWebSearch` argument of `AvailableTools.all`); the Web preset
+    /// appears only when it is true AND the Web switch is on
+    /// (`AvailableTools.webSubagentActive`), so the Agent enum and the tool
+    /// list can never disagree (WEB_SUBAGENT_PLAN §4.1).
+    static func builtIns(webSearchAvailable: Bool) -> [SubagentType] {
+        let web: [SubagentType] = webSearchAvailable && AvailableTools.webSubagentActive ? [webResearcher] : []
+        return staticBuiltIns + web + activeDynamicBuiltIns()
     }
+
+    static var builtIns: [SubagentType] { builtIns(webSearchAvailable: true) }
 
     /// Built-ins plus any user-defined agents from `~/.config/briglia/agents/*.md`.
     /// Built-ins win on name collision.
-    static func all() -> [SubagentType] {
+    static func all(webSearchAvailable: Bool = true) -> [SubagentType] {
         let user = UserAgentLoader.loadAll()
-        let built = builtIns
-        let builtInNames = Set(built.map { $0.name.lowercased() })
+        let built = builtIns(webSearchAvailable: webSearchAvailable)
+        // While the switch is on, a user agent may not shadow the Web name
+        // even on a surface where the preset is absent (no web search).
+        var builtInNames = Set(built.map { $0.name.lowercased() })
+        if AvailableTools.webSubagentActive { builtInNames.insert(webResearcherName.lowercased()) }
         let filteredUser = user.filter { !builtInNames.contains($0.name.lowercased()) }
         return built + filteredUser
     }
@@ -147,11 +204,14 @@ enum SubagentTypes {
     }
 
     /// Case-insensitive lookup by name. Built-ins first, then user-defined.
+    /// The Web preset resolves only while the switch is on: a run requested
+    /// for it with the switch off fails as an unknown type.
     static func find(name: String) -> SubagentType? {
         let lowered = name.lowercased()
         if let builtIn = builtIns.first(where: { $0.name.lowercased() == lowered }) {
             return builtIn
         }
+        if lowered == webResearcherName.lowercased(), AvailableTools.webSubagentActive { return nil }
         return UserAgentLoader.loadAll().first { $0.name.lowercased() == lowered }
     }
 }

@@ -3387,6 +3387,9 @@ class ConversationManager: ObservableObject {
         case "/subagents":
             await handleSubagentsCommand(argument: commandArgument(from: text))
             return true
+        case "/websubagent":
+            await handleWebSubagentCommand(argument: commandArgument(from: text))
+            return true
         case "/upgrade":
             await handleUpgradeCommand()
             return true
@@ -4940,9 +4943,60 @@ class ConversationManager: ObservableObject {
             return
         }
         UserDefaults.standard.set(target, forKey: "ada.subagentsEnabled")
+        // O5: the Web researcher cannot exist without the Agent tool — turning
+        // subagents off turns it off too, and says so.
+        var cascade = ""
+        if !target, AvailableTools.webSubagentEnabled {
+            UserDefaults.standard.set(false, forKey: "ada.webSubagentEnabled")
+            cascade = " The Web research subagent was on and is now off too (the legacy web_search tools are back); re-enable it with /websubagent on after /subagents on."
+        }
         try? await sendText(target
             ? "✅ Subagents ON — the Agent and subagent_manage tools are available from the next message."
-            : "✅ Subagents OFF — the Agent and subagent_manage tools are removed from the next message. Re-enable with /subagents on.")
+            : "✅ Subagents OFF — the Agent and subagent_manage tools are removed from the next message. Re-enable with /subagents on." + cascade)
+    }
+
+    /// `/websubagent` — the Web research subagent switch (WEB_SUBAGENT_PLAN
+    /// §4.8, R1a; default OFF during the field trial). On: the main agent
+    /// loses web_search / web_research_sweep and delegates research to
+    /// Agent(subagent_type=Web); web_fetch gains `refresh`. Off: today's
+    /// tools, byte for byte. Requires /subagents on (O5). Same idle guard as
+    /// /subagents: the tool array is part of the prompt-cache prefix.
+    private func handleWebSubagentCommand(argument: String) async {
+        guard replyAddress != nil else { return }
+        let enabled = AvailableTools.webSubagentEnabled
+        let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""
+        let availability = serperKey.isEmpty ? "Web preset available: no (Serper key missing)" : "Web preset available: yes"
+
+        let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty {
+            try? await sendText("""
+                Web research subagent: \(enabled ? "ON" : "OFF") (default: off). \(availability). Subagents: \(AvailableTools.subagentsEnabled ? "on" : "off").
+                On: web research runs in a resumable Web subagent (Agent, subagent_type=Web, deliverable short|standard|report) on the /websearch backend; the main agent keeps only web_fetch (with refresh).
+                Off: the legacy web_search and web_research_sweep tools. Switch with /websubagent on or /websubagent off — takes effect from the next message.
+                """)
+            return
+        }
+        guard normalized == "on" || normalized == "off" else {
+            try? await sendText("Usage: /websubagent on|off (currently \(enabled ? "on" : "off")).")
+            return
+        }
+        let target = normalized == "on"
+        if target == enabled {
+            try? await sendText("Web research subagent is already \(target ? "on" : "off").")
+            return
+        }
+        if target, !AvailableTools.subagentsEnabled {
+            try? await sendText("Subagents are off, so the main agent would have no web capability. Send /subagents on first, then /websubagent on.")
+            return
+        }
+        guard activeRunId == nil, activeProcessingTask == nil else {
+            try? await sendText("⏳ A turn is running — send /websubagent \(normalized) again when Briglia is idle (or /stop first).")
+            return
+        }
+        UserDefaults.standard.set(target, forKey: "ada.webSubagentEnabled")
+        try? await sendText(target
+            ? "✅ Web research subagent ON — from the next message, web research goes through Agent(subagent_type=Web); web_search and web_research_sweep are removed from the main agent, web_fetch gains refresh. \(availability)."
+            : "✅ Web research subagent OFF — the legacy web_search and web_research_sweep tools are back from the next message. Re-enable with /websubagent on.")
     }
 
     /// Reply with a chronological snapshot of tool activity in the current
@@ -5034,8 +5088,8 @@ class ConversationManager: ObservableObject {
         if name.hasPrefix("mcp__") { return "🔌" }
         switch name {
         case "web_research_sweep": return "🧠🔍"
-        case "web_search": return "🔍"
-        case "web_fetch": return "🌐"
+        case "web_search", "web_query": return "🔍"
+        case "web_fetch", "web_extract": return "🌐"
         case "Agent": return "🤖"
         case "subagent_manage": return "🤖"
         case "generate_image": return "🎨"
@@ -9159,6 +9213,7 @@ class ConversationManager: ObservableObject {
             handle: \(completion.handle.id)
             subagent_type: \(completion.handle.subagentType)
             description: \(completion.handle.description)
+            session_id: \(completion.result.sessionId.isEmpty ? "(none)" : completion.result.sessionId)
             turns_used: \(completion.result.turnsUsed)
             tools_called: \(toolsStr)
             files_touched: \(filesStr)

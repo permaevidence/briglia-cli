@@ -48,7 +48,25 @@ actor SubagentSessionRegistry {
         /// legacy session without it falls back to `lastUsed`, which commit
         /// set at that same event — never the reload time.
         var lastAssistantAt: Date? = nil
+        /// First 80 characters of the first task prompt, whitespace-collapsed
+        /// and marker-neutralized (WEB_SUBAGENT_PLAN §4.7). Optional decode
+        /// keeps every existing file valid.
+        var topic: String? = nil
+        /// Web researcher sessions only (§4.2, §4.5): the evidence ledger
+        /// (one record per retrieval result) and the queries run, persisted
+        /// with the session and restored at resume.
+        var webEvidence: [WebEvidenceRecord]? = nil
+        var webQueriesUsed: [String]? = nil
+        /// Number of report files written for this session (`report_path`
+        /// numbering, §4.3 O6).
+        var webReportCount: Int? = nil
+
+        /// Pool membership (§4.7): Web researcher sessions live in their own
+        /// pool with its own cap and expiry.
+        var kind: Kind { subagentType == SubagentTypes.webResearcherName ? .web : .general }
     }
+
+    enum Kind { case general, web }
 
     private var sessions: [String: Session] = [:]
 
@@ -93,7 +111,7 @@ actor SubagentSessionRegistry {
     func create(subagentType: String, description: String, initialPrompt: String) -> (id: String, session: Session) {
         let id = generateId()
         let userMessage = Message(role: .user, content: initialPrompt, timestamp: HarnessClock.now())
-        let session = Session(
+        var session = Session(
             id: id,
             subagentType: subagentType,
             description: description,
@@ -106,10 +124,19 @@ actor SubagentSessionRegistry {
             toolInteractions: [],
             lastAssistantText: nil
         )
+        session.topic = Self.topic(from: initialPrompt)
         sessions[id] = session
         persist(session)
+        if session.kind == .web { sweepExpiredWebSessions() }
         pruneLRU()
         return (id, session)
+    }
+
+    /// Topic line of a session (§4.7): first 80 characters of the first task
+    /// prompt, whitespace collapsed, marker-neutralized.
+    static func topic(from prompt: String) -> String {
+        let collapsed = prompt.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ")
+        return MarkerNeutralizer.escape(String(collapsed.prefix(80)))
     }
 
     /// Prepare a session for resumption by appending a new user message.
@@ -149,13 +176,35 @@ actor SubagentSessionRegistry {
     /// already the first message and the evicted items are gone. The
     /// summary is only persisted here AFTER it was generated successfully,
     /// so a failed summarization never loses history from disk.
-    func applyCompaction(sessionId: String, messages: [Message], toolInteractions: [ToolInteraction]) {
+    func applyCompaction(sessionId: String, messages: [Message], toolInteractions: [ToolInteraction],
+                         webEvidence: [WebEvidenceRecord]? = nil) {
         guard var session = sessions[sessionId] else { return }
         session.messages = messages
         session.toolInteractions = toolInteractions
+        if let webEvidence { session.webEvidence = webEvidence }
         session.lastUsed = Date()
         sessions[sessionId] = session
         persist(session)
+    }
+
+    /// Persist the Web researcher's ledger and query log mid-run (after each
+    /// tool batch), so a cancelled or crashed run keeps what it retrieved.
+    func updateWebEvidence(sessionId: String, evidence: [WebEvidenceRecord], queries: [String]) {
+        guard var session = sessions[sessionId] else { return }
+        session.webEvidence = evidence
+        session.webQueriesUsed = queries
+        sessions[sessionId] = session
+        persist(session)
+    }
+
+    /// Reserve the next report number of a Web session (§4.3 O6).
+    func nextReportNumber(sessionId: String) -> Int {
+        guard var session = sessions[sessionId] else { return 1 }
+        let next = (session.webReportCount ?? 0) + 1
+        session.webReportCount = next
+        sessions[sessionId] = session
+        persist(session)
+        return next
     }
 
     /// Persist the full canonical interaction list before dispatch/continuation.
@@ -182,9 +231,13 @@ actor SubagentSessionRegistry {
         newToolInteractions: [ToolInteraction],
         finalAssistantText: String?,
         responsesReplay: ResponsesReplayEnvelope? = nil,
-        responsesMode: Bool = false
+        responsesMode: Bool = false,
+        webEvidence: [WebEvidenceRecord]? = nil,
+        webQueriesUsed: [String]? = nil
     ) -> Bool {
         guard var session = sessions[sessionId] else { return false }
+        if let webEvidence { session.webEvidence = webEvidence }
+        if let webQueriesUsed { session.webQueriesUsed = webQueriesUsed }
         session.totalTurns += additionalTurns
         session.totalSpendUSD += additionalSpend
         session.lastUsed = Date()
@@ -216,7 +269,9 @@ actor SubagentSessionRegistry {
         }
 
         sessions[sessionId] = session
-        return persist(session)
+        let persisted = persist(session)
+        if session.kind == .web { sweepExpiredWebSessions() }
+        return persisted
     }
 
     // MARK: - Query
@@ -226,8 +281,9 @@ actor SubagentSessionRegistry {
     }
 
     /// Paginated listing sorted by `lastUsed` descending (most recent first).
-    func list(limit: Int = 20, offset: Int = 0) -> (sessions: [Session], total: Int) {
-        let sorted = sessions.values.sorted { $0.lastUsed > $1.lastUsed }
+    /// `kind` nil = every session (the legacy single-pool listing).
+    func list(limit: Int = 20, offset: Int = 0, kind: Kind? = nil) -> (sessions: [Session], total: Int) {
+        let sorted = sessions.values.filter { kind == nil || $0.kind == kind! }.sorted { $0.lastUsed > $1.lastUsed }
         let total = sorted.count
         let page = Array(sorted.dropFirst(offset).prefix(limit))
         return (page, total)
@@ -263,24 +319,53 @@ actor SubagentSessionRegistry {
     /// frequently-resumed sessions survive even if they were created long ago.
     static let maxSessions = 300
 
+    /// The Web researcher pool (WEB_SUBAGENT_PLAN §4.7, O3): its own cap and
+    /// a 14-day expiry, so web sessions never crowd out or evict the
+    /// general pool. Pinned (watcher-bound) sessions are never Web —
+    /// asserted in `pruneLRU`, not assumed.
+    static let maxWebSessions = 40
+    static let webSessionTTL: TimeInterval = 14 * 24 * 60 * 60
+
     /// Evict UNPINNED sessions with the oldest `lastUsed` timestamps until
-    /// the unpinned pool is at or below `maxSessions`. Called after create()
-    /// and after the initial disk hydration. Pinned (watcher-bound)
+    /// each unpinned pool is at or below its cap (`maxSessions` for the
+    /// general pool, `maxWebSessions` for the web pool). Called after
+    /// create() and after the initial disk hydration. Pinned (watcher-bound)
     /// sessions bypass the budget entirely — they are neither candidates
     /// nor counted, so 50 pinned lanes still leave the full 300-session
     /// pool for ordinary sessions.
     private func pruneLRU() {
-        let unpinned = sessions.values.filter { !pinnedSessionIds.contains($0.id) }
-        guard unpinned.count > Self.maxSessions else { return }
-        let excess = unpinned.count - Self.maxSessions
-        var evicted = 0
-        for session in unpinned.sorted(by: { $0.lastUsed < $1.lastUsed }).prefix(excess) {
+        for session in sessions.values where session.kind == .web && pinnedSessionIds.contains(session.id) {
+            print("[SubagentSessionRegistry] WARNING: pinned session \(session.id) is a Web session; treating it as unpinned for the web pool.")
+        }
+        for kind in [Kind.general, Kind.web] {
+            let cap = kind == .web ? Self.maxWebSessions : Self.maxSessions
+            let unpinned = sessions.values.filter { $0.kind == kind && (kind == .web || !pinnedSessionIds.contains($0.id)) }
+            guard unpinned.count > cap else { continue }
+            let excess = unpinned.count - cap
+            var evicted = 0
+            for session in unpinned.sorted(by: { $0.lastUsed < $1.lastUsed }).prefix(excess) {
+                sessions.removeValue(forKey: session.id)
+                deletePersisted(session.id)
+                evicted += 1
+            }
+            if evicted > 0 {
+                print("[SubagentSessionRegistry] Evicted \(evicted) LRU \(kind == .web ? "web " : "")session(s); retained \(sessions.count).")
+            }
+        }
+    }
+
+    /// Delete Web sessions whose `lastUsed` is older than `webSessionTTL`
+    /// (the answers live in the main conversation). Runs at hydration and
+    /// after each Web create/commit.
+    private func sweepExpiredWebSessions() {
+        let cutoff = Date().addingTimeInterval(-Self.webSessionTTL)
+        let expired = sessions.values.filter { $0.kind == .web && $0.lastUsed < cutoff }
+        for session in expired {
             sessions.removeValue(forKey: session.id)
             deletePersisted(session.id)
-            evicted += 1
         }
-        if evicted > 0 {
-            print("[SubagentSessionRegistry] Evicted \(evicted) LRU session(s); retained \(sessions.count).")
+        if !expired.isEmpty {
+            print("[SubagentSessionRegistry] Expired \(expired.count) web session(s) older than 14 days.")
         }
     }
 
@@ -363,6 +448,7 @@ actor SubagentSessionRegistry {
         if loaded > 0 {
             print("[SubagentSessionRegistry] Restored \(loaded) session(s) from disk.")
         }
+        sweepExpiredWebSessions()
         pruneLRU()
     }
 

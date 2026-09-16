@@ -28,6 +28,26 @@ enum Endpoints {
     static let openaiResponses = URL(string: "https://api.openai.com/v1/responses")!
     static let serperSearch   = URL(string: "https://google.serper.dev/search")!
     static let jinaReaderBase = "https://r.jina.ai/"
+
+    /// Development-build seams for hermetic selftests (same pattern as the
+    /// affinity `BRIGLIA_DEV_AFFINITY_*` bases): release builds ignore the
+    /// environment and always use the production hosts.
+    static var serperSearchURL: URL {
+        if adaCLIVersion.hasSuffix("-dev"), let raw = ProcessInfo.processInfo.environment["BRIGLIA_DEV_SERPER_BASE"],
+           !raw.isEmpty, let url = URL(string: raw + "/search") { return url }
+        return serperSearch
+    }
+    static var jinaReaderBaseURL: String {
+        if adaCLIVersion.hasSuffix("-dev"), let raw = ProcessInfo.processInfo.environment["BRIGLIA_DEV_JINA_READER_BASE"],
+           !raw.isEmpty { return raw.hasSuffix("/") ? raw : raw + "/" }
+        return jinaReaderBase
+    }
+    /// The Web researcher's OpenAI Responses base (`webExecutionContext`).
+    static var webOpenAIBase: String {
+        if adaCLIVersion.hasSuffix("-dev"), let raw = ProcessInfo.processInfo.environment["BRIGLIA_DEV_WEB_OPENAI_BASE"],
+           !raw.isEmpty { return raw }
+        return "https://api.openai.com/v1"
+    }
 }
 
 // MARK: - Web Search Backend
@@ -431,6 +451,11 @@ struct JinaReaderResult: Codable {
     let content: String
     let links: [ExtractedLink]
     let images: [ExtractedImage]
+    /// Cache/source-time metadata, present only while the Web switch is on
+    /// (WEB_SUBAGENT_PLAN §4.2, O12); nil = legacy result shape, byte for byte.
+    var fetched_at: String? = nil
+    var served_from_cache: Bool? = nil
+    var previously_fetched: String? = nil
 
     func asJSON() -> String {
         let encoder = JSONEncoder()
@@ -507,10 +532,17 @@ actor WebOrchestrator {
         let title: String?
         let markdown: String
         let cachedAt: Date
+        /// Harness-clock time of the reader request (reported as fetched_at;
+        /// `cachedAt` stays the wall clock the TTL is measured against).
+        var fetchedAt: Date = Date()
     }
     private struct CachedExcerpt {
         let payload: JinaReaderResult
         let cachedAt: Date
+        /// When the SOURCE bytes were fetched (the markdown tier's time), so
+        /// a later excerpt-cache hit reports the original fetch time
+        /// (WEB_SUBAGENT_PLAN §4.2, O12).
+        var fetchedAt: Date = Date()
     }
     private let webFetchCacheTTL: TimeInterval = 15 * 60
     private let webFetchCacheCapacity = 64
@@ -557,6 +589,59 @@ actor WebOrchestrator {
     func executeDeepResearchForTool(query: String) async throws -> WebSearchResult {
         try await executeForTool(query: query, mode: .deepResearch)
     }
+
+    // MARK: - Web researcher subagent tools (WEB_SUBAGENT_PLAN §4.2, R1a)
+    //
+    // The loop's `search` / `fetch_and_extract` network phases as first-class
+    // entry points for the `web_query` / `web_extract` tools of the Web
+    // subagent. Same code, same per-call caps and payload bounds; the
+    // evidence bookkeeping (no hidden results, fetched_at) is the caller's.
+
+    struct WebQueryOutcome {
+        let context: WebContext
+        let failures: [String]
+        let dropped: Int
+        let queriesRun: [String]
+        /// Whether usable evidence came back (`gotResults`).
+        var gotResults: Bool { !context.results.isEmpty || context.answerBox != nil || context.knowledgeGraph != nil }
+    }
+
+    struct WebExtractOutcome {
+        let docs: [ScrapedDoc]
+        let failures: [String]
+        let dropped: Int
+        /// Time of the reader requests of this call (one value for the call).
+        let fetchedAt: Date
+        /// Excerpt-extraction spend inside the tool.
+        let spendUSD: Double
+    }
+
+    func executeWebQuery(queries: [String]) async throws -> WebQueryOutcome {
+        let (queriesToRun, dropped) = WebAgentSupport.capped(queries, to: WebAgentTools.maxQueriesPerCall)
+        let executionID = UUID()
+        executionStates[executionID] = ExecutionState()
+        defer { executionStates.removeValue(forKey: executionID) }
+        let outcome = try await executeSearch(queries: queriesToRun, atStep: 1, executionID: executionID)
+        return WebQueryOutcome(context: outcome.context, failures: outcome.failures, dropped: dropped, queriesRun: queriesToRun)
+    }
+
+    func executeWebExtract(requests: [ScrapeRequest], mode: ResearchMode) async throws -> WebExtractOutcome {
+        let (requestsToRun, dropped) = WebAgentSupport.capped(requests, to: WebAgentTools.maxFetchRequestsPerCall)
+        let executionID = UUID()
+        executionStates[executionID] = ExecutionState()
+        defer { executionStates.removeValue(forKey: executionID) }
+        let fetchedAt = HarnessClock.now()
+        let outcome = try await executeScrape(requests: requestsToRun, atStep: 1, mode: mode, executionID: executionID)
+        let spend = executionStates[executionID]?.spendUSD ?? 0
+        return WebExtractOutcome(docs: outcome.docs, failures: outcome.failures, dropped: dropped, fetchedAt: fetchedAt, spendUSD: spend)
+    }
+
+    /// Per-fetch excerpt budget of one `web_extract` call (the loop's bound).
+    static var webExtractPayloadBudget: Int { fetchPayloadExcerptBudget }
+
+    /// Normalized form of a URL for the evidence ledger (the same
+    /// normalization the search dedup uses).
+    func normalizedURL(_ url: String) -> String { normalize(url) }
 
     private func executeForTool(query: String, mode: ResearchMode) async throws -> WebSearchResult {
         let executionID = UUID()
@@ -1563,7 +1648,7 @@ actor WebOrchestrator {
         let req = SerperSearchReq(q: q, num: perQueryDepth)
         let data: Data
         do {
-            data = try await httpJSONPostWithRetry(url: Endpoints.serperSearch, body: req, headers: ["X-API-KEY": serperApiKey], timeout: 60, label: "serper search")
+            data = try await httpJSONPostWithRetry(url: Endpoints.serperSearchURL, body: req, headers: ["X-API-KEY": serperApiKey], timeout: 60, label: "serper search")
         } catch {
             await ToolServiceHealth.shared.recordFailure(.webSearch, error: error.localizedDescription)
             throw error
@@ -1593,7 +1678,7 @@ actor WebOrchestrator {
     
     private func fetchWithJinaReader(originalURL: String, includeImageCaptions: Bool = false) async throws -> (title: String?, content: String) {
         let target = (originalURL.hasPrefix("http://") || originalURL.hasPrefix("https://")) ? originalURL : "https://\(originalURL)"
-        guard let proxyURL = URL(string: Endpoints.jinaReaderBase + target) else { throw URLError(.badURL) }
+        guard let proxyURL = URL(string: Endpoints.jinaReaderBaseURL + target) else { throw URLError(.badURL) }
         var req = URLRequest(url: proxyURL)
         req.httpMethod = "GET"
         req.timeoutInterval = 120
@@ -1637,6 +1722,17 @@ actor WebOrchestrator {
     /// compressed in one call; larger pages are chunked with overlap and judged
     /// in parallel, so the tail of a long page is read rather than cut.
     func readUrlContent(url: String, prompt: String, sectionOffset: Int = 0) async throws -> JinaReaderResult {
+        try await readUrlContentWithMetadata(url: url, prompt: prompt, sectionOffset: sectionOffset, refresh: false).result
+    }
+
+    /// `readUrlContent` plus the cache/source-time metadata of the Web
+    /// switch (WEB_SUBAGENT_PLAN §4.2, O12): `fetchedAt` is when the reader
+    /// obtained the source bytes (the ORIGINAL time on a cache hit),
+    /// `servedFromCache` whether either cache tier answered. `refresh`
+    /// evicts both tiers for the URL first and makes a new reader request.
+    func readUrlContentWithMetadata(url: String, prompt: String, sectionOffset: Int = 0, refresh: Bool = false)
+        async throws -> (result: JinaReaderResult, fetchedAt: Date, servedFromCache: Bool)
+    {
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPrompt.isEmpty else {
             throw NSError(domain: "WebOrchestrator", code: 1, userInfo: [NSLocalizedDescriptionKey: "web_fetch requires a non-empty prompt describing what to extract from the page."])
@@ -1649,27 +1745,40 @@ actor WebOrchestrator {
 
         let normalizedURL = normalize(url)
 
+        if refresh {
+            markdownCache.removeValue(forKey: normalizedURL)
+            for key in excerptCache.keys where key.hasPrefix(normalizedURL + "|") {
+                excerptCache.removeValue(forKey: key)
+            }
+            webLog("[WebOrchestrator] web_fetch refresh: caches evicted url=\(normalizedURL)")
+        }
+
         // Tier 2 cache: exact (url, offset, prompt) hit.
         prunedExcerptCache()
         let excerptKey = "\(normalizedURL)|s\(sectionOffset)|\(trimmedPrompt)"
         if let hit = excerptCache[excerptKey], Date().timeIntervalSince(hit.cachedAt) < webFetchCacheTTL {
             webLog("[WebOrchestrator] web_fetch excerpt cache hit url=\(normalizedURL)")
-            return hit.payload
+            return (hit.payload, hit.fetchedAt, true)
         }
 
         // Tier 1 cache: url -> raw Jina markdown (reused across different prompts).
         prunedMarkdownCache()
         let rawTitle: String?
         let rawMarkdown: String
+        let fetchedAt: Date
+        var servedFromCache = false
         if let md = markdownCache[normalizedURL], Date().timeIntervalSince(md.cachedAt) < webFetchCacheTTL {
             rawTitle = md.title
             rawMarkdown = md.markdown
+            fetchedAt = md.fetchedAt
+            servedFromCache = true
             webLog("[WebOrchestrator] web_fetch markdown cache hit url=\(normalizedURL)")
         } else {
+            fetchedAt = HarnessClock.now()
             let (title, content) = try await fetchWithJinaReader(originalURL: url, includeImageCaptions: true)
             rawTitle = title
             rawMarkdown = content
-            markdownCache[normalizedURL] = CachedMarkdown(title: title, markdown: content, cachedAt: Date())
+            markdownCache[normalizedURL] = CachedMarkdown(title: title, markdown: content, cachedAt: Date(), fetchedAt: fetchedAt)
         }
 
         let links = extractLinksFromMarkdown(rawMarkdown)
@@ -1721,8 +1830,8 @@ actor WebOrchestrator {
             images: images
         )
 
-        excerptCache[excerptKey] = CachedExcerpt(payload: result, cachedAt: Date())
-        return result
+        excerptCache[excerptKey] = CachedExcerpt(payload: result, cachedAt: Date(), fetchedAt: fetchedAt)
+        return (result, fetchedAt, servedFromCache)
     }
 
     /// Small-model compression of a page's markdown against the user's prompt.
@@ -2290,6 +2399,9 @@ actor WebOrchestrator {
     /// fit), accepts reasoning_effort, accurate on extraction — but ~5-10x
     /// slower than Luna (11-27s per large call), the price of the headroom.
     private static let opencodeModel = "mimo-v2.5"
+    /// The same pin, for the Web researcher's OpenCode context
+    /// (`OpenRouterService.webExecutionContext`).
+    static var opencodeResearchModel: String { opencodeModel }
 
     private func resolvedModel(for backend: WebSearchBackend, requested: String) -> String {
         switch backend {

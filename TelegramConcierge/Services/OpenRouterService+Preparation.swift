@@ -10,13 +10,25 @@ extension OpenRouterService {
         chunkSummaries: [ArchivedSummaryItem]?, totalChunkCount: Int,
         turnStartDate: Date?, finalResponseInstruction: String?,
         tailSystemMessage: String?, tailUserMessage: String?,
-        deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]?
+        deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]?,
+        promptStyle: SubagentPromptStyle = .messaging
     ) -> PreparedConversation {
         // Add system message with date context (date-only for prompt cache stability)
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "EEEE, MMMM d, yyyy"
         let currentDate = dateFormatter.string(from: turnStartDate ?? Date())
         let timezone = TimeZone.current.identifier
+
+        // The Web researcher's prompt is assembled separately (§4.3); every
+        // other caller continues below, byte for byte.
+        if promptStyle == .research {
+            return PreparedConversation(
+                systemPrompt: researchSystemPrompt(currentDate: currentDate, timezone: timezone,
+                                                  finalResponseInstruction: finalResponseInstruction),
+                messages: messages, imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
+                tools: tools, toolResultMessages: toolResultMessages,
+                tailSystemMessage: tailSystemMessage, tailUserMessage: tailUserMessage)
+        }
 
         // Load persona settings
         let assistantName = KeychainHelper.load(key: KeychainHelper.assistantNameKey)

@@ -23,6 +23,9 @@ actor SubagentRunner {
         let taskPrompt: String
         let modelOverride: String?        // "cheap-vision"/"cheap-text"/"inherit"/nil (lane names, see SubagentModelLanes)
         let runInBackground: Bool         // Informational; actual routing happens in ToolExecutor.executeAgent
+        /// Web preset only (WEB_SUBAGENT_PLAN §4.3), validated by ToolExecutor;
+        /// rendered into the task message, never into the cached prefix.
+        var deliverable: WebDeliverable? = nil
     }
 
     struct RunResult {
@@ -44,6 +47,17 @@ actor SubagentRunner {
         /// whose frontmatter lane is unconfigured degrades to inherit (full
         /// parent-model price), and this field is where that shows up.
         var modelUsed: String? = nil
+        /// Web researcher runs only (WEB_SUBAGENT_PLAN §4.5): mechanical
+        /// retrieval-activity label, the audit trail of what was retrieved,
+        /// the in-context count behind a `prior_sources_only` label, the
+        /// report file (deliverable=report) and a loud note when the run
+        /// could not use the web backend.
+        var evidenceProvenance: WebEvidenceProvenance? = nil
+        var queriesUsed: [String]? = nil
+        var sourcesConsulted: [(url: String, retrievedAt: Date)]? = nil
+        var priorExtracts: (inContext: Int, total: Int)? = nil
+        var reportPath: String? = nil
+        var note: String? = nil
 
         func asJSON() -> String {
             var obj: [String: Any] = [
@@ -57,6 +71,16 @@ actor SubagentRunner {
             ]
             if let error { obj["error"] = error }
             if let modelUsed { obj["model_used"] = modelUsed }
+            if let evidenceProvenance { obj["evidence_provenance"] = evidenceProvenance.rawValue }
+            if let queriesUsed { obj["queries_used"] = queriesUsed }
+            if let sourcesConsulted {
+                obj["sources_consulted"] = sourcesConsulted.map { ["url": $0.url, "retrieved_at": ToolExecutor.webTimestamp($0.retrievedAt)] }
+            }
+            if let priorExtracts, evidenceProvenance == .priorSourcesOnly {
+                obj["prior_extracts_in_context"] = "\(priorExtracts.inContext) of \(priorExtracts.total)"
+            }
+            if let reportPath { obj["report_path"] = reportPath }
+            if let note { obj["note"] = note }
             if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .withoutEscapingSlashes]),
                let str = String(data: data, encoding: .utf8) {
                 return str
@@ -65,11 +89,49 @@ actor SubagentRunner {
         }
     }
 
+    /// The native (non-MCP, pre-bash-mapping) tool inventory of a subagent
+    /// type, enforced here for every executor (matrix §4.6.1): pure, so the
+    /// Web selftest asserts every reachable row directly.
+    static func nativeToolInventory(parentTools: [ToolDefinition], type subagentType: SubagentType) -> [ToolDefinition] {
+        if subagentType.isWebResearcher {
+            // The Web researcher owns the pipeline's tools directly and
+            // nothing else (WEB_SUBAGENT_PLAN §4.1): no bash, no files, no
+            // MCP, no Agent. `web_fetch` with `refresh`.
+            return [AvailableTools.webQuery, AvailableTools.webExtract, AvailableTools.webFetchWithRefresh]
+        }
+        var inventory = parentTools
+        // R1a, switch on: the legacy research tools left the main list
+        // (research goes through Agent(Web)) but ordinary subagents KEEP
+        // them (matrix §4.6.1, R1a) — re-added here, ahead of the list as
+        // before, whenever the parent surface had web search (web_fetch
+        // present). Switch off: the list is the parent's, byte for byte.
+        if AvailableTools.webSubagentActive,
+           inventory.contains(where: { $0.function.name == "web_fetch" }),
+           !inventory.contains(where: { $0.function.name == "web_search" }) {
+            inventory = AvailableTools.legacyResearchTools + inventory
+        }
+        // mid_turn_message_user is main-agent-only: subagents have no channel
+        // to the user — anything user-relevant belongs in their final result.
+        var filtered = inventory.filter { $0.function.name != "Agent" && $0.function.name != "mid_turn_message_user" }
+        if let whitelist = subagentType.allowedToolNames {
+            filtered = filtered.filter { whitelist.contains($0.function.name) }
+        }
+        return filtered
+    }
+
     /// Hard cap on the subagent's final message returned to the parent. Claude Code
     /// has no documented cap; 32 KB covers its typical envelope (long Plans,
     /// comprehensive general-purpose analyses) while retaining a runaway-protection
     /// backstop. Truncation adds a `[...truncated]` marker on a UTF-8 boundary.
     private static let finalMessageByteCap = 32 * 1024
+    /// Web researcher, deliverable=report (WEB_SUBAGENT_PLAN §4.3, O6):
+    /// parity with the old uncapped sweep bounded by 32k output tokens; the
+    /// report is also written to disk (`report_path`).
+    private static let reportFinalMessageByteCap = 128 * 1024
+
+    /// One tail nudge when a Web run's first final arrives without any
+    /// retrieval (§4.5). A second such final is accepted and labelled.
+    static let webZeroRetrievalNudge = "[NO RETRIEVAL YET] No retrieval has been done in this run. Run at least one web_query, or state explicitly that the answer relies on evidence already in this session and which parts."
 
     /// Entry point. Owns the per-session FIFO lock's whole lifecycle so the
     /// acquire/release pairing is structural, not documentary: resumed sessions
@@ -146,10 +208,7 @@ actor SubagentRunner {
         // 2. Build filtered tool list (rebuilt fresh each run so new MCPs are picked up).
         // mid_turn_message_user is main-agent-only: subagents have no channel to
         // the user — anything user-relevant belongs in their final result.
-        var filteredTools = parentTools.filter { $0.function.name != "Agent" && $0.function.name != "mid_turn_message_user" }
-        if let whitelist = subagentType.allowedToolNames {
-            filteredTools = filteredTools.filter { whitelist.contains($0.function.name) }
-        }
+        var filteredTools = Self.nativeToolInventory(parentTools: parentTools, type: subagentType)
         // Bash schema and executor capability must agree
         // (BASH_V2_SCHEMA_CLEANUP_PLAN §3.3). Subagents share the managed
         // lifecycle vocabulary but never the main conversation's lanes:
@@ -201,24 +260,50 @@ actor SubagentRunner {
         let isNew: Bool
         var messagesForLLM: [Message]
         var priorToolInteractions: [ToolInteraction]
+        // The Web researcher's deliverable goes on the task message as a
+        // trailing line (§4.3): a resume may change it, the previous one
+        // stays in history as an ordinary line, and the cached prefix is
+        // untouched.
+        let webDeliverable: WebDeliverable? = subagentType.isWebResearcher ? (invocation.deliverable ?? .standard) : nil
+        let taskPrompt = webDeliverable.map { invocation.taskPrompt + "\n\n" + $0.taskLine } ?? invocation.taskPrompt
+        var webLedger: WebEvidenceLedger? = nil
 
-        if let sid = sessionId, let session = await registry.prepareResume(sessionId: sid, continuationPrompt: invocation.taskPrompt) {
+        if let sid = sessionId, let session = await registry.prepareResume(sessionId: sid, continuationPrompt: taskPrompt) {
             resolvedSessionId = sid
             isNew = false
             messagesForLLM = session.messages
             priorToolInteractions = session.toolInteractions
+            if let webDeliverable {
+                webLedger = WebEvidenceLedger(records: session.webEvidence ?? [], queries: session.webQueriesUsed ?? [], deliverable: webDeliverable)
+            }
         } else {
             let (newId, session) = await registry.create(
                 subagentType: invocation.subagentType,
                 description: invocation.description,
-                initialPrompt: invocation.taskPrompt
+                initialPrompt: taskPrompt
             )
             resolvedSessionId = newId
             isNew = true
             messagesForLLM = session.messages
             priorToolInteractions = session.toolInteractions
+            if let webDeliverable { webLedger = WebEvidenceLedger(deliverable: webDeliverable) }
         }
-        let syntheticUser = messagesForLLM.last ?? Message(role: .user, content: invocation.taskPrompt, timestamp: HarnessClock.now())
+        let syntheticUser = messagesForLLM.last ?? Message(role: .user, content: taskPrompt, timestamp: HarnessClock.now())
+        // The child executor's web tools consult and extend the ledger; the
+        // runner persists it and applies compaction evictions (§4.2).
+        await toolExecutor.setWebEvidenceLedger(webLedger)
+        /// Tool-call ids still present in a (compacted) context, for the
+        /// ledger's in-context flags: only a COMMITTED compaction flips them.
+        func keptToolCallIds(messages: [Message], interactions: [ToolInteraction]) -> Set<String> {
+            var ids = Set<String>()
+            for message in messages { for round in message.toolInteractions { for result in round.results { ids.insert(result.toolCallId) } } }
+            for round in interactions { for result in round.results { ids.insert(result.toolCallId) } }
+            return ids
+        }
+        func persistWebEvidence() async {
+            guard let webLedger else { return }
+            await registry.updateWebEvidence(sessionId: resolvedSessionId, evidence: webLedger.allRecords, queries: webLedger.queriesUsed)
+        }
 
         // 4. Pick the model. Resolution order (highest precedence first):
         //    a. Per-call Agent-tool LANE hint ("cheap-vision"/"cheap-text").
@@ -305,12 +390,37 @@ actor SubagentRunner {
         var compactionAttempts = CompactionAttempts()
         var needsEmergencyContinuationNote = false
 
+        // Web researcher provider context (WEB_SUBAGENT_PLAN §4.4): resolved
+        // ONCE from the configured web research backend and carried through
+        // every request of the run. Hint rule: `model` omitted → the web
+        // backend; `inherit` → the main profile (today's semantics, chosen
+        // deliberately by the caller); a cheap lane → that lane on the main
+        // profile. An unusable backend (no key) falls back to the main
+        // profile LOUDLY: a log line and a `note` in the result.
+        var webExecution: ProviderExecutionContext? = nil
+        var webBackendNote: String? = nil
+        let explicitInherit = invocation.modelOverride?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "inherit"
+        if subagentType.isWebResearcher, perCallLane == nil, !explicitInherit {
+            do {
+                webExecution = try await openRouterService.webExecutionContext(lane: .subagent(resolvedSessionId))
+            } catch {
+                let reason = (error as? OpenRouterService.WebBackendUnavailable)?.description ?? error.localizedDescription
+                print("[SubagentRunner] Web researcher: \(reason); running on the main model instead.")
+                webBackendNote = "web backend unavailable (\(reason)), ran on main model"
+            }
+        }
+        let webBackendLabel = WebSearchBackend.active.rawValue
+
         // Eager compaction on resume. Sessions normally stay under the budget
         let snapshot = await openRouterService.executionContext(modelOverride: effectiveModelOverride,
             providerOverride: effectiveProviderOverride, reasoningEffortOverride: effectiveReasoningOverride,
             textOnlyOverride: effectiveTextOnlyOverride, lane: .subagent(resolvedSessionId))
-        let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
-        defer { responsesExecution?.responsesTurn.close() }
+        // The context every request of this run carries: the Web context
+        // when resolved, else the main profile's Responses snapshot (chat
+        // completions pass nil and resolve per request as before).
+        let runExecution: ProviderExecutionContext? = webExecution ?? (snapshot.wireProtocol == .responses ? snapshot : nil)
+        let responsesExecution: ProviderExecutionContext? = runExecution?.wireProtocol == .responses ? runExecution : nil
+        defer { runExecution?.responsesTurn.close() }
         if responsesExecution != nil,
            !(await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: priorToolInteractions)) {
             return RunResult(sessionId: resolvedSessionId, isNewSession: isNew, finalMessage: "",
@@ -334,15 +444,17 @@ actor SubagentRunner {
                providerOverride: effectiveProviderOverride,
                reasoningEffortOverride: effectiveReasoningOverride,
                textOnlyOverride: effectiveTextOnlyOverride,
-           execution: responsesExecution, lane: .subagent(resolvedSessionId)
+           execution: runExecution, lane: .subagent(resolvedSessionId)
 ) {
             messagesForLLM = compacted.messages
             priorToolInteractions = compacted.interactions
             compactionsUsed += 1
+            webLedger?.markEvicted(keeping: keptToolCallIds(messages: compacted.messages, interactions: compacted.interactions))
             await registry.applyCompaction(
                 sessionId: resolvedSessionId,
                 messages: compacted.messages,
-                toolInteractions: compacted.interactions
+                toolInteractions: compacted.interactions,
+                webEvidence: webLedger?.allRecords
             )
             print("[SubagentRunner] Compacted oversized session \(resolvedSessionId) at resume → ~\(compacted.estimatedTokens) tokens")
         }
@@ -375,6 +487,10 @@ actor SubagentRunner {
             tail.map { runClockNote + "\n\n" + $0 } ?? runClockNote
         }
         var lastPromptTokens: Int? = nil
+        // Web researcher (§4.5): one tail nudge when the first final arrives
+        // without any retrieval in this run; the second is accepted.
+        var webNudgePending = false
+        var webNudgeUsed = false
 
         loop: for round in 1...maxTurns {
             turnsUsed = round
@@ -398,17 +514,19 @@ actor SubagentRunner {
                        providerOverride: effectiveProviderOverride,
                        reasoningEffortOverride: effectiveReasoningOverride,
                        textOnlyOverride: effectiveTextOnlyOverride,
-                   execution: responsesExecution, lane: .subagent(resolvedSessionId)
+                   execution: runExecution, lane: .subagent(resolvedSessionId)
 ) {
                     messagesForLLM = compacted.messages
                     toolInteractions = compacted.interactions
                     priorToolInteractions = compacted.interactions  // commitRun appends relative to this baseline
                     lastPromptTokens = compacted.estimatedTokens
                     compactionsUsed += 1
+                    webLedger?.markEvicted(keeping: keptToolCallIds(messages: compacted.messages, interactions: compacted.interactions))
                     await registry.applyCompaction(
                         sessionId: resolvedSessionId,
                         messages: compacted.messages,
-                        toolInteractions: compacted.interactions
+                        toolInteractions: compacted.interactions,
+                        webEvidence: webLedger?.allRecords
                     )
                     print("[SubagentRunner] Compacted context mid-run (\(compactionsUsed)): ~\(pt) → ~\(compacted.estimatedTokens) tokens")
                 }
@@ -432,22 +550,34 @@ actor SubagentRunner {
                     currentUserMessageId: syntheticUser.id,
                     turnStartDate: turnStartDate,
                     finalResponseInstruction: subagentType.systemPromptSuffix,
+                    promptStyle: subagentType.promptStyle,
                     tailSystemMessage: withRunClock(forceFinish
                         ? "[CONTEXT LIMIT] This turn has reached the maximum allowed context window and automatic history compaction is unavailable or exhausted. Do NOT call any more tools. Provide your final answer NOW — summarize everything you accomplished, what files were touched, what you discovered, and what remains to be done."
-                        : (needsEmergencyContinuationNote ? Self.emergencyContinuationNote : nil)),
+                        : (needsEmergencyContinuationNote ? Self.emergencyContinuationNote : (webNudgePending ? Self.webZeroRetrievalNudge : nil))),
                     modelOverride: effectiveModelOverride,
                     providerOverride: effectiveProviderOverride,
                     reasoningEffortOverride: effectiveReasoningOverride,
                     textOnlyOverride: effectiveTextOnlyOverride,
-                    execution: responsesExecution, lane: .subagent(resolvedSessionId)
+                    execution: runExecution, lane: .subagent(resolvedSessionId)
                 )
                 needsEmergencyContinuationNote = false
+                webNudgePending = false
                 markProgress()  // LLM responded — subagent is alive
 
                 switch response {
                 case .text(let content, _, _, let promptTk, _, let spend, let native):
                     if let spend { totalSpendUSD += spend }
                     if let pt = promptTk { lastPromptTokens = pt }
+                    // Web researcher: a final with no retrieval in this run gets
+                    // ONE nudge (the answer is not kept; the model answers again
+                    // with the nudge in the tail). A second such final is
+                    // accepted and labelled by provenance (§4.5).
+                    if let webLedger, !forceFinish, !webNudgeUsed, webLedger.runActivity.attempted == 0, round < maxTurns {
+                        webNudgeUsed = true
+                        webNudgePending = true
+                        print("[SubagentRunner] Web researcher answered without any retrieval; nudging once.")
+                        continue loop
+                    }
                     finalText = content
                     finalReplay = native?.envelope
                     break loop
@@ -481,6 +611,7 @@ actor SubagentRunner {
                                 currentUserMessageId: syntheticUser.id,
                                 turnStartDate: turnStartDate,
                                 finalResponseInstruction: subagentType.systemPromptSuffix,
+                    promptStyle: subagentType.promptStyle,
                                 tailSystemMessage: withRunClock("""
                                     [CONTEXT LIMIT SUMMARY RETRY \(attempt)/4] This turn has reached the maximum allowed context window. \
                                     The tool call(s) you requested were not executed. Do NOT call any more tools. \
@@ -491,7 +622,7 @@ actor SubagentRunner {
                                 providerOverride: effectiveProviderOverride,
                                 reasoningEffortOverride: effectiveReasoningOverride,
                                 textOnlyOverride: effectiveTextOnlyOverride,
-                                execution: responsesExecution, lane: .subagent(resolvedSessionId)
+                                execution: runExecution, lane: .subagent(resolvedSessionId)
                             )
                             markProgress()
 
@@ -556,6 +687,7 @@ actor SubagentRunner {
                     }
                     toolResults.append(contentsOf: blockedResults)
                     markProgress()  // Tools completed — subagent is alive
+                    await persistWebEvidence()
 
                     // Accumulate any tool-internal spend (e.g. web_search nested API calls).
                     for r in toolResults { if let s = r.spendUSD { totalSpendUSD += s } }
@@ -608,7 +740,7 @@ actor SubagentRunner {
                                    providerOverride: effectiveProviderOverride,
                                    reasoningEffortOverride: effectiveReasoningOverride,
                                    textOnlyOverride: effectiveTextOnlyOverride,
-                               execution: responsesExecution, lane: .subagent(resolvedSessionId)
+                               execution: runExecution, lane: .subagent(resolvedSessionId)
 ),
                                compacted.estimatedTokens < turnTokenBudget {
                                 messagesForLLM = compacted.messages
@@ -616,10 +748,12 @@ actor SubagentRunner {
                                 priorToolInteractions = compacted.interactions
                                 lastPromptTokens = compacted.estimatedTokens
                                 compactionsUsed += 1
+                                webLedger?.markEvicted(keeping: keptToolCallIds(messages: compacted.messages, interactions: compacted.interactions))
                                 await registry.applyCompaction(
                                     sessionId: resolvedSessionId,
                                     messages: compacted.messages,
-                                    toolInteractions: compacted.interactions
+                                    toolInteractions: compacted.interactions,
+                                    webEvidence: webLedger?.allRecords
                                 )
                                 print("[SubagentRunner] Compacted context after tool batch (\(compactionsUsed)): ~\(projected) → ~\(compacted.estimatedTokens) tokens")
                                 compactedNow = true
@@ -647,15 +781,17 @@ actor SubagentRunner {
                                        imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
                                        modelOverride: effectiveModelOverride, providerOverride: effectiveProviderOverride,
                                        reasoningEffortOverride: effectiveReasoningOverride, textOnlyOverride: effectiveTextOnlyOverride,
-                                       execution: responsesExecution, lane: .subagent(resolvedSessionId)),
+                                       execution: runExecution, lane: .subagent(resolvedSessionId)),
                                    compacted.estimatedTokens + requestOverhead < turnTokenBudget {
                                     messagesForLLM = compacted.messages
                                     toolInteractions = compacted.interactions
                                     priorToolInteractions = compacted.interactions
                                     lastPromptTokens = compacted.estimatedTokens + requestOverhead
                                     compactionsUsed += 1
+                                    webLedger?.markEvicted(keeping: keptToolCallIds(messages: compacted.messages, interactions: compacted.interactions))
                                     await registry.applyCompaction(sessionId: resolvedSessionId,
-                                        messages: compacted.messages, toolInteractions: compacted.interactions)
+                                        messages: compacted.messages, toolInteractions: compacted.interactions,
+                                        webEvidence: webLedger?.allRecords)
                                     if responsesExecution != nil,
                                        !(await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: toolInteractions)) {
                                         throw ResponsesFailure.failed("cannot persist oversized-batch compaction before continuation")
@@ -720,6 +856,7 @@ actor SubagentRunner {
                         currentUserMessageId: syntheticUser.id,
                         turnStartDate: turnStartDate,
                         finalResponseInstruction: subagentType.systemPromptSuffix,
+                    promptStyle: subagentType.promptStyle,
                         tailSystemMessage: withRunClock(stoppedForContext ? "[CONTEXT LIMIT] The newest tool round was omitted because the context budget could not accommodate it and compaction was unavailable or insufficient. Its tools already executed (omitted results from: \(omittedToolNames)); do not claim to have inspected their omitted results. Do NOT call more tools. Give your final answer with progress and unfinished work." : """
                             [ROUND LIMIT SUMMARY REQUEST \(attempt + 1)/5] You have reached the maximum number of tool rounds for this run. \
                             Do NOT call any more tools. Provide your final answer NOW — summarize everything \
@@ -729,7 +866,7 @@ actor SubagentRunner {
                         providerOverride: effectiveProviderOverride,
                         reasoningEffortOverride: effectiveReasoningOverride,
                         textOnlyOverride: effectiveTextOnlyOverride,
-                        execution: responsesExecution, lane: .subagent(resolvedSessionId)
+                        execution: runExecution, lane: .subagent(resolvedSessionId)
                     )
                     markProgress()
 
@@ -766,8 +903,43 @@ actor SubagentRunner {
         let postSnapshot = await FilesLedgerDiff.snapshot()
         let filesTouched = FilesLedgerDiff.diff(pre: preSnapshot, post: postSnapshot).allTouched
 
-        // 9. Cap the final message at 32 KB (runaway-protection backstop).
-        let cappedFinal = Self.capToBytes(finalText, limit: Self.finalMessageByteCap)
+        // 8b. Web researcher (§4.5): mechanical provenance from the tool log
+        // of THIS run and the ledger; only-failures → an error, never a
+        // prose "I found nothing"; guidance prefix for the parent.
+        var provenance: WebEvidenceProvenance? = nil
+        var priorExtracts: (inContext: Int, total: Int)? = nil
+        var reportPath: String? = nil
+        if let webLedger {
+            let activity = webLedger.runActivity
+            let counts = webLedger.extractCounts
+            let label = WebEvidenceProvenance.classify(activity: activity, priorExtracts: counts)
+            provenance = label
+            priorExtracts = counts
+            if runError == nil, activity.attempted > 0, activity.usable == 0, activity.failed == activity.attempted {
+                runError = "web_tools_failed: " + activity.failureMessages.prefix(5).joined(separator: "; ")
+            }
+            if let prefix = label.finalMessagePrefix(priorExtracts: counts), !finalText.isEmpty {
+                finalText = prefix + "\n" + finalText
+            }
+            // Report deliverable (§4.3, O6): 128 KB inline cap and a copy on
+            // disk, private to the user.
+            if webDeliverable == .report, !finalText.isEmpty {
+                let number = await registry.nextReportNumber(sessionId: resolvedSessionId)
+                let directory = StoragePaths.dataRoot.appendingPathComponent("research", isDirectory: true)
+                let file = directory.appendingPathComponent("\(resolvedSessionId)-\(number).md")
+                do {
+                    try PrivateStorage.ensureDirectory(directory)
+                    _ = try PrivateStorage.writeAtomically(Data(finalText.utf8), to: file, mode: 0o600)
+                    reportPath = file.path
+                } catch {
+                    print("[SubagentRunner] Could not write the research report file: \(error)")
+                }
+            }
+        }
+
+        // 9. Cap the final message at 32 KB (runaway-protection backstop);
+        //    128 KB for a Web report (O6).
+        let cappedFinal = Self.capToBytes(finalText, limit: webDeliverable == .report ? Self.reportFinalMessageByteCap : Self.finalMessageByteCap)
 
         // 10. Commit run state to the session registry so the session is resumable.
         let newInteractions = Array(toolInteractions.dropFirst(priorToolInteractions.count))
@@ -784,14 +956,18 @@ actor SubagentRunner {
             newToolsCalled: toolsCalledOrdered,
             newToolInteractions: responsesExecution == nil ? newInteractions : [],
             finalAssistantText: finalText.isEmpty ? nil : finalText,
-            responsesReplay: finalReplay, responsesMode: responsesExecution != nil
+            responsesReplay: finalReplay, responsesMode: responsesExecution != nil,
+            webEvidence: webLedger?.allRecords, webQueriesUsed: webLedger?.queriesUsed
         ) } else { sessionPersisted = false }
+        await toolExecutor.setWebEvidenceLedger(nil)
 
         // Report the CONCRETE model for inherit-routed runs, not just the
         // route name — this is where an unconfigured frontmatter lane that
         // degraded to inherit becomes visible to the parent.
         let modelUsedLabel: String
-        if let effectiveModelOverride {
+        if let webExecution {
+            modelUsedLabel = "\(webExecution.model) (web backend: \(webBackendLabel))"
+        } else if let effectiveModelOverride {
             modelUsedLabel = effectiveModelOverride
         } else {
             let concrete: String
@@ -800,7 +976,7 @@ actor SubagentRunner {
             modelUsedLabel = concrete.isEmpty ? "inherit" : "\(concrete) (inherited)"
         }
 
-        return RunResult(
+        var result = RunResult(
             sessionId: resolvedSessionId,
             isNewSession: isNew,
             finalMessage: cappedFinal,
@@ -812,6 +988,15 @@ actor SubagentRunner {
             sessionPersisted: sessionPersisted,
             modelUsed: modelUsedLabel
         )
+        if let webLedger {
+            result.evidenceProvenance = provenance
+            result.queriesUsed = webLedger.queriesUsed
+            result.sourcesConsulted = webLedger.sourcesConsulted
+            result.priorExtracts = priorExtracts
+            result.reportPath = reportPath
+            result.note = webBackendNote
+        }
+        return result
     }
 
     // MARK: - Context Compaction

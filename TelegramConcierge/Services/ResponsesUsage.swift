@@ -224,12 +224,16 @@ struct ResponsesUsageStore {
         let provider: Provider = context.subscriptionGeneration != nil ? .subscription
             : (URL(string: context.endpoint)?.host?.lowercased() == "api.openai.com" ? .openaiAPI : .customAPI)
         let lane: String
-        switch context.lane {
-        case .main: lane = "main"
-        case .archive: lane = "archive"
-        case .subagent: lane = "subagent"
-        case .ephemeral: lane = "ephemeral"
-        case .probe: lane = "probe"
+        if let label = context.usageLaneLabel {
+            lane = label
+        } else {
+            switch context.lane {
+            case .main: lane = "main"
+            case .archive: lane = "archive"
+            case .subagent: lane = "subagent"
+            case .ephemeral: lane = "ephemeral"
+            case .probe: lane = "probe"
+            }
         }
         var record = Record(requestID: requestID, operationID: context.responsesTurn.id, provider: provider,
             model: String(context.model.prefix(128)), lane: lane, operation: context.responsesOperation, attempt: attempt)
