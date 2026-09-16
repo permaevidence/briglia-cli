@@ -45,6 +45,11 @@ extension OpenRouterService {
                   interaction.results.count == calls.count else {
                 throw ResponsesFailure.malformed("unresolved historical tool call/result graph; prune the affected turn")
             }
+            // Recorded receipt time of the round: a system item of its own
+            // before the round, native or semantic (never inside an item).
+            if let issuedAt = assistant.issuedAt {
+                input.append(ResponsesAdapter.message(role: "system", text: chronology.issuedNote(at: issuedAt)))
+            }
             var native = ResponsesAdapter.nativeItems(envelope: identity.hasPrefix("current:") || nativeHistory.contains(identity) ? assistant.responsesReplay : nil,
                 scope: context.responsesScope, text: assistant.content, calls: calls)
             if !usedCallIDs.isDisjoint(with: calls.map(\.id)) { native = nil }

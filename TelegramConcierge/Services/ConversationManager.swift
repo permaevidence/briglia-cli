@@ -5859,8 +5859,11 @@ class ConversationManager: ObservableObject {
                     subagentSessionEvents: sessionEvents
                 )
 
-            case .toolCalls(let assistantMessage, let calls, let roundPromptTokens, _, _):
-                // Model wants to use more tools
+            case .toolCalls(let received, let calls, let roundPromptTokens, _, _):
+                // Model wants to use more tools. Record the round's receipt
+                // time once, before dispatch (rendered beside the round).
+                var assistantMessage = received
+                assistantMessage.issuedAt = HarnessClock.now()
                 print("[ConversationManager] Round \(round): LLM requested \(calls.count) tool(s): \(calls.map { $0.function.name })")
 
                 // Track prompt tokens and attribute delta to previous interaction
@@ -7353,8 +7356,10 @@ class ConversationManager: ObservableObject {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         // A refusal is a result the model actually receives: it carries the
-        // delivery time like any executed batch.
+        // delivery time like any executed batch, and the round its receipt time.
         let refusedAt = HarnessClock.now()
+        var issued = assistantMessage
+        issued.issuedAt = refusedAt
         let results = calls.map { call in
             var result = ToolResultMessage(
                 toolCallId: call.id,
@@ -7363,7 +7368,7 @@ class ConversationManager: ObservableObject {
             result.completedAt = refusedAt
             return result
         }
-        return ToolInteraction(assistantMessage: assistantMessage, results: results)
+        return ToolInteraction(assistantMessage: issued, results: results)
     }
 
     private func fallbackPrunedContextSummary(
@@ -11127,7 +11132,7 @@ extension ConversationManager {
             for path in message.imageFileNames + message.documentFileNames { try await add("\nAttachment: " + path) }
         }
         for round in rounds {
-            try await add("\nCOMPLETE TOOL ROUND\n")
+            try await add(Self.activeCompactionRoundHeader(round))
             if let text = round.assistantMessage.content { try await add(text) }
             func readable(_ value: JSONValue?) async throws {
                 guard let value else { return }
@@ -11142,7 +11147,7 @@ extension ConversationManager {
             try await readable(round.assistantMessage.reasoningDetails)
             for call in round.assistantMessage.toolCalls { try await add("\nTool \(call.function.name), call \(call.id)\n" + call.function.arguments) }
             for result in round.results {
-                try await add("\nResult \(result.toolCallId)\n")
+                try await add(Self.activeCompactionResultHeader(result))
                 try await add(result.content)
                 for ref in result.fileAttachmentReferences { try await add("\nAttachment reference: " + ref.filename) }
             }
@@ -11150,6 +11155,21 @@ extension ConversationManager {
         if !buffer.isEmpty { try await consume(buffer) }
         guard !summary.isEmpty else { throw PruneArchiveStore.Failure("No usable active-turn summary") }
         return summary
+    }
+
+    /// Round and result headers of the bounded summarizer transcript (active-turn
+    /// compaction and oversized historical pruning share it). The recorded
+    /// chronology travels with the source: the round's receipt time and each
+    /// result's delivery time, with date and offset (Codex R1); a legacy record
+    /// without a recorded time stays unstamped — never dated by the request.
+    nonisolated static func activeCompactionRoundHeader(_ round: ToolInteraction) -> String {
+        let issued = round.assistantMessage.issuedAt.map { " (issued \(Chronology.transcriptClock($0)))" } ?? ""
+        return "\nCOMPLETE TOOL ROUND\(issued)\n"
+    }
+
+    nonisolated static func activeCompactionResultHeader(_ result: ToolResultMessage) -> String {
+        let delivered = result.completedAt.map { " (delivered \(Chronology.transcriptClock($0)))" } ?? ""
+        return "\nResult \(result.toolCallId)\(delivered)\n"
     }
 
     /// Used by cancellation/error and recovery. Oversized raw work never becomes

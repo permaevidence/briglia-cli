@@ -18,11 +18,17 @@ Reversed here (rule: fixtures/chat-lifecycle/chronology-r7.json):
    (the note was baked into the persisted content) and are untouched.
 3. The compaction summary, now rendered without the epoch day header/time
    prefix and with its chronology line; restored to the SOURCE rendering.
-4. The summarizer transcript's dialogue stamps "[MAIN AGENT yyyy-MM-dd HH:mm] ".
-5. Persisted records: ToolResultMessage.completedAt (main-agent results: the
+4. The summarizer transcript's dialogue stamps "[MAIN AGENT yyyy-MM-dd HH:mm UTC+00:00] ".
+5. The "[System Note: The following tool calls were issued at HH:mm:ss]" system
+   message before every round that recorded its receipt time (Codex R3).
+6. The run-clock tail of every subagent run request (Codex R2): the whole
+   system message when the run clock was its only content, otherwise the
+   run-clock prefix of a combined tail (force-finish / round-limit requests).
+7. Persisted records: ToolResultMessage.completedAt (main-agent results: the
    field removed and the note re-baked into content, exactly as SOURCE
-   persisted it; subagent results: the field removed) and
-   Session.lastAssistantAt (removed).
+   persisted it; subagent results: the field removed),
+   AssistantToolCallMessage.issuedAt (removed) and Session.lastAssistantAt
+   (removed).
 
 Request bodies are sorted compact JSON that Foundation re-serializes byte for
 byte; the reversal parses, edits and re-serializes, and refuses any body that
@@ -42,6 +48,8 @@ TOOL_NOTE = RULE['tool_note']
 SUMMARY_HEADER = RULE['summary_header']
 SUMMARY_LINE = RULE['summary_chronology_line']
 SUMMARY_SOURCE_PREFIX = RULE['summary_source_prefix']
+ISSUED_NOTE = RULE['issued_note']
+RUN_CLOCK = RULE['run_clock_note']
 STAMPS = RULE['dialogue_stamps']          # {"[MAIN AGENT 2023-11-14 22:13] ": "[MAIN AGENT] ", ...}
 COMPLETED_AT_CONVERSATION = RULE['completed_at_conversation']   # Foundation seconds since 2001 for the pinned instant
 COMPLETED_AT_SESSION = RULE['completed_at_session']             # ISO 8601 for the pinned instant
@@ -69,19 +77,33 @@ def reverse_body(name, body):
         # Not named by the rule: must carry no R0 addition (the tool note
         # cannot be tested here — main-agent executed batches carried it at
         # SOURCE) and is returned untouched, never re-serialized.
-        for marker in (json.dumps(REPLY_TIME)[1:-1], json.dumps(SUMMARY_LINE)[1:-1], *(json.dumps(s)[1:-1] for s in STAMPS)):
+        for marker in (json.dumps(REPLY_TIME)[1:-1], json.dumps(SUMMARY_LINE)[1:-1], json.dumps(ISSUED_NOTE)[1:-1],
+                       json.dumps(RUN_CLOCK)[1:-1], *(json.dumps(s)[1:-1] for s in STAMPS)):
             if marker.encode() in body:
                 raise RuntimeError(f'r7: {name}: carries an R0 addition but the reviewed rule does not name it')
         return body
     obj = parse_exact(body, True, f'{name} body')
-    kept, reply_notes = [], 0
+    kept, reply_notes, issued_notes, run_clocks = [], 0, 0, 0
     for message in obj['messages']:
         content = message.get('content')
-        if message.get('role') == 'system' and isinstance(content, str) and content.startswith(REPLY_TIME):
-            if content != REPLY_TIME or set(message) != {'role', 'content'}:
-                raise RuntimeError(f'r7: {name}: unexpected reply-time note shape')
-            reply_notes += 1
-            continue
+        if message.get('role') == 'system' and isinstance(content, str):
+            if content.startswith(REPLY_TIME):
+                if content != REPLY_TIME or set(message) != {'role', 'content'}:
+                    raise RuntimeError(f'r7: {name}: unexpected reply-time note shape')
+                reply_notes += 1
+                continue
+            if content.startswith(ISSUED_NOTE):
+                if content != ISSUED_NOTE or set(message) != {'role', 'content'}:
+                    raise RuntimeError(f'r7: {name}: unexpected issued-round note shape')
+                issued_notes += 1
+                continue
+            if content.startswith(RUN_CLOCK):
+                run_clocks += 1
+                if content == RUN_CLOCK:
+                    continue          # the run clock was the whole tail
+                if not content.startswith(RUN_CLOCK + '\n\n'):
+                    raise RuntimeError(f'r7: {name}: unexpected run-clock tail shape')
+                message['content'] = content[len(RUN_CLOCK) + 2:]
         kept.append(message)
     obj['messages'] = kept
     tool_notes = summaries = stamps = 0
@@ -101,7 +123,8 @@ def reverse_body(name, body):
                 content = content.replace(stamp, plain)
             message['content'] = content
     found = {k: v for k, v in (('reply_time_messages', reply_notes), ('new_tool_notes', tool_notes),
-                               ('summaries', summaries), ('dialogue_stamps', stamps)) if v}
+                               ('summaries', summaries), ('dialogue_stamps', stamps),
+                               ('issued_notes', issued_notes), ('run_clocks', run_clocks)) if v}
     if found != counts:
         raise RuntimeError(f'r7: {name}: removals {found} differ from the reviewed rule {counts}')
     restored = swift_bytes(obj)
@@ -122,13 +145,27 @@ def strip_result(result, what, rebake):
     return 1
 
 
+def strip_round(round_, what, rebake):
+    """Remove the typed receipt time from one persisted round and the
+    delivery time from each of its results."""
+    removed = 0
+    expected = COMPLETED_AT_CONVERSATION if rebake else COMPLETED_AT_SESSION
+    if 'issuedAt' in round_['assistantMessage']:
+        if round_['assistantMessage']['issuedAt'] != expected:
+            raise RuntimeError(f'{what}.assistantMessage: expected issuedAt {expected!r}')
+        del round_['assistantMessage']['issuedAt']
+        removed += 1
+    for k, result in enumerate(round_['results']):
+        if 'completedAt' in result:
+            removed += strip_result(result, f'{what}.results[{k}]', rebake)
+    return removed
+
+
 def strip_messages(messages, what, rebake):
     removed = 0
     for i, message in enumerate(messages):
         for j, round_ in enumerate(message.get('toolInteractions') or []):
-            for k, result in enumerate(round_['results']):
-                if 'completedAt' in result:
-                    removed += strip_result(result, f'{what}[{i}].toolInteractions[{j}].results[{k}]', rebake)
+            removed += strip_round(round_, f'{what}[{i}].toolInteractions[{j}]', rebake)
     return removed
 
 
@@ -142,9 +179,7 @@ def reverse_observations(observations):
         removed = 0
         for key in spec.get('interaction_lists', []):
             for j, round_ in enumerate(item[key]):
-                for k, result in enumerate(round_['results']):
-                    if 'completedAt' in result:
-                        removed += strip_result(result, f'{scenario}.{key}[{j}].results[{k}]', True)
+                removed += strip_round(round_, f'{scenario}.{key}[{j}]', True)
         for key in spec.get('message_lists', []):
             removed += strip_messages(item[key], f'{scenario}.{key}', True)
         if 'rawConversation' in spec:
@@ -161,9 +196,7 @@ def reverse_observations(observations):
             del session['lastAssistantAt']
             removed += 1
             for j, round_ in enumerate(session['toolInteractions']):
-                for k, result in enumerate(round_['results']):
-                    if 'completedAt' in result:
-                        removed += strip_result(result, f'{scenario}.rawSession.toolInteractions[{j}].results[{k}]', False)
+                removed += strip_round(round_, f'{scenario}.rawSession.toolInteractions[{j}]', False)
             removed += strip_messages(session['messages'], f'{scenario}.rawSession.messages', False)
             item['rawSession'] = session   # parsed; compared and substituted by verify_migration
         found[scenario] = removed

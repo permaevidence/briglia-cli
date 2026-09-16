@@ -70,8 +70,21 @@ enum Chronology {
 
     /// `[HH:mm]` for the reply-time metadata line and transcript stamps.
     static func time(_ date: Date) -> String { makeFormatter(timeFormat).string(from: date) }
-    static func transcriptStamp(_ date: Date) -> String { makeFormatter(transcriptStampFormat, posix: true).string(from: date) }
-    static func transcriptClock(_ date: Date) -> String { makeFormatter(transcriptClockFormat, posix: true).string(from: date) }
+    /// Transcript stamps carry the UTC offset, so a lone event that survived
+    /// compaction is unambiguous even on a daylight-saving repeated hour.
+    static func transcriptStamp(_ date: Date) -> String { makeFormatter(transcriptStampFormat, posix: true).string(from: date) + " " + offsetLabel(date) }
+    static func transcriptClock(_ date: Date) -> String { makeFormatter(transcriptClockFormat, posix: true).string(from: date) + " " + offsetLabel(date) }
+
+    /// The run/resume clock note appended (outside the stable prefix, as the
+    /// tail) to every model request of one subagent run: recorded once at the
+    /// run's start, never regenerated. It is what separates the current run's
+    /// clock from replayed historical tool notes — in the Chat Completions
+    /// resume layout an earlier run's rounds follow the new continuation
+    /// prompt, so the last "Current time is now" note in the request can be
+    /// yesterday's.
+    static func runClockNote(startedAt: Date) -> String {
+        "[Run clock: this run started at \(makeFormatter(clockFormat).string(from: startedAt)) on \(makeFormatter(dayHeaderFormat).string(from: startedAt)) (\(offsetLabel(startedAt))). Tool notes and reply times earlier than that are historical, from previous runs of this session.]"
+    }
 
     /// The metadata line that exposes an assistant reply's original time.
     /// Rendered inside the `[Turn metadata]` system note, never as a prefix
@@ -178,5 +191,21 @@ struct ChronologyCursor {
     /// whole request (nothing to compare the day against).
     static func bareResultNote(at date: Date, clock: DateFormatter = Chronology.makeFormatter(Chronology.clockFormat)) -> String {
         "[System Note: Current time is now \(clock.string(from: date))]"
+    }
+
+    /// The harness note placed before an assistant tool-call round that
+    /// recorded its receipt time (`AssistantToolCallMessage.issuedAt`): a
+    /// system message of its own, so the round's native call/result adjacency
+    /// is untouched. Day and offset context as for `resultNote`.
+    mutating func issuedNote(at date: Date) -> String {
+        let transition = advance(to: date)
+        var note = "[System Note: The following tool calls were issued at \(clockFormatter.string(from: date))"
+        if transition.dayChanged {
+            note += " on \(dayFormatter.string(from: date))"
+        }
+        if let previous = transition.previousOffset {
+            note += " (clock offset now \(Chronology.offsetLabel(seconds: transition.offset)), was \(Chronology.offsetLabel(seconds: previous)))"
+        }
+        return note + "]"
     }
 }

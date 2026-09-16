@@ -141,7 +141,8 @@ to ship and pass a device check before new profile kinds are enabled there.
 r5's shape: it restores the CANDIDATE to the pre-R0 form — reply-time notes,
 tool notes on results that carried none at SOURCE (subagent results and
 maintenance-pass refusals), the compaction summary rendering, transcript
-dialogue stamps, and the persisted `completedAt` / `lastAssistantAt` fields
+dialogue stamps, the issued-round notes and run-clock tails (Codex R2/R3), and the
+persisted `completedAt` / `issuedAt` / `lastAssistantAt` fields
 (main-agent results get the note re-baked into content exactly as SOURCE
 persisted it) — asserting every removal against the pinned clock, then hands
 the restored candidate to the r5 → r4 → r3 chain. Unlisted captures must come

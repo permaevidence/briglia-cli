@@ -140,7 +140,13 @@ struct ChronologySelftest: AsyncParsableCommand {
         try KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Fixture User")
         try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: EmailCalendarProvider.none.rawValue)
         var clock = at(2026, 3, 12, 10, 0, 0)
-        HarnessClock.overrideForTesting = { clock }
+        // §8 turns on a stepping clock: every harness read advances 37 s, so
+        // receipt, delivery and completion times are all distinct and predictable.
+        var stepping = false
+        HarnessClock.overrideForTesting = {
+            if stepping { defer { clock = clock.addingTimeInterval(37) }; return clock }
+            return clock
+        }
         defer { HarnessClock.overrideForTesting = nil }
 
         @Sendable func chatBody(_ text: String, tool: Bool = false, prompt: Int = 100) throws -> String {
@@ -236,6 +242,9 @@ struct ChronologySelftest: AsyncParsableCommand {
             ("assistant", ""),
             ("tool", "current\n\n[System Note: Current time is now 10:00:40]"),
         ]
+        func endsWith<S: BidirectionalCollection>(_ rows: S, _ role: String, _ text: String) -> Bool where S.Element == (String, String) {
+            rows.last.map { $0.0 == role && $0.1 == text } ?? false
+        }
         func same(_ actual: [(String, String)], _ expected: [(String, String)]) -> Bool {
             actual.count == expected.count && zip(actual, expected).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
         }
@@ -340,8 +349,12 @@ struct ChronologySelftest: AsyncParsableCommand {
             let firstRows = try server.completeRequests.map(chatMessages)
             check("4.2 task message: day header + [HH:mm] at run start (the model learns the time before any tool ran)",
                   firstRows.count == 2 && firstRows[0].dropFirst().first?.1 == "--- Wednesday, 11 March 2026 ---\n[10:00] Read the fixture", describe(firstRows.first ?? []))
-            check("4.3 subagent tool result carries the batch time note", firstRows.count == 2 && firstRows[1].last?.0 == "tool"
-                  && firstRows[1].last?.1.hasSuffix("\n\n[System Note: Current time is now 10:00:00]") == true, describe(firstRows.last ?? []))
+            let runClock1 = Chronology.runClockNote(startedAt: at(2026, 3, 11, 10, 0, 0))
+            check("4.3 subagent round: issued note before the call, batch time note on the result, run clock as the tail of every request of the run",
+                  firstRows.count == 2 && endsWith(firstRows[0], "system", runClock1) && endsWith(firstRows[1], "system", runClock1)
+                  && firstRows[1].count >= 6 && firstRows[1][firstRows[1].count - 4].0 == "system" && firstRows[1][firstRows[1].count - 4].1 == "[System Note: The following tool calls were issued at 10:00:00]"
+                  && firstRows[1][firstRows[1].count - 2].0 == "tool"
+                  && firstRows[1][firstRows[1].count - 2].1.hasSuffix("\n\n[System Note: Current time is now 10:00:00]"), describe(firstRows.last ?? []))
             let stored = try session(first.sessionId)
             check("4.4 session records the reply's completion time and the result's delivery time",
                   stored.lastAssistantAt == clock && stored.toolInteractions.first?.results.first?.completedAt == clock)
@@ -359,9 +372,14 @@ struct ChronologySelftest: AsyncParsableCommand {
                   resumed.error == nil && same(Array(resumeRows), [
                     ("user", "--- Wednesday, 11 March 2026 ---\n[10:00] Read the fixture"),
                     ("assistant", "first reply"), ("system", "[Turn metadata]\nAssistant reply time: 10:00"),
-                    ("user", "--- Thursday, 12 March 2026 ---\n[09:30] Read the fixture"), ("assistant", "use read"),
-                    ("tool", "{\"content\":\"1→synthetic file content\",\"offset\":1,\"path\":\"\(root.path)/read.txt\",\"returned_lines\":1,\"success\":true,\"total_lines\":1,\"truncated\":false}\n\n[System Note: Current time is now 10:00:00 on Wednesday, 11 March 2026]")]),
+                    ("user", "--- Thursday, 12 March 2026 ---\n[09:30] Read the fixture"),
+                    ("system", "[System Note: The following tool calls were issued at 10:00:00 on Wednesday, 11 March 2026]"), ("assistant", "use read"),
+                    ("tool", "{\"content\":\"1→synthetic file content\",\"offset\":1,\"path\":\"\(root.path)/read.txt\",\"returned_lines\":1,\"success\":true,\"total_lines\":1,\"truncated\":false}\n\n[System Note: Current time is now 10:00:00]"),
+                    ("system", Chronology.runClockNote(startedAt: at(2026, 3, 12, 9, 30, 0)))]),
                   describe(Array(resumeRows)))
+            check("4.5b the run clock is recorded at the resume, later than every replayed historical note, and identical on a repeated request",
+                  resumeRows.last?.1.contains("started at 09:30:00 on Thursday, 12 March 2026 (UTC+01:00)") == true
+                  && resumeRows.last?.1.contains("earlier than that are historical") == true)
             // Legacy session record: no lastAssistantAt → the reply is dated by lastUsed (recorded at that commit), never by the reload.
             let url = StoragePaths.dataRoot.appendingPathComponent("subagent_sessions/\(first.sessionId).json")
             var raw = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
@@ -387,13 +405,14 @@ struct ChronologySelftest: AsyncParsableCommand {
             let compactionRows = try server.completeRequests.map(chatMessages)
             let summarizer = compactionRows.first.map { $0.map(\.1).joined(separator: "\n") } ?? ""
             check("4.7 summarizer transcript stamps dialogue lines with their original times", compacted.error == nil && compactionRows.count == 2
-                  && summarizer.contains("[MAIN AGENT 2026-03-11 11:00] older content") && summarizer.contains("[SUBAGENT 2026-03-11 11:03] older content") && !summarizer.contains("2026-03-11 11:05]"), compacted.error ?? String(summarizer.suffix(300)))
+                  && summarizer.contains("[MAIN AGENT 2026-03-11 11:00 UTC+01:00] older content") && summarizer.contains("[SUBAGENT 2026-03-11 11:03 UTC+01:00] older content") && !summarizer.contains("2026-03-11 11:05 UTC+01:00]") && !summarizer.contains("[Run clock:"), compacted.error ?? String(summarizer.suffix(300)))
             let continuation = compactionRows.count == 2 ? Array(compactionRows[1].dropFirst()) : []
             let expectedSummary = Chronology.compactionSummaryHeader + "\n[Summary written 15:05, Saturday, 14 March 2026 (UTC+01:00). Covers evicted session history from 11:00, Wednesday, 11 March 2026 to 11:04, Wednesday, 11 March 2026.]\n\nEVICTED_SUMMARY"
             check("4.8 summary message: no day header, no time prefix, creation time and covered period inside; the kept tail keeps its own first header",
                   continuation.count >= 2 && continuation[0].0 == "user" && continuation[0].1 == expectedSummary
                   && continuation[1].0 == "assistant" && continuation[1].1.hasPrefix("--- Wednesday, 11 March 2026 ---\nolder content")
-                  && continuation.last?.1 == "--- Saturday, 14 March 2026 ---\n[15:05] Read the fixture", describe(continuation))
+                  && continuation.count >= 3 && continuation[continuation.count - 2].1 == "--- Saturday, 14 March 2026 ---\n[15:05] Read the fixture"
+                  && continuation.last?.1 == Chronology.runClockNote(startedAt: at(2026, 3, 14, 15, 5, 0)), describe(continuation))
             let persisted = try session(first.sessionId)
             check("4.9 persisted summary carries its creation time, never the epoch", persisted.messages.first.map(Chronology.isCompactionSummary) == true
                   && persisted.messages.first?.timestamp == clock)
@@ -416,9 +435,11 @@ struct ChronologySelftest: AsyncParsableCommand {
             let blocked = await runner.run(invocation: triage, sessionId: nil, openRouterService: service, toolExecutor: executor,
                                            imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
             let blockedRows = try server.completeRequests.count == 2 ? chatMessages(server.completeRequests[1]) : []
-            check("4.11 watcher-triage: blocked tool result carries the time note like any other", blocked.error == nil
-                  && blockedRows.last?.0 == "tool" && blockedRows.last?.1.hasSuffix("\n\n[System Note: Current time is now 16:00:00]") == true
-                  && (blockedRows.last?.1.contains("not available") == true || blockedRows.last?.1.contains("synthetic file content") == true), describe(blockedRows))
+            let blockedTool = blockedRows.count >= 2 ? blockedRows[blockedRows.count - 2] : ("", "")
+            check("4.11 watcher-triage: blocked tool result carries the time note like any other, run clock as the tail", blocked.error == nil
+                  && blockedTool.0 == "tool" && blockedTool.1.hasSuffix("\n\n[System Note: Current time is now 16:00:00]")
+                  && (blockedTool.1.contains("not available") || blockedTool.1.contains("synthetic file content"))
+                  && endsWith(blockedRows, "system", Chronology.runClockNote(startedAt: at(2026, 3, 14, 16, 0, 0))), describe(blockedRows))
         }
 
         print("5. Subagents, Responses")
@@ -438,17 +459,22 @@ struct ChronologySelftest: AsyncParsableCommand {
             let firstItems = try server.completeRequests.map(responsesItems)
             check("5.1 Responses subagent: task prefixed, tool output dated", first.error == nil && firstItems.count == 2
                   && firstItems[0].dropFirst().first?.1 == "--- Friday, 20 March 2026 ---\n[22:00] Read the fixture"
-                  && firstItems[1].last?.0 == "function_call_output" && firstItems[1].last?.1.hasSuffix("\n\n[System Note: Current time is now 22:00:00]") == true,
+                  && firstItems[1].contains { $0.0 == "function_call_output" && $0.1.hasSuffix("\n\n[System Note: Current time is now 22:00:00]") }
+                  && firstItems[1].contains { $0 == ("system", "[System Note: The following tool calls were issued at 22:00:00]") }
+                  && endsWith(firstItems[0], "system", Chronology.runClockNote(startedAt: at(2026, 3, 20, 22, 0, 0)))
+                  && endsWith(firstItems[1], "system", Chronology.runClockNote(startedAt: at(2026, 3, 20, 22, 0, 0))),
                   first.error ?? describe(firstItems.last ?? []))
             clock = at(2026, 3, 21, 7, 45, 0)
             server.clear(); server.script([try responsesBody("resumed", id: "f2")])
             let resumed = await runner.run(invocation: invocation, sessionId: first.sessionId, openRouterService: service, toolExecutor: executor,
                                            imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
-            let items = try responsesItems(server.completeRequests[0]).dropFirst()
+            let items = Array(try responsesItems(server.completeRequests[0]).dropFirst())
             check("5.2 Responses resume: prior reply keeps 22:00 on 20 March, continuation dated 21 March, no duplicate notes",
                   resumed.error == nil && items.contains { $0 == ("system", "[Turn metadata]\nAssistant reply time: 22:00") }
-                  && items.last?.1 == "--- Saturday, 21 March 2026 ---\n[07:45] Read the fixture"
-                  && items.filter { $0.1.contains("Current time is now 22:00:00") }.count == 1, describe(Array(items)))
+                  && items.count >= 2 && items[items.count - 2].1 == "--- Saturday, 21 March 2026 ---\n[07:45] Read the fixture"
+                  && endsWith(items, "system", Chronology.runClockNote(startedAt: at(2026, 3, 21, 7, 45, 0)))
+                  && items.filter { $0.1.contains("Current time is now 22:00:00") }.count == 1
+                  && items.filter { $0.1.contains("issued at 22:00:00") }.count == 1, describe(Array(items)))
         }
 
         print("6. Persistence")
@@ -467,6 +493,16 @@ struct ChronologySelftest: AsyncParsableCommand {
             check("6.4 malformed recorded time is dropped, the record still loads", try JSONDecoder().decode(ToolResultMessage.self, from: malformed).completedAt == nil)
             let none = ToolResultMessage(toolCallId: "p4", content: "y")
             check("6.5 a result without a recorded time encodes no field (legacy bytes unchanged)", !String(decoding: try JSONEncoder().encode(none), as: UTF8.self).contains("completedAt"))
+            var call = AssistantToolCallMessage(content: "go", toolCalls: [ToolCall(id: "i1", type: "function", function: FunctionCall(name: "read_file", arguments: "{}"))])
+            call.issuedAt = at(2026, 3, 11, 10, 0, 3)
+            check("6.6 issuedAt survives both encoders", try JSONDecoder().decode(AssistantToolCallMessage.self, from: JSONEncoder().encode(call)).issuedAt == call.issuedAt
+                  && (try isoDecoder.decode(AssistantToolCallMessage.self, from: isoEncoder.encode(call)).issuedAt) == call.issuedAt)
+            let legacyCall = Data(#"{"role":"assistant","content":null,"tool_calls":[]}"#.utf8)
+            let badCall = Data(#"{"role":"assistant","content":null,"tool_calls":[],"issuedAt":"garbage"}"#.utf8)
+            check("6.7 legacy round decodes undated; malformed issuedAt dropped; unset issuedAt encodes no field",
+                  try JSONDecoder().decode(AssistantToolCallMessage.self, from: legacyCall).issuedAt == nil
+                  && (try JSONDecoder().decode(AssistantToolCallMessage.self, from: badCall).issuedAt) == nil
+                  && !String(decoding: try JSONEncoder().encode(AssistantToolCallMessage(content: nil, toolCalls: [])), as: UTF8.self).contains("issuedAt"))
         }
 
         print("7. Transcript rendering for summarizers")
@@ -480,7 +516,7 @@ struct ChronologySelftest: AsyncParsableCommand {
             let transcript = SubagentRunner.compactionTranscript(priorSummaries: [], dialogue: [Message(role: .user, content: "ask", timestamp: at(2026, 3, 11, 9, 59))],
                                                                  work: [round, undated])
             check("7.1 dialogue stamped, dated result stamped to the second, undated result left undated (never invented)",
-                  transcript.contains("[MAIN AGENT 2026-03-11 09:59] ask") && transcript.contains("[TOOL RESULT 2026-03-11 10:00:03] <r>") && transcript.contains("[TOOL RESULT] <u>"), transcript)
+                  transcript.contains("[MAIN AGENT 2026-03-11 09:59 UTC+01:00] ask") && transcript.contains("[TOOL RESULT 2026-03-11 10:00:03 UTC+01:00] <r>") && transcript.contains("[TOOL RESULT] <u>"), transcript)
             let plan = SubagentRunner.planCompaction(messages: [Message(role: .user, content: "old task", timestamp: at(2026, 3, 11, 9, 0)),
                                                                 Message(role: .assistant, content: "old reply", timestamp: at(2026, 3, 11, 9, 30)),
                                                                 Message(role: .user, content: "new task", timestamp: at(2026, 3, 12, 9, 0)),
@@ -488,6 +524,90 @@ struct ChronologySelftest: AsyncParsableCommand {
                                                      interactions: [], dialogueKeepTokens: 6, totalKeepTokens: 10)
             check("7.2 coverage spans the evicted events only", SubagentRunner.compactionCoverage(plan).map { $0.lowerBound == at(2026, 3, 11, 9, 0) && $0.upperBound < at(2026, 3, 12, 9, 0) } == true
                   && !plan.evictedDialogue.isEmpty)
+            // Codex R1: the main agent's bounded summarizer (active-turn
+            // compaction and oversized historical pruning share these headers)
+            // carries the recorded receipt/delivery times; legacy stays unstamped.
+            var issuedRound = round
+            var issuedCall = round.assistantMessage; issuedCall.issuedAt = at(2026, 3, 11, 9, 59, 40)
+            issuedRound = ToolInteraction(assistantMessage: issuedCall, results: round.results)
+            check("7.3 main-agent summarizer headers stamp issued and delivered times with date and offset",
+                  ConversationManager.activeCompactionRoundHeader(issuedRound) == "\nCOMPLETE TOOL ROUND (issued 2026-03-11 09:59:40 UTC+01:00)\n"
+                  && ConversationManager.activeCompactionResultHeader(dated) == "\nResult t1 (delivered 2026-03-11 10:00:03 UTC+01:00)\n")
+            check("7.4 main-agent summarizer headers leave legacy records unstamped (never dated by the request)",
+                  ConversationManager.activeCompactionRoundHeader(undated) == "\nCOMPLETE TOOL ROUND\n"
+                  && ConversationManager.activeCompactionResultHeader(undated.results[0]) == "\nResult t2\n")
+            check("7.5 daylight-saving repeated hour: a lone retained event is unambiguous in transcript stamps (offset carried)",
+                  Chronology.transcriptStamp(dstFirst) == "2026-10-25 02:30 UTC+02:00" && Chronology.transcriptStamp(dstSecond) == "2026-10-25 02:30 UTC+01:00"
+                  && Chronology.transcriptClock(dstSecond) == "2026-10-25 02:30:00 UTC+01:00")
+        }
+
+        print("8. Distinct receipt, delivery and completion times (stepping clock), both transports, forced final")
+        do {
+            stepping = true
+            defer { stepping = false }
+            try ProviderProfiles.saveProfile(.custom, apiKey: "synthetic-chronology-key", baseURL: base + "/v1", model: "fixture-model",
+                                             effort: nil, textOnly: false, wireProtocol: .chatCompletions)
+            try ProviderProfiles.activate(.custom)
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "250000")
+            let runner = SubagentRunner()
+            let service = OpenRouterService(); await service.configure(apiKey: "synthetic-chronology-key")
+            let executor = ToolExecutor(outputMode: .subagent)
+            let invocation = SubagentRunner.Invocation(subagentType: "general-purpose", description: "Stepping worker",
+                taskPrompt: "Read the fixture", modelOverride: nil, runInBackground: false)
+            // Reads, in order: task message (T), run clock (T+37), receipt (T+74), delivery (T+111), commit (T+148).
+            clock = at(2026, 4, 1, 12, 0, 0)
+            server.clear(); server.script([try chatBody("use read", tool: true), try chatBody("done")])
+            let first = await runner.run(invocation: invocation, sessionId: nil, openRouterService: service, toolExecutor: executor,
+                                         imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+            let rows = try chatMessages(server.completeRequests[1])
+            check("8.1 chat: task 12:00, run clock 12:00:37, round issued 12:01:14, batch delivered 12:01:51 — in that order", first.error == nil && rows.count >= 6
+                  && rows[1].1 == "--- Wednesday, 1 April 2026 ---\n[12:00] Read the fixture"
+                  && rows[2] == ("system", "[System Note: The following tool calls were issued at 12:01:14]")
+                  && rows[4].0 == "tool" && rows[4].1.hasSuffix("\n\n[System Note: Current time is now 12:01:51]")
+                  && endsWith(rows, "system", Chronology.runClockNote(startedAt: at(2026, 4, 1, 12, 0, 37))), first.error ?? describe(rows))
+            let sessionDecoder = JSONDecoder(); sessionDecoder.dateDecodingStrategy = .iso8601
+            let stored = try sessionDecoder.decode(SubagentSessionRegistry.Session.self, from: Data(contentsOf: StoragePaths.dataRoot.appendingPathComponent("subagent_sessions/\(first.sessionId).json")))
+            check("8.2 persisted: issuedAt 12:01:14, completedAt 12:01:51, reply completed 12:02:28",
+                  stored.toolInteractions.first?.assistantMessage.issuedAt == at(2026, 4, 1, 12, 1, 14)
+                  && stored.toolInteractions.first?.results.first?.completedAt == at(2026, 4, 1, 12, 1, 51)
+                  && stored.lastAssistantAt == at(2026, 4, 1, 12, 2, 28))
+            // Forced final (round limit 1): the tail carries the run clock and the round-limit request.
+            try AgentTurnOverrides.setOverride(1, forAgent: "general-purpose")
+            defer { try? AgentTurnOverrides.setOverride(nil, forAgent: "general-purpose") }
+            clock = at(2026, 4, 2, 8, 0, 0)
+            await SubagentSessionRegistry.shared.reloadFromDisk()
+            server.clear(); server.script([try chatBody("one more", tool: true), try chatBody("forced answer")])
+            let forced = await runner.run(invocation: invocation, sessionId: first.sessionId, openRouterService: service, toolExecutor: executor,
+                                          imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+            let forcedRows = try chatMessages(server.completeRequests[1])
+            let forcedTail = forcedRows.last?.1 ?? ""
+            check("8.3 forced final: run clock (recorded at resume) precedes the round-limit request in one tail; replayed yesterday's notes stay historical",
+                  forced.error == nil && forcedRows.last?.0 == "system"
+                  && forcedTail.hasPrefix(Chronology.runClockNote(startedAt: at(2026, 4, 2, 8, 0, 37)) + "\n\n[ROUND LIMIT SUMMARY REQUEST 1/5]")
+                  && forcedRows.contains { $0.1.contains("issued at 12:01:14 on Wednesday, 1 April 2026") }, describe(forcedRows))
+            try AgentTurnOverrides.setOverride(nil, forAgent: "general-purpose")
+            // Responses: native replay keeps the issued note as a system item before the round.
+            try ProviderProfiles.saveProfile(.custom, apiKey: "synthetic-chronology-key", baseURL: base + "/v1", model: "fixture-model",
+                                             effort: nil, textOnly: false, wireProtocol: .responses)
+            try ProviderProfiles.activate(.custom)
+            let responsesService = OpenRouterService(); await responsesService.configure(apiKey: "synthetic-chronology-key")
+            clock = at(2026, 4, 3, 9, 0, 0)
+            server.clear(); server.script([try responsesBody("use read", id: "s1", tool: true), try responsesBody("native done", id: "s2")])
+            let native = await runner.run(invocation: invocation, sessionId: nil, openRouterService: responsesService, toolExecutor: executor,
+                                          imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+            clock = at(2026, 4, 3, 10, 0, 0)
+            await SubagentSessionRegistry.shared.reloadFromDisk()
+            server.clear(); server.script([try responsesBody("resumed", id: "s3")])
+            let replayed = await runner.run(invocation: invocation, sessionId: native.sessionId, openRouterService: responsesService, toolExecutor: executor,
+                                            imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
+            let items = try responsesItems(server.completeRequests[0])
+            let issuedIndex = items.firstIndex { $0 == ("system", "[System Note: The following tool calls were issued at 09:01:14]") }
+            check("8.4 Responses replay after reload: issued note precedes the round, delivery note in the output, reply time 09:02:28, run clock recorded at resume",
+                  native.error == nil && replayed.error == nil && issuedIndex != nil
+                  && items.indices.contains(issuedIndex! + 1) && items[issuedIndex! + 1].0 == "assistant"
+                  && items.contains { $0.0 == "function_call_output" && $0.1.hasSuffix("\n\n[System Note: Current time is now 09:01:51]") }
+                  && items.contains { $0 == ("system", "[Turn metadata]\nAssistant reply time: 09:02") }
+                  && endsWith(items, "system", Chronology.runClockNote(startedAt: at(2026, 4, 3, 10, 0, 37))), describe(items))
         }
 
         print("Chronology selftest: \(total - failures)/\(total) passed")

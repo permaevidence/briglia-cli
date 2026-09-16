@@ -47,6 +47,11 @@ extension OpenRouterService {
             // BEFORE the final text so the model sees the full reasoning chain
             if message.role == .assistant && !isToolRunLog && !message.toolInteractions.isEmpty {
                 for interaction in message.toolInteractions {
+                    // Recorded receipt time of the round, as its own system
+                    // note before the round (call/result adjacency intact).
+                    if let issuedAt = interaction.assistantMessage.issuedAt {
+                        apiMessages.append(OpenRouterAPIMessage(role: "system", content: .text(chronology.issuedNote(at: issuedAt))))
+                    }
                     apiMessages.append(OpenRouterAPIMessage(
                         role: "assistant",
                         content: interaction.assistantMessage.content.map { .text($0) },
@@ -250,6 +255,9 @@ extension OpenRouterService {
 
         if let interactions = toolResultMessages {
             for interaction in interactions {
+                if let issuedAt = interaction.assistantMessage.issuedAt {
+                    apiMessages.append(OpenRouterAPIMessage(role: "system", content: .text(chronology.issuedNote(at: issuedAt))))
+                }
                 // Add assistant's tool call message. producedByModel rides
                 // along so the sanitize pass can compare provenance — without
                 // it, a nil producer is "treated as same-model" and a

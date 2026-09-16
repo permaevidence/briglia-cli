@@ -365,6 +365,15 @@ actor SubagentRunner {
         let maxTurns = AgentTurnOverrides.override(forAgent: subagentType.name)
             ?? subagentType.defaultMaxTurns
         let turnStartDate = Date()
+        // Run/resume clock (WEB_SUBAGENT_PLAN §12.2.3, Codex R2): recorded once
+        // here, appended as the tail of every model request of this run (after
+        // the stable prefix, constant within the run) so the current run's
+        // clock is never confused with replayed historical tool notes. The
+        // summarizer requests are separate maintenance calls and do not carry it.
+        let runClockNote = Chronology.runClockNote(startedAt: HarnessClock.now())
+        func withRunClock(_ tail: String?) -> String {
+            tail.map { runClockNote + "\n\n" + $0 } ?? runClockNote
+        }
         var lastPromptTokens: Int? = nil
 
         loop: for round in 1...maxTurns {
@@ -423,9 +432,9 @@ actor SubagentRunner {
                     currentUserMessageId: syntheticUser.id,
                     turnStartDate: turnStartDate,
                     finalResponseInstruction: subagentType.systemPromptSuffix,
-                    tailSystemMessage: forceFinish
+                    tailSystemMessage: withRunClock(forceFinish
                         ? "[CONTEXT LIMIT] This turn has reached the maximum allowed context window and automatic history compaction is unavailable or exhausted. Do NOT call any more tools. Provide your final answer NOW — summarize everything you accomplished, what files were touched, what you discovered, and what remains to be done."
-                        : (needsEmergencyContinuationNote ? Self.emergencyContinuationNote : nil),
+                        : (needsEmergencyContinuationNote ? Self.emergencyContinuationNote : nil)),
                     modelOverride: effectiveModelOverride,
                     providerOverride: effectiveProviderOverride,
                     reasoningEffortOverride: effectiveReasoningOverride,
@@ -443,9 +452,12 @@ actor SubagentRunner {
                     finalReplay = native?.envelope
                     break loop
 
-                case .toolCalls(let assistantMessage, let calls, let promptTk, _, let spend):
+                case .toolCalls(let received, let calls, let promptTk, _, let spend):
                     if let spend { totalSpendUSD += spend }
                     if let pt = promptTk { lastPromptTokens = pt }
+                    // Record the round's receipt time once, before dispatch.
+                    var assistantMessage = received
+                    assistantMessage.issuedAt = HarnessClock.now()
 
                     if forceFinish {
                         var forceInteractions = toolInteractions + [
@@ -469,12 +481,12 @@ actor SubagentRunner {
                                 currentUserMessageId: syntheticUser.id,
                                 turnStartDate: turnStartDate,
                                 finalResponseInstruction: subagentType.systemPromptSuffix,
-                                tailSystemMessage: """
+                                tailSystemMessage: withRunClock("""
                                     [CONTEXT LIMIT SUMMARY RETRY \(attempt)/4] This turn has reached the maximum allowed context window. \
                                     The tool call(s) you requested were not executed. Do NOT call any more tools. \
                                     Provide your final answer NOW — summarize everything you accomplished, what files were touched, \
                                     what you discovered, and what remains to be done.
-                                    """,
+                                    """),
                                 modelOverride: effectiveModelOverride,
                                 providerOverride: effectiveProviderOverride,
                                 reasoningEffortOverride: effectiveReasoningOverride,
@@ -708,11 +720,11 @@ actor SubagentRunner {
                         currentUserMessageId: syntheticUser.id,
                         turnStartDate: turnStartDate,
                         finalResponseInstruction: subagentType.systemPromptSuffix,
-                        tailSystemMessage: stoppedForContext ? "[CONTEXT LIMIT] The newest tool round was omitted because the context budget could not accommodate it and compaction was unavailable or insufficient. Its tools already executed (omitted results from: \(omittedToolNames)); do not claim to have inspected their omitted results. Do NOT call more tools. Give your final answer with progress and unfinished work." : """
+                        tailSystemMessage: withRunClock(stoppedForContext ? "[CONTEXT LIMIT] The newest tool round was omitted because the context budget could not accommodate it and compaction was unavailable or insufficient. Its tools already executed (omitted results from: \(omittedToolNames)); do not claim to have inspected their omitted results. Do NOT call more tools. Give your final answer with progress and unfinished work." : """
                             [ROUND LIMIT SUMMARY REQUEST \(attempt + 1)/5] You have reached the maximum number of tool rounds for this run. \
                             Do NOT call any more tools. Provide your final answer NOW — summarize everything \
                             you accomplished, what files were touched, and what remains to be done.
-                            """,
+                            """),
                         modelOverride: effectiveModelOverride,
                         providerOverride: effectiveProviderOverride,
                         reasoningEffortOverride: effectiveReasoningOverride,
@@ -1520,8 +1532,10 @@ actor SubagentRunner {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         // A refusal is a result the model actually receives: it carries the
-        // delivery time like any executed batch.
+        // delivery time like any executed batch, and the round its receipt time.
         let refusedAt = HarnessClock.now()
+        var issued = assistantMessage
+        issued.issuedAt = refusedAt
         let results = calls.map { call in
             var result = ToolResultMessage(
                 toolCallId: call.id,
@@ -1530,7 +1544,7 @@ actor SubagentRunner {
             result.completedAt = refusedAt
             return result
         }
-        return ToolInteraction(assistantMessage: assistantMessage, results: results)
+        return ToolInteraction(assistantMessage: issued, results: results)
     }
 
     // MARK: - Turn Token Budget

@@ -630,6 +630,12 @@ struct AssistantToolCallMessage: Codable {
     var responsesReplay: ResponsesReplayEnvelope? = nil
     // Transient: receipt proves which typed deliveries were actually encoded.
     var responsesReceipt: PreparedRequestReceipt? = nil
+    /// When the harness received this tool-call round from the model (before
+    /// dispatch), recorded once by the harness at that event. Rendered beside
+    /// the round as a system note by both wire serializers (never inside the
+    /// message or a native replay item). Additive optional field: absent in
+    /// legacy JSON, and a legacy round without it stays undated.
+    var issuedAt: Date? = nil
 
     enum CodingKeys: String, CodingKey {
         case role
@@ -639,6 +645,7 @@ struct AssistantToolCallMessage: Codable {
         case reasoningDetails = "reasoning_details"
         case producedByModel = "produced_by_model"
         case responsesReplay
+        case issuedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -650,6 +657,8 @@ struct AssistantToolCallMessage: Codable {
         reasoningDetails = try c.decodeIfPresent(JSONValue.self, forKey: .reasoningDetails)
         producedByModel = try c.decodeIfPresent(String.self, forKey: .producedByModel)
         responsesReplay = try? c.decodeIfPresent(ResponsesReplayEnvelope.self, forKey: .responsesReplay)
+        // Lossy at the field boundary: a malformed recorded time is dropped.
+        issuedAt = (try? c.decodeIfPresent(Date.self, forKey: .issuedAt)) ?? nil
     }
 
     init(content: String?, toolCalls: [ToolCall], reasoning: JSONValue? = nil, reasoningDetails: JSONValue? = nil, producedByModel: String? = nil) {

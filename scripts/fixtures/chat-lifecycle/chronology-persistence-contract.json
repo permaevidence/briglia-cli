@@ -1,8 +1,8 @@
 {
- "purpose": "R0 chronology (WEB_SUBAGENT_PLAN \u00a712) additive optional fields: ToolResultMessage.completedAt (typed tool-result delivery time rendered at the provider boundary) and SubagentSessionRegistry.Session.lastAssistantAt (original completion time of the reply re-injected at resume); ProviderToolResultRenderer renders the typed note. Requires independent review with the R0 implementation. Frozen P0 bytes for records without these fields are unchanged.",
+ "purpose": "R0 chronology (WEB_SUBAGENT_PLAN \u00a712) additive optional fields: ToolResultMessage.completedAt (typed tool-result delivery time rendered at the provider boundary) AssistantToolCallMessage.issuedAt (typed round receipt time) and SubagentSessionRegistry.Session.lastAssistantAt (original completion time of the reply re-injected at resume); ProviderToolResultRenderer renders the typed note. Requires independent review with the R0 implementation. Frozen P0 bytes for records without these fields are unchanged.",
  "sha256": {
   "TelegramConcierge/Models/Message.swift": "eb96f44b0cad44f69c74639fd2dd29c40d196007138be066103a5c68b256f186",
-  "TelegramConcierge/Models/ToolModels.swift": "adad5ca5d3a73ba4dd685cbc1c46d052d9e79c75d9a691c3f77fbc5c6ef5df65",
+  "TelegramConcierge/Models/ToolModels.swift": "4311f4461a8238f67a09fe3f09d527b1061a94c3f793f66f08dbb5c8304372e9",
   "TelegramConcierge/Services/ConversationManager.swift#declaration": "7e8328c639c37cf0d671ca3be4921d917095844e671ff8388b492ac6d515d23a",
   "TelegramConcierge/Services/HarnessAnnotations.swift": "105cf192446288bec1be62d11480d328f3a3fe0b2721b64503b063a8c15f8897",
   "TelegramConcierge/Services/OpenRouterService.swift#declaration": "51272020cb6063053dc3d5831c878acf9f440945b1925200cc6e5259e6efd804",
