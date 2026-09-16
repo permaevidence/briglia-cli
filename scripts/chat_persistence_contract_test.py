@@ -16,8 +16,8 @@ class ContractTests(unittest.TestCase):
         # Exercise the current additive fallback, without editing either frozen manifest.
         with tempfile.TemporaryDirectory() as folder:
             alternate = Path(folder) / 'responses.json'
-            actual = json.loads(contract.IMAGE_MANIFEST.read_text())
-            with patch.object(contract, 'IMAGE_MANIFEST', alternate):
+            actual = json.loads(contract.CHRONOLOGY_MANIFEST.read_text())
+            with patch.object(contract, 'CHRONOLOGY_MANIFEST', alternate):
                 alternate.write_text(json.dumps(actual))
                 verify()
                 for field in ['source', 'sha256']:

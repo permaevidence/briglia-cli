@@ -429,12 +429,25 @@ struct ToolResultMessage: Codable {
     /// ordinary tool-result encoding is byte-identical to before.
     var harnessAnnotations: [HarnessAnnotation]
 
+    /// When this result was delivered to the model: the completion time of the
+    /// tool batch it belongs to (every result of one round carries the same
+    /// value), recorded once by the harness at that event. Rendered at the
+    /// provider boundary as the `[System Note: Current time is now HH:mm:ss]`
+    /// note (`ProviderToolResultRenderer`), for both wire protocols and every
+    /// agent type; never baked into `content`, so history bytes stay stable
+    /// and a result is never annotated twice. Additive optional field: absent
+    /// in legacy JSON (legacy main-agent results carry the note inside their
+    /// content and render as before); a legacy result without a recorded time
+    /// gets no note rather than an invented one.
+    var completedAt: Date? = nil
+
     enum CodingKeys: String, CodingKey {
         case role
         case toolCallId = "tool_call_id"
         case content
         case fileAttachmentReferences
         case harnessAnnotations
+        case completedAt
     }
 
     func encode(to encoder: Encoder) throws {
@@ -446,6 +459,7 @@ struct ToolResultMessage: Codable {
         if !harnessAnnotations.isEmpty {
             try container.encode(harnessAnnotations, forKey: .harnessAnnotations)
         }
+        try container.encodeIfPresent(completedAt, forKey: .completedAt)
     }
 
     init(
@@ -485,6 +499,9 @@ struct ToolResultMessage: Codable {
         self.fileAttachments = [] // Not decoded, only used transiently
         self.spendUSD = nil // Not decoded, only used transiently
         self.bashReceipt = nil // Not decoded — receipts never survive persistence
+        // Lossy at the field boundary: a malformed recorded time is dropped
+        // (the result then renders without a note), never a load failure.
+        self.completedAt = (try? container.decodeIfPresent(Date.self, forKey: .completedAt)) ?? nil
         // Fail-closed and lossy at the annotation-field boundary: an absent
         // field is [], a malformed element is discarded, a defensively
         // oversized payload is dropped whole — the conversation stays loadable

@@ -228,7 +228,11 @@ enum PruneArchiveStore {
                     try line("Arguments:"); try line(call.function.arguments)
                 }
                 for result in round.results {
-                    try line("Result call ID: " + result.toolCallId); try line("Result:"); try line(result.content)
+                    try line("Result call ID: " + result.toolCallId)
+                    // Recorded delivery time when the result has one (typed
+                    // `completedAt`); legacy results keep the parent-time note.
+                    if let completedAt = result.completedAt { try line("Result delivered: " + ISO8601DateFormatter().string(from: completedAt)) }
+                    try line("Result:"); try line(result.content)
                     try line("Attachment references: " + json(result.fileAttachmentReferences))
                     // The canonical user message supplies actual text. We do
                     // not flatten trusted harness delimiters into the archive.

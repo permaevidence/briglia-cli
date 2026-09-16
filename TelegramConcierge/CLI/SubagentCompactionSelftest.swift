@@ -88,6 +88,13 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             return a.lowerBound < b.lowerBound
         }
         let total50 = 50_000
+        // R0 chronology: transcript dialogue lines carry the message's original
+        // time; every harness-recorded time (result delivery, reply completion,
+        // summary creation) reads HarnessClock, pinned to the fixture instant.
+        let fixtureInstant = Date(timeIntervalSince1970: 1_700_000_000)
+        HarnessClock.overrideForTesting = { fixtureInstant }
+        defer { HarnessClock.overrideForTesting = nil }
+        let stamp = Chronology.transcriptStamp(fixtureInstant)
         let dialogue30 = SubagentRunner.dialogueKeepTokens(totalKeepTokens: total50)
         func plan(_ messages: [Message], _ rounds: [ToolInteraction], dialogue: Int? = nil, total: Int = 50_000) -> SubagentRunner.CompactionPlan {
             SubagentRunner.planCompaction(messages: messages, interactions: rounds,
@@ -346,7 +353,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             let raTranscript = SubagentRunner.compactionTranscript(priorSummaries: [], dialogue: ra.evictedDialogue, work: ra.evictedWork)
             let transcriptDialogue = raTranscript.split(separator: "\n").compactMap { line -> String? in
                 let role: String
-                if line.hasPrefix("[MAIN AGENT] <") { role = "task" } else if line.hasPrefix("[SUBAGENT] <") { role = "reply" } else { return nil }
+                if line.hasPrefix("[MAIN AGENT \(stamp)] <") { role = "task" } else if line.hasPrefix("[SUBAGENT \(stamp)] <") { role = "reply" } else { return nil }
                 let t = String(line.drop { $0 != "<" }.dropFirst().prefix { $0 != ">" })
                 return t.hasPrefix(role) ? t : "MISLABELLED:\(t)"
             }
@@ -394,7 +401,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             check("5.3 a plan with only summaries to fold is not empty", !plan([old, message("ask", .user, tokens: 10)], []).isEmpty)
             let transcript = SubagentRunner.compactionTranscript(priorSummaries: p.priorSummaries, dialogue: [message("ask", .user, tokens: 20), message("rep", .assistant, tokens: 20)], work: p.evictedWork)
             check("5.4 transcript blocks ordered prior → dialogue → work", ordered(transcript, "=== PRIOR SUMMARY", "=== DIALOGUE WITH THE MAIN AGENT") && ordered(transcript, "=== DIALOGUE WITH THE MAIN AGENT", "=== WORK"))
-            check("5.5 dialogue roles labelled MAIN AGENT / SUBAGENT", transcript.contains("[MAIN AGENT] <ask>") && transcript.contains("[SUBAGENT] <rep>"))
+            check("5.5 dialogue roles labelled MAIN AGENT / SUBAGENT", transcript.contains("[MAIN AGENT \(stamp)] <ask>") && transcript.contains("[SUBAGENT \(stamp)] <rep>"))
             check("5.6 prior summary text carried into the transcript", transcript.contains("OLD_DIALOGUE") && transcript.contains("OLDER"))
             check("5.7 evicted work rendered with call and result", transcript.contains("[TOOL CALL] read_file") && transcript.contains("[TOOL RESULT] <w0>"))
             let none = SubagentRunner.compactionTranscript(priorSummaries: [], dialogue: [], work: [])
@@ -599,7 +606,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                 check("8.9 summarizer: prior summary block, then the evicted dialogue oldest first, no work block",
                       bodies[0].contains("=== PRIOR SUMMARY") && bodies[0].contains("EAGER_SUMMARY_TEXT")
                       && ordered(bodies[0], "=== PRIOR SUMMARY", "=== DIALOGUE WITH THE MAIN AGENT")
-                      && bodies[0].contains("[MAIN AGENT] <ask0>") && bodies[0].contains("[SUBAGENT] <reply11>") && bodies[0].contains("[SUBAGENT] first answer") && !bodies[0].contains("[SUBAGENT] eager answer")
+                      && bodies[0].contains("[MAIN AGENT \(stamp)] <ask0>") && bodies[0].contains("[SUBAGENT \(stamp)] <reply11>") && bodies[0].contains("[SUBAGENT \(stamp)] first answer") && !bodies[0].contains("[SUBAGENT \(stamp)] eager answer")
                       && ordered(bodies[0], "<ask0>", "<reply11>") && !bodies[0].contains("=== WORK"))
                 check("8.10 continuation carries exactly one summary (the new one), the newest two messages, the one round",
                       bodies[1].contains("FOLDED_SUMMARY_TEXT") && !bodies[1].contains("EAGER_SUMMARY_TEXT") && !bodies[1].contains("<ask0>")
@@ -625,8 +632,8 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             bodies = requestBodies()
             if bodies.count == 2 {
                 check("8.13 summarizer input: previous summary verbatim + the new exchanges + the re-injected reply, nothing older",
-                      bodies[0].contains("FOLDED_SUMMARY_TEXT") && bodies[0].contains("[MAIN AGENT] <ask12>") && bodies[0].contains("[SUBAGENT] <reply13>")
-                      && bodies[0].contains("[SUBAGENT] eager answer") && !bodies[0].contains("[SUBAGENT] folded answer") && !bodies[0].contains("EAGER_SUMMARY_TEXT") && !bodies[0].contains("<ask0>"))
+                      bodies[0].contains("FOLDED_SUMMARY_TEXT") && bodies[0].contains("[MAIN AGENT \(stamp)] <ask12>") && bodies[0].contains("[SUBAGENT \(stamp)] <reply13>")
+                      && bodies[0].contains("[SUBAGENT \(stamp)] eager answer") && !bodies[0].contains("[SUBAGENT \(stamp)] folded answer") && !bodies[0].contains("EAGER_SUMMARY_TEXT") && !bodies[0].contains("<ask0>"))
                 check("8.14 continuation carries only the third summary", bodies[1].contains("THIRD_SUMMARY_TEXT") && !bodies[1].contains("FOLDED_SUMMARY_TEXT") && !bodies[1].contains("<ask12>"))
             } else {
                 check("8.13 two requests on the third run", false, "\(bodies.count)")
@@ -1038,7 +1045,7 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
                 let summarizer = String(decoding: requests[0].body, as: UTF8.self)
                 check("9.5 summarizer input carries exactly the four evicted rounds (calls + results) and no dialogue",
                       summarizer.contains("=== WORK") && summarizer.components(separatedBy: "[TOOL CALL] read_file").count == 5
-                      && summarizer.components(separatedBy: "[TOOL RESULT]").count == 5 && summarizer.contains("<FILE_BODY>")
+                      && summarizer.components(separatedBy: "[TOOL RESULT \(Chronology.transcriptClock(fixtureInstant))]").count == 5 && summarizer.contains("<FILE_BODY>")
                       && !summarizer.contains("=== DIALOGUE WITH THE MAIN AGENT") && !summarizer.contains("=== PRIOR SUMMARY"))
                 let items = try input(requests[1])
                 let encrypted = items.compactMap { $0["encrypted_content"] as? String }

@@ -218,7 +218,7 @@ actor SubagentRunner {
             messagesForLLM = session.messages
             priorToolInteractions = session.toolInteractions
         }
-        let syntheticUser = messagesForLLM.last ?? Message(role: .user, content: invocation.taskPrompt, timestamp: Date())
+        let syntheticUser = messagesForLLM.last ?? Message(role: .user, content: invocation.taskPrompt, timestamp: HarnessClock.now())
 
         // 4. Pick the model. Resolution order (highest precedence first):
         //    a. Per-call Agent-tool LANE hint ("cheap-vision"/"cheap-text").
@@ -557,6 +557,11 @@ actor SubagentRunner {
                         }
                     }
                     if !remaining.isEmpty { ordered.append(contentsOf: remaining) }
+                    // Batch delivery time on every result of the round, blocked
+                    // ones included — the same typed note the main agent gets
+                    // (rendered at the provider boundary, never baked into content).
+                    let batchCompletedAt = HarnessClock.now()
+                    for i in ordered.indices { ordered[i].completedAt = batchCompletedAt }
 
                     let completed = ToolInteraction(assistantMessage: assistantMessage, results: ordered)
                     if responsesExecution != nil {
@@ -860,13 +865,33 @@ actor SubagentRunner {
     """
 
     /// Header of the summary message a compaction leaves at the front of the
-    /// session. Byte-stable: the next compaction recognizes it by this prefix
-    /// and folds it into the new summary, so a session carries ONE anchored
-    /// summary instead of a stack.
-    static let compactionSummaryHeader = "[SESSION HISTORY SUMMARY — Earlier work in this session was summarized to free context space. Details below are from the evicted portion.]"
+    /// session (owned by `Chronology` so both wire serializers recognize it).
+    static var compactionSummaryHeader: String { Chronology.compactionSummaryHeader }
 
     static func isCompactionSummary(_ message: Message) -> Bool {
-        message.role == .user && message.content.hasPrefix(compactionSummaryHeader)
+        Chronology.isCompactionSummary(message)
+    }
+
+    /// Period of evicted history a compaction summary covers, from the times
+    /// the evicted events recorded: dialogue message timestamps and tool
+    /// results' delivery times. nil when nothing evicted recorded a time
+    /// (legacy rounds), so the summary says so instead of inventing a period.
+    static func compactionCoverage(_ plan: CompactionPlan) -> ClosedRange<Date>? {
+        var times = plan.evictedDialogue.map(\.timestamp)
+        for round in plan.evictedWork {
+            times.append(contentsOf: round.results.compactMap(\.completedAt))
+        }
+        guard let first = times.min(), let last = times.max() else { return nil }
+        return first...last
+    }
+
+    /// The complete summary message text: byte-stable header, the chronology
+    /// line (creation time, covered period), then the summarizer's text.
+    static func compactionSummaryText(_ summary: String, writtenAt: Date, plan: CompactionPlan) -> String {
+        Chronology.compactionSummaryHeader + "\n"
+            + Chronology.compactionSummaryChronologyLine(writtenAt: writtenAt, coverage: compactionCoverage(plan),
+                                                          foldsEarlierSummaries: !plan.priorSummaries.isEmpty)
+            + "\n\n" + summary
     }
 
     /// Result of a successful compaction: the summary is already inserted as
@@ -1180,7 +1205,14 @@ actor SubagentRunner {
         ), !Task.isCancelled else { return nil }
 
         var keptMessages = plan.keptMessages
-        let summaryMsg = Message(role: .user, content: summary, timestamp: Date(timeIntervalSince1970: 0))
+        // The summary is a synthetic record written now: it carries its real
+        // creation time (never the epoch sentinel, which rendered as a 1970
+        // day header) and states inside itself the period it covers. The
+        // serializers give it no header/prefix and it does not move the
+        // chronology cursor, so the kept tail's own dates follow unchanged.
+        let writtenAt = HarnessClock.now()
+        let summaryMsg = Message(role: .user, content: Self.compactionSummaryText(summary, writtenAt: writtenAt, plan: plan),
+                                 timestamp: writtenAt)
         keptMessages.insert(summaryMsg, at: 0)
         let after = Self.estimatedContextTokens(messages: keptMessages, interactions: plan.keptInteractions)
         guard Self.compactionMakesProgress(before: before, after: after) else {
@@ -1245,7 +1277,9 @@ actor SubagentRunner {
             transcript += "=== DIALOGUE WITH THE MAIN AGENT (evicted exchanges, oldest first) ===\n"
             for msg in dialogue {
                 let role = msg.role == .user ? "MAIN AGENT" : "SUBAGENT"
-                transcript += "[\(role)] \(msg.content)\n\n"
+                // Original message time, so the summary can state when things
+                // happened (harness metadata, never text parsed from content).
+                transcript += "[\(role) \(Chronology.transcriptStamp(msg.timestamp))] \(msg.content)\n\n"
             }
         }
         if !work.isEmpty {
@@ -1263,7 +1297,10 @@ actor SubagentRunner {
                 }
                 for result in interaction.results {
                     let id = includeRoundDetails ? " id=\(result.toolCallId)" : ""
-                    transcript += "[TOOL RESULT\(id)] \(result.content)\n"
+                    // Delivery time when recorded; a legacy result without one
+                    // is rendered undated rather than with an invented time.
+                    let at = result.completedAt.map { " " + Chronology.transcriptClock($0) } ?? ""
+                    transcript += "[TOOL RESULT\(id)\(at)] \(result.content)\n"
                 }
                 transcript += "\n"
             }
@@ -1334,7 +1371,7 @@ actor SubagentRunner {
         \(MarkerNeutralizer.escape(transcript))
         """
 
-        let summaryMessages = [Message(role: .user, content: summaryPrompt, timestamp: Date())]
+        let summaryMessages = [Message(role: .user, content: summaryPrompt, timestamp: HarnessClock.now())]
 
         do {
             var refusalInteractions: [ToolInteraction] = []
@@ -1359,7 +1396,7 @@ actor SubagentRunner {
 
                 switch response {
                 case .text(let content, _, _, _, _, _, _):
-                    return Self.compactionSummaryHeader + "\n\n" + content
+                    return content
                 case .toolCalls(let assistantMessage, let calls, _, _, _):
                     refusalInteractions.append(disabledToolInteraction(
                         assistantMessage: assistantMessage,
@@ -1455,7 +1492,7 @@ actor SubagentRunner {
                 \(fragment)
                 """
                 let response = try await openRouterService.generateResponse(
-                    messages: [Message(role: .user, content: prompt, timestamp: Date())],
+                    messages: [Message(role: .user, content: prompt, timestamp: HarnessClock.now())],
                     imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
                     tools: [], modelOverride: modelOverride, providerOverride: providerOverride,
                     reasoningEffortOverride: reasoningEffortOverride, textOnlyOverride: textOnlyOverride,
@@ -1467,7 +1504,7 @@ actor SubagentRunner {
                 markProgress()
             }
             try Task.checkCancellation()
-            return Self.compactionSummaryHeader + "\n\n" + MarkerNeutralizer.escape(summary)
+            return MarkerNeutralizer.escape(summary)
         } catch {
             print("[SubagentRunner] Failed to summarize oversized batch: \(error.localizedDescription)")
             return nil
@@ -1482,11 +1519,16 @@ actor SubagentRunner {
         let escaped = reason
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+        // A refusal is a result the model actually receives: it carries the
+        // delivery time like any executed batch.
+        let refusedAt = HarnessClock.now()
         let results = calls.map { call in
-            ToolResultMessage(
+            var result = ToolResultMessage(
                 toolCallId: call.id,
                 content: "{\"error\":\"\(escaped)\"}"
             )
+            result.completedAt = refusedAt
+            return result
         }
         return ToolInteraction(assistantMessage: assistantMessage, results: results)
     }

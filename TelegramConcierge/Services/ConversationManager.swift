@@ -6019,20 +6019,22 @@ class ConversationManager: ObservableObject {
                 
                 print("[ConversationManager] Round \(round) tool execution complete")
                 
-                // Append real-time chronology to the end of each tool result
-                // This lets the model know exactly how much time passed without breaking the prompt cache prefix
-                let postToolTimeFormatter = DateFormatter()
-                postToolTimeFormatter.dateFormat = "HH:mm:ss"
-                let currentRealTime = postToolTimeFormatter.string(from: Date())
-                
+                // Record the batch delivery time on every result of this round
+                // (typed `completedAt`, one clock read per batch). The provider
+                // boundary renders it as the "[System Note: Current time is now
+                // HH:mm:ss]" note after the content, so the model knows exactly
+                // how much time passed without the prompt cache prefix changing
+                // and without the note ever being baked into persisted content.
+                let batchCompletedAt = HarnessClock.now()
+
                 for i in 0..<orderedToolResults.count {
                     // Early neutralization pass (MIDTURN_NONCE_PLAN §8 step 3):
                     // escape the reserved harness-marker prefix in every
                     // finalized tool result BEFORE trusted harness suffixes are
                     // added, so persisted results are already safe and the
                     // final provider-boundary pass is pure defense in depth.
-                    let existingContent = MarkerNeutralizer.escape(orderedToolResults[i].content)
-                    orderedToolResults[i].content = existingContent + "\n\n[System Note: Current time is now \(currentRealTime)]"
+                    orderedToolResults[i].content = MarkerNeutralizer.escape(orderedToolResults[i].content)
+                    orderedToolResults[i].completedAt = batchCompletedAt
                 }
 
                 // Deliver any user messages that arrived while this round ran.
@@ -7350,11 +7352,16 @@ class ConversationManager: ObservableObject {
         let escaped = reason
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+        // A refusal is a result the model actually receives: it carries the
+        // delivery time like any executed batch.
+        let refusedAt = HarnessClock.now()
         let results = calls.map { call in
-            ToolResultMessage(
+            var result = ToolResultMessage(
                 toolCallId: call.id,
                 content: "{\"error\":\"\(escaped)\"}"
             )
+            result.completedAt = refusedAt
+            return result
         }
         return ToolInteraction(assistantMessage: assistantMessage, results: results)
     }

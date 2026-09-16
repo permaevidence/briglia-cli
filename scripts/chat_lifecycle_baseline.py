@@ -86,8 +86,16 @@ def instrument(tree):
             "let now = P0Life.instant\n        P0Life.defaults.set(now, forKey: systemPromptTimestampKey)")
     replace(manager, "P0Life.defaults.set(Date(), forKey: systemPromptTimestampKey)",
             "P0Life.defaults.set(P0Life.instant, forKey: systemPromptTimestampKey)")
-    replace(manager, "let currentRealTime = postToolTimeFormatter.string(from: Date())",
-            "let currentRealTime = postToolTimeFormatter.string(from: P0Life.instant)")
+    # Main-agent batch clock. R0 chronology (WEB_SUBAGENT_PLAN §12) moved it, with
+    # every other harness-recorded chronology time (subagent batch delivery,
+    # reply completion, compaction-summary creation), behind one HarnessClock
+    # read; pin that read on the candidate layout, the formatter call on SOURCE.
+    if "let currentRealTime = postToolTimeFormatter.string(from: Date())" in manager.read_text():
+        replace(manager, "let currentRealTime = postToolTimeFormatter.string(from: Date())",
+                "let currentRealTime = postToolTimeFormatter.string(from: P0Life.instant)")
+    else:
+        replace(tree / "TelegramConcierge/Services/Chronology.swift",
+                "overrideForTesting?() ?? Date()", "overrideForTesting?() ?? P0Life.instant")
     replace(tree / "TelegramConcierge/Services/UserContextStructurer.swift", "lane: .ephemeral(UUID())",
             'lane: .ephemeral(UUID(uuidString: "00000000-0000-4000-8000-000000000060")!)')
     snapshot = tree / "TelegramConcierge/Services/PruneArchiveStore.swift"
@@ -105,16 +113,28 @@ def instrument(tree):
     freeze_fallback_prompt_day(tree)
     path = tree / "TelegramConcierge/Services/SubagentRunner.swift"
     replace(path, "let turnStartDate = Date()", "let turnStartDate = P0Life.instant")
-    # The emergency summarizer adds one ephemeral request message. Freeze its
-    # exact new site independently; still require the two original sites below.
-    # The pinned release has no emergency method and keeps its original seam.
-    if "private func summarizeOversizedTranscript(" in path.read_text():
-        replace(path,
-                "messages: [Message(role: .user, content: prompt, timestamp: Date())],",
-                "messages: [Message(role: .user, content: prompt, timestamp: P0Life.instant)],")
-    replace(path, "timestamp: Date()", "timestamp: P0Life.instant", 2)
-    path = tree / "TelegramConcierge/Services/SubagentSessionRegistry.swift"
-    replace(path, "timestamp: Date()", "timestamp: P0Life.instant", 3)
+    registry = tree / "TelegramConcierge/Services/SubagentSessionRegistry.swift"
+    if (tree / "TelegramConcierge/Services/Chronology.swift").exists():
+        # R0 chronology (WEB_SUBAGENT_PLAN §12): every harness-recorded
+        # chronology time (task/continuation message time, batch delivery,
+        # reply completion, summary creation, summarizer prompt messages)
+        # reads the one HarnessClock seam pinned above; the reply re-injected
+        # at resume keeps its recorded original time (lastAssistantAt). No
+        # direct clock read may remain at those sites.
+        for source in (path, registry):
+            if "timestamp: Date()" in source.read_text():
+                raise RuntimeError(f"Unpinned chronology clock read in {source.name}")
+    else:
+        # The emergency summarizer adds one ephemeral request message. Freeze its
+        # exact new site independently; still require the two original sites below.
+        # The pinned release has no emergency method and keeps its original seam.
+        if "private func summarizeOversizedTranscript(" in path.read_text():
+            replace(path,
+                    "messages: [Message(role: .user, content: prompt, timestamp: Date())],",
+                    "messages: [Message(role: .user, content: prompt, timestamp: P0Life.instant)],")
+        replace(path, "timestamp: Date()", "timestamp: P0Life.instant", 2)
+        replace(registry, "timestamp: Date()", "timestamp: P0Life.instant", 3)
+    path = registry
     replace(path, 'id = String((0..<5).map { _ in base36.randomElement()! })', 'id = "p0001"')
     replace(tree / "TelegramConcierge/Models/Message.swift", "id: UUID = UUID(),", "id: UUID = P0Life.messageID(),")
     replace(tree / "TelegramConcierge/Models/Message.swift", "timestamp: Date = Date(),", "timestamp: Date = P0Life.instant,")

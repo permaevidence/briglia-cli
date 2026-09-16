@@ -390,6 +390,14 @@ def main():
     result = run_selftest([ADA, "__subagent-compaction-selftest"], capture_output=True, text=True, timeout=300)
     check("subagent compaction selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # Chronology (WEB_SUBAGENT_PLAN §12, R0): day headers, time prefixes and
+    # dated tool notes for the main agent and every subagent type on both
+    # transports; original reply times at resume; compaction summaries that
+    # are never a 1970 event. Real serializers and runner against a scripted
+    # loopback provider under isolated XDG roots, HarnessClock pinned.
+    result = run_selftest([ADA, "__chronology-selftest"], capture_output=True, text=True, timeout=300)
+    check("chronology selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # 3c5-ter. MCP tool surface: server handles, canonical aliases (length,
     # charset, determinism, per-server prefix isolation), escaped
     # descriptions, refused hostile semantic strings, registry-only dispatch

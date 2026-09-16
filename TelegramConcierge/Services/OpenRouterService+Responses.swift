@@ -6,6 +6,12 @@ extension OpenRouterService {
         var input: [JSONValue] = [ResponsesAdapter.message(role: "system", text: conversation.systemPrompt)]
         var nonces = Set<String>(), usedCallIDs = Set<String>(), usedItemIDs = Set<String>()
         var replayBytes = 0
+        // Same chronology contract as Chat Completions (Chronology.swift): day
+        // headers and `[HH:mm]` on user input, dated tool notes from typed
+        // `completedAt`, reply times in the metadata note. Never inside native
+        // replay items, encrypted reasoning or provider item IDs: for an
+        // assistant message the day header is a separate system item.
+        var chronology = ChronologyCursor()
         // Reserve ongoing work first. Bound historical native cache entries as
         // complete rounds; their canonical text/calls/results still replay.
         // Ciphertext size is never converted into a token estimate.
@@ -68,7 +74,7 @@ extension OpenRouterService {
                 }
             }
             for result in interaction.results {
-                let text = try ProviderToolResultRenderer.wireText(for: result)
+                let text = try ProviderToolResultRenderer.wireText(for: result, chronology: &chronology)
                 // Render succeeded from typed state. Never infer receipt membership
                 // by looking for marker-like text in tool/media/model content.
                 for annotation in result.harnessAnnotations { nonces.insert(annotation.deliveryNonce) }
@@ -115,6 +121,12 @@ extension OpenRouterService {
                 if message.toolInteractions.isEmpty, let log = message.compactToolLog, !log.isEmpty {
                     input.append(ResponsesAdapter.message(role: "assistant", text: MarkerNeutralizer.escape(log)))
                 }
+                // Day/offset change at this reply: a system item before the
+                // reply's own items (native or semantic), never a prefix.
+                let lead = chronology.messageLead(for: message.timestamp)
+                if !lead.isEmpty {
+                    input.append(ResponsesAdapter.message(role: "system", text: lead.trimmingCharacters(in: .newlines)))
+                }
                 if let native = ResponsesAdapter.nativeItems(envelope: nativeHistory.contains("\(message.id):final") ? message.responsesReplay : nil,
                     scope: context.responsesScope, text: message.content, calls: []),
                    usedItemIDs.isDisjoint(with: native.compactMap({ $0.responsesObject?["id"]?.responsesString })) {
@@ -147,7 +159,12 @@ extension OpenRouterService {
                         fileName: name, descriptor: "Document"))
                 }
                 let canonical = message.kind == .userText ? message.content : MarkerNeutralizer.escape(message.content)
-                let text = (hints.isEmpty ? "" : MarkerNeutralizer.escape(hints.joined(separator: "\n")) + "\n") + canonical
+                // A compaction summary is not an event: no header, no prefix,
+                // and it does not move the cursor (its creation time and the
+                // period it covers are stated inside it).
+                let lead = Chronology.isCompactionSummary(message) ? ""
+                    : chronology.messageLead(for: message.timestamp) + chronology.timePrefix(for: message.timestamp)
+                let text = lead + (hints.isEmpty ? "" : MarkerNeutralizer.escape(hints.joined(separator: "\n")) + "\n") + canonical
                 let parts = try await responsesMedia(media, textOnly: context.textOnly)
                 input.append(.object(["role": .string("user"), "content": .array(parts + [
                     .object(["type": .string("input_text"), "text": .string(text)])])]))

@@ -1028,6 +1028,14 @@ actor OpenRouterService {
     func historyMetadataNote(for message: Message) async -> String? {
         var lines: [String] = []
 
+        // Original time of every assistant reply (WEB_SUBAGENT_PLAN §12.2):
+        // exposed as harness metadata beside the message, never as a prefix
+        // on the assistant text (a prefix teaches the model to imitate it).
+        // Tool run logs are system metadata, not replies.
+        if message.role == .assistant, !message.content.hasPrefix("[TOOL RUN LOG") {
+            lines.append(Chronology.assistantReplyTimeLine(message.timestamp))
+        }
+
         if !message.downloadedDocumentFileNames.isEmpty {
             var parts: [String] = []
             for entry in message.downloadedDocumentFileNames {

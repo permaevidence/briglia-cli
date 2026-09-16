@@ -154,11 +154,32 @@ enum HarnessAnnotationRenderer {
 enum ProviderToolResultRenderer {
     /// The single path from a `ToolResultMessage` to the provider wire.
     /// Ordinary content is re-neutralized (defense in depth for legacy data
-    /// and future tool paths); validated annotations are rendered after it.
-    /// A current annotation can never be silently omitted: an invariant
-    /// violation throws before any network transmission.
+    /// and future tool paths); the harness time note follows it when the
+    /// result recorded its delivery time (`completedAt`); validated
+    /// annotations are rendered after both, so a genuine mid-turn delivery
+    /// keeps its required trailing position. A current annotation can never
+    /// be silently omitted: an invariant violation throws before any network
+    /// transmission.
+    ///
+    /// `chronology` is the request-wide cursor (day and offset context for
+    /// the note). Callers that do not walk a whole request use the overload
+    /// without it and get the bare note.
+    static func wireText(for result: ToolResultMessage, chronology: inout ChronologyCursor) throws -> String {
+        try wireText(for: result, note: result.completedAt.map { chronology.resultNote(at: $0) })
+    }
+
     static func wireText(for result: ToolResultMessage) throws -> String {
-        let safeToolText = MarkerNeutralizer.escape(result.content)
+        try wireText(for: result, note: result.completedAt.map { ChronologyCursor.bareResultNote(at: $0) })
+    }
+
+    private static func wireText(for result: ToolResultMessage, note: String?) throws -> String {
+        var safeToolText = MarkerNeutralizer.escape(result.content)
+        if let note {
+            // Same bytes the legacy main-agent path produced when it appended
+            // the note to the content itself (typed now, so history and
+            // repeated serialization never carry it twice).
+            safeToolText += "\n\n" + note
+        }
         guard !result.harnessAnnotations.isEmpty else { return safeToolText }
         // Rollback consistency (Codex round-1 finding 2): under the legacy
         // flag, persisted typed annotations render in the legacy flattened

@@ -21,15 +21,9 @@ extension OpenRouterService {
             content: .text(systemPrompt)
         ))
 
-        // Date formatters for timestamps
-        let timeFormatter = DateFormatter()
-        timeFormatter.dateFormat = "HH:mm"
-
-        let dateHeaderFormatter = DateFormatter()
-        dateHeaderFormatter.dateFormat = "EEEE, d MMMM yyyy"
-
-        let calendar = Calendar.current
-        var lastMessageDate: Date? = nil
+        // Request-wide chronology: day headers, time prefixes and dated tool
+        // notes come from one cursor walked in emission order (Chronology.swift).
+        var chronology = ChronologyCursor()
 
         // Convert conversation messages, interleaving stored tool interactions
         for message in truncatedMessages {
@@ -68,7 +62,7 @@ extension OpenRouterService {
                         // (MIDTURN_NONCE_PLAN §8 step 12).
                         apiMessages.append(OpenRouterAPIMessage(
                             role: "tool",
-                            content: .text(try ProviderToolResultRenderer.wireText(for: result)),
+                            content: .text(try ProviderToolResultRenderer.wireText(for: result, chronology: &chronology)),
                             toolCallId: result.toolCallId
                         ))
                         currentInteractionReferences.append(contentsOf: result.fileAttachmentReferences)
@@ -100,21 +94,14 @@ extension OpenRouterService {
                 apiMessages.append(OpenRouterAPIMessage(role: "system", content: .text(MarkerNeutralizer.escape(compactLog))))
             }
 
-            // Check if we need to add a date header (new day)
-            var dateHeader = ""
-            if let lastDate = lastMessageDate {
-                if !calendar.isDate(lastDate, inSameDayAs: message.timestamp) {
-                    // New day - add date header
-                    dateHeader = "--- \(dateHeaderFormatter.string(from: message.timestamp)) ---\n"
-                }
-            } else {
-                // First message - add date header
-                dateHeader = "--- \(dateHeaderFormatter.string(from: message.timestamp)) ---\n"
-            }
-            lastMessageDate = message.timestamp
-
-            // Format time for this message
-            let timePrefix = "[\(timeFormatter.string(from: message.timestamp))] "
+            // Day header on the first message and on a change of day (plus an
+            // offset line on a daylight-saving switch); `[HH:mm]` time prefix.
+            // A compaction summary is not an event: no header, no prefix, and
+            // it does not move the cursor — its own creation time and covered
+            // period are stated inside it.
+            let isCompactionSummary = Chronology.isCompactionSummary(message)
+            let dateHeader = isCompactionSummary ? "" : chronology.messageLead(for: message.timestamp)
+            let timePrefix = isCompactionSummary ? "" : chronology.timePrefix(for: message.timestamp)
 
             // Check if message has multimodal content (images or documents, including referenced ones)
             let hasImages = !message.imageFileNames.isEmpty
@@ -293,7 +280,7 @@ extension OpenRouterService {
                     // `result.content` (MIDTURN_NONCE_PLAN §8 step 12).
                     apiMessages.append(OpenRouterAPIMessage(
                         role: "tool",
-                        content: .text(try ProviderToolResultRenderer.wireText(for: result)),
+                        content: .text(try ProviderToolResultRenderer.wireText(for: result, chronology: &chronology)),
                         toolCallId: result.toolCallId
                     ))
                 }

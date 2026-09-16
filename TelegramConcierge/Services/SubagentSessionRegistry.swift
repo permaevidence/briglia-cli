@@ -42,6 +42,12 @@ actor SubagentSessionRegistry {
         var messages: [Message]                 // user messages fed to the LLM
         var toolInteractions: [ToolInteraction] // accumulated tool call/result pairs
         var lastAssistantText: String?          // final text from last run (becomes assistant message on resume)
+        /// When `lastAssistantText` was produced (recorded at commit), so the
+        /// message materialized at resume keeps the reply's ORIGINAL time
+        /// instead of being dated at the resume. Additive optional field: a
+        /// legacy session without it falls back to `lastUsed`, which commit
+        /// set at that same event — never the reload time.
+        var lastAssistantAt: Date? = nil
     }
 
     private var sessions: [String: Session] = [:]
@@ -86,7 +92,7 @@ actor SubagentSessionRegistry {
     /// Create a fresh session and return its ID.
     func create(subagentType: String, description: String, initialPrompt: String) -> (id: String, session: Session) {
         let id = generateId()
-        let userMessage = Message(role: .user, content: initialPrompt, timestamp: Date())
+        let userMessage = Message(role: .user, content: initialPrompt, timestamp: HarnessClock.now())
         let session = Session(
             id: id,
             subagentType: subagentType,
@@ -120,12 +126,16 @@ actor SubagentSessionRegistry {
         // If the prior run ended with a text response, inject it as an
         // assistant message so the subagent sees its own prior reply.
         if let priorText = session.lastAssistantText {
-            let assistantMsg = Message(role: .assistant, content: priorText, timestamp: Date())
+            // Original completion time of that reply (WEB_SUBAGENT_PLAN §12.2.5):
+            // yesterday's reply is not dated today.
+            let assistantMsg = Message(role: .assistant, content: priorText,
+                                       timestamp: session.lastAssistantAt ?? session.lastUsed)
             session.messages.append(assistantMsg)
             session.lastAssistantText = nil
+            session.lastAssistantAt = nil
         }
 
-        let userMsg = Message(role: .user, content: continuationPrompt, timestamp: Date())
+        let userMsg = Message(role: .user, content: continuationPrompt, timestamp: HarnessClock.now())
         session.messages.append(userMsg)
         session.lastUsed = Date()
 
@@ -179,6 +189,9 @@ actor SubagentSessionRegistry {
         session.totalSpendUSD += additionalSpend
         session.lastUsed = Date()
         session.lastAssistantText = finalAssistantText
+        // Recorded once, at the event it describes (the reply's completion).
+        let completedAt = HarnessClock.now()
+        session.lastAssistantAt = finalAssistantText == nil ? nil : completedAt
         session.toolInteractions.append(contentsOf: newToolInteractions)
         if responsesMode {
             // Completed native turns own their interactions in chronological
@@ -186,11 +199,13 @@ actor SubagentSessionRegistry {
             // checkpoint, so resume cannot move old calls behind a new user turn.
             var final = Message(role: .assistant,
                 content: finalAssistantText ?? "[Subagent interrupted; inspect recorded tool outcomes before continuing.]",
+                timestamp: completedAt,
                 toolInteractions: session.toolInteractions)
             final.responsesReplay = responsesReplay
             session.messages.append(final)
             session.toolInteractions = []
             session.lastAssistantText = nil
+            session.lastAssistantAt = nil
         }
 
 
