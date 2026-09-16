@@ -39,6 +39,7 @@ jobs:
       - name: Wire comparator negative tests
         run: |
           python3 scripts/chat_wire_baseline_test.py
+          python3 scripts/chronology_wire_migration_test.py
           python3 scripts/read_file_description_migration_test.py
           python3 scripts/reasoning_history_removal_migration_test.py
           python3 scripts/image_schema_contract_test.py .build/debug/briglia
@@ -56,6 +57,7 @@ jobs:
           python3 scripts/active_compaction_lifecycle_migration_test.py
           python3 scripts/newest_turn_protection_lifecycle_migration_test.py
           python3 scripts/subagent_dialogue_compaction_lifecycle_migration_test.py
+          python3 scripts/chronology_lifecycle_migration_test.py
           python3 scripts/prune_schema_contract_test.py
       - name: Chat Completions lifecycle r3 and shipped-client differential gate
         run: python3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline scripts/fixtures/chat-lifecycle/ci-linux-x86_64-r2.json
@@ -107,6 +109,7 @@ jobs:
       - name: Wire comparator negative tests
         run: |
           python3 scripts/chat_wire_baseline_test.py
+          python3 scripts/chronology_wire_migration_test.py
           python3 scripts/read_file_description_migration_test.py
           python3 scripts/reasoning_history_removal_migration_test.py
           python3 scripts/image_schema_contract_test.py .build/debug/briglia
@@ -124,6 +127,7 @@ jobs:
           python3 scripts/active_compaction_lifecycle_migration_test.py
           python3 scripts/newest_turn_protection_lifecycle_migration_test.py
           python3 scripts/subagent_dialogue_compaction_lifecycle_migration_test.py
+          python3 scripts/chronology_lifecycle_migration_test.py
           python3 scripts/prune_schema_contract_test.py
       - name: Chat Completions lifecycle r3 and shipped-client differential gate
         # The frozen macOS fixture embeds rendered PDF pages whose Apple ICC

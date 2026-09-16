@@ -1,0 +1,18 @@
+{
+ "revision": 1,
+ "reply_time_message": "[Turn metadata]\nAssistant reply time: 22:13",
+ "scope": "every pinned request whose history carries the assistant reply (url-form indices 1, 2, 3, 10 and 11 of every model): one system note after the reply, after any adapter-emitted system note for it, before the next non-system message; the Anthropic cache breakpoint moves onto the note when the note is the last history message",
+ "fixtures": [
+  "anthropic_claude-sonnet-4-1", "anthropic_claude-sonnet-4-2", "anthropic_claude-sonnet-4-3", "anthropic_claude-sonnet-4-10", "anthropic_claude-sonnet-4-11",
+  "custom-model-1", "custom-model-2", "custom-model-3", "custom-model-10", "custom-model-11",
+  "glm-5.3-1", "glm-5.3-2", "glm-5.3-3", "glm-5.3-10", "glm-5.3-11",
+  "kimi-k2.7-code-1", "kimi-k2.7-code-2", "kimi-k2.7-code-3", "kimi-k2.7-code-10", "kimi-k2.7-code-11",
+  "kimi-k3-1", "kimi-k3-2", "kimi-k3-3", "kimi-k3-10", "kimi-k3-11",
+  "local-model-1", "local-model-2", "local-model-3", "local-model-10", "local-model-11",
+  "qwen3.8-max-1", "qwen3.8-max-2", "qwen3.8-max-3", "qwen3.8-max-10", "qwen3.8-max-11"
+ ],
+ "reason": "R0 chronology (WEB_SUBAGENT_PLAN §12): the original time of every assistant reply is exposed to the model as harness metadata beside the message, never as a prefix on the assistant text. The fixture instant 1700000000 renders as 22:13 (fixtures run under TZ=UTC).",
+ "source_change": "OpenRouterService.historyMetadataNote adds the reply-time line for assistant messages (wip/chronology)",
+ "requests_without_the_note": "requests whose history has no assistant reply (indices 0, 4-9 and 12) pass through unchanged and are still compared byte for byte",
+ "review": "private-docs docs/review/CHRONOLOGY_R0_2026-09-16.md"
+}
