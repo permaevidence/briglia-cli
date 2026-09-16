@@ -104,9 +104,14 @@ extension OpenRouterService {
             // Web researcher on (WEB_SUBAGENT_PLAN §4.8): the research tools
             // left this list, so the guidance names the delegation instead.
             // Decided from THIS request's tool list, never a second lookup;
-            // with the switch off the legacy line is byte-identical.
+            // with the switch off the legacy line is byte-identical. The
+            // marker is the Agent tool's `deliverable` parameter, which the
+            // schema carries only when the BUILT-IN researcher is present
+            // (identity-based) — never the enum value "Web", which a
+            // user-defined agent of that name also produces with the switch
+            // off (Codex R1a round 2).
             let webResearcherAvailable = tools?.first { $0.function.name == "Agent" }?
-                .function.parameters.properties["subagent_type"]?.enumValues?.contains(SubagentTypes.webResearcherName) == true
+                .function.parameters.properties["deliverable"] != nil
                 && tools?.contains { $0.function.name == "web_search" } != true
             let webGuidance = webResearcherAvailable
                 ? "- For current or unstable facts, delegate web research to the Web subagent (Agent with subagent_type=Web and a deliverable: short | standard | report); carry its provenance and sources into your reply, and resume its session for follow-ups. web_fetch stays for a known URL."

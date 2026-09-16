@@ -1034,6 +1034,99 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             clock = at(2026, 4, 10, 10, 0, 0)
         }
 
+        print("14. Built-in identity, not display name (Codex round 2) — and Browse vs Web wording")
+        do {
+            webFlag = false
+            subagentsFlag = true
+            WebSearchBackend.processOverride = .opencode
+            // A REAL user-defined agent named `Web`, loaded through UserAgentLoader.
+            let agentsDir = StoragePaths.configRoot.appendingPathComponent("agents", isDirectory: true)
+            try PrivateStorage.ensureDirectory(agentsDir)
+            let definition = agentsDir.appendingPathComponent("custom-web.md")
+            try "---\nname: Web\ndescription: User-defined offline reader\ntools: read_file\nmodel: inherit\n---\nAnswer from the supplied task only.\n".write(to: definition, atomically: true, encoding: .utf8)
+            defer { try? FileManager.default.removeItem(at: definition) }
+
+            let custom = SubagentTypes.find(name: "Web")
+            let parentOn = AvailableTools.all(includeWebSearch: true)
+            let inventory = custom.map { SubagentRunner.nativeToolInventory(parentTools: parentOn, type: $0).map { $0.function.name } } ?? []
+            check("14.1 switch off: the loaded custom Web is ORDINARY (role, not researcher), keeps its read_file whitelist, messaging prompt, inherit lane",
+                  custom != nil && custom?.builtInRole == .ordinary && custom?.isWebResearcher == false && inventory == ["read_file"]
+                  && custom?.promptStyle == .messaging && custom?.forbidMCP == false && custom?.description == "User-defined offline reader",
+                  "role=\(String(describing: custom?.builtInRole)) tools=\(inventory)")
+            let schemaOff = parentOn.first { $0.function.name == "Agent" }!
+            check("14.2 switch off: the custom Web is listed by name but enables NO researcher schema (no deliverable, no Web usage notes, no Browse scope)",
+                  schemaOff.function.parameters.properties["subagent_type"]?.enumValues?.contains("Web") == true
+                  && schemaOff.function.parameters.properties["deliverable"] == nil
+                  && !schemaOff.function.description.contains("Web research: use subagent_type=Web")
+                  && !schemaOff.function.description.contains("OPERATE a browser")
+                  && schemaOff.function.description.contains("  - Web: User-defined offline reader (tools: read_file)"))
+            check("14.3 switch off: deliverable validation treats the custom Web as ordinary (no default, parameter refused)",
+                  ToolExecutor.agentDeliverable(nil, subagentType: "Web").deliverable == nil
+                  && ToolExecutor.agentDeliverable("report", subagentType: "Web").error == "{\"error\": \"deliverable is only valid for subagent_type=Web\"}")
+            // Real runner: main profile (A), general pool, no research metadata.
+            let customExecutor = ToolExecutor(outputMode: .subagent)
+            await customExecutor.configure(openRouterKey: "", serperKey: "synthetic-serper-key", jinaKey: "synthetic-jina-key")
+            serverA.clear(); serverB.clear()
+            serverA.script([WebFixtureServer.chatBody("Custom offline answer")])
+            serverB.script([WebFixtureServer.chatBody("Custom offline answer"), WebFixtureServer.chatBody("Custom offline answer")])
+            let customRun = await SubagentRunner().run(
+                invocation: .init(subagentType: "Web", description: "custom offline", taskPrompt: "Summarize the supplied text.", modelOverride: nil, runInBackground: false),
+                sessionId: nil, openRouterService: service, toolExecutor: customExecutor, imagesDirectory: images, documentsDirectory: documents, parentTools: parentOn)
+            let customSession = await SubagentSessionRegistry.shared.get(customRun.sessionId)
+            let customJSON = resultJSON(customRun)
+            check("14.4 switch off: the custom Web runs on the MAIN profile (1 request on A, 0 on the web backend), lands in the general pool, carries no provenance / queries / report / backend note",
+                  customRun.error == nil && serverA.requests.count == 1 && serverB.requests.isEmpty
+                  && customSession?.kind == .general && customSession?.pool == nil && customSession?.subagentType == "Web"
+                  && customRun.evidenceProvenance == nil && customJSON["evidence_provenance"] == nil && customJSON["queries_used"] == nil
+                  && customJSON["report_path"] == nil && customJSON["note"] == nil
+                  && (customJSON["model_used"] as? String)?.contains("web backend") != true,
+                  "A=\(serverA.requests.count) B=\(serverB.requests.count) pool=\(customSession?.pool ?? "nil") model=\(customRun.modelUsed ?? "nil") err=\(customRun.error ?? "nil")")
+            let customBody = serverA.requests.first.map(body) ?? [:]
+            let customToolNames = ((customBody["tools"] as? [[String: Any]]) ?? []).compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
+            let customSystem = ((customBody["messages"] as? [[String: Any]]) ?? []).first { $0["role"] as? String == "system" }?["content"] as? String ?? ""
+            check("14.5 switch off: the custom Web's request carries the messaging prompt with its own suffix and its own whitelist (read_file only, no web_query)",
+                  customToolNames == ["read_file"]
+                  && customSystem.contains("Reply with short direct messages")
+                  && customSystem.contains("Answer from the supplied task only."),
+                  "tools=\(customToolNames) system=\(customSystem.prefix(200))")
+            // Main prompt: with the custom Web listed, the legacy guidance whether web search is available or not.
+            let offAvailable = await service.prepareConversation(messages: [Message(role: .user, content: "hi", timestamp: clock)], imagesDirectory: images, documentsDirectory: documents,
+                tools: AvailableTools.all(includeWebSearch: true), toolResultMessages: nil, calendarContext: nil, emailContext: nil, chunkSummaries: nil, totalChunkCount: 0,
+                turnStartDate: clock, finalResponseInstruction: nil, tailSystemMessage: nil, tailUserMessage: nil, deferredMCPSummaries: nil)
+            let offUnavailable = await service.prepareConversation(messages: [Message(role: .user, content: "hi", timestamp: clock)], imagesDirectory: images, documentsDirectory: documents,
+                tools: AvailableTools.all(includeWebSearch: false), toolResultMessages: nil, calendarContext: nil, emailContext: nil, chunkSummaries: nil, totalChunkCount: 0,
+                turnStartDate: clock, finalResponseInstruction: nil, tailSystemMessage: nil, tailUserMessage: nil, deferredMCPSummaries: nil)
+            let unavailableAgent = AvailableTools.all(includeWebSearch: false).first { $0.function.name == "Agent" }
+            check("14.6 switch off, custom Web in the enum: main-prompt guidance is the legacy line with web search available AND unavailable (no web_search tool, 'Web' in the enum)",
+                  offAvailable.systemPrompt.contains("- Use web tools for current or unstable facts, and cite sources when useful.") && !offAvailable.systemPrompt.contains("Web subagent")
+                  && offUnavailable.systemPrompt.contains("- Use web tools for current or unstable facts, and cite sources when useful.") && !offUnavailable.systemPrompt.contains("Web subagent")
+                  && unavailableAgent?.function.parameters.properties["subagent_type"]?.enumValues?.contains("Web") == true
+                  && AvailableTools.all(includeWebSearch: false).contains { $0.function.name == "web_search" } == false)
+            // Switch on: the built-in shadows the file; the lowercase call resolves to the built-in (13.5 keeps the pool check).
+            webFlag = true
+            let builtIn = SubagentTypes.find(name: "web")
+            let onTypes = SubagentTypes.all(webSearchAvailable: true)
+            check("14.7 switch on: the built-in shadows the custom file — one Web in the listing, lowercase resolves to the researcher by identity, the file's description absent from the schema",
+                  builtIn?.builtInRole == .webResearcher && builtIn?.isWebResearcher == true && onTypes.filter { $0.name.lowercased() == "web" }.count == 1
+                  && onTypes.first { $0.name == "Web" }?.builtInRole == .webResearcher
+                  && !AvailableTools.all(includeWebSearch: true).first { $0.function.name == "Agent" }!.function.description.contains("User-defined offline reader"))
+            // Browse vs Web wording (owner question 2026-09-16): gated on the researcher's presence, by identity.
+            let browseOn = AvailableTools.agentListingLine(for: SubagentTypes.browse, webPresent: true)
+            let browseOff = AvailableTools.agentListingLine(for: SubagentTypes.browse, webPresent: false)
+            let customBrowse = SubagentType(name: "Browse", description: "my browse", systemPromptSuffix: "", allowedToolNames: ["read_file"], defaultMaxTurns: 1, preferredModel: .inherit)
+            let onSchema = AvailableTools.all(includeWebSearch: true).first { $0.function.name == "Agent" }!.function.description
+            check("14.8 Browse line: legacy byte for byte while Web is absent; the OPERATE-a-browser scope while Web is present; a user agent named Browse (ordinary role) never gets it",
+                  browseOff == "  - Browse: browser automation via Playwright MCP (tools: bash, grep, inspect_media, read_file, web_fetch, web_search; MCP: mcp__playwright__*)"
+                  && browseOn == "  - Browse: browser automation via Playwright MCP" + AvailableTools.browseScopeWhileWebPresent + " (tools: bash, grep, inspect_media, read_file, web_fetch, web_search; MCP: mcp__playwright__*)"
+                  && SubagentTypes.browse.builtInRole == .browser && customBrowse.builtInRole == .ordinary
+                  && !AvailableTools.agentListingLine(for: customBrowse, webPresent: true).contains("OPERATE"),
+                  browseOff + "\n" + browseOn)
+            check("14.9 Web usage notes (switch on) tell the model Browse is only for operating a browser and research goes to Web",
+                  onSchema.contains("Browse (when listed) is only for operating a browser") && onSchema.contains("use subagent_type=Web instead of searching yourself — for any lookup, fact check, or reading of public pages"))
+            webFlag = false
+            serverA.clear(); serverB.clear()
+        }
+
         print("Web subagent selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }
     }

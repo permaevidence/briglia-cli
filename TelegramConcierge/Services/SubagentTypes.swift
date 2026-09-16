@@ -39,6 +39,24 @@ enum SubagentPromptStyle {
     case research
 }
 
+/// Typed identity of a built-in with special runtime behaviour. Only the
+/// built-in definitions in `SubagentTypes` carry a value other than
+/// `.ordinary`: `UserAgentLoader` never sets it, so a user-defined agent is
+/// ordinary whatever its display name (Codex R1a round 2: a custom agent
+/// named `Web` must never be treated as the researcher). Every Web-specific
+/// decision — tool inventory, provider routing, schema, main-prompt
+/// guidance, deliverable handling, pool membership — derives from this
+/// identity, never from the name.
+enum SubagentBuiltInRole: Equatable {
+    case ordinary
+    case webResearcher
+    /// The built-in Browse preset (Playwright). Carries no runtime special
+    /// case; the Agent listing uses it to tell the model, while the Web
+    /// researcher is available, that Browse is for OPERATING a browser and
+    /// research goes to Web (WEB_SUBAGENT_PLAN §4.1).
+    case browser
+}
+
 /// Describes a subagent kind (built-in or user-defined).
 struct SubagentType {
     let name: String
@@ -62,8 +80,12 @@ struct SubagentType {
     /// keeps `.messaging`, so their prompt bytes are unchanged.
     let promptStyle: SubagentPromptStyle
 
-    /// The built-in Web researcher (WEB_SUBAGENT_PLAN §4.1).
-    var isWebResearcher: Bool { name == SubagentTypes.webResearcherName }
+    /// Typed built-in identity (`.ordinary` for every user-defined agent).
+    let builtInRole: SubagentBuiltInRole
+
+    /// The built-in Web researcher (WEB_SUBAGENT_PLAN §4.1) — by identity,
+    /// never by display name.
+    var isWebResearcher: Bool { builtInRole == .webResearcher }
 
     init(
         name: String,
@@ -74,7 +96,8 @@ struct SubagentType {
         preferredModel: SubagentModelChoice,
         mcpToolPatterns: [String]? = nil,
         forbidMCP: Bool = false,
-        promptStyle: SubagentPromptStyle = .messaging
+        promptStyle: SubagentPromptStyle = .messaging,
+        builtInRole: SubagentBuiltInRole = .ordinary
     ) {
         self.name = name
         self.description = description
@@ -85,6 +108,7 @@ struct SubagentType {
         self.mcpToolPatterns = mcpToolPatterns
         self.forbidMCP = forbidMCP
         self.promptStyle = promptStyle
+        self.builtInRole = builtInRole
     }
 }
 
@@ -110,7 +134,8 @@ enum SubagentTypes {
         allowedToolNames: ["read_file", "grep", "bash", "web_fetch", "web_search", "inspect_media"],
         defaultMaxTurns: 200,
         preferredModel: .inherit,
-        mcpToolPatterns: ["mcp__playwright__*"]
+        mcpToolPatterns: ["mcp__playwright__*"],
+        builtInRole: .browser
     )
 
     /// Restricted profile for harness-dispatched watcher-fire triage
@@ -151,7 +176,8 @@ enum SubagentTypes {
         preferredModel: .web,
         mcpToolPatterns: nil,
         forbidMCP: true,
-        promptStyle: .research
+        promptStyle: .research,
+        builtInRole: .webResearcher
     )
 
     static let staticBuiltIns: [SubagentType] = [generalPurpose, watcherTriage]

@@ -4369,7 +4369,10 @@ extension ToolExecutor {
     /// (WEB_SUBAGENT_PLAN §4.3): present with a non-Web type → tool error;
     /// Web without it → standard. Returns (error JSON, resolved deliverable).
     static func agentDeliverable(_ raw: String?, subagentType: String) -> (error: String?, deliverable: WebDeliverable?) {
-        let isWeb = subagentType.lowercased() == SubagentTypes.webResearcherName.lowercased()
+        // Identity, not name: a user-defined agent called `Web` (switch off)
+        // is ordinary and gets neither a default deliverable nor the
+        // parameter (Codex R1a round 2).
+        let isWeb = SubagentTypes.find(name: subagentType)?.isWebResearcher == true
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !raw.isEmpty else {
             return (nil, isWeb ? .standard : nil)
         }

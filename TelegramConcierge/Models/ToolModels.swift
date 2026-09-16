@@ -1589,22 +1589,7 @@ enum AvailableTools {
             modelDescription = "Optional model for this run. 'inherit' (default) = no per-call preference: the subagent runs its own frontmatter lane default if it declares one, otherwise the parent model. Use it whenever the task needs full capability. Cheap lanes, configured by the user, for mechanical or low-difficulty tasks (bulk file reads, simple searches, formatting, high-volume triage): \(laneLines.joined(separator: "; ")). When unsure, inherit."
         }
         let listing = allSubagents
-            .map { sub in
-                // Sorted so the rendered description is stable across builds
-                // (Set iteration order isn't) — keeps the prompt cacheable.
-                var clause = sub.allowedToolNames.map { "tools: \($0.sorted().joined(separator: ", "))" }
-                    ?? "tools: all"
-                let mcpPatterns = MCPAgentRouting.effectivePatterns(
-                    forAgent: sub.name,
-                    fallbackPatterns: sub.mcpToolPatterns
-                )
-                if !mcpPatterns.isEmpty {
-                    // Patterns are user/profile-authored, but they are still
-                    // interpolated text: neutralize before they enter the prompt.
-                    clause += "; MCP: \(MarkerNeutralizer.escape(mcpPatterns.joined(separator: ", ")))"
-                }
-                return "  - \(sub.name): \(sub.description) (\(clause))"
-            }
+            .map { agentListingLine(for: $0, webPresent: webPresent) }
             .joined(separator: "\n")
         let description = """
         Launch a new subagent with a fresh, isolated context for focused work. Useful for broad codebase exploration, architectural planning, or focused investigations that would otherwise bloat your own context. The subagent has its own tools and returns only its final message to you.
@@ -1685,7 +1670,32 @@ enum AvailableTools {
 
     /// Agent-description bullets present only when the Web preset is in the
     /// enum (WEB_SUBAGENT_PLAN §4.3, §4.5, §4.7).
-    static let webResearcherUsageNotes = "- Web research: use subagent_type=Web instead of searching yourself. State the expected deliverable (short | standard | report). Its result carries evidence_provenance, queries_used, sources_consulted (pages it read) and search_results_seen (results it only saw): carry the provenance into your answer — say when an answer relies on evidence retained from earlier runs, when the searches found nothing, and what could not be verified. A [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim. Resume the same Web session (session_id) for follow-ups; web sessions are listed in their own section of subagent_manage(list_sessions)."
+    /// One line of the Agent tool's "Available subagents" listing. Pure, so
+    /// the Web selftest asserts the Browse-vs-Web wording directly.
+    static func agentListingLine(for sub: SubagentType, webPresent: Bool) -> String {
+        // Sorted so the rendered description is stable across builds
+        // (Set iteration order isn't) — keeps the prompt cacheable.
+        var clause = sub.allowedToolNames.map { "tools: \($0.sorted().joined(separator: ", "))" }
+            ?? "tools: all"
+        let mcpPatterns = MCPAgentRouting.effectivePatterns(
+            forAgent: sub.name,
+            fallbackPatterns: sub.mcpToolPatterns
+        )
+        if !mcpPatterns.isEmpty {
+            // Patterns are user/profile-authored, but they are still
+            // interpolated text: neutralize before they enter the prompt.
+            clause += "; MCP: \(MarkerNeutralizer.escape(mcpPatterns.joined(separator: ", ")))"
+        }
+        // While the Web researcher is listed, Browse's line says what it is
+        // NOT for, so the model never drives a browser to look something up.
+        // Switch off: the legacy line, byte for byte.
+        let scope = webPresent && sub.builtInRole == .browser ? browseScopeWhileWebPresent : ""
+        return "  - \(sub.name): \(sub.description)\(scope) (\(clause))"
+    }
+
+    static let browseScopeWhileWebPresent = " — only when the task needs to OPERATE a browser (log in, click, fill forms, pages that render only with JavaScript, sites needing a session); reading and researching the public web is Web's job, not Browse's"
+
+    static let webResearcherUsageNotes = "- Web research: use subagent_type=Web instead of searching yourself — for any lookup, fact check, or reading of public pages. Browse (when listed) is only for operating a browser: logging in, clicking, filling forms, JavaScript-only pages, sites needing a session; never for plain research. State the expected deliverable (short | standard | report). Its result carries evidence_provenance, queries_used, sources_consulted (pages it read) and search_results_seen (results it only saw): carry the provenance into your answer — say when an answer relies on evidence retained from earlier runs, when the searches found nothing, and what could not be verified. A [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim. Resume the same Web session (session_id) for follow-ups; web sessions are listed in their own section of subagent_manage(list_sessions)."
 
     static var subagentManage: ToolDefinition { subagentManage(webSearchAvailable: true) }
 
