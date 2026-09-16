@@ -5,7 +5,7 @@
   "TelegramConcierge/Models/ToolModels.swift": "33cbbf98a1e2352f39bd812388e6b215dd7bedfc5d5d28d1609caeaa3e2000b5",
   "TelegramConcierge/Services/HarnessAnnotations.swift": "105cf192446288bec1be62d11480d328f3a3fe0b2721b64503b063a8c15f8897",
   "TelegramConcierge/Services/ConversationManager.swift#declaration": "7e8328c639c37cf0d671ca3be4921d917095844e671ff8388b492ac6d515d23a",
-  "TelegramConcierge/Services/SubagentSessionRegistry.swift#declaration": "8131f4a03ebf75c5a99fb4b91f1fa8b45507c212dc5ec1b2bd8da8072ed7dd2e",
+  "TelegramConcierge/Services/SubagentSessionRegistry.swift#declaration": "4e037a3f97c76d3f593307513d883f454b6c83339d9f37a3d8c56050fc10d9fb",
   "TelegramConcierge/Services/OpenRouterService.swift#declaration": "51272020cb6063053dc3d5831c878acf9f440945b1925200cc6e5259e6efd804"
  },
  "source": "4dd86133de03b484bed62fb81ce59935b89a7de8"

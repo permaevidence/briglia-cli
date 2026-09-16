@@ -48,9 +48,10 @@ actor SubagentSessionRegistry {
         /// legacy session without it falls back to `lastUsed`, which commit
         /// set at that same event — never the reload time.
         var lastAssistantAt: Date? = nil
-        /// First 80 characters of the first task prompt, whitespace-collapsed
-        /// and marker-neutralized (WEB_SUBAGENT_PLAN §4.7). Optional decode
-        /// keeps every existing file valid.
+        /// Web sessions: first 80 characters of the first task prompt,
+        /// whitespace-collapsed and marker-neutralized (WEB_SUBAGENT_PLAN
+        /// §4.7). nil for every other session, so their files are unchanged;
+        /// optional decode keeps every existing file valid.
         var topic: String? = nil
         /// Web researcher sessions only (§4.2, §4.5): the evidence ledger
         /// (one record per retrieval result) and the queries run, persisted
@@ -124,7 +125,9 @@ actor SubagentSessionRegistry {
             toolInteractions: [],
             lastAssistantText: nil
         )
-        session.topic = Self.topic(from: initialPrompt)
+        // Web sessions only (§4.7 listing): a general session's file stays
+        // byte-identical to the frozen lifecycle captures.
+        if session.kind == .web { session.topic = Self.topic(from: initialPrompt) }
         sessions[id] = session
         persist(session)
         if session.kind == .web { sweepExpiredWebSessions() }
