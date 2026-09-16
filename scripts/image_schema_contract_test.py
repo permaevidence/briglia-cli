@@ -2,6 +2,7 @@
 """Reviewed OpenAI-only schema migration; frozen Gemini/P0 fixtures stay intact."""
 import base64
 import copy
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -78,9 +79,16 @@ class Tests(unittest.TestCase):
         self.assertEqual(old["source"], new["source"])
         self.assertEqual({k for k in old["sha256"] if old["sha256"][k] != new["sha256"].get(k)},
                          {"TelegramConcierge/Models/ToolModels.swift"})
+        # The reviewed image-schema change (614f889, the commit whose ToolModels.swift
+        # hash the image-schema manifest pins) touched nothing outside the OpenAI schema
+        # block. Compare the two historical revisions, not the working tree: later
+        # reviewed changes to ToolModels.swift (e.g. the R0 chronology fields) have their
+        # own persistence manifests and must not trip this guard.
         path = "TelegramConcierge/Models/ToolModels.swift"
         before = subprocess.check_output(["git", "show", "1b9c1f6:" + path], cwd=ROOT).decode()
-        after = (ROOT / path).read_text()
+        after = subprocess.check_output(["git", "show", "614f889:" + path], cwd=ROOT).decode()
+        self.assertEqual(hashlib.sha256(after.encode()).hexdigest(),
+                         new["sha256"]["TelegramConcierge/Models/ToolModels.swift"])
         def outside_schema(text):
             start = text.index("    private static let openAIGenerateImage")
             end = text.index("\n    // MARK:", start)
