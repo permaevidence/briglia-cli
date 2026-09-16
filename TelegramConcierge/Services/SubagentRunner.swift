@@ -885,12 +885,15 @@ actor SubagentRunner {
     }
 
     /// Period of evicted history a compaction summary covers, from the times
-    /// the evicted events recorded: dialogue message timestamps and tool
-    /// results' delivery times. nil when nothing evicted recorded a time
-    /// (legacy rounds), so the summary says so instead of inventing a period.
+    /// the evicted events recorded: dialogue message timestamps, tool-call
+    /// rounds' issue times and tool results' delivery times (a long operation
+    /// starts at its issue time, not at its delivery). nil when nothing
+    /// evicted recorded a time (legacy rounds), so the summary says so
+    /// instead of inventing a period.
     static func compactionCoverage(_ plan: CompactionPlan) -> ClosedRange<Date>? {
         var times = plan.evictedDialogue.map(\.timestamp)
         for round in plan.evictedWork {
+            if let issuedAt = round.assistantMessage.issuedAt { times.append(issuedAt) }
             times.append(contentsOf: round.results.compactMap(\.completedAt))
         }
         guard let first = times.min(), let last = times.max() else { return nil }
@@ -1302,6 +1305,14 @@ actor SubagentRunner {
                 }
                 if let reasoning = interaction.assistantMessage.reasoning {
                     transcript += "[THINKING] \(reasoning)\n"
+                }
+                // Receipt time of the round, once, before its calls: with the
+                // results' delivery times the summary can state how long an
+                // operation ran and when it began. A legacy round without one
+                // is rendered without the line (never invented). Ordinary and
+                // emergency compaction share this transcript.
+                if let issuedAt = interaction.assistantMessage.issuedAt {
+                    transcript += "[TOOL CALLS ISSUED \(Chronology.transcriptClock(issuedAt))]\n"
                 }
                 for tc in interaction.assistantMessage.toolCalls {
                     let id = includeRoundDetails ? " id=\(tc.id)" : ""

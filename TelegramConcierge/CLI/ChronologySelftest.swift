@@ -77,9 +77,14 @@ struct ChronologySelftest: AsyncParsableCommand {
             let covered = Chronology.compactionSummaryChronologyLine(writtenAt: at(2026, 3, 12, 9, 30), coverage: at(2026, 3, 11, 10, 0)...at(2026, 3, 11, 18, 45), foldsEarlierSummaries: true)
             let unknown = Chronology.compactionSummaryChronologyLine(writtenAt: at(2026, 3, 12, 9, 30), coverage: nil, foldsEarlierSummaries: false)
             check("0.11 summary chronology line: creation time, offset, covered period, folding",
-                  covered == "[Summary written 09:30, Thursday, 12 March 2026 (UTC+01:00). Covers evicted session history from 10:00, Wednesday, 11 March 2026 to 18:45, Wednesday, 11 March 2026. Earlier summaries are folded in.]", covered)
+                  covered == "[Summary written 09:30, Thursday, 12 March 2026 (UTC+01:00). Covers evicted session history from 10:00, Wednesday, 11 March 2026 (UTC+01:00) to 18:45, Wednesday, 11 March 2026 (UTC+01:00). Earlier summaries are folded in.]", covered)
             check("0.12 summary chronology line: unknown period is said, never invented",
                   unknown == "[Summary written 09:30, Thursday, 12 March 2026 (UTC+01:00). The evicted history recorded no event times.]", unknown)
+            // Codex round 2: a range across the repeated hour names each
+            // endpoint's offset, so "02:30 to 02:30" is an hour, not nothing.
+            let dstCovered = Chronology.compactionSummaryChronologyLine(writtenAt: dstSecond, coverage: dstFirst...dstSecond, foldsEarlierSummaries: false)
+            check("0.14 summary chronology line: daylight-saving repeated hour disambiguated per endpoint",
+                  dstCovered == "[Summary written 02:30, Sunday, 25 October 2026 (UTC+01:00). Covers evicted session history from 02:30, Sunday, 25 October 2026 (UTC+02:00) to 02:30, Sunday, 25 October 2026 (UTC+01:00).]", dstCovered)
             check("0.13 summary predicate needs the byte-stable header on a user message",
                   Chronology.isCompactionSummary(Message(role: .user, content: Chronology.compactionSummaryHeader + "\nx"))
                   && !Chronology.isCompactionSummary(Message(role: .assistant, content: Chronology.compactionSummaryHeader))
@@ -407,7 +412,7 @@ struct ChronologySelftest: AsyncParsableCommand {
             check("4.7 summarizer transcript stamps dialogue lines with their original times", compacted.error == nil && compactionRows.count == 2
                   && summarizer.contains("[MAIN AGENT 2026-03-11 11:00 UTC+01:00] older content") && summarizer.contains("[SUBAGENT 2026-03-11 11:03 UTC+01:00] older content") && !summarizer.contains("2026-03-11 11:05 UTC+01:00]") && !summarizer.contains("[Run clock:"), compacted.error ?? String(summarizer.suffix(300)))
             let continuation = compactionRows.count == 2 ? Array(compactionRows[1].dropFirst()) : []
-            let expectedSummary = Chronology.compactionSummaryHeader + "\n[Summary written 15:05, Saturday, 14 March 2026 (UTC+01:00). Covers evicted session history from 11:00, Wednesday, 11 March 2026 to 11:04, Wednesday, 11 March 2026.]\n\nEVICTED_SUMMARY"
+            let expectedSummary = Chronology.compactionSummaryHeader + "\n[Summary written 15:05, Saturday, 14 March 2026 (UTC+01:00). Covers evicted session history from 11:00, Wednesday, 11 March 2026 (UTC+01:00) to 11:04, Wednesday, 11 March 2026 (UTC+01:00).]\n\nEVICTED_SUMMARY"
             check("4.8 summary message: no day header, no time prefix, creation time and covered period inside; the kept tail keeps its own first header",
                   continuation.count >= 2 && continuation[0].0 == "user" && continuation[0].1 == expectedSummary
                   && continuation[1].0 == "assistant" && continuation[1].1.hasPrefix("--- Wednesday, 11 March 2026 ---\nolder content")
@@ -539,6 +544,43 @@ struct ChronologySelftest: AsyncParsableCommand {
             check("7.5 daylight-saving repeated hour: a lone retained event is unambiguous in transcript stamps (offset carried)",
                   Chronology.transcriptStamp(dstFirst) == "2026-10-25 02:30 UTC+02:00" && Chronology.transcriptStamp(dstSecond) == "2026-10-25 02:30 UTC+01:00"
                   && Chronology.transcriptClock(dstSecond) == "2026-10-25 02:30:00 UTC+01:00")
+            // Codex round 2: the subagent summarizer sees when a round was
+            // issued, not only when its result arrived, and the coverage
+            // interval starts at the issue time — a long operation issued
+            // before midnight and delivered after it, on both compaction paths.
+            let filler = String(repeating: "x", count: 4_000)
+            var longResult = ToolResultMessage(toolCallId: "t3", content: "done " + filler)
+            longResult.completedAt = at(2026, 3, 12, 1, 30, 51)
+            var longCall = AssistantToolCallMessage(content: nil, toolCalls: [
+                ToolCall(id: "t3", type: "function", function: FunctionCall(name: "bash", arguments: "{\"command\":\"long operation\"}"))])
+            longCall.issuedAt = at(2026, 3, 11, 23, 50, 0)
+            let longRound = ToolInteraction(assistantMessage: longCall, results: [longResult])
+            let longTranscript = SubagentRunner.compactionTranscript(priorSummaries: [], dialogue: [], work: [longRound, undated])
+            let issuedIndex = longTranscript.range(of: "[TOOL CALLS ISSUED 2026-03-11 23:50:00 UTC+01:00]\n[TOOL CALL] bash(")?.lowerBound
+            let deliveredIndex = longTranscript.range(of: "[TOOL RESULT 2026-03-12 01:30:51 UTC+01:00] done ")?.lowerBound
+            check("7.6 subagent transcript states the round's issue time once, before its calls, on a different day from delivery; legacy round has none",
+                  issuedIndex != nil && deliveredIndex != nil && issuedIndex! < deliveredIndex!
+                  && longTranscript.components(separatedBy: "[TOOL CALLS ISSUED").count == 2
+                  && longTranscript.contains("[TOOL CALL] read_file({})\n[TOOL RESULT] <u>"), longTranscript)
+            let taskAfter = Message(role: .user, content: "task", timestamp: at(2026, 3, 12, 2, 0))
+            let newest = ToolInteraction(assistantMessage: AssistantToolCallMessage(content: nil, toolCalls: [
+                ToolCall(id: "t4", type: "function", function: FunctionCall(name: "read_file", arguments: "{}"))]),
+                results: [ToolResultMessage(toolCallId: "t4", content: filler)])
+            let ordinary = SubagentRunner.planCompaction(messages: [taskAfter], interactions: [longRound, newest],
+                                                         dialogueKeepTokens: 1_000, totalKeepTokens: 10)
+            let emergency = SubagentRunner.planCompaction(messages: [taskAfter], interactions: [longRound],
+                                                          dialogueKeepTokens: 1_000, totalKeepTokens: 10, retireNewestRound: true)
+            let ordinaryCoverage = SubagentRunner.compactionCoverage(ordinary), emergencyCoverage = SubagentRunner.compactionCoverage(emergency)
+            check("7.7 ordinary compaction: coverage starts at the evicted round's issue time (previous day), ends at its delivery",
+                  ordinary.evictedWork.count == 1 && ordinary.evictedWork[0].assistantMessage.toolCalls[0].id == "t3"
+                  && ordinaryCoverage?.lowerBound == at(2026, 3, 11, 23, 50, 0) && ordinaryCoverage?.upperBound == at(2026, 3, 12, 1, 30, 51),
+                  "\(String(describing: ordinaryCoverage)) evicted \(ordinary.evictedWork.count)")
+            check("7.8 emergency compaction: same coverage rule for the retired newest round",
+                  emergency.evictedWork.count == 1 && emergencyCoverage?.lowerBound == at(2026, 3, 11, 23, 50, 0)
+                  && emergencyCoverage?.upperBound == at(2026, 3, 12, 1, 30, 51), "\(String(describing: emergencyCoverage))")
+            check("7.9 summary line for that eviction spans the two days with an offset on each endpoint",
+                  SubagentRunner.compactionSummaryText("S", writtenAt: at(2026, 3, 12, 2, 1), plan: emergency)
+                    .contains("Covers evicted session history from 23:50, Wednesday, 11 March 2026 (UTC+01:00) to 01:30, Thursday, 12 March 2026 (UTC+01:00).]"))
         }
 
         print("8. Distinct receipt, delivery and completion times (stepping clock), both transports, forced final")

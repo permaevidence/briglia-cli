@@ -95,16 +95,21 @@ enum Chronology {
     }
 
     /// Second line of a compaction summary: when it was written and which
-    /// period of evicted history it covers. `coverage` is nil when none of the
-    /// evicted events recorded a time (legacy rounds); the line then says so
-    /// instead of inventing a period.
+    /// period of evicted history it covers, each endpoint with its own UTC
+    /// offset. `coverage` is nil when none of the evicted events recorded a
+    /// time (legacy rounds); the line then says so instead of inventing a
+    /// period.
     static func compactionSummaryChronologyLine(writtenAt: Date, coverage: ClosedRange<Date>?, foldsEarlierSummaries: Bool) -> String {
         let day = makeFormatter(dayHeaderFormat)
         let clock = makeFormatter(timeFormat)
         var line = "[Summary written \(clock.string(from: writtenAt)), \(day.string(from: writtenAt)) (\(offsetLabel(writtenAt)))."
         if let coverage {
-            line += " Covers evicted session history from \(clock.string(from: coverage.lowerBound)), \(day.string(from: coverage.lowerBound))"
-            line += " to \(clock.string(from: coverage.upperBound)), \(day.string(from: coverage.upperBound))."
+            // Each endpoint carries its own offset: a range across a
+            // daylight-saving repeated hour would otherwise read
+            // "from 02:30 … to 02:30 …" with nothing to tell the two apart
+            // (Codex round 2).
+            line += " Covers evicted session history from \(clock.string(from: coverage.lowerBound)), \(day.string(from: coverage.lowerBound)) (\(offsetLabel(coverage.lowerBound)))"
+            line += " to \(clock.string(from: coverage.upperBound)), \(day.string(from: coverage.upperBound)) (\(offsetLabel(coverage.upperBound)))."
         } else {
             line += " The evicted history recorded no event times."
         }

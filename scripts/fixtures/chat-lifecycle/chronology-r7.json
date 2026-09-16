@@ -4,7 +4,7 @@
  "reply_time_message": "[Turn metadata]\nAssistant reply time: 22:13",
  "tool_note": "\n\n[System Note: Current time is now 22:13:20]",
  "summary_header": "[SESSION HISTORY SUMMARY — Earlier work in this session was summarized to free context space. Details below are from the evicted portion.]",
- "summary_chronology_line": "[Summary written 22:13, Tuesday, 14 November 2023 (UTC+00:00). Covers evicted session history from 22:13, Tuesday, 14 November 2023 to 22:13, Tuesday, 14 November 2023.]",
+ "summary_chronology_line": "[Summary written 22:13, Tuesday, 14 November 2023 (UTC+00:00). Covers evicted session history from 22:13, Tuesday, 14 November 2023 (UTC+00:00) to 22:13, Tuesday, 14 November 2023 (UTC+00:00).]",
  "summary_source_prefix": "--- Thursday, 1 January 1970 ---\n[00:00] ",
  "dialogue_stamps": {
   "[MAIN AGENT 2023-11-14 22:13 UTC+00:00] ": "[MAIN AGENT] ",
