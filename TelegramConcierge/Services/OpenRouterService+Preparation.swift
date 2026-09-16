@@ -101,6 +101,16 @@ extension OpenRouterService {
             // bullet is omitted so the model isn't told to call a tool it
             // doesn't have.
             let subagentsEnabled = AvailableTools.subagentsEnabled
+            // Web researcher on (WEB_SUBAGENT_PLAN §4.8): the research tools
+            // left this list, so the guidance names the delegation instead.
+            // Decided from THIS request's tool list, never a second lookup;
+            // with the switch off the legacy line is byte-identical.
+            let webResearcherAvailable = tools?.first { $0.function.name == "Agent" }?
+                .function.parameters.properties["subagent_type"]?.enumValues?.contains(SubagentTypes.webResearcherName) == true
+                && tools?.contains { $0.function.name == "web_search" } != true
+            let webGuidance = webResearcherAvailable
+                ? "- For current or unstable facts, delegate web research to the Web subagent (Agent with subagent_type=Web and a deliverable: short | standard | report); carry its provenance and sources into your reply, and resume its session for follow-ups. web_fetch stays for a known URL."
+                : "- Use web tools for current or unstable facts, and cite sources when useful."
 
             prompt += """
             You have access to tools that can help you answer questions.
@@ -117,7 +127,7 @@ extension OpenRouterService {
             - For reviews, lead with findings ordered by severity, or say clearly that no issues were found.
 
             Tool-use guidance:
-            - Use web tools for current or unstable facts, and cite sources when useful.
+            \(webGuidance)
             - When a tool fails for an external, user-fixable reason (bad/expired API key, out of credits, quota or billing — e.g. HTTP 401/402/403), explicitly tell the user what failed and why in your reply, even if you complete the task another way and even on turns you would otherwise skip silently. Never silently work around a fixable failure the user should know about.
             \(EmailCalendarProvider.current.toolGuidanceBullet.map { $0 + "\n" } ?? "")\(subagentsEnabled ? "- Use `Agent` for broad codebase exploration, focused investigations, or architectural planning.\n" : "")- Use reminders for future follow-up work. They are your way to wake yourself up in the future.
             - For generated documents, render or read them back and fix objective layout defects before delivering.

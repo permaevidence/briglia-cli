@@ -623,7 +623,18 @@ struct WebSubagentSelftest: AsyncParsableCommand {
                   reportRun.error == nil && reportRun.finalMessage.utf8.count > 32 * 1024 && reportRun.finalMessage == longReport
                   && reportPath.hasSuffix("/research/\(reportRun.sessionId)-1.md") && mode == 0o600
                   && (try? String(contentsOfFile: reportPath, encoding: .utf8)) == longReport, reportRun.error ?? reportPath)
+            // Main-agent prompt guidance (§4.8): names the delegation while on,
+            // the legacy line while off — decided from the request's tool list.
+            let onPrepared = await service.prepareConversation(messages: [Message(role: .user, content: "hi", timestamp: clock)], imagesDirectory: images, documentsDirectory: documents,
+                tools: AvailableTools.all(includeWebSearch: true), toolResultMessages: nil, calendarContext: nil, emailContext: nil, chunkSummaries: nil, totalChunkCount: 0,
+                turnStartDate: clock, finalResponseInstruction: nil, tailSystemMessage: nil, tailUserMessage: nil, deferredMCPSummaries: nil)
             webFlag = false
+            let offPrepared = await service.prepareConversation(messages: [Message(role: .user, content: "hi", timestamp: clock)], imagesDirectory: images, documentsDirectory: documents,
+                tools: AvailableTools.all(includeWebSearch: true), toolResultMessages: nil, calendarContext: nil, emailContext: nil, chunkSummaries: nil, totalChunkCount: 0,
+                turnStartDate: clock, finalResponseInstruction: nil, tailSystemMessage: nil, tailUserMessage: nil, deferredMCPSummaries: nil)
+            check("5.6 main-agent prompt: delegation guidance while on, the legacy web-tools line while off",
+                  onPrepared.systemPrompt.contains("delegate web research to the Web subagent") && !onPrepared.systemPrompt.contains("- Use web tools for current or unstable facts")
+                  && offPrepared.systemPrompt.contains("- Use web tools for current or unstable facts, and cite sources when useful.") && !offPrepared.systemPrompt.contains("Web subagent"))
         }
 
         print("8. Pools")

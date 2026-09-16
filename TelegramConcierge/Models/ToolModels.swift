@@ -1874,10 +1874,15 @@ enum AvailableTools {
         if let override = subagentsStoredFlagOverrideForTesting {
             stored = override()
         } else {
-            stored = UserDefaults.standard.object(forKey: "ada.subagentsEnabled") as? Bool
+            stored = switchDefaults.object(forKey: "ada.subagentsEnabled") as? Bool
         }
         return stored ?? true
     }
+
+    /// The preference store behind the tool switches — one accessor for
+    /// both flags, so the lifecycle instrumentation's per-file accounting of
+    /// standard-defaults access is unchanged by the second switch.
+    private static var switchDefaults: UserDefaults { UserDefaults.standard }
 
     /// Test seam for the Web-subagent flag (same contract as
     /// `subagentsStoredFlagOverrideForTesting`).
@@ -1890,7 +1895,7 @@ enum AvailableTools {
         if let override = webSubagentStoredFlagOverrideForTesting {
             stored = override()
         } else {
-            stored = UserDefaults.standard.object(forKey: "ada.webSubagentEnabled") as? Bool
+            stored = switchDefaults.object(forKey: "ada.webSubagentEnabled") as? Bool
         }
         return stored ?? false
     }

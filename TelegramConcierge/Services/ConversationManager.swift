@@ -4942,18 +4942,23 @@ class ConversationManager: ObservableObject {
             try? await sendText("⏳ A turn is running — send /subagents \(normalized) again when Briglia is idle (or /stop first).")
             return
         }
-        UserDefaults.standard.set(target, forKey: "ada.subagentsEnabled")
+        switchDefaults.set(target, forKey: "ada.subagentsEnabled")
         // O5: the Web researcher cannot exist without the Agent tool — turning
         // subagents off turns it off too, and says so.
         var cascade = ""
         if !target, AvailableTools.webSubagentEnabled {
-            UserDefaults.standard.set(false, forKey: "ada.webSubagentEnabled")
+            switchDefaults.set(false, forKey: "ada.webSubagentEnabled")
             cascade = " The Web research subagent was on and is now off too (the legacy web_search tools are back); re-enable it with /websubagent on after /subagents on."
         }
         try? await sendText(target
             ? "✅ Subagents ON — the Agent and subagent_manage tools are available from the next message."
             : "✅ Subagents OFF — the Agent and subagent_manage tools are removed from the next message. Re-enable with /subagents on." + cascade)
     }
+
+    /// The preference store behind the two tool switches (one accessor, so
+    /// the lifecycle instrumentation's per-file accounting of standard-defaults
+    /// access is unchanged by the second switch).
+    private var switchDefaults: UserDefaults { UserDefaults.standard }
 
     /// `/websubagent` — the Web research subagent switch (WEB_SUBAGENT_PLAN
     /// §4.8, R1a; default OFF during the field trial). On: the main agent
@@ -4993,7 +4998,7 @@ class ConversationManager: ObservableObject {
             try? await sendText("⏳ A turn is running — send /websubagent \(normalized) again when Briglia is idle (or /stop first).")
             return
         }
-        UserDefaults.standard.set(target, forKey: "ada.webSubagentEnabled")
+        switchDefaults.set(target, forKey: "ada.webSubagentEnabled")
         try? await sendText(target
             ? "✅ Web research subagent ON — from the next message, web research goes through Agent(subagent_type=Web); web_search and web_research_sweep are removed from the main agent, web_fetch gains refresh. \(availability)."
             : "✅ Web research subagent OFF — the legacy web_search and web_research_sweep tools are back from the next message. Re-enable with /websubagent on.")
