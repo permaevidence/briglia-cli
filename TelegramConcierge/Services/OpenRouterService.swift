@@ -1454,6 +1454,15 @@ actor OpenRouterService {
     nonisolated static let webResearcherReasoningEffort = "medium"
 
     func webExecutionContext(lane: AffinityLane) throws -> ProviderExecutionContext {
+        try webExecutionContextWithNote(lane: lane).context
+    }
+
+    /// `webExecutionContext` plus a note when the configured web model was
+    /// NOT the one used (Codex R1a review R1): the shared resolver
+    /// (`WebSearchBackend.researchModel`) decides, exactly as the legacy
+    /// pipeline does, and the run reports the substitution to the parent
+    /// instead of silently using the default.
+    func webExecutionContextWithNote(lane: AffinityLane) throws -> (context: ProviderExecutionContext, note: String?) {
         let backend = WebSearchBackend.active
         // Always the backend's OWN stored credential — never this service's
         // in-memory key, which is the main profile's.
@@ -1465,11 +1474,15 @@ actor OpenRouterService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let requested = configured.isEmpty ? KeychainHelper.defaultWebSearchModel : configured
         let effort = Self.webResearcherReasoningEffort
+        // One resolver for the pipeline and the researcher (R1).
+        let resolution = WebSearchBackend.researchModel(for: backend, requested: requested)
+        let note: String? = resolution.honoured ? nil
+            : "configured web model '\(requested)' is not usable on the \(backend.rawValue) web backend; ran on its default \(resolution.model)"
         switch backend {
         case .opencode:
-            let model = WebOrchestrator.opencodeResearchModel
+            let model = resolution.model
             let useReasoningContent = Self.isOpenCodeReasoningContentModel(model)
-            return ProviderExecutionContext(
+            return (ProviderExecutionContext(
                 provider: .openAICompatible, model: model,
                 endpoint: backend.endpoint.absoluteString,
                 authorization: "Bearer " + key, affinityKey: key, lane: lane,
@@ -1479,17 +1492,10 @@ actor OpenRouterService {
                 thinkingType: useReasoningContent ? Self.openCodeThinkingType(for: model, reasoningEffort: effort) : nil,
                 useReasoningContent: useReasoningContent,
                 textOnly: false, anthropicCacheControl: false, renderPDFAsImages: true,
-                profileIdentity: "web-opencode", usageLaneLabel: "subagent:web")
+                profileIdentity: "web-opencode", usageLaneLabel: "subagent:web"), nil)
         case .openai:
-            var model = requested
-            if model.hasPrefix("openai/") { model = String(model.dropFirst("openai/".count)) }
-            else if !ResponsesAdapter.allowedEfforts(model: model).contains(effort) {
-                // A non-OpenAI slug was configured for OpenRouter: the pipeline
-                // falls back to the default on this backend, so does the run.
-                let fallback = KeychainHelper.defaultWebSearchModel
-                model = fallback.hasPrefix("openai/") ? String(fallback.dropFirst("openai/".count)) : fallback
-            }
-            return ProviderExecutionContext(
+            let model = resolution.model
+            return (ProviderExecutionContext(
                 provider: .openAICompatible, model: model,
                 endpoint: Endpoints.webOpenAIBase,
                 authorization: "Bearer " + key, affinityKey: key, lane: lane,
@@ -1498,15 +1504,15 @@ actor OpenRouterService {
                 thinkingType: nil, useReasoningContent: false,
                 textOnly: false, anthropicCacheControl: false, renderPDFAsImages: true,
                 wireProtocol: .responses, profileIdentity: "web-openai", nativeToolMedia: true,
-                usageLaneLabel: "subagent:web")
+                usageLaneLabel: "subagent:web"), note)
         case .openrouter:
-            let model = requested
+            let model = resolution.model
             var prefs: ProviderPreferences? = nil
             if let order = providers(for: model), !order.isEmpty {
                 prefs = ProviderPreferences(order: nil, only: order, allow_fallbacks: false, sort: nil)
             }
             let lowered = model.lowercased()
-            return ProviderExecutionContext(
+            return (ProviderExecutionContext(
                 provider: .openRouter, model: model, endpoint: backend.endpoint.absoluteString,
                 authorization: "Bearer " + key, affinityKey: key, lane: lane,
                 provenance: Self.reasoningProvenance(model: model, provider: .openRouter),
@@ -1514,7 +1520,7 @@ actor OpenRouterService {
                 thinkingType: nil, useReasoningContent: false,
                 textOnly: false, anthropicCacheControl: lowered.contains("anthropic") || lowered.contains("claude"),
                 renderPDFAsImages: !lowered.contains("gemini"),
-                profileIdentity: "web-openrouter", usageLaneLabel: "subagent:web")
+                profileIdentity: "web-openrouter", usageLaneLabel: "subagent:web"), nil)
         }
     }
 

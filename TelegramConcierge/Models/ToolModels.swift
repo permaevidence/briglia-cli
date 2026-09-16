@@ -1685,7 +1685,7 @@ enum AvailableTools {
 
     /// Agent-description bullets present only when the Web preset is in the
     /// enum (WEB_SUBAGENT_PLAN §4.3, §4.5, §4.7).
-    static let webResearcherUsageNotes = "- Web research: use subagent_type=Web instead of searching yourself. State the expected deliverable (short | standard | report). Its result carries evidence_provenance, queries_used and sources_consulted: carry the provenance into your answer — say when an answer relies on evidence retained from earlier runs, when the searches found nothing, and what could not be verified. A [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim. Resume the same Web session (session_id) for follow-ups; web sessions are listed in their own section of subagent_manage(list_sessions)."
+    static let webResearcherUsageNotes = "- Web research: use subagent_type=Web instead of searching yourself. State the expected deliverable (short | standard | report). Its result carries evidence_provenance, queries_used, sources_consulted (pages it read) and search_results_seen (results it only saw): carry the provenance into your answer — say when an answer relies on evidence retained from earlier runs, when the searches found nothing, and what could not be verified. A [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim. Resume the same Web session (session_id) for follow-ups; web sessions are listed in their own section of subagent_manage(list_sessions)."
 
     static var subagentManage: ToolDefinition { subagentManage(webSearchAvailable: true) }
 

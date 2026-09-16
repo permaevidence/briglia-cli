@@ -31,6 +31,41 @@ struct WebEvidenceRecord: Codable, Equatable {
     var isExtract: Bool = true
     /// Whether the retrieval returned usable content.
     var usable: Bool = true
+    /// Search-hit records only (Codex R1a review R3): the query that
+    /// surfaced this hit. A hit is evidence the run SAW (title, snippet,
+    /// answer box, knowledge graph) — never that the page was read; the
+    /// `url` is the hit's link, or empty for URL-less answer-box /
+    /// knowledge-graph evidence (no URL is ever invented).
+    var query: String? = nil
+}
+
+/// `(inContext, total)` over one class of usable records.
+struct WebEvidenceCounts: Equatable {
+    var inContext: Int
+    var total: Int
+}
+
+/// Earlier evidence in the session, by class (§4.5): page extracts (read)
+/// and search results (seen). Both classes count as evidence; the parent
+/// gets both figures so "n of m" never conflates reading with seeing.
+struct WebPriorEvidence: Equatable {
+    var extracts: WebEvidenceCounts
+    var searchResults: WebEvidenceCounts
+    var total: Int { extracts.total + searchResults.total }
+    static let none = WebPriorEvidence(extracts: .init(inContext: 0, total: 0), searchResults: .init(inContext: 0, total: 0))
+}
+
+/// One search result the run saw, for `search_results_seen`.
+struct WebSearchEvidenceSummary: Equatable {
+    /// Distinct hit URLs in first-seen order, each with the first query that
+    /// surfaced it and when that search ran.
+    var hits: [(url: String, query: String, retrievedAt: Date)]
+    /// URL-less evidence (answer boxes, knowledge graphs) seen.
+    var urlless: Int
+    static func == (a: WebSearchEvidenceSummary, b: WebSearchEvidenceSummary) -> Bool {
+        a.urlless == b.urlless && a.hits.count == b.hits.count
+            && zip(a.hits, b.hits).allSatisfy { $0.url == $1.url && $0.query == $1.query && $0.retrievedAt == $1.retrievedAt }
+    }
 }
 
 /// Per-run retrieval activity, for the mechanical provenance label
@@ -88,6 +123,44 @@ final class WebEvidenceLedger: @unchecked Sendable {
         return (extracts.filter(\.inContext).count, extracts.count)
     }
 
+    /// `(inContext, total)` over the usable search-hit records — evidence
+    /// seen in search results (R3), tracked separately from page reads.
+    var searchCounts: (inContext: Int, total: Int) {
+        lock.lock(); defer { lock.unlock() }
+        let hits = records.filter { !$0.isExtract && $0.usable }
+        return (hits.filter(\.inContext).count, hits.count)
+    }
+
+    /// Both classes of earlier evidence, for the provenance label and the
+    /// parent's "n of m" figures.
+    var priorEvidence: WebPriorEvidence {
+        let e = extractCounts, s = searchCounts
+        return WebPriorEvidence(extracts: .init(inContext: e.inContext, total: e.total),
+                                searchResults: .init(inContext: s.inContext, total: s.total))
+    }
+
+    /// The search results the session saw (`search_results_seen`): distinct
+    /// hit URLs in first-seen order plus the count of URL-less evidence.
+    var searchEvidence: WebSearchEvidenceSummary {
+        lock.lock(); defer { lock.unlock() }
+        var seen = Set<String>()
+        var hits: [(url: String, query: String, retrievedAt: Date)] = []
+        var urlless = 0
+        for record in records where !record.isExtract && record.usable {
+            if record.url.isEmpty { urlless += 1; continue }
+            if seen.insert(record.url).inserted { hits.append((record.url, record.query ?? "", record.fetchedAt)) }
+        }
+        return WebSearchEvidenceSummary(hits: hits, urlless: urlless)
+    }
+
+    /// Per-session bound on search-hit records (R3): the newest
+    /// `maxSearchRecords` are kept, the oldest dropped first; page extracts
+    /// are never dropped. Each `web_query` call adds at most
+    /// `maxSearchRecordsPerQuery` hits per query plus one record per
+    /// URL-less answer box / knowledge graph.
+    static let maxSearchRecords = 400
+    static let maxSearchRecordsPerQuery = 10
+
     /// URLs whose retrieval returned content, in first-retrieved order,
     /// each with its first retrieval time (`sources_consulted`).
     var sourcesConsulted: [(url: String, retrievedAt: Date)] {
@@ -110,7 +183,17 @@ final class WebEvidenceLedger: @unchecked Sendable {
 
     func append(_ new: [WebEvidenceRecord]) {
         guard !new.isEmpty else { return }
-        lock.lock(); records.append(contentsOf: new); lock.unlock()
+        lock.lock(); defer { lock.unlock() }
+        records.append(contentsOf: new)
+        let searchCount = records.filter { !$0.isExtract }.count
+        var excess = searchCount - Self.maxSearchRecords
+        if excess > 0 {
+            records.removeAll { record in
+                guard excess > 0, !record.isExtract else { return false }
+                excess -= 1
+                return true
+            }
+        }
     }
 
     /// One executed web tool call: `usable` = it returned usable evidence,
@@ -167,19 +250,22 @@ enum WebEvidenceProvenance: String {
     /// No lookup in this run and no prior evidence in the session.
     case noEvidence = "no_evidence"
 
-    static func classify(activity: WebRetrievalActivity, priorExtracts: (inContext: Int, total: Int)) -> WebEvidenceProvenance {
+    /// `prior` counts BOTH classes of earlier evidence (page extracts and
+    /// search results): a session whose only evidence is search snippets is
+    /// `prior_sources_only`, never `no_evidence` (Codex R1a review R3).
+    static func classify(activity: WebRetrievalActivity, prior: WebPriorEvidence) -> WebEvidenceProvenance {
         if activity.usable > 0 { return .retrievedThisRun }
         if activity.attempted > 0 { return .attemptedNoResults }
-        return priorExtracts.total > 0 ? .priorSourcesOnly : .noEvidence
+        return prior.total > 0 ? .priorSourcesOnly : .noEvidence
     }
 
     /// Guidance prefix for the parent's `final_message`, or nil.
-    func finalMessagePrefix(priorExtracts: (inContext: Int, total: Int)) -> String? {
+    func finalMessagePrefix(prior: WebPriorEvidence) -> String? {
         switch self {
         case .retrievedThisRun: return nil
         case .noEvidence, .attemptedNoResults: return "[NO USABLE EVIDENCE RETRIEVED IN THIS RUN]"
         case .priorSourcesOnly:
-            return "[FROM RETAINED HISTORY — no new retrieval in this run; \(priorExtracts.inContext) of \(priorExtracts.total) earlier extracts still in context]"
+            return "[FROM RETAINED HISTORY — no new retrieval in this run; \(prior.extracts.inContext) of \(prior.extracts.total) earlier extracts and \(prior.searchResults.inContext) of \(prior.searchResults.total) earlier search results still in context]"
         }
     }
 }

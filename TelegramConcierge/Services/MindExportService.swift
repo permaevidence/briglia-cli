@@ -59,7 +59,7 @@ actor MindExportService {
         /// The payload folders a lite export skips. Cached file
         /// DESCRIPTIONS still ride in mind_config, so the restored agent
         /// remembers what the files were — it just can't re-open them.
-        static let payloadFolderNames = ["images", "documents", "tool_attachments", "projects"]
+        static let payloadFolderNames = ["images", "documents", "tool_attachments", "projects", "research"]
     }
 
     /// Export user data to a ZIP file at the specified destination.
@@ -92,6 +92,10 @@ actor MindExportService {
         // subfolder) rides along since 2026-08-27 (Codex): reminders.json
         // stores only absolute script paths, so a backup without the script
         // bodies and their $WATCHER_STATE restored nothing runnable.
+        // research/ = the Web researcher's report files (WEB_SUBAGENT_PLAN
+        // O6; Codex R1a review N2): work product referenced by report_path,
+        // carried by a full export, skipped by lite, restored on import,
+        // wiped by /deleteuserdata, never deleted by session expiry.
         for folderName in [
             "archive",
             "prune-archives",
@@ -99,7 +103,8 @@ actor MindExportService {
             "documents",
             "tool_attachments",
             "projects",
-            "reminder-scripts"
+            "reminder-scripts",
+            "research"
         ] where scope == .full || !ExportScope.payloadFolderNames.contains(folderName) {
             if folderName == "prune-archives" {
                 let source = appFolder.appendingPathComponent(folderName)
@@ -264,7 +269,8 @@ actor MindExportService {
             "documents",
             "tool_attachments",
             "projects",
-            "reminder-scripts"
+            "reminder-scripts",
+            "research"
         ] {
             try restoreDirectory(named: folderName, from: tempDir, to: appFolder)
         }
@@ -291,7 +297,7 @@ actor MindExportService {
     ]
     static let restoredFolderNames = [
         "archive", "prune-archives", "images", "documents", "tool_attachments", "projects", "reminder-scripts",
-        "subagent_sessions",
+        "subagent_sessions", "research",
     ]
 
     /// First entry of the staged payload that must not be restored: a

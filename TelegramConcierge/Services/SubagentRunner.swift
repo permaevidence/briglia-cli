@@ -54,8 +54,14 @@ actor SubagentRunner {
         /// could not use the web backend.
         var evidenceProvenance: WebEvidenceProvenance? = nil
         var queriesUsed: [String]? = nil
+        /// Pages READ (web_extract / web_fetch), first-retrieved order.
         var sourcesConsulted: [(url: String, retrievedAt: Date)]? = nil
-        var priorExtracts: (inContext: Int, total: Int)? = nil
+        /// Search results SEEN (web_query hits, answer boxes, knowledge
+        /// graphs) — never a claim that the page was read (R3).
+        var searchEvidence: WebSearchEvidenceSummary? = nil
+        /// Earlier evidence in the session, both classes, behind a
+        /// `prior_sources_only` label.
+        var priorEvidence: WebPriorEvidence? = nil
         var reportPath: String? = nil
         var note: String? = nil
 
@@ -76,8 +82,14 @@ actor SubagentRunner {
             if let sourcesConsulted {
                 obj["sources_consulted"] = sourcesConsulted.map { ["url": $0.url, "retrieved_at": ToolExecutor.webTimestamp($0.retrievedAt)] }
             }
-            if let priorExtracts, evidenceProvenance == .priorSourcesOnly {
-                obj["prior_extracts_in_context"] = "\(priorExtracts.inContext) of \(priorExtracts.total)"
+            if let searchEvidence {
+                obj["search_results_seen"] = searchEvidence.hits.map {
+                    ["url": $0.url, "query": $0.query, "retrieved_at": ToolExecutor.webTimestamp($0.retrievedAt)] }
+                if searchEvidence.urlless > 0 { obj["search_results_seen_urlless"] = searchEvidence.urlless }
+            }
+            if let priorEvidence, evidenceProvenance == .priorSourcesOnly {
+                obj["prior_extracts_in_context"] = "\(priorEvidence.extracts.inContext) of \(priorEvidence.extracts.total)"
+                obj["prior_search_results_in_context"] = "\(priorEvidence.searchResults.inContext) of \(priorEvidence.searchResults.total)"
             }
             if let reportPath { obj["report_path"] = reportPath }
             if let note { obj["note"] = note }
@@ -87,7 +99,47 @@ actor SubagentRunner {
             }
             return "{\"error\": \"Failed to serialize subagent result\"}"
         }
+
+        /// The Web result contract as `key: value` lines for the parent-facing
+        /// BACKGROUND completion message (Codex R1a review R2): the same
+        /// fields `asJSON()` carries for a foreground `Agent` result —
+        /// provenance, queries, sources read, search results seen, prior
+        /// counts, report path, backend note, model — so background delivery
+        /// never drops the evidence audit trail, the fallback notice or the
+        /// report locator. Empty for a non-Web run (ordinary completions are
+        /// unchanged).
+        func webContractLines() -> [String] {
+            guard let evidenceProvenance else { return [] }
+            func compact(_ value: Any) -> String {
+                guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.withoutEscapingSlashes, .sortedKeys]),
+                      let text = String(data: data, encoding: .utf8) else { return "[]" }
+                return text
+            }
+            var lines = ["evidence_provenance: \(evidenceProvenance.rawValue)"]
+            if let queriesUsed { lines.append("queries_used: " + compact(queriesUsed)) }
+            if let sourcesConsulted {
+                lines.append("sources_consulted: " + compact(sourcesConsulted.map { ["url": $0.url, "retrieved_at": ToolExecutor.webTimestamp($0.retrievedAt)] }))
+            }
+            if let searchEvidence {
+                lines.append("search_results_seen: " + compact(searchEvidence.hits.map { ["url": $0.url, "query": $0.query, "retrieved_at": ToolExecutor.webTimestamp($0.retrievedAt)] }))
+                if searchEvidence.urlless > 0 { lines.append("search_results_seen_urlless: \(searchEvidence.urlless)") }
+            }
+            if let priorEvidence, evidenceProvenance == .priorSourcesOnly {
+                lines.append("prior_extracts_in_context: \(priorEvidence.extracts.inContext) of \(priorEvidence.extracts.total)")
+                lines.append("prior_search_results_in_context: \(priorEvidence.searchResults.inContext) of \(priorEvidence.searchResults.total)")
+            }
+            if let reportPath { lines.append("report_path: \(reportPath)") }
+            if let note { lines.append("note: \(note)") }
+            if let modelUsed { lines.append("model_used: \(modelUsed)") }
+            return lines
+        }
     }
+
+    /// Placeholder result of a Responses tool round whose outcome is unknown
+    /// (recovery checkpoint). Its tool-call id is NOT evidence that the
+    /// retrieved text survived (R4): the evidence ledger treats it as absent.
+    static let interruptedToolIntentPlaceholder = "[Interrupted tool intent: outcome unknown. Inspect external state before repeating this call.]"
+    static func isInterruptedToolIntent(_ content: String) -> Bool { content.hasPrefix("[Interrupted tool intent:") }
 
     /// The native (non-MCP, pre-bash-mapping) tool inventory of a subagent
     /// type, enforced here for every executor (matrix §4.6.1): pure, so the
@@ -277,10 +329,14 @@ actor SubagentRunner {
                 webLedger = WebEvidenceLedger(records: session.webEvidence ?? [], queries: session.webQueriesUsed ?? [], deliverable: webDeliverable)
             }
         } else {
+            // The RESOLVED built-in name is stored (N1): a case-variant
+            // invocation ("web") runs the Web preset and must live in the Web
+            // pool, never in the general one.
             let (newId, session) = await registry.create(
-                subagentType: invocation.subagentType,
+                subagentType: subagentType.name,
                 description: invocation.description,
-                initialPrompt: taskPrompt
+                initialPrompt: taskPrompt,
+                webPool: subagentType.isWebResearcher
             )
             resolvedSessionId = newId
             isNew = true
@@ -296,13 +352,26 @@ actor SubagentRunner {
         /// ledger's in-context flags: only a COMMITTED compaction flips them.
         func keptToolCallIds(messages: [Message], interactions: [ToolInteraction]) -> Set<String> {
             var ids = Set<String>()
-            for message in messages { for round in message.toolInteractions { for result in round.results { ids.insert(result.toolCallId) } } }
-            for round in interactions { for result in round.results { ids.insert(result.toolCallId) } }
+            for message in messages { for round in message.toolInteractions { for result in round.results where !Self.isInterruptedToolIntent(result.content) { ids.insert(result.toolCallId) } } }
+            for round in interactions { for result in round.results where !Self.isInterruptedToolIntent(result.content) { ids.insert(result.toolCallId) } }
             return ids
         }
         func persistWebEvidence() async {
             guard let webLedger else { return }
             await registry.updateWebEvidence(sessionId: resolvedSessionId, evidence: webLedger.allRecords, queries: webLedger.queriesUsed)
+        }
+        /// Reconcile the ledger's in-context flags against the AUTHORITATIVE
+        /// retained results (R4): a record whose result is not in the
+        /// retained context — dropped at a cutoff, never persisted (crash
+        /// between the ledger write and the result commit), or an uncertain
+        /// Responses placeholder — keeps its audit row but loses the flag.
+        func reconcileWebEvidence(messages: [Message], interactions: [ToolInteraction]) {
+            webLedger?.markEvicted(keeping: keptToolCallIds(messages: messages, interactions: interactions))
+        }
+        if !isNew, let webLedger {
+            let before = webLedger.allRecords
+            reconcileWebEvidence(messages: messagesForLLM, interactions: priorToolInteractions)
+            if webLedger.allRecords != before { await persistWebEvidence() }
         }
 
         // 4. Pick the model. Resolution order (highest precedence first):
@@ -402,7 +471,12 @@ actor SubagentRunner {
         let explicitInherit = invocation.modelOverride?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "inherit"
         if subagentType.isWebResearcher, perCallLane == nil, !explicitInherit {
             do {
-                webExecution = try await openRouterService.webExecutionContext(lane: .subagent(resolvedSessionId))
+                let resolved = try await openRouterService.webExecutionContextWithNote(lane: .subagent(resolvedSessionId))
+                webExecution = resolved.context
+                if let note = resolved.note {
+                    print("[SubagentRunner] Web researcher: \(note)")
+                    webBackendNote = note
+                }
             } catch {
                 let reason = (error as? OpenRouterService.WebBackendUnavailable)?.description ?? error.localizedDescription
                 print("[SubagentRunner] Web researcher: \(reason); running on the main model instead.")
@@ -674,7 +748,7 @@ actor SubagentRunner {
                     if responsesExecution != nil {
                         let pending = toolInteractions + [ToolInteraction(assistantMessage: assistantMessage,
                             results: calls.map { ToolResultMessage(toolCallId: $0.id,
-                                content: "[Interrupted tool intent: outcome unknown. Inspect external state before repeating this call.]") })]
+                                content: Self.interruptedToolIntentPlaceholder) })]
                         guard await registry.checkpointResponses(sessionId: resolvedSessionId, interactions: pending) else {
                             throw ResponsesFailure.failed("cannot persist subagent tool intent")
                         }
@@ -808,6 +882,10 @@ actor SubagentRunner {
                                 let dropped = toolInteractions.removeLast()
                                 let droppedTools = dropped.assistantMessage.toolCalls.map { $0.function.name }.joined(separator: ", ")
                                 omittedToolNames = MarkerNeutralizer.escape(droppedTools)
+                                // R4: the dropped round's results are gone from the
+                                // context the forced final (and any resume) sees.
+                                reconcileWebEvidence(messages: messagesForLLM, interactions: toolInteractions)
+                                await persistWebEvidence()
                                 // Persist the same tail the forced answer will see, before
                                 // dispatch: recovery during that request must not resurrect
                                 // an executed round whose results were omitted.
@@ -907,18 +985,21 @@ actor SubagentRunner {
         // of THIS run and the ledger; only-failures → an error, never a
         // prose "I found nothing"; guidance prefix for the parent.
         var provenance: WebEvidenceProvenance? = nil
-        var priorExtracts: (inContext: Int, total: Int)? = nil
+        var priorEvidence: WebPriorEvidence? = nil
         var reportPath: String? = nil
         if let webLedger {
+            // R4: the flags the parent (and any resume) will read describe the
+            // context that is about to be COMMITTED, nothing else.
+            reconcileWebEvidence(messages: messagesForLLM, interactions: toolInteractions)
             let activity = webLedger.runActivity
-            let counts = webLedger.extractCounts
-            let label = WebEvidenceProvenance.classify(activity: activity, priorExtracts: counts)
+            let prior = webLedger.priorEvidence
+            let label = WebEvidenceProvenance.classify(activity: activity, prior: prior)
             provenance = label
-            priorExtracts = counts
+            priorEvidence = prior
             if runError == nil, activity.attempted > 0, activity.usable == 0, activity.failed == activity.attempted {
                 runError = "web_tools_failed: " + activity.failureMessages.prefix(5).joined(separator: "; ")
             }
-            if let prefix = label.finalMessagePrefix(priorExtracts: counts), !finalText.isEmpty {
+            if let prefix = label.finalMessagePrefix(prior: prior), !finalText.isEmpty {
                 finalText = prefix + "\n" + finalText
             }
             // Report deliverable (§4.3, O6): 128 KB inline cap and a copy on
@@ -992,7 +1073,8 @@ actor SubagentRunner {
             result.evidenceProvenance = provenance
             result.queriesUsed = webLedger.queriesUsed
             result.sourcesConsulted = webLedger.sourcesConsulted
-            result.priorExtracts = priorExtracts
+            result.searchEvidence = webLedger.searchEvidence
+            result.priorEvidence = priorEvidence
             result.reportPath = reportPath
             result.note = webBackendNote
         }

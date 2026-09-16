@@ -72,10 +72,21 @@ extension ToolExecutor {
             return ToolResultMessage(toolCallId: call.id, content: "{\"error\": \"Could not parse arguments. Expected {\\\"queries\\\": [\\\"...\\\"]} with at least one query.\"}")
         }
         do {
+            let searchedAt = HarnessClock.now()
             let outcome = try await webOrchestrator.executeWebQuery(queries: args.queries)
             let ledger = webEvidenceLedger
             ledger?.appendQueries(outcome.queriesRun)
             var hits: [WebQueryPayload.Hit] = []
+            // Search-evidence records (Codex R1a review R3): one bounded
+            // record per hit the run SAW, so a later run answering from the
+            // retained search result is `prior_sources_only`, never
+            // `no_evidence`. The merged result set of a multi-query call
+            // cannot be attributed to one query, so `query` is the call's
+            // query list. URL-less answer-box / knowledge-graph evidence gets
+            // a record with an empty url — no URL is invented.
+            let callQueries = outcome.queriesRun.joined(separator: " | ")
+            var searchRecords: [WebEvidenceRecord] = []
+            let hitCap = WebEvidenceLedger.maxSearchRecordsPerQuery * max(1, outcome.queriesRun.count)
             for result in outcome.context.results {
                 var hit = WebQueryPayload.Hit(title: result.title, snippet: result.snippet, link: result.link,
                                               source: result.source, date: result.date)
@@ -85,8 +96,27 @@ extension ToolExecutor {
                         hit.previously_retrieved = Self.webTimestamp(prior.fetchedAt)
                         hit.extract_in_context = prior.inContext
                     }
+                    if searchRecords.count < hitCap {
+                        searchRecords.append(WebEvidenceRecord(url: normalized, fetchedAt: searchedAt, toolCallId: call.id,
+                                                               servedFromCache: false, isExtract: false, usable: true, query: callQueries))
+                    }
                 }
                 hits.append(hit)
+            }
+            if ledger != nil {
+                if let box = outcome.context.answerBox, box.answer != nil || box.snippet != nil {
+                    let link = box.link.map { $0 } ?? ""
+                    let normalized = link.isEmpty ? "" : await webOrchestrator.normalizedURL(link)
+                    searchRecords.append(WebEvidenceRecord(url: normalized, fetchedAt: searchedAt, toolCallId: call.id,
+                                                           servedFromCache: false, isExtract: false, usable: true, query: callQueries))
+                }
+                if let kg = outcome.context.knowledgeGraph, kg.title != nil || kg.description != nil {
+                    let link = kg.url ?? ""
+                    let normalized = link.isEmpty ? "" : await webOrchestrator.normalizedURL(link)
+                    searchRecords.append(WebEvidenceRecord(url: normalized, fetchedAt: searchedAt, toolCallId: call.id,
+                                                           servedFromCache: false, isExtract: false, usable: true, query: callQueries))
+                }
+                ledger?.append(searchRecords)
             }
             let payload = WebQueryPayload(
                 results: hits,
@@ -140,7 +170,8 @@ extension ToolExecutor {
                                                   excerpts_truncated: truncated ? true : nil,
                                                   fetched_at: fetchedAtLabel)
                 let normalized = await webOrchestrator.normalizedURL(doc.url)
-                if let prior = ledger?.priorRetrievals(of: normalized).last {
+                // Page reads only: a search hit of this URL is not an earlier fetch.
+                if let prior = ledger?.priorRetrievals(of: normalized).filter(\.isExtract).last {
                     page.previously_fetched = "\(Self.webTimestamp(prior.fetchedAt)) (in context: \(prior.inContext ? "yes" : "no")); new reader request at \(fetchedAtLabel)"
                 }
                 pages.append(page)

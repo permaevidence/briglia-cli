@@ -80,6 +80,7 @@ struct StorageSelftest: AsyncParsableCommand {
             (dataRoot.appendingPathComponent("reminder-scripts/state/x.json").path, .harnessState),
             (dataRoot.appendingPathComponent("reminder-scripts/daily.sh").path, .inScope),
             (dataRoot.appendingPathComponent("documents/a.pdf").path, .inScope),
+            (dataRoot.appendingPathComponent("research/abcde-1.md").path, .inScope),
             (configRoot.appendingPathComponent("skills/pdf/helper.sh").path, .inScope),
             (configRoot.appendingPathComponent("agents/x.md").path, .inScope),
             (dataRoot.appendingPathComponent("projects/p/main.py").path, .outside),

@@ -101,6 +101,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
                 switch fixtures.serperMode {
                 case .failing: return .init(status: 500, body: "{\"error\":\"injected\"}")
                 case .empty: return .init(body: "{\"organic\":[]}")
+                case .answerBoxOnly: return .init(body: "{\"organic\":[],\"answerBox\":{\"answer\":\"42\",\"snippet\":\"The answer to \(query) is 42.\"}}")
                 case .normal:
                     let slug = query.lowercased().replacingOccurrences(of: " ", with: "-")
                     let organic: [[String: Any]] = [
@@ -493,9 +494,10 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             let followUp = SubagentRunner.Invocation(subagentType: "Web", description: "prov", taskPrompt: "And what about delta again?", modelOverride: nil, runInBackground: false, deliverable: .short)
             let prior = await runner.run(invocation: followUp, sessionId: retrieved.sessionId, openRouterService: service, toolExecutor: executor,
                                          imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
-            check("4.4 resumed session answered from retained evidence: prior_sources_only, 1 of 1 extracts in context, prefix",
+            check("4.4 resumed session answered from retained evidence: prior_sources_only, 1 of 1 extracts and 4 of 4 search results in context, prefix with both figures",
                   prior.error == nil && prior.evidenceProvenance == .priorSourcesOnly && resultJSON(prior)["prior_extracts_in_context"] as? String == "1 of 1"
-                  && prior.finalMessage.hasPrefix("[FROM RETAINED HISTORY — no new retrieval in this run; 1 of 1 earlier extracts still in context]\n"), prior.error ?? prior.finalMessage)
+                  && resultJSON(prior)["prior_search_results_in_context"] as? String == "4 of 4"
+                  && prior.finalMessage.hasPrefix("[FROM RETAINED HISTORY — no new retrieval in this run; 1 of 1 earlier extracts and 4 of 4 earlier search results still in context]\n"), prior.error ?? prior.finalMessage)
             // 4.5 compaction evicts the extract's round → 0 of 1.
             try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "1000")
             let bigDialogue = (0..<6).map { i in Message(role: i % 2 == 0 ? .user : .assistant, content: String(repeating: "older content ", count: 100), timestamp: at(2026, 4, 9, 11, i, 0)) }
@@ -507,10 +509,12 @@ struct WebSubagentSelftest: AsyncParsableCommand {
                                                    imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
             try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "250000")
             let persistedEvidence = await SubagentSessionRegistry.shared.get(retrieved.sessionId)?.webEvidence ?? []
-            check("4.5 a committed compaction that evicted the extract's round flips its in-context flag: 0 of 1; the ledger record itself stays",
+            let searchStillIn = persistedEvidence.filter { !$0.isExtract && $0.inContext }.count
+            check("4.5 a committed compaction that evicted the extract's (older) round flips its in-context flag: 0 of 1; the newer search round's count matches the persisted flags; the 5 ledger records themselves stay",
                   afterCompaction.error == nil && afterCompaction.evidenceProvenance == .priorSourcesOnly
                   && resultJSON(afterCompaction)["prior_extracts_in_context"] as? String == "0 of 1"
-                  && persistedEvidence.count == 1 && persistedEvidence[0].inContext == false, afterCompaction.error ?? afterCompaction.asJSON())
+                  && resultJSON(afterCompaction)["prior_search_results_in_context"] as? String == "\(searchStillIn) of 4"
+                  && persistedEvidence.count == 5 && persistedEvidence.first { $0.isExtract }?.inContext == false, afterCompaction.error ?? "search in context: \(searchStillIn); " + afterCompaction.asJSON())
             // Pure ledger rules: per-result records, declined compaction changes nothing.
             let ledger = WebEvidenceLedger(records: [
                 WebEvidenceRecord(url: "u", fetchedAt: clock, toolCallId: "r1"), WebEvidenceRecord(url: "u", fetchedAt: clock, toolCallId: "r2")], deliverable: .short)
@@ -570,8 +574,9 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             // 4.12 ledger and queries survive save/reload/resume.
             await SubagentSessionRegistry.shared.reloadFromDisk()
             let reloaded = await SubagentSessionRegistry.shared.get(retrieved.sessionId)
-            check("4.12 ledger and query log persist with the session and survive a reload", reloaded?.webQueriesUsed == ["delta", "delta facts"] && reloaded?.webEvidence?.count == 1
-                  && reloaded?.webEvidence?.first?.url == "https://example.test/delta")
+            check("4.12 ledger and query log persist with the session and survive a reload", reloaded?.webQueriesUsed == ["delta", "delta facts"] && reloaded?.webEvidence?.count == 5
+                  && reloaded?.webEvidence?.first?.url == "https://example.test/delta" && reloaded?.webEvidence?.first?.isExtract == true
+                  && reloaded?.webEvidence?.last?.isExtract == false && reloaded?.webEvidence?.last?.query == "delta | delta facts")
             clock = at(2026, 4, 10, 10, 0, 0)
             webFlag = false
         }
@@ -644,7 +649,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             var webIds: [String] = []
             for index in 0..<41 {
                 clock = at(2026, 4, 10, 11, 0, index)
-                webIds.append(await registry.create(subagentType: "Web", description: "w\(index)", initialPrompt: "topic \(index)  with   spaces").id)
+                webIds.append(await registry.create(subagentType: "Web", description: "w\(index)", initialPrompt: "topic \(index)  with   spaces", webPool: true).id)
             }
             let webAfter = await registry.list(limit: 1000, kind: .web)
             let oldestGone = await registry.get(webIds[0]) == nil
@@ -808,6 +813,227 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             webFlag = false
         }
 
+
+        print("13. Codex R1a review corrections (R1–R4, N1, N2)")
+        do {
+            webFlag = true
+            let runner = SubagentRunner()
+            let executor = ToolExecutor(outputMode: .subagent)
+            await executor.configure(openRouterKey: "", serperKey: "synthetic-serper-key", jinaKey: "synthetic-jina-key")
+            let all = AvailableTools.all(includeWebSearch: true)
+            clock = at(2026, 4, 10, 10, 0, 0)
+            // ---- R1: one backend/model resolver; the OpenAI backend never receives a foreign slug.
+            WebSearchBackend.processOverride = .openai
+            try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "google/gemini-test")
+            let profileBefore = KeychainHelper.loadSnapshot()
+            let foreign = try await service.webExecutionContextWithNote(lane: .subagent("foreign"))
+            serverA.clear(); serverC.clear()
+            serverC.script([WebFixtureServer.responsesBody("Foreign answer.", id: "f1"), WebFixtureServer.responsesBody("Foreign answer.", id: "f2")])
+            let foreignRun = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "foreign", taskPrompt: "stable?", modelOverride: nil, runInBackground: false, deliverable: .short),
+                                              sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            let foreignRequests = agentRequests(serverC)
+            check("13.1 R1: a foreign OpenRouter slug configured for the OpenAI backend → the default native model in the context AND on the wire, a note in the result, main profile untouched",
+                  foreign.context.model == "gpt-5.6-luna" && foreign.note?.contains("google/gemini-test") == true
+                  && foreignRun.error == nil && !foreignRequests.isEmpty && foreignRequests.allSatisfy { body($0)["model"] as? String == "gpt-5.6-luna" } && serverA.requests.isEmpty
+                  && (resultJSON(foreignRun)["note"] as? String)?.contains("not usable on the openai web backend") == true
+                  && foreignRun.modelUsed == "gpt-5.6-luna (web backend: openai)" && KeychainHelper.loadSnapshot() == profileBefore, foreignRun.asJSON())
+            try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "openai/gpt-5.6-terra")
+            let terra = try await service.webExecutionContextWithNote(lane: .subagent("terra"))
+            try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "gpt-5.6-terra")
+            let bare = try await service.webExecutionContextWithNote(lane: .subagent("bare"))
+            check("13.2 R1: an openai/ slug is honoured without a note; a bare id (no vendor prefix) is not honoured — default plus a note, exactly the pipeline's rule",
+                  terra.context.model == "gpt-5.6-terra" && terra.note == nil && bare.context.model == "gpt-5.6-luna" && bare.note != nil, "\(terra.context.model) \(bare.context.model)")
+            let shared = [WebSearchBackend.researchModel(for: .openrouter, requested: "google/gemini-test"),
+                          WebSearchBackend.researchModel(for: .openai, requested: "google/gemini-test"),
+                          WebSearchBackend.researchModel(for: .openai, requested: "openai/gpt-5.6-luna"),
+                          WebSearchBackend.researchModel(for: .opencode, requested: "google/gemini-test")]
+            check("13.3 R1: the shared resolver — OpenRouter honours any slug, OpenAI only openai/…, OpenCode pins by design (honoured, no note)",
+                  shared[0] == ("google/gemini-test", true) && shared[1] == ("gpt-5.6-luna", false) && shared[2] == ("gpt-5.6-luna", true) && shared[3] == ("mimo-v2.5", true))
+            try KeychainHelper.delete(key: KeychainHelper.openRouterWebSearchModelKey)
+            WebSearchBackend.processOverride = .opencode
+
+            // ---- R3: search-only evidence is durable, distinct from page reads, classified on resume.
+            serverB.clear(); fixtures.serperMode = .normal
+            serverB.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"alpha\"]}")]), WebFixtureServer.chatBody("Alpha, from the snippets.")])
+            let ask = SubagentRunner.Invocation(subagentType: "web", description: "search-only", taskPrompt: "Find alpha using search snippets.", modelOverride: nil, runInBackground: false, deliverable: .short)
+            let searched = await runner.run(invocation: ask, sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            let searchedJSON = resultJSON(searched)
+            let seen = searchedJSON["search_results_seen"] as? [[String: Any]] ?? []
+            check("13.4 R3: a search-only run — retrieved_this_run, sources_consulted EMPTY (nothing read), search_results_seen lists the hits with query and retrieved_at",
+                  searched.error == nil && searched.evidenceProvenance == .retrievedThisRun && (searchedJSON["sources_consulted"] as? [[String: Any]])?.isEmpty == true
+                  && seen.map { $0["url"] as? String } == ["https://example.test/alpha", "https://example.test/alpha-2"]
+                  && seen.allSatisfy { $0["query"] as? String == "alpha" && ($0["retrieved_at"] as? String)?.hasPrefix("2026-04-10 10:00:00") == true }, searched.asJSON())
+            // N1: a lowercase invocation runs the Web preset and lives in the Web pool under the canonical name.
+            let savedSearch = await SubagentSessionRegistry.shared.get(searched.sessionId)
+            await SubagentSessionRegistry.shared.reloadFromDisk()
+            let reloadedSearch = await SubagentSessionRegistry.shared.get(searched.sessionId)
+            let impostor = await SubagentSessionRegistry.shared.create(subagentType: "Web", description: "impostor", initialPrompt: "x", webPool: false)
+            check("13.5 N1: subagent_type 'web' → stored as the canonical 'Web', pool marker set, Web pool before and after reload; a session created without the marker is general even under that name",
+                  savedSearch?.subagentType == "Web" && savedSearch?.pool == "web" && savedSearch?.kind == .web && reloadedSearch?.kind == .web && reloadedSearch?.topic != nil
+                  && impostor.session.kind == .general,
+                  "stored type: \(savedSearch?.subagentType ?? "missing") pool: \(savedSearch?.pool ?? "nil")")
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("Alpha, still from the retained snippets."), WebFixtureServer.chatBody("Alpha, still from the retained snippets.")])
+            let continued = await runner.run(invocation: ask, sessionId: searched.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            check("13.6 R3: the no-retrieval follow-up of a search-only session is prior_sources_only (never no_evidence): 0 of 0 extracts, 2 of 2 search results, prefix with both figures, records survive save/reload with their query",
+                  continued.error == nil && continued.evidenceProvenance == .priorSourcesOnly
+                  && resultJSON(continued)["prior_extracts_in_context"] as? String == "0 of 0" && resultJSON(continued)["prior_search_results_in_context"] as? String == "2 of 2"
+                  && continued.finalMessage.hasPrefix("[FROM RETAINED HISTORY — no new retrieval in this run; 0 of 0 earlier extracts and 2 of 2 earlier search results still in context]\n")
+                  && reloadedSearch?.webEvidence?.count == 2 && reloadedSearch?.webEvidence?.allSatisfy { !$0.isExtract && $0.query == "alpha" && $0.inContext } == true, continued.asJSON())
+            // Empty and failed searches leave no evidence; the follow-up is no_evidence.
+            fixtures.serperMode = .empty
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"omicron\"]}")]), WebFixtureServer.chatBody("Nothing about omicron.")])
+            let emptyRun = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "empty", taskPrompt: "omicron?", modelOverride: nil, runInBackground: false, deliverable: .short),
+                                            sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            fixtures.serperMode = .failing
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"omicron\"]}")]), WebFixtureServer.chatBody("Search failed.")])
+            let failedRun = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "failed", taskPrompt: "more?", modelOverride: nil, runInBackground: false, deliverable: .short),
+                                             sessionId: emptyRun.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            fixtures.serperMode = .normal
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("Omicron from memory."), WebFixtureServer.chatBody("Omicron from memory.")])
+            let afterEmpty = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "after", taskPrompt: "so?", modelOverride: nil, runInBackground: false, deliverable: .short),
+                                              sessionId: emptyRun.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            let emptyEvidence = await SubagentSessionRegistry.shared.get(emptyRun.sessionId)?.webEvidence ?? []
+            check("13.7 R3: empty and failed searches add no evidence records (queries stay logged); the later no-retrieval run is no_evidence, not prior_sources_only",
+                  emptyRun.evidenceProvenance == .attemptedNoResults && failedRun.error?.hasPrefix("web_tools_failed") == true && emptyEvidence.isEmpty
+                  && afterEmpty.evidenceProvenance == .noEvidence && (resultJSON(afterEmpty)["queries_used"] as? [String]) == ["omicron", "omicron"], afterEmpty.asJSON())
+            // Answer-box-only evidence: usable, URL-less, no URL invented.
+            fixtures.serperMode = .answerBoxOnly
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"meaning\"]}")]), WebFixtureServer.chatBody("It is 42.")])
+            let boxRun = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "box", taskPrompt: "meaning?", modelOverride: nil, runInBackground: false, deliverable: .short),
+                                          sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            fixtures.serperMode = .normal
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("Still 42."), WebFixtureServer.chatBody("Still 42.")])
+            let boxFollow = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "box2", taskPrompt: "sure?", modelOverride: nil, runInBackground: false, deliverable: .short),
+                                             sessionId: boxRun.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            let boxEvidence = await SubagentSessionRegistry.shared.get(boxRun.sessionId)?.webEvidence ?? []
+            check("13.8 R3: answer-box-only evidence — retrieved_this_run, no hit URLs, search_results_seen_urlless = 1, record with an EMPTY url (none invented); the follow-up counts it as 1 of 1 search results",
+                  boxRun.evidenceProvenance == .retrievedThisRun && (resultJSON(boxRun)["search_results_seen"] as? [[String: Any]])?.isEmpty == true
+                  && resultJSON(boxRun)["search_results_seen_urlless"] as? Int == 1 && boxEvidence.count == 1 && boxEvidence[0].url == "" && boxEvidence[0].isExtract == false
+                  && boxFollow.evidenceProvenance == .priorSourcesOnly && resultJSON(boxFollow)["prior_search_results_in_context"] as? String == "1 of 1", boxRun.asJSON())
+            // Compaction of the search result's round flips the search records' flags.
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "1000")
+            let bigDialogue = (0..<6).map { i in Message(role: i % 2 == 0 ? .user : .assistant, content: String(repeating: "older content ", count: 100), timestamp: at(2026, 4, 9, 11, i, 0)) }
+            let storedSearch = await SubagentSessionRegistry.shared.get(searched.sessionId)!
+            // A bulkier NEWER round after the search, so the compaction's verbatim tail holds that one and the search round is evicted.
+            let bulkyRound = ToolInteraction(
+                assistantMessage: AssistantToolCallMessage(content: nil, toolCalls: [ToolCall(id: "bulky-1", type: "function", function: FunctionCall(name: "web_extract", arguments: "{}"))]),
+                results: [ToolResultMessage(toolCallId: "bulky-1", content: String(repeating: "bulky result ", count: 200))])
+            await SubagentSessionRegistry.shared.applyCompaction(sessionId: searched.sessionId, messages: bigDialogue, toolInteractions: storedSearch.toolInteractions + [bulkyRound])
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("EVICTED_SUMMARY"), WebFixtureServer.chatBody("From the summary: alpha.", prompt: 300), WebFixtureServer.chatBody("From the summary: alpha.", prompt: 300)])
+            let compactedSearch = await runner.run(invocation: ask, sessionId: searched.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "250000")
+            let compactedRecords = await SubagentSessionRegistry.shared.get(searched.sessionId)?.webEvidence ?? []
+            check("13.9 R3: a committed compaction that evicts the search round → 0 of 2 search results in context, records kept",
+                  compactedSearch.error == nil && compactedSearch.evidenceProvenance == .priorSourcesOnly && resultJSON(compactedSearch)["prior_search_results_in_context"] as? String == "0 of 2"
+                  && compactedRecords.count == 2 && compactedRecords.allSatisfy { !$0.inContext }, compactedSearch.asJSON())
+            // Bound: the newest 400 search records are kept, extracts never dropped.
+            let bounded = WebEvidenceLedger(records: [WebEvidenceRecord(url: "x", fetchedAt: clock, toolCallId: "e0")], deliverable: .short)
+            bounded.append((0..<410).map { WebEvidenceRecord(url: "s\($0)", fetchedAt: clock, toolCallId: "s", isExtract: false, query: "q") })
+            check("13.10 R3: the per-session search-record bound (400, oldest dropped first) never touches page extracts",
+                  bounded.searchCounts.total == 400 && bounded.extractCounts.total == 1 && bounded.allRecords.contains { $0.url == "s409" } && !bounded.allRecords.contains { $0.url == "s9" })
+
+            // ---- R4: in-context flags reconcile against the retained results.
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "60000")
+            fixtures.pages["https://example.test/cutoff"] = "# Cutoff\n\nCutoff facts."
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("extract", calls: [("web_extract", "{\"requests\":[{\"url\":\"https://example.test/cutoff\",\"focus\":\"facts\"}]}")], prompt: 60000), WebFixtureServer.chatBody("Cutoff; results omitted.")])
+            let cutoff = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "cutoff", taskPrompt: "Read this page.", modelOverride: nil, runInBackground: false, deliverable: .short),
+                                          sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "250000")
+            let cutSaved = await SubagentSessionRegistry.shared.get(cutoff.sessionId)
+            let retainedIds = Set((cutSaved?.toolInteractions ?? []).flatMap { $0.results.map(\.toolCallId) } + (cutSaved?.messages ?? []).flatMap { $0.toolInteractions.flatMap { $0.results.map(\.toolCallId) } })
+            let cutEvidence = cutSaved?.webEvidence ?? []
+            check("13.11 R4: a hard cutoff that drops the executed extract's round → the record stays (audit: sources_consulted lists the page) but is NOT in context in the saved session",
+                  cutoff.error == nil && retainedIds.isEmpty && cutEvidence.count == 1 && cutEvidence[0].inContext == false && cutEvidence[0].url == "https://example.test/cutoff"
+                  && ((resultJSON(cutoff)["sources_consulted"] as? [[String: Any]])?.first?["url"] as? String) == "https://example.test/cutoff", "retained ids: \(retainedIds.count); \(cutoff.asJSON())")
+            // Resume after a cutoff: prior_sources_only with 0 of 1 (never claims the extract is available).
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("Cannot recall the page."), WebFixtureServer.chatBody("Cannot recall the page.")])
+            let afterCut = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "after-cut", taskPrompt: "what did it say?", modelOverride: nil, runInBackground: false, deliverable: .short),
+                                            sessionId: cutoff.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            check("13.12 R4: the resume after the cutoff reports 0 of 1 extracts in context", afterCut.evidenceProvenance == .priorSourcesOnly && resultJSON(afterCut)["prior_extracts_in_context"] as? String == "0 of 1", afterCut.asJSON())
+            // Orphan record (crash between the ledger write and the result commit) and an uncertain Responses placeholder: both absent at resume.
+            fixtures.pages["https://example.test/kept"] = "# Kept\n\nKept facts."
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("extract", calls: [("web_extract", "{\"requests\":[{\"url\":\"https://example.test/kept\",\"focus\":\"facts\"}]}")]), WebFixtureServer.chatBody("Kept.")])
+            let kept = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "kept", taskPrompt: "Read kept.", modelOverride: nil, runInBackground: false, deliverable: .short),
+                                        sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            let keptSession = await SubagentSessionRegistry.shared.get(kept.sessionId)!
+            let placeholderRound = ToolInteraction(
+                assistantMessage: AssistantToolCallMessage(content: nil, toolCalls: [ToolCall(id: "uncertain-1", type: "function", function: FunctionCall(name: "web_extract", arguments: "{}"))]),
+                results: [ToolResultMessage(toolCallId: "uncertain-1", content: SubagentRunner.interruptedToolIntentPlaceholder)])
+            let doctored = (keptSession.webEvidence ?? []) + [
+                WebEvidenceRecord(url: "https://example.test/ghost", fetchedAt: clock, toolCallId: "ghost-1"),
+                WebEvidenceRecord(url: "https://example.test/uncertain", fetchedAt: clock, toolCallId: "uncertain-1")]
+            await SubagentSessionRegistry.shared.applyCompaction(sessionId: kept.sessionId, messages: keptSession.messages, toolInteractions: keptSession.toolInteractions + [placeholderRound], webEvidence: doctored)
+            await SubagentSessionRegistry.shared.reloadFromDisk()
+            serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("From kept."), WebFixtureServer.chatBody("From kept.")])
+            let resumedKept = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "kept2", taskPrompt: "and?", modelOverride: nil, runInBackground: false, deliverable: .short),
+                                               sessionId: kept.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            let reconciled = await SubagentSessionRegistry.shared.get(kept.sessionId)?.webEvidence ?? []
+            check("13.13 R4: at resume an orphan record (result never persisted) and a record behind an uncertain Responses placeholder lose the flag; the really retained extract keeps it → 1 of 3",
+                  resumedKept.evidenceProvenance == .priorSourcesOnly && resultJSON(resumedKept)["prior_extracts_in_context"] as? String == "1 of 3"
+                  && reconciled.count == 3 && reconciled.first { $0.url.hasSuffix("/kept") }?.inContext == true
+                  && reconciled.first { $0.url.hasSuffix("/ghost") }?.inContext == false && reconciled.first { $0.url.hasSuffix("/uncertain") }?.inContext == false, resumedKept.asJSON())
+
+            // ---- R2: the background completion message carries the Web result contract.
+            try KeychainHelper.delete(key: KeychainHelper.webSearchOpenCodeApiKeyKey)
+            serverA.clear(); serverB.clear()
+            serverA.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"kappa\"]}")]), WebFixtureServer.chatBody("# Kappa report\n\nKappa. Sources: https://example.test/kappa")])
+            let bgInvocation = SubagentRunner.Invocation(subagentType: "Web", description: "bg report", taskPrompt: "Report on kappa.", modelOverride: nil, runInBackground: true, deliverable: .report)
+            _ = await SubagentBackgroundRegistry.shared.spawn(invocation: bgInvocation, sessionId: nil, parentTools: all, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents)
+            var completions: [SubagentBackgroundRegistry.Completion] = []
+            for _ in 0..<200 where completions.isEmpty {
+                completions = await SubagentBackgroundRegistry.shared.drainCompletions()
+                if completions.isEmpty { try await Task.sleep(nanoseconds: 50_000_000) }
+            }
+            try KeychainHelper.save(key: KeychainHelper.webSearchOpenCodeApiKeyKey, value: "synthetic-web-opencode-key")
+            let bgBody = completions.first.map { ConversationManager.backgroundSubagentCompletionBody($0, durationStr: "1.0s") } ?? ""
+            let bgLines = bgBody.components(separatedBy: "\n")
+            let bgResult = completions.first?.result
+            check("13.14 R2: a background Web run's [SUBAGENT COMPLETE] message (the manager's template) carries evidence_provenance, queries_used, sources_consulted, search_results_seen, report_path, the backend-fallback note and model_used, before final_message",
+                  completions.count == 1 && bgResult?.error == nil
+                  && bgLines.contains("evidence_provenance: retrieved_this_run") && bgLines.contains("queries_used: [\"kappa\"]")
+                  && bgLines.contains("sources_consulted: []") && bgLines.contains { $0.hasPrefix("search_results_seen: [{") && $0.contains("\"url\":\"https://example.test/kappa\"") }
+                  && bgLines.contains { $0.hasPrefix("report_path: ") && $0.hasSuffix(".md") && FileManager.default.fileExists(atPath: String($0.dropFirst("report_path: ".count))) }
+                  && bgLines.contains { $0.hasPrefix("note: web backend unavailable") } && bgLines.contains("model_used: main-model (inherited)")
+                  && (bgLines.firstIndex(of: "final_message:") ?? -1) > (bgLines.firstIndex { $0.hasPrefix("report_path: ") } ?? Int.max)
+                  && bgBody.hasSuffix("\n# Kappa report\n\nKappa. Sources: https://example.test/kappa"), bgBody.prefix(900).description)
+            // Failed/partial and prior-sources shapes through the same template; ordinary runs byte-identical to the legacy layout.
+            var failedResult = SubagentRunner.RunResult(sessionId: "abcde", isNewSession: false, finalMessage: "partial", turnsUsed: 2, toolsCalled: ["web_query"], filesTouched: [], spendUSD: 0.01, error: "web_tools_failed: search — boom", modelUsed: "mimo-v2.5 (web backend: opencode)")
+            failedResult.evidenceProvenance = .priorSourcesOnly
+            failedResult.queriesUsed = ["a"]
+            failedResult.sourcesConsulted = [(url: "https://example.test/a", retrievedAt: clock)]
+            failedResult.searchEvidence = WebSearchEvidenceSummary(hits: [], urlless: 2)
+            failedResult.priorEvidence = WebPriorEvidence(extracts: .init(inContext: 1, total: 2), searchResults: .init(inContext: 0, total: 3))
+            let handle = SubagentBackgroundRegistry.Handle(id: "subagent_9", subagentType: "Web", description: "d", startedAt: clock, sessionId: "abcde")
+            let failedBody = ConversationManager.backgroundSubagentCompletionBody(SubagentBackgroundRegistry.Completion(handle: handle, result: failedResult, completedAt: clock), durationStr: "2.0s")
+            let ordinary = SubagentRunner.RunResult(sessionId: "zzzzz", isNewSession: true, finalMessage: "done", turnsUsed: 1, toolsCalled: [], filesTouched: ["/tmp/x"], spendUSD: 0.5, error: nil, modelUsed: "main-model (inherited)")
+            let ordinaryBody = ConversationManager.backgroundSubagentCompletionBody(SubagentBackgroundRegistry.Completion(handle: SubagentBackgroundRegistry.Handle(id: "subagent_2", subagentType: "general-purpose", description: "g", startedAt: clock), result: ordinary, completedAt: clock), durationStr: "3.5s")
+            let legacyLayout = "[SUBAGENT COMPLETE]\nhandle: subagent_2\nsubagent_type: general-purpose\ndescription: g\nsession_id: zzzzz\nturns_used: 1\ntools_called: (none)\nfiles_touched: /tmp/x\nspend_usd: 0.5000\nduration: 3.5s\nfinal_message:\ndone"
+            check("13.15 R2: failed/partial Web result → contract lines then error + 'final_message (possibly partial)'; prior counts for both classes; urlless count; an ordinary run's message is the legacy layout byte for byte",
+                  failedBody.contains("\nevidence_provenance: prior_sources_only\nqueries_used: [\"a\"]\nsources_consulted: [{\"retrieved_at\":\"\(ToolExecutor.webTimestamp(clock))\",\"url\":\"https://example.test/a\"}]\nsearch_results_seen: []\nsearch_results_seen_urlless: 2\nprior_extracts_in_context: 1 of 2\nprior_search_results_in_context: 0 of 3\nmodel_used: mimo-v2.5 (web backend: opencode)\nerror: web_tools_failed: search — boom\nfinal_message (possibly partial):\npartial")
+                  && ordinaryBody == legacyLayout, failedBody + "\n---\n" + ordinaryBody)
+
+            // ---- N2: report files are payload — full Mind export carries them, lite skips them, /deleteuserdata targets them.
+            let researchDir = StoragePaths.dataRoot.appendingPathComponent("research", isDirectory: true)
+            check("13.16 N2: the report directory is a payload folder (full export yes, lite no), restored on import, classified as user content (0600 sweep), and the report file exists 0600",
+                  MindExportService.ExportScope.payloadFolderNames.contains("research") && MindExportService.restoredFolderNames.contains("research")
+                  && PrivateStorage.classify(researchDir.appendingPathComponent("abcde-1.md").path) == .inScope
+                  && (bgResult?.reportPath).map { FileManager.default.fileExists(atPath: $0) && (try? FileManager.default.attributesOfItem(atPath: $0)[.posixPermissions] as? Int) == 0o600 } == true,
+                  bgResult?.reportPath ?? "no report")
+            webFlag = false
+            clock = at(2026, 4, 10, 10, 0, 0)
+        }
+
         print("Web subagent selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }
     }
@@ -816,7 +1042,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
 // MARK: - Fixture state and loopback server
 
 final class WebFixtureState: @unchecked Sendable {
-    enum SerperMode { case normal, empty, failing }
+    enum SerperMode { case normal, empty, failing, answerBoxOnly }
     private let lock = NSLock()
     private var _serperMode: SerperMode = .normal
     private var _serperCalls = 0

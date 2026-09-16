@@ -61,10 +61,17 @@ actor SubagentSessionRegistry {
         /// Number of report files written for this session (`report_path`
         /// numbering, §4.3 O6).
         var webReportCount: Int? = nil
+        /// Pool membership marker (§4.7, N1): "web" for sessions created by
+        /// the built-in Web researcher — set from the RESOLVED type, so a
+        /// case-variant invocation lands here and a user-defined agent that
+        /// merely shares the name never does. nil (absent) for every other
+        /// session, so their files are unchanged.
+        var pool: String? = nil
 
         /// Pool membership (§4.7): Web researcher sessions live in their own
         /// pool with its own cap and expiry.
-        var kind: Kind { subagentType == SubagentTypes.webResearcherName ? .web : .general }
+        var kind: Kind { pool == Session.webPoolMarker ? .web : .general }
+        static let webPoolMarker = "web"
     }
 
     enum Kind { case general, web }
@@ -109,7 +116,9 @@ actor SubagentSessionRegistry {
     // MARK: - Create / Resume
 
     /// Create a fresh session and return its ID.
-    func create(subagentType: String, description: String, initialPrompt: String) -> (id: String, session: Session) {
+    /// `webPool`: the session belongs to the built-in Web researcher's pool
+    /// (decided by the runner from the RESOLVED type, N1).
+    func create(subagentType: String, description: String, initialPrompt: String, webPool: Bool = false) -> (id: String, session: Session) {
         let id = generateId()
         let userMessage = Message(role: .user, content: initialPrompt, timestamp: HarnessClock.now())
         var session = Session(
@@ -127,6 +136,7 @@ actor SubagentSessionRegistry {
         )
         // Web sessions only (§4.7 listing): a general session's file stays
         // byte-identical to the frozen lifecycle captures.
+        if webPool { session.pool = Session.webPoolMarker }
         if session.kind == .web { session.topic = Self.topic(from: initialPrompt) }
         sessions[id] = session
         persist(session)

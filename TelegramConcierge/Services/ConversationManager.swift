@@ -3761,7 +3761,8 @@ class ConversationManager: ObservableObject {
             "images": "images",
             "documents": "documents",
             "tool_attachments": "attachment snapshots",
-            "projects": "projects"
+            "projects": "projects",
+            "research": "research reports"
         ]
         var emptyNote = ""
         if !absentPayloadFolders.isEmpty {
@@ -9196,14 +9197,6 @@ class ConversationManager: ObservableObject {
                 isError: !subagentErr.isEmpty
             )
 
-            let toolsStr = completion.result.toolsCalled.isEmpty
-                ? "(none)"
-                : completion.result.toolsCalled.joined(separator: ", ")
-            let filesStr = completion.result.filesTouched.isEmpty
-                ? "(none)"
-                : completion.result.filesTouched.joined(separator: ", ")
-            let spendStr = String(format: "%.4f", completion.result.spendUSD)
-
             // Persist background subagent spend to the authoritative daily/monthly
             // counters in Keychain so it counts toward the user-configured spend
             // limits. The generateResponseWithTools call that follows will re-seed
@@ -9213,25 +9206,7 @@ class ConversationManager: ObservableObject {
                 print("[ConversationManager] Background subagent \(completion.handle.id) spend: +$\(formatUSD(completion.result.spendUSD))")
             }
 
-            var body = """
-            [SUBAGENT COMPLETE]
-            handle: \(completion.handle.id)
-            subagent_type: \(completion.handle.subagentType)
-            description: \(completion.handle.description)
-            session_id: \(completion.result.sessionId.isEmpty ? "(none)" : completion.result.sessionId)
-            turns_used: \(completion.result.turnsUsed)
-            tools_called: \(toolsStr)
-            files_touched: \(filesStr)
-            spend_usd: \(spendStr)
-            duration: \(durationStr)
-            """
-            if let err = completion.result.error, !err.isEmpty {
-                body += "\nerror: \(err)"
-                body += "\nfinal_message (possibly partial):"
-            } else {
-                body += "\nfinal_message:"
-            }
-            body += "\n\(completion.result.finalMessage)"
+            let body = Self.backgroundSubagentCompletionBody(completion, durationStr: durationStr)
 
             let userMessage = Message(role: .user, content: body, kind: .subagentComplete)
             messages.append(userMessage)
@@ -9242,6 +9217,46 @@ class ConversationManager: ObservableObject {
         guard let trigger = lastMessage else { return }
         statusMessage = "Processing subagent completion..."
         startActiveProcessing(for: trigger)
+    }
+
+    /// The parent-facing `[SUBAGENT COMPLETE]` message of a background run —
+    /// the template `checkBackgroundSubagentCompletions` persists as the
+    /// synthetic user message. Ordinary runs: the legacy fields, unchanged.
+    /// Web researcher runs (Codex R1a review R2): the same result contract a
+    /// foreground `Agent` call returns (`RunResult.webContractLines`) —
+    /// provenance, queries, sources read, search results seen, prior counts,
+    /// report path, backend note, model — so background delivery never
+    /// drops the evidence audit trail, the fallback notice or the report
+    /// locator.
+    nonisolated static func backgroundSubagentCompletionBody(_ completion: SubagentBackgroundRegistry.Completion, durationStr: String) -> String {
+        let toolsStr = completion.result.toolsCalled.isEmpty
+            ? "(none)"
+            : completion.result.toolsCalled.joined(separator: ", ")
+        let filesStr = completion.result.filesTouched.isEmpty
+            ? "(none)"
+            : completion.result.filesTouched.joined(separator: ", ")
+        let spendStr = String(format: "%.4f", completion.result.spendUSD)
+        var body = """
+        [SUBAGENT COMPLETE]
+        handle: \(completion.handle.id)
+        subagent_type: \(completion.handle.subagentType)
+        description: \(completion.handle.description)
+        session_id: \(completion.result.sessionId.isEmpty ? "(none)" : completion.result.sessionId)
+        turns_used: \(completion.result.turnsUsed)
+        tools_called: \(toolsStr)
+        files_touched: \(filesStr)
+        spend_usd: \(spendStr)
+        duration: \(durationStr)
+        """
+        for line in completion.result.webContractLines() { body += "\n" + line }
+        if let err = completion.result.error, !err.isEmpty {
+            body += "\nerror: \(err)"
+            body += "\nfinal_message (possibly partial):"
+        } else {
+            body += "\nfinal_message:"
+        }
+        body += "\n\(completion.result.finalMessage)"
+        return body
     }
 
     // MARK: - Background bash_manage watch match handling
@@ -10006,6 +10021,10 @@ class ConversationManager: ObservableObject {
         for (dir, label) in [
             (appFolder.appendingPathComponent("archive", isDirectory: true), "archive directory"),
             (appFolder.appendingPathComponent("subagent_sessions", isDirectory: true), "subagent sessions directory"),
+            // Web researcher report files (WEB_SUBAGENT_PLAN O6, Codex R1a
+            // review N2): derived from the user's questions — user data,
+            // deleted like documents (projects, by contrast, are kept).
+            (appFolder.appendingPathComponent("research", isDirectory: true), "research reports directory"),
             (appFolder.appendingPathComponent("trigger-events", isDirectory: true), "trigger spool directory"),
             (appFolder.appendingPathComponent("fire-outbox", isDirectory: true), "fire outbox directory"),
         ] {

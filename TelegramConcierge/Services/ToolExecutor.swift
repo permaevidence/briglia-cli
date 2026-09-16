@@ -3954,7 +3954,8 @@ extension ToolExecutor {
             // fetched_at / served_from_cache reported, the Web researcher's
             // ledger extended when this executor serves one.
             let normalized = await webOrchestrator.normalizedURL(args.url)
-            let prior = webEvidenceLedger?.priorRetrievals(of: normalized).last
+            // Page reads only: a search hit of this URL is not an earlier fetch.
+            let prior = webEvidenceLedger?.priorRetrievals(of: normalized).filter(\.isExtract).last
             let fetched = try await webOrchestrator.readUrlContentWithMetadata(
                 url: args.url,
                 prompt: promptTrim,

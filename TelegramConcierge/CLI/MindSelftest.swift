@@ -420,7 +420,7 @@ struct MindSelftest: AsyncParsableCommand {
 
             // 3a-ter. LITE export (owner, 2026-08-27): memory only — the
             // payload folders are skipped, everything else rides along.
-            for payload in ["images", "tool_attachments", "projects"] {
+            for payload in ["images", "tool_attachments", "projects", "research"] {
                 let dir = dataRoot.appendingPathComponent(payload, isDirectory: true)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 try Data("payload marker".utf8).write(to: dir.appendingPathComponent("marker.bin"))
@@ -431,13 +431,13 @@ struct MindSelftest: AsyncParsableCommand {
             let missingPayload = MindExportService.ExportScope.payloadFolderNames.allSatisfy {
                 !FileManager.default.fileExists(atPath: liteStaged.tempDir.appendingPathComponent($0).path)
             }
-            check("lite export carries no payload folders (documents/images/attachments/projects)",
+            check("lite export carries no payload folders (documents/images/attachments/projects/research)",
                   missingPayload)
             check("lite export still carries the watcher scripts and archive memory",
                   FileManager.default.fileExists(atPath: liteStaged.tempDir.appendingPathComponent("reminder-scripts").path)
                       && FileManager.default.fileExists(atPath: liteStaged.tempDir.appendingPathComponent("mind_config.json").path))
             await MindExportService.shared.discardStagedMind(liteStaged)
-            for payload in ["images", "tool_attachments", "projects"] {
+            for payload in ["images", "tool_attachments", "projects", "research"] {
                 try? FileManager.default.removeItem(at: dataRoot.appendingPathComponent(payload, isDirectory: true))
             }
 

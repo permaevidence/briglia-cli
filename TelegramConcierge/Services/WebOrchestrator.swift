@@ -54,6 +54,33 @@ enum Endpoints {
 /// Which gateway serves every LLM call in the web pipeline. Selected in
 /// onboarding and Settings ("Ricerca e lettura") via `selectionKey`.
 enum WebSearchBackend: String {
+    /// The ONE backend/model resolver of the web pipeline and the Web
+    /// researcher subagent (Codex R1a review R1). `requested` is the stored
+    /// web model setting (an OpenRouter-style `vendor/model` slug; default
+    /// `openai/gpt-5.6-luna`). `honoured` says whether the requested value is
+    /// what runs:
+    /// - `.openrouter`: the slug as configured, always honoured.
+    /// - `.openai`: only an `openai/<id>` slug is honoured (native id = the
+    ///   slug minus the prefix). A foreign gateway slug (`google/…`) and a
+    ///   bare id without a vendor prefix are NOT honoured — the backend's
+    ///   default runs instead (the pipeline's legacy rule, unchanged; the
+    ///   researcher reports the substitution in its result note).
+    /// - `.opencode`: the pinned research model by design (the backend has
+    ///   no model setting), reported as honoured — no substitution note.
+    static func researchModel(for backend: WebSearchBackend, requested: String) -> (model: String, honoured: Bool) {
+        let fallback = KeychainHelper.defaultWebSearchModel
+        let nativeFallback = fallback.hasPrefix("openai/") ? String(fallback.dropFirst("openai/".count)) : fallback
+        switch backend {
+        case .openrouter:
+            return (requested, true)
+        case .openai:
+            if requested.hasPrefix("openai/") { return (String(requested.dropFirst("openai/".count)), true) }
+            return (nativeFallback, requested == fallback)
+        case .opencode:
+            return (WebOrchestrator.opencodeResearchModel, true)
+        }
+    }
+
     case openrouter   // current OpenRouter envelope, models as configured
     case openai       // api.openai.com — same models, native slugs (no "openai/" prefix)
     case opencode     // default — OpenCode Go, mimo-v2.5 on every stage (huge usage limits, slower)
@@ -2404,19 +2431,7 @@ actor WebOrchestrator {
     static var opencodeResearchModel: String { opencodeModel }
 
     private func resolvedModel(for backend: WebSearchBackend, requested: String) -> String {
-        switch backend {
-        case .openrouter:
-            return requested
-        case .openai:
-            // Same models as on OpenRouter, native slugs (no gateway prefix).
-            if requested.hasPrefix("openai/") { return String(requested.dropFirst("openai/".count)) }
-            // A non-OpenAI model was configured (e.g. a Gemini override): fall
-            // back to the default so the call still works on this backend.
-            let fallback = KeychainHelper.defaultWebSearchModel
-            return fallback.hasPrefix("openai/") ? String(fallback.dropFirst("openai/".count)) : fallback
-        case .opencode:
-            return Self.opencodeModel
-        }
+        WebSearchBackend.researchModel(for: backend, requested: requested).model
     }
 
     private func apiKey(for backend: WebSearchBackend) -> String {
