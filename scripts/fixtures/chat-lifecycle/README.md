@@ -134,3 +134,18 @@ the accepted P0 head and their original `d4767d9` lineage.
 The LM Studio addition observes the real local-model estimator/planner. UT
 coverage remains shipped Python-bridge coverage; P2 requires the updated UT app
 to ship and pass a device check before new profile kinds are enabled there.
+
+## r7 — chronology for every agent (R0, 2026-09-16)
+
+`chronology_lifecycle_migration.py` (rule `chronology-r7.json`) runs first, in
+r5's shape: it restores the CANDIDATE to the pre-R0 form — reply-time notes,
+tool notes on results that carried none at SOURCE (subagent results and
+maintenance-pass refusals), the compaction summary rendering, transcript
+dialogue stamps, and the persisted `completedAt` / `lastAssistantAt` fields
+(main-agent results get the note re-baked into content exactly as SOURCE
+persisted it) — asserting every removal against the pinned clock, then hands
+the restored candidate to the r5 → r4 → r3 chain. Unlisted captures must come
+back unchanged and are never re-serialized. The candidate build pins
+`HarnessClock` (the one chronology clock) instead of the SOURCE-era anchors;
+the persistence-schema guard accepts the additive manifest
+`chronology-persistence-contract.json`.

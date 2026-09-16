@@ -118,3 +118,12 @@ CI references are compiler-specific; an image/compiler upgrade fails explicitly
 and requires a reviewed pinned-SOURCE re-record. CI must pass `--baseline` in
 addition to its current reference-versus-candidate comparison. Never re-record
 from the candidate or silently update a file after a comparison failure.
+
+## Chronology (R0, 2026-09-16)
+
+`chronology_wire_migration.py` (rule `chronology-r1.json`) is chained after the
+reasoning_history removal: exactly the 35 requests whose history carries the
+assistant reply gain one `[Turn metadata]\nAssistant reply time: 22:13` system
+message right after it (the Anthropic cache breakpoint moves onto the note when
+the reply was the last history message). Bodies are re-serialized byte for byte
+and refused otherwise; the other 56 requests are still compared unchanged.
