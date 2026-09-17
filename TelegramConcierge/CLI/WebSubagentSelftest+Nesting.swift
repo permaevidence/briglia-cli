@@ -218,10 +218,10 @@ extension WebSubagentSelftest {
                   "error \(cancelledParent.error ?? "nil") latency \(cancelLatency)")
 
             // 7.2 The parent's batch timer is re-armed by the child's progress.
-            SubagentRunner.stalenessTimeoutOverrideForTesting = 0.5
+            SubagentRunner.stalenessTimeoutOverrideForTesting = 1.0
             SubagentRunner.nestedRunCeilingOverrideForTesting = 10
             serverA.clear(); serverB.clear()
-            let steadyBase = delayRoute(serverB, marker: "STEADY-CHILD", delay: 0.3)
+            let steadyBase = delayRoute(serverB, marker: "STEADY-CHILD", delay: 0.25)
             serverA.script([WebFixtureServer.chatBody("delegating", calls: [agentCall(["subagent_type": "Web", "description": "steady", "prompt": "STEADY-CHILD question", "deliverable": "short"])]), WebFixtureServer.chatBody("Parent survived.")])
             serverB.script([
                 WebFixtureServer.chatBody("s1", calls: [("web_query", "{\"queries\":[\"one\"]}")]),
@@ -235,13 +235,13 @@ extension WebSubagentSelftest {
                 sessionId: nil, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             let steadyElapsed = Date().timeIntervalSince(steadyStart)
             serverB.route = steadyBase
-            check("7.2 a child that keeps reporting progress (5 requests × 0.3 s, staleness 0.5 s) keeps the parent's batch timer from firing: the parent finishes normally after > 1 s",
-                  steady.error == nil && steady.finalMessage == "Parent survived." && steadyElapsed > 1.0 && agentRequests(serverB).count == 5,
+            check("7.2 a child that keeps reporting progress (5 requests × 0.25 s, staleness 1.0 s) keeps the parent's batch timer from firing: the parent finishes normally after > 1.2 s (longer than one staleness window)",
+                  steady.error == nil && steady.finalMessage == "Parent survived." && steadyElapsed > 1.2 && agentRequests(serverB).count == 5,
                   "error \(steady.error ?? "nil") elapsed \(steadyElapsed) requests \(agentRequests(serverB).count)")
 
             // 7.3 A stalled child (no progress) is killed by the parent's staleness clock; the parent gets the error.
             serverA.clear(); serverB.clear()
-            let stalledBase = delayRoute(serverB, marker: "STALLED-CHILD", delay: 2.5)
+            let stalledBase = delayRoute(serverB, marker: "STALLED-CHILD", delay: 4)
             serverA.script([WebFixtureServer.chatBody("delegating", calls: [agentCall(["subagent_type": "Web", "description": "stalled", "prompt": "STALLED-CHILD question", "deliverable": "short"])]), WebFixtureServer.chatBody("never")])
             serverB.script([WebFixtureServer.chatBody("Late answer."), WebFixtureServer.chatBody("Late answer.")])
             let stalledStart = Date()
@@ -253,16 +253,16 @@ extension WebSubagentSelftest {
             let stalledChild = await registry.list(limit: 100, kind: .web).sessions.first { $0.description == "via \(stalled.sessionId): stalled" }
             var stalledLocks = (await SubagentSessionLocks.shared.isHeld(stalled.sessionId), true)
             if let stalledChild { stalledLocks.1 = await SubagentSessionLocks.shared.isHeld(stalledChild.id) }
-            check("7.3 a stalled child (one 2.5 s request, staleness 0.5 s) is killed by the parent's clock: the parent reports the staleness error within ~1 s, the child's session is committed and both locks are released",
-                  stalled.error?.hasPrefix("Subagent killed: no progress") == true && stalledElapsed < 2.0 && stalledChild != nil && !stalledLocks.0 && !stalledLocks.1,
+            check("7.3 a stalled child (one 4 s request, staleness 1.0 s) is killed by the parent's clock: the parent reports the staleness error at ~1 s (well before the 4 s response), the child's session is committed and both locks are released",
+                  stalled.error?.hasPrefix("Subagent killed: no progress") == true && stalledElapsed >= 0.9 && stalledElapsed < 3.0 && stalledChild != nil && !stalledLocks.0 && !stalledLocks.1,
                   "error \(stalled.error ?? "nil") elapsed \(stalledElapsed)")
 
             // 7.4 The absolute ceiling bounds a child that never stops making progress.
-            SubagentRunner.nestedRunCeilingOverrideForTesting = 1.2
+            SubagentRunner.nestedRunCeilingOverrideForTesting = 2.0
             serverA.clear(); serverB.clear()
-            let ceilingBase = delayRoute(serverB, marker: "CEILING-CHILD", delay: 0.3)
+            let ceilingBase = delayRoute(serverB, marker: "CEILING-CHILD", delay: 0.25)
             serverA.script([WebFixtureServer.chatBody("delegating", calls: [agentCall(["subagent_type": "Web", "description": "endless", "prompt": "CEILING-CHILD question", "deliverable": "short"])]), WebFixtureServer.chatBody("never")])
-            serverB.script((1...12).map { WebFixtureServer.chatBody("r\($0)", calls: [("web_query", "{\"queries\":[\"q\($0)\"]}")]) } + [WebFixtureServer.chatBody("Endless answer.")])
+            serverB.script((1...20).map { WebFixtureServer.chatBody("r\($0)", calls: [("web_query", "{\"queries\":[\"q\($0)\"]}")]) } + [WebFixtureServer.chatBody("Endless answer.")])
             let ceilingStart = Date()
             let ceiling = await SubagentRunner().run(
                 invocation: SubagentRunner.Invocation(subagentType: "general-purpose", description: "ceiling-parent", taskPrompt: "delegate endlessly", modelOverride: nil, runInBackground: false),
@@ -272,16 +272,17 @@ extension WebSubagentSelftest {
             let ceilingChild = await registry.list(limit: 100, kind: .web).sessions.first { $0.description == "via \(ceiling.sessionId): endless" }
             var ceilingLocks = (await SubagentSessionLocks.shared.isHeld(ceiling.sessionId), true)
             if let ceilingChild { ceilingLocks.1 = await SubagentSessionLocks.shared.isHeld(ceilingChild.id) }
-            check("7.4 a child that progresses forever is bounded by the absolute nested ceiling (1.2 s here, 60 min in production): the parent reports the ceiling error at ~1.2 s, the child is cancelled and committed, locks released",
-                  ceiling.error?.contains("nested Web run exceeded") == true && ceilingElapsed >= 1.1 && ceilingElapsed < 3.0 && ceilingChild != nil && !ceilingLocks.0 && !ceilingLocks.1,
-                  "error \(ceiling.error ?? "nil") elapsed \(ceilingElapsed)")
+            let ceilingRequests = agentRequests(serverB).count
+            check("7.4 a child that progresses forever (0.25 s per request, staleness 1.0 s) is bounded by the absolute nested ceiling (2.0 s here, 60 min in production): the parent reports the CEILING error (not staleness) at ~2 s after several child requests, the child is cancelled and committed, locks released",
+                  ceiling.error?.contains("nested Web run exceeded") == true && ceilingElapsed >= 1.9 && ceilingElapsed < 4.0 && ceilingRequests >= 4 && ceilingChild != nil && !ceilingLocks.0 && !ceilingLocks.1,
+                  "error \(ceiling.error ?? "nil") elapsed \(ceilingElapsed) child requests \(ceilingRequests)")
             // Ordinary batches keep the single deadline: a slow ordinary tool with no nested call is killed at staleness.
             SubagentRunner.nestedRunCeilingOverrideForTesting = 10
             serverA.clear()
             serverA.script([WebFixtureServer.chatBody("fetching", calls: [("web_fetch", "{\"url\":\"https://example.test/SLOW-ORDINARY\",\"prompt\":\"read\"}")]), WebFixtureServer.chatBody("never")])
             let readerBase = h.serverS.route
             h.serverS.route = { request in
-                if request.path.contains("SLOW-ORDINARY") { Thread.sleep(forTimeInterval: 1.5) }
+                if request.path.contains("SLOW-ORDINARY") { Thread.sleep(forTimeInterval: 3) }
                 return readerBase?(request) ?? .init(status: 500, body: "{}")
             }
             let ordinaryStart = Date()
@@ -290,8 +291,8 @@ extension WebSubagentSelftest {
                 sessionId: nil, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             let ordinaryElapsed = Date().timeIntervalSince(ordinaryStart)
             h.serverS.route = readerBase
-            check("7.5 an ordinary batch (no nested call) keeps the single staleness deadline: a 1.5 s tool with staleness 0.5 s is killed as before, the ceiling plays no part",
-                  ordinary.error?.hasPrefix("Subagent killed: no progress") == true && ordinaryElapsed < 1.4, "error \(ordinary.error ?? "nil") elapsed \(ordinaryElapsed)")
+            check("7.5 an ordinary batch (no nested call) keeps the single staleness deadline: a 3 s tool with staleness 1.0 s is killed at ~1 s as before, the ceiling plays no part",
+                  ordinary.error?.hasPrefix("Subagent killed: no progress") == true && ordinaryElapsed >= 0.9 && ordinaryElapsed < 2.5, "error \(ordinary.error ?? "nil") elapsed \(ordinaryElapsed)")
             serverA.clear(); serverB.clear()
         }
 
@@ -400,6 +401,185 @@ extension WebSubagentSelftest {
             let ordinaryPacket = SubagentRunner.RunResult(sessionId: "zzzzz", isNewSession: true, finalMessage: "done", turnsUsed: 1, toolsCalled: [], filesTouched: ["/tmp/x"], spendUSD: 0.5, error: nil, modelUsed: "m").asJSON()
             check("15.6 an ordinary run's result JSON keeps the legacy pretty-printed shape (no web keys, no compact renderer)",
                   ordinaryPacket.contains("\"session_id\"") && ordinaryPacket.contains("\n") && !ordinaryPacket.contains("search_results_seen") && !ordinaryPacket.contains("evidence_provenance"), ordinaryPacket)
+            state.webFlag = false
+            serverA.clear(); serverB.clear(); serverC.clear()
+        }
+
+        print("16. Codex R1b review (R1 emergency prompt, R2 queued resume cancellation, R3 session identity)")
+        do {
+            state.webFlag = true
+            WebSearchBackend.processOverride = .opencode
+            fixtures.serperMode = .normal
+            let locks = SubagentSessionLocks.shared
+            defer {
+                SubagentRunner.stalenessTimeoutOverrideForTesting = nil
+                SubagentRunner.nestedRunCeilingOverrideForTesting = nil
+            }
+            // ---- R1: a real emergency compaction of a Web run, on both transports, with a
+            // profile sentinel stored and a background subagent running (ambient sentinel).
+            try KeychainHelper.save(key: KeychainHelper.structuredUserContextKey, value: "PRIVATE-PROFILE-SENTINEL age 40 vegan")
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "60000")
+            defer {
+                try? KeychainHelper.delete(key: KeychainHelper.structuredUserContextKey)
+                try? KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "250000")
+            }
+            serverA.clear(); serverB.clear(); serverC.clear()
+            let bgBase = delayRoute(serverA, marker: "SLOW-BG", delay: 6)
+            serverA.script([WebFixtureServer.chatBody("bg done")])
+            _ = await SubagentBackgroundRegistry.shared.spawn(
+                invocation: SubagentRunner.Invocation(subagentType: "general-purpose", description: "SLOW-BG job", taskPrompt: "SLOW-BG task", modelOverride: nil, runInBackground: true),
+                sessionId: nil, parentTools: [AvailableTools.readFile], openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents)
+            for _ in 0..<100 where serverA.requests.isEmpty { try await Task.sleep(nanoseconds: 20_000_000) }
+            let bigTask = "Research the emergency topic. " + String(repeating: "Relevant task context. ", count: 1000)
+            serverB.script([
+                WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"emergency topic\"]}")], prompt: 60000),
+                WebFixtureServer.chatBody("Compact summary."),
+                WebFixtureServer.chatBody("Finished. Sources: https://example.test/emergency-topic"), WebFixtureServer.chatBody("Finished. Sources: https://example.test/emergency-topic")])
+            let emergencyChat = await SubagentRunner().run(
+                invocation: SubagentRunner.Invocation(subagentType: "Web", description: "emergency-chat", taskPrompt: bigTask, modelOverride: nil, runInBackground: false, deliverable: .short),
+                sessionId: nil, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            let chatBodies = serverB.requests.map { String(decoding: $0.body, as: UTF8.self) }
+            let chatEmergency = chatBodies.filter { $0.contains("[OVERSIZED BATCH SUMMARY") }
+            check("16.1 R1 (Chat Completions): a real emergency compaction of a Web run — every oversized-batch summary request and every later research request carries the research identity, no user profile and no ambient block",
+                  emergencyChat.error == nil && !chatEmergency.isEmpty
+                  && chatBodies.allSatisfy { !$0.contains("PRIVATE-PROFILE-SENTINEL") && !$0.contains("Ambient status") && !$0.contains("Fixture User") }
+                  && chatEmergency.allSatisfy { $0.contains("You are the web research subagent of Fixture Assistant.") },
+                  "error \(emergencyChat.error ?? "nil") requests \(chatBodies.count) emergency \(chatEmergency.count) profile-leaks \(chatBodies.filter { $0.contains("PRIVATE-PROFILE-SENTINEL") }.count)")
+            WebSearchBackend.processOverride = .openai
+            serverC.script([
+                WebFixtureServer.responsesBody("searching", id: "e1", calls: [("web_query", "{\"queries\":[\"emergency topic\"]}")], prompt: 60000),
+                WebFixtureServer.responsesBody("Compact summary.", id: "e2"),
+                WebFixtureServer.responsesBody("Finished. Sources: https://example.test/emergency-topic", id: "e3"), WebFixtureServer.responsesBody("Finished. Sources: https://example.test/emergency-topic", id: "e4")])
+            let emergencyResponses = await SubagentRunner().run(
+                invocation: SubagentRunner.Invocation(subagentType: "Web", description: "emergency-responses", taskPrompt: bigTask, modelOverride: nil, runInBackground: false, deliverable: .short),
+                sessionId: nil, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            WebSearchBackend.processOverride = .opencode
+            let responsesBodies = serverC.requests.map { String(decoding: $0.body, as: UTF8.self) }
+            let responsesEmergency = responsesBodies.filter { $0.contains("[OVERSIZED BATCH SUMMARY") }
+            check("16.2 R1 (Responses): the same on the native transport",
+                  emergencyResponses.error == nil && !responsesEmergency.isEmpty
+                  && responsesBodies.allSatisfy { !$0.contains("PRIVATE-PROFILE-SENTINEL") && !$0.contains("Ambient status") && !$0.contains("Fixture User") }
+                  && responsesEmergency.allSatisfy { $0.contains("You are the web research subagent of Fixture Assistant.") },
+                  "error \(emergencyResponses.error ?? "nil") requests \(responsesBodies.count) emergency \(responsesEmergency.count)")
+            var bgDrained: [SubagentBackgroundRegistry.Completion] = []
+            for _ in 0..<300 where bgDrained.isEmpty {
+                bgDrained = await SubagentBackgroundRegistry.shared.drainCompletions()
+                if bgDrained.isEmpty { try await Task.sleep(nanoseconds: 50_000_000) }
+            }
+            serverA.route = bgBase
+            try KeychainHelper.delete(key: KeychainHelper.structuredUserContextKey)
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "250000")
+
+            // ---- R2: a nested resume queued behind the session's owner, cancelled while waiting.
+            let (busySid, _) = await registry.create(subagentType: "Web", description: "busy-web", initialPrompt: "Original web task", webPool: true)
+            _ = await locks.acquire(busySid)   // the owner: somebody else is running this session
+            serverA.clear(); serverB.clear()
+            serverA.script([WebFixtureServer.chatBody("delegate", calls: [agentCall(["subagent_type": "Web", "description": "queued", "prompt": "CANCELLED-CONTINUATION-MUST-NOT-APPEAR", "session_id": busySid])])])
+            let queuedParent = Task {
+                await SubagentRunner().run(
+                    invocation: SubagentRunner.Invocation(subagentType: "general-purpose", description: "cancel-queued", taskPrompt: "resume research", modelOverride: nil, runInBackground: false),
+                    sessionId: nil, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            }
+            for _ in 0..<200 where await locks.waiterCount(busySid) == 0 { try await Task.sleep(nanoseconds: 20_000_000) }
+            let queuedBefore = await locks.waiterCount(busySid)
+            queuedParent.cancel()
+            let queuedStart = Date()
+            let stopped = await queuedParent.value
+            let queuedLatency = Date().timeIntervalSince(queuedStart)
+            let queuedAfterCancel = await locks.waiterCount(busySid)
+            let ownerStillHeld = await locks.isHeld(busySid)
+            // A successor queues behind the same owner, then the owner releases: the successor
+            // (not the cancelled waiter) gets the lane and runs.
+            serverB.script([WebFixtureServer.chatBody("Successor answer, from what I read."), WebFixtureServer.chatBody("Successor answer, from what I read.")])
+            let successor = Task {
+                await SubagentRunner().run(
+                    invocation: SubagentRunner.Invocation(subagentType: "Web", description: "successor", taskPrompt: "SUCCESSOR-CONTINUATION", modelOverride: nil, runInBackground: false, deliverable: .short),
+                    sessionId: busySid, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            }
+            for _ in 0..<200 where await locks.waiterCount(busySid) == 0 { try await Task.sleep(nanoseconds: 20_000_000) }
+            let sessionBeforeRelease = await registry.get(busySid)
+            await locks.release(busySid)
+            let successorRun = await successor.value
+            try await Task.sleep(nanoseconds: 300_000_000)
+            let sessionAfter = await registry.get(busySid)
+            let busyHeldAfter = await locks.isHeld(busySid)
+            let busyQueueAfter = await locks.waiterCount(busySid)
+            let busyFree = !busyHeldAfter && busyQueueAfter == 0
+            check("16.3 R2: a nested Web resume queued behind the session owner and cancelled while waiting returns 'Subagent cancelled' at once, leaves the queue, never touches the session; the owner keeps the lane; a successor waiter gets the handoff and its continuation is the only new message",
+                  queuedBefore == 1 && stopped.error == "Subagent cancelled" && queuedLatency < 1.0 && queuedAfterCancel == 0 && ownerStillHeld
+                  && sessionBeforeRelease?.messages.count == 1 && successorRun.error == nil && successorRun.sessionId == busySid
+                  && sessionAfter?.messages.count == 2 && sessionAfter?.messages.contains { $0.content.contains("SUCCESSOR-CONTINUATION") } == true
+                  && sessionAfter?.messages.contains { $0.content.contains("CANCELLED-CONTINUATION-MUST-NOT-APPEAR") } == false && busyFree,
+                  "queued \(queuedBefore)/\(queuedAfterCancel) error \(stopped.error ?? "nil") latency \(queuedLatency) msgs \(sessionBeforeRelease?.messages.count ?? -1)→\(sessionAfter?.messages.count ?? -1) successor \(successorRun.error ?? "ok")")
+            // The parent's own batch timer cancels the same queued waiter.
+            SubagentRunner.stalenessTimeoutOverrideForTesting = 1.0
+            SubagentRunner.nestedRunCeilingOverrideForTesting = 10
+            _ = await locks.acquire(busySid)
+            serverA.clear(); serverB.clear()
+            serverA.script([WebFixtureServer.chatBody("delegate", calls: [agentCall(["subagent_type": "Web", "description": "queued-timeout", "prompt": "TIMED-OUT-CONTINUATION-MUST-NOT-APPEAR", "session_id": busySid])])])
+            let timedOutStart = Date()
+            let timedOut = await SubagentRunner().run(
+                invocation: SubagentRunner.Invocation(subagentType: "general-purpose", description: "timeout-queued", taskPrompt: "resume research", modelOverride: nil, runInBackground: false),
+                sessionId: nil, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            let timedOutElapsed = Date().timeIntervalSince(timedOutStart)
+            let timedOutQueue = await locks.waiterCount(busySid)
+            await locks.release(busySid)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            let sessionAfterTimeout = await registry.get(busySid)
+            SubagentRunner.stalenessTimeoutOverrideForTesting = nil
+            SubagentRunner.nestedRunCeilingOverrideForTesting = nil
+            let busyHeldAfterTimeout = await locks.isHeld(busySid)
+            check("16.4 R2: the parent's staleness timer (1.0 s) cancels a nested resume still queued behind a busy owner: the parent reports staleness at ~1 s, the waiter leaves the queue, the session is unchanged after the owner releases, the lane ends free",
+                  timedOut.error?.hasPrefix("Subagent killed: no progress") == true && timedOutElapsed >= 0.9 && timedOutElapsed < 3.0 && timedOutQueue == 0
+                  && sessionAfterTimeout?.messages.count == 2 && sessionAfterTimeout?.messages.contains { $0.content.contains("TIMED-OUT-CONTINUATION") } == false
+                  && !busyHeldAfterTimeout,
+                  "error \(timedOut.error ?? "nil") elapsed \(timedOutElapsed) queue \(timedOutQueue) msgs \(sessionAfterTimeout?.messages.count ?? -1)")
+
+            // ---- R3: session identity — a nested Web call may resume only Web-pool sessions.
+            let (ordinarySid, _) = await registry.create(subagentType: "general-purpose", description: "ordinary-private", initialPrompt: "ORDINARY-HISTORY-PRIVATE-SENTINEL")
+            let (customWebSid, _) = await registry.create(subagentType: "Web", description: "custom web (ordinary)", initialPrompt: "CUSTOM-WEB-HISTORY-SENTINEL", webPool: false)
+            serverA.clear(); serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("Read history"), WebFixtureServer.chatBody("Read history")])
+            let depth1 = await mainExecutor.makeChildExecutor()
+            let ordinaryResume = await depth1.executeAgentToolResult(ToolCall(id: "k1", type: "function", function: FunctionCall(name: "Agent", arguments: agentCall(["subagent_type": "Web", "description": "resume research", "prompt": "Continue", "session_id": ordinarySid]).1)))
+            let customResume = await depth1.executeAgentToolResult(ToolCall(id: "k2", type: "function", function: FunctionCall(name: "Agent", arguments: agentCall(["subagent_type": "Web", "description": "resume research", "prompt": "Continue", "session_id": customWebSid]).1)))
+            let ordinaryAfter = await registry.get(ordinarySid), customAfter = await registry.get(customWebSid)
+            let leaked = serverB.requests.contains { String(decoding: $0.body, as: UTF8.self).contains("SENTINEL") }
+            let ordinaryHeld = await locks.isHeld(ordinarySid), customHeld = await locks.isHeld(customWebSid)
+            check("16.5 R3: a nested Web call naming an ordinary session, or a general-pool session that merely carries the name Web, is refused before any history is appended or a provider contacted",
+                  ordinaryResume.content.contains("belongs to an ordinary subagent (general-purpose)") && customResume.content.contains("belongs to an ordinary subagent (Web)")
+                  && serverB.requests.isEmpty && !leaked && ordinaryAfter?.messages.count == 1 && customAfter?.messages.count == 1
+                  && !ordinaryHeld && !customHeld,
+                  ordinaryResume.content + " | " + customResume.content)
+            // A resumed parent naming its OWN session: refused at once, no wait on the lane the parent holds.
+            let (parentSid, _) = await registry.create(subagentType: "general-purpose", description: "self-resume parent", initialPrompt: "first run")
+            serverA.clear(); serverB.clear()
+            serverA.script([WebFixtureServer.chatBody("delegate to myself", calls: [agentCall(["subagent_type": "Web", "description": "self", "prompt": "Continue", "session_id": parentSid])]), WebFixtureServer.chatBody("parent finished")])
+            let selfStart = Date()
+            let selfResume = await SubagentRunner().run(
+                invocation: SubagentRunner.Invocation(subagentType: "general-purpose", description: "self-resume", taskPrompt: "second run", modelOverride: nil, runInBackground: false),
+                sessionId: parentSid, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            let selfElapsed = Date().timeIntervalSince(selfStart)
+            let selfResults = (await registry.get(parentSid))?.toolInteractions.last?.results.map(\.content) ?? []
+            check("16.6 R3: a resumed parent whose nested call names the parent's own session gets the refusal in its tool result immediately (no wait on the lane it holds) and finishes",
+                  selfResume.error == nil && selfResume.finalMessage == "parent finished" && selfElapsed < 3.0 && selfResults.first?.contains("belongs to an ordinary subagent") == true && serverB.requests.isEmpty,
+                  "error \(selfResume.error ?? "nil") elapsed \(selfElapsed) \(selfResults.first ?? "")")
+            // Valid reuse from depth 0 (the main agent) and the reverse mismatch.
+            let (webSid, _) = await registry.create(subagentType: "Web", description: "valid web", initialPrompt: "web task", webPool: true)
+            serverA.clear(); serverB.clear()
+            serverB.script([WebFixtureServer.chatBody("Still valid."), WebFixtureServer.chatBody("Still valid.")])
+            let validResume = await mainExecutor.executeAgentToolResult(ToolCall(id: "k3", type: "function", function: FunctionCall(name: "Agent", arguments: agentCall(["subagent_type": "Web", "description": "valid", "prompt": "Continue", "session_id": webSid, "deliverable": "short"]).1)))
+            let validJSON = (try? JSONSerialization.jsonObject(with: Data(validResume.content.utf8)) as? [String: Any]) ?? [:]
+            serverA.script([WebFixtureServer.chatBody("ordinary on web")])
+            let reverse = await SubagentRunner().run(
+                invocation: SubagentRunner.Invocation(subagentType: "general-purpose", description: "reverse", taskPrompt: "Continue", modelOverride: nil, runInBackground: false),
+                sessionId: webSid, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            let webSessionAfter = await registry.get(webSid)
+            check("16.7 R3: a valid Web session is still resumed by the main agent (depth 0); the reverse — an ordinary type resuming a Web session — is refused without touching it",
+                  validJSON["session_id"] as? String == webSid && validJSON["is_new_session"] as? Bool == false && validJSON["error"] == nil
+                  && reverse.error?.contains("is a Web research session; it can only be resumed with subagent_type=Web") == true && serverA.requests.isEmpty
+                  && webSessionAfter?.messages.count == 2,
+                  "valid \(validJSON["error"] as? String ?? "ok") reverse \(reverse.error ?? "nil")")
             state.webFlag = false
             serverA.clear(); serverB.clear(); serverC.clear()
         }

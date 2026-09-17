@@ -489,27 +489,74 @@ actor SubagentSessionRegistry {
 actor SubagentSessionLocks {
     static let shared = SubagentSessionLocks()
 
-    private var held: Set<String> = []
-    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+    private enum WaiterState { case pending, queued, cancelled }
 
-    func acquire(_ sessionId: String) async {
+    private var held: Set<String> = []
+    private var waiters: [String: [Waiter]] = [:]
+    /// Waiters between registration and handoff (R2): `.pending` until the
+    /// continuation is queued, `.queued` while waiting, `.cancelled` when the
+    /// cancellation arrived before the continuation could be queued. Absent
+    /// once handed off or resumed.
+    private var states: [UUID: WaiterState] = [:]
+
+    /// Acquire the session's lane. Returns `true` when the lane is held by
+    /// the caller. A caller cancelled while waiting is removed from the
+    /// queue and returns `false` WITHOUT the lane (nobody else's handoff is
+    /// disturbed; the owner keeps running); a caller cancelled after the
+    /// handoff still holds the lane (returns `true`) and must release it.
+    func acquire(_ sessionId: String) async -> Bool {
+        if Task.isCancelled { return false }
         if !held.contains(sessionId) {
             held.insert(sessionId)
-            return
+            return true
         }
-        await withCheckedContinuation { continuation in
-            waiters[sessionId, default: []].append(continuation)
+        let id = UUID()
+        states[id] = .pending
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                if states[id] == .cancelled {
+                    states[id] = nil
+                    continuation.resume(returning: false)
+                    return
+                }
+                states[id] = .queued
+                waiters[sessionId, default: []].append(Waiter(id: id, continuation: continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id, sessionId: sessionId) }
+        }
+    }
+
+    private func cancelWaiter(_ id: UUID, sessionId: String) {
+        switch states[id] {
+        case .pending:
+            states[id] = .cancelled
+        case .queued:
+            guard var queue = waiters[sessionId], let index = queue.firstIndex(where: { $0.id == id }) else { return }
+            let waiter = queue.remove(at: index)
+            waiters[sessionId] = queue.isEmpty ? nil : queue
+            states[id] = nil
+            waiter.continuation.resume(returning: false)
+        case .cancelled, nil:
+            break   // already resumed false, or handed off (it holds the lane and will release it)
         }
     }
 
     /// Whether a lane is currently held (diagnostics and selftests only).
     func isHeld(_ sessionId: String) -> Bool { held.contains(sessionId) }
+    /// Number of queued waiters (selftests only).
+    func waiterCount(_ sessionId: String) -> Int { waiters[sessionId]?.count ?? 0 }
 
     func release(_ sessionId: String) {
         if var queue = waiters[sessionId], !queue.isEmpty {
             let next = queue.removeFirst()
             waiters[sessionId] = queue.isEmpty ? nil : queue
-            next.resume()   // lock hands off directly to the next waiter
+            states[next.id] = nil
+            next.continuation.resume(returning: true)   // lock hands off directly to the next waiter
         } else {
             held.remove(sessionId)
         }

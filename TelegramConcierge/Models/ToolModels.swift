@@ -1677,7 +1677,7 @@ enum AvailableTools {
     /// present (R1b, WEB_SUBAGENT_PLAN §4.6.1): ordinary subagents may
     /// delegate web research one level down and nothing else. Absent Web,
     /// the legacy "CANNOT spawn" bullet, byte for byte.
-    static let nestingSentenceWhileWebPresent = "- Subagents cannot spawn other subagents, except that any subagent may delegate web research to a Web subagent (one level, foreground only). Provide a self-contained prompt — the subagent sees none of your conversation history."
+    static let nestingSentenceWhileWebPresent = "- Subagents cannot spawn other subagents, except that eligible ordinary subagents (general-purpose, Browse, custom agents that had web search — never Web itself or watcher-triage) may delegate web research to a Web subagent (one level, foreground only). Provide a self-contained prompt — the subagent sees none of your conversation history."
 
     /// The `Agent` tool an ordinary subagent receives while the Web
     /// researcher is available (R1b, §4.6): `subagent_type` enum `[Web]`
@@ -1717,7 +1717,7 @@ enum AvailableTools {
                         ),
                         "session_id": ParameterProperty(
                             type: "string",
-                            description: "Optional. Pass a session_id from a prior Agent result to continue that research session with its evidence intact. Omit to start a fresh session."
+                            description: "Optional. Pass a session_id of a Web research session (from a prior Agent result) to continue it: the researcher keeps its evidence ledger and re-reads anything compaction evicted from its context. Omit to start a fresh session."
                         ),
                         "model": agentModelParameter(),
                         "deliverable": webDeliverableParameter

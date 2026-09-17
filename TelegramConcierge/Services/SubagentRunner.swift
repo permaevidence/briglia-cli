@@ -296,7 +296,34 @@ actor SubagentRunner {
             await BackgroundProcessRegistry.shared.terminateOwned(owner: toolExecutor.bashOwner)
             return result
         }
-        await SubagentSessionLocks.shared.acquire(sid)
+        // Session identity (Codex R1b review R3): a stored session is resumed
+        // only by a compatible type — the Web researcher resumes Web-pool
+        // sessions, ordinary types resume ordinary sessions (cross-type
+        // resumes among ordinary types stay allowed, as before). Decided from
+        // the persisted pool marker, never the display name, BEFORE the lock
+        // is taken (a nested call naming its own parent's session would
+        // otherwise wait on a lock the parent holds) and before any history
+        // is appended or a provider contacted.
+        if let mismatch = await Self.sessionKindMismatch(sessionId: sid, requestedType: invocation.subagentType) {
+            return RunResult(sessionId: sid, isNewSession: false, finalMessage: "", turnsUsed: 0,
+                             toolsCalled: [], filesTouched: [], spendUSD: 0, error: mismatch)
+        }
+        // Cancellation-aware wait (Codex R1b review R2): a waiter cancelled
+        // while queued behind the session's owner returns without the lock
+        // and without touching the session; a run cancelled between the
+        // handoff and the body releases the lock untouched.
+        let acquired = await SubagentSessionLocks.shared.acquire(sid)
+        guard acquired else {
+            // Cancelled while queued: the lane was never handed to us.
+            await BackgroundProcessRegistry.shared.terminateOwned(owner: toolExecutor.bashOwner)
+            return Self.cancelledResult(sessionId: sid)
+        }
+        if Task.isCancelled {
+            // Cancelled after the handoff: we hold the lane — give it back untouched.
+            await SubagentSessionLocks.shared.release(sid)
+            await BackgroundProcessRegistry.shared.terminateOwned(owner: toolExecutor.bashOwner)
+            return Self.cancelledResult(sessionId: sid)
+        }
         let result = await runBody(
             invocation: invocation,
             sessionId: sid,
@@ -312,6 +339,26 @@ actor SubagentRunner {
         await BackgroundProcessRegistry.shared.terminateOwned(owner: toolExecutor.bashOwner)
         await SubagentSessionLocks.shared.release(sid)
         return result
+    }
+
+    /// "Subagent cancelled" before any session mutation (R2).
+    static func cancelledResult(sessionId: String) -> RunResult {
+        RunResult(sessionId: sessionId, isNewSession: false, finalMessage: "", turnsUsed: 0,
+                  toolsCalled: [], filesTouched: [], spendUSD: 0, error: "Subagent cancelled")
+    }
+
+    /// The R3 compatibility rule, shared by every caller of `run`: nil when the
+    /// stored session (if any) may be resumed as `requestedType`, else the
+    /// error text. Unknown session ids pass here and fail in `runBody` as
+    /// before ("session not found" path via `prepareResume`).
+    static func sessionKindMismatch(sessionId: String, requestedType: String) async -> String? {
+        guard let stored = await SubagentSessionRegistry.shared.get(sessionId) else { return nil }
+        let requestedIsWeb = SubagentTypes.find(name: requestedType)?.isWebResearcher == true
+        let storedIsWeb = stored.kind == .web
+        guard requestedIsWeb != storedIsWeb else { return nil }
+        return storedIsWeb
+            ? "Session '\(sessionId)' is a Web research session; it can only be resumed with subagent_type=Web."
+            : "Session '\(sessionId)' belongs to an ordinary subagent (\(stored.subagentType)) and cannot be resumed as the Web researcher. Start a new Web session or resume an existing Web session."
     }
 
     private func runBody(
@@ -336,6 +383,9 @@ actor SubagentRunner {
                 error: "Unknown subagent_type '\(invocation.subagentType)'. Valid values: \(SubagentTypes.allNames().joined(separator: ", "))."
             )
         }
+
+        // A run cancelled before it started never creates or mutates a session (R2).
+        if Task.isCancelled { return Self.cancelledResult(sessionId: sessionId ?? "") }
 
         // 2. Build filtered tool list (rebuilt fresh each run so new MCPs are picked up).
         // mid_turn_message_user is main-agent-only: subagents have no channel to
@@ -1723,7 +1773,7 @@ actor SubagentRunner {
                 "=== RETAINED DIALOGUE (reference for interpreting the work; remains verbatim) ===\n" + reference + "\n" + transcript,
                 openRouterService: openRouterService, imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
                 modelOverride: modelOverride, providerOverride: providerOverride, reasoningEffortOverride: reasoningEffortOverride,
-                textOnlyOverride: textOnlyOverride, execution: execution, lane: lane)
+                textOnlyOverride: textOnlyOverride, execution: execution, lane: lane, promptStyle: promptStyle)
         }
 
         let summaryPrompt = """
@@ -1839,7 +1889,8 @@ actor SubagentRunner {
         openRouterService: OpenRouterService,
         imagesDirectory: URL, documentsDirectory: URL,
         modelOverride: String?, providerOverride: [String]?, reasoningEffortOverride: String?,
-        textOnlyOverride: Bool?, execution: ProviderExecutionContext?, lane: AffinityLane
+        textOnlyOverride: Bool?, execution: ProviderExecutionContext?, lane: AffinityLane,
+        promptStyle: SubagentPromptStyle = .messaging
     ) async -> String? {
         guard let fragments = Self.oversizedTranscriptFragments(transcript) else { return nil }
         var summary = ""
@@ -1882,7 +1933,8 @@ actor SubagentRunner {
                 let response = try await openRouterService.generateResponse(
                     messages: [Message(role: .user, content: prompt, timestamp: HarnessClock.now())],
                     imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
-                    tools: [], modelOverride: modelOverride, providerOverride: providerOverride,
+                    tools: [], promptStyle: promptStyle,
+                    modelOverride: modelOverride, providerOverride: providerOverride,
                     reasoningEffortOverride: reasoningEffortOverride, textOnlyOverride: textOnlyOverride,
                     execution: execution, lane: lane)
                 guard case .text(let content, _, _, _, _, _, _) = response,
