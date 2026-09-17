@@ -314,13 +314,12 @@ def main():
                 raise RuntimeError("Wrong baseline compiler")
             compare(frozen["fixtures"], results.get("reference", results["candidate"]))
         if not args.candidate_only:
-            from chronology_lifecycle_migration import verify_migration
+            from web_subagent_r2_lifecycle_migration import verify_migration
             from read_file_description_migration import migrate_lifecycle
             from reasoning_history_removal_migration import migrate_lifecycle as migrate_reasoning_history_removal_lifecycle
             from subagent_dialogue_compaction_lifecycle_migration import migrate_lifecycle as migrate_subagent_dialogue_lifecycle
-            from web_subagent_r2_lifecycle_migration import migrate_lifecycle as migrate_web_subagent_r2_lifecycle
-            # r8 (Web subagent R2 reply-policy line) migrates the reference forward; r7 (chronology) restores the candidate, then r5 → r4 → r3 verify as before.
-            verify_migration(migrate_web_subagent_r2_lifecycle(migrate_subagent_dialogue_lifecycle(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"])))), results["candidate"], compare)
+            # r8 (Web subagent R2 reply-policy line) and r7 (chronology) restore the candidate, then r5 → r4 → r3 verify as before.
+            verify_migration(migrate_subagent_dialogue_lifecycle(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"]))), results["candidate"], compare)
             # New-binary export MUST open with the pinned release's actual importer.
             imported = root / "cross-import"
             env = dict(os.environ, SWIFT_DETERMINISTIC_HASHING="1", LC_ALL="C", TZ="UTC")

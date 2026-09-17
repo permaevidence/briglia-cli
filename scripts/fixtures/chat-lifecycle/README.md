@@ -153,12 +153,14 @@ the persistence-schema guard accepts the additive manifest
 
 ## r8 — Web subagent R2 reply-policy line (2026-09-17)
 
-`web_subagent_r2_lifecycle_migration.py` (rule `web-subagent-r2.json`) migrates the
-REFERENCE forward (read_file's shape), outermost in the chain: exactly the 45
-captures that carry the main prompt's reply-style section (main-agent turns and
-messaging-style subagent runs) gain the one reviewed reply-policy line right after
-the Markdown line, as a raw byte edit of the Foundation-escaped string; the 3
-summarizer captures carry no reply-style section and stay byte-identical, and an
-unlisted capture that carries the section is refused. The lifecycle driver has no
-web search key, so no tool schema and no web bullet change here; observations are
-untouched. r7 (chronology) keeps restoring the candidate before r5 → r4 → r3.
+`web_subagent_r2_lifecycle_migration.py` (rule `web-subagent-r2.json`) runs first, in
+r7's shape: it restores the CANDIDATE to the pre-R2 form by removing the one reviewed
+reply-policy line (right after the Markdown line of the reply-style section) from
+exactly the captures the rule names — every request that carries the main prompt:
+main-agent turns, messaging-style subagent runs and the two r5-only requests whose
+pinned body templates were recorded before R2 — as a raw byte edit of the
+Foundation-escaped string, then hands the restored candidate to r7 → r5 → r4 → r3.
+A named capture must carry the line exactly once; an unnamed capture must not carry
+the reply-style section at all (the 3 summarizer captures) and comes back unchanged.
+The lifecycle driver has no web search key, so no tool schema and no web bullet
+change here; observations are untouched.
