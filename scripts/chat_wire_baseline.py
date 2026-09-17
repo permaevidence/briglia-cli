@@ -201,8 +201,9 @@ def main():
             from read_file_description_migration import migrate_wire_fixtures
             from reasoning_history_removal_migration import migrate_wire_fixtures as migrate_reasoning_history_removal
             from chronology_wire_migration import migrate_wire_fixtures as migrate_chronology
-            compare(migrate_chronology(migrate_reasoning_history_removal(migrate_wire_fixtures(fixtures))), actual)
-            print(f"Matched {len(fixtures)} pinned-release bodies with the reviewed read_file description addition, reasoning_history removal and chronology reply-time notes, targets and full header maps", flush=True)
+            from web_subagent_r2_wire_migration import migrate_wire_fixtures as migrate_web_subagent_r2
+            compare(migrate_web_subagent_r2(migrate_chronology(migrate_reasoning_history_removal(migrate_wire_fixtures(fixtures)))), actual)
+            print(f"Matched {len(fixtures)} pinned-release bodies with the reviewed read_file description addition, reasoning_history removal, chronology reply-time notes and the Web subagent R2 default-on/reply-policy change, targets and full header maps", flush=True)
         finally:
             for tree in reversed(trees):
                 command(["git", "worktree", "remove", "--force", str(tree)])

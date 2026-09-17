@@ -143,7 +143,9 @@ class ConversationManager: ObservableObject {
     /// instead of being bombarded by a progress ping per tool call.
     /// `failed` flips to true when the call's result carries a top-level
     /// "error" key, so /status can mark failed calls with a ❌.
-    private var currentTurnToolLog: [(id: String, name: String, startedAt: Date, failed: Bool)] = []
+    /// `label` is the display form (`toolLogLabel`): the tool name, or for
+    /// Agent calls the subagent's role and description (plan §16.2).
+    private var currentTurnToolLog: [(id: String, name: String, label: String, startedAt: Date, failed: Bool)] = []
     /// Whether the current log belongs to an actively-running turn or the
     /// most recently completed one. /status uses this to label its output.
     private var currentTurnLogIsActive: Bool = false
@@ -4962,7 +4964,7 @@ class ConversationManager: ObservableObject {
     private var switchDefaults: UserDefaults { UserDefaults.standard }
 
     /// `/websubagent` — the Web research subagent switch (WEB_SUBAGENT_PLAN
-    /// §4.8, R1a; default OFF during the field trial). On: the main agent
+    /// §4.8–4.9; default OFF in R1a/R1b, ON since R2). On: the main agent
     /// loses web_search / web_research_sweep and delegates research to
     /// Agent(subagent_type=Web); web_fetch gains `refresh`. Off: today's
     /// tools, byte for byte. Requires /subagents on (O5). Same idle guard as
@@ -4976,7 +4978,7 @@ class ConversationManager: ObservableObject {
         let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if normalized.isEmpty {
             try? await sendText("""
-                Web research subagent: \(enabled ? "ON" : "OFF") (default: off). \(availability). Subagents: \(AvailableTools.subagentsEnabled ? "on" : "off").
+                Web research subagent: \(enabled ? "ON" : "OFF") (default: on). \(availability). Subagents: \(AvailableTools.subagentsEnabled ? "on" : "off").
                 On: web research runs in a resumable Web subagent (Agent, subagent_type=Web, deliverable short|standard|report) on the /websearch backend; the main agent keeps only web_fetch (with refresh).
                 Off: the legacy web_search and web_research_sweep tools. Switch with /websubagent on or /websubagent off — takes effect from the next message.
                 """)
@@ -5036,7 +5038,7 @@ class ConversationManager: ObservableObject {
         for entry in log {
             let emoji = Self.progressEmoji(forToolName: entry.name)
             let time = formatter.string(from: entry.startedAt)
-            lines.append("  [\(time)] \(emoji) \(entry.name)\(entry.failed ? " ❌" : "")")
+            lines.append("  [\(time)] \(emoji) \(entry.label)\(entry.failed ? " ❌" : "")")
         }
         lines.append("")
         lines.append(contextLine)
@@ -5083,6 +5085,42 @@ class ConversationManager: ObservableObject {
             return obj["error"] != nil
         }
         return content.hasPrefix("{\"error\"")
+    }
+
+    /// Display label of one tool call in the per-turn log (/status rows and
+    /// the activity line). Agent calls name the subagent by ROLE (WEB_SUBAGENT_PLAN
+    /// §16.2): the resolved type's `builtInRole` decides the word — never the
+    /// name alone — so a user agent named "Web" reads `Agent (Web): …` and only
+    /// the built-in researcher reads `Agent (Web research): …`; Browse reads
+    /// `Agent (Browser use): …`; ordinary types show their name. A resume adds
+    /// the session id's short form. Unparsable arguments or an unresolvable
+    /// type fall back to the bare tool name. Display only: nothing here
+    /// touches request bytes. Scope: the main agent's own calls — a nested
+    /// Web run launched by a subagent is not logged here (its parent's entry
+    /// stands; the run is listed by subagent_manage as "via <parent>").
+    nonisolated static func toolLogLabel(name: String, arguments: String,
+                             resolve: (String) -> SubagentType? = { SubagentTypes.find(name: $0) }) -> String {
+        guard name == "Agent",
+              let data = arguments.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let typeName = object["subagent_type"] as? String,
+              let type = resolve(typeName) else { return name }
+        let role: String
+        switch type.builtInRole {
+        case .webResearcher: role = "Web research"
+        case .browser: role = "Browser use"
+        case .ordinary: role = type.name
+        }
+        var label = "Agent (\(role)"
+        if let session = (object["session_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !session.isEmpty {
+            label += ", resume \(session.prefix(8))"
+        }
+        label += ")"
+        let description = ((object["description"] as? String) ?? "")
+            .components(separatedBy: .newlines).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !description.isEmpty { label += ": \(description.prefix(80))" }
+        return label
     }
 
     /// Emoji for a single tool name — used by /status to render each row.
@@ -5996,10 +6034,10 @@ class ConversationManager: ObservableObject {
                 if !executableCalls.isEmpty {
                     let now = Date()
                     for call in executableCalls {
-                        currentTurnToolLog.append((id: call.id, name: call.function.name, startedAt: now, failed: false))
+                        currentTurnToolLog.append((id: call.id, name: call.function.name, label: Self.toolLogLabel(name: call.function.name, arguments: call.function.arguments), startedAt: now, failed: false))
                     }
                     turnActivity = TurnActivity(
-                        kind: .tools(executableCalls.map { $0.function.name }),
+                        kind: .tools(currentTurnToolLog.suffix(executableCalls.count).map { $0.label }),
                         startedAt: now
                     )
                 }

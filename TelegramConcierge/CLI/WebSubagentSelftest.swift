@@ -650,6 +650,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             chatMessages: chatMessages, body: body, resultJSON: resultJSON, agentRequests: agentRequests)
         try await Self.runLateGroups(harness)
         try await Self.runNestingGroups(harness)
+        try await Self.runR2Groups(harness)
 
         print("Web subagent selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }

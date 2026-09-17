@@ -59,6 +59,7 @@ extension OpenRouterService {
             For the exact current time, check the most recent user message timestamp or tool result time note in the conversation below.
             Reply with short direct messages, like all humans do in messaging apps.
             Do not use Markdown syntax in user-facing replies (no headings like ###, no **bold**, no backticks, no markdown links).
+            \(Self.findTaskReplyPolicyLine)
 
             """
 
@@ -216,6 +217,7 @@ extension OpenRouterService {
             For the exact current time, check the most recent user message timestamp or tool result time note in the conversation below.
             Reply with short direct messages, like all humans do in messaging apps.
             Do not use Markdown syntax in user-facing replies (no headings like ###, no **bold**, no backticks, no markdown links).
+            \(Self.findTaskReplyPolicyLine)
             """
 
             // Inject calendar context if available

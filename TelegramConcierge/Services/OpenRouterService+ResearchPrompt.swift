@@ -39,6 +39,7 @@ extension OpenRouterService {
         - Search wide first (several distinct queries per call), extract the few most relevant pages with a specific focus, go deeper where sources disagree or the deliverable is a report; reports pursue useful coverage, not length.
         - Freshness: evidence retained from earlier runs of this session is fine for stable explanatory follow-ups; anything time-sensitive ("is it fixed today", prices, versions, status) is re-retrieved even at the same URL. Evidence that is no longer in your context is re-read, or the gap is disclosed. Never present an old observation as newly verified.
         - Never answer a new question without at least one retrieval. Cite inline; end with a Sources list of the URLs you actually read; say plainly what could not be verified.
+        \(Self.researchFindTaskBullet)
         - When resumed, build on what you already read; do not repeat a search whose results are still in your history unless the question is time-sensitive.
         - The Deliverable line in the task message sets the size of the answer: short = a few sentences (about 1,500 characters at most); standard = one or two screens (about 6,000 characters); report = as long as the material warrants, structured with headings and a Sources section. Markdown is fine.
 
@@ -49,6 +50,12 @@ extension OpenRouterService {
         }
         return prompt
     }
+
+    /// Find tasks (WEB_SUBAGENT_PLAN §16.1, R2): the researcher's answer is
+    /// where the actionable link or address comes from, so each recommended
+    /// item carries its direct page and, for places, its address — when the
+    /// page read gives them, never invented.
+    static let researchFindTaskBullet = "- Find tasks (the main agent asks for a product, a place, a service, a document, an offer): give each item you recommend with its direct URL — the product or listing page you read, never a search page — and, for places, the street address or coordinates, when the page gives them; otherwise say so for that item rather than inventing one. The Sources list stays for provenance."
 
     /// The research prompt's only identity content (R1b, §14.2).
     static func researchIdentityLine(assistantName: String?) -> String {

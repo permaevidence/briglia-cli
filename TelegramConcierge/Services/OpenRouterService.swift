@@ -1207,6 +1207,15 @@ actor OpenRouterService {
     // MARK: - Chunk Summary Formatting
     
     /// Formats chunk summaries for system prompt injection
+    /// The reply-policy line for "find" requests (WEB_SUBAGENT_PLAN §16.1,
+    /// R2; Codex 2026-09-17 wording: link or location WHEN AVAILABLE with
+    /// disclosure otherwise, never a guessed URL or address, no unnecessary
+    /// links). Unconditional — it is about the reply, not about which tool
+    /// did the research — so it sits in every request that carries the main
+    /// prompt (main agent and messaging-style subagents); the reviewed R2
+    /// wire and lifecycle migrations cover exactly this string.
+    static let findTaskReplyPolicyLine = "When the user asked you to find something concrete (a product, a place, a service, a document, an offer), give each item's link or location next to its name when available — the one bare URL or address that lets the user act on it, not a list of sources — and say when it could not be established; never guess a URL or an address. Don't add unnecessary links, and keep the message short."
+
     func formatChunkSummaries(_ items: [ArchivedSummaryItem], totalChunkCount: Int) -> String {
         guard !items.isEmpty else { return "" }
         
@@ -1590,6 +1599,7 @@ actor OpenRouterService {
         For the exact current time, check the most recent user message timestamp or tool result time note in the conversation below.
         Reply with short direct messages, like all humans do in messaging apps.
         Do not use Markdown syntax in user-facing replies (no headings like ###, no **bold**, no backticks, no markdown links).
+        \(Self.findTaskReplyPolicyLine)
 
         """
 

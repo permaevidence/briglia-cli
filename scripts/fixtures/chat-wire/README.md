@@ -127,3 +127,18 @@ assistant reply gain one `[Turn metadata]\nAssistant reply time: 22:13` system
 message right after it (the Anthropic cache breakpoint moves onto the note when
 the reply was the last history message). Bodies are re-serialized byte for byte
 and refused otherwise; the other 56 requests are still compared unchanged.
+
+## Web subagent R2 (default on + reply policy, 2026-09-17)
+
+`web_subagent_r2_wire_migration.py` (rule `web-subagent-r2.json`) is chained after
+the chronology notes. All 91 requests gain the one reviewed reply-policy line for
+"find" requests, on its own line right after the Markdown line of the reply-style
+section (unconditional in the prompt builder). The 28 tool-carrying requests with
+subagents on (indices 6, 8, 9, 10 of every model) additionally lose `web_search`
+and `web_research_sweep` at the head of the tools array, get the switch-on
+`web_fetch` / `Agent` / `subagent_manage` function objects (each asserted against
+the exact pre-R2 object first) and swap the legacy web bullet for the delegation
+bullet; the 7 requests at index 7 (subagents off, O5) keep the legacy tools and
+bullet byte for byte. Bodies are re-serialized byte for byte and refused
+otherwise; a second application is refused. The candidate's `/websubagent off`
+surface is proven separately by the Web selftest against the legacy statics.

@@ -1755,7 +1755,7 @@ enum AvailableTools {
 
     static let browseScopeWhileWebPresent = " — only when the task needs to OPERATE a browser (log in, click, fill forms, pages that render only with JavaScript, sites needing a session); reading and researching the public web is Web's job, not Browse's"
 
-    static let webResearcherUsageNotes = "- Web research: use subagent_type=Web instead of searching yourself — for any lookup, fact check, or reading of public pages. Browse (when listed) is only for operating a browser: logging in, clicking, filling forms, JavaScript-only pages, sites needing a session; never for plain research. The researcher sees none of this conversation and not the user's profile: put country, language, constraints and what is already known in the task text. State the expected deliverable (short | standard | report). Its result carries evidence_provenance, queries_used, sources_consulted (pages it read, with retrieval times) and a search_results_seen count (results it only saw): carry the provenance into your answer — say when an answer relies on evidence retained from earlier runs, when the searches found nothing, and what could not be verified. A [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim. Resume the same Web session (session_id) for follow-ups; web sessions are listed in their own section of subagent_manage(list_sessions)."
+    static let webResearcherUsageNotes = "- Web research: use subagent_type=Web instead of searching yourself — for any lookup, fact check, or reading of public pages. Browse (when listed) is only for operating a browser: logging in, clicking, filling forms, JavaScript-only pages, sites needing a session; never for plain research. The researcher sees none of this conversation and not the user's profile: put country, language, constraints and what is already known in the task text. State the expected deliverable (short | standard | report). For a find task (a product, a place, a service, a document, an offer) its final_message gives each recommended item's direct URL and, for places, the address, or says when the page had none — carry those into your reply. Its result carries evidence_provenance, queries_used, sources_consulted (pages it read, with retrieval times) and a search_results_seen count (results it only saw): carry the provenance into your answer — say when an answer relies on evidence retained from earlier runs, when the searches found nothing, and what could not be verified. A [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim. Resume the same Web session (session_id) for follow-ups; web sessions are listed in their own section of subagent_manage(list_sessions)."
 
     static var subagentManage: ToolDefinition { subagentManage(webSearchAvailable: true) }
 
@@ -1959,7 +1959,9 @@ enum AvailableTools {
     static var webSubagentStoredFlagOverrideForTesting: (() -> Bool?)?
 
     /// Single source of truth for the `/websubagent` flag
-    /// (`ada.webSubagentEnabled`, default OFF in R1 — WEB_SUBAGENT_PLAN §4.8).
+    /// (`ada.webSubagentEnabled`; default OFF in R1a/R1b, default ON since R2 —
+    /// WEB_SUBAGENT_PLAN §4.8–4.9; the legacy implementation stays intact so
+    /// `/websubagent off` still restores the baseline surface byte for byte).
     static var webSubagentEnabled: Bool {
         let stored: Bool?
         if let override = webSubagentStoredFlagOverrideForTesting {
@@ -1967,7 +1969,7 @@ enum AvailableTools {
         } else {
             stored = switchDefaults.object(forKey: "ada.webSubagentEnabled") as? Bool
         }
-        return stored ?? false
+        return stored ?? true
     }
 
     /// The Web researcher is active only while BOTH switches are on (O5:

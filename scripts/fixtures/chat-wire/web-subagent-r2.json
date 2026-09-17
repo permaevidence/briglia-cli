@@ -1,0 +1,390 @@
+{
+ "line_fixtures": [
+  "glm-5.3-0",
+  "glm-5.3-1",
+  "glm-5.3-2",
+  "glm-5.3-3",
+  "glm-5.3-4",
+  "glm-5.3-5",
+  "glm-5.3-6",
+  "glm-5.3-7",
+  "glm-5.3-8",
+  "glm-5.3-9",
+  "glm-5.3-10",
+  "glm-5.3-11",
+  "glm-5.3-12",
+  "kimi-k3-0",
+  "kimi-k3-1",
+  "kimi-k3-2",
+  "kimi-k3-3",
+  "kimi-k3-4",
+  "kimi-k3-5",
+  "kimi-k3-6",
+  "kimi-k3-7",
+  "kimi-k3-8",
+  "kimi-k3-9",
+  "kimi-k3-10",
+  "kimi-k3-11",
+  "kimi-k3-12",
+  "kimi-k2.7-code-0",
+  "kimi-k2.7-code-1",
+  "kimi-k2.7-code-2",
+  "kimi-k2.7-code-3",
+  "kimi-k2.7-code-4",
+  "kimi-k2.7-code-5",
+  "kimi-k2.7-code-6",
+  "kimi-k2.7-code-7",
+  "kimi-k2.7-code-8",
+  "kimi-k2.7-code-9",
+  "kimi-k2.7-code-10",
+  "kimi-k2.7-code-11",
+  "kimi-k2.7-code-12",
+  "qwen3.8-max-0",
+  "qwen3.8-max-1",
+  "qwen3.8-max-2",
+  "qwen3.8-max-3",
+  "qwen3.8-max-4",
+  "qwen3.8-max-5",
+  "qwen3.8-max-6",
+  "qwen3.8-max-7",
+  "qwen3.8-max-8",
+  "qwen3.8-max-9",
+  "qwen3.8-max-10",
+  "qwen3.8-max-11",
+  "qwen3.8-max-12",
+  "custom-model-0",
+  "custom-model-1",
+  "custom-model-2",
+  "custom-model-3",
+  "custom-model-4",
+  "custom-model-5",
+  "custom-model-6",
+  "custom-model-7",
+  "custom-model-8",
+  "custom-model-9",
+  "custom-model-10",
+  "custom-model-11",
+  "custom-model-12",
+  "local-model-0",
+  "local-model-1",
+  "local-model-2",
+  "local-model-3",
+  "local-model-4",
+  "local-model-5",
+  "local-model-6",
+  "local-model-7",
+  "local-model-8",
+  "local-model-9",
+  "local-model-10",
+  "local-model-11",
+  "local-model-12",
+  "anthropic_claude-sonnet-4-0",
+  "anthropic_claude-sonnet-4-1",
+  "anthropic_claude-sonnet-4-2",
+  "anthropic_claude-sonnet-4-3",
+  "anthropic_claude-sonnet-4-4",
+  "anthropic_claude-sonnet-4-5",
+  "anthropic_claude-sonnet-4-6",
+  "anthropic_claude-sonnet-4-7",
+  "anthropic_claude-sonnet-4-8",
+  "anthropic_claude-sonnet-4-9",
+  "anthropic_claude-sonnet-4-10",
+  "anthropic_claude-sonnet-4-11",
+  "anthropic_claude-sonnet-4-12"
+ ],
+ "markdown_line": "Do not use Markdown syntax in user-facing replies (no headings like ###, no **bold**, no backticks, no markdown links).",
+ "purpose": "WEB_SUBAGENT_PLAN §4.9 + §16.1 (R2, 2026-09-17): the Web researcher switch defaults ON (legacy implementation retained), and the main prompt gains one reviewed reply-policy line for find requests. Applied to the pinned-SOURCE wire fixtures after the read_file description addition, the reasoning_history removal and the chronology reply-time notes. Every one of the 91 requests gains the reply-policy line once, immediately after the Markdown line of the reply-style section. The 28 tool-carrying requests with subagents on (indices 6, 8, 9, 10 of every model) additionally lose the two legacy research tools at the head of the tools array, get the switch-on web_fetch (refresh), Agent (Web in the enum, deliverable, the R1b nesting bullet, the Web usage notes) and subagent_manage (kind, the two-section list_sessions note) function objects, and swap the legacy web bullet of the system prompt for the delegation bullet. The 7 requests at index 7 (subagents off, O5) keep the legacy tools and bullet byte for byte and gain only the line.",
+ "removed_tools": [
+  "web_search",
+  "web_research_sweep"
+ ],
+ "replaced_tools": {
+  "Agent": {
+   "after": {
+    "function": {
+     "description": "Launch a new subagent with a fresh, isolated context for focused work. Useful for broad codebase exploration, architectural planning, or focused investigations that would otherwise bloat your own context. The subagent has its own tools and returns only its final message to you.\n\nAvailable subagents:\n  - general-purpose: open-ended focused task — codebase exploration, research, planning, or multi-step execution (tools: all)\n  - watcher-triage: harness-driven watcher-fire triage (read-only; fires are dispatched automatically — resume a session to ask it about watcher history) (tools: grep, list_dir, list_recent_files, read_file)\n  - Web: web research: searches, reads pages, answers or writes a report; resumable for follow-ups (deliverable: short | standard | report) (tools: web_extract, web_fetch, web_query)\n\n## When not to use\n\nIf the target is already known, use the direct tool: read_file for a known path, grep for a specific symbol or string. Reserve this tool for open-ended questions that span the codebase, or tasks that match an available subagent type.\n\n## Usage notes\n\n- Always include a short description summarizing what the subagent will do.\n- When you launch multiple subagents for independent work, send them in a single message with multiple tool uses so they run concurrently.\n- When the subagent is done, it will return a single message back to you. The result returned is not visible to the user; relay the relevant findings yourself.\n- Trust but verify: a subagent's summary describes what it intended to do, not necessarily what it did. When a subagent writes or edits code, check the actual changes before reporting the work as done.\n- You can optionally run subagents in the background using run_in_background. When one completes, you'll be notified via a synthetic [SUBAGENT COMPLETE] message — do NOT sleep, poll, or proactively check on its progress.\n- **Foreground vs background**: Use foreground (default) when you need the subagent's results before you can proceed. Use background when you have genuinely independent work to do in parallel.\n- To continue a previously spawned subagent, pass its session_id — that resumes it with full context. A new Agent call starts a fresh subagent with no memory of prior runs. Resume is useful to ask follow up or qualifying questions to a subagent that has already done the work.\n- Clearly tell the subagent whether you expect it to write code or just do research (search, file reads, web fetches), since it is not aware of the user's intent.\n- Subagents cannot spawn other subagents, except that eligible ordinary subagents (general-purpose, Browse, custom agents that had web search — never Web itself or watcher-triage) may delegate web research to a Web subagent (one level, foreground only). Provide a self-contained prompt — the subagent sees none of your conversation history.\n- Web research: use subagent_type=Web instead of searching yourself — for any lookup, fact check, or reading of public pages. Browse (when listed) is only for operating a browser: logging in, clicking, filling forms, JavaScript-only pages, sites needing a session; never for plain research. The researcher sees none of this conversation and not the user's profile: put country, language, constraints and what is already known in the task text. State the expected deliverable (short | standard | report). For a find task (a product, a place, a service, a document, an offer) its final_message gives each recommended item's direct URL and, for places, the address, or says when the page had none — carry those into your reply. Its result carries evidence_provenance, queries_used, sources_consulted (pages it read, with retrieval times) and a search_results_seen count (results it only saw): carry the provenance into your answer — say when an answer relies on evidence retained from earlier runs, when the searches found nothing, and what could not be verified. A [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim. Resume the same Web session (session_id) for follow-ups; web sessions are listed in their own section of subagent_manage(list_sessions).\n\n## Writing the prompt\n\nBrief the subagent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.\n- Explain what you're trying to accomplish and why.\n- Describe what you've already learned or ruled out.\n- Give enough context about the surrounding problem that the subagent can make judgment calls rather than just following a narrow instruction.\n- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.\n\nTerse command-style prompts produce shallow, generic work.\n\n**Never delegate understanding.** Don't write \"based on your findings, fix the bug\" or \"based on the research, implement it.\" Those phrases push synthesis onto the subagent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.",
+     "name": "Agent",
+     "parameters": {
+      "properties": {
+       "deliverable": {
+        "description": "Only for subagent_type=Web. How much to return: short = a few sentences, standard = one or two screens, report = a complete written report. Ignored for other types.",
+        "enum": [
+         "short",
+         "standard",
+         "report"
+        ],
+        "type": "string"
+       },
+       "description": {
+        "description": "A short (3-5 word) description of the task. Used for progress display.",
+        "type": "string"
+       },
+       "model": {
+        "description": "Optional. Only 'inherit' is available: no per-call preference — the subagent runs the parent model. The user can configure cheap subagent model lanes with the /subagentmodels command.",
+        "enum": [
+         "inherit"
+        ],
+        "type": "string"
+       },
+       "prompt": {
+        "description": "The task or continuation message. For new sessions: the full self-contained task. For resumed sessions: the follow-up instruction (the subagent already has its prior context).",
+        "type": "string"
+       },
+       "run_in_background": {
+        "description": "Optional. When true, run the subagent in the background and receive a synthetic [SUBAGENT COMPLETE] user message when it finishes. Useful for long-running research or exploration tasks so the parent can continue in parallel. Default false (synchronous).",
+        "type": "boolean"
+       },
+       "session_id": {
+        "description": "Optional. Pass a session_id from a prior Agent call to resume that subagent's conversation with its full prior context intact. Omit to start a fresh session. Every Agent call returns a session_id in its result — save it if you might want to continue later. Use subagent_manage(mode='list_sessions') to see all available sessions.",
+        "type": "string"
+       },
+       "subagent_type": {
+        "description": "Which subagent to spawn (for new sessions) or which type the existing session belongs to (for resumes).",
+        "enum": [
+         "general-purpose",
+         "watcher-triage",
+         "Web"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "subagent_type",
+       "description",
+       "prompt"
+      ],
+      "type": "object"
+     }
+    },
+    "type": "function"
+   },
+   "before": {
+    "function": {
+     "description": "Launch a new subagent with a fresh, isolated context for focused work. Useful for broad codebase exploration, architectural planning, or focused investigations that would otherwise bloat your own context. The subagent has its own tools and returns only its final message to you.\n\nAvailable subagents:\n  - general-purpose: open-ended focused task — codebase exploration, research, planning, or multi-step execution (tools: all)\n  - watcher-triage: harness-driven watcher-fire triage (read-only; fires are dispatched automatically — resume a session to ask it about watcher history) (tools: grep, list_dir, list_recent_files, read_file)\n\n## When not to use\n\nIf the target is already known, use the direct tool: read_file for a known path, grep for a specific symbol or string. Reserve this tool for open-ended questions that span the codebase, or tasks that match an available subagent type.\n\n## Usage notes\n\n- Always include a short description summarizing what the subagent will do.\n- When you launch multiple subagents for independent work, send them in a single message with multiple tool uses so they run concurrently.\n- When the subagent is done, it will return a single message back to you. The result returned is not visible to the user; relay the relevant findings yourself.\n- Trust but verify: a subagent's summary describes what it intended to do, not necessarily what it did. When a subagent writes or edits code, check the actual changes before reporting the work as done.\n- You can optionally run subagents in the background using run_in_background. When one completes, you'll be notified via a synthetic [SUBAGENT COMPLETE] message — do NOT sleep, poll, or proactively check on its progress.\n- **Foreground vs background**: Use foreground (default) when you need the subagent's results before you can proceed. Use background when you have genuinely independent work to do in parallel.\n- To continue a previously spawned subagent, pass its session_id — that resumes it with full context. A new Agent call starts a fresh subagent with no memory of prior runs. Resume is useful to ask follow up or qualifying questions to a subagent that has already done the work.\n- Clearly tell the subagent whether you expect it to write code or just do research (search, file reads, web fetches), since it is not aware of the user's intent.\n- Subagents CANNOT spawn other subagents. Provide a self-contained prompt — the subagent sees none of your conversation history.\n\n## Writing the prompt\n\nBrief the subagent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.\n- Explain what you're trying to accomplish and why.\n- Describe what you've already learned or ruled out.\n- Give enough context about the surrounding problem that the subagent can make judgment calls rather than just following a narrow instruction.\n- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.\n\nTerse command-style prompts produce shallow, generic work.\n\n**Never delegate understanding.** Don't write \"based on your findings, fix the bug\" or \"based on the research, implement it.\" Those phrases push synthesis onto the subagent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.",
+     "name": "Agent",
+     "parameters": {
+      "properties": {
+       "description": {
+        "description": "A short (3-5 word) description of the task. Used for progress display.",
+        "type": "string"
+       },
+       "model": {
+        "description": "Optional. Only 'inherit' is available: no per-call preference — the subagent runs the parent model. The user can configure cheap subagent model lanes with the /subagentmodels command.",
+        "enum": [
+         "inherit"
+        ],
+        "type": "string"
+       },
+       "prompt": {
+        "description": "The task or continuation message. For new sessions: the full self-contained task. For resumed sessions: the follow-up instruction (the subagent already has its prior context).",
+        "type": "string"
+       },
+       "run_in_background": {
+        "description": "Optional. When true, run the subagent in the background and receive a synthetic [SUBAGENT COMPLETE] user message when it finishes. Useful for long-running research or exploration tasks so the parent can continue in parallel. Default false (synchronous).",
+        "type": "boolean"
+       },
+       "session_id": {
+        "description": "Optional. Pass a session_id from a prior Agent call to resume that subagent's conversation with its full prior context intact. Omit to start a fresh session. Every Agent call returns a session_id in its result — save it if you might want to continue later. Use subagent_manage(mode='list_sessions') to see all available sessions.",
+        "type": "string"
+       },
+       "subagent_type": {
+        "description": "Which subagent to spawn (for new sessions) or which type the existing session belongs to (for resumes).",
+        "enum": [
+         "general-purpose",
+         "watcher-triage"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "subagent_type",
+       "description",
+       "prompt"
+      ],
+      "type": "object"
+     }
+    },
+    "type": "function"
+   }
+  },
+  "subagent_manage": {
+   "after": {
+    "function": {
+     "description": "Manage background subagents. Three modes: (1) 'list_running' — list every subagent currently running in the background. Returns {handle, subagent_type, description, started_at, running_seconds} for each. (2) 'list_sessions' — list all subagent sessions from this app run, sorted by most-recently-used. Each session is resumable by passing its session_id to the Agent tool. Output has two sections: 'sessions' (general pool, paged by limit/offset) and 'web_sessions' (Web research sessions, newest 5 by default; pass kind='web' to page the whole web pool). (3) 'cancel' — cancel a running background subagent by handle. Cancellation is best-effort at the next turn boundary.",
+     "name": "subagent_manage",
+     "parameters": {
+      "properties": {
+       "handle": {
+        "description": "For mode='cancel' only. The handle returned by Agent(run_in_background=true), e.g. 'subagent_1'.",
+        "type": "string"
+       },
+       "kind": {
+        "description": "For mode='list_sessions' only. 'all' (default) = general page plus the newest web sessions; 'general' = general pool only; 'web' = page the web pool with limit/offset.",
+        "enum": [
+         "all",
+         "general",
+         "web"
+        ],
+        "type": "string"
+       },
+       "limit": {
+        "description": "For mode='list_sessions' only. Max sessions to return. Default 20.",
+        "type": "integer"
+       },
+       "mode": {
+        "description": "Action to perform.",
+        "enum": [
+         "list_running",
+         "list_sessions",
+         "cancel"
+        ],
+        "type": "string"
+       },
+       "offset": {
+        "description": "For mode='list_sessions' only. Number of sessions to skip for pagination. Default 0.",
+        "type": "integer"
+       }
+      },
+      "required": [
+       "mode"
+      ],
+      "type": "object"
+     }
+    },
+    "type": "function"
+   },
+   "before": {
+    "function": {
+     "description": "Manage background subagents. Three modes: (1) 'list_running' — list every subagent currently running in the background. Returns {handle, subagent_type, description, started_at, running_seconds} for each. (2) 'list_sessions' — list all subagent sessions from this app run, sorted by most-recently-used. Each session is resumable by passing its session_id to the Agent tool. (3) 'cancel' — cancel a running background subagent by handle. Cancellation is best-effort at the next turn boundary.",
+     "name": "subagent_manage",
+     "parameters": {
+      "properties": {
+       "handle": {
+        "description": "For mode='cancel' only. The handle returned by Agent(run_in_background=true), e.g. 'subagent_1'.",
+        "type": "string"
+       },
+       "limit": {
+        "description": "For mode='list_sessions' only. Max sessions to return. Default 20.",
+        "type": "integer"
+       },
+       "mode": {
+        "description": "Action to perform.",
+        "enum": [
+         "list_running",
+         "list_sessions",
+         "cancel"
+        ],
+        "type": "string"
+       },
+       "offset": {
+        "description": "For mode='list_sessions' only. Number of sessions to skip for pagination. Default 0.",
+        "type": "integer"
+       }
+      },
+      "required": [
+       "mode"
+      ],
+      "type": "object"
+     }
+    },
+    "type": "function"
+   }
+  },
+  "web_fetch": {
+   "after": {
+    "function": {
+     "description": "IMPORTANT: web_fetch WILL FAIL for authenticated or private URLs.\n\nFetches content from a URL and processes it with an AI model that extracts only the information matching your prompt. Use AFTER web_search or web_research_sweep when you need the content of a specific page. Returns a focused excerpt plus structured image and link arrays. If you want to actually SEE an image from the page, download it with bash curl -o /tmp/img.png <url> then read_file to view it multimodally. Ideal for: reading articles, documentation, product pages, API references, or any URL from search results where you need targeted information.\n\nUsage notes:\n- For GitHub URLs (PRs, issues, pull request diffs, repo contents), prefer using the gh CLI via bash instead — e.g. `gh pr view`, `gh issue view`, `gh api repos/<owner>/<repo>/...`. It handles auth automatically and is faster.\n- For a single known file in a public repo, `web_fetch` on the raw.githubusercontent.com URL is the lightest option (no clone, no API).",
+     "name": "web_fetch",
+     "parameters": {
+      "properties": {
+       "prompt": {
+        "description": "What you want to know from this page. Be specific — the tool extracts only the relevant excerpt using this prompt. Examples: 'How do I configure the X option?', 'Summarize the migration steps', 'What is the pricing for the pro plan?'. Vague prompts like 'summarize' produce noisier results.",
+        "type": "string"
+       },
+       "refresh": {
+        "description": "Optional. This tool caches a page and its excerpt for 15 minutes; a cache hit returns served_from_cache: true with the ORIGINAL fetched_at. Pass true to discard the cached page and make a new reader request (fresh fetched_at) when the answer must reflect the page as it is now.",
+        "type": "boolean"
+       },
+       "section_offset": {
+        "description": "Only for very large pages. When a result's coverage line says later sections were NOT read, call again with the same url and prompt plus the section_offset the coverage line tells you (it also lists headings from the unread portion so you can decide whether continuing is worth it). Omit on first fetch.",
+        "type": "integer"
+       },
+       "url": {
+        "description": "The full URL to fetch (e.g., 'https://example.com/article'). Must be http:// or https://.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "url",
+       "prompt"
+      ],
+      "type": "object"
+     }
+    },
+    "type": "function"
+   },
+   "before": {
+    "function": {
+     "description": "IMPORTANT: web_fetch WILL FAIL for authenticated or private URLs.\n\nFetches content from a URL and processes it with an AI model that extracts only the information matching your prompt. Use AFTER web_search or web_research_sweep when you need the content of a specific page. Returns a focused excerpt plus structured image and link arrays. If you want to actually SEE an image from the page, download it with bash curl -o /tmp/img.png <url> then read_file to view it multimodally. Ideal for: reading articles, documentation, product pages, API references, or any URL from search results where you need targeted information.\n\nUsage notes:\n- For GitHub URLs (PRs, issues, pull request diffs, repo contents), prefer using the gh CLI via bash instead — e.g. `gh pr view`, `gh issue view`, `gh api repos/<owner>/<repo>/...`. It handles auth automatically and is faster.\n- For a single known file in a public repo, `web_fetch` on the raw.githubusercontent.com URL is the lightest option (no clone, no API).",
+     "name": "web_fetch",
+     "parameters": {
+      "properties": {
+       "prompt": {
+        "description": "What you want to know from this page. Be specific — the tool extracts only the relevant excerpt using this prompt. Examples: 'How do I configure the X option?', 'Summarize the migration steps', 'What is the pricing for the pro plan?'. Vague prompts like 'summarize' produce noisier results.",
+        "type": "string"
+       },
+       "section_offset": {
+        "description": "Only for very large pages. When a result's coverage line says later sections were NOT read, call again with the same url and prompt plus the section_offset the coverage line tells you (it also lists headings from the unread portion so you can decide whether continuing is worth it). Omit on first fetch.",
+        "type": "integer"
+       },
+       "url": {
+        "description": "The full URL to fetch (e.g., 'https://example.com/article'). Must be http:// or https://.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "url",
+       "prompt"
+      ],
+      "type": "object"
+     }
+    },
+    "type": "function"
+   }
+  }
+ },
+ "reply_policy_line": "When the user asked you to find something concrete (a product, a place, a service, a document, an offer), give each item's link or location next to its name when available — the one bare URL or address that lets the user act on it, not a list of sources — and say when it could not be established; never guess a URL or an address. Don't add unnecessary links, and keep the message short.",
+ "revision": 1,
+ "tool_fixtures": [
+  "glm-5.3-6",
+  "glm-5.3-8",
+  "glm-5.3-9",
+  "glm-5.3-10",
+  "kimi-k3-6",
+  "kimi-k3-8",
+  "kimi-k3-9",
+  "kimi-k3-10",
+  "kimi-k2.7-code-6",
+  "kimi-k2.7-code-8",
+  "kimi-k2.7-code-9",
+  "kimi-k2.7-code-10",
+  "qwen3.8-max-6",
+  "qwen3.8-max-8",
+  "qwen3.8-max-9",
+  "qwen3.8-max-10",
+  "custom-model-6",
+  "custom-model-8",
+  "custom-model-9",
+  "custom-model-10",
+  "local-model-6",
+  "local-model-8",
+  "local-model-9",
+  "local-model-10",
+  "anthropic_claude-sonnet-4-6",
+  "anthropic_claude-sonnet-4-8",
+  "anthropic_claude-sonnet-4-9",
+  "anthropic_claude-sonnet-4-10"
+ ],
+ "web_bullet_after": "- For current or unstable facts, delegate web research to the Web subagent (Agent with subagent_type=Web and a deliverable: short | standard | report); carry its provenance and sources into your reply, and resume its session for follow-ups. web_fetch stays for a known URL.",
+ "web_bullet_before": "- Use web tools for current or unstable facts, and cite sources when useful."
+}

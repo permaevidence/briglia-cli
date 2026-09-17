@@ -150,3 +150,15 @@ back unchanged and are never re-serialized. The candidate build pins
 `HarnessClock` (the one chronology clock) instead of the SOURCE-era anchors;
 the persistence-schema guard accepts the additive manifest
 `chronology-persistence-contract.json`.
+
+## r8 — Web subagent R2 reply-policy line (2026-09-17)
+
+`web_subagent_r2_lifecycle_migration.py` (rule `web-subagent-r2.json`) migrates the
+REFERENCE forward (read_file's shape), outermost in the chain: exactly the 45
+captures that carry the main prompt's reply-style section (main-agent turns and
+messaging-style subagent runs) gain the one reviewed reply-policy line right after
+the Markdown line, as a raw byte edit of the Foundation-escaped string; the 3
+summarizer captures carry no reply-style section and stay byte-identical, and an
+unlisted capture that carries the section is refused. The lifecycle driver has no
+web search key, so no tool schema and no web bullet change here; observations are
+untouched. r7 (chronology) keeps restoring the candidate before r5 → r4 → r3.
