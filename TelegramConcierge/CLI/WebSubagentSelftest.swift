@@ -304,10 +304,10 @@ struct WebSubagentSelftest: AsyncParsableCommand {
                                          imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
             state.webSessionId = first.sessionId
             let bRequests = agentRequests(serverB)
-            check("3.1 OpenCode backend: every round on B with B's key and pinned model, medium effort, zero requests on A",
+            check("3.1 OpenCode backend: every round on B with B's key and pinned model, high effort, zero requests on A",
                   first.error == nil && bRequests.count == 2 && serverA.requests.isEmpty
                   && bRequests.allSatisfy { $0.headers["authorization"] == "Bearer synthetic-web-opencode-key" && body($0)["model"] as? String == "mimo-v2.5"
-                      && body($0)["reasoning_effort"] as? String == "medium" && $0.path == "/zen/go/v1/chat/completions" },
+                      && body($0)["reasoning_effort"] as? String == "high" && $0.path == "/zen/go/v1/chat/completions" },
                   first.error ?? "\(bRequests.count) B, \(serverA.requests.count) A")
             let sessionHeader = bRequests.first?.headers["x-opencode-session"]
             check("3.2 affinity: x-opencode-session derived from the subagent lane, identical across the run", sessionHeader != nil && bRequests.allSatisfy { $0.headers["x-opencode-session"] == sessionHeader })
@@ -398,10 +398,10 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             let openaiRun = await runner.run(invocation: big413, sessionId: nil, openRouterService: service, toolExecutor: executor,
                                              imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
             let cRequests = agentRequests(serverC)
-            check("3.11 OpenAI backend: Responses transport on C (store:false, encrypted reasoning include, medium effort, luna), zero on A",
+            check("3.11 OpenAI backend: Responses transport on C (store:false, encrypted reasoning include, high effort, luna), zero on A",
                   openaiRun.error == nil && cRequests.count == 2 && serverA.requests.isEmpty
                   && cRequests.allSatisfy { $0.path == "/v1/responses" && body($0)["model"] as? String == "gpt-5.6-luna" && body($0)["store"] as? Bool == false
-                      && (body($0)["include"] as? [String]) == ["reasoning.encrypted_content"] && ((body($0)["reasoning"] as? [String: Any])?["effort"] as? String) == "medium"
+                      && (body($0)["include"] as? [String]) == ["reasoning.encrypted_content"] && ((body($0)["reasoning"] as? [String: Any])?["effort"] as? String) == "high"
                       && $0.headers["authorization"] == "Bearer synthetic-web-openai-key" }
                   && openaiRun.modelUsed == "gpt-5.6-luna (web backend: openai)", openaiRun.error ?? "\(cRequests.count) \(openaiRun.modelUsed ?? "")")
             // OpenRouter backend → D with the configured slug.
@@ -413,11 +413,11 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             let routerRun = await runner.run(invocation: big413, sessionId: nil, openRouterService: service, toolExecutor: executor,
                                              imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
             let dRequests = agentRequests(serverD)
-            check("3.12 OpenRouter backend: configured slug on D, OpenRouter key, x-session-id from the subagent lane, medium reasoning, zero on A",
+            check("3.12 OpenRouter backend: configured slug on D, OpenRouter key, x-session-id from the subagent lane, high reasoning, zero on A",
                   routerRun.error == nil && dRequests.count == 2 && serverA.requests.isEmpty
                   && dRequests[0].path == "/api/v1/chat/completions" && body(dRequests[0])["model"] as? String == "vendor/research-model"
                   && dRequests[0].headers["authorization"] == "Bearer synthetic-openrouter-key" && dRequests[0].headers["x-session-id"] != nil
-                  && ((body(dRequests[0])["reasoning"] as? [String: Any])?["effort"] as? String) == "medium", routerRun.error ?? "\(dRequests.count)")
+                  && ((body(dRequests[0])["reasoning"] as? [String: Any])?["effort"] as? String) == "high", routerRun.error ?? "\(dRequests.count)")
             try KeychainHelper.delete(key: KeychainHelper.openRouterApiKeyKey)
             try KeychainHelper.delete(key: KeychainHelper.openRouterWebSearchModelKey)
             WebSearchBackend.processOverride = .opencode

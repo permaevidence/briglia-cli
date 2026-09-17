@@ -1443,15 +1443,19 @@ actor OpenRouterService {
     /// and a note in the result), never silently.
     ///
     /// - `.opencode`: OpenCode Go chat completions, the pipeline's pinned
-    ///   `mimo-v2.5`, reasoning_effort medium (mimo is not a
+    ///   `mimo-v2.5`, reasoning_effort high (mimo is not a
     ///   reasoning_content model, so the plain field as the pipeline sends).
     /// - `.openai`: `api.openai.com/v1` over the Responses transport
     ///   (`store:false`, encrypted-reasoning replay), the configured web
     ///   model with the `openai/` prefix stripped (default gpt-5.6-luna),
-    ///   effort medium.
+    ///   effort high.
     /// - `.openrouter`: the configured slug on OpenRouter with the existing
-    ///   provider preferences for that model, effort medium.
-    nonisolated static let webResearcherReasoningEffort = "medium"
+    ///   provider preferences for that model, effort high.
+    /// Researcher rounds run at HIGH effort (owner decision 2026-09-16 after
+    /// the first field test: the legacy pipeline's agent rounds ran at the
+    /// main profile's configured effort — default high — so medium was a
+    /// regression). Extraction (`excerptReasoning`) stays at medium.
+    nonisolated static let webResearcherReasoningEffort = "high"
 
     func webExecutionContext(lane: AffinityLane) throws -> ProviderExecutionContext {
         try webExecutionContextWithNote(lane: lane).context
