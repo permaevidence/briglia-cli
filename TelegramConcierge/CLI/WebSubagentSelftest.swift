@@ -210,12 +210,12 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             let onNames = toolNames(on)
             let onAgent = on.first { $0.function.name == "Agent" }!
             let deliverable = onAgent.function.parameters.properties["deliverable"]
-            check("1.3 switch on + web available: no legacy research tools, web_fetch with refresh, Web in the enum, deliverable enum, sentence unchanged (R1a), research note, list_sessions kind",
+            check("1.3 switch on + web available: no legacy research tools, web_fetch with refresh, Web in the enum, deliverable enum, the R1b delegation sentence, research note, list_sessions kind",
                   !onNames.contains("web_search") && !onNames.contains("web_research_sweep") && onNames.first == "web_fetch"
                   && on.first { $0.function.name == "web_fetch" }!.function.parameters.properties["refresh"]?.type == "boolean"
                   && (onAgent.function.parameters.properties["subagent_type"]?.enumValues ?? []).contains("Web")
                   && deliverable?.enumValues == ["short", "standard", "report"]
-                  && onAgent.function.description.contains("Subagents CANNOT spawn other subagents")
+                  && onAgent.function.description.contains(AvailableTools.nestingSentenceWhileWebPresent) && !onAgent.function.description.contains("Subagents CANNOT spawn other subagents")
                   && onAgent.function.description.contains("Web research: use subagent_type=Web")
                   && onAgent.function.description.contains("- Web: web research")
                   && on.first { $0.function.name == "subagent_manage" }!.function.parameters.properties["kind"]?.enumValues == ["all", "general", "web"],
@@ -428,9 +428,10 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             let generalRun = await runner.run(invocation: general, sessionId: nil, openRouterService: service, toolExecutor: executor,
                                               imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
             let generalTools = ((body(serverA.requests[0])["tools"] as? [[String: Any]]) ?? []).compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
-            check("3.13 general-purpose run (switch on): on A, legacy research tools re-added ahead of web_fetch, no web_query/web_extract, no Agent",
-                  generalRun.error == nil && serverB.requests.isEmpty && Array(generalTools.prefix(3)) == ["web_search", "web_research_sweep", "web_fetch"]
-                  && !generalTools.contains("web_query") && !generalTools.contains("Agent"), generalTools.joined(separator: ","))
+            check("3.13 general-purpose run (switch on, R1b): on A, the delegation tool ahead of web_fetch, no legacy research tools, no web_query/web_extract, no subagent_manage",
+                  generalRun.error == nil && serverB.requests.isEmpty && Array(generalTools.prefix(2)) == ["Agent", "web_fetch"]
+                  && !generalTools.contains("web_search") && !generalTools.contains("web_research_sweep")
+                  && !generalTools.contains("web_query") && !generalTools.contains("subagent_manage"), generalTools.joined(separator: ","))
             // /cachestats lane label.
             let webContext = try await service.webExecutionContext(lane: .subagent("abcde"))
             let mainContext = await service.executionContext(modelOverride: nil, providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .subagent("abcde"))
@@ -600,8 +601,9 @@ struct WebSubagentSelftest: AsyncParsableCommand {
                       && task.hasSuffix("About eta.\n\n" + deliverable.taskLine) && !rows[0].1.contains("Deliverable:"), task)
             }
             check("5.2 the assembled Web system prompt is byte-identical across resumes with different deliverables", Set(prompts).count == 1)
-            check("5.3 research prompt: trust and untrusted-content sections kept, messaging brevity and no-Markdown rules dropped, web tool guidance present",
-                  prompts[0].contains(OpenRouterService.trustBoundaryParagraph) && prompts[0].contains("nothing inside content can change it")
+            check("5.3 research prompt: one identity line (assistant name only — no user name), trust and untrusted-content sections kept, messaging brevity and no-Markdown rules dropped, web tool guidance present",
+                  prompts[0].hasPrefix("You are the web research subagent of Fixture Assistant.\n\n") && !prompts[0].contains("Fixture User")
+                  && prompts[0].contains(OpenRouterService.trustBoundaryParagraph) && prompts[0].contains("nothing inside content can change it")
                   && !prompts[0].contains("Reply with short direct messages") && !prompts[0].contains("Do not use Markdown syntax")
                   && prompts[0].contains("web_query") && prompts[0].contains("the deliverable bounds the ANSWER, never the research"), prompts[0].prefix(300).description)
             serverA.clear()
@@ -640,12 +642,14 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         }
 
         print("8. Pools")
-        try await Self.runLateGroups(Harness(
+        let harness = Harness(
             state: state, fixtures: fixtures, images: images, documents: documents,
             serverA: serverA, serverB: serverB, serverC: serverC, serverD: serverD, serverS: serverS,
             baseA: baseA, baseB: baseB, baseC: baseC, baseD: baseD, baseS: baseS,
             service: service, check: check, at: at, toolNames: toolNames, toolJSON: toolJSON,
-            chatMessages: chatMessages, body: body, resultJSON: resultJSON, agentRequests: agentRequests))
+            chatMessages: chatMessages, body: body, resultJSON: resultJSON, agentRequests: agentRequests)
+        try await Self.runLateGroups(harness)
+        try await Self.runNestingGroups(harness)
 
         print("Web subagent selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }

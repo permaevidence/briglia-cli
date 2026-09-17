@@ -502,6 +502,9 @@ actor SubagentSessionLocks {
         }
     }
 
+    /// Whether a lane is currently held (diagnostics and selftests only).
+    func isHeld(_ sessionId: String) -> Bool { held.contains(sessionId) }
+
     func release(_ sessionId: String) {
         if var queue = waiters[sessionId], !queue.isEmpty {
             let next = queue.removeFirst()

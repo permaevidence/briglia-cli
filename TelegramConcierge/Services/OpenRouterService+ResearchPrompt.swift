@@ -2,9 +2,12 @@ import Foundation
 
 extension OpenRouterService {
     /// System prompt of the Web researcher subagent (WEB_SUBAGENT_PLAN §4.3,
-    /// `SubagentPromptStyle.research`). Persona intro, today's date and
-    /// timezone, the trust and untrusted-content sections VERBATIM as in the
-    /// main prompt, guidance for the three web tools, then the research
+    /// `SubagentPromptStyle.research`). One identity line (R1b, plan §14.2:
+    /// the assistant's name only — no user name, no structured profile, so
+    /// nothing about the user reaches the web backend provider and no
+    /// profile line can steer the answer's language or style), today's date
+    /// and timezone, the trust and untrusted-content sections VERBATIM as in
+    /// the main prompt, guidance for the three web tools, then the research
     /// discipline. Deliberately omitted: the messaging-app paragraph,
     /// "Reply with short direct messages" and "Do not use Markdown syntax",
     /// which contradict a report with headings and a Sources section. The
@@ -12,21 +15,12 @@ extension OpenRouterService {
     /// prefix across resumes): the runner renders it into the task message.
     /// Constant for a session, so the prefix stays cacheable.
     func researchSystemPrompt(currentDate: String, timezone: String, finalResponseInstruction: String?) -> String {
-        let assistantName = KeychainHelper.load(key: KeychainHelper.assistantNameKey)
-        let userName = KeychainHelper.load(key: KeychainHelper.userNameKey)
-        let structuredUserContext = KeychainHelper.load(key: KeychainHelper.structuredUserContextKey)
-        let personaIntro = Self.buildPersonaIntro(
-            assistantName: assistantName,
-            userName: userName,
-            structuredUserContext: structuredUserContext,
-            bareFallback: Self.bareIntroFallback,
-            previousName: IdentityMigration.priorPersonaName()
-        )
+        let identity = Self.researchIdentityLine(assistantName: KeychainHelper.load(key: KeychainHelper.assistantNameKey))
 
         var prompt = """
-        \(personaIntro)
+        \(identity)
 
-        In this session you are the WEB RESEARCH subagent: the main agent (the assistant's own planning process, not the user) hands you a research question and expects a written answer built from live web evidence. You cannot reach the user; everything the main agent needs goes in your final message.
+        The main agent (the assistant's own planning process, not the user) hands you a research question and expects a written answer built from live web evidence. You cannot reach the user and you know nothing about them beyond what the task says; everything the main agent needs goes in your final message.
 
         **Today's date**: \(currentDate) (\(timezone))
         For the exact current time, check the most recent message timestamp or tool result time note in the conversation below.
@@ -54,5 +48,13 @@ extension OpenRouterService {
             prompt += "\n\n\(finalResponseInstruction)"
         }
         return prompt
+    }
+
+    /// The research prompt's only identity content (R1b, §14.2).
+    static func researchIdentityLine(assistantName: String?) -> String {
+        let name = (assistantName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty
+            ? "You are the web research subagent of a Briglia assistant."
+            : "You are the web research subagent of \(name)."
     }
 }

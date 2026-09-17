@@ -27,7 +27,8 @@ extension OpenRouterService {
                                                   finalResponseInstruction: finalResponseInstruction),
                 messages: messages, imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
                 tools: tools, toolResultMessages: toolResultMessages,
-                tailSystemMessage: tailSystemMessage, tailUserMessage: tailUserMessage)
+                tailSystemMessage: tailSystemMessage, tailUserMessage: tailUserMessage,
+                omitAmbientStatus: true)
         }
 
         // Load persona settings

@@ -86,12 +86,38 @@ actor ToolExecutor {
         midTurnMessageSender = sender
     }
 
-    init(outputMode: OutputMode = .mainAgent) {
+    /// Nesting depth of this executor (WEB_SUBAGENT_PLAN §4.6, R1b): 0 for
+    /// the main agent, 1 for a subagent started by the main agent, 2 for the
+    /// Web researcher a depth-1 subagent delegated to. `makeChildExecutor()`
+    /// increments it, so the depth cap is structural: a depth-2 executor's
+    /// inventory carries no `Agent` at all and `executeAgentToolResult`
+    /// refuses every call there.
+    nonisolated let depth: Int
+
+    /// Progress hook installed by the runner that OWNS this executor's parent
+    /// (`SubagentRunner.runBody`), inherited by every child executor: a
+    /// nested Web run's `markProgress()` also marks its parent's progress
+    /// beacon, so the parent's batch staleness timer keeps resetting while
+    /// the child works (§4.6 O8). nil at depth 0 and on a depth-1 executor
+    /// until its runner installs one.
+    private var nestedProgressHook: (@Sendable () -> Void)?
+    /// The session id of the subagent running ON this executor, set by its
+    /// runner once the session is resolved; a nested Web session created
+    /// through this executor gets `via <that id>` in its description so the
+    /// main agent can find and resume it from `list_sessions` (§4.6).
+    private var nestedParentSessionId: String?
+
+    init(outputMode: OutputMode = .mainAgent, depth: Int? = nil) {
         self.outputMode = outputMode
+        self.depth = depth ?? (outputMode == .mainAgent ? 0 : 1)
         self.bashOwner = outputMode == .mainAgent
             ? BackgroundProcessRegistry.mainOwner
             : "sub-\(UUID().uuidString.prefix(8))"
     }
+
+    func setNestedProgressHook(_ hook: (@Sendable () -> Void)?) { nestedProgressHook = hook }
+    var currentNestedProgressHook: (@Sendable () -> Void)? { nestedProgressHook }
+    func setNestedParentSession(_ sessionId: String?) { nestedParentSessionId = sessionId }
 
     private var allowsUserVisibleToolOutputs: Bool {
         outputMode == .mainAgent
@@ -244,12 +270,15 @@ actor ToolExecutor {
     /// run on a separate actor queue, eliminating serialization contention
     /// with the parent agent's tool execution.
     func makeChildExecutor() async -> ToolExecutor {
-        let child = ToolExecutor(outputMode: .subagent)
+        let child = ToolExecutor(outputMode: .subagent, depth: depth + 1)
         await child.configure(
             openRouterKey: configuredOpenRouterKey,
             serperKey: configuredSerperKey,
             jinaKey: configuredJinaKey
         )
+        // A nested run reports progress to the runner that owns THIS
+        // executor (installed by that runner before its loop; nil at depth 0).
+        await child.setNestedProgressHook(nestedProgressHook)
         if let ors = openRouterService,
            let imgDir = subagentImagesDirectory,
            let docDir = subagentDocumentsDirectory {
@@ -4390,12 +4419,45 @@ extension ToolExecutor {
     /// daily/monthly counters and spend-limit enforcement. Background spawns still
     /// return spend = 0 here (the cost lands later via SubagentBackgroundRegistry →
     /// checkBackgroundSubagentCompletions).
+    /// Depth-1 delegation gate (WEB_SUBAGENT_PLAN §4.6, R1b). A subagent's
+    /// `Agent` is the restricted variant (`agentToolForChildren`: enum
+    /// `[Web]`, foreground only); this is the executor-side second line of
+    /// defence, so a stale or hand-written call can never start anything
+    /// else: at depth ≥ 2 nothing may be started at all (the Web researcher
+    /// has no `Agent` in its inventory either), at depth 1 only the built-in
+    /// Web researcher, never in the background. Returns the error JSON, or
+    /// nil when the call may proceed.
+    func nestedAgentRefusal(_ args: SubagentInvocationArguments) -> String? {
+        guard depth >= 1 else { return nil }
+        if depth >= 2 {
+            return "{\"error\": \"Nested subagents cannot spawn subagents (depth \(depth)).\"}"
+        }
+        guard SubagentTypes.find(name: args.subagent_type)?.isWebResearcher == true else {
+            return "{\"error\": \"Nested subagents may only delegate to Web (subagent_type=Web); '\(args.subagent_type)' is not available here.\"}"
+        }
+        if args.run_in_background == true {
+            return "{\"error\": \"Nested subagents run in the foreground only; run_in_background is not available here.\"}"
+        }
+        return nil
+    }
+
+    /// The description a nested Web session is created with: `via <parent
+    /// session id>: <description>` so the main agent can find it in
+    /// `list_sessions` (§4.6); unchanged at depth 0.
+    private func nestedDescription(_ description: String) -> String {
+        guard depth >= 1, let parent = nestedParentSessionId, !parent.isEmpty else { return description }
+        return "via \(parent): \(description)"
+    }
+
     func executeAgentToolResult(_ call: ToolCall) async -> ToolResultMessage {
         guard let data = call.function.arguments.data(using: .utf8),
               let args = try? JSONDecoder().decode(SubagentInvocationArguments.self, from: data) else {
             return ToolResultMessage(toolCallId: call.id, content: "{\"error\": \"Invalid Agent tool arguments\"}")
         }
 
+        if let refusal = nestedAgentRefusal(args) {
+            return ToolResultMessage(toolCallId: call.id, content: refusal)
+        }
         if let laneError = Self.agentModelHintError(args.model) {
             return ToolResultMessage(toolCallId: call.id, content: laneError)
         }
@@ -4414,7 +4476,7 @@ extension ToolExecutor {
         let runInBg = args.run_in_background ?? false
         let invocation = SubagentRunner.Invocation(
             subagentType: args.subagent_type,
-            description: args.description,
+            description: nestedDescription(args.description),
             taskPrompt: args.prompt,
             modelOverride: args.model,
             runInBackground: runInBg,
@@ -4470,6 +4532,9 @@ extension ToolExecutor {
             return "{\"error\": \"Invalid Agent tool arguments\"}"
         }
 
+        if let refusal = nestedAgentRefusal(args) {
+            return refusal
+        }
         if let laneError = Self.agentModelHintError(args.model) {
             return laneError
         }
@@ -4491,7 +4556,7 @@ extension ToolExecutor {
         let runInBg = args.run_in_background ?? false
         let invocation = SubagentRunner.Invocation(
             subagentType: args.subagent_type,
-            description: args.description,
+            description: nestedDescription(args.description),
             taskPrompt: args.prompt,
             modelOverride: args.model,
             runInBackground: runInBg,

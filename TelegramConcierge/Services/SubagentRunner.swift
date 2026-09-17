@@ -12,11 +12,24 @@ import Crypto
 actor SubagentRunner {
     /// If no progress (LLM response or tool completion) occurs within this
     /// interval, the subagent is considered stuck and is force-killed.
-    private static let stalenessTimeout: TimeInterval = 20 * 60  // 20 minutes
+    private static var stalenessTimeout: TimeInterval { stalenessTimeoutOverrideForTesting ?? 20 * 60 }  // 20 minutes
+    /// Absolute ceiling on a tool batch that contains a nested `Agent(Web)`
+    /// call (WEB_SUBAGENT_PLAN §4.6 O8): the child's progress keeps resetting
+    /// the parent's staleness clock, this bounds the whole batch regardless.
+    private static var nestedRunCeiling: TimeInterval { nestedRunCeilingOverrideForTesting ?? 60 * 60 }  // 60 minutes
+    /// Test seams (selftest only): shorten both clocks so the batch timer's
+    /// behaviour under nested progress can be proven in seconds.
+    static var stalenessTimeoutOverrideForTesting: TimeInterval?
+    static var nestedRunCeilingOverrideForTesting: TimeInterval?
 
-    /// Tracks the last time a meaningful operation completed. Reset after each
-    /// LLM response or tool execution batch.
-    private var lastProgressDate = Date()
+    /// Last time a meaningful operation completed (LLM response, tool batch,
+    /// or — R1b — a progress mark from a nested run executing inside this
+    /// run's tool batch). A lock-guarded class rather than an actor property
+    /// so the batch timer task can read it without hopping onto the actor.
+    private let progress = ProgressBeacon()
+    /// The parent run's beacon, when this run is a nested one (installed on
+    /// the executor by the parent's runner, inherited by the child executor).
+    private var upstreamProgress: (@Sendable () -> Void)?
     struct Invocation {
         let subagentType: String
         let description: String
@@ -66,6 +79,7 @@ actor SubagentRunner {
         var note: String? = nil
 
         func asJSON() -> String {
+            if evidenceProvenance != nil { return webResultJSON() }
             var obj: [String: Any] = [
                 "session_id": sessionId,
                 "is_new_session": isNewSession,
@@ -100,10 +114,61 @@ actor SubagentRunner {
             return "{\"error\": \"Failed to serialize subagent result\"}"
         }
 
+        /// `search_results_seen` as the parent sees it (R1b, plan §14.4): a
+        /// count, never the inventory of results the researcher only saw —
+        /// the ledger keeps every hit for the labels and the "n of m"
+        /// figures, and a resume can still ask about any of them.
+        static func searchResultsSeenLine(hits: Int, queries: [String]) -> String {
+            "\(hits) results across \(Set(queries).count) queries"
+        }
+
+        /// The Web researcher's result JSON (R1b compact packet, §14.4): one
+        /// key per line in a fixed order, arrays compact, `sources_consulted`
+        /// one object per line, `search_results_seen` a count. Ordinary runs
+        /// keep the legacy pretty-printed dictionary above.
+        func webResultJSON() -> String {
+            func fragment(_ value: Any) -> String {
+                guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .withoutEscapingSlashes, .sortedKeys]),
+                      let text = String(data: data, encoding: .utf8) else { return "null" }
+                return text
+            }
+            var lines: [String] = []
+            lines.append("\"session_id\": \(fragment(sessionId))")
+            lines.append("\"is_new_session\": \(isNewSession)")
+            lines.append("\"final_message\": \(fragment(finalMessage))")
+            lines.append("\"turns_used\": \(turnsUsed)")
+            lines.append("\"tools_called\": \(fragment(toolsCalled))")
+            lines.append("\"files_touched\": \(fragment(filesTouched))")
+            lines.append("\"spend_usd\": \(fragment(spendUSD))")
+            if let error { lines.append("\"error\": \(fragment(error))") }
+            if let modelUsed { lines.append("\"model_used\": \(fragment(modelUsed))") }
+            if let evidenceProvenance { lines.append("\"evidence_provenance\": \(fragment(evidenceProvenance.rawValue))") }
+            if let queriesUsed { lines.append("\"queries_used\": \(fragment(queriesUsed))") }
+            if let sourcesConsulted {
+                if sourcesConsulted.isEmpty {
+                    lines.append("\"sources_consulted\": []")
+                } else {
+                    let rows = sourcesConsulted.map { fragment(["url": $0.url, "retrieved_at": ToolExecutor.webTimestamp($0.retrievedAt)]) }
+                    lines.append("\"sources_consulted\": [\n    " + rows.joined(separator: ",\n    ") + "\n  ]")
+                }
+            }
+            if let searchEvidence {
+                lines.append("\"search_results_seen\": \(fragment(Self.searchResultsSeenLine(hits: searchEvidence.hits.count, queries: queriesUsed ?? [])))")
+                if searchEvidence.urlless > 0 { lines.append("\"search_results_seen_urlless\": \(searchEvidence.urlless)") }
+            }
+            if let priorEvidence, evidenceProvenance == .priorSourcesOnly {
+                lines.append("\"prior_extracts_in_context\": \(fragment("\(priorEvidence.extracts.inContext) of \(priorEvidence.extracts.total)"))")
+                lines.append("\"prior_search_results_in_context\": \(fragment("\(priorEvidence.searchResults.inContext) of \(priorEvidence.searchResults.total)"))")
+            }
+            if let reportPath { lines.append("\"report_path\": \(fragment(reportPath))") }
+            if let note { lines.append("\"note\": \(fragment(note))") }
+            return "{\n  " + lines.joined(separator: ",\n  ") + "\n}"
+        }
+
         /// The Web result contract as `key: value` lines for the parent-facing
         /// BACKGROUND completion message (Codex R1a review R2): the same
         /// fields `asJSON()` carries for a foreground `Agent` result —
-        /// provenance, queries, sources read, search results seen, prior
+        /// provenance, queries, sources read, search-results-seen count, prior
         /// counts, report path, backend note, model — so background delivery
         /// never drops the evidence audit trail, the fallback notice or the
         /// report locator. Empty for a non-Web run (ordinary completions are
@@ -121,7 +186,7 @@ actor SubagentRunner {
                 lines.append("sources_consulted: " + compact(sourcesConsulted.map { ["url": $0.url, "retrieved_at": ToolExecutor.webTimestamp($0.retrievedAt)] }))
             }
             if let searchEvidence {
-                lines.append("search_results_seen: " + compact(searchEvidence.hits.map { ["url": $0.url, "query": $0.query, "retrieved_at": ToolExecutor.webTimestamp($0.retrievedAt)] }))
+                lines.append("search_results_seen: " + Self.searchResultsSeenLine(hits: searchEvidence.hits.count, queries: queriesUsed ?? []))
                 if searchEvidence.urlless > 0 { lines.append("search_results_seen_urlless: \(searchEvidence.urlless)") }
             }
             if let priorEvidence, evidenceProvenance == .priorSourcesOnly {
@@ -144,7 +209,11 @@ actor SubagentRunner {
     /// The native (non-MCP, pre-bash-mapping) tool inventory of a subagent
     /// type, enforced here for every executor (matrix §4.6.1): pure, so the
     /// Web selftest asserts every reachable row directly.
-    static func nativeToolInventory(parentTools: [ToolDefinition], type subagentType: SubagentType) -> [ToolDefinition] {
+    ///
+    /// `nestingAllowed`: the executor the subagent runs on is a direct child
+    /// of the main agent (depth 1). A deeper executor never receives `Agent`
+    /// at all — the depth cap is structural (R1b, §4.6).
+    static func nativeToolInventory(parentTools: [ToolDefinition], type subagentType: SubagentType, nestingAllowed: Bool = true) -> [ToolDefinition] {
         if subagentType.isWebResearcher {
             // The Web researcher owns the pipeline's tools directly and
             // nothing else (WEB_SUBAGENT_PLAN §4.1): no bash, no files, no
@@ -152,22 +221,33 @@ actor SubagentRunner {
             return [AvailableTools.webQuery, AvailableTools.webExtract, AvailableTools.webFetchWithRefresh]
         }
         var inventory = parentTools
-        // R1a, switch on: the legacy research tools left the main list
-        // (research goes through Agent(Web)) but ordinary subagents KEEP
-        // them (matrix §4.6.1, R1a) — re-added here, ahead of the list as
-        // before, whenever the parent surface had web search (web_fetch
-        // present). Switch off: the list is the parent's, byte for byte.
+        // Switch on with web search available: the legacy research tools
+        // left the main list (research goes through Agent(Web)). R1b (matrix
+        // §4.6.1): an ELIGIBLE ordinary subagent — nil whitelist, or a
+        // whitelist that names a legacy research tool — gets the restricted
+        // delegation tool (`Agent`, enum [Web], foreground) at the head of
+        // its list in place of those tools; `web_fetch` stays where it was
+        // allowed; `subagent_manage` leaves every child (O4). Switch off:
+        // the list is the parent's, byte for byte, filtered as before.
+        var delegation: ToolDefinition? = nil
         if AvailableTools.webSubagentActive,
            inventory.contains(where: { $0.function.name == "web_fetch" }),
            !inventory.contains(where: { $0.function.name == "web_search" }) {
-            inventory = AvailableTools.legacyResearchTools + inventory
+            let eligible = subagentType.allowedToolNames.map { whitelist in
+                AvailableTools.legacyResearchTools.contains { whitelist.contains($0.function.name) }
+            } ?? true
+            if eligible && nestingAllowed { delegation = AvailableTools.agentToolForChildren }
+            inventory.removeAll { $0.function.name == "subagent_manage" }
         }
         // mid_turn_message_user is main-agent-only: subagents have no channel
         // to the user — anything user-relevant belongs in their final result.
+        // The parent's own `Agent` never reaches a child; only the restricted
+        // delegation tool does, and only through the branch above.
         var filtered = inventory.filter { $0.function.name != "Agent" && $0.function.name != "mid_turn_message_user" }
         if let whitelist = subagentType.allowedToolNames {
             filtered = filtered.filter { whitelist.contains($0.function.name) }
         }
+        if let delegation { filtered.insert(delegation, at: 0) }
         return filtered
     }
 
@@ -260,7 +340,10 @@ actor SubagentRunner {
         // 2. Build filtered tool list (rebuilt fresh each run so new MCPs are picked up).
         // mid_turn_message_user is main-agent-only: subagents have no channel to
         // the user — anything user-relevant belongs in their final result.
-        var filteredTools = Self.nativeToolInventory(parentTools: parentTools, type: subagentType)
+        // Delegation (R1b) only for a subagent running directly under the
+        // main agent; a nested Web run's executor is deeper and gets no Agent.
+        var filteredTools = Self.nativeToolInventory(parentTools: parentTools, type: subagentType,
+                                                     nestingAllowed: toolExecutor.depth <= 1)
         // Bash schema and executor capability must agree
         // (BASH_V2_SCHEMA_CLEANUP_PLAN §3.3). Subagents share the managed
         // lifecycle vocabulary but never the main conversation's lanes:
@@ -348,6 +431,15 @@ actor SubagentRunner {
         // The child executor's web tools consult and extend the ledger; the
         // runner persists it and applies compaction evictions (§4.2).
         await toolExecutor.setWebEvidenceLedger(webLedger)
+        // R1b nesting (§4.6): a Web run delegated from THIS run reports its
+        // progress to this run's beacon (read the hook the executor inherited
+        // first — it is the parent's, for a nested run — then install ours
+        // for any child executor made from this one), and is created with
+        // `via <this session>` in its description.
+        upstreamProgress = await toolExecutor.currentNestedProgressHook
+        let ownBeacon = progress
+        await toolExecutor.setNestedProgressHook { ownBeacon.mark() }
+        await toolExecutor.setNestedParentSession(resolvedSessionId)
         /// Tool-call ids still present in a (compacted) context, for the
         /// ledger's in-context flags: only a COMMITTED compaction flips them.
         func keptToolCallIds(messages: [Message], interactions: [ToolInteraction]) -> Set<String> {
@@ -518,7 +610,7 @@ actor SubagentRunner {
                providerOverride: effectiveProviderOverride,
                reasoningEffortOverride: effectiveReasoningOverride,
                textOnlyOverride: effectiveTextOnlyOverride,
-           execution: runExecution, lane: .subagent(resolvedSessionId)
+           execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle
 ) {
             messagesForLLM = compacted.messages
             priorToolInteractions = compacted.interactions
@@ -588,7 +680,7 @@ actor SubagentRunner {
                        providerOverride: effectiveProviderOverride,
                        reasoningEffortOverride: effectiveReasoningOverride,
                        textOnlyOverride: effectiveTextOnlyOverride,
-                   execution: runExecution, lane: .subagent(resolvedSessionId)
+                   execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle
 ) {
                     messagesForLLM = compacted.messages
                     toolInteractions = compacted.interactions
@@ -814,7 +906,7 @@ actor SubagentRunner {
                                    providerOverride: effectiveProviderOverride,
                                    reasoningEffortOverride: effectiveReasoningOverride,
                                    textOnlyOverride: effectiveTextOnlyOverride,
-                               execution: runExecution, lane: .subagent(resolvedSessionId)
+                               execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle
 ),
                                compacted.estimatedTokens < turnTokenBudget {
                                 messagesForLLM = compacted.messages
@@ -855,7 +947,7 @@ actor SubagentRunner {
                                        imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
                                        modelOverride: effectiveModelOverride, providerOverride: effectiveProviderOverride,
                                        reasoningEffortOverride: effectiveReasoningOverride, textOnlyOverride: effectiveTextOnlyOverride,
-                                       execution: runExecution, lane: .subagent(resolvedSessionId)),
+                                       execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle),
                                    compacted.estimatedTokens + requestOverhead < turnTokenBudget {
                                     messagesForLLM = compacted.messages
                                     toolInteractions = compacted.interactions
@@ -1435,7 +1527,8 @@ actor SubagentRunner {
         reasoningEffortOverride: String?,
         textOnlyOverride: Bool?,
         execution: ProviderExecutionContext? = nil,
-        lane: AffinityLane
+        lane: AffinityLane,
+        promptStyle: SubagentPromptStyle = .messaging
     ) async -> CompactionOutcome? {
         let plan = Self.planCompaction(
             messages: messages,
@@ -1483,7 +1576,7 @@ actor SubagentRunner {
             providerOverride: providerOverride,
             reasoningEffortOverride: reasoningEffortOverride,
             textOnlyOverride: textOnlyOverride,
-            execution: execution, lane: lane
+            execution: execution, lane: lane, promptStyle: promptStyle
         ), !Task.isCancelled else { return nil }
 
         var keptMessages = plan.keptMessages
@@ -1615,7 +1708,8 @@ actor SubagentRunner {
         reasoningEffortOverride: String?,
         textOnlyOverride: Bool?,
         execution: ProviderExecutionContext? = nil,
-        lane: AffinityLane
+        lane: AffinityLane,
+        promptStyle: SubagentPromptStyle = .messaging
     ) async -> String? {
         let execution = execution?.forOperation(.subagentCompaction)
         defer { execution?.responsesTurn.close() }
@@ -1672,6 +1766,10 @@ actor SubagentRunner {
                     documentsDirectory: documentsDirectory,
                     tools: [],
                     toolResultMessages: refusalInteractions.isEmpty ? nil : refusalInteractions,
+                    // A Web run's summarizer keeps the research prompt style
+                    // (R1b, plan §14.2): no persona/profile reaches the web
+                    // backend on this path either. Ordinary runs: .messaging.
+                    promptStyle: promptStyle,
                     tailSystemMessage: attempt == 0 ? nil : """
                     [SUMMARY RETRY \(attempt)/4]
                     The previous response attempted to call tools. Tool use is disabled for this summarization pass.
@@ -1838,11 +1936,12 @@ actor SubagentRunner {
     // MARK: - Progress Watchdog
 
     private func markProgress() {
-        lastProgressDate = Date()
+        progress.mark()
+        upstreamProgress?()
     }
 
     private func checkStaleness() throws {
-        let elapsed = Date().timeIntervalSince(lastProgressDate)
+        let elapsed = Date().timeIntervalSince(progress.lastMark)
         if elapsed > Self.stalenessTimeout {
             throw SubagentStalenessError(staleDuration: elapsed)
         }
@@ -1879,17 +1978,46 @@ actor SubagentRunner {
                 }
                 race.setExecutionTask(executionTask)
 
+                // Batch timer. An ordinary batch has one deadline, start +
+                // staleness, exactly as before. A batch that carries a nested
+                // `Agent(Web)` call (R1b, §4.6 O8) is re-armed by the child's
+                // progress marks (they land on this run's beacon through the
+                // executor hook) and bounded by the absolute nested ceiling.
+                let hasNested = calls.contains { $0.function.name == "Agent" }
+                let staleness = Self.stalenessTimeout
+                let ceiling = Self.nestedRunCeiling
+                let beacon = progress
                 let timeoutTask = Task {
-                    do {
-                        try await Task.sleep(nanoseconds: UInt64(Self.stalenessTimeout * 1_000_000_000))
-                    } catch {
-                        return
+                    let start = Date()
+                    var ceilingHit = false
+                    while true {
+                        let now = Date()
+                        let deadline: Date
+                        if hasNested {
+                            let progressDeadline = beacon.lastMark.addingTimeInterval(staleness)
+                            let hardDeadline = start.addingTimeInterval(ceiling)
+                            ceilingHit = hardDeadline <= progressDeadline
+                            deadline = min(progressDeadline, hardDeadline)
+                        } else {
+                            deadline = start.addingTimeInterval(staleness)
+                        }
+                        let remaining = deadline.timeIntervalSince(now)
+                        if remaining <= 0 { break }
+                        do {
+                            try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+                        } catch {
+                            return
+                        }
                     }
                     race.cancelExecution()
                     Task {
                         await executor.cancelAllRunningProcesses()
                     }
-                    race.resolve(.failure(SubagentStalenessError(staleDuration: Self.stalenessTimeout)))
+                    if hasNested && ceilingHit {
+                        race.resolve(.failure(SubagentNestedCeilingError(ceiling: ceiling)))
+                    } else {
+                        race.resolve(.failure(SubagentStalenessError(staleDuration: staleness)))
+                    }
                 }
                 race.setTimeoutTask(timeoutTask)
             }
@@ -1951,6 +2079,24 @@ struct SubagentStalenessError: Error, LocalizedError {
     }
 }
 
+/// A tool batch carrying a nested `Agent(Web)` run exceeded the absolute
+/// ceiling although the child kept reporting progress (§4.6 O8).
+struct SubagentNestedCeilingError: Error, LocalizedError {
+    let ceiling: TimeInterval
+    var errorDescription: String? {
+        "Subagent killed: a nested Web run exceeded the \(Int(ceiling / 60))-minute ceiling for one tool batch"
+    }
+}
+
+/// Lock-guarded "last progress" instant shared between a runner and its
+/// batch timer task (and, for a nested run, written by the child's runner).
+final class ProgressBeacon: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last = Date()
+    func mark() { lock.lock(); last = Date(); lock.unlock() }
+    var lastMark: Date { lock.lock(); defer { lock.unlock() }; return last }
+}
+
 private final class ToolExecutionTimeoutRace {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<[ToolResultMessage], Error>?
@@ -2009,7 +2155,7 @@ private final class ToolExecutionTimeoutRace {
         lock.unlock()
 
         timeoutTask?.cancel()
-        if case .failure(let error) = result, error is SubagentStalenessError {
+        if case .failure(let error) = result, error is SubagentStalenessError || error is SubagentNestedCeilingError {
             executionTask?.cancel()
         }
 

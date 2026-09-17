@@ -177,10 +177,14 @@ extension WebSubagentSelftest {
             let onMain = toolNames(onParent)
             let onGeneral = names(SubagentTypes.generalPurpose, onParent), onCustom = names(custom, onParent), onTriage = names(SubagentTypes.watcherTriage, onParent)
             let onWeb = names(SubagentTypes.webResearcher, onParent)
-            check("11.2 switch on (R1a): main = web_fetch + Agent(Web), no legacy; general-purpose keeps the legacy tools + web_fetch, no Agent; custom unchanged; Web = its three; triage unchanged",
+            let onGeneralAgent = SubagentRunner.nativeToolInventory(parentTools: onParent, type: SubagentTypes.generalPurpose).first { $0.function.name == "Agent" }
+            check("11.2 switch on (R1b): main = web_fetch + Agent(Web), no legacy; general-purpose = Agent(Web) at the head + web_fetch, no legacy research tools, no web_query/web_extract, no subagent_manage; custom naming web_search = Agent(Web) + web_fetch + read_file; Web = its three; triage unchanged",
                   onMain.first == "web_fetch" && onMain.contains("Agent") && !onMain.contains("web_search")
-                  && onGeneral.prefix(3) == ["web_search", "web_research_sweep", "web_fetch"] && !onGeneral.contains("Agent") && !onGeneral.contains("web_query")
-                  && onCustom == ["web_search", "web_fetch", "read_file"] && onWeb == ["web_query", "web_extract", "web_fetch"] && onTriage == offTriage,
+                  && onGeneral.prefix(2) == ["Agent", "web_fetch"] && !onGeneral.contains("web_search") && !onGeneral.contains("web_research_sweep")
+                  && !onGeneral.contains("web_query") && !onGeneral.contains("web_extract") && !onGeneral.contains("subagent_manage") && !onGeneral.contains("mid_turn_message_user")
+                  && onGeneralAgent?.function.parameters.properties["subagent_type"]?.enumValues == ["Web"] && onGeneralAgent?.function.parameters.properties["run_in_background"] == nil
+                  && onGeneralAgent?.function.parameters.properties["deliverable"] != nil && onGeneralAgent?.function.parameters.properties["session_id"] != nil && onGeneralAgent?.function.parameters.properties["model"] != nil
+                  && onCustom == ["Agent", "web_fetch", "read_file"] && onWeb == ["web_query", "web_extract", "web_fetch"] && onTriage == offTriage,
                   onGeneral.prefix(4).joined(separator: ",") + " | " + onCustom.joined(separator: ","))
             check("11.3 switch off restores every inventory to its baseline bytes",
                   { state.webFlag = false; defer { state.webFlag = true }
@@ -271,11 +275,12 @@ extension WebSubagentSelftest {
             let ask = SubagentRunner.Invocation(subagentType: "web", description: "search-only", taskPrompt: "Find alpha using search snippets.", modelOverride: nil, runInBackground: false, deliverable: .short)
             let searched = await runner.run(invocation: ask, sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             let searchedJSON = resultJSON(searched)
-            let seen = searchedJSON["search_results_seen"] as? [[String: Any]] ?? []
-            check("13.4 R3: a search-only run — retrieved_this_run, sources_consulted EMPTY (nothing read), search_results_seen lists the hits with query and retrieved_at",
+            let seen = searched.searchEvidence?.hits ?? []
+            check("13.4 R3: a search-only run — retrieved_this_run, sources_consulted EMPTY (nothing read), the ledger holds the hits with query and retrieved_at, the packet carries only their count (R1b §14.4)",
                   searched.error == nil && searched.evidenceProvenance == .retrievedThisRun && (searchedJSON["sources_consulted"] as? [[String: Any]])?.isEmpty == true
-                  && seen.map { $0["url"] as? String } == ["https://example.test/alpha", "https://example.test/alpha-2"]
-                  && seen.allSatisfy { $0["query"] as? String == "alpha" && ($0["retrieved_at"] as? String)?.hasPrefix("2026-04-10 10:00:00") == true }, searched.asJSON())
+                  && seen.map { $0.url } == ["https://example.test/alpha", "https://example.test/alpha-2"]
+                  && seen.allSatisfy { $0.query == "alpha" && ToolExecutor.webTimestamp($0.retrievedAt).hasPrefix("2026-04-10 10:00:00") }
+                  && searchedJSON["search_results_seen"] as? String == "2 results across 1 queries", searched.asJSON())
             // N1: a lowercase invocation runs the Web preset and lives in the Web pool under the canonical name.
             let savedSearch = await SubagentSessionRegistry.shared.get(searched.sessionId)
             await SubagentSessionRegistry.shared.reloadFromDisk()
@@ -326,7 +331,7 @@ extension WebSubagentSelftest {
                                              sessionId: boxRun.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             let boxEvidence = await SubagentSessionRegistry.shared.get(boxRun.sessionId)?.webEvidence ?? []
             check("13.8 R3: answer-box-only evidence — retrieved_this_run, no hit URLs, search_results_seen_urlless = 1, record with an EMPTY url (none invented); the follow-up counts it as 1 of 1 search results",
-                  boxRun.evidenceProvenance == .retrievedThisRun && (resultJSON(boxRun)["search_results_seen"] as? [[String: Any]])?.isEmpty == true
+                  boxRun.evidenceProvenance == .retrievedThisRun && resultJSON(boxRun)["search_results_seen"] as? String == "0 results across 1 queries"
                   && resultJSON(boxRun)["search_results_seen_urlless"] as? Int == 1 && boxEvidence.count == 1 && boxEvidence[0].url == "" && boxEvidence[0].isExtract == false
                   && boxFollow.evidenceProvenance == .priorSourcesOnly && resultJSON(boxFollow)["prior_search_results_in_context"] as? String == "1 of 1", boxRun.asJSON())
             // Compaction of the search result's round flips the search records' flags.
@@ -415,7 +420,7 @@ extension WebSubagentSelftest {
             check("13.14 R2: a background Web run's [SUBAGENT COMPLETE] message (the manager's template) carries evidence_provenance, queries_used, sources_consulted, search_results_seen, report_path, the backend-fallback note and model_used, before final_message",
                   completions.count == 1 && bgResult?.error == nil
                   && bgLines.contains("evidence_provenance: retrieved_this_run") && bgLines.contains("queries_used: [\"kappa\"]")
-                  && bgLines.contains("sources_consulted: []") && bgLines.contains { $0.hasPrefix("search_results_seen: [{") && $0.contains("\"url\":\"https://example.test/kappa\"") }
+                  && bgLines.contains("sources_consulted: []") && bgLines.contains("search_results_seen: 2 results across 1 queries") && !bgBody.contains("https://example.test/kappa-2")
                   && bgLines.contains { $0.hasPrefix("report_path: ") && $0.hasSuffix(".md") && FileManager.default.fileExists(atPath: String($0.dropFirst("report_path: ".count))) }
                   && bgLines.contains { $0.hasPrefix("note: web backend unavailable") } && bgLines.contains("model_used: main-model (inherited)")
                   && (bgLines.firstIndex(of: "final_message:") ?? -1) > (bgLines.firstIndex { $0.hasPrefix("report_path: ") } ?? Int.max)
@@ -433,7 +438,7 @@ extension WebSubagentSelftest {
             let ordinaryBody = ConversationManager.backgroundSubagentCompletionBody(SubagentBackgroundRegistry.Completion(handle: SubagentBackgroundRegistry.Handle(id: "subagent_2", subagentType: "general-purpose", description: "g", startedAt: state.clock), result: ordinary, completedAt: state.clock), durationStr: "3.5s")
             let legacyLayout = "[SUBAGENT COMPLETE]\nhandle: subagent_2\nsubagent_type: general-purpose\ndescription: g\nsession_id: zzzzz\nturns_used: 1\ntools_called: (none)\nfiles_touched: /tmp/x\nspend_usd: 0.5000\nduration: 3.5s\nfinal_message:\ndone"
             check("13.15 R2: failed/partial Web result → contract lines then error + 'final_message (possibly partial)'; prior counts for both classes; urlless count; an ordinary run's message is the legacy layout byte for byte",
-                  failedBody.contains("\nevidence_provenance: prior_sources_only\nqueries_used: [\"a\"]\nsources_consulted: [{\"retrieved_at\":\"\(ToolExecutor.webTimestamp(state.clock))\",\"url\":\"https://example.test/a\"}]\nsearch_results_seen: []\nsearch_results_seen_urlless: 2\nprior_extracts_in_context: 1 of 2\nprior_search_results_in_context: 0 of 3\nmodel_used: mimo-v2.5 (web backend: opencode)\nerror: web_tools_failed: search — boom\nfinal_message (possibly partial):\npartial")
+                  failedBody.contains("\nevidence_provenance: prior_sources_only\nqueries_used: [\"a\"]\nsources_consulted: [{\"retrieved_at\":\"\(ToolExecutor.webTimestamp(state.clock))\",\"url\":\"https://example.test/a\"}]\nsearch_results_seen: 0 results across 1 queries\nsearch_results_seen_urlless: 2\nprior_extracts_in_context: 1 of 2\nprior_search_results_in_context: 0 of 3\nmodel_used: mimo-v2.5 (web backend: opencode)\nerror: web_tools_failed: search — boom\nfinal_message (possibly partial):\npartial")
                   && ordinaryBody == legacyLayout, failedBody + "\n---\n" + ordinaryBody)
 
             // ---- N2: report files are payload — full Mind export carries them, lite skips them, /deleteuserdata targets them.

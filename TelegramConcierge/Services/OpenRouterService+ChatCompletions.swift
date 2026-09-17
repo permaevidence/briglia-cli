@@ -353,10 +353,10 @@ extension OpenRouterService {
         // drift in "running 12s / 35s / 1m 02s" does not invalidate any cached prefix.
         // Omitted entirely when nothing is running to avoid noise.
         var ambientLines: [String] = []
-        if let bashLive = await BackgroundProcessRegistry.shared.liveSummaryText() {
+        if !conversation.omitAmbientStatus, let bashLive = await BackgroundProcessRegistry.shared.liveSummaryText() {
             ambientLines.append(bashLive)
         }
-        if let subagentLive = await SubagentBackgroundRegistry.shared.liveSummary() {
+        if !conversation.omitAmbientStatus, let subagentLive = await SubagentBackgroundRegistry.shared.liveSummary() {
             ambientLines.append(subagentLive)
         }
         if !ambientLines.isEmpty {

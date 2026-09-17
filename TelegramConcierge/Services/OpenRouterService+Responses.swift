@@ -189,8 +189,8 @@ extension OpenRouterService {
             input.append(ResponsesAdapter.message(role: "user", text: MarkerNeutralizer.escape(tail)))
         }
         var ambient: [String] = []
-        if let bash = await BackgroundProcessRegistry.shared.liveSummaryText() { ambient.append(bash) }
-        if let subagents = await SubagentBackgroundRegistry.shared.liveSummary() { ambient.append(subagents) }
+        if !conversation.omitAmbientStatus, let bash = await BackgroundProcessRegistry.shared.liveSummaryText() { ambient.append(bash) }
+        if !conversation.omitAmbientStatus, let subagents = await SubagentBackgroundRegistry.shared.liveSummary() { ambient.append(subagents) }
         if !ambient.isEmpty {
             input.append(ResponsesAdapter.message(role: "user", text: MarkerNeutralizer.escape(
                 "[Ambient status — not a user message]\n" + ambient.joined(separator: "\n"))))

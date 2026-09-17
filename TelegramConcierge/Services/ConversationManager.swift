@@ -5001,7 +5001,7 @@ class ConversationManager: ObservableObject {
         }
         switchDefaults.set(target, forKey: "ada.webSubagentEnabled")
         try? await sendText(target
-            ? "✅ Web research subagent ON — from the next message, web research goes through Agent(subagent_type=Web); web_search and web_research_sweep are removed from the main agent, web_fetch gains refresh. \(availability)."
+            ? "✅ Web research subagent ON — from the next message, web research goes through Agent(subagent_type=Web); web_search and web_research_sweep are removed from the main agent and from ordinary subagents (they delegate to Web instead), web_fetch gains refresh. \(availability)."
             : "✅ Web research subagent OFF — the legacy web_search and web_research_sweep tools are back from the next message. Re-enable with /websubagent on.")
     }
 

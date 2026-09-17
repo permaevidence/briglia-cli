@@ -13,6 +13,11 @@ struct PreparedConversation {
     let toolResultMessages: [ToolInteraction]?
     let tailSystemMessage: String?
     let tailUserMessage: String?
+    /// Research-style requests (the Web researcher, R1b plan §14.3) get no
+    /// `[Ambient status]` tail: the researcher has neither bash_manage nor
+    /// Agent, so the block is useless to it and would leak what the main
+    /// agent is running elsewhere. Every other request keeps it.
+    var omitAmbientStatus: Bool = false
 }
 
 /// Immutable configuration for one existing generateResponse invocation and all

@@ -1564,14 +1564,12 @@ enum AvailableTools {
     /// appear in the schema only when web search is available AND the Web
     /// switch is on, so the wire/lifecycle drivers stay deterministic and the
     /// two gates can never disagree (WEB_SUBAGENT_PLAN §4.1, §4.3).
-    static func agentTool(webSearchAvailable: Bool) -> ToolDefinition {
-        let allSubagents = SubagentTypes.all(webSearchAvailable: webSearchAvailable)
-        let webPresent = allSubagents.contains { $0.isWebResearcher }
-        let subagentNames = allSubagents.map { $0.name }
-        // The main agent picks a model INTENT, never a concrete model id:
-        // "inherit" or one of the user-configured cheap lanes
-        // (/subagentmodels, stored per provider). Only configured lanes are
-        // offered — an empty configuration leaves just "inherit".
+    /// The `model` parameter of the Agent tool (main and children alike): a
+    /// model INTENT, never a concrete model id — "inherit" or one of the
+    /// user-configured cheap lanes (/subagentmodels, stored per provider).
+    /// Only configured lanes are offered; an empty configuration leaves just
+    /// "inherit".
+    static func agentModelParameter() -> ParameterProperty {
         let configuredLanes = SubagentModelLanes.configuredLanes()
         let modelEnumValues = ["inherit"] + configuredLanes.map { $0.lane.rawValue }
         let modelDescription: String
@@ -1588,6 +1586,21 @@ enum AvailableTools {
             }
             modelDescription = "Optional model for this run. 'inherit' (default) = no per-call preference: the subagent runs its own frontmatter lane default if it declares one, otherwise the parent model. Use it whenever the task needs full capability. Cheap lanes, configured by the user, for mechanical or low-difficulty tasks (bulk file reads, simple searches, formatting, high-volume triage): \(laneLines.joined(separator: "; ")). When unsure, inherit."
         }
+        return ParameterProperty(type: "string", description: modelDescription, enumValues: modelEnumValues)
+    }
+
+    /// The `deliverable` parameter, present only when the built-in Web
+    /// researcher is in the enum (main tool) or is the only type (children).
+    static let webDeliverableParameter = ParameterProperty(
+        type: "string",
+        description: "Only for subagent_type=Web. How much to return: short = a few sentences, standard = one or two screens, report = a complete written report. Ignored for other types.",
+        enumValues: ["short", "standard", "report"])
+
+    static func agentTool(webSearchAvailable: Bool) -> ToolDefinition {
+        let allSubagents = SubagentTypes.all(webSearchAvailable: webSearchAvailable)
+        let webPresent = allSubagents.contains { $0.isWebResearcher }
+        let subagentNames = allSubagents.map { $0.name }
+        let modelParameter = agentModelParameter()
         let listing = allSubagents
             .map { agentListingLine(for: $0, webPresent: webPresent) }
             .joined(separator: "\n")
@@ -1611,7 +1624,7 @@ enum AvailableTools {
         - **Foreground vs background**: Use foreground (default) when you need the subagent's results before you can proceed. Use background when you have genuinely independent work to do in parallel.
         - To continue a previously spawned subagent, pass its session_id — that resumes it with full context. A new Agent call starts a fresh subagent with no memory of prior runs. Resume is useful to ask follow up or qualifying questions to a subagent that has already done the work.
         - Clearly tell the subagent whether you expect it to write code or just do research (search, file reads, web fetches), since it is not aware of the user's intent.
-        - Subagents CANNOT spawn other subagents. Provide a self-contained prompt — the subagent sees none of your conversation history.\(webPresent ? "\n" + webResearcherUsageNotes : "")
+        \(webPresent ? nestingSentenceWhileWebPresent : "- Subagents CANNOT spawn other subagents. Provide a self-contained prompt — the subagent sees none of your conversation history.")\(webPresent ? "\n" + webResearcherUsageNotes : "")
 
         ## Writing the prompt
 
@@ -1652,16 +1665,63 @@ enum AvailableTools {
                             type: "boolean",
                             description: "Optional. When true, run the subagent in the background and receive a synthetic [SUBAGENT COMPLETE] user message when it finishes. Useful for long-running research or exploration tasks so the parent can continue in parallel. Default false (synchronous)."
                         ),
-                        "model": ParameterProperty(
+                        "model": modelParameter
+                    ].merging(webPresent ? ["deliverable": webDeliverableParameter] : [:]) { current, _ in current },
+                    required: ["subagent_type", "description", "prompt"]
+                )
+            )
+        )
+    }
+
+    /// The nesting bullet of the main Agent tool while the Web researcher is
+    /// present (R1b, WEB_SUBAGENT_PLAN §4.6.1): ordinary subagents may
+    /// delegate web research one level down and nothing else. Absent Web,
+    /// the legacy "CANNOT spawn" bullet, byte for byte.
+    static let nestingSentenceWhileWebPresent = "- Subagents cannot spawn other subagents, except that any subagent may delegate web research to a Web subagent (one level, foreground only). Provide a self-contained prompt — the subagent sees none of your conversation history."
+
+    /// The `Agent` tool an ordinary subagent receives while the Web
+    /// researcher is available (R1b, §4.6): `subagent_type` enum `[Web]`
+    /// only, no `run_in_background`, the shared `model`, `session_id` and
+    /// `deliverable` parameters, and a description reduced to the Web use.
+    /// The Web researcher itself never receives it, so research is at most
+    /// one level deep. Computed, so the model lanes it lists are current.
+    static var agentToolForChildren: ToolDefinition {
+        let description = """
+        Delegate web research to the Web subagent: a resumable researcher with its own context that searches, reads pages and returns an answer or a written report with provenance. Use it for any lookup, fact check or reading of public pages instead of pulling page extracts into your own context (web_fetch stays for reading one known URL). Web is the only subagent you can start, only in the foreground, and it cannot start anything itself.
+
+        ## Usage notes
+
+        - The researcher sees none of your context and not the user's profile: write a self-contained task — what you need and why, what is already known, and any country, language or date constraints.
+        - State the deliverable: short = a few sentences, standard = one or two screens, report = a complete written report.
+        - Its result carries evidence_provenance, queries_used, sources_consulted (pages it read, with retrieval times) and a search_results_seen count. Say when an answer relies on retained history or when the searches found nothing; a [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim.
+        - Pass session_id to ask a follow-up in the same research session; every result returns one.
+        """
+        return ToolDefinition(
+            function: FunctionDefinition(
+                name: "Agent",
+                description: description,
+                parameters: FunctionParameters(
+                    properties: [
+                        "subagent_type": ParameterProperty(
                             type: "string",
-                            description: modelDescription,
-                            enumValues: modelEnumValues
-                        )
-                    ].merging(webPresent ? ["deliverable": ParameterProperty(
+                            description: "Always Web: the built-in web researcher (for new sessions and resumes alike).",
+                            enumValues: [SubagentTypes.webResearcherName]
+                        ),
+                        "description": ParameterProperty(
                             type: "string",
-                            description: "Only for subagent_type=Web. How much to return: short = a few sentences, standard = one or two screens, report = a complete written report. Ignored for other types.",
-                            enumValues: ["short", "standard", "report"]
-                        )] : [:]) { current, _ in current },
+                            description: "A short (3-5 word) description of the research task. Used for progress display."
+                        ),
+                        "prompt": ParameterProperty(
+                            type: "string",
+                            description: "The research task or continuation message. For new sessions: the full self-contained question with its context. For resumed sessions: the follow-up (the researcher already has its prior context)."
+                        ),
+                        "session_id": ParameterProperty(
+                            type: "string",
+                            description: "Optional. Pass a session_id from a prior Agent result to continue that research session with its evidence intact. Omit to start a fresh session."
+                        ),
+                        "model": agentModelParameter(),
+                        "deliverable": webDeliverableParameter
+                    ],
                     required: ["subagent_type", "description", "prompt"]
                 )
             )
@@ -1695,7 +1755,7 @@ enum AvailableTools {
 
     static let browseScopeWhileWebPresent = " — only when the task needs to OPERATE a browser (log in, click, fill forms, pages that render only with JavaScript, sites needing a session); reading and researching the public web is Web's job, not Browse's"
 
-    static let webResearcherUsageNotes = "- Web research: use subagent_type=Web instead of searching yourself — for any lookup, fact check, or reading of public pages. Browse (when listed) is only for operating a browser: logging in, clicking, filling forms, JavaScript-only pages, sites needing a session; never for plain research. State the expected deliverable (short | standard | report). Its result carries evidence_provenance, queries_used, sources_consulted (pages it read) and search_results_seen (results it only saw): carry the provenance into your answer — say when an answer relies on evidence retained from earlier runs, when the searches found nothing, and what could not be verified. A [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim. Resume the same Web session (session_id) for follow-ups; web sessions are listed in their own section of subagent_manage(list_sessions)."
+    static let webResearcherUsageNotes = "- Web research: use subagent_type=Web instead of searching yourself — for any lookup, fact check, or reading of public pages. Browse (when listed) is only for operating a browser: logging in, clicking, filling forms, JavaScript-only pages, sites needing a session; never for plain research. The researcher sees none of this conversation and not the user's profile: put country, language, constraints and what is already known in the task text. State the expected deliverable (short | standard | report). Its result carries evidence_provenance, queries_used, sources_consulted (pages it read, with retrieval times) and a search_results_seen count (results it only saw): carry the provenance into your answer — say when an answer relies on evidence retained from earlier runs, when the searches found nothing, and what could not be verified. A [NO USABLE EVIDENCE …] or [FROM RETAINED HISTORY …] prefix on final_message is guidance for you, not text to relay verbatim. Resume the same Web session (session_id) for follow-ups; web sessions are listed in their own section of subagent_manage(list_sessions)."
 
     static var subagentManage: ToolDefinition { subagentManage(webSearchAvailable: true) }
 
