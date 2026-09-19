@@ -4684,12 +4684,7 @@ class ConversationManager: ObservableObject {
 
         var stored = value
         var note = ""
-        if isOpenCode {
-            guard let match = OpenCodeGo.choices.first(where: { $0.id.lowercased() == value.lowercased() }) else {
-                let ids = OpenCodeGo.choices.map { "\($0.id) (\($0.textOnly ? "text-only" : "vision"))" }.joined(separator: ", ")
-                try? await sendText("Unknown OpenCode Go model \"\(value)\". Catalog: \(ids)")
-                return
-            }
+        if isOpenCode, let match = OpenCodeGo.choices.first(where: { $0.id.lowercased() == value.lowercased() }) {
             if lane == .cheapVision && match.textOnly {
                 try? await sendText("✖ \(match.id) is text-only on the Go gateway — it can't serve the vision lane. Put it in the text lane (/subagentmodels text \(match.id)) or pick a vision-capable model.")
                 return
@@ -4698,6 +4693,13 @@ class ConversationManager: ObservableObject {
             if lane == .cheapText && !match.textOnly {
                 note = " Note: \(match.id) is vision-capable, but the text lane always OCR-preprocesses images — a vision model there works, it just wastes its vision."
             }
+        } else if isOpenCode {
+            // Outside the curated catalog (a retired entry or a newer id the
+            // Go gateway serves): accept as typed, exactly like /model does,
+            // and say what could not be checked.
+            note = lane == .cheapVision
+                ? " Not in the curated OpenCode catalog — make sure the Go gateway serves it and that it accepts images; the vision lane sends them natively."
+                : " Not in the curated OpenCode catalog — make sure the Go gateway serves it."
         } else if lane == .cheapVision {
             note = " Make sure this model actually accepts images — the vision lane sends them natively."
         }

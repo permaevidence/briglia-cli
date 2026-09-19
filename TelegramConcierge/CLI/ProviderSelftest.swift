@@ -154,6 +154,29 @@ struct ProviderSelftest: AsyncParsableCommand {
         check("catalogEntry(for:) is exact for non-aliased ids",
               OpenCodeGo.catalogEntry(for: "deepseek-v4.1-flash")?.id == "deepseek-v4.1-flash"
               && OpenCodeGo.catalogEntry(for: "not-a-model") == nil)
+        // 5d'. Curated picker trim + company grouping (owner, 2026-09-19).
+        // The retired ids are out of every picker but stay typeable into
+        // /model, so the reasoning predicates must keep recognizing them.
+        for retired in ["glm-5.3", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] {
+            check("retired OpenCode id \(retired) is out of the curated catalog",
+                  !OpenCodeGo.choices.contains(where: { $0.id == retired })
+                  && OpenCodeGo.catalogEntry(for: retired) == nil)
+            check("retired OpenCode id \(retired) still drives reasoning_content when typed",
+                  OpenRouterService.isOpenCodeReasoningContentModel(retired))
+        }
+        let curatedIds = OpenCodeGo.choices.map(\.id)
+        check("curated catalog keeps the default first",
+              curatedIds.first == OpenCodeGo.defaultModel)
+        check("curated catalog has no duplicate ids",
+              Set(curatedIds).count == curatedIds.count)
+        let kimiPositions = curatedIds.indices.filter { curatedIds[$0].hasPrefix("kimi-") }
+        check("curated catalog groups Kimi together, newest first",
+              curatedIds.filter { $0.hasPrefix("kimi-") } == ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6"]
+              && kimiPositions.count == 3 && kimiPositions[2] - kimiPositions[0] == 2)
+        check("DeepSeek V4.1 Flash is the only curated DeepSeek entry",
+              curatedIds.filter { $0.hasPrefix("deepseek") } == ["deepseek-v4.1-flash"])
+        check("Luna is the only curated text-only entry",
+              OpenCodeGo.choices.filter(\.textOnly).map(\.id) == ["gpt-5.6-luna"])
         // 5e. The doctor's legacy-alias nudge is OpenCode-only (Codex S1): a
         // custom or local server may serve its own "deepseek-flash".
         let opencodeURL = OpenCodeGo.baseURL

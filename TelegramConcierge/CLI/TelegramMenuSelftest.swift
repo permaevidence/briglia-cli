@@ -101,9 +101,9 @@ struct TelegramMenuSelftest: ParsableCommand {
         check("model menu (OpenCode): one row per catalog entry in catalog order, bound to the profile, then the typed-model button",
               ocData == OpenCodeGo.choices.map { ["bm1:m:opencode:\($0.id)"] } + [["bm1:m:?"]], "\(ocData)")
         let kimiRow = ocMenu.rows.first { $0.first?.data == "bm1:m:opencode:kimi-k3" }?.first
-        let textOnlyRow = ocMenu.rows.first { $0.first?.data == "bm1:m:opencode:glm-5.3" }?.first
+        let textOnlyRow = ocMenu.rows.first { $0.first?.data == "bm1:m:opencode:gpt-5.6-luna" }?.first
         check("model menu (OpenCode): active model ticked, text-only models tagged, typed button last",
-              kimiRow?.label == "✓ Kimi K3" && textOnlyRow?.label == "GLM 5.3 · text-only"
+              kimiRow?.label == "✓ Kimi K3" && textOnlyRow?.label == "GPT 5.6 Luna · text-only"
               && ocMenu.rows.last?.first?.label == "Type a model name…" && ocMenu.text.contains("Current model: kimi-k3"))
         let gptMenu = Menu.modelMenu(catalog: .chatgpt, profile: "chatgpt", current: "gpt-6-astra")
         check("model menu (ChatGPT): exactly Luna, Terra, Sol, Astra bound to chatgpt + typed button",

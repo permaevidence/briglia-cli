@@ -1094,60 +1094,59 @@ enum OpenCodeGo {
         let canonical = legacyAliases[id.lowercased()] ?? id
         return choices.first(where: { $0.id == canonical })
     }
+    /// Curated picker order (owner, 2026-09-19): the default first (the
+    /// wizard's "Model [1]" and the UT app's preselection read choices[0]),
+    /// then one block per upstream company, newest version first inside a
+    /// block. The Telegram /model buttons, the /model text listing, the
+    /// setup-api `opencode_catalog` and the Quick Setup page all render this
+    /// array in order, so the grouping lives here only.
+    /// Retired from the picker on 2026-09-19 (owner): "glm-5.3" (text-only),
+    /// "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp".
+    /// They stay selectable by typing the id into /model and the reasoning
+    /// predicates in OpenRouterService still recognize them; installs that
+    /// keep one stored are untouched (the picker is display only).
     static let choices: [(id: String, label: String, textOnly: Bool)] = [
-        // Multimodal sibling of GLM 5.3 with the same reasoning contract:
-        // reasoning_content on plain + tool-call turns, replay accepted,
-        // implicit prefix caching, reasoning_tokens/cached_tokens in usage,
-        // effort restricted to low/high/max. Briglia's 5.3 effort remap and
-        // thinking-flag omission match on the "glm-5.3" substring, so both
-        // apply automatically. Full vision through the Go gateway (data-URL
-        // image parts, layout-describe verified) — verified 2026-08-26.
+        // Zhipu — the default. Multimodal sibling of GLM 5.3 with the same
+        // reasoning contract: reasoning_content on plain + tool-call turns,
+        // replay accepted, implicit prefix caching, reasoning_tokens/
+        // cached_tokens in usage, effort restricted to low/high/max.
+        // Briglia's 5.3 effort remap and thinking-flag omission match on the
+        // "glm-5.3" substring, so both apply automatically. Full vision
+        // through the Go gateway (data-URL image parts, layout-describe
+        // verified) — verified 2026-08-26.
         ("glm-5.3-flash", "GLM 5.3 Flash", false),
-        ("kimi-k2.6", "Kimi K2.6", false),
-        // reasoning_content on plain + tool-call turns, replay accepted,
-        // implicit prefix caching; effort restricted to low/high/max (Briglia
-        // remaps minimal/medium/xhigh), thinking flag must stay omitted,
-        // images rejected — verified 2026-08-14, replacing glm-5.2.
-        ("glm-5.3", "GLM 5.3", true),
-        ("deepseek-v4-pro", "DeepSeek V4 Pro", true),
-        // Hosted only in China: without the per-workspace "Chinese models"
-        // opt-in on opencode.ai the gateway returns a RegionError. With the
-        // opt-in it behaves exactly like V4 Pro (reasoning_content, tool
-        // replay, all effort levels; images rejected — verified 2026-08-05).
-        ("deepseek-v4-flash", "DeepSeek V4 Flash (requires China opt-in)", true),
-        // NOT China-gated, unlike its -flash/-pro siblings. Full vision
-        // (data-URL image parts), reasoning_content on plain/tool-call/
-        // post-tool turns, tool + reasoning replay accepted, all six effort
-        // levels unchanged, thinking:{enabled} honored, implicit prefix
-        // caching — verified 2026-08-22. "-exp" = experimental upstream:
-        // may be renamed, repriced, or gated later.
-        ("deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision (experimental)", false),
-        // DeepSeek V4.1 Flash (models.dev opencode-go, released 2026-09-10).
-        // It first appeared as the unversioned "deepseek-flash"; models.dev
-        // renamed the entry to "deepseek-v4.1-flash" later the same day and
-        // the gateway serves both ids (verified: same prompt_tokens, reasoning
-        // and vision on both). Installs that picked the model before the
-        // rename keep "deepseek-flash" stored; the reasoning predicates still
-        // recognize it and `briglia doctor` nudges them to re-select.
-        // Same contract as the V4 entries, verified live 2026-09-10 side by side with
-        // deepseek-v4-flash-vision-exp: reasoning_content on plain and
-        // tool-call turns, replay with/without reasoning_content accepted,
-        // all six effort levels unchanged, thinking:{enabled} honored,
-        // prefix caching (cached_tokens), full vision through data-URL image
-        // parts, reasoning_tokens in usage. $0.15/$0.60 per M tokens, 1M
-        // context. Region gating unverified: probed from a workspace that
-        // already has the "Chinese models" opt-in.
-        ("deepseek-v4.1-flash", "DeepSeek V4.1 Flash", false),
-        // Multimodal upstream, but the Go gateway short-circuits image parts
-        // (empty synthetic completion, no usage) as of 2026-08-02.
-        ("gpt-5.6-luna", "GPT 5.6 Luna", true),
-        ("kimi-k2.7-code", "Kimi K2.7 Code", false),
+        // Moonshot, newest first.
         ("kimi-k3", "Kimi K3", false),
-        ("minimax-m3", "MiniMax M3", false),
-        // Full vision through the Go gateway (unlike Luna), reasoning_content
-        // on plain and tool-call turns, replay with/without reasoning, all
-        // effort levels accepted unchanged, long-prefix implicit caching —
-        // verified 2026-08-11.
+        ("kimi-k2.7-code", "Kimi K2.7 Code", false),
+        ("kimi-k2.6", "Kimi K2.6", false),
+        // DeepSeek — only V4.1 Flash is curated (models.dev opencode-go,
+        // released 2026-09-10). It first appeared as the unversioned
+        // "deepseek-flash"; models.dev renamed the entry to
+        // "deepseek-v4.1-flash" later the same day and the gateway serves
+        // both ids (verified: same prompt_tokens, reasoning and vision on
+        // both). Installs that picked the model before the rename keep
+        // "deepseek-flash" stored; the reasoning predicates still recognize
+        // it and `briglia doctor` nudges them to re-select. Verified live
+        // 2026-09-10 side by side with deepseek-v4-flash-vision-exp:
+        // reasoning_content on plain and tool-call turns, replay with/
+        // without reasoning_content accepted, all six effort levels
+        // unchanged, thinking:{enabled} honored, prefix caching
+        // (cached_tokens), full vision through data-URL image parts,
+        // reasoning_tokens in usage. $0.15/$0.60 per M tokens, 1M context.
+        // Region gating: since 2026-09-15 every DeepSeek id on the Go
+        // gateway returns RegionError unless the workspace has the
+        // "Chinese models" opt-in.
+        ("deepseek-v4.1-flash", "DeepSeek V4.1 Flash", false),
+        // Alibaba. Full vision through the Go gateway (unlike Luna),
+        // reasoning_content on plain and tool-call turns, replay with/
+        // without reasoning, all effort levels accepted unchanged,
+        // long-prefix implicit caching — verified 2026-08-11.
         ("qwen3.8-max", "Qwen 3.8 Max", false),
+        // MiniMax.
+        ("minimax-m3", "MiniMax M3", false),
+        // OpenAI. Multimodal upstream, but the Go gateway short-circuits
+        // image parts (empty synthetic completion, no usage) as of
+        // 2026-08-02.
+        ("gpt-5.6-luna", "GPT 5.6 Luna", true),
     ]
 }

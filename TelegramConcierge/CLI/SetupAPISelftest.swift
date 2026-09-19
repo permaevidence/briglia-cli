@@ -240,7 +240,7 @@ struct SetupAPISelftest: AsyncParsableCommand {
             check("apply provider: missing model → missing_field",
                   errorCode(noModel) == "missing_field")
             let noKey = await SetupAPICore.apply(
-                ["provider": ["profile": "opencode", "model": "glm-5.3"]])
+                ["provider": ["profile": "opencode", "model": "gpt-5.6-luna"]])
             check("apply provider: no key and none stored → missing_field naming api_key",
                   errorCode(noKey) == "missing_field"
                   && ((noKey["error"] as? [String: Any])?["message"] as? String ?? "").contains("api_key"))
@@ -293,25 +293,25 @@ struct SetupAPISelftest: AsyncParsableCommand {
         do {
             let result = await SetupAPICore.apply(
                 ["provider": ["profile": "opencode", "api_key": "sk-test-0123456789abcdef",
-                              "model": "glm-5.3"]])
+                              "model": "gpt-5.6-luna"]])
             check("apply provider: opencode accepted", isOK(result),
                   errorCode(result))
             check("apply provider: first profile auto-activated",
                   ProviderProfiles.activeProfile() == .opencode)
-            check("apply provider: catalog derived text_only for glm-5.3",
+            check("apply provider: catalog derived text_only for gpt-5.6-luna",
                   ProviderProfiles.textOnly(.opencode) == true
                   && KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey) == "true")
             check("apply provider: runtime slots point at OpenCode",
                   (KeychainHelper.load(key: KeychainHelper.openAICompatibleBaseURLKey) ?? "")
                       .contains("opencode.ai")
-                  && KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) == "glm-5.3")
+                  && KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) == "gpt-5.6-luna")
             let status = await SetupAPICore.status()
             let providers = status["providers"] as? [String: Any]
             let entry = (providers?["profiles"] as? [String: Any])?["opencode"] as? [String: Any]
             check("status reflects applied provider (active, masked key, effort)",
                   providers?["active"] as? String == "opencode"
                   && entry?["configured"] as? Bool == true
-                  && entry?["model"] as? String == "glm-5.3"
+                  && entry?["model"] as? String == "gpt-5.6-luna"
                   && entry?["effort"] as? String == "high"
                   && (entry?["masked_key"] as? String ?? "").contains("…"))
         }
