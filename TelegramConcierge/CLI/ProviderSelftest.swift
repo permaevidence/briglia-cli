@@ -782,7 +782,7 @@ struct ProviderSelftest: AsyncParsableCommand {
         Pin.fetchOverride = { _, _ in listed }
         let plainPin = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
         check("R3 control: an undisturbed lookup pins and names the scope",
-              Pin.pinnedSlugs() == ["deepinfra"] && plainPin.contains("main agent and every subagent"), plainPin)
+              Pin.pinnedSlugs() == ["deepinfra"] && plainPin.contains("every subagent except the Web researcher"), plainPin)
         _ = await manager.handleTerminalCommand("/orprovider off")
         check("R3 control: off releases", !Pin.isPinned)
         // Another channel switches the model while the listing is in flight.
@@ -856,6 +856,93 @@ struct ProviderSelftest: AsyncParsableCommand {
         check("R3 control: an undisturbed revalidation still releases an unserved pin",
               !Pin.isPinned && revalReleased.contains("released: it doesn't serve"), revalReleased)
         try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
+
+        // Codex round 2: cooperative cancellation that lands while the
+        // listing completes NORMALLY, or fails for its own reasons, must be
+        // seen by the task flag — not only by a thrown error. Each command
+        // runs in its own task; the seam cancels that task from inside the
+        // lookup, then returns valid JSON / throws an ordinary failure.
+        try Pin.setPin(nil)
+        Pin.fetchOverride = { _, _ in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return listed
+        }
+        let cancelledThenListed = await Task { @MainActor in
+            let reply = await manager.handleTerminalCommand("/orprovider deepinfra")
+            return (Task.isCancelled, (reply ?? []).joined())
+        }.value
+        check("R3.2 task cancelled during a lookup that returns normally → nothing pinned, says cancelled",
+              cancelledThenListed.0 && !Pin.isPinned && cancelledThenListed.1.contains("cancelled"),
+              "taskCancelled=\(cancelledThenListed.0) stored=\(Pin.pinnedSlugs()) reply=\(cancelledThenListed.1)")
+        try Pin.setPin(nil)
+        Pin.fetchOverride = { _, _ in
+            withUnsafeCurrentTask { $0?.cancel() }
+            throw Pin.FetchError(description: "synthetic HTTP 503 after cancellation")
+        }
+        let cancelledThenFailed = await Task { @MainActor in
+            let reply = await manager.handleTerminalCommand("/orprovider deepinfra")
+            return (Task.isCancelled, (reply ?? []).joined())
+        }.value
+        check("R3.2 task cancelled during a lookup that fails ordinarily → nothing pinned, never 'saved anyway'",
+              cancelledThenFailed.0 && !Pin.isPinned && cancelledThenFailed.1.contains("cancelled") && !cancelledThenFailed.1.contains("saved anyway"),
+              "taskCancelled=\(cancelledThenFailed.0) stored=\(Pin.pinnedSlugs()) reply=\(cancelledThenFailed.1)")
+        try Pin.setPin(["old-host"])
+        Pin.fetchOverride = { _, _ in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return listed
+        }
+        let cancelledRevalidation = await Task { @MainActor in
+            let reply = await manager.handleTerminalCommand("/model other/model-six")
+            return (Task.isCancelled, (reply ?? []).joined())
+        }.value
+        check("R3.2 task cancelled during a revalidation that returns normally → pin preserved, says cancelled",
+              cancelledRevalidation.0 && Pin.pinnedSlugs() == ["old-host"] && cancelledRevalidation.1.contains("cancelled"),
+              "taskCancelled=\(cancelledRevalidation.0) stored=\(Pin.pinnedSlugs()) reply=\(cancelledRevalidation.1)")
+        try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
+        // Pre-cancelled control: the flag is set before the command starts.
+        try Pin.setPin(nil)
+        var seamReached = false
+        Pin.fetchOverride = { _, _ in seamReached = true; return listed }
+        let preCancelled = await Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            let reply = await manager.handleTerminalCommand("/orprovider deepinfra")
+            return (Task.isCancelled, (reply ?? []).joined())
+        }.value
+        check("R3.2 control: a pre-cancelled task never reaches the transport and pins nothing",
+              preCancelled.0 && !seamReached && !Pin.isPinned && preCancelled.1.contains("cancelled"),
+              "seamReached=\(seamReached) stored=\(Pin.pinnedSlugs()) reply=\(preCancelled.1)")
+        // Helper-level: a normal delivery on a cancelled task is cancellation.
+        Pin.fetchOverride = { _, _ in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return listed
+        }
+        let helperOutcome: String = await Task {
+            do { _ = try await Pin.fetchEndpoints(model: "m", apiKey: "k"); return "returned" }
+            catch is CancellationError { return "cancellation" }
+            catch { return "other: \(error)" }
+        }.value
+        check("R3.2 fetchEndpoints reports cancellation when the flag lands during a normal delivery",
+              helperOutcome == "cancellation", helperOutcome)
+        Pin.fetchOverride = { _, _ in
+            withUnsafeCurrentTask { $0?.cancel() }
+            throw Pin.FetchError(description: "HTTP 503")
+        }
+        let helperFailure: String = await Task {
+            do { _ = try await Pin.fetchEndpoints(model: "m", apiKey: "k"); return "returned" }
+            catch is CancellationError { return "cancellation" }
+            catch { return "other: \(error)" }
+        }.value
+        check("R3.2 fetchEndpoints reports cancellation, not the ordinary failure, when the flag lands during a failure",
+              helperFailure == "cancellation", helperFailure)
+        // Not-cancelled control through the same task shape: pins normally.
+        Pin.fetchOverride = { _, _ in listed }
+        let plainTask = await Task { @MainActor in
+            let reply = await manager.handleTerminalCommand("/orprovider deepinfra")
+            return (Task.isCancelled, (reply ?? []).joined())
+        }.value
+        check("R3.2 control: the same task shape without cancellation pins normally",
+              !plainTask.0 && Pin.pinnedSlugs() == ["deepinfra"] && plainTask.1.contains("except the Web researcher"), plainTask.1)
+        try Pin.setPin(nil)
         return failures
     }
 }

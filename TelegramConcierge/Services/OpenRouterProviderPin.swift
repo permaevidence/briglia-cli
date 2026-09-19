@@ -112,7 +112,7 @@ enum OpenRouterProviderPin {
     /// model keeps OpenRouter's automatic routing: the Web researcher and
     /// the legacy web pipeline (their own backend and key), a configured
     /// description model, the OCR/vision preprocessor (own ZDR routing).
-    static let scopeNote = "Applies to the main model: the main agent and every subagent (cheap lanes are bypassed while pinned). Web research keeps its own routing."
+    static let scopeNote = "Applies to the main model: the main agent and every subagent except the Web researcher, which keeps its own backend (cheap lanes are bypassed while pinned)."
 
     /// Persist a pin (nil or empty clears it). Slugs are stored verbatim
     /// after normalization — the caller validates them first.
@@ -129,7 +129,7 @@ enum OpenRouterProviderPin {
     static func statusLine() -> String? {
         let slugs = pinnedSlugs()
         guard !slugs.isEmpty else { return nil }
-        return "📌 OpenRouter host pin: \(slugs.joined(separator: ", ")) (main model, main agent + subagents; /orprovider off to release)"
+        return "📌 OpenRouter host pin: \(slugs.joined(separator: ", ")) (main model: main agent + subagents, not web research; /orprovider off to release)"
     }
 
     // MARK: Endpoint listing
@@ -205,17 +205,22 @@ enum OpenRouterProviderPin {
     /// Live listing for a model. Never retries auth errors; one retry on
     /// 429/5xx. Throws `FetchError` with a user-facing description.
     /// Cancellation is propagated as `CancellationError` — whether it
-    /// arrives as the task flag, a `URLError.cancelled` from the session, or
-    /// during the retry pause — never converted into a retry or a
-    /// `FetchError` (Codex R3: a cancelled lookup must not look like a
-    /// failed one, because the caller treats failure as "save anyway").
+    /// arrives as the task flag (checked on entry AND again after every
+    /// suspension, because a cooperative cancellation can land while the
+    /// transport is completing normally or failing for its own reasons), a
+    /// `URLError.cancelled` from the session, or during the retry pause —
+    /// never converted into a retry or a `FetchError` (Codex R3 rounds 1–2:
+    /// a cancelled lookup must not look like a successful or a failed one,
+    /// because the caller treats failure as "save anyway").
     static func fetchEndpoints(model: String, apiKey: String) async throws -> [Endpoint] {
         try Task.checkCancellation()
         if let fetchOverride {
             do {
-                return try parseEndpoints(try await fetchOverride(model, apiKey))
+                let endpoints = try parseEndpoints(try await fetchOverride(model, apiKey))
+                try Task.checkCancellation()
+                return endpoints
             } catch {
-                if Self.isCancellation(error) { throw CancellationError() }
+                if Self.isCancellation(error) || Task.isCancelled { throw CancellationError() }
                 throw error
             }
         }
@@ -232,6 +237,7 @@ enum OpenRouterProviderPin {
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+                try Task.checkCancellation()
                 switch http.statusCode {
                 case 200:
                     return try parseEndpoints(data)
@@ -245,9 +251,10 @@ enum OpenRouterProviderPin {
                     throw FetchError(description: "OpenRouter answered HTTP \(http.statusCode)")
                 }
             } catch let error as FetchError {
+                if Task.isCancelled { throw CancellationError() }
                 throw error
             } catch {
-                if Self.isCancellation(error) { throw CancellationError() }
+                if Self.isCancellation(error) || Task.isCancelled { throw CancellationError() }
                 lastError = FetchError(description: error.localizedDescription)
             }
             if attempt < 2 {

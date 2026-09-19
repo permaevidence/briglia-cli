@@ -4764,6 +4764,13 @@ class ConversationManager: ObservableObject {
     /// Why a decision taken against `snapshot` may no longer be applied, or
     /// nil when nothing relevant changed during the await.
     private func orProviderStaleReason(_ snapshot: OrProviderSnapshot) -> String? {
+        // Cooperative cancellation can land while the listing completes
+        // normally (or fails for its own reasons); the fetch helper already
+        // turns that into CancellationError, and this is the second layer
+        // in front of every write (Codex round 2).
+        if Task.isCancelled {
+            return "the command was cancelled while checking OpenRouter's host list"
+        }
         if activeRunId != nil || activeProcessingTask != nil {
             return "a turn started while checking OpenRouter's host list"
         }
@@ -4921,7 +4928,7 @@ class ConversationManager: ObservableObject {
             let lanes = SubagentModelLanes.storedModel(.cheapVision, provider: .openRouter) != nil
                 || SubagentModelLanes.storedModel(.cheapText, provider: .openRouter) != nil
             let laneNote = lanes ? " Your subagent cheap lanes are bypassed while pinned (/subagentmodels shows them)." : ""
-            try? await sendText("✅ OpenRouter host pinned to \(slugs.joined(separator: ", ")) for the main model from the next message — main agent and every subagent.\(verification) A base slug allows every endpoint of that host (price and caching vary per endpoint); requests fail instead of hopping when the host is unavailable. /orprovider off releases it.\(laneNote)")
+            try? await sendText("✅ OpenRouter host pinned to \(slugs.joined(separator: ", ")) for the main model from the next message — main agent and every subagent except the Web researcher, which keeps its own backend.\(verification) A base slug allows every endpoint of that host (price and caching vary per endpoint); requests fail instead of hopping when the host is unavailable. /orprovider off releases it.\(laneNote)")
         } catch {
             try? await sendText("✖ Could not save the setting: \(error.localizedDescription)")
         }
