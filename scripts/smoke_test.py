@@ -1344,6 +1344,35 @@ def main():
                      "tool_call_marker": ""}
 
         class SlowableOpenAIHandler(MockOpenAIHandler):
+            # /orprovider (0.2.30): BRIGLIA_OPENROUTER_API_BASE points the
+            # host listing at this server. Two models with different hosts so
+            # the /model re-validation has something to release.
+            OR_HOSTS = {"or-model-a": [("Novita", "novita/fp8"), ("DeepInfra", "deepinfra/fp4")],
+                        "or-model-b": [("Z.AI", "z-ai/fp8")]}
+
+            def do_GET(self):
+                if "/models/" in self.path and self.path.endswith("/endpoints"):
+                    model = self.path.split("/models/", 1)[1][:-len("/endpoints")]
+                    hosts = self.OR_HOSTS.get(model)
+                    if hosts is None:
+                        body = json.dumps({"error": {"message": "no model"}}).encode()
+                        self.send_response(404)
+                    else:
+                        body = json.dumps({"data": {"id": model, "endpoints": [
+                            {"provider_name": n, "tag": t, "context_length": 1048576,
+                             "pricing": {"prompt": "0.0000001", "completion": "0.0000004",
+                                         "input_cache_read": "0.00000002"},
+                             "status": 0, "uptime_last_30m": 99.5} for n, t in hosts]}}).encode()
+                        self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length).decode("utf-8", errors="replace")
@@ -2542,6 +2571,81 @@ def main():
               and not any("Model switched to glm-5.3-flash" in (m.get("text") or "") for m in p13.get("sent_after_race", [])),
               f"{ {k: p13.get(k) for k in ('race_ack_started', 'race_hop', 'race_refused')} } edits={race_edits} "
               f"custom_model={after_r.get('custom_endpoint_model')!r}\n" + out13[-2500:])
+
+        # Phase 13b: /orprovider (owner request 2026-09-19). Menu of the hosts
+        # OpenRouter serves the current model from (mocked listing), tap to
+        # pin (stored in openrouter_providers), a typed host the model isn't
+        # served from is refused, /model onto a model the pinned host does
+        # not serve releases the pin, /status shows the pin, off releases.
+        with open(secrets_path) as f:
+            sec = json.load(f)
+        sec.pop("openrouter_providers", None)
+        sec.update({"openrouter_api_key": "smoke-or-key", "openrouter_model": "or-model-a"})
+        with open(secrets_path, "w") as f:
+            json.dump(sec, f)
+        os.chmod(secrets_path, 0o600)
+        with tg_lock:
+            tg_state["updates"].clear()
+            tg_state["offsets"].clear()
+            tg_state["sent"].clear()
+            tg_state["posts"].clear()
+        p13b = {}
+
+        def phase13b(pwait, push, pout, proc):
+            push([tg_update(990, "/provider openrouter")])
+            p13b["hop"] = wait_for(lambda: sent_contains("Active provider: OpenRouter"), 30)
+            push([tg_update(991, "/orprovider")])
+            p13b["menu"] = wait_for(lambda: menus_seen() >= 1, 30)
+            menu = latest_menu() if p13b["menu"] else {}
+            p13b["menu_text"] = (menu or {}).get("text") or ""
+            novita = menu_button(menu, "novita") or ""
+            p13b["novita_button"] = novita
+            p13b["off_button"] = menu_button(menu, "off") or ""
+            push([tg_callback(992, novita or "bm1:o:00000000:novita", msg_id=91)])
+            p13b["pinned"] = wait_for(lambda: sent_contains("OpenRouter host pinned to novita"), 30)
+            p13b["secrets_pinned"] = read_secrets()
+            push([tg_update(993, "/orprovider deepseek")])
+            p13b["refused"] = wait_for(lambda: sent_contains("does not serve or-model-a from \"deepseek\""), 30)
+            p13b["secrets_after_refusal"] = read_secrets()
+            push([tg_update(994, "/status")])
+            p13b["status"] = wait_for(lambda: sent_contains("OpenRouter host pin: novita"), 30)
+            push([tg_update(995, "/model or-model-b")])
+            p13b["released_on_model"] = wait_for(lambda: sent_contains("released: it doesn't serve or-model-b"), 30)
+            p13b["secrets_after_model"] = read_secrets()
+            push([tg_update(996, "/orprovider Z-AI")])
+            p13b["repinned"] = wait_for(lambda: sent_contains("OpenRouter host pinned to z-ai"), 30)
+            p13b["secrets_repinned"] = read_secrets()
+            push([tg_update(997, "/orprovider off")])
+            p13b["off"] = wait_for(lambda: sent_contains("OpenRouter host pin released"), 30)
+            p13b["secrets_off"] = read_secrets()
+            # Leave the config as the later checks expect it.
+            push([tg_update(998, "/provider custom")])
+            wait_for(lambda: sent_contains("Active provider: Custom endpoint"), 30)
+            push([tg_update(999, "/model mock-model")])
+            wait_for(lambda: sent_contains("Model switched to mock-model"), 30)
+
+        tg_mark("phase13b-start")
+        out13b, rc13b = run_poller_phase({"BRIGLIA_OPENROUTER_API_BASE": f"http://127.0.0.1:{llm_port}"}, phase13b, timeout_s=200)
+        check("orprovider: menu lists the mocked hosts for the current model with bound payloads + Automatic",
+              p13b.get("hop") and p13b.get("menu")
+              and p13b.get("novita_button", "").startswith("bm1:o:") and p13b.get("novita_button", "").endswith(":novita")
+              and p13b.get("off_button", "").endswith(":off")
+              and "Hosts serving or-model-a" in p13b.get("menu_text", ""),
+              f"{ {k: p13b.get(k) for k in ('hop', 'menu', 'novita_button', 'off_button', 'menu_text')} }\n" + out13b[-2000:])
+        check("orprovider: tapping a host pins it in openrouter_providers",
+              p13b.get("pinned") and p13b.get("secrets_pinned", {}).get("openrouter_providers") == "novita",
+              f"pinned={p13b.get('pinned')} stored={p13b.get('secrets_pinned', {}).get('openrouter_providers')!r}\n" + out13b[-2000:])
+        check("orprovider: a host that doesn't serve the model is refused and the pin is untouched",
+              p13b.get("refused") and p13b.get("secrets_after_refusal", {}).get("openrouter_providers") == "novita",
+              f"refused={p13b.get('refused')} stored={p13b.get('secrets_after_refusal', {}).get('openrouter_providers')!r}")
+        check("orprovider: /status shows the pin", bool(p13b.get("status")))
+        check("orprovider: /model onto a model the pinned host doesn't serve releases the pin",
+              p13b.get("released_on_model") and "openrouter_providers" not in p13b.get("secrets_after_model", {"openrouter_providers": "?"}),
+              f"released={p13b.get('released_on_model')} stored={p13b.get('secrets_after_model', {}).get('openrouter_providers')!r}\n" + out13b[-2000:])
+        check("orprovider: typed host is normalized, validated and stored; off releases it",
+              p13b.get("repinned") and p13b.get("secrets_repinned", {}).get("openrouter_providers") == "z-ai"
+              and p13b.get("off") and "openrouter_providers" not in p13b.get("secrets_off", {"openrouter_providers": "?"}),
+              f"repinned={p13b.get('repinned')} stored={p13b.get('secrets_repinned', {}).get('openrouter_providers')!r} off={p13b.get('off')}")
 
         # H2 (b): after every phase ran, nothing under the roots (projects/
         # and toolchain/ excluded) may carry a group/other bit — this catches

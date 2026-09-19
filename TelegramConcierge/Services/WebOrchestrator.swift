@@ -2409,18 +2409,6 @@ actor WebOrchestrator {
         return makeReasoning(configuredEffort)
     }
 
-    private func configuredProviderOrder() -> [String]? {
-        guard let providersString = KeychainHelper.load(key: KeychainHelper.openRouterProvidersKey),
-              !providersString.isEmpty else {
-            return nil
-        }
-        let providers = providersString
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        return providers.isEmpty ? nil : providers
-    }
-
     /// mimo-v2.5: chosen for its very high usage limits on OpenCode Go.
     /// Probed 2026-08-01: swallows 312k-token inputs (so the 800K-char chunks
     /// fit), accepts reasoning_effort, accurate on extraction — but ~5-10x
@@ -2467,9 +2455,12 @@ actor WebOrchestrator {
             )
         }
 
-        // All other models (Gemini, user-configured): use user's provider order, no restriction
+        // All other models (Gemini, user-configured): automatic routing. The
+        // /orprovider host pin (`openrouter_providers`) is main-agent only
+        // since 0.2.30: the web model differs from the chat model, so a pin
+        // that fits one would break the other.
         return .init(
-            order: configuredProviderOrder(),
+            order: nil,
             only: nil,
             allow_fallbacks: true,
             sort: nil

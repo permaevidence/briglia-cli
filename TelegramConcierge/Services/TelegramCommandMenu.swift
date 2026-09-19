@@ -47,6 +47,10 @@ enum TelegramCommandMenu {
         case modelTyped
         /// `context`: `effortContext(profile:model:)` at menu time.
         case effort(context: String, level: String)
+        /// `/orprovider` (0.2.30): `slug` is an OpenRouter base provider slug
+        /// or "off"; `context` binds the menu to the OpenRouter model it
+        /// listed hosts for (same hash as effort).
+        case orProvider(context: String, slug: String)
     }
 
     /// Versioned prefix: a keyboard left over from an older build decodes as
@@ -80,8 +84,9 @@ enum TelegramCommandMenu {
     }
 
     /// Payloads: `bm1:p:<profile>`, `bm1:m:<profile>:<model-id>`, `bm1:m:?`,
-    /// `bm1:e:<context>:<level>`. nil when a field can't be carried (charset
-    /// or the 64-byte cap).
+    /// `bm1:e:<context>:<level>`, `bm1:o:<context>:<slug>`. nil when a field
+    /// can't be carried (charset or the 64-byte cap) — a variant tag with a
+    /// slash (`deepinfra/turbo`) is typed-only.
     static func encode(_ action: Action) -> String? {
         let data: String
         switch action {
@@ -96,6 +101,9 @@ enum TelegramCommandMenu {
         case .effort(let context, let level):
             guard isValidContext(context), isValidArgument(level) else { return nil }
             data = "\(dataPrefix):e:\(context):\(level)"
+        case .orProvider(let context, let slug):
+            guard isValidContext(context), isValidArgument(slug) else { return nil }
+            data = "\(dataPrefix):o:\(context):\(slug)"
         }
         guard data.utf8.count <= maxDataBytes else { return nil }
         return data
@@ -114,6 +122,8 @@ enum TelegramCommandMenu {
             return isValidArgument(parts[2]) && isValidArgument(parts[3]) ? .model(profile: parts[2], id: parts[3]) : nil
         case ("e", 4):
             return isValidContext(parts[2]) && isValidArgument(parts[3]) ? .effort(context: parts[2], level: parts[3]) : nil
+        case ("o", 4):
+            return isValidContext(parts[2]) && isValidArgument(parts[3]) ? .orProvider(context: parts[2], slug: parts[3]) : nil
         default:
             return nil
         }
@@ -126,6 +136,7 @@ enum TelegramCommandMenu {
         case .model(_, let id): return "/model \(id)"
         case .modelTyped: return nil
         case .effort(_, let level): return "/effort \(level)"
+        case .orProvider(_, let slug): return "/orprovider \(slug)"
         }
     }
 
@@ -210,6 +221,31 @@ enum TelegramCommandMenu {
             lines.append("\"Endpoint default\" sends no effort field (/effort off).")
         }
         lines.append("Takes effect from the next message.")
+        return Menu(text: lines.joined(separator: "\n"), rows: rows)
+    }
+
+    // MARK: - /orprovider
+
+    /// One row per host OpenRouter serves `model` from (base slugs, in
+    /// OpenRouter's order) plus "Automatic"; `context` =
+    /// `effortContext(profile: "openrouter", model:)` so a tap after a
+    /// model switch is refused as stale instead of pinning a host that may
+    /// not serve the new model.
+    static func orProviderMenu(model: String, choices: [OpenRouterProviderPin.Endpoint], context: String, pinned: [String]) -> Menu {
+        var lines = [
+            "Current OpenRouter host pin: \(pinned.isEmpty ? "automatic routing" : pinned.joined(separator: ", "))",
+            "Hosts serving \(model) — tap one to pin it (requests then fail instead of hopping when it is unavailable):",
+        ]
+        var rows: [[Button]] = []
+        for endpoint in choices {
+            guard let data = encode(.orProvider(context: context, slug: endpoint.baseSlug)) else { continue }
+            let isPinned = pinned.contains { OpenRouterProviderPin.matches(pin: $0, endpoint: endpoint) }
+            rows.append([Button(label: (isPinned ? "✓ " : "") + OpenRouterProviderPin.describe(endpoint), data: data)])
+        }
+        if let data = encode(.orProvider(context: context, slug: "off")) {
+            rows.append([Button(label: (pinned.isEmpty ? "✓ " : "") + "Automatic (OpenRouter routing)", data: data)])
+        }
+        lines.append("Or /orprovider <slug> (a full tag like deepinfra/turbo targets one variant); /orprovider off releases the pin. Takes effect from the next message.")
         return Menu(text: lines.joined(separator: "\n"), rows: rows)
     }
 

@@ -3294,6 +3294,12 @@ class ConversationManager: ObservableObject {
                 return active == nil ? "this menu is outdated: no active provider profile. Send /effort again." : nil
             }
             return "this menu is outdated: the provider or model changed since it was sent. Send /effort again."
+        case .orProvider(let context, _):
+            guard active == .openrouter,
+                  TelegramCommandMenu.effortContext(profile: ProviderProfiles.Profile.openrouter.rawValue, model: currentMainModel()) == context else {
+                return "this menu is outdated: the provider or model changed since it was sent. Send /orprovider again."
+            }
+            return nil
         }
     }
 
@@ -3385,6 +3391,9 @@ class ConversationManager: ObservableObject {
             return true
         case "/subagentmodels":
             await handleSubagentModelsCommand(argument: commandArgument(from: text))
+            return true
+        case "/orprovider":
+            await handleOrProviderCommand(argument: commandArgument(from: text))
             return true
         case "/subagents":
             await handleSubagentsCommand(argument: commandArgument(from: text))
@@ -4531,7 +4540,11 @@ class ConversationManager: ObservableObject {
         // Remember the switch in the active provider profile so /provider
         // hops away and back restore it.
         ProviderProfiles.recordModelChange(stored, textOnly: knownTextOnly)
-        try? await sendText("✅ Model switched to \(stored) — takes effect from the next message.\(note)")
+        // An OpenRouter host pin is per model in practice (hosts differ per
+        // model): keep it only when the new model is served from that host.
+        var pinNote = ""
+        if provider == .openRouter { pinNote = await revalidateOrProviderPin(model: stored) }
+        try? await sendText("✅ Model switched to \(stored) — takes effect from the next message.\(note)\(pinNote)")
     }
 
     private static let validReasoningEfforts = ["minimal", "low", "medium", "high", "xhigh"]
@@ -4708,6 +4721,141 @@ class ConversationManager: ObservableObject {
             try? await sendText("✅ The \(lane.displayName) lane for \(provider.displayName) is now \(stored) — the agent sees it as '\(lane.rawValue)' from the next message.\(note)")
         } catch {
             try? await sendText("✖ Could not save the setting: \(error.localizedDescription)")
+        }
+    }
+
+
+    /// `/orprovider` — show, pin or release the upstream host OpenRouter
+    /// routes the main model to (OpenRouterProviderPin). Storage-level and
+    /// idle-guarded like /model; `OpenRouterService.providers(for:)` applies
+    /// the stored pin as `provider.only` + `allow_fallbacks: false`.
+    private func handleOrProviderCommand(argument: String) async {
+        let provider = LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey))
+        let pinned = OpenRouterProviderPin.pinnedSlugs()
+        guard provider == .openRouter, ProviderProfiles.activeProfile() == .openrouter else {
+            let active = ProviderProfiles.activeProfile()?.displayName ?? provider.displayName
+            let stored = pinned.isEmpty ? "" : " A pin is stored (\(pinned.joined(separator: ", "))); it applies when OpenRouter is the active provider."
+            try? await sendText("The OpenRouter host pin only applies to the OpenRouter provider — active provider: \(active).\(stored)")
+            return
+        }
+        let model = KeychainHelper.load(key: KeychainHelper.openRouterModelKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let apiKey = KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? ""
+        let trimmed = argument.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pinText = pinned.isEmpty ? "automatic routing" : pinned.joined(separator: ", ")
+
+        if trimmed.isEmpty {
+            guard !model.isEmpty else {
+                try? await sendText("Current OpenRouter host pin: \(pinText)\nNo OpenRouter model is set — pick one with /model first.")
+                return
+            }
+            let endpoints: [OpenRouterProviderPin.Endpoint]
+            do {
+                endpoints = try await OpenRouterProviderPin.fetchEndpoints(model: model, apiKey: apiKey)
+            } catch {
+                try? await sendText("Current OpenRouter host pin: \(pinText)\nCouldn't list the hosts for \(model): \(error). Pin with /orprovider <slug>, release with /orprovider off.")
+                return
+            }
+            let choices = OpenRouterProviderPin.baseChoices(endpoints)
+            if replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true, !choices.isEmpty {
+                let context = TelegramCommandMenu.effortContext(profile: ProviderProfiles.Profile.openrouter.rawValue, model: model)
+                await sendCommandMenu(TelegramCommandMenu.orProviderMenu(model: model, choices: choices, context: context, pinned: pinned))
+                return
+            }
+            var lines = ["Current OpenRouter host pin: \(pinText)", "Hosts serving \(model):"]
+            for endpoint in choices {
+                let isPinned = pinned.contains { OpenRouterProviderPin.matches(pin: $0, endpoint: endpoint) }
+                lines.append("• \(OpenRouterProviderPin.describe(endpoint, pinned: isPinned))")
+            }
+            if choices.isEmpty { lines.append("• (OpenRouter lists no hosts for this model)") }
+            lines.append("Pin with /orprovider <slug> (a full tag like deepinfra/turbo targets one variant); /orprovider off releases it. Takes effect from the next message.")
+            try? await sendText(lines.joined(separator: "\n"))
+            return
+        }
+
+        // Idle guard (same as /model): the pin changes where the next round
+        // of a running turn would go.
+        guard activeRunId == nil, activeProcessingTask == nil else {
+            try? await sendText("⏳ A turn is running — send /orprovider \(trimmed) again when Briglia is idle (or /stop first).")
+            return
+        }
+
+        if ["off", "auto", "automatic", "none", "clear"].contains(trimmed.lowercased()) {
+            do {
+                try OpenRouterProviderPin.setPin(nil)
+                try? await sendText(pinned.isEmpty
+                    ? "OpenRouter host pin was not set — routing is automatic."
+                    : "✅ OpenRouter host pin released — OpenRouter routes automatically (sticky by session) from the next message.")
+            } catch {
+                try? await sendText("✖ Could not save the setting: \(error.localizedDescription)")
+            }
+            return
+        }
+
+        var slugs: [String] = []
+        for item in trimmed.split(separator: ",").map({ String($0).trimmingCharacters(in: .whitespacesAndNewlines) }) where !item.isEmpty {
+            guard let slug = OpenRouterProviderPin.normalizedSlug(item) else {
+                try? await sendText("✖ \"\(item)\" is not an OpenRouter provider slug (letters, digits, . _ - and one / for a variant, e.g. deepinfra or deepinfra/turbo). Nothing changed.")
+                return
+            }
+            slugs.append(slug)
+        }
+        guard !slugs.isEmpty else {
+            try? await sendText("Usage: /orprovider <slug>[,<slug>] or /orprovider off.")
+            return
+        }
+
+        var verification = ""
+        if !model.isEmpty {
+            do {
+                let endpoints = try await OpenRouterProviderPin.fetchEndpoints(model: model, apiKey: apiKey)
+                var served: [String] = []
+                for slug in slugs {
+                    switch OpenRouterProviderPin.validate(pin: slug, endpoints: endpoints) {
+                    case .served(let hits):
+                        served.append(hits.map(\.tag).joined(separator: ", "))
+                    case .notServed(let available):
+                        try? await sendText("✖ OpenRouter does not serve \(model) from \"\(slug)\". Hosts: \(available.joined(separator: ", ")). Nothing changed.")
+                        return
+                    }
+                }
+                verification = " Serving \(model) via \(served.joined(separator: "; "))."
+            } catch {
+                verification = " (Couldn't verify against OpenRouter's host list: \(error) — saved anyway.)"
+            }
+        }
+        do {
+            try OpenRouterProviderPin.setPin(slugs)
+            try? await sendText("✅ OpenRouter host pinned to \(slugs.joined(separator: ", ")) for the main agent from the next message.\(verification) Requests fail instead of hopping when the host is unavailable; /orprovider off releases it.")
+        } catch {
+            try? await sendText("✖ Could not save the setting: \(error.localizedDescription)")
+        }
+    }
+
+    /// After /model on OpenRouter: keep the pin only if the new model is
+    /// served from the pinned host; otherwise release it and say so. Returns
+    /// the note appended to the /model confirmation ("" when no pin).
+    private func revalidateOrProviderPin(model: String) async -> String {
+        let pinned = OpenRouterProviderPin.pinnedSlugs()
+        guard !pinned.isEmpty, !model.isEmpty else { return "" }
+        let apiKey = KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? ""
+        let list = pinned.joined(separator: ", ")
+        do {
+            let endpoints = try await OpenRouterProviderPin.fetchEndpoints(model: model, apiKey: apiKey)
+            let unserved = pinned.filter { pin in
+                if case .notServed = OpenRouterProviderPin.validate(pin: pin, endpoints: endpoints) { return true }
+                return false
+            }
+            guard !unserved.isEmpty else { return " OpenRouter host pin \(list) kept." }
+            let hosts = OpenRouterProviderPin.baseChoices(endpoints).map(\.baseSlug).joined(separator: ", ")
+            do {
+                try OpenRouterProviderPin.setPin(nil)
+                return " OpenRouter host pin \(list) released: it doesn't serve \(model) (hosts: \(hosts)). Re-pin with /orprovider."
+            } catch {
+                return " ⚠️ OpenRouter host pin \(list) doesn't serve \(model) and could not be released (\(error.localizedDescription)) — requests fail until /orprovider off succeeds."
+            }
+        } catch {
+            return " ⚠️ OpenRouter host pin \(list) kept but not verified for \(model) (\(error))."
         }
     }
 
@@ -5017,7 +5165,11 @@ class ConversationManager: ObservableObject {
         guard replyAddress != nil else { return }
         let log = currentTurnToolLog
 
-        let contextLine = formatContextGaugeLine() + "\n" + PruneArchiveStore.statusLine()
+        var contextLine = formatContextGaugeLine() + "\n" + PruneArchiveStore.statusLine()
+        if LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)) == .openRouter,
+           let pin = OpenRouterProviderPin.statusLine() {
+            contextLine += "\n" + pin
+        }
 
         if log.isEmpty {
             let msg = activeRunId != nil

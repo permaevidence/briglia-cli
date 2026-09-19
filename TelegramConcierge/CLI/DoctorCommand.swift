@@ -56,6 +56,9 @@ struct Doctor: AsyncParsableCommand {
                                                             activeProfile: ProviderProfiles.activeProfile()) {
             note(advisory)
         }
+        if provider == .openRouter, let pin = OpenRouterProviderPin.statusLine() {
+            note(pin)
+        }
         let openAIKey = KeychainHelper.load(key: KeychainHelper.openAITranscriptionApiKeyKey) ?? ""
         check("OpenAI key present", ok: !openAIKey.isEmpty, hint: "run `briglia setup`, section 2")
         let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""

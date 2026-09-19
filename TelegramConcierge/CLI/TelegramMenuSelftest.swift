@@ -206,6 +206,33 @@ struct TelegramMenuSelftest: ParsableCommand {
             check("chatgpt list: QuickSetup resources reachable", false)
         }
 
+        // ---- 9a. /orprovider (0.2.30): codec, menu rows, context binding.
+        let orCtx = Menu.effortContext(profile: "openrouter", model: "z-ai/glm-5.3-flash")
+        check("orprovider codec: base slug round-trips bound to its context; 'off' is a slug",
+              Menu.decode(Menu.encode(.orProvider(context: orCtx, slug: "z-ai")) ?? "") == .orProvider(context: orCtx, slug: "z-ai")
+              && Menu.encode(.orProvider(context: orCtx, slug: "z-ai")) == "bm1:o:\(orCtx):z-ai"
+              && Menu.commandText(for: .orProvider(context: orCtx, slug: "off")) == "/orprovider off"
+              && Menu.commandText(for: .orProvider(context: orCtx, slug: "novita")) == "/orprovider novita")
+        check("orprovider codec: a variant tag with a slash is typed-only; bad context/slug refused",
+              Menu.encode(.orProvider(context: orCtx, slug: "deepinfra/turbo")) == nil
+              && Menu.decode("bm1:o:\(orCtx):deep infra") == nil && Menu.decode("bm1:o:nothex1:z-ai") == nil
+              && Menu.decode("bm1:o:\(orCtx)") == nil)
+        let pinSample = [
+            OpenRouterProviderPin.Endpoint(providerName: "Novita", tag: "novita/fp8", promptUSDPerM: 0.132, completionUSDPerM: 0.44, cacheReadUSDPerM: 0.0264, contextLength: 1048576, uptimeLast30m: 99.7, status: 0),
+            OpenRouterProviderPin.Endpoint(providerName: "Z.AI", tag: "z-ai/fp8", promptUSDPerM: 0.15, completionUSDPerM: 0.5, cacheReadUSDPerM: 0.03, contextLength: 1048576, uptimeLast30m: 99.8, status: 0),
+        ]
+        let pinMenu = Menu.orProviderMenu(model: "z-ai/glm-5.3-flash", choices: pinSample, context: orCtx, pinned: ["z-ai"])
+        check("orprovider menu: one row per host + Automatic, pinned host ticked, payloads bound to the context",
+              pinMenu.rows.map { $0.map(\.data) } == [["bm1:o:\(orCtx):novita"], ["bm1:o:\(orCtx):z-ai"], ["bm1:o:\(orCtx):off"]]
+              && pinMenu.rows[1].first?.label == "✓ Z.AI (z-ai) · $0.15/$0.5 per M · cache $0.03 · up 99.8%"
+              && pinMenu.rows[0].first?.label == "Novita (novita) · $0.132/$0.44 per M · cache $0.0264 · up 99.7%"
+              && pinMenu.rows[2].first?.label == "Automatic (OpenRouter routing)"
+              && pinMenu.text.contains("Current OpenRouter host pin: z-ai"), "\(pinMenu.rows.map { $0.map(\.label) })")
+        let pinMenuAuto = Menu.orProviderMenu(model: "m", choices: pinSample, context: orCtx, pinned: [])
+        check("orprovider menu: automatic ticked when nothing is pinned",
+              pinMenuAuto.rows.last?.first?.label == "✓ Automatic (OpenRouter routing)"
+              && pinMenuAuto.text.contains("automatic routing"))
+
         // ---- 9. Frozen-menu text.
         check("frozen text: original menu + note; note alone when the menu text is unavailable",
               Menu.frozenText(original: "Menu", note: "▸ /effort high") == "Menu\n\n▸ /effort high"

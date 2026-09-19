@@ -7,6 +7,11 @@ import Foundation
 /// key listings. Self-isolates into temp XDG roots (set BEFORE the lazy
 /// StoragePaths statics are first touched) so it never disturbs a real
 /// installation.
+/// Mutable cell for values a test seam closure records.
+final class SeamBox: @unchecked Sendable {
+    var value: String = ""
+}
+
 struct ProviderSelftest: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "__provider-selftest",
@@ -177,6 +182,61 @@ struct ProviderSelftest: AsyncParsableCommand {
               curatedIds.filter { $0.hasPrefix("deepseek") } == ["deepseek-v4.1-flash"])
         check("Luna is the only curated text-only entry",
               OpenCodeGo.choices.filter(\.textOnly).map(\.id) == ["gpt-5.6-luna"])
+
+        // 5e′. /orprovider (0.2.30): slug rules, live-pinListing parse, matching,
+        // storage in the pre-existing openrouter_providers key, fetch seam.
+        typealias Pin = OpenRouterProviderPin
+        let pinListing = """
+        {"data":{"id":"z-ai/glm-5.3-flash","endpoints":[
+          {"provider_name":"DeepInfra","tag":"deepinfra/fp4","context_length":1048576,"pricing":{"prompt":"0.000000075","completion":"0.00000025","input_cache_read":"0.000000015"},"status":0,"uptime_last_30m":98.9},
+          {"provider_name":"Novita","tag":"novita/fp8","context_length":1048576,"pricing":{"prompt":"0.000000132","completion":"0.00000044","input_cache_read":"0.0000000264"},"status":0,"uptime_last_30m":99.7},
+          {"provider_name":"DeepInfra","tag":"DeepInfra/Turbo","context_length":1048576,"pricing":{"prompt":"0.0000002","completion":"0.0000006"},"status":-2,"uptime_last_30m":92.1},
+          {"provider_name":"Z.AI","tag":"z-ai/fp8","context_length":1048576,"pricing":{"prompt":"0.00000015","completion":"0.0000005","input_cache_read":"0.00000003"},"status":0,"uptime_last_30m":99.8},
+          {"provider_name":"Novita","tag":"novita/fp8","pricing":{}}
+        ]}}
+        """
+        let pinEndpoints = try Pin.parseEndpoints(Data(pinListing.utf8))
+        check("orprovider parse: 4 endpoints (duplicate tag dropped), tags lowercased, $/M scaled, missing fields nil",
+              pinEndpoints.map(\.tag) == ["deepinfra/fp4", "novita/fp8", "deepinfra/turbo", "z-ai/fp8"]
+              && pinEndpoints[1].promptUSDPerM.map { abs($0 - 0.132) < 1e-9 } == true
+              && pinEndpoints[2].cacheReadUSDPerM == nil && pinEndpoints[2].status == -2)
+        check("orprovider parse: bad shape throws", (try? Pin.parseEndpoints(Data("{\"data\":{}}".utf8))) == nil)
+        check("orprovider slugs: base slug, normalization, refusals",
+              Pin.baseSlug("DeepInfra/Turbo") == "deepinfra" && Pin.baseSlug("z-ai") == "z-ai"
+              && Pin.normalizedSlug(" Z-AI ") == "z-ai" && Pin.normalizedSlug("deepinfra/turbo") == "deepinfra/turbo"
+              && Pin.normalizedSlug("deep infra") == nil && Pin.normalizedSlug("/novita") == nil
+              && Pin.normalizedSlug("a//b") == nil && Pin.normalizedSlug("") == nil && Pin.normalizedSlug("x\"y") == nil)
+        check("orprovider matching: base slug covers variants, full tag targets one, unknown lists hosts",
+              Pin.validate(pin: "deepinfra", endpoints: pinEndpoints) == .served([pinEndpoints[0], pinEndpoints[2]])
+              && Pin.validate(pin: "deepinfra/turbo", endpoints: pinEndpoints) == .served([pinEndpoints[2]])
+              && Pin.validate(pin: "deepseek", endpoints: pinEndpoints) == .notServed(available: ["deepinfra", "novita", "z-ai"]))
+        check("orprovider base choices: one row per provider in listing order",
+              Pin.baseChoices(pinEndpoints).map(\.baseSlug) == ["deepinfra", "novita", "z-ai"])
+        check("orprovider describe: figures per M, trailing zeros trimmed, degraded flag, pin marker",
+              Pin.describe(pinEndpoints[1]) == "Novita (novita) · $0.132/$0.44 per M · cache $0.0264 · up 99.7%"
+              && Pin.describe(pinEndpoints[2], pinned: true) == "📌 DeepInfra (deepinfra) · $0.2/$0.6 per M · up 92.1% · degraded",
+              Pin.describe(pinEndpoints[1]))
+        try Pin.setPin(["Novita", "deepinfra/turbo"])
+        check("orprovider storage: normalized comma list in openrouter_providers, statusLine, isPinned",
+              load(KeychainHelper.openRouterProvidersKey) == "novita,deepinfra/turbo"
+              && Pin.pinnedSlugs() == ["novita", "deepinfra/turbo"] && Pin.isPinned
+              && Pin.statusLine()?.contains("novita, deepinfra/turbo") == true)
+        try Pin.setPin(nil)
+        check("orprovider storage: cleared → automatic",
+              load(KeychainHelper.openRouterProvidersKey) == nil && !Pin.isPinned && Pin.statusLine() == nil)
+        try Pin.setPin(["bad slug", "z-ai"])
+        check("orprovider storage: invalid items are dropped, valid ones kept",
+              Pin.pinnedSlugs() == ["z-ai"])
+        try Pin.setPin(nil)
+        let seenArgs = SeamBox()
+        Pin.fetchOverride = { model, key in
+            seenArgs.value = "\(model)|\(key)"
+            return Data(pinListing.utf8)
+        }
+        let fetched = try await Pin.fetchEndpoints(model: "z-ai/glm-5.3-flash", apiKey: "or-key")
+        Pin.fetchOverride = nil
+        check("orprovider fetch seam: model + key forwarded, parsed through the same decoder",
+              seenArgs.value == "z-ai/glm-5.3-flash|or-key" && fetched == pinEndpoints)
         // 5e. The doctor's legacy-alias nudge is OpenCode-only (Codex S1): a
         // custom or local server may serve its own "deepseek-flash".
         let opencodeURL = OpenCodeGo.baseURL
