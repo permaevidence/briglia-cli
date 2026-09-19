@@ -1089,22 +1089,46 @@ enum OpenCodeGo {
         // v0.2.17 catalog id → models.dev canonical id (renamed 2026-09-10).
         "deepseek-flash": "deepseek-v4.1-flash",
     ]
-    /// Catalog entry for an id, following legacy aliases.
+    /// Capability entry for an id — curated OR retired — following legacy
+    /// aliases (case-insensitive). This is the lookup for anything typed or
+    /// stored: `/model <id>` (vision state + canonical id), the vision-lane
+    /// refusal in `/subagentmodels`, setup-api `text_only` inference and the
+    /// doctor's alias nudge. Pickers render `choices` only (Codex R2,
+    /// 2026-09-19: retiring an entry from the picker must not lose what
+    /// Briglia knows about the model).
     static func catalogEntry(for id: String) -> (id: String, label: String, textOnly: Bool)? {
-        let canonical = legacyAliases[id.lowercased()] ?? id
-        return choices.first(where: { $0.id == canonical })
+        let lowered = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let canonical = legacyAliases[lowered] ?? lowered
+        return known.first(where: { $0.id.lowercased() == canonical })
     }
+    /// Every model Briglia has verified on the Go gateway: the curated
+    /// picker plus the retired entries. Never rendered as a menu.
+    static var known: [(id: String, label: String, textOnly: Bool)] { choices + retired }
+    /// Retired from the picker on 2026-09-19 (owner) but still served by the
+    /// gateway and still fully recognized when typed or already stored. The
+    /// capability facts are the ones verified when they were curated.
+    static let retired: [(id: String, label: String, textOnly: Bool)] = [
+        // Zhipu — text-only sibling of the default; images rejected
+        // (verified 2026-08-14).
+        ("glm-5.3", "GLM 5.3", true),
+        // DeepSeek V4 — text-only (images rejected, verified 2026-08-05).
+        ("deepseek-v4-pro", "DeepSeek V4 Pro", true),
+        // Hosted only in China (RegionError without the workspace opt-in).
+        ("deepseek-v4-flash", "DeepSeek V4 Flash (requires China opt-in)", true),
+        // Full vision through the Go gateway (verified 2026-08-22).
+        ("deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision (experimental)", false),
+    ]
     /// Curated picker order (owner, 2026-09-19): the default first (the
     /// wizard's "Model [1]" and the UT app's preselection read choices[0]),
     /// then one block per upstream company, newest version first inside a
     /// block. The Telegram /model buttons, the /model text listing, the
     /// setup-api `opencode_catalog` and the Quick Setup page all render this
     /// array in order, so the grouping lives here only.
-    /// Retired from the picker on 2026-09-19 (owner): "glm-5.3" (text-only),
-    /// "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp".
-    /// They stay selectable by typing the id into /model and the reasoning
-    /// predicates in OpenRouterService still recognize them; installs that
-    /// keep one stored are untouched (the picker is display only).
+    /// Retired from the picker on 2026-09-19 (owner): see `retired`. They
+    /// stay selectable by typing the id into /model with their verified
+    /// vision state (`catalogEntry(for:)` searches `known`), the reasoning
+    /// predicates in OpenRouterService still recognize them, and installs
+    /// that keep one stored are untouched (the picker is display only).
     static let choices: [(id: String, label: String, textOnly: Bool)] = [
         // Zhipu — the default. Multimodal sibling of GLM 5.3 with the same
         // reasoning contract: reasoning_content on plain + tool-call turns,

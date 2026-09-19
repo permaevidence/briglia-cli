@@ -97,6 +97,23 @@ enum OpenRouterProviderPin {
 
     static var isPinned: Bool { !pinnedSlugs().isEmpty }
 
+    /// A stored pin only means anything while OpenRouter is the active
+    /// provider: `providers(for:)` never reads it on a custom endpoint, and
+    /// the lane bypass below must not touch OpenCode/local lane picks.
+    static var appliesToActiveProvider: Bool {
+        isPinned && LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)) == .openRouter
+    }
+
+    /// Scope (owner decision 2026-09-19 03:03 EDT): the pin governs the
+    /// MAIN MODEL wherever it runs — the main agent, and every subagent,
+    /// which runs on exactly the main model while a pin is set because the
+    /// cheap-vision/cheap-text lanes are bypassed (`SubagentModelLanes`;
+    /// the picks stay stored and return on release). Anything on another
+    /// model keeps OpenRouter's automatic routing: the Web researcher and
+    /// the legacy web pipeline (their own backend and key), a configured
+    /// description model, the OCR/vision preprocessor (own ZDR routing).
+    static let scopeNote = "Applies to the main model: the main agent and every subagent (cheap lanes are bypassed while pinned). Web research keeps its own routing."
+
     /// Persist a pin (nil or empty clears it). Slugs are stored verbatim
     /// after normalization — the caller validates them first.
     static func setPin(_ slugs: [String]?) throws {
@@ -112,7 +129,7 @@ enum OpenRouterProviderPin {
     static func statusLine() -> String? {
         let slugs = pinnedSlugs()
         guard !slugs.isEmpty else { return nil }
-        return "📌 OpenRouter host pin: \(slugs.joined(separator: ", ")) (main agent; /orprovider off to release)"
+        return "📌 OpenRouter host pin: \(slugs.joined(separator: ", ")) (main model, main agent + subagents; /orprovider off to release)"
     }
 
     // MARK: Endpoint listing
@@ -187,9 +204,20 @@ enum OpenRouterProviderPin {
 
     /// Live listing for a model. Never retries auth errors; one retry on
     /// 429/5xx. Throws `FetchError` with a user-facing description.
+    /// Cancellation is propagated as `CancellationError` — whether it
+    /// arrives as the task flag, a `URLError.cancelled` from the session, or
+    /// during the retry pause — never converted into a retry or a
+    /// `FetchError` (Codex R3: a cancelled lookup must not look like a
+    /// failed one, because the caller treats failure as "save anyway").
     static func fetchEndpoints(model: String, apiKey: String) async throws -> [Endpoint] {
+        try Task.checkCancellation()
         if let fetchOverride {
-            return try parseEndpoints(try await fetchOverride(model, apiKey))
+            do {
+                return try parseEndpoints(try await fetchOverride(model, apiKey))
+            } catch {
+                if Self.isCancellation(error) { throw CancellationError() }
+                throw error
+            }
         }
         guard let encoded = model.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "?#"))),
               let url = URL(string: "\(apiBase)/models/\(encoded)/endpoints") else {
@@ -219,12 +247,22 @@ enum OpenRouterProviderPin {
             } catch let error as FetchError {
                 throw error
             } catch {
-                if error is CancellationError { throw error }
+                if Self.isCancellation(error) { throw CancellationError() }
                 lastError = FetchError(description: error.localizedDescription)
             }
-            if attempt < 2 { try? await Task.sleep(nanoseconds: 1_000_000_000) }
+            if attempt < 2 {
+                // A cancelled pause ends the lookup as cancelled, not as
+                // the previous attempt's error.
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            }
         }
         throw lastError
+    }
+
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        return false
     }
 
     /// Validation verdict for a requested pin against a listing.

@@ -1573,7 +1573,11 @@ enum AvailableTools {
         let configuredLanes = SubagentModelLanes.configuredLanes()
         let modelEnumValues = ["inherit"] + configuredLanes.map { $0.lane.rawValue }
         let modelDescription: String
-        if configuredLanes.isEmpty {
+        if configuredLanes.isEmpty && SubagentModelLanes.hostPinBypass() {
+            // Pinned host (/orprovider): lanes bypassed by owner decision;
+            // this text is only ever rendered while a pin is set.
+            modelDescription = "Optional. Only 'inherit' is available: the user pinned OpenRouter to one host (/orprovider), so every subagent runs the main model on that host; the cheap lanes are bypassed until the pin is released."
+        } else if configuredLanes.isEmpty {
             modelDescription = "Optional. Only 'inherit' is available: no per-call preference — the subagent runs the parent model. The user can configure cheap subagent model lanes with the /subagentmodels command."
         } else {
             let laneLines = configuredLanes.map { entry -> String in

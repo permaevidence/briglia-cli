@@ -161,11 +161,14 @@ struct ProviderSelftest: AsyncParsableCommand {
               && OpenCodeGo.catalogEntry(for: "not-a-model") == nil)
         // 5d'. Curated picker trim + company grouping (owner, 2026-09-19).
         // The retired ids are out of every picker but stay typeable into
-        // /model, so the reasoning predicates must keep recognizing them.
+        // /model with their verified capability facts (Codex R2: the
+        // capability lookup keeps them), and the reasoning predicates must
+        // keep recognizing them.
         for retired in ["glm-5.3", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] {
-            check("retired OpenCode id \(retired) is out of the curated catalog",
+            check("retired OpenCode id \(retired) is out of the picker but still known to the capability lookup",
                   !OpenCodeGo.choices.contains(where: { $0.id == retired })
-                  && OpenCodeGo.catalogEntry(for: retired) == nil)
+                  && OpenCodeGo.catalogEntry(for: retired)?.id == retired
+                  && OpenCodeGo.retired.contains(where: { $0.id == retired }))
             check("retired OpenCode id \(retired) still drives reasoning_content when typed",
                   OpenRouterService.isOpenCodeReasoningContentModel(retired))
         }
@@ -640,9 +643,219 @@ struct ProviderSelftest: AsyncParsableCommand {
         check("same shape without the flag is byte-identical to before (note has no field)",
               otherWire == [nil, nil, nil, "call it", nil])
 
+        failures += try await hostPinScopeChecks()
+
         print(failures == 0
               ? "\nAll provider-profile checks passed."
               : "\n\(failures) provider-profile check(s) FAILED.")
         if failures > 0 { throw ExitCode(1) }
+    }
+
+    /// 5e″ — Codex review of e3a0b38 (2026-09-19), three corrections:
+    ///   R1 pin scope: the /orprovider pin applies to requests on the MAIN
+    ///      model only (main agent + subagents, whose cheap lanes are
+    ///      bypassed while pinned — owner decision); the Web researcher and
+    ///      any other model keep automatic routing.
+    ///   R2 retired catalog entries keep their capability facts when typed.
+    ///   R3 /orprovider and the /model revalidation re-check state after
+    ///      the listing await; a cancelled lookup never writes.
+    /// Drives the real command handlers and execution-context builders
+    /// with the fetch seam standing in for OpenRouter; storage is the
+    /// selftest's temp roots.
+    @MainActor
+    private func hostPinScopeChecks() async throws -> Int {
+        var failures = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            print("\(ok ? "✔" : "✖") \(label)\(ok || detail.isEmpty ? "" : " — \(detail)")")
+            if !ok { failures += 1 }
+        }
+        typealias Pin = OpenRouterProviderPin
+        UserDefaults.standard.setVolatileDomain(["should_resume_polling_on_launch": false], forName: UserDefaults.argumentDomain)
+        defer {
+            WebSearchBackend.processOverride = nil
+            Pin.fetchOverride = nil
+            try? Pin.setPin(nil)
+        }
+        let mainModel = "deepseek/deepseek-chat"
+        try ProviderProfiles.saveProfile(.openrouter, apiKey: "synthetic-review-key", baseURL: nil, model: mainModel, effort: "high", textOnly: false)
+        try ProviderProfiles.activate(.openrouter)
+        try Pin.setPin(["deepinfra"])
+        try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "openai/gpt-5.6-luna")
+        WebSearchBackend.processOverride = .openrouter
+        let service = OpenRouterService()
+
+        // R1 — scope of the pin across execution contexts.
+        let web = try await service.webExecutionContextWithNote(lane: .subagent("review-web")).context
+        check("R1 web researcher on the OpenRouter backend never carries the main pin",
+              web.providerPreferences == nil, "model=\(web.model) prefs=\(String(describing: web.providerPreferences))")
+        try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: mainModel)
+        let webSameModel = try await service.webExecutionContextWithNote(lane: .subagent("review-web-same")).context
+        check("R1 web researcher configured on the SAME model as the main agent still never carries the pin (own backend and key)",
+              webSameModel.model == mainModel && webSameModel.providerPreferences == nil, "prefs=\(String(describing: webSameModel.providerPreferences))")
+        try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "openai/gpt-5.6-luna")
+        let main = await service.executionContext(modelOverride: nil, providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
+        check("R1 main-model request carries the pin as only + no fallbacks",
+              main.providerPreferences?.only == ["deepinfra"] && main.providerPreferences?.allow_fallbacks == false)
+        let sameModelChild = await service.executionContext(modelOverride: mainModel, providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .subagent("review-same"))
+        check("R1 subagent on the main model inherits the pin (intended: every subagent runs the main model while pinned)",
+              sameModelChild.providerPreferences?.only == ["deepinfra"])
+        let otherChild = await service.executionContext(modelOverride: "other/child-model", providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .subagent("review-child"))
+        check("R1 a request on any other model never inherits the pin",
+              otherChild.providerPreferences == nil, "prefs=\(String(describing: otherChild.providerPreferences))")
+        // Lane bypass while pinned — picks stay stored, routing ignores them.
+        try SubagentModelLanes.setModel(.cheapText, model: "cheap/text-model", provider: .openRouter)
+        try SubagentModelLanes.setModel(.cheapVision, model: "cheap/vision-model", provider: .openRouter)
+        check("R1 lanes bypassed while pinned: configuredLanes empty, picks still stored, hint resolves to inherit, gate passes",
+              SubagentModelLanes.configuredLanes(provider: .openRouter).isEmpty
+              && SubagentModelLanes.storedModel(.cheapText, provider: .openRouter) == "cheap/text-model"
+              && SubagentModelLanes.resolve(hint: "cheap-vision") == .inherit
+              && ToolExecutor.agentModelHintError("cheap-text") == nil)
+        let agentEnum = AvailableTools.agentTool.function.parameters.properties["model"]?.enumValues
+        let agentDesc = AvailableTools.agentTool.function.parameters.properties["model"]?.description ?? ""
+        check("R1 Agent schema offers only inherit and says why while pinned",
+              agentEnum == ["inherit"] && agentDesc.contains("/orprovider"), agentDesc)
+        let manager = ConversationManager()
+        let laneStatus = (await manager.handleTerminalCommand("/subagentmodels") ?? []).joined(separator: "\n")
+        check("R1 /subagentmodels shows the stored picks as bypassed with the reason",
+              laneStatus.contains("cheap/text-model — bypassed") && laneStatus.contains("Bypassed while the OpenRouter host pin"), laneStatus)
+        let laneSet = (await manager.handleTerminalCommand("/subagentmodels text cheap/text-two") ?? []).joined(separator: "\n")
+        check("R1 setting a lane while pinned stores it and says it is bypassed",
+              SubagentModelLanes.storedModel(.cheapText, provider: .openRouter) == "cheap/text-two" && laneSet.contains("Bypassed"), laneSet)
+        try Pin.setPin(nil)
+        check("R1 releasing the pin restores the lanes without re-entry",
+              SubagentModelLanes.configuredLanes(provider: .openRouter).map(\.model) == ["cheap/vision-model", "cheap/text-two"]
+              && SubagentModelLanes.resolve(hint: "cheap-vision") == .lane(.cheapVision, model: "cheap/vision-model"))
+        let unpinnedMain = await service.executionContext(modelOverride: nil, providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
+        check("R1 no pin → no preferences on a non-Gemini main model (Briglia's default is Gemini-only)",
+              unpinnedMain.providerPreferences == nil)
+        // The OpenCode/custom provider's lanes are untouched by an OpenRouter pin.
+        try SubagentModelLanes.setModel(.cheapText, model: "kimi-k2.6", provider: .openAICompatible)
+        try Pin.setPin(["deepinfra"])
+        check("R1 a pin never bypasses another provider's lanes",
+              !SubagentModelLanes.hostPinBypass(provider: .openAICompatible)
+              && SubagentModelLanes.configuredModel(.cheapText, provider: .openAICompatible) == "kimi-k2.6")
+        try Pin.setPin(nil)
+        try SubagentModelLanes.setModel(.cheapText, model: nil, provider: .openAICompatible)
+        try SubagentModelLanes.setModel(.cheapText, model: nil, provider: .openRouter)
+        try SubagentModelLanes.setModel(.cheapVision, model: nil, provider: .openRouter)
+
+        // R2 — retired ids keep their capability facts; pickers unchanged.
+        try ProviderProfiles.saveProfile(.opencode, apiKey: "synthetic-opencode-key", baseURL: nil, model: "glm-5.3-flash", effort: "high", textOnly: false)
+        try ProviderProfiles.activate(.opencode)
+        check("R2 catalogEntry finds retired ids (case-insensitive) and aliases; the picker does not list them",
+              OpenCodeGo.catalogEntry(for: "GLM-5.3")?.textOnly == true
+              && OpenCodeGo.catalogEntry(for: "deepseek-v4-pro")?.textOnly == true
+              && OpenCodeGo.catalogEntry(for: "deepseek-v4-flash-vision-exp")?.textOnly == false
+              && OpenCodeGo.catalogEntry(for: "deepseek-flash")?.id == "deepseek-v4.1-flash"
+              && OpenCodeGo.catalogEntry(for: "some/unknown") == nil
+              && !OpenCodeGo.choices.contains { $0.id == "glm-5.3" }
+              && Set(OpenCodeGo.retired.map(\.id)).isDisjoint(with: OpenCodeGo.choices.map(\.id)))
+        for retired in ["glm-5.3", "deepseek-v4-pro", "deepseek-v4-flash"] {
+            _ = await manager.handleTerminalCommand("/model glm-5.3-flash")
+            let reply = (await manager.handleTerminalCommand("/model " + retired) ?? []).joined()
+            check("R2 typing retired text-only \(retired) turns OCR preprocessing on",
+                  KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey) == "true"
+                  && KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) == retired
+                  && reply.contains("Text-only model"), reply)
+        }
+        _ = await manager.handleTerminalCommand("/model deepseek-v4-flash-vision-exp")
+        check("R2 typing the retired vision id turns OCR preprocessing off",
+              KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey) == nil)
+        let aliasReply = (await manager.handleTerminalCommand("/model deepseek-flash") ?? []).joined()
+        check("R2 typing the legacy alias stores the canonical id and says so",
+              KeychainHelper.load(key: KeychainHelper.openAICompatibleModelKey) == "deepseek-v4.1-flash"
+              && aliasReply.contains("legacy alias"), aliasReply)
+        try SubagentModelLanes.setModel(.cheapVision, model: nil)
+        let laneRefusal = (await manager.handleTerminalCommand("/subagentmodels vision glm-5.3") ?? []).joined()
+        check("R2 a retired text-only id stays refused in the vision lane",
+              SubagentModelLanes.configuredModel(.cheapVision) == nil && laneRefusal.contains("text-only"), laneRefusal)
+        _ = await manager.handleTerminalCommand("/subagentmodels text glm-5.3")
+        check("R2 …and accepted in the text lane", SubagentModelLanes.configuredModel(.cheapText) == "glm-5.3")
+        try SubagentModelLanes.setModel(.cheapText, model: nil)
+        try KeychainHelper.delete(key: KeychainHelper.textOnlyModelEnabledKey)
+
+        // R3 — state re-check after the listing await; cancellation never writes.
+        try ProviderProfiles.activate(.openrouter)
+        try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
+        try Pin.setPin(nil)
+        let listed = Data(#"{"data":{"endpoints":[{"provider_name":"DeepInfra","tag":"deepinfra"}]}}"#.utf8)
+        Pin.fetchOverride = { _, _ in listed }
+        let plainPin = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
+        check("R3 control: an undisturbed lookup pins and names the scope",
+              Pin.pinnedSlugs() == ["deepinfra"] && plainPin.contains("main agent and every subagent"), plainPin)
+        _ = await manager.handleTerminalCommand("/orprovider off")
+        check("R3 control: off releases", !Pin.isPinned)
+        // Another channel switches the model while the listing is in flight.
+        Pin.fetchOverride = { _, _ in
+            _ = await manager.handleTerminalCommand("/model other/new-model")
+            return listed
+        }
+        let raceReply = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
+        check("R3 model switch during the lookup → nothing pinned, reason given",
+              !Pin.isPinned && raceReply.contains("model changed to other/new-model"), raceReply)
+        try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
+        // A newer explicit OFF arrives while an older pin lookup waits (key already absent).
+        try Pin.setPin(nil)
+        Pin.fetchOverride = { _, _ in
+            _ = await manager.handleTerminalCommand("/orprovider off")
+            return listed
+        }
+        let offReply = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
+        check("R3 a newer /orprovider off wins over the older pending pin",
+              !Pin.isPinned && offReply.contains("Not pinned"), offReply)
+        // A newer pin arrives from outside this process (direct store edit) during the lookup.
+        Pin.fetchOverride = { _, _ in
+            try Pin.setPin(["novita"])
+            return listed
+        }
+        let externalReply = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
+        check("R3 a pin written outside the manager during the lookup is not overwritten",
+              Pin.pinnedSlugs() == ["novita"] && externalReply.contains("Not pinned"), externalReply)
+        try Pin.setPin(nil)
+        // Cancellation: task flag, and URLError.cancelled from the session.
+        Pin.fetchOverride = { _, _ in throw CancellationError() }
+        let cancelledReply = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
+        check("R3 a cancelled lookup never saves the pin",
+              !Pin.isPinned && cancelledReply.contains("cancelled"), cancelledReply)
+        Pin.fetchOverride = { _, _ in throw URLError(.cancelled) }
+        let urlCancelled = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
+        check("R3 URLError.cancelled is cancellation too — never 'saved anyway'",
+              !Pin.isPinned && urlCancelled.contains("cancelled") && !urlCancelled.contains("saved anyway"), urlCancelled)
+        var seamHit = false
+        Pin.fetchOverride = { _, _ in seamHit = true; throw URLError(.cancelled) }
+        do {
+            _ = try await Pin.fetchEndpoints(model: "m", apiKey: "k")
+            check("R3 fetchEndpoints maps URLError.cancelled to CancellationError", false, "no throw")
+        } catch {
+            check("R3 fetchEndpoints maps URLError.cancelled to CancellationError", seamHit && error is CancellationError, "\(error)")
+        }
+        // A genuine listing failure still saves with the note (unchanged behavior).
+        Pin.fetchOverride = { _, _ in throw Pin.FetchError(description: "HTTP 503") }
+        let failedReply = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
+        check("R3 an ordinary listing failure still saves the pin with the note",
+              Pin.pinnedSlugs() == ["deepinfra"] && failedReply.contains("saved anyway"), failedReply)
+        // /model revalidation: a newer pin stored during the lookup survives.
+        try Pin.setPin(["old-host"])
+        Pin.fetchOverride = { _, _ in
+            try Pin.setPin(["deepinfra"])
+            return listed
+        }
+        let revalReply = (await manager.handleTerminalCommand("/model other/model-three") ?? []).joined()
+        check("R3 /model revalidation cannot delete a newer pin",
+              Pin.pinnedSlugs() == ["deepinfra"] && revalReply.contains("left as is"), revalReply)
+        // /model revalidation cancelled: pin kept, said so.
+        try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
+        try Pin.setPin(["old-host"])
+        Pin.fetchOverride = { _, _ in throw CancellationError() }
+        let revalCancelled = (await manager.handleTerminalCommand("/model other/model-four") ?? []).joined()
+        check("R3 a cancelled revalidation keeps the pin and says so",
+              Pin.pinnedSlugs() == ["old-host"] && revalCancelled.contains("cancelled"), revalCancelled)
+        // /model revalidation undisturbed: unserved pin released (unchanged behavior).
+        Pin.fetchOverride = { _, _ in listed }
+        let revalReleased = (await manager.handleTerminalCommand("/model other/model-five") ?? []).joined()
+        check("R3 control: an undisturbed revalidation still releases an unserved pin",
+              !Pin.isPinned && revalReleased.contains("released: it doesn't serve"), revalReleased)
+        try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
+        return failures
     }
 }

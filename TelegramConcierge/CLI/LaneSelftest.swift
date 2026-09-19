@@ -75,6 +75,32 @@ struct LaneSelftest: AsyncParsableCommand {
         check("Agent tool description names the lane's model", modelDesc.contains("glm-5.3"))
         check("gate passes the configured lane", ToolExecutor.agentModelHintError("cheap-text") == nil)
 
+        // 4b. Host-pin bypass (owner decision 2026-09-19): while /orprovider
+        //     pins OpenRouter to one host, every subagent runs the main model
+        //     there — lane hints resolve to inherit, the schema offers only
+        //     inherit, the picks stay stored and return on release. Other
+        //     providers' lanes are untouched.
+        try OpenRouterProviderPin.setPin(["deepinfra"])
+        check("pinned: lane hint resolves to inherit, not to the lane and not to unconfigured",
+              SubagentModelLanes.resolve(hint: "cheap-text") == .inherit
+              && SubagentModelLanes.resolve(hint: "cheap-vision") == .inherit)
+        check("pinned: configuredModel is nil while storedModel keeps the pick",
+              SubagentModelLanes.configuredModel(.cheapText) == nil
+              && SubagentModelLanes.storedModel(.cheapText) == "glm-5.3")
+        let pinnedEnum = AvailableTools.agentTool.function.parameters.properties["model"]?.enumValues
+        let pinnedDesc = AvailableTools.agentTool.function.parameters.properties["model"]?.description ?? ""
+        check("pinned: Agent tool offers only inherit and names the pin as the reason",
+              pinnedEnum == ["inherit"] && pinnedDesc.contains("/orprovider"))
+        check("pinned: the gate passes a lane hint quietly (runs the main model)",
+              ToolExecutor.agentModelHintError("cheap-text") == nil)
+        check("pinned: other providers are not bypassed",
+              !SubagentModelLanes.hostPinBypass(provider: .openAICompatible)
+              && !SubagentModelLanes.hostPinBypass(provider: .lmStudio))
+        try OpenRouterProviderPin.setPin(nil)
+        check("released: the lane is back exactly as configured",
+              SubagentModelLanes.resolve(hint: "cheap-text") == .lane(.cheapText, model: "glm-5.3")
+              && AvailableTools.agentTool.function.parameters.properties["model"]?.enumValues == ["inherit", "cheap-text"])
+
         // 5. Lanes are stored PER PROVIDER: the OpenCode/custom provider has
         //    its own (empty) slots; configuring there does not leak back.
         try KeychainHelper.save(key: KeychainHelper.llmProviderKey, value: LLMProvider.openAICompatible.rawValue)

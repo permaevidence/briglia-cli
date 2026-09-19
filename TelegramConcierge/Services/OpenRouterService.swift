@@ -460,21 +460,28 @@ actor OpenRouterService {
         )
     }
 
-    /// Returns the user-configured provider order, or nil if not set.
-    /// Falls back to ["google-ai-studio"] for the default Gemini model when no provider is configured,
-    /// because OpenRouter may route it to unreliable providers otherwise.
+    /// Provider routing for a request on `requestedModel`:
+    ///   1. the user's `/orprovider` host pin (`openrouter_providers`) —
+    ///      ONLY when the request runs the main model (the pin was validated
+    ///      against that model's host list; owner scope 2026-09-19: main
+    ///      agent + subagents, which run the main model while pinned).
+    ///      A request on any other model (a configured description model,
+    ///      the web backends) never inherits it;
+    ///   2. otherwise Briglia's own default for that model (`defaultProviders`).
     private func providers(for requestedModel: String) -> [String]? {
         guard !isCustomEndpoint else { return nil }
-        if let providersString = KeychainHelper.load(key: KeychainHelper.openRouterProvidersKey),
-           !providersString.isEmpty {
-            // User explicitly configured providers — use those
-            return providersString
-                .split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
+        if requestedModel == model {
+            let pinned = OpenRouterProviderPin.pinnedSlugs()
+            if !pinned.isEmpty { return pinned }
         }
-        // No provider configured — default to google-ai-studio for the default model,
-        // which only works reliably through Google AI Studio on OpenRouter
+        return defaultProviders(for: requestedModel)
+    }
+
+    /// Briglia's own routing default, independent of any user pin: the
+    /// default Gemini model goes to google-ai-studio, which is the only host
+    /// that serves it reliably on OpenRouter. Everything else is automatic.
+    private func defaultProviders(for requestedModel: String) -> [String]? {
+        guard !isCustomEndpoint else { return nil }
         if requestedModel == defaultModel {
             return ["google-ai-studio"]
         }
@@ -1520,8 +1527,12 @@ actor OpenRouterService {
                 usageLaneLabel: "subagent:web"), note)
         case .openrouter:
             let model = resolution.model
+            // Web research keeps OpenRouter's automatic routing: this
+            // context runs the web backend's own model and key, so the main
+            // model's /orprovider pin never applies here — only Briglia's
+            // model default (Codex R1, 2026-09-19).
             var prefs: ProviderPreferences? = nil
-            if let order = providers(for: model), !order.isEmpty {
+            if let order = defaultProviders(for: model), !order.isEmpty {
                 prefs = ProviderPreferences(order: nil, only: order, allow_fallbacks: false, sort: nil)
             }
             let lowered = model.lowercased()

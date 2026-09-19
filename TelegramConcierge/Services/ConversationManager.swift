@@ -4525,7 +4525,11 @@ class ConversationManager: ObservableObject {
         var stored = argument
         var note = ""
         var knownTextOnly: Bool? = nil
-        if isOpenCode, let match = OpenCodeGo.choices.first(where: { $0.id.lowercased() == argument.lowercased() }) {
+        // Capability lookup over the WHOLE known catalog (curated + retired
+        // + legacy aliases), not the picker: a retired text-only id typed
+        // here still turns OCR preprocessing on, and a legacy alias is
+        // stored under its canonical id (Codex R2, 2026-09-19).
+        if isOpenCode, let match = OpenCodeGo.catalogEntry(for: argument) {
             stored = match.id
             knownTextOnly = match.textOnly
             if match.textOnly {
@@ -4535,8 +4539,12 @@ class ConversationManager: ObservableObject {
                 try? KeychainHelper.delete(key: KeychainHelper.textOnlyModelEnabledKey)
                 note = " Vision model: images flow natively."
             }
+            if match.id.lowercased() != argument.lowercased() {
+                note += " (\"\(argument)\" is the legacy alias; stored as \(match.id).)"
+            }
         }
         try? KeychainHelper.save(key: modelKey, value: stored)
+        modelRoutingGeneration += 1
         // Remember the switch in the active provider profile so /provider
         // hops away and back restore it.
         ProviderProfiles.recordModelChange(stored, textOnly: knownTextOnly)
@@ -4635,9 +4643,11 @@ class ConversationManager: ObservableObject {
         let baseURL = KeychainHelper.load(key: KeychainHelper.openAICompatibleBaseURLKey) ?? ""
         let isOpenCode = provider == .openAICompatible && SessionAffinity.isOpenCodeBaseURL(baseURL)
 
+        let bypassed = SubagentModelLanes.hostPinBypass(provider: provider)
+        let bypassNote = "⚠️ Bypassed while the OpenRouter host pin is set (/orprovider): every subagent runs the main model on the pinned host. /orprovider off restores the lanes."
         func laneStatus(_ lane: SubagentModelLane) -> String {
-            let model = SubagentModelLanes.configuredModel(lane, provider: provider)
-            return "• \(lane.rawValue) (\(lane.displayName)): \(model ?? "not set")"
+            let model = SubagentModelLanes.storedModel(lane, provider: provider)
+            return "• \(lane.rawValue) (\(lane.displayName)): \(model ?? "not set")\(model != nil && bypassed ? " — bypassed" : "")"
         }
 
         guard !argument.isEmpty else {
@@ -4645,11 +4655,14 @@ class ConversationManager: ObservableObject {
                 "Cheap subagent model lanes for \(provider.displayName):",
                 laneStatus(.cheapVision),
                 laneStatus(.cheapText),
+            ]
+            if bypassed { lines.append(bypassNote) }
+            lines.append(contentsOf: [
                 "",
                 "The agent sees 'inherit' plus the configured lanes when delegating to subagents (and for watcher triage via triage_model). Configuring even one lane is fine.",
                 "Set:   /subagentmodels vision <model-id>  |  /subagentmodels text <model-id>",
                 "Clear: /subagentmodels vision off  |  /subagentmodels text off  |  /subagentmodels off"
-            ]
+            ])
             if isOpenCode {
                 lines.append("")
                 lines.append("OpenCode Go catalog:")
@@ -4696,25 +4709,27 @@ class ConversationManager: ObservableObject {
         }
 
         var stored = value
-        var note = ""
-        if isOpenCode, let match = OpenCodeGo.choices.first(where: { $0.id.lowercased() == value.lowercased() }) {
+        var note = bypassed ? " " + bypassNote : ""
+        // Whole known catalog (curated + retired + aliases): a retired
+        // text-only model stays refused in the vision lane (Codex R2).
+        if isOpenCode, let match = OpenCodeGo.catalogEntry(for: value) {
             if lane == .cheapVision && match.textOnly {
                 try? await sendText("✖ \(match.id) is text-only on the Go gateway — it can't serve the vision lane. Put it in the text lane (/subagentmodels text \(match.id)) or pick a vision-capable model.")
                 return
             }
             stored = match.id
             if lane == .cheapText && !match.textOnly {
-                note = " Note: \(match.id) is vision-capable, but the text lane always OCR-preprocesses images — a vision model there works, it just wastes its vision."
+                note += " Note: \(match.id) is vision-capable, but the text lane always OCR-preprocesses images — a vision model there works, it just wastes its vision."
             }
         } else if isOpenCode {
-            // Outside the curated catalog (a retired entry or a newer id the
-            // Go gateway serves): accept as typed, exactly like /model does,
-            // and say what could not be checked.
-            note = lane == .cheapVision
-                ? " Not in the curated OpenCode catalog — make sure the Go gateway serves it and that it accepts images; the vision lane sends them natively."
-                : " Not in the curated OpenCode catalog — make sure the Go gateway serves it."
+            // Outside the known catalog (a newer id the Go gateway serves):
+            // accept as typed, exactly like /model does, and say what could
+            // not be checked.
+            note += lane == .cheapVision
+                ? " Not in the OpenCode catalog — make sure the Go gateway serves it and that it accepts images; the vision lane sends them natively."
+                : " Not in the OpenCode catalog — make sure the Go gateway serves it."
         } else if lane == .cheapVision {
-            note = " Make sure this model actually accepts images — the vision lane sends them natively."
+            note += " Make sure this model actually accepts images — the vision lane sends them natively."
         }
         do {
             try SubagentModelLanes.setModel(lane, model: stored, provider: provider)
@@ -4725,10 +4740,59 @@ class ConversationManager: ObservableObject {
     }
 
 
+    /// Bumped by every routing-relevant settings write this manager makes
+    /// (/model, /provider hop, /orprovider set/release, pin release on
+    /// revalidation). `/orprovider` and the /model revalidation await a
+    /// network listing; a write that lands during that await (another
+    /// channel, the app socket, a menu tap) makes the pending decision
+    /// stale, so both compare this generation — plus the stored model and
+    /// pin, which also catch edits from outside this process — before they
+    /// commit (Codex R3, 2026-09-19).
+    private var modelRoutingGeneration = 0
+
+    /// Snapshot of what an /orprovider decision was made against.
+    private struct OrProviderSnapshot {
+        let generation: Int
+        let model: String
+        let pin: [String]
+    }
+
+    private func orProviderSnapshot(model: String) -> OrProviderSnapshot {
+        OrProviderSnapshot(generation: modelRoutingGeneration, model: model, pin: OpenRouterProviderPin.pinnedSlugs())
+    }
+
+    /// Why a decision taken against `snapshot` may no longer be applied, or
+    /// nil when nothing relevant changed during the await.
+    private func orProviderStaleReason(_ snapshot: OrProviderSnapshot) -> String? {
+        if activeRunId != nil || activeProcessingTask != nil {
+            return "a turn started while checking OpenRouter's host list"
+        }
+        let provider = LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey))
+        guard provider == .openRouter, ProviderProfiles.activeProfile() == .openrouter else {
+            return "the active provider changed while checking OpenRouter's host list"
+        }
+        let model = KeychainHelper.load(key: KeychainHelper.openRouterModelKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if model != snapshot.model {
+            return "the model changed to \(model.isEmpty ? "(not set)" : model) while checking OpenRouter's host list"
+        }
+        if OpenRouterProviderPin.pinnedSlugs() != snapshot.pin {
+            return "the OpenRouter host pin changed while checking OpenRouter's host list"
+        }
+        if modelRoutingGeneration != snapshot.generation {
+            return "the routing settings changed while checking OpenRouter's host list"
+        }
+        return nil
+    }
+
     /// `/orprovider` — show, pin or release the upstream host OpenRouter
     /// routes the main model to (OpenRouterProviderPin). Storage-level and
     /// idle-guarded like /model; `OpenRouterService.providers(for:)` applies
-    /// the stored pin as `provider.only` + `allow_fallbacks: false`.
+    /// the stored pin as `provider.only` + `allow_fallbacks: false` on every
+    /// request that runs the main model (main agent + subagents; the cheap
+    /// lanes are bypassed while pinned). Every write after the listing
+    /// await is re-checked against a snapshot; a cancelled listing never
+    /// writes.
     private func handleOrProviderCommand(argument: String) async {
         let provider = LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey))
         let pinned = OpenRouterProviderPin.pinnedSlugs()
@@ -4752,23 +4816,35 @@ class ConversationManager: ObservableObject {
             let endpoints: [OpenRouterProviderPin.Endpoint]
             do {
                 endpoints = try await OpenRouterProviderPin.fetchEndpoints(model: model, apiKey: apiKey)
+            } catch is CancellationError {
+                try? await sendText("Current OpenRouter host pin: \(pinText)\nThe host listing was cancelled — send /orprovider again.")
+                return
             } catch {
                 try? await sendText("Current OpenRouter host pin: \(pinText)\nCouldn't list the hosts for \(model): \(error). Pin with /orprovider <slug>, release with /orprovider off.")
                 return
             }
-            let choices = OpenRouterProviderPin.baseChoices(endpoints)
-            if replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true, !choices.isEmpty {
-                let context = TelegramCommandMenu.effortContext(profile: ProviderProfiles.Profile.openrouter.rawValue, model: model)
-                await sendCommandMenu(TelegramCommandMenu.orProviderMenu(model: model, choices: choices, context: context, pinned: pinned))
+            // The listing is informational; it is shown for the CURRENT
+            // model so a switch during the fetch doesn't mislabel it.
+            let now = KeychainHelper.load(key: KeychainHelper.openRouterModelKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard now == model else {
+                try? await sendText("The model changed to \(now.isEmpty ? "(not set)" : now) while listing the hosts for \(model) — send /orprovider again.")
                 return
             }
-            var lines = ["Current OpenRouter host pin: \(pinText)", "Hosts serving \(model):"]
+            let choices = OpenRouterProviderPin.baseChoices(endpoints)
+            let currentPin = OpenRouterProviderPin.pinnedSlugs()
+            if replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true, !choices.isEmpty {
+                let context = TelegramCommandMenu.effortContext(profile: ProviderProfiles.Profile.openrouter.rawValue, model: model)
+                await sendCommandMenu(TelegramCommandMenu.orProviderMenu(model: model, choices: choices, context: context, pinned: currentPin))
+                return
+            }
+            var lines = ["Current OpenRouter host pin: \(currentPin.isEmpty ? "automatic routing" : currentPin.joined(separator: ", "))", "Hosts serving \(model) (cheapest endpoint's figures; a base slug allows every endpoint of that host):"]
             for endpoint in choices {
-                let isPinned = pinned.contains { OpenRouterProviderPin.matches(pin: $0, endpoint: endpoint) }
+                let isPinned = currentPin.contains { OpenRouterProviderPin.matches(pin: $0, endpoint: endpoint) }
                 lines.append("• \(OpenRouterProviderPin.describe(endpoint, pinned: isPinned))")
             }
             if choices.isEmpty { lines.append("• (OpenRouter lists no hosts for this model)") }
-            lines.append("Pin with /orprovider <slug> (a full tag like deepinfra/turbo targets one variant); /orprovider off releases it. Takes effect from the next message.")
+            lines.append("Pin with /orprovider <slug> (a full tag like deepinfra/turbo targets one variant); /orprovider off releases it. \(OpenRouterProviderPin.scopeNote) Takes effect from the next message.")
             try? await sendText(lines.joined(separator: "\n"))
             return
         }
@@ -4783,9 +4859,12 @@ class ConversationManager: ObservableObject {
         if ["off", "auto", "automatic", "none", "clear"].contains(trimmed.lowercased()) {
             do {
                 try OpenRouterProviderPin.setPin(nil)
+                // Bumped even when the key was already absent: a pending
+                // pin lookup must lose to this explicit OFF.
+                modelRoutingGeneration += 1
                 try? await sendText(pinned.isEmpty
                     ? "OpenRouter host pin was not set — routing is automatic."
-                    : "✅ OpenRouter host pin released — OpenRouter routes automatically (sticky by session) from the next message.")
+                    : "✅ OpenRouter host pin released — from the next message OpenRouter routes automatically again (sticky by session; Briglia's own default host for the Gemini default model still applies). Subagent cheap lanes, if configured, are back in use.")
             } catch {
                 try? await sendText("✖ Could not save the setting: \(error.localizedDescription)")
             }
@@ -4807,8 +4886,13 @@ class ConversationManager: ObservableObject {
 
         var verification = ""
         if !model.isEmpty {
+            let snapshot = orProviderSnapshot(model: model)
             do {
                 let endpoints = try await OpenRouterProviderPin.fetchEndpoints(model: model, apiKey: apiKey)
+                if let reason = orProviderStaleReason(snapshot) {
+                    try? await sendText("✖ Not pinned: \(reason). Nothing changed — send /orprovider \(trimmed) again.")
+                    return
+                }
                 var served: [String] = []
                 for slug in slugs {
                     switch OpenRouterProviderPin.validate(pin: slug, endpoints: endpoints) {
@@ -4820,13 +4904,24 @@ class ConversationManager: ObservableObject {
                     }
                 }
                 verification = " Serving \(model) via \(served.joined(separator: "; "))."
+            } catch is CancellationError {
+                try? await sendText("✖ Not pinned: the host check was cancelled. Nothing changed — send /orprovider \(trimmed) again.")
+                return
             } catch {
+                if let reason = orProviderStaleReason(snapshot) {
+                    try? await sendText("✖ Not pinned: \(reason). Nothing changed — send /orprovider \(trimmed) again.")
+                    return
+                }
                 verification = " (Couldn't verify against OpenRouter's host list: \(error) — saved anyway.)"
             }
         }
         do {
             try OpenRouterProviderPin.setPin(slugs)
-            try? await sendText("✅ OpenRouter host pinned to \(slugs.joined(separator: ", ")) for the main agent from the next message.\(verification) Requests fail instead of hopping when the host is unavailable; /orprovider off releases it.")
+            modelRoutingGeneration += 1
+            let lanes = SubagentModelLanes.storedModel(.cheapVision, provider: .openRouter) != nil
+                || SubagentModelLanes.storedModel(.cheapText, provider: .openRouter) != nil
+            let laneNote = lanes ? " Your subagent cheap lanes are bypassed while pinned (/subagentmodels shows them)." : ""
+            try? await sendText("✅ OpenRouter host pinned to \(slugs.joined(separator: ", ")) for the main model from the next message — main agent and every subagent.\(verification) A base slug allows every endpoint of that host (price and caching vary per endpoint); requests fail instead of hopping when the host is unavailable. /orprovider off releases it.\(laneNote)")
         } catch {
             try? await sendText("✖ Could not save the setting: \(error.localizedDescription)")
         }
@@ -4834,12 +4929,17 @@ class ConversationManager: ObservableObject {
 
     /// After /model on OpenRouter: keep the pin only if the new model is
     /// served from the pinned host; otherwise release it and say so. Returns
-    /// the note appended to the /model confirmation ("" when no pin).
+    /// the note appended to the /model confirmation ("" when no pin). The
+    /// release is re-checked against a snapshot taken before the listing
+    /// await: a pin stored meanwhile (another channel, the app socket) is
+    /// never deleted by this older decision, and a cancelled listing keeps
+    /// the pin untouched.
     private func revalidateOrProviderPin(model: String) async -> String {
         let pinned = OpenRouterProviderPin.pinnedSlugs()
         guard !pinned.isEmpty, !model.isEmpty else { return "" }
         let apiKey = KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? ""
         let list = pinned.joined(separator: ", ")
+        let snapshot = orProviderSnapshot(model: model)
         do {
             let endpoints = try await OpenRouterProviderPin.fetchEndpoints(model: model, apiKey: apiKey)
             let unserved = pinned.filter { pin in
@@ -4848,12 +4948,18 @@ class ConversationManager: ObservableObject {
             }
             guard !unserved.isEmpty else { return " OpenRouter host pin \(list) kept." }
             let hosts = OpenRouterProviderPin.baseChoices(endpoints).map(\.baseSlug).joined(separator: ", ")
+            if let reason = orProviderStaleReason(snapshot) {
+                return " ⚠️ OpenRouter host pin \(list) doesn't serve \(model) (hosts: \(hosts)), but \(reason) — left as is; check /orprovider."
+            }
             do {
                 try OpenRouterProviderPin.setPin(nil)
+                modelRoutingGeneration += 1
                 return " OpenRouter host pin \(list) released: it doesn't serve \(model) (hosts: \(hosts)). Re-pin with /orprovider."
             } catch {
                 return " ⚠️ OpenRouter host pin \(list) doesn't serve \(model) and could not be released (\(error.localizedDescription)) — requests fail until /orprovider off succeeds."
             }
+        } catch is CancellationError {
+            return " ⚠️ OpenRouter host pin \(list) kept but not verified for \(model) (the check was cancelled)."
         } catch {
             return " ⚠️ OpenRouter host pin \(list) kept but not verified for \(model) (\(error))."
         }
@@ -4970,6 +5076,7 @@ class ConversationManager: ObservableObject {
             try? await sendText("✖ \(ProviderProfiles.describeActivationError(error))")
             return
         }
+        modelRoutingGeneration += 1
 
         // OpenRouterService holds the OpenRouter key in memory (set once at
         // startup) — refresh it so a hop works without a restart.

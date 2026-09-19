@@ -100,13 +100,38 @@ enum SubagentModelLanes {
         return "\(sanitizedHost.isEmpty ? "endpoint" : String(sanitizedHost.prefix(48)))-\(hash8)"
     }
 
-    /// The configured model for `lane` under the active provider, or nil.
-    static func configuredModel(_ lane: SubagentModelLane, provider: LLMProvider? = nil) -> String? {
+    /// The model stored for `lane` under `provider`, ignoring the host-pin
+    /// bypass — for display (/subagentmodels) only; routing decisions use
+    /// `configuredModel`.
+    static func storedModel(_ lane: SubagentModelLane, provider: LLMProvider? = nil) -> String? {
         let p = provider ?? activeProvider()
         guard let stored = KeychainHelper.load(key: storageKey(lane, provider: p))?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !stored.isEmpty else { return nil }
         return stored
+    }
+
+    /// While an `/orprovider` host pin is set on the OpenRouter provider,
+    /// the lanes are bypassed: every subagent runs on exactly the main
+    /// model, on the pinned host (owner decision 2026-09-19 — someone who
+    /// pinned a host wants its characteristics for the subagents too, and
+    /// a pin validated for the main model must not be applied to a lane
+    /// model the host may not serve). The picks stay stored and return
+    /// when the pin is released. OpenCode/custom/local lane picks are
+    /// never affected: the pin does not apply to those providers.
+    static func hostPinBypass(provider: LLMProvider? = nil) -> Bool {
+        (provider ?? activeProvider()) == .openRouter && OpenRouterProviderPin.isPinned
+    }
+
+    /// The configured model for `lane` under the active provider, or nil —
+    /// also nil while the lanes are bypassed by a host pin (see
+    /// `hostPinBypass`), so the Agent schema offers only 'inherit', a
+    /// custom agent's frontmatter lane degrades to inherit, and a stored
+    /// watcher lane runs inherit.
+    static func configuredModel(_ lane: SubagentModelLane, provider: LLMProvider? = nil) -> String? {
+        let p = provider ?? activeProvider()
+        if hostPinBypass(provider: p) { return nil }
+        return storedModel(lane, provider: p)
     }
 
     /// Set (non-empty) or clear (nil/empty) a lane for the active provider.
@@ -157,6 +182,12 @@ enum SubagentModelLanes {
         guard let lane = SubagentModelLane(rawValue: raw) else {
             return .unknown(raw)
         }
+        // A lane hint that arrives while the lanes are bypassed by a host
+        // pin (a watcher's stored triage_model, a custom agent's frontmatter,
+        // a stale schema) runs the main model — quietly, not as the loud
+        // "not configured" refusal, which would point the agent at
+        // /subagentmodels for a setting the user deliberately overrode.
+        if hostPinBypass() { return .inherit }
         guard let model = configuredModel(lane) else {
             return .unconfigured(lane)
         }
