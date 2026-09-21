@@ -36,11 +36,14 @@ enum ResponsesAuxiliary {
         let stored = KeychainHelper.loadSnapshot()
         guard stored[KeychainHelper.llmProviderKey] == LLMProvider.openAICompatible.rawValue,
               let wire = ProviderProfiles.runtimeProtocolValue(stored: stored, model: nil), !wire.isEmpty, wire != "chatCompletions" else { return nil }
+        let model = stored[KeychainHelper.openAICompatibleModelKey] ?? ""
+        let rawEffort = effortOverride ?? stored[KeychainHelper.openAICompatibleReasoningEffortKey]
         var context = ProviderExecutionContext.responsesAPI(
             baseURL: stored[KeychainHelper.openAICompatibleBaseURLKey] ?? "",
             key: stored[KeychainHelper.openAICompatibleApiKeyKey] ?? "",
-            model: stored[KeychainHelper.openAICompatibleModelKey] ?? "", lane: lane,
-            effort: effortOverride ?? stored[KeychainHelper.openAICompatibleReasoningEffortKey])
+            model: model, lane: lane,
+            // OpenCode: resolved against the main model's transport (Codex R1).
+            effort: ProviderProfiles.isOpenCodeRuntime(stored: stored) ? OpenCodeGo.compatibleEffort(rawEffort, for: model) : rawEffort)
         if stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.opencode.rawValue {
             // Same scope identity the main-agent context carries (v0.2.31).
             context.profileIdentity = ProviderProfiles.Profile.opencode.rawValue

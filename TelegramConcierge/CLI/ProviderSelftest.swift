@@ -1110,6 +1110,106 @@ struct ProviderSelftest: AsyncParsableCommand {
         check("P5 the OpenAI profile stays Responses whatever the model id, slot stamped as before",
               openaiOther.wireProtocol == .responses && openaiOther.profileIdentity == "openai"
               && KeychainHelper.loadSnapshot()[ProviderProfiles.runtimeProtocolKey] == "responses" && ProviderProfiles.usesResponses)
+
+        // ---- Codex round 1 on e8f528d (2026-09-21) ----
+        // C1 — R1: the stored effort is resolved per effective model at
+        // request time (main, lanes, auxiliary work), never rewritten there.
+        check("C1 compatibleEffort: Responses model keeps an accepted value, minimal→low, max→xhigh only where max is not accepted, junk dropped; chat model drops none and keeps the rest verbatim",
+              OpenCodeGo.compatibleEffort("high", for: "gpt-5.6-luna") == "high"
+              && OpenCodeGo.compatibleEffort(" Max ", for: "gpt-5.6-luna") == " Max "
+              && OpenCodeGo.compatibleEffort("minimal", for: "gpt-5.6-luna") == "low"
+              && OpenCodeGo.compatibleEffort("max", for: "gpt-7-preview") == "xhigh"
+              && OpenCodeGo.compatibleEffort("ultra", for: "gpt-5.6-luna") == nil
+              && OpenCodeGo.compatibleEffort("", for: "gpt-5.6-luna") == nil
+              && OpenCodeGo.compatibleEffort("none", for: "glm-5.3-flash") == nil
+              && OpenCodeGo.compatibleEffort("Minimal", for: "glm-5.3-flash") == "Minimal"
+              && OpenCodeGo.compatibleEffort("max", for: "kimi-k2.6") == "max")
+        // GLM main on minimal (accepted on chat) → a Luna lane inherits it: builds and sends low, stored value untouched.
+        try ProviderProfiles.saveProfile(.opencode, apiKey: "oc-synthetic-key-1234567890", baseURL: nil,
+                                         model: "glm-5.3-flash", effort: "minimal", textOnly: false)
+        try ProviderProfiles.activate(.opencode)
+        let lunaLaneMinimal = await context(service, model: "gpt-5.6-luna", lane: .subagent("c1-luna-lane"))
+        let lunaLaneRequest = try? ResponsesAdapter(context: lunaLaneMinimal).request(input: [ResponsesAdapter.message(role: "user", text: "hi")], tools: nil)
+        let glmMainMinimal = await context(service)
+        check("C1 a Luna lane under a GLM main on 'minimal' resolves to Responses at 'low', its request builds, the stored main effort stays 'minimal' and the GLM main still remaps it (low)",
+              lunaLaneMinimal.wireProtocol == .responses && lunaLaneMinimal.reasoningEffort == "low" && lunaLaneRequest != nil
+              && KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey) == "minimal"
+              && KeychainHelper.load(key: ProviderProfiles.opencodeReasoningEffortKey) == "minimal"
+              && glmMainMinimal.wireProtocol == .chatCompletions && glmMainMinimal.reasoningEffort == "low",
+              "\(lunaLaneMinimal.reasoningEffort ?? "-") built=\(lunaLaneRequest != nil)")
+        // An upgraded Luna profile: minimal + text-only + no protocol slot, activated by the migration guard only.
+        try KeychainHelper.saveBatch([ProviderProfiles.opencodeModelKey: "gpt-5.6-luna", KeychainHelper.openAICompatibleModelKey: "gpt-5.6-luna",
+                                      ProviderProfiles.opencodeReasoningEffortKey: "minimal", KeychainHelper.openAICompatibleReasoningEffortKey: "minimal",
+                                      ProviderProfiles.opencodeTextOnlyKey: "true", KeychainHelper.textOnlyModelEnabledKey: "true",
+                                      ProviderProfiles.runtimeProtocolKey: String?.none])
+        ProviderProfiles.ensureMigrated()
+        let upgradedMain = await context(service)
+        let upgradedAux = ResponsesAuxiliary.inheritedSnapshot(lane: .archive)
+        let upgradedRequest = try? ResponsesAdapter(context: upgradedMain).request(input: [ResponsesAdapter.message(role: "user", text: "hi")], tools: nil)
+        let upgradedAuxRequest = upgradedAux.flatMap { try? ResponsesAdapter(context: $0).request(input: [ResponsesAdapter.message(role: "user", text: "hi")], tools: nil) }
+        check("C1 an upgraded Luna profile (minimal, no slot) builds main AND archive requests over Responses at 'low' without any /model re-selection; stored minimal untouched",
+              upgradedMain.wireProtocol == .responses && upgradedMain.reasoningEffort == "low" && upgradedRequest != nil
+              && upgradedAux?.reasoningEffort == "low" && upgradedAuxRequest != nil
+              && KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey) == "minimal",
+              "\(upgradedMain.reasoningEffort ?? "-") aux=\(upgradedAux?.reasoningEffort ?? "-")")
+        check("C3 the doctor nudges an upgraded Luna profile still flagged text-only, and only that case",
+              Doctor.openCodeStaleTextOnlyAdvisory(model: "gpt-5.6-luna", textOnly: true, activeProfile: .opencode)?.contains("/model gpt-5.6-luna") == true
+              && Doctor.openCodeStaleTextOnlyAdvisory(model: "gpt-5.6-luna", textOnly: false, activeProfile: .opencode) == nil
+              && Doctor.openCodeStaleTextOnlyAdvisory(model: "glm-5.3-flash", textOnly: true, activeProfile: .opencode) == nil
+              && Doctor.openCodeStaleTextOnlyAdvisory(model: "gpt-5.6-luna", textOnly: true, activeProfile: .custom) == nil
+              && Doctor.openCodeStaleTextOnlyAdvisory(model: "gpt-5.6-luna", textOnly: true, activeProfile: nil) == nil)
+        // Reverse: Luna main on 'none' → a GLM lane must not carry 'none'; a Kimi lane likewise; the doctor probe override still wins.
+        try KeychainHelper.saveBatch([KeychainHelper.openAICompatibleReasoningEffortKey: "none", ProviderProfiles.opencodeReasoningEffortKey: "none",
+                                      KeychainHelper.textOnlyModelEnabledKey: String?.none, ProviderProfiles.opencodeTextOnlyKey: "false"])
+        let glmLaneNone = await context(service, model: "glm-5.3-flash", lane: .subagent("c1-glm-lane"))
+        let kimiLaneNone = await context(service, model: "kimi-k2.6", lane: .subagent("c1-kimi-lane"))
+        let lunaMainNone = await context(service)
+        check("C1 a GLM or Kimi lane under a Luna main on 'none' sends no effort field (chat completions), the Luna main keeps 'none' on Responses, stored value untouched",
+              glmLaneNone.wireProtocol == .chatCompletions && glmLaneNone.reasoningEffort == nil && glmLaneNone.thinkingType == nil
+              && kimiLaneNone.wireProtocol == .chatCompletions && kimiLaneNone.reasoningEffort == nil
+              && lunaMainNone.wireProtocol == .responses && lunaMainNone.reasoningEffort == "none"
+              && KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey) == "none",
+              "glm=\(glmLaneNone.reasoningEffort ?? "nil") kimi=\(kimiLaneNone.reasoningEffort ?? "nil") luna=\(lunaMainNone.reasoningEffort ?? "nil")")
+        let probeOverride = ResponsesAuxiliary.inheritedSnapshot(lane: .probe(UUID()), effortOverride: "low")
+        check("C1 an explicit auxiliary effort override is resolved the same way (low stays low)", probeOverride?.reasoningEffort == "low")
+        // An explicit lane override that the lane's transport rejects is adapted too.
+        let lunaLaneOverride = await context(service, model: "gpt-5.6-luna", effort: "minimal", lane: .subagent("c1-luna-override"))
+        check("C1 an explicit per-call 'minimal' on a Luna lane is adapted to 'low'", lunaLaneOverride.reasoningEffort == "low")
+
+        // C2 — R2: /model honours the resolver's profile boundary.
+        let manager2 = ConversationManager()
+        for (savedProtocol, target, expectSlot) in [(ProviderWireProtocol.chatCompletions, "gpt-5.6-luna", String?.none),
+                                                     (ProviderWireProtocol.responses, "glm-5.3-flash", "responses")] {
+            try ProviderProfiles.saveProfile(.custom, apiKey: "custom-synthetic-key-1234567890", baseURL: "https://opencode.ai/zen/v1",
+                                             model: "kimi-k3", effort: "high", textOnly: false, wireProtocol: savedProtocol)
+            try ProviderProfiles.activate(.custom)
+            try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "none")
+            let reply = (await manager2.handleTerminalCommand("/model \(target)") ?? []).joined(separator: "\n")
+            let after = KeychainHelper.loadSnapshot()
+            check("C2 a custom profile at an OpenCode host with explicit \(savedProtocol.rawValue): /model \(target) keeps the runtime slot (\(expectSlot ?? "absent")), the saved protocol, the effort, and says nothing about Responses",
+                  after[ProviderProfiles.runtimeProtocolKey] == expectSlot
+                  && after[ProviderProfiles.customProtocolKey] == (savedProtocol == .responses ? "responses" : nil)
+                  && after[KeychainHelper.openAICompatibleModelKey] == target && after[ProviderProfiles.customModelKey] == target
+                  && after[KeychainHelper.openAICompatibleReasoningEffortKey] == "none"
+                  && !reply.contains("Responses API") && !reply.contains("cleared")
+                  && ProviderProfiles.wireProtocol(.custom, model: target) == savedProtocol,
+                  "slot=\(after[ProviderProfiles.runtimeProtocolKey] ?? "nil") saved=\(after[ProviderProfiles.customProtocolKey] ?? "nil") \(reply)")
+            let customContext = await context(service)
+            check("C2 …and its requests follow the saved protocol (\(savedProtocol.rawValue)) for \(target)",
+                  customContext.wireProtocol == savedProtocol)
+        }
+        // Pre-profile compatibility path: no active profile, OpenCode runtime URL → host inference applies.
+        try KeychainHelper.saveBatch([ProviderProfiles.activeProfileKey: String?.none, ProviderProfiles.customProtocolKey: String?.none,
+                                      KeychainHelper.llmProviderKey: LLMProvider.openAICompatible.rawValue,
+                                      KeychainHelper.openAICompatibleBaseURLKey: OpenCodeGo.baseURL,
+                                      KeychainHelper.openAICompatibleModelKey: "glm-5.3-flash",
+                                      KeychainHelper.openAICompatibleApiKeyKey: "oc-synthetic-key-1234567890",
+                                      ProviderProfiles.runtimeProtocolKey: String?.none])
+        let preProfileLuna = await context(service, model: "gpt-5.6-luna", lane: .subagent("c2-pre"))
+        check("C2 pre-profile install on the OpenCode URL: identified as OpenCode by the host, Luna resolves to Responses",
+              ProviderProfiles.isOpenCodeRuntime(stored: KeychainHelper.loadSnapshot())
+              && preProfileLuna.wireProtocol == .responses
+              && ProviderProfiles.runtimeProtocolValue(stored: KeychainHelper.loadSnapshot(), model: "gpt-5.6-luna") == "responses")
         return failures
     }
 }

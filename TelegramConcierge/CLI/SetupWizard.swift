@@ -1103,6 +1103,32 @@ enum OpenCodeGo {
         let canonical = (legacyAliases[trimmed] ?? trimmed).lowercased()
         return canonical.hasPrefix("gpt-") && !canonical.hasPrefix("gpt-oss")
     }
+    /// Request-time effort adaptation for one effective Go model (Codex R1,
+    /// 2026-09-21). The OpenCode profile stores ONE reasoning effort while its
+    /// models split across two transports with different vocabularies, so
+    /// every request — main, cheap lane, archive/description work — resolves
+    /// the stored value against the model it is about to hit instead of
+    /// letting the adapter refuse it (a Luna lane under a GLM main on
+    /// `minimal`, an upgraded Luna profile that kept `minimal`, a GLM lane
+    /// under a Luna main on `none`). Responses models: an accepted value is
+    /// returned untouched, `minimal → low`, `max → xhigh` where that list has
+    /// no max, anything else dropped (endpoint default). Chat-completions
+    /// models: `none` (a Responses-only value) dropped, everything else
+    /// returned untouched for the existing per-model normalizers. Stored
+    /// settings are never rewritten here; `/model` does that visibly.
+    static func compatibleEffort(_ effort: String?, for model: String) -> String? {
+        guard let effort, !effort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let raw = effort.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard usesResponses(model) else { return raw == "none" ? nil : effort }
+        let lowered = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let allowed = ResponsesAdapter.allowedEfforts(model: legacyAliases[lowered] ?? lowered)
+        if allowed.contains(raw) { return effort }
+        switch raw {
+        case "minimal": return "low"
+        case "max": return allowed.contains("xhigh") ? "xhigh" : nil
+        default: return nil
+        }
+    }
     /// Capability entry for an id — curated OR retired — following legacy
     /// aliases (case-insensitive). This is the lookup for anything typed or
     /// stored: `/model <id>` (vision state + canonical id), the vision-lane

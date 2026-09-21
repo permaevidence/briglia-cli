@@ -4549,25 +4549,30 @@ class ConversationManager: ObservableObject {
         // so the runtime protocol slot flips in the SAME write as the model,
         // and a stored effort the new transport rejects is replaced rather
         // than left to fail the next request (v0.2.31).
+        // Gated on the SAME profile identification the request resolver uses
+        // (named OpenCode profile, host inference only pre-profile): a custom
+        // profile pointed at an OpenCode host keeps its explicit protocol and
+        // its effort untouched (Codex R2, 2026-09-21).
         var adjustedEffort: String?? = nil
-        if isOpenCode {
+        if ProviderProfiles.isOpenCodeRuntime(stored: KeychainHelper.loadSnapshot()) {
             let responses = OpenCodeGo.usesResponses(stored)
             changes[ProviderProfiles.runtimeProtocolKey] = responses ? ProviderWireProtocol.responses.rawValue : String?.none
+            if responses { note += " Served over the Responses API." }
+            // Same rule every request applies at build time (OpenCodeGo.
+            // compatibleEffort); here the stored value is rewritten visibly so
+            // /effort shows what actually runs.
             let effort = KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-            if responses {
-                note += " Served over the Responses API."
-                if !effort.isEmpty, !ResponsesAdapter.allowedEfforts(model: stored).contains(effort) {
-                    let replacement: String? = effort == "minimal" ? "low" : effort == "max" ? "xhigh" : nil
-                    changes[KeychainHelper.openAICompatibleReasoningEffortKey] = replacement
-                    adjustedEffort = .some(replacement)
-                    note += replacement.map { " Reasoning effort \"\(effort)\" isn't available on \(stored); set to \($0)." }
+            let compatible = OpenCodeGo.compatibleEffort(effort, for: stored)?.lowercased()
+            if !effort.isEmpty, compatible != effort {
+                changes[KeychainHelper.openAICompatibleReasoningEffortKey] = compatible
+                adjustedEffort = .some(compatible)
+                if responses {
+                    note += compatible.map { " Reasoning effort \"\(effort)\" isn't available on \(stored); set to \($0)." }
                         ?? " Reasoning effort \"\(effort)\" isn't available on \(stored); cleared (endpoint default)."
+                } else {
+                    note += " Reasoning effort \"\(effort)\" only exists on the Responses API; cleared (endpoint default)."
                 }
-            } else if effort == "none" {
-                changes[KeychainHelper.openAICompatibleReasoningEffortKey] = String?.none
-                adjustedEffort = .some(nil)
-                note += " Reasoning effort \"none\" only exists on the Responses API; cleared (endpoint default)."
             }
         }
         try? KeychainHelper.saveBatch(changes)

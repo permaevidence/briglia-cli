@@ -101,6 +101,20 @@ enum ProviderProfiles {
                 .map { !$0.isEmpty && $0 != ProviderWireProtocol.chatCompletions.rawValue } == true
     }
 
+    /// Whether the runtime slots belong to the OpenCode profile — the ONE
+    /// identification every per-model rule uses (protocol derivation, the
+    /// `/model` slot/effort writes, request-time effort adaptation): the
+    /// NAMED `.opencode` profile, or, only on a pre-profile install with no
+    /// active profile yet, an OpenCode runtime base URL. A custom profile
+    /// pointed at an OpenCode host is NOT OpenCode here: its explicit
+    /// protocol choice stands (Codex R2, 2026-09-21).
+    static func isOpenCodeRuntime(stored: [String: String]) -> Bool {
+        if let active = stored[activeProfileKey]?.trimmingCharacters(in: .whitespacesAndNewlines), !active.isEmpty {
+            return active == Profile.opencode.rawValue
+        }
+        return SessionAffinity.isOpenCodeBaseURL(stored[KeychainHelper.openAICompatibleBaseURLKey] ?? "")
+    }
+
     /// The raw `active_provider_protocol` value the runtime slots resolve to
     /// for `model` (nil or blank = the main model). On the OpenCode profile
     /// the protocol is DERIVED from the effective model on every read — a
@@ -113,13 +127,7 @@ enum ProviderProfiles {
     /// Pre-profile installs (no active profile yet) are recognized by the
     /// runtime base URL, the same rule `/model` uses.
     static func runtimeProtocolValue(stored: [String: String], model: String?) -> String? {
-        let onOpenCode: Bool
-        if let active = stored[activeProfileKey]?.trimmingCharacters(in: .whitespacesAndNewlines), !active.isEmpty {
-            onOpenCode = active == Profile.opencode.rawValue
-        } else {
-            onOpenCode = SessionAffinity.isOpenCodeBaseURL(stored[KeychainHelper.openAICompatibleBaseURLKey] ?? "")
-        }
-        guard onOpenCode else { return stored[runtimeProtocolKey] }
+        guard isOpenCodeRuntime(stored: stored) else { return stored[runtimeProtocolKey] }
         let requested = model?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let effective = requested.isEmpty ? (stored[KeychainHelper.openAICompatibleModelKey] ?? "") : requested
         return OpenCodeGo.usesResponses(effective) ? ProviderWireProtocol.responses.rawValue : nil

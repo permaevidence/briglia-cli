@@ -56,6 +56,11 @@ struct Doctor: AsyncParsableCommand {
                                                             activeProfile: ProviderProfiles.activeProfile()) {
             note(advisory)
         }
+        if let advisory = Self.openCodeStaleTextOnlyAdvisory(model: model,
+                textOnly: KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey) == "true",
+                activeProfile: ProviderProfiles.activeProfile()) {
+            note(advisory)
+        }
         if provider == .openRouter, let pin = OpenRouterProviderPin.statusLine() {
             note(pin)
         }
@@ -324,6 +329,19 @@ extension Doctor {
     /// legacy-alias nudge fires only when the main agent is positively on
     /// OpenCode — the active profile is OpenCode, or the configured base URL
     /// is an OpenCode endpoint. Never a failing check.
+    /// v0.2.31 upgrade nudge: the pre-0.2.31 catalog stored Luna as
+    /// text-only, and a catalog change does not rewrite a persisted profile
+    /// flag (a deliberate OCR preference cannot be told apart from the old
+    /// default, so nothing is migrated silently — Codex, 2026-09-21). Fires
+    /// only on the named OpenCode profile, for a model that now runs over
+    /// the Responses API, while the runtime is still in text-only mode.
+    static func openCodeStaleTextOnlyAdvisory(model: String, textOnly: Bool,
+                                              activeProfile: ProviderProfiles.Profile?) -> String? {
+        guard activeProfile == .opencode, textOnly, OpenCodeGo.usesResponses(model),
+              let entry = OpenCodeGo.catalogEntry(for: model), !entry.textOnly else { return nil }
+        return "\(entry.label) is stored as text-only from the pre-0.2.31 catalog; since 0.2.31 it sees images natively over the Responses API — re-select it with /model \(entry.id) (or `briglia setup`) to turn OCR preprocessing off"
+    }
+
     static func legacyOpenCodeAliasAdvisory(model: String, baseURL: String,
                                             activeProfile: ProviderProfiles.Profile?) -> String? {
         let onOpenCode = activeProfile == .opencode || SessionAffinity.isOpenCodeBaseURL(baseURL)

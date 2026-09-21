@@ -1360,11 +1360,15 @@ actor OpenRouterService {
             let selectedEffort = reasoningEffortOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
             let key = (stored[KeychainHelper.openAICompatibleApiKeyKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let model = selectedModel.flatMap { $0.isEmpty ? nil : $0 } ?? stored[KeychainHelper.openAICompatibleModelKey] ?? ""
+            let rawEffort = selectedEffort.flatMap { $0.isEmpty ? nil : $0 } ?? stored[KeychainHelper.openAICompatibleReasoningEffortKey]
+            // OpenCode: the profile's one stored effort is resolved against
+            // the model this request hits (Codex R1); other profiles untouched.
+            let effort = ProviderProfiles.isOpenCodeRuntime(stored: stored) ? OpenCodeGo.compatibleEffort(rawEffort, for: model) : rawEffort
             return ProviderExecutionContext(provider: .openAICompatible, model: model,
                 endpoint: stored[KeychainHelper.openAICompatibleBaseURLKey] ?? "",
                 authorization: "Bearer " + key, affinityKey: key, lane: lane,
                 provenance: model + "#responses", providerPreferences: nil, reasoning: nil,
-                reasoningEffort: selectedEffort.flatMap { $0.isEmpty ? nil : $0 } ?? stored[KeychainHelper.openAICompatibleReasoningEffortKey],
+                reasoningEffort: effort,
                 thinkingType: nil, useReasoningContent: false,
                 textOnly: textOnlyOverride ?? (stored[KeychainHelper.textOnlyModelEnabledKey] == "true"),
                 anthropicCacheControl: false, renderPDFAsImages: true, wireProtocol: .responses,
@@ -1406,9 +1410,17 @@ actor OpenRouterService {
         }()
 
         let useReasoningContent = currentProvider == .openAICompatible && Self.isOpenCodeReasoningContentModel(effectiveModel)
-        let effectiveOpenCodeReasoningEffort = useReasoningContent
-            ? Self.normalizedOpenCodeReasoningEffort(effectiveReasoningEffort, for: effectiveModel)
+        // OpenCode chat-completions request (a chat model under a Responses
+        // main, or the main itself): a Responses-only stored value (`none`)
+        // is dropped before the per-model normalizers (Codex R1); every other
+        // value and every other profile pass through untouched.
+        let onOpenCode = currentProvider == .openAICompatible && ProviderProfiles.isOpenCodeRuntime(stored: stored)
+        let transportCompatibleEffort = onOpenCode
+            ? OpenCodeGo.compatibleEffort(effectiveReasoningEffort, for: effectiveModel)
             : effectiveReasoningEffort
+        let effectiveOpenCodeReasoningEffort = useReasoningContent
+            ? Self.normalizedOpenCodeReasoningEffort(transportCompatibleEffort, for: effectiveModel)
+            : transportCompatibleEffort
         let openCodeThinkingType = useReasoningContent
             ? Self.openCodeThinkingType(for: effectiveModel, reasoningEffort: effectiveOpenCodeReasoningEffort)
             : nil
