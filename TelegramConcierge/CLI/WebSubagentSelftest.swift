@@ -306,14 +306,14 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             let bRequests = agentRequests(serverB)
             check("3.1 OpenCode backend: every round on B with B's key and pinned model, high effort, zero requests on A",
                   first.error == nil && bRequests.count == 2 && serverA.requests.isEmpty
-                  && bRequests.allSatisfy { $0.headers["authorization"] == "Bearer synthetic-web-opencode-key" && body($0)["model"] as? String == "mimo-v2.5"
+                  && bRequests.allSatisfy { $0.headers["authorization"] == "Bearer synthetic-web-opencode-key" && body($0)["model"] as? String == "mimo-v2.6-flash"
                       && body($0)["reasoning_effort"] as? String == "high" && $0.path == "/zen/go/v1/chat/completions" },
                   first.error ?? "\(bRequests.count) B, \(serverA.requests.count) A")
             let sessionHeader = bRequests.first?.headers["x-opencode-session"]
             check("3.2 affinity: x-opencode-session derived from the subagent lane, identical across the run", sessionHeader != nil && bRequests.allSatisfy { $0.headers["x-opencode-session"] == sessionHeader })
             check("3.3 main profile untouched before/after", KeychainHelper.loadSnapshot() == profileBefore)
             check("3.4 result: model_used names the web backend; provenance retrieved_this_run; queries_used; no note",
-                  first.modelUsed == "mimo-v2.5 (web backend: opencode)" && resultJSON(first)["evidence_provenance"] as? String == "retrieved_this_run"
+                  first.modelUsed == "mimo-v2.6-flash (web backend: opencode)" && resultJSON(first)["evidence_provenance"] as? String == "retrieved_this_run"
                   && resultJSON(first)["queries_used"] as? [String] == ["alpha"] && resultJSON(first)["note"] == nil, first.asJSON())
             // Resume: same header, still B; forced final (round limit 1) also on B.
             try AgentTurnOverrides.setOverride(1, forAgent: "Web")
@@ -342,7 +342,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             let summarizerRows = compactionRequests.isEmpty ? [] : try chatMessages(compactionRequests[0])
             check("3.6 compaction summarizer request on B with B's model and key, zero on A",
                   compacted.error == nil && compactionRequests.count == 3 && serverA.requests.isEmpty
-                  && compactionRequests.allSatisfy { body($0)["model"] as? String == "mimo-v2.5" && $0.headers["authorization"] == "Bearer synthetic-web-opencode-key" }
+                  && compactionRequests.allSatisfy { body($0)["model"] as? String == "mimo-v2.6-flash" && $0.headers["authorization"] == "Bearer synthetic-web-opencode-key" }
                   && summarizerRows.contains { $0.1.contains("TRANSCRIPT TO SUMMARIZE") }, compacted.error ?? "\(compactionRequests.count)")
             // model: inherit → A.
             serverA.clear(); serverB.clear()
@@ -486,6 +486,27 @@ struct WebSubagentSelftest: AsyncParsableCommand {
                   && retrievedJSON["queries_used"] as? [String] == ["delta", "delta facts"]
                   && ((retrievedJSON["sources_consulted"] as? [[String: Any]])?.first?["url"] as? String) == "https://example.test/delta"
                   && ((retrievedJSON["sources_consulted"] as? [[String: Any]])?.first?["retrieved_at"] as? String)?.hasPrefix("2026-04-10") == true, retrieved.asJSON())
+            // 4.3b (v0.2.32) the OpenCode web backend folds the stage effort per
+            // model before the body is built: MiMo takes low/medium/high only,
+            // so a configured 'minimal' excerpt/compression stage goes out as
+            // 'low'. Own executor + ledger, as in section 2, long page so the
+            // model stages run.
+            fixtures.pages["https://example.test/longdelta"] = String(repeating: "delta long text ", count: 700)
+            let foldExecutor = ToolExecutor(outputMode: .subagent)
+            await foldExecutor.configure(openRouterKey: "", serperKey: "synthetic-serper-key", jinaKey: "synthetic-jina-key")
+            await foldExecutor.setWebEvidenceLedger(WebEvidenceLedger(deliverable: .standard))
+            ReasoningSettings.excerpts = .minimal
+            serverB.clear()
+            let (foldName, foldArgs) = webExtractCall(["https://example.test/longdelta"])
+            let foldResult = try await foldExecutor.executeParallel([ToolCall(id: "x43b", type: "function", function: FunctionCall(name: foldName, arguments: foldArgs))])[0]
+            ReasoningSettings.excerpts = .medium
+            let foldRequests = serverB.requests.filter {
+                let t = String(decoding: $0.body, as: UTF8.self)
+                return t.contains("You extract information from a web page") || t.contains("Cite verbatim and in full")
+            }
+            check("4.3b OpenCode web backend: a 'minimal' page stage reaches mimo-v2.6-flash as reasoning_effort 'low' (per-model fold in the web body)",
+                  !foldRequests.isEmpty && foldRequests.allSatisfy { body($0)["model"] as? String == "mimo-v2.6-flash" && body($0)["reasoning_effort"] as? String == "low" },
+                  "\(foldRequests.count) page-stage requests of \(serverB.requests.count), efforts \(foldRequests.map { body($0)["reasoning_effort"] as? String ?? "nil" }); tool: \(foldResult.content.prefix(200))")
             // 4.4 resume, no lookup → prior_sources_only with n of m (after the one nudge).
             serverB.clear()
             serverB.script([WebFixtureServer.chatBody("From what I read: delta."), WebFixtureServer.chatBody("Still from what I read: delta.")])

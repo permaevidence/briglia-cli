@@ -1206,6 +1206,22 @@ enum OpenCodeGo {
         // without reasoning, all effort levels accepted unchanged,
         // long-prefix implicit caching — verified 2026-08-11.
         ("qwen3.8-max", "Qwen 3.8 Max", false),
+        // Xiaomi, newest first (models.dev opencode-go, released 2026-09-22;
+        // served on the Go gateway from 2026-09-21). Verified live 2026-09-21
+        // on both ids: reasoning_content on plain and tool-call turns, replay
+        // with/without reasoning accepted and READ (own-altered-code, in-turn
+        // and across turns), effort low/medium/high only (the MiMo remap in
+        // OpenRouterService folds the rest), thinking:{enabled|disabled}
+        // honored, prefix caching (cached_tokens), full vision through
+        // data-URL image parts, reasoning_tokens in usage; 1M context. A
+        // multi-tool loop under Briglia's real prompt + 25 schemas (bug fix,
+        // parallel reads, 9–13-round audit with reasoning replayed) passed
+        // 9/9 on each with no textual tool-call imitations. Pro $0.435/$0.87,
+        // Flash $0.14/$0.28 per M tokens. The Go gateway also keeps a
+        // server-side copy of tool-round reasoning keyed by tool_call id
+        // (re-injected when a replay omits it; a provided one wins).
+        ("mimo-v2.6-pro", "MiMo 2.6 Pro", false),
+        ("mimo-v2.6-flash", "MiMo 2.6 Flash", false),
         // MiniMax.
         ("minimax-m3", "MiniMax M3", false),
         // OpenAI. Served over the Responses API (`usesResponses`, v0.2.31):

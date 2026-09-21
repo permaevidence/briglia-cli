@@ -18,7 +18,8 @@ import FoundationNetworking
 //     Responses additionally returns encrypted reasoning items we replay for
 //     true chain-of-thought continuity across rounds.
 //   - openrouter / opencode backends → chat completions with `tools`
-//     (mimo-v2.5 verified: tool calls + reasoning_content round-trip).
+//     (mimo-v2.5 verified 2026-08; mimo-v2.6-flash, the pin since v0.2.32,
+//     verified 2026-09-21: tool calls + reasoning_content round-trip).
 
 // MARK: - Chat-completions tool types
 

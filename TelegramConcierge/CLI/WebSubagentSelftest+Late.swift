@@ -265,7 +265,7 @@ extension WebSubagentSelftest {
                           WebSearchBackend.researchModel(for: .openai, requested: "openai/gpt-5.6-luna"),
                           WebSearchBackend.researchModel(for: .opencode, requested: "google/gemini-test")]
             check("13.3 R1: the shared resolver — OpenRouter honours any slug, OpenAI only openai/…, OpenCode pins by design (honoured, no note)",
-                  shared[0] == ("google/gemini-test", true) && shared[1] == ("gpt-5.6-luna", false) && shared[2] == ("gpt-5.6-luna", true) && shared[3] == ("mimo-v2.5", true))
+                  shared[0] == ("google/gemini-test", true) && shared[1] == ("gpt-5.6-luna", false) && shared[2] == ("gpt-5.6-luna", true) && shared[3] == ("mimo-v2.6-flash", true))
             try KeychainHelper.delete(key: KeychainHelper.openRouterWebSearchModelKey)
             WebSearchBackend.processOverride = .opencode
 
@@ -426,7 +426,7 @@ extension WebSubagentSelftest {
                   && (bgLines.firstIndex(of: "final_message:") ?? -1) > (bgLines.firstIndex { $0.hasPrefix("report_path: ") } ?? Int.max)
                   && bgBody.hasSuffix("\n# Kappa report\n\nKappa. Sources: https://example.test/kappa"), bgBody.prefix(900).description)
             // Failed/partial and prior-sources shapes through the same template; ordinary runs byte-identical to the legacy layout.
-            var failedResult = SubagentRunner.RunResult(sessionId: "abcde", isNewSession: false, finalMessage: "partial", turnsUsed: 2, toolsCalled: ["web_query"], filesTouched: [], spendUSD: 0.01, error: "web_tools_failed: search — boom", modelUsed: "mimo-v2.5 (web backend: opencode)")
+            var failedResult = SubagentRunner.RunResult(sessionId: "abcde", isNewSession: false, finalMessage: "partial", turnsUsed: 2, toolsCalled: ["web_query"], filesTouched: [], spendUSD: 0.01, error: "web_tools_failed: search — boom", modelUsed: "mimo-v2.6-flash (web backend: opencode)")
             failedResult.evidenceProvenance = .priorSourcesOnly
             failedResult.queriesUsed = ["a"]
             failedResult.sourcesConsulted = [(url: "https://example.test/a", retrievedAt: state.clock)]
@@ -438,7 +438,7 @@ extension WebSubagentSelftest {
             let ordinaryBody = ConversationManager.backgroundSubagentCompletionBody(SubagentBackgroundRegistry.Completion(handle: SubagentBackgroundRegistry.Handle(id: "subagent_2", subagentType: "general-purpose", description: "g", startedAt: state.clock), result: ordinary, completedAt: state.clock), durationStr: "3.5s")
             let legacyLayout = "[SUBAGENT COMPLETE]\nhandle: subagent_2\nsubagent_type: general-purpose\ndescription: g\nsession_id: zzzzz\nturns_used: 1\ntools_called: (none)\nfiles_touched: /tmp/x\nspend_usd: 0.5000\nduration: 3.5s\nfinal_message:\ndone"
             check("13.15 R2: failed/partial Web result → contract lines then error + 'final_message (possibly partial)'; prior counts for both classes; urlless count; an ordinary run's message is the legacy layout byte for byte",
-                  failedBody.contains("\nevidence_provenance: prior_sources_only\nqueries_used: [\"a\"]\nsources_consulted: [{\"retrieved_at\":\"\(ToolExecutor.webTimestamp(state.clock))\",\"url\":\"https://example.test/a\"}]\nsearch_results_seen: 0 results across 1 queries\nsearch_results_seen_urlless: 2\nprior_extracts_in_context: 1 of 2\nprior_search_results_in_context: 0 of 3\nmodel_used: mimo-v2.5 (web backend: opencode)\nerror: web_tools_failed: search — boom\nfinal_message (possibly partial):\npartial")
+                  failedBody.contains("\nevidence_provenance: prior_sources_only\nqueries_used: [\"a\"]\nsources_consulted: [{\"retrieved_at\":\"\(ToolExecutor.webTimestamp(state.clock))\",\"url\":\"https://example.test/a\"}]\nsearch_results_seen: 0 results across 1 queries\nsearch_results_seen_urlless: 2\nprior_extracts_in_context: 1 of 2\nprior_search_results_in_context: 0 of 3\nmodel_used: mimo-v2.6-flash (web backend: opencode)\nerror: web_tools_failed: search — boom\nfinal_message (possibly partial):\npartial")
                   && ordinaryBody == legacyLayout, failedBody + "\n---\n" + ordinaryBody)
 
             // ---- N2: report files are payload — full Mind export carries them, lite skips them, /deleteuserdata targets them.

@@ -83,7 +83,7 @@ enum WebSearchBackend: String {
 
     case openrouter   // current OpenRouter envelope, models as configured
     case openai       // api.openai.com — same models, native slugs (no "openai/" prefix)
-    case opencode     // default — OpenCode Go, mimo-v2.5 on every stage (huge usage limits, slower)
+    case opencode     // default — OpenCode Go, mimo-v2.6-flash on every stage (huge usage limits, slower)
 
     static let selectionKey = "ada.webSearchBackend"
 
@@ -177,7 +177,7 @@ enum WebSearchBackend: String {
         switch self {
         case .openrouter: return "configured models via openrouter.ai"
         case .openai:     return "GPT-5.6 Luna via api.openai.com"
-        case .opencode:   return "mimo-v2.5 (slower, huge usage limits)"
+        case .opencode:   return "mimo-v2.6-flash (slower, huge usage limits)"
         }
     }
 
@@ -1502,7 +1502,12 @@ actor WebOrchestrator {
                 response_format: attachedFormat
             )
         case .opencode:
-            webLog("[WebOrchestrator] OpenCode request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(reasoningLabel) max_tokens=\(maxTokens)")
+            // Same per-model effort fold as the main transport (MiMo takes
+            // low/medium/high only; GLM 5.3 three tiers; Kimi K2.6/K2.7
+            // edges) — the web stages only ever ask medium/high today, the
+            // fold is the guarantee for any configured value.
+            let openCodeEffort = OpenRouterService.normalizedOpenCodeReasoningEffort(effortString, for: resolvedModel)
+            webLog("[WebOrchestrator] OpenCode request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(openCodeEffort ?? reasoningLabel) max_tokens=\(maxTokens)")
             return ORChatReq(
                 model: resolvedModel,
                 messages: messages,
@@ -1511,7 +1516,7 @@ actor WebOrchestrator {
                 temperature: temperature,
                 stream: false,
                 reasoning: nil,
-                reasoning_effort: effortString,
+                reasoning_effort: openCodeEffort,
                 provider: nil
             )
         }
@@ -2409,11 +2414,16 @@ actor WebOrchestrator {
         return makeReasoning(configuredEffort)
     }
 
-    /// mimo-v2.5: chosen for its very high usage limits on OpenCode Go.
-    /// Probed 2026-08-01: swallows 312k-token inputs (so the 800K-char chunks
-    /// fit), accepts reasoning_effort, accurate on extraction — but ~5-10x
-    /// slower than Luna (11-27s per large call), the price of the headroom.
-    private static let opencodeModel = "mimo-v2.5"
+    /// mimo-v2.6-flash (v0.2.32; was mimo-v2.5 from 2026-08-01, retired by
+    /// the owner on 2026-09-21): chosen for its very high usage limits on
+    /// OpenCode Go and 1M context. 2.5 probed 2026-08-01: swallows 312k-token
+    /// inputs (so the 800K-char chunks fit), accurate on extraction, ~5-10x
+    /// slower than Luna. 2.6 Flash probed 2026-09-21 on this exact request
+    /// shape (temperature 0.1, max_tokens 32000, reasoning_effort
+    /// medium/high, a ~250k-token extraction input): see the v0.2.32 notes.
+    /// MiMo accepts reasoning_effort low/medium/high only (400 on the rest),
+    /// hence the fold in `buildChatBody`.
+    private static let opencodeModel = "mimo-v2.6-flash"
     /// The same pin, for the Web researcher's OpenCode context
     /// (`OpenRouterService.webExecutionContext`).
     static var opencodeResearchModel: String { opencodeModel }

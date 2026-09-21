@@ -645,6 +645,7 @@ struct ProviderSelftest: AsyncParsableCommand {
 
         failures += try await hostPinScopeChecks()
         failures += try await openCodeProtocolChecks()
+        failures += try await mimoChecks()
 
         print(failures == 0
               ? "\nAll provider-profile checks passed."
@@ -1212,4 +1213,121 @@ struct ProviderSelftest: AsyncParsableCommand {
               && ProviderProfiles.runtimeProtocolValue(stored: KeychainHelper.loadSnapshot(), model: "gpt-5.6-luna") == "responses")
         return failures
     }
+
+    /// v0.2.32 — Xiaomi MiMo 2.6 (Flash/Pro) on the Go gateway. Facts
+    /// verified live 2026-09-21: reasoning_content emitted and replayed on
+    /// plain and tool-call turns and READ back (own-altered-code, in-turn and
+    /// across turns), missing reasoning tolerated, effort low/medium/high
+    /// only (minimal/xhigh/max = HTTP 400), full vision, prefix caching.
+    /// The rows pin the three things Briglia needs for that: the
+    /// reasoning_content predicate, the effort fold, and the catalog entries
+    /// (vision on, Xiaomi block newest first, every picker derived from it).
+    @MainActor
+    private func mimoChecks() async throws -> Int {
+        var failures = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            print("\(ok ? "✔" : "✖") \(label)\(ok || detail.isEmpty ? "" : " — \(detail)")")
+            if !ok { failures += 1 }
+        }
+        UserDefaults.standard.setVolatileDomain(["should_resume_polling_on_launch": false], forName: UserDefaults.argumentDomain)
+        func context(_ service: OpenRouterService, model: String? = nil, effort: String? = nil,
+                     lane: AffinityLane = .main) async -> ProviderExecutionContext {
+            await service.executionContext(modelOverride: model, providerOverride: nil,
+                reasoningEffortOverride: effort, textOnlyOverride: nil, lane: lane)
+        }
+
+        // X1 — predicate: both 2.6 ids, the web backend's 2.5, case/whitespace
+        // tolerant; never a non-MiMo id.
+        check("X1 MiMo ids drive reasoning_content (2.6 flash/pro, 2.5, case-insensitive), non-MiMo ids untouched",
+              OpenRouterService.isOpenCodeReasoningContentModel("mimo-v2.6-flash")
+              && OpenRouterService.isOpenCodeReasoningContentModel("mimo-v2.6-pro")
+              && OpenRouterService.isOpenCodeReasoningContentModel("MiMo-V2.6-Pro")
+              && OpenRouterService.isOpenCodeReasoningContentModel("mimo-v2.5")
+              && OpenRouterService.isOpenCodeMiMoModel("mimo-v2.6-flash")
+              && !OpenRouterService.isOpenCodeMiMoModel("minimax-m3")
+              && !OpenRouterService.isOpenCodeMiMoModel("gpt-5.6-luna"))
+
+        // X2 — catalog: both entries curated, vision on, Xiaomi block newest
+        // first and contiguous, default still first, every picker derived.
+        let ids = OpenCodeGo.choices.map(\.id)
+        let mimoPositions = ids.indices.filter { ids[$0].hasPrefix("mimo-") }
+        check("X2 catalog carries MiMo 2.6 Pro then Flash as one contiguous Xiaomi block, both vision, default still first",
+              ids.filter { $0.hasPrefix("mimo-") } == ["mimo-v2.6-pro", "mimo-v2.6-flash"]
+              && mimoPositions.count == 2 && mimoPositions[1] - mimoPositions[0] == 1
+              && ids.first == OpenCodeGo.defaultModel
+              && OpenCodeGo.catalogEntry(for: "mimo-v2.6-flash")?.textOnly == false
+              && OpenCodeGo.catalogEntry(for: " MiMo-v2.6-Pro ")?.id == "mimo-v2.6-pro"
+              && OpenCodeGo.catalogEntry(for: "mimo-v2.5") == nil,
+              "\(ids)")
+        check("X2 MiMo stays on chat completions (never Responses) and compatibleEffort passes chat values through except 'none'",
+              !OpenCodeGo.usesResponses("mimo-v2.6-flash") && !OpenCodeGo.usesResponses("mimo-v2.6-pro")
+              && OpenCodeGo.compatibleEffort("max", for: "mimo-v2.6-pro") == "max"
+              && OpenCodeGo.compatibleEffort("none", for: "mimo-v2.6-pro") == nil)
+
+        // X3 — request-time effort fold on the OpenCode profile: main model
+        // and cheap lanes, all six tiers.
+        let service = OpenRouterService()
+        try ProviderProfiles.saveProfile(.opencode, apiKey: "oc-synthetic-key-1234567890", baseURL: nil,
+                                         model: "mimo-v2.6-flash", effort: "max", textOnly: false)
+        try ProviderProfiles.activate(.opencode)
+        let mainMax = await context(service)
+        check("X3 MiMo main on stored 'max' builds at 'high' on chat completions with reasoning_content replay, no thinking flag, stored value untouched",
+              mainMax.wireProtocol == .chatCompletions && mainMax.useReasoningContent && mainMax.reasoningEffort == "high"
+              && mainMax.thinkingType == nil && mainMax.model == "mimo-v2.6-flash"
+              && KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey) == "max",
+              "effort=\(mainMax.reasoningEffort ?? "nil") thinking=\(mainMax.thinkingType ?? "nil") rc=\(mainMax.useReasoningContent)")
+        for (stored, sent) in [("minimal", "low"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high"), ("max", "high")] {
+            let lane = await context(service, model: "mimo-v2.6-pro", effort: stored, lane: .subagent("x3-\(stored)"))
+            check("X3 a MiMo Pro lane on explicit '\(stored)' sends '\(sent)'",
+                  lane.reasoningEffort == sent && lane.useReasoningContent && lane.thinkingType == nil,
+                  "effort=\(lane.reasoningEffort ?? "nil")")
+        }
+        // A MiMo lane under a Luna main (Responses, 'none'): the Responses-only
+        // value is dropped before the fold → no effort field, thinking:enabled
+        // (the model's default reasoning mode), still chat completions.
+        try ProviderProfiles.saveProfile(.opencode, apiKey: "oc-synthetic-key-1234567890", baseURL: nil,
+                                         model: "gpt-5.6-luna", effort: "none", textOnly: false)
+        try ProviderProfiles.activate(.opencode)
+        let mimoUnderLuna = await context(service, model: "mimo-v2.6-flash", lane: .subagent("x3-under-luna"))
+        check("X3 a MiMo lane under a Luna main on 'none' sends no effort field, thinking:enabled, chat completions, reasoning_content",
+              mimoUnderLuna.wireProtocol == .chatCompletions && mimoUnderLuna.reasoningEffort == nil
+              && mimoUnderLuna.thinkingType == "enabled" && mimoUnderLuna.useReasoningContent,
+              "effort=\(mimoUnderLuna.reasoningEffort ?? "nil") thinking=\(mimoUnderLuna.thinkingType ?? "nil")")
+        // Other families keep their own folds (the MiMo rule must not leak).
+        let glmLane = await context(service, model: "glm-5.3-flash", effort: "xhigh", lane: .subagent("x3-glm"))
+        let kimiLane = await context(service, model: "kimi-k2.6", effort: "xhigh", lane: .subagent("x3-kimi"))
+        check("X3 the MiMo fold does not leak: GLM 5.3 xhigh → max, Kimi K2.6 xhigh unchanged",
+              glmLane.reasoningEffort == "max" && kimiLane.reasoningEffort == "xhigh",
+              "glm=\(glmLane.reasoningEffort ?? "nil") kimi=\(kimiLane.reasoningEffort ?? "nil")")
+
+        // X4 — the wire: a MiMo request replays stored reasoning as
+        // reasoning_content (native), not as the downgraded system note.
+        let stored = OpenRouterAPIMessage(role: "assistant", content: .text("Done."), toolCalls: nil, toolCallId: nil,
+                                          reasoning: JSONValue.string("CODE=4827"), reasoningDetails: nil, reasoningContent: JSONValue.string("CODE=4827"))
+        let (native, note) = stored.sanitizedForProvider(.openAICompatible, useReasoningContent: mainMax.useReasoningContent)
+        var nativeReplay = false
+        if case .string(let replayed)? = native.reasoningContent, replayed == "CODE=4827" { nativeReplay = true }
+        check("X4 a stored MiMo assistant message replays reasoning_content natively with no downgrade note",
+              nativeReplay && note == nil)
+
+        // X5 — /model to a MiMo id from the Telegram/terminal handler: vision on,
+        // effort fold applied visibly, chat completions slot.
+        let manager = ConversationManager()
+        try ProviderProfiles.saveProfile(.opencode, apiKey: "oc-synthetic-key-1234567890", baseURL: nil,
+                                         model: "glm-5.3-flash", effort: "high", textOnly: false)
+        try ProviderProfiles.activate(.opencode)
+        try KeychainHelper.save(key: KeychainHelper.textOnlyModelEnabledKey, value: "true")
+        let reply = (await manager.handleTerminalCommand("/model mimo-v2.6-pro") ?? []).joined(separator: "\n")
+        let snap = KeychainHelper.loadSnapshot()
+        check("X5 /model mimo-v2.6-pro: stored, vision on, runtime slot not Responses, effort kept",
+              snap[KeychainHelper.openAICompatibleModelKey] == "mimo-v2.6-pro"
+              && snap[ProviderProfiles.opencodeModelKey] == "mimo-v2.6-pro"
+              && snap[KeychainHelper.textOnlyModelEnabledKey] != "true"
+              && snap[ProviderProfiles.runtimeProtocolKey] != "responses"
+              && snap[KeychainHelper.openAICompatibleReasoningEffortKey] == "high"
+              && !reply.contains("Responses API"),
+              "slot=\(snap[ProviderProfiles.runtimeProtocolKey] ?? "nil") textOnly=\(snap[KeychainHelper.textOnlyModelEnabledKey] ?? "nil") \(reply)")
+        return failures
+    }
 }
+

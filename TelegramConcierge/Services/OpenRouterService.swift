@@ -329,6 +329,11 @@ actor OpenRouterService {
             || normalized.contains("deepseek-flash")
             || Self.isOpenCodeGLMReasoningModel(normalized)
             || normalized.contains("minimax-")
+            // Xiaomi MiMo (v2.6 Flash/Pro on the Go gateway): reasoning_content
+            // on plain and tool-call turns, replay accepted and read back
+            // in-turn and across turns, missing/empty reasoning tolerated —
+            // verified 2026-09-21 (own-altered-code method, both models).
+            || Self.isOpenCodeMiMoModel(normalized)
             // Qwen 3.x on the Go gateway emits/replays reasoning_content and
             // accepts every effort level unchanged (verified 2026-08-11 on
             // qwen3.8-max; thinking:{enabled|disabled} both honored).
@@ -355,6 +360,15 @@ actor OpenRouterService {
         model.lowercased().contains("minimax-")
     }
 
+    /// Xiaomi MiMo ids on the Go gateway ("mimo-v2.6-flash", "mimo-v2.6-pro",
+    /// the web backend's "mimo-v2.5"). Only reasoning_effort low/medium/high
+    /// are accepted — minimal/xhigh/max are a hard 400 "Invalid request
+    /// parameters" (verified 2026-09-21 on both 2.6 ids), so the effort
+    /// normalizer folds Briglia's six tiers onto those three.
+    static func isOpenCodeMiMoModel(_ model: String) -> Bool {
+        model.lowercased().contains("mimo-")
+    }
+
     private static func isOpenCodeKimiK27CodeModel(_ model: String) -> Bool {
         let normalized = model.lowercased()
         return normalized.contains("kimi-k2.7") || normalized.contains("kimi-k2p7")
@@ -365,7 +379,9 @@ actor OpenRouterService {
         return normalized.contains("kimi-k2.6") || normalized.contains("kimi-k2p6")
     }
 
-    private static func normalizedOpenCodeReasoningEffort(_ effort: String?, for model: String) -> String? {
+    /// Internal (not private) since v0.2.32: the web pipeline's OpenCode
+    /// backend applies the same fold to its own chat-completions bodies.
+    static func normalizedOpenCodeReasoningEffort(_ effort: String?, for model: String) -> String? {
         guard let effort = effort?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               !effort.isEmpty else { return nil }
 
@@ -375,6 +391,16 @@ actor OpenRouterService {
 
         if Self.isOpenCodeKimiK27CodeModel(model), effort == "max" || effort == "xhigh" {
             return "high"
+        }
+
+        if Self.isOpenCodeMiMoModel(model) {
+            // MiMo accepts low/medium/high only (400 on the rest, 2026-09-21):
+            // minimal → low; xhigh, max → high; the three accepted pass through.
+            switch effort {
+            case "minimal": return "low"
+            case "xhigh", "max": return "high"
+            default: return effort
+            }
         }
 
         if Self.isOpenCodeGLM53Model(model.lowercased()) {
