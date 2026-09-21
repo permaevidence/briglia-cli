@@ -1351,7 +1351,10 @@ actor OpenRouterService {
         reasoningEffortOverride: String?, textOnlyOverride: Bool?, lane: AffinityLane
     ) -> ProviderExecutionContext {
         let stored = KeychainHelper.loadSnapshot()
-        if let wire = stored[ProviderProfiles.runtimeProtocolKey], !wire.isEmpty, wire != "chatCompletions",
+        // Per-model protocol: on OpenCode Go the effective model (a lane
+        // override or the main model) decides Responses vs chat completions;
+        // elsewhere this is the stored runtime flag as before (v0.2.31).
+        if let wire = ProviderProfiles.runtimeProtocolValue(stored: stored, model: modelOverride), !wire.isEmpty, wire != "chatCompletions",
            stored[KeychainHelper.llmProviderKey] == LLMProvider.openAICompatible.rawValue {
             let selectedModel = modelOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
             let selectedEffort = reasoningEffortOverride?.trimmingCharacters(in: .whitespacesAndNewlines)

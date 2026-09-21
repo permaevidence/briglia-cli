@@ -4529,25 +4529,53 @@ class ConversationManager: ObservableObject {
         // + legacy aliases), not the picker: a retired text-only id typed
         // here still turns OCR preprocessing on, and a legacy alias is
         // stored under its canonical id (Codex R2, 2026-09-19).
+        var changes: [String: String?] = [modelKey: stored]
         if isOpenCode, let match = OpenCodeGo.catalogEntry(for: argument) {
             stored = match.id
+            changes[modelKey] = stored
             knownTextOnly = match.textOnly
             if match.textOnly {
-                try? KeychainHelper.save(key: KeychainHelper.textOnlyModelEnabledKey, value: "true")
+                changes[KeychainHelper.textOnlyModelEnabledKey] = "true"
                 note = " Text-only model: images and scans go through the OCR preprocessor."
             } else {
-                try? KeychainHelper.delete(key: KeychainHelper.textOnlyModelEnabledKey)
+                changes[KeychainHelper.textOnlyModelEnabledKey] = String?.none
                 note = " Vision model: images flow natively."
             }
             if match.id.lowercased() != argument.lowercased() {
                 note += " (\"\(argument)\" is the legacy alias; stored as \(match.id).)"
             }
         }
-        try? KeychainHelper.save(key: modelKey, value: stored)
+        // OpenCode Go: the protocol follows the model (GPT ids → Responses),
+        // so the runtime protocol slot flips in the SAME write as the model,
+        // and a stored effort the new transport rejects is replaced rather
+        // than left to fail the next request (v0.2.31).
+        var adjustedEffort: String?? = nil
+        if isOpenCode {
+            let responses = OpenCodeGo.usesResponses(stored)
+            changes[ProviderProfiles.runtimeProtocolKey] = responses ? ProviderWireProtocol.responses.rawValue : String?.none
+            let effort = KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if responses {
+                note += " Served over the Responses API."
+                if !effort.isEmpty, !ResponsesAdapter.allowedEfforts(model: stored).contains(effort) {
+                    let replacement: String? = effort == "minimal" ? "low" : effort == "max" ? "xhigh" : nil
+                    changes[KeychainHelper.openAICompatibleReasoningEffortKey] = replacement
+                    adjustedEffort = .some(replacement)
+                    note += replacement.map { " Reasoning effort \"\(effort)\" isn't available on \(stored); set to \($0)." }
+                        ?? " Reasoning effort \"\(effort)\" isn't available on \(stored); cleared (endpoint default)."
+                }
+            } else if effort == "none" {
+                changes[KeychainHelper.openAICompatibleReasoningEffortKey] = String?.none
+                adjustedEffort = .some(nil)
+                note += " Reasoning effort \"none\" only exists on the Responses API; cleared (endpoint default)."
+            }
+        }
+        try? KeychainHelper.saveBatch(changes)
         modelRoutingGeneration += 1
         // Remember the switch in the active provider profile so /provider
         // hops away and back restore it.
         ProviderProfiles.recordModelChange(stored, textOnly: knownTextOnly)
+        if let adjustedEffort { ProviderProfiles.recordEffortChange(adjustedEffort) }
         // An OpenRouter host pin is per model in practice (hosts differ per
         // model): keep it only when the new model is served from that host.
         var pinNote = ""

@@ -101,9 +101,14 @@ struct TelegramMenuSelftest: ParsableCommand {
         check("model menu (OpenCode): one row per catalog entry in catalog order, bound to the profile, then the typed-model button",
               ocData == OpenCodeGo.choices.map { ["bm1:m:opencode:\($0.id)"] } + [["bm1:m:?"]], "\(ocData)")
         let kimiRow = ocMenu.rows.first { $0.first?.data == "bm1:m:opencode:kimi-k3" }?.first
-        let textOnlyRow = ocMenu.rows.first { $0.first?.data == "bm1:m:opencode:gpt-5.6-luna" }?.first
+        let lunaRow = ocMenu.rows.first { $0.first?.data == "bm1:m:opencode:gpt-5.6-luna" }?.first
+        // Luna is vision-capable since v0.2.31 (Responses API), so no curated
+        // entry carries the tag; a synthetic text-only catalog keeps the
+        // tagging rule under test.
+        let taggedMenu = Menu.modelMenu(catalog: .opencode([Menu.ModelChoice(id: "text-model", label: "Text Model", textOnly: true)]), profile: "opencode", current: "kimi-k3")
         check("model menu (OpenCode): active model ticked, text-only models tagged, typed button last",
-              kimiRow?.label == "✓ Kimi K3" && textOnlyRow?.label == "GPT 5.6 Luna · text-only"
+              kimiRow?.label == "✓ Kimi K3" && lunaRow?.label == "GPT 5.6 Luna"
+              && taggedMenu.rows.first?.first?.label == "Text Model · text-only"
               && ocMenu.rows.last?.first?.label == "Type a model name…" && ocMenu.text.contains("Current model: kimi-k3"))
         let gptMenu = Menu.modelMenu(catalog: .chatgpt, profile: "chatgpt", current: "gpt-6-astra")
         check("model menu (ChatGPT): exactly Luna, Terra, Sol, Astra bound to chatgpt + typed button",

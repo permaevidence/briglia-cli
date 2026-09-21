@@ -183,8 +183,8 @@ struct ProviderSelftest: AsyncParsableCommand {
               && kimiPositions.count == 3 && kimiPositions[2] - kimiPositions[0] == 2)
         check("DeepSeek V4.1 Flash is the only curated DeepSeek entry",
               curatedIds.filter { $0.hasPrefix("deepseek") } == ["deepseek-v4.1-flash"])
-        check("Luna is the only curated text-only entry",
-              OpenCodeGo.choices.filter(\.textOnly).map(\.id) == ["gpt-5.6-luna"])
+        check("no curated entry is text-only any more (Luna sees images over the Responses API, v0.2.31)",
+              OpenCodeGo.choices.filter(\.textOnly).isEmpty && OpenCodeGo.catalogEntry(for: "gpt-5.6-luna")?.textOnly == false)
 
         // 5e′. /orprovider (0.2.30): slug rules, live-pinListing parse, matching,
         // storage in the pre-existing openrouter_providers key, fetch seam.
@@ -644,6 +644,7 @@ struct ProviderSelftest: AsyncParsableCommand {
               otherWire == [nil, nil, nil, "call it", nil])
 
         failures += try await hostPinScopeChecks()
+        failures += try await openCodeProtocolChecks()
 
         print(failures == 0
               ? "\nAll provider-profile checks passed."
@@ -943,6 +944,172 @@ struct ProviderSelftest: AsyncParsableCommand {
         check("R3.2 control: the same task shape without cancellation pins normally",
               !plainTask.0 && Pin.pinnedSlugs() == ["deepinfra"] && plainTask.1.contains("except the Web researcher"), plainTask.1)
         try Pin.setPin(nil)
+        return failures
+    }
+
+    /// v0.2.31 — OpenCode Go per-model protocol. The Go gateway serves its
+    /// GPT models (today: Luna) over the Responses API and everything else
+    /// over chat completions, as OpenCode's own client does. Briglia decides
+    /// per request from the EFFECTIVE model (main model or lane override),
+    /// keeps the runtime protocol slot in step through activation and
+    /// /model, and never lets a stale slot pair GLM with Responses or Luna
+    /// with chat completions. Every other profile keeps its stored protocol
+    /// untouched.
+    @MainActor
+    private func openCodeProtocolChecks() async throws -> Int {
+        var failures = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            print("\(ok ? "✔" : "✖") \(label)\(ok || detail.isEmpty ? "" : " — \(detail)")")
+            if !ok { failures += 1 }
+        }
+        UserDefaults.standard.setVolatileDomain(["should_resume_polling_on_launch": false], forName: UserDefaults.argumentDomain)
+        let mainLane = AffinityLane.main
+        func context(_ service: OpenRouterService, model: String? = nil, effort: String? = nil,
+                     textOnly: Bool? = nil, lane: AffinityLane = mainLane) async -> ProviderExecutionContext {
+            await service.executionContext(modelOverride: model, providerOverride: nil,
+                reasoningEffortOverride: effort, textOnlyOverride: textOnly, lane: lane)
+        }
+
+        // P1 — the rule and the catalog.
+        check("P1 usesResponses: every gpt-* id (case/whitespace tolerant), never gpt-oss-*, never the chat-completions families or an alias",
+              OpenCodeGo.usesResponses("gpt-5.6-luna") && OpenCodeGo.usesResponses(" GPT-5.6-Luna ")
+              && OpenCodeGo.usesResponses("gpt-6-astra") && !OpenCodeGo.usesResponses("gpt-oss-120b")
+              && !OpenCodeGo.usesResponses("glm-5.3-flash") && !OpenCodeGo.usesResponses("kimi-k3")
+              && !OpenCodeGo.usesResponses("deepseek-flash") && !OpenCodeGo.usesResponses("qwen3.8-max")
+              && !OpenCodeGo.usesResponses(""))
+        check("P1 wireProtocol(profile, model): OpenCode follows the model, the fixed profiles ignore it",
+              ProviderProfiles.wireProtocol(.opencode, model: "gpt-5.6-luna") == .responses
+              && ProviderProfiles.wireProtocol(.opencode, model: "glm-5.3-flash") == .chatCompletions
+              && ProviderProfiles.wireProtocol(.opencode, model: nil) == .chatCompletions
+              && ProviderProfiles.wireProtocol(.openai, model: "glm-5.3-flash") == .responses
+              && ProviderProfiles.wireProtocol(.chatgpt, model: "glm-5.3-flash") == .responses
+              && ProviderProfiles.wireProtocol(.openrouter, model: "gpt-5.6-luna") == .chatCompletions
+              && ProviderProfiles.wireProtocol(.local, model: "gpt-5.6-luna") == .chatCompletions)
+        check("P1 the Responses effort list for Luna is the one the Go gateway accepts (none…max, no minimal)",
+              ResponsesAdapter.allowedEfforts(model: "gpt-5.6-luna") == ["none", "low", "medium", "high", "xhigh", "max"])
+
+        // P2 — activation stamps the slot; requests resolve per effective model.
+        try ProviderProfiles.saveProfile(.opencode, apiKey: "oc-synthetic-key-1234567890", baseURL: nil,
+                                         model: "gpt-5.6-luna", effort: "high", textOnly: false)
+        try ProviderProfiles.activate(.opencode)
+        var snap = KeychainHelper.loadSnapshot()
+        check("P2 activating OpenCode on Luna stamps the runtime protocol slot, vision on, no native-media override, profile reports Responses",
+              snap[ProviderProfiles.runtimeProtocolKey] == "responses" && snap[KeychainHelper.textOnlyModelEnabledKey] != "true"
+              && snap[ProviderProfiles.runtimeNativeMediaKey] == nil && ProviderProfiles.usesResponses
+              && ProviderProfiles.wireProtocol(.opencode) == .responses
+              && ProviderProfiles.statusLines().contains(where: { $0.contains("opencode — ACTIVE") && $0.contains("Responses API") }),
+              ProviderProfiles.statusLines().joined(separator: "\n"))
+        let service = OpenRouterService()
+        let main = await context(service)
+        check("P2 main request on Luna: Responses at the Go endpoint, stored effort, vision, native tool media, opencode identity, no subscription generation",
+              main.wireProtocol == .responses && main.endpoint == OpenCodeGo.baseURL && main.model == "gpt-5.6-luna"
+              && main.reasoningEffort == "high" && !main.textOnly && main.nativeToolMedia && main.renderPDFAsImages
+              && main.subscriptionGeneration == nil && main.profileIdentity == "opencode"
+              && main.provenance == "gpt-5.6-luna#responses" && main.configurationError == nil,
+              "\(main.wireProtocol) \(main.endpoint) \(main.model) \(main.reasoningEffort ?? "-") \(main.profileIdentity)")
+        let built = try ResponsesAdapter(context: main).request(input: [ResponsesAdapter.message(role: "user", text: "hi")], tools: nil)
+        check("P2 the built request targets the Go gateway's /responses route with the key and no subscription headers",
+              built.url?.absoluteString == OpenCodeGo.baseURL + "/responses"
+              && built.value(forHTTPHeaderField: "Authorization") == "Bearer oc-synthetic-key-1234567890"
+              && built.value(forHTTPHeaderField: "ChatGPT-Account-Id") == nil,
+              built.url?.absoluteString ?? "nil")
+        let glmLane = await context(service, model: "glm-5.3-flash", effort: "medium", textOnly: false, lane: .subagent("lane-glm"))
+        check("P2 a cheap lane on GLM under a Luna main runs chat completions with the reasoning_content contract and GLM's effort remap",
+              glmLane.wireProtocol == .chatCompletions && glmLane.model == "glm-5.3-flash" && glmLane.useReasoningContent
+              && glmLane.reasoningEffort == "high" && glmLane.endpoint == OpenCodeGo.baseURL + "/chat/completions"
+              && glmLane.provenance == OpenRouterService.reasoningProvenance(model: "glm-5.3-flash", provider: .openAICompatible),
+              "\(glmLane.wireProtocol) \(glmLane.reasoningEffort ?? "-") \(glmLane.provenance) endpoint=\(glmLane.endpoint) static=\(OpenRouterService.reasoningProvenance(model: "glm-5.3-flash", provider: .openAICompatible)) rc=\(glmLane.useReasoningContent) model=\(glmLane.model)")
+        let kimiLane = await context(service, model: "kimi-k3", lane: .subagent("lane-kimi"))
+        check("P2 a cheap lane on Kimi under a Luna main runs chat completions too",
+              kimiLane.wireProtocol == .chatCompletions && kimiLane.useReasoningContent)
+        let aux = ResponsesAuxiliary.inheritedSnapshot(lane: .archive)
+        check("P2 archive/description work on the main model inherits Responses at the Go endpoint with the opencode identity and native media",
+              aux?.wireProtocol == .responses && aux?.endpoint == OpenCodeGo.baseURL && aux?.model == "gpt-5.6-luna"
+              && aux?.profileIdentity == "opencode" && aux?.nativeToolMedia == true && aux?.subscriptionGeneration == nil
+              && aux?.responsesOperation == .archive)
+        let probe = ResponsesAuxiliary.inheritedSnapshot(lane: .probe(UUID()), effortOverride: ResponsesAdapter.probeEffort(model: "gpt-5.6-luna"))
+        check("P2 the doctor's probe snapshot is a Responses probe on Luna at low effort",
+              probe?.wireProtocol == .responses && probe?.responsesOperation == .probe && probe?.reasoningEffort == "low")
+
+        // P3 — the /model handler flips the slot in the same write and fixes
+        // an effort the new transport rejects.
+        let manager = ConversationManager()
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "minimal")
+        try KeychainHelper.save(key: ProviderProfiles.opencodeReasoningEffortKey, value: "minimal")
+        let toGLM = (await manager.handleTerminalCommand("/model glm-5.3-flash") ?? []).joined(separator: "\n")
+        snap = KeychainHelper.loadSnapshot()
+        check("P3 /model to GLM clears the protocol slot, mirrors the profile, keeps a chat-completions effort, says nothing about Responses",
+              snap[ProviderProfiles.runtimeProtocolKey] == nil && snap[KeychainHelper.openAICompatibleModelKey] == "glm-5.3-flash"
+              && snap[ProviderProfiles.opencodeModelKey] == "glm-5.3-flash" && snap[KeychainHelper.openAICompatibleReasoningEffortKey] == "minimal"
+              && snap[ProviderProfiles.opencodeReasoningEffortKey] == "minimal" && !ProviderProfiles.usesResponses
+              && !toGLM.contains("Responses API") && toGLM.contains("Vision model"), toGLM)
+        let glmMain = await context(service)
+        let lunaLane = await context(service, model: "gpt-5.6-luna", lane: .subagent("lane-luna"))
+        check("P3 main request on GLM is chat completions; a Luna lane under it is Responses; no auxiliary Responses snapshot",
+              glmMain.wireProtocol == .chatCompletions && glmMain.useReasoningContent && glmMain.model == "glm-5.3-flash"
+              && lunaLane.wireProtocol == .responses && lunaLane.model == "gpt-5.6-luna" && lunaLane.provenance == "gpt-5.6-luna#responses"
+              && ResponsesAuxiliary.inheritedSnapshot(lane: .archive) == nil)
+        let toLuna = (await manager.handleTerminalCommand("/model gpt-5.6-luna") ?? []).joined(separator: "\n")
+        snap = KeychainHelper.loadSnapshot()
+        check("P3 /model to Luna stamps the slot, turns vision on, replaces the unsupported effort 'minimal' with 'low' in both slots, and says so",
+              snap[ProviderProfiles.runtimeProtocolKey] == "responses" && snap[KeychainHelper.textOnlyModelEnabledKey] == nil
+              && snap[KeychainHelper.openAICompatibleModelKey] == "gpt-5.6-luna"
+              && snap[KeychainHelper.openAICompatibleReasoningEffortKey] == "low" && snap[ProviderProfiles.opencodeReasoningEffortKey] == "low"
+              && toLuna.contains("Responses API") && toLuna.contains("set to low") && toLuna.contains("Vision model")
+              && ProviderProfiles.usesResponses, toLuna)
+        let effortHelp = (await manager.handleTerminalCommand("/effort") ?? []).joined(separator: "\n")
+        check("P3 /effort on Luna offers the Responses levels of the model",
+              effortHelp.contains("none|low|medium|high|xhigh|max"), effortHelp)
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "max")
+        let toLunaAgain = (await manager.handleTerminalCommand("/model gpt-5.6-luna") ?? []).joined(separator: "\n")
+        check("P3 an effort Luna accepts ('max') is left alone by a re-switch",
+              KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey) == "max" && !toLunaAgain.contains("isn't available"), toLunaAgain)
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "none")
+        try KeychainHelper.save(key: ProviderProfiles.opencodeReasoningEffortKey, value: "none")
+        let backToGLM = (await manager.handleTerminalCommand("/model glm-5.3-flash") ?? []).joined(separator: "\n")
+        snap = KeychainHelper.loadSnapshot()
+        check("P3 /model back to GLM clears a Responses-only effort ('none') in both slots and says so",
+              snap[ProviderProfiles.runtimeProtocolKey] == nil && snap[KeychainHelper.openAICompatibleReasoningEffortKey] == nil
+              && snap[ProviderProfiles.opencodeReasoningEffortKey] == nil && backToGLM.contains("cleared"), backToGLM)
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "max")
+        let glmMax = (await manager.handleTerminalCommand("/model glm-5.3-flash") ?? []).joined(separator: "\n")
+        check("P3 a chat-completions effort GLM accepts ('max') survives a re-switch",
+              KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey) == "max" && !glmMax.contains("cleared"), glmMax)
+
+        // P4 — derivation on read beats a stale slot (hand edits, external writers).
+        try KeychainHelper.save(key: ProviderProfiles.runtimeProtocolKey, value: "responses")
+        let staleSlot = await context(service)
+        check("P4 a stale 'responses' slot on a GLM main never sends GLM to /responses",
+              staleSlot.wireProtocol == .chatCompletions && !ProviderProfiles.usesResponses
+              && ResponsesAuxiliary.inheritedSnapshot(lane: .archive) == nil)
+        try KeychainHelper.delete(key: ProviderProfiles.runtimeProtocolKey)
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleModelKey, value: "gpt-5.6-luna")
+        let handEdited = await context(service)
+        check("P4 a hand-edited runtime model 'gpt-5.6-luna' with the slot absent still runs Responses",
+              handEdited.wireProtocol == .responses && ProviderProfiles.usesResponses
+              && ResponsesAuxiliary.inheritedSnapshot(lane: .archive)?.wireProtocol == .responses)
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleModelKey, value: "glm-5.3-flash")
+        let laneSet = (await manager.handleTerminalCommand("/subagentmodels vision gpt-5.6-luna") ?? []).joined(separator: "\n")
+        check("P4 the vision lane accepts Luna on OpenCode (it sees images over Responses)",
+              SubagentModelLanes.storedModel(.cheapVision, provider: .openAICompatible) == "gpt-5.6-luna" && !laneSet.contains("text-only"), laneSet)
+        try SubagentModelLanes.setModel(.cheapVision, model: nil, provider: .openAICompatible)
+
+        // P5 — the per-model rule is OpenCode-only: other profiles keep their stored protocol.
+        try ProviderProfiles.saveProfile(.custom, apiKey: "custom-synthetic-key-1234567890", baseURL: "https://example.invalid/v1",
+                                         model: "gpt-5.6-luna", effort: "high", textOnly: false, wireProtocol: .chatCompletions)
+        try ProviderProfiles.activate(.custom)
+        let customLuna = await context(service)
+        check("P5 a custom profile on a gpt-* id keeps its explicit chat-completions protocol",
+              customLuna.wireProtocol == .chatCompletions && !ProviderProfiles.usesResponses
+              && KeychainHelper.loadSnapshot()[ProviderProfiles.runtimeProtocolKey] == nil
+              && ProviderProfiles.wireProtocol(.custom, model: "gpt-5.6-luna") == .chatCompletions)
+        try ProviderProfiles.saveProfile(.openai, apiKey: "sk-synthetic-openai-key-1234567890", baseURL: nil,
+                                         model: "glm-5.3-flash", effort: nil, textOnly: false)
+        try ProviderProfiles.activate(.openai)
+        let openaiOther = await context(service)
+        check("P5 the OpenAI profile stays Responses whatever the model id, slot stamped as before",
+              openaiOther.wireProtocol == .responses && openaiOther.profileIdentity == "openai"
+              && KeychainHelper.loadSnapshot()[ProviderProfiles.runtimeProtocolKey] == "responses" && ProviderProfiles.usesResponses)
         return failures
     }
 }

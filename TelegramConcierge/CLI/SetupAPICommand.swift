@@ -648,6 +648,7 @@ enum SetupAPICore {
         // of daemonRunning alone has a check/write race with daemon startup.
         let affectsResponses = profile == .openai || section["protocol"] as? String == "responses"
             || ProviderProfiles.wireProtocol(profile) == .responses || ProviderProfiles.usesResponses
+            || (profile == .opencode && OpenCodeGo.usesResponses(nonEmptyString(section["model"]) ?? ""))
         var lease: InstanceLease?
         if affectsResponses && !ownsLease {
             try StoragePaths.ensureRootsChecked()
@@ -729,17 +730,19 @@ enum SetupAPICore {
             }
             requestedProtocol = parsed
         } else { requestedProtocol = nil }
-        if profile == .openai || requestedProtocol == .responses || ProviderProfiles.wireProtocol(profile) == .responses {
+        if profile == .openai || requestedProtocol == .responses || ProviderProfiles.wireProtocol(profile, model: model) == .responses {
             if profile == .custom { _ = try ResponsesAdapter.endpoint(baseURL ?? "") }
         }
         if let media = section["native_tool_media"], !(media is Bool) || profile != .custom {
             throw APIError(code: "invalid_value", message: "native_tool_media must be a boolean for a custom Responses profile")
         }
-        let protocolForSave = requestedProtocol ?? ProviderProfiles.wireProtocol(profile)
+        let protocolForSave = requestedProtocol ?? ProviderProfiles.wireProtocol(profile, model: model)
         // Responses also supports models without a reasoning parameter. Only
         // send an effort explicitly requested by the owner; no model-name sniff.
+        // OpenCode Go keeps its "high" default on every model: its Responses
+        // models (Luna) take high, and the wizard saves the same.
         let effort: String? = profile == .local ? nil
-            : (nonEmptyString(section["effort"]) ?? (protocolForSave == .responses ? nil : "high"))
+            : (nonEmptyString(section["effort"]) ?? (protocolForSave == .responses && profile != .opencode ? nil : "high"))
         try checkpoint()
         do {
             try ProviderProfiles.saveProfile(profile, apiKey: profile == .local ? nil : apiKey,

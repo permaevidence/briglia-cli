@@ -132,9 +132,13 @@ final class BrowserSettingsWorkflow {
                   let profile = ProviderProfiles.Profile(rawValue: try text("profile")) else { throw Invalid(text: "Unknown provider settings.") }
             let model = try text("model")
             let effort = try text("effort", required: false)
-            let wire = try text("protocol", fallback: ProviderProfiles.wireProtocol(profile).rawValue)
+            // OpenCode Go's protocol follows the SUBMITTED model (GPT ids →
+            // Responses); the page's echoed protocol is for the model it was
+            // rendered with, so it is derived here rather than compared.
+            let expectedWire = ProviderProfiles.wireProtocol(profile, model: model)
+            let wire = profile == .opencode ? expectedWire.rawValue : try text("protocol", fallback: expectedWire.rawValue)
             guard let parsedWire = ProviderWireProtocol(rawValue: wire),
-                  profile == .custom || parsedWire == ProviderProfiles.wireProtocol(profile) else { throw Invalid(text: "Unsupported provider protocol.") }
+                  profile == .custom || parsedWire == expectedWire else { throw Invalid(text: "Unsupported provider protocol.") }
             if parsedWire == .responses, !effort.isEmpty, !ResponsesAdapter.allowedEfforts(model: model).contains(effort) {
                 throw Invalid(text: "Unsupported reasoning effort for this model.")
             }
@@ -187,7 +191,7 @@ final class BrowserSettingsWorkflow {
     private func probeRequest(_ request: [String: Any]) -> [String: Any]? {
         if let p = request["provider"] as? [String: Any], let raw = p["profile"] as? String,
            let profile = ProviderProfiles.Profile(rawValue: raw) {
-            let wire = p["protocol"] as? String ?? ProviderProfiles.wireProtocol(profile).rawValue
+            let wire = p["protocol"] as? String ?? ProviderProfiles.wireProtocol(profile, model: p["model"] as? String).rawValue
             var result: [String: Any] = ["kind": wire == "responses" ? "responses" : profile == .local ? "local" : "custom", "model": p["model"]!]
             result["base_url"] = p["base_url"] ?? (profile == .opencode ? OpenCodeGo.baseURL : profile == .openrouter ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1")
             result["api_key"] = p["api_key"]
@@ -204,7 +208,7 @@ final class BrowserSettingsWorkflow {
             let model = ProviderProfiles.configuredModel(p) ?? (p == .opencode ? OpenCodeGo.defaultModel : p == .openrouter ? "google/gemini-3-flash-preview" : p == .chatgpt || p == .openai ? "gpt-5.6-luna" : "")
             profiles.append(["id": p.rawValue, "label": p.displayName,
                 "configured": ProviderProfiles.isConfigured(p), "model": model,
-                "effort": ProviderProfiles.configuredEffort(p) ?? (p == .local || (ProviderProfiles.isConfigured(p) && ProviderProfiles.wireProtocol(p) == .responses) ? "" : "high"),
+                "effort": ProviderProfiles.configuredEffort(p) ?? (p == .local || (ProviderProfiles.isConfigured(p) && p != .opencode && ProviderProfiles.wireProtocol(p) == .responses) ? "" : "high"),
                 "endpoint": ProviderProfiles.configuredEndpoint(p) ?? "",
                 "text_only": ProviderProfiles.textOnly(p) ?? !(p == .chatgpt || p == .openai),
                 "protocol": ProviderProfiles.wireProtocol(p).rawValue,

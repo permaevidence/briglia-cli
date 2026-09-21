@@ -298,9 +298,13 @@ struct SetupAPISelftest: AsyncParsableCommand {
                   errorCode(result))
             check("apply provider: first profile auto-activated",
                   ProviderProfiles.activeProfile() == .opencode)
-            check("apply provider: catalog derived text_only for gpt-5.6-luna",
-                  ProviderProfiles.textOnly(.opencode) == true
-                  && KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey) == "true")
+            check("apply provider: catalog derived text_only for gpt-5.6-luna (vision over the Responses API since v0.2.31)",
+                  ProviderProfiles.textOnly(.opencode) == false
+                  && KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey) != "true")
+            check("apply provider: Luna on OpenCode activates with the Responses protocol slot, effort high",
+                  KeychainHelper.load(key: ProviderProfiles.runtimeProtocolKey) == "responses"
+                  && KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey) == "high"
+                  && ProviderProfiles.usesResponses)
             check("apply provider: runtime slots point at OpenCode",
                   (KeychainHelper.load(key: KeychainHelper.openAICompatibleBaseURLKey) ?? "")
                       .contains("opencode.ai")
@@ -308,11 +312,13 @@ struct SetupAPISelftest: AsyncParsableCommand {
             let status = await SetupAPICore.status()
             let providers = status["providers"] as? [String: Any]
             let entry = (providers?["profiles"] as? [String: Any])?["opencode"] as? [String: Any]
-            check("status reflects applied provider (active, masked key, effort)",
+            check("status reflects applied provider (active, masked key, effort, per-model protocol)",
                   providers?["active"] as? String == "opencode"
                   && entry?["configured"] as? Bool == true
                   && entry?["model"] as? String == "gpt-5.6-luna"
                   && entry?["effort"] as? String == "high"
+                  && entry?["protocol"] as? String == "responses"
+                  && (entry?["capabilities"] as? [String: Any])?["native_tool_media"] as? Bool == true
                   && (entry?["masked_key"] as? String ?? "").contains("…"))
         }
 

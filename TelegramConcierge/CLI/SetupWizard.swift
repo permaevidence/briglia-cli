@@ -359,6 +359,7 @@ struct SetupWizard {
             let marks = [
                 model.id == OpenCodeGo.defaultModel ? "default" : nil,
                 model.textOnly ? "text-only" : "vision",
+                OpenCodeGo.usesResponses(model.id) ? "Responses API" : nil,
             ].compactMap { $0 }.joined(separator: ", ")
             print("  \(index + 1). \(model.label) (\(marks))")
         }
@@ -1089,6 +1090,19 @@ enum OpenCodeGo {
         // v0.2.17 catalog id → models.dev canonical id (renamed 2026-09-10).
         "deepseek-flash": "deepseek-v4.1-flash",
     ]
+    /// Which Go models Briglia talks the Responses API to (v0.2.31).
+    /// OpenCode's own client picks the transport per model from models.dev
+    /// (a per-model `provider.npm` override → native OpenAI SDK → Responses);
+    /// Briglia carries no catalog fetch, so the rule is the id family: every
+    /// `gpt-*` id except the open-weights `gpt-oss-*` line, which gateways
+    /// serve over chat completions. Legacy aliases resolve first. Everything
+    /// else on the Go gateway (GLM, Kimi, DeepSeek, Qwen, MiniMax) stays on
+    /// chat completions with the reasoning_content contract.
+    static func usesResponses(_ model: String) -> Bool {
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let canonical = (legacyAliases[trimmed] ?? trimmed).lowercased()
+        return canonical.hasPrefix("gpt-") && !canonical.hasPrefix("gpt-oss")
+    }
     /// Capability entry for an id — curated OR retired — following legacy
     /// aliases (case-insensitive). This is the lookup for anything typed or
     /// stored: `/model <id>` (vision state + canonical id), the vision-lane
@@ -1168,9 +1182,15 @@ enum OpenCodeGo {
         ("qwen3.8-max", "Qwen 3.8 Max", false),
         // MiniMax.
         ("minimax-m3", "MiniMax M3", false),
-        // OpenAI. Multimodal upstream, but the Go gateway short-circuits
-        // image parts (empty synthetic completion, no usage) as of
-        // 2026-08-02.
-        ("gpt-5.6-luna", "GPT 5.6 Luna", true),
+        // OpenAI. Served over the Responses API (`usesResponses`, v0.2.31):
+        // OpenCode's own client resolves Luna through the native OpenAI SDK
+        // (models.dev per-model `provider.npm: @ai-sdk/openai`), and the Go
+        // gateway's /responses route takes data-URL image parts (also inside
+        // tool outputs), function tools, encrypted reasoning replay, prompt
+        // caching and streaming; effort none/low/medium/high/xhigh/max,
+        // minimal rejected — verified live 2026-09-21. The chat-completions
+        // route Briglia used before short-circuited image parts (2026-08-02)
+        // and answered 503 "Endpoint is unavailable" on 2026-09-21.
+        ("gpt-5.6-luna", "GPT 5.6 Luna", false),
     ]
 }

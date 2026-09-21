@@ -76,15 +76,53 @@ enum ProviderProfiles {
     static let customNativeMediaKey = "custom_responses_native_tool_media"
     static let runtimeNativeMediaKey = "responses_native_tool_media"
 
+    /// The protocol a profile runs its configured model on. OpenCode Go's
+    /// protocol follows the model (see the two-argument form); the other
+    /// profiles are fixed.
     static func wireProtocol(_ profile: Profile) -> ProviderWireProtocol {
+        wireProtocol(profile, model: profile == .opencode ? value(opencodeModelKey) : nil)
+    }
+
+    /// Per-model protocol (v0.2.31). OpenCode Go serves its GPT models over
+    /// the Responses API and everything else over chat completions, exactly
+    /// as OpenCode's own client does, so the OpenCode profile's protocol is
+    /// a function of the model; every other profile ignores `model`.
+    static func wireProtocol(_ profile: Profile, model: String?) -> ProviderWireProtocol {
         if profile == .openai || profile == .chatgpt { return .responses }
+        if profile == .opencode { return OpenCodeGo.usesResponses(model ?? "") ? .responses : .chatCompletions }
         if profile == .custom { return value(customProtocolKey).flatMap(ProviderWireProtocol.init(rawValue:)) ?? .chatCompletions }
         return .chatCompletions
     }
 
     static var usesResponses: Bool {
-        KeychainHelper.load(key: KeychainHelper.llmProviderKey) == LLMProvider.openAICompatible.rawValue
-            && value(runtimeProtocolKey).map { $0 != ProviderWireProtocol.chatCompletions.rawValue } == true
+        let stored = KeychainHelper.loadSnapshot()
+        return stored[KeychainHelper.llmProviderKey] == LLMProvider.openAICompatible.rawValue
+            && runtimeProtocolValue(stored: stored, model: nil)
+                .map { !$0.isEmpty && $0 != ProviderWireProtocol.chatCompletions.rawValue } == true
+    }
+
+    /// The raw `active_provider_protocol` value the runtime slots resolve to
+    /// for `model` (nil or blank = the main model). On the OpenCode profile
+    /// the protocol is DERIVED from the effective model on every read — a
+    /// cheap-lane model, a `/model` switch, or a hand-edited `opencode_model`
+    /// can never pair a GPT model with chat completions or GLM with
+    /// Responses, whatever the stored key says. Every other profile returns
+    /// the stored value untouched, so their requests stay byte-identical.
+    /// `activate()` and the `/model` handler keep the stored key in step for
+    /// readers of the raw value (status listings, the credential catalog).
+    /// Pre-profile installs (no active profile yet) are recognized by the
+    /// runtime base URL, the same rule `/model` uses.
+    static func runtimeProtocolValue(stored: [String: String], model: String?) -> String? {
+        let onOpenCode: Bool
+        if let active = stored[activeProfileKey]?.trimmingCharacters(in: .whitespacesAndNewlines), !active.isEmpty {
+            onOpenCode = active == Profile.opencode.rawValue
+        } else {
+            onOpenCode = SessionAffinity.isOpenCodeBaseURL(stored[KeychainHelper.openAICompatibleBaseURLKey] ?? "")
+        }
+        guard onOpenCode else { return stored[runtimeProtocolKey] }
+        let requested = model?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let effective = requested.isEmpty ? (stored[KeychainHelper.openAICompatibleModelKey] ?? "") : requested
+        return OpenCodeGo.usesResponses(effective) ? ProviderWireProtocol.responses.rawValue : nil
     }
 
     // OpenRouter + local profiles ride their existing native slots
@@ -448,6 +486,7 @@ enum ProviderProfiles {
             if let endpoint = configuredEndpoint(profile) { parts.append("@ \(endpoint)") }
             if let masked = maskedKey(profile) { parts.append("key \(masked)") }
             if let effort = configuredEffort(profile) { parts.append("effort \(effort)") }
+            if profile == .opencode, wireProtocol(profile) == .responses { parts.append("Responses API") }
             switch textOnly(profile) {
             case .some(true): parts.append("text-only (OCR preprocessing)")
             case .some(false): parts.append("vision")
