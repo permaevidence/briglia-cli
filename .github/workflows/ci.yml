@@ -41,6 +41,7 @@ jobs:
           python3 scripts/chat_wire_baseline_test.py
           python3 scripts/chronology_wire_migration_test.py
           python3 scripts/web_subagent_r2_wire_migration_test.py
+          python3 scripts/harness_identity_migration_test.py
           python3 scripts/read_file_description_migration_test.py
           python3 scripts/reasoning_history_removal_migration_test.py
           python3 scripts/image_schema_contract_test.py .build/debug/briglia
@@ -113,6 +114,7 @@ jobs:
           python3 scripts/chat_wire_baseline_test.py
           python3 scripts/chronology_wire_migration_test.py
           python3 scripts/web_subagent_r2_wire_migration_test.py
+          python3 scripts/harness_identity_migration_test.py
           python3 scripts/read_file_description_migration_test.py
           python3 scripts/reasoning_history_removal_migration_test.py
           python3 scripts/image_schema_contract_test.py .build/debug/briglia

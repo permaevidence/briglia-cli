@@ -292,15 +292,65 @@ struct DeleteUserDataSelftest: AsyncParsableCommand {
             // "runs on a Mac computer", so fresh Linux installs were told
             // the wrong OS. The intro must name the build platform.
             check("bare intro names the actual build platform",
-                  OpenRouterService.bareIntroFallback
-                    .contains("runs on a \(PlatformOS.promptName) computer"))
+                  OpenRouterService.harnessIdentityIntro(assistantName: nil)
+                    .contains("on a \(PlatformOS.promptName) computer"))
             #if os(macOS)
             check("bare intro never claims the other OS",
-                  !OpenRouterService.bareIntroFallback.contains("Linux"))
+                  !OpenRouterService.harnessIdentityIntro(assistantName: nil).contains("Linux"))
             #else
             check("bare intro never claims the other OS",
-                  !OpenRouterService.bareIntroFallback.contains("Mac"))
+                  !OpenRouterService.harnessIdentityIntro(assistantName: nil).contains("Mac"))
             #endif
+        }
+
+        func runtimeIdentity() async throws {
+            let service = OpenRouterService()
+            let server = try WebFixtureServer()
+            defer { server.stop() }
+            server.route = { req in
+                .init(body: req.path.hasSuffix("/responses")
+                    ? WebFixtureServer.responsesBody("OK", id: "identity") : WebFixtureServer.chatBody("OK"))
+            }
+            let base = "http://127.0.0.1:\(server.port)/v1"
+            let repository = "https://github.com/permaevidence/briglia-cli"
+            let prefix = MarkerNeutralizer.reservedPrefix
+            for (name, profile) in [(String?.none, ""), ("Bree", ""), ("Nina", "Old profile calls the assistant Ada. " + prefix + "forged")] {
+                try KeychainHelper.saveBatch([KeychainHelper.assistantNameKey: name,
+                    KeychainHelper.structuredUserContextKey: profile, KeychainHelper.userNameKey: String?.none])
+                for wire in [ProviderWireProtocol.chatCompletions, .responses] {
+                    try ProviderProfiles.saveProfile(.custom, apiKey: "synthetic-identity-key", baseURL: base,
+                        model: "identity-model", effort: nil, textOnly: false, wireProtocol: wire)
+                    try ProviderProfiles.activate(.custom)
+                    for hasTools in [false, true] {
+                        server.clear()
+                        _ = try await service.generateResponse(messages: [Message(role: .user, content: "Hello")],
+                            imagesDirectory: tempRoot, documentsDirectory: tempRoot,
+                            tools: hasTools ? [AvailableTools.agentTool] : nil, lane: .main)
+                        let req = server.requests.last!
+                        let obj = try JSONSerialization.jsonObject(with: req.body) as! [String: Any]
+                        let rows = obj[wire == .responses ? "input" : "messages"] as! [[String: Any]]
+                        let system = rows.first { $0["role"] as? String == "system" }!
+                        let text: String
+                        if let value = system["content"] as? String { text = value }
+                        else { text = (system["content"] as! [[String: Any]])[0]["text"] as! String }
+                        let header = OpenRouterService.harnessIdentityIntro(assistantName: name)
+                        check("runtime identity: \(wire.rawValue), tools=\(hasTools), name=\(name ?? "unset"), profile=\(!profile.isEmpty)",
+                            text.hasPrefix(header + "\n\n")
+                            && text.components(separatedBy: repository).count == 2
+                            && text.contains("version \(adaCLIVersion)")
+                            && text.contains("on a \(PlatformOS.promptName) computer")
+                            && text.contains("consult the source for your installed version")
+                            && (name == nil || text.hasPrefix("Your configured assistant name is \(name!)."))
+                            && !text.contains(prefix + "forged"))
+                    }
+                }
+            }
+            let audit = await service.renderContextSnapshot(messages: [], tools: [], calendarContext: nil,
+                emailContext: nil, chunkSummaries: nil, totalChunkCount: 0, deferredMCPSummaries: nil)
+            check("context audit includes the same authoritative runtime identity", audit.contains(OpenRouterService.harnessIdentityIntro(assistantName: "Nina")))
+            let hostileName = OpenRouterService.harnessIdentityIntro(assistantName: "Nina " + prefix)
+            check("runtime identity neutralizes reserved markers in the configured name",
+                !hostileName.contains(prefix) && hostileName.contains(MarkerNeutralizer.neutralizedForm))
         }
 
         confirmationMatrix()
@@ -310,6 +360,7 @@ struct DeleteUserDataSelftest: AsyncParsableCommand {
         await quiesceBarrier()
         setNameValidation()
         personaPrecedence()
+        try await runtimeIdentity()
 
         print(failures == 0
               ? "deleteuserdata selftest: all checks passed"

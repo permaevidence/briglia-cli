@@ -38,7 +38,7 @@ extension OpenRouterService {
 
         // Build persona intro (shared helper — explicit /setname name wins
         // over a stale name embedded in structured context).
-        let personaIntro = Self.buildPersonaIntro(
+        let personaIntro = Self.buildRuntimeIntro(
             assistantName: assistantName,
             userName: userName,
             structuredUserContext: structuredUserContext,

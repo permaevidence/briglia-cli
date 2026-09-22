@@ -14,9 +14,27 @@ actor OpenRouterService {
     /// use this one helper so the precedence can never drift again
     /// (review round 5, 2026-08-20).
     /// Persona intro for fresh installs (no name, no profile stored yet).
-    /// Platform-derived: a Linux install must never be told it runs on a
-    /// Mac (selftest-pinned; found live on the Pixel, 2026-08-22).
-    static let bareIntroFallback = "You are a helpful AI assistant. You are using a harness called Briglia (https://github.com/permaevidence/briglia-cli) that runs on a \(PlatformOS.promptName) computer. You have full control of the computer to assist the user."
+    /// Runtime and platform identity are supplied separately by buildRuntimeIntro.
+    static let bareIntroFallback = "You are a helpful AI assistant. You have full control of the computer to assist the user."
+
+    /// Runtime identity is independent of remembered profile/persona text.
+    /// The release pipeline stamps adaCLIVersion; source builds identify
+    /// themselves with the development version instead of claiming a release.
+    static func harnessIdentityIntro(assistantName: String?) -> String {
+        let name = (assistantName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let persona = name.isEmpty ? "" : "Your configured assistant name is \(MarkerNeutralizer.escape(name)). "
+        return persona + "You run inside the Briglia CLI agent harness (version \(adaCLIVersion)) on a \(PlatformOS.promptName) computer. Official source repository: https://github.com/permaevidence/briglia-cli. When investigating your own implementation, consult the source for your installed version; the repository's latest code may differ."
+    }
+
+    static func buildRuntimeIntro(
+        assistantName: String?, userName: String?, structuredUserContext: String?,
+        bareFallback: String, previousName: String? = nil
+    ) -> String {
+        harnessIdentityIntro(assistantName: assistantName) + "\n\n" + buildPersonaIntro(
+            assistantName: assistantName, userName: userName,
+            structuredUserContext: structuredUserContext, bareFallback: bareFallback,
+            previousName: previousName)
+    }
 
     static func buildPersonaIntro(
         assistantName: String?,
@@ -1689,7 +1707,7 @@ actor OpenRouterService {
         let userName = KeychainHelper.load(key: KeychainHelper.userNameKey)
         let structuredUserContext = KeychainHelper.load(key: KeychainHelper.structuredUserContextKey)
 
-        let personaIntro = Self.buildPersonaIntro(
+        let personaIntro = Self.buildRuntimeIntro(
             assistantName: assistantName,
             userName: userName,
             structuredUserContext: structuredUserContext,
