@@ -329,11 +329,9 @@ actor OpenRouterService {
             || normalized.contains("deepseek-flash")
             || Self.isOpenCodeGLMReasoningModel(normalized)
             || normalized.contains("minimax-")
-            // Xiaomi MiMo (v2.6 Flash/Pro on the Go gateway): reasoning_content
-            // on plain and tool-call turns, replay accepted and read back
-            // in-turn and across turns, missing/empty reasoning tolerated —
-            // verified 2026-09-21 (own-altered-code method, both models).
-            || Self.isOpenCodeMiMoModel(normalized)
+            // Xiaomi MiMo is NOT here: its reasoning_content contract is
+            // recognized on the OpenCode runtime only — see
+            // `usesReasoningContent(model:onOpenCodeRuntime:)`.
             // Qwen 3.x on the Go gateway emits/replays reasoning_content and
             // accepts every effort level unchanged (verified 2026-08-11 on
             // qwen3.8-max; thinking:{enabled|disabled} both honored).
@@ -367,6 +365,62 @@ actor OpenRouterService {
     /// normalizer folds Briglia's six tiers onto those three.
     static func isOpenCodeMiMoModel(_ model: String) -> Bool {
         model.lowercased().contains("mimo-")
+    }
+
+    /// The reasoning_content decision for one chat-completions request on
+    /// the OpenAI-compatible provider. The established families (Kimi,
+    /// DeepSeek, GLM, MiniMax, Qwen) keep their pre-v0.2.32 scope: any
+    /// OpenAI-compatible endpoint serving such an id. MiMo (v0.2.32) is
+    /// recognized ONLY on the OpenCode runtime (`ProviderProfiles.
+    /// isOpenCodeRuntime`, the one identification every per-model rule
+    /// uses): its contract was verified on the Go gateway alone, so a custom
+    /// profile — at an unrelated host or even at the OpenCode URL — keeps
+    /// its pre-0.2.32 request bytes for a MiMo id (raw effort, historical-
+    /// note replay, no `thinking` field) (Codex R2, 2026-09-22).
+    static func usesReasoningContent(model: String, onOpenCodeRuntime: Bool) -> Bool {
+        Self.isOpenCodeReasoningContentModel(model)
+            || (onOpenCodeRuntime && Self.isOpenCodeMiMoModel(model))
+    }
+
+    /// The reasoning fields of one chat-completions body, resolved by
+    /// `openAICompatibleChatReasoning`.
+    struct ChatReasoningFields: Equatable {
+        /// Replay stored reasoning natively as `reasoning_content`.
+        let useReasoningContent: Bool
+        /// Value of the top-level `reasoning_effort` field (nil = omit).
+        let reasoningEffort: String?
+        /// Value of `thinking.type` (nil = omit); never set together with
+        /// `reasoningEffort`.
+        let thinkingType: String?
+    }
+
+    /// ONE request-time reasoning rule for every chat-completions body the
+    /// OpenAI-compatible provider builds: main turns and cheap lanes
+    /// (`executionContext`), archive maintenance (`ConversationArchiveService`),
+    /// user-context structuring (`UserContextStructurer`) and file
+    /// descriptions (`generateFileDescriptions`). Until v0.2.32 the archive
+    /// carried its own copy of the predicate and normalizer, and the other
+    /// two sent the stored effort raw, so a value the main turn folded (MiMo
+    /// on `max`) still reached the gateway unchanged from maintenance work
+    /// and failed there while chat worked (Codex R1, 2026-09-22).
+    ///
+    /// In order: on the OpenCode runtime the stored value is resolved
+    /// against the model this request hits (`OpenCodeGo.compatibleEffort`:
+    /// the Responses-only `none` is dropped for a chat model); then, for a
+    /// reasoning_content model, the per-model fold
+    /// (`normalizedOpenCodeReasoningEffort`) and the `thinking` toggle when
+    /// no effort remains. Any other model passes the value through
+    /// untouched. Stored settings are never rewritten here.
+    static func openAICompatibleChatReasoning(effort: String?, model: String, onOpenCodeRuntime: Bool) -> ChatReasoningFields {
+        let useReasoningContent = Self.usesReasoningContent(model: model, onOpenCodeRuntime: onOpenCodeRuntime)
+        let transportCompatible = onOpenCodeRuntime ? OpenCodeGo.compatibleEffort(effort, for: model) : effort
+        let resolved = useReasoningContent
+            ? Self.normalizedOpenCodeReasoningEffort(transportCompatible, for: model)
+            : transportCompatible
+        let thinking = useReasoningContent ? Self.openCodeThinkingType(for: model, reasoningEffort: resolved) : nil
+        return ChatReasoningFields(useReasoningContent: useReasoningContent,
+                                   reasoningEffort: thinking == nil ? resolved : nil,
+                                   thinkingType: thinking)
     }
 
     private static func isOpenCodeKimiK27CodeModel(_ model: String) -> Bool {
@@ -1435,32 +1489,30 @@ actor OpenRouterService {
             return reasoningEffort
         }()
 
-        let useReasoningContent = currentProvider == .openAICompatible && Self.isOpenCodeReasoningContentModel(effectiveModel)
         // OpenCode chat-completions request (a chat model under a Responses
         // main, or the main itself): a Responses-only stored value (`none`)
-        // is dropped before the per-model normalizers (Codex R1); every other
-        // value and every other profile pass through untouched.
+        // is dropped before the per-model normalizers (Codex R1, 2026-09-21);
+        // every other value and every other profile pass through untouched.
         let onOpenCode = currentProvider == .openAICompatible && ProviderProfiles.isOpenCodeRuntime(stored: stored)
-        let transportCompatibleEffort = onOpenCode
-            ? OpenCodeGo.compatibleEffort(effectiveReasoningEffort, for: effectiveModel)
-            : effectiveReasoningEffort
-        let effectiveOpenCodeReasoningEffort = useReasoningContent
-            ? Self.normalizedOpenCodeReasoningEffort(transportCompatibleEffort, for: effectiveModel)
-            : transportCompatibleEffort
-        let openCodeThinkingType = useReasoningContent
-            ? Self.openCodeThinkingType(for: effectiveModel, reasoningEffort: effectiveOpenCodeReasoningEffort)
-            : nil
+        // The one rule shared with the auxiliary builders (v0.2.32): the
+        // reasoning_content decision (MiMo on the OpenCode runtime only), the
+        // OpenCode transport resolution, the per-model fold, the thinking
+        // toggle. OpenRouter and local never use reasoning_content; their
+        // effort passes through (OpenRouter as the `reasoning` object).
+        let chatReasoning = currentProvider == .openAICompatible
+            ? Self.openAICompatibleChatReasoning(effort: effectiveReasoningEffort, model: effectiveModel, onOpenCodeRuntime: onOpenCode)
+            : ChatReasoningFields(useReasoningContent: false, reasoningEffort: effectiveReasoningEffort, thinkingType: nil)
+        let useReasoningContent = chatReasoning.useReasoningContent
+        let openCodeThinkingType = chatReasoning.thinkingType
 
         var reasoningConfig: ReasoningConfig? = nil
         var reasoningEffortField: String? = nil
-        if let effort = effectiveOpenCodeReasoningEffort {
+        if let effort = chatReasoning.reasoningEffort {
             switch currentProvider {
             case .openRouter:
                 reasoningConfig = ReasoningConfig(effort: effort)
             case .openAICompatible:
-                if openCodeThinkingType == nil {
-                    reasoningEffortField = effort
-                }
+                reasoningEffortField = effort
             case .lmStudio:
                 break
             }
@@ -1500,8 +1552,9 @@ actor OpenRouterService {
     /// and a note in the result), never silently.
     ///
     /// - `.opencode`: OpenCode Go chat completions, the pipeline's pinned
-    ///   `mimo-v2.5`, reasoning_effort high (mimo is not a
-    ///   reasoning_content model, so the plain field as the pipeline sends).
+    ///   `mimo-v2.6-flash` (v0.2.32; was mimo-v2.5), a reasoning_content
+    ///   model on the Go gateway: native replay, reasoning_effort high
+    ///   through the same per-model fold as the main transport.
     /// - `.openai`: `api.openai.com/v1` over the Responses transport
     ///   (`store:false`, encrypted-reasoning replay), the configured web
     ///   model with the `openai/` prefix stripped (default gpt-5.6-luna),
@@ -1542,7 +1595,9 @@ actor OpenRouterService {
         switch backend {
         case .opencode:
             let model = resolution.model
-            let useReasoningContent = Self.isOpenCodeReasoningContentModel(model)
+            // This context is the OpenCode Go gateway by construction, so the
+            // OpenCode-only MiMo rule applies here (Codex R2, 2026-09-22).
+            let useReasoningContent = Self.usesReasoningContent(model: model, onOpenCodeRuntime: true)
             return (ProviderExecutionContext(
                 provider: .openAICompatible, model: model,
                 endpoint: backend.endpoint.absoluteString,
@@ -2967,8 +3022,22 @@ actor OpenRouterService {
         var descriptionReasoningEffortField: String? = nil
         if usingCustomEndpointForDescriptions {
             descriptionReasoningConfig = nil
-            // For OpenAI-Compatible this resolves to the configured effort; for Local it's nil.
-            descriptionReasoningEffortField = reasoningEffort
+            // OpenAI-compatible on the OpenCode runtime: the stored effort
+            // goes through the same request-time rule as the main turn,
+            // resolved against the model THIS request hits (the separate
+            // description model when one is configured). An explicitly
+            // configured separate description endpoint is a foreign host,
+            // not the OpenCode runtime: the stored value is sent raw there,
+            // as on every other OpenAI-compatible profile (Codex R1,
+            // 2026-09-22). Local: nil.
+            let separateDescriptionEndpoint = !(KeychainHelper.load(key: KeychainHelper.lmStudioDescriptionBaseURLKey) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let descriptionOnOpenCode = currentProvider == .openAICompatible && !separateDescriptionEndpoint
+                && ProviderProfiles.isOpenCodeRuntime(stored: KeychainHelper.loadSnapshot())
+            descriptionReasoningEffortField = descriptionOnOpenCode
+                ? Self.openAICompatibleChatReasoning(effort: reasoningEffort, model: descriptionModel,
+                                                     onOpenCodeRuntime: true).reasoningEffort
+                : reasoningEffort
         } else if let visionDescriptionBackend {
             descriptionReasoningConfig = visionDescriptionBackend.reasoning
             descriptionReasoningEffortField = visionDescriptionBackend.reasoningEffort

@@ -456,73 +456,19 @@ actor ConversationArchiveService {
         }
     }
 
-    private var usesOpenCodeReasoningContent: Bool {
-        guard currentProvider == .openAICompatible else { return false }
-        let normalized = model.lowercased()
-        return normalized.contains("kimi-k2.")
-            || normalized.contains("kimi-k2p")
-            || normalized.contains("kimi-k3")
-            // Covers -pro, -flash and "deepseek-v4.1-flash" (same
-            // reasoning_content behavior).
-            || normalized.contains("deepseek-v4")
-            // Legacy alias for V4.1 Flash (v0.2.17 catalog id, still served).
-            || normalized.contains("deepseek-flash")
-            || isOpenCodeGLMReasoningModel(normalized)
-            || normalized.contains("minimax-")
-            // Qwen 3.x: reasoning_content + all effort levels (2026-08-11).
-            || normalized.contains("qwen3.")
-    }
-
-    private func isOpenCodeGLMReasoningModel(_ normalizedModel: String) -> Bool {
-        normalizedModel.contains("glm-5.1") || normalizedModel.contains("glm-5.2")
-            // Same reasoning_content contract as 5.1/5.2 (verified 2026-08-14).
-            || normalizedModel.contains("glm-5.3")
-    }
-
-    private var openCodeThinkingType: String? {
-        guard usesOpenCodeReasoningContent,
-              normalizedOpenCodeReasoningEffort == nil else { return nil }
-        let normalized = model.lowercased()
-        if isOpenCodeKimiK27CodeModel { return nil }
-        if isOpenCodeGLMReasoningModel(normalized) { return nil }
-        if normalized.contains("minimax-") { return "adaptive" }
-        return "enabled"
-    }
-
-    private var isOpenCodeKimiK27CodeModel: Bool {
-        let normalized = model.lowercased()
-        return normalized.contains("kimi-k2.7") || normalized.contains("kimi-k2p7")
-    }
-
-    private var isOpenCodeKimiK26Model: Bool {
-        let normalized = model.lowercased()
-        return normalized.contains("kimi-k2.6") || normalized.contains("kimi-k2p6")
-    }
-
-    private var normalizedOpenCodeReasoningEffort: String? {
-        guard let effort = reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !effort.isEmpty else { return nil }
-
-        if isOpenCodeKimiK26Model, effort == "minimal" {
-            return "low"
-        }
-
-        if isOpenCodeKimiK27CodeModel, effort == "max" || effort == "xhigh" {
-            return "high"
-        }
-
-        if model.lowercased().contains("glm-5.3") {
-            // GLM 5.3 only accepts low/high/max (400 [1210] otherwise);
-            // monotone map: minimal→low, medium→high, xhigh→max (2026-08-14).
-            switch effort {
-            case "minimal": return "low"
-            case "medium": return "high"
-            case "xhigh": return "max"
-            default: return effort
-            }
-        }
-
-        return effort
+    /// The one request-time reasoning rule shared with the main transport
+    /// (v0.2.32, Codex R1 2026-09-22): until then this service carried its
+    /// own copy of the reasoning_content predicate and effort normalizer,
+    /// which drifted from the main turn's (no MiMo fold, no OpenCode
+    /// transport resolution), so maintenance work could send a value the
+    /// main turn had folded. Same scope as the main turn: the established
+    /// families on any OpenAI-compatible endpoint, MiMo on the OpenCode
+    /// runtime only (Codex R2).
+    private var chatReasoning: OpenRouterService.ChatReasoningFields {
+        OpenRouterService.openAICompatibleChatReasoning(
+            effort: reasoningEffort, model: model,
+            onOpenCodeRuntime: currentProvider == .openAICompatible
+                && ProviderProfiles.isOpenCodeRuntime(stored: KeychainHelper.loadSnapshot()))
     }
 
     /// Stable first message for all archive-memory LLM requests.
@@ -2296,7 +2242,9 @@ actor ConversationArchiveService {
     
     // MARK: - Archive LLM API
     
-    private func callLLM(systemPrompt: String, userPrompt: String, maxTokens: Int? = nil, sharedContextPrompt: String? = nil) async throws -> String {
+    /// Internal (not private) since v0.2.32 so the provider selftest can
+    /// assert the HTTP body this builder sends (auxiliary-body rows).
+    func callLLM(systemPrompt: String, userPrompt: String, maxTokens: Int? = nil, sharedContextPrompt: String? = nil) async throws -> String {
         if let context = ResponsesAuxiliary.inheritedSnapshot(lane: .archive) {
             var input = [("system", archiveSystemPrefix)]
             if let sharedContextPrompt, !sharedContextPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2366,15 +2314,9 @@ actor ConversationArchiveService {
             archiveThinking = nil
         case .openAICompatible:
             archiveReasoningConfig = nil
-            if let thinkingType = openCodeThinkingType {
-                archiveReasoningEffort = nil
-                archiveThinking = .init(type: thinkingType)
-            } else {
-                archiveReasoningEffort = usesOpenCodeReasoningContent
-                    ? normalizedOpenCodeReasoningEffort
-                    : reasoningEffort
-                archiveThinking = nil
-            }
+            let fields = chatReasoning
+            archiveReasoningEffort = fields.reasoningEffort
+            archiveThinking = fields.thinkingType.map { .init(type: $0) }
         case .lmStudio:
             archiveReasoningConfig = nil
             archiveReasoningEffort = nil

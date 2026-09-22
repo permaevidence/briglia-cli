@@ -136,10 +136,12 @@ struct ProviderSelftest: AsyncParsableCommand {
         // would be driven without reasoning_history and with its reasoning
         // dropped from replay (the shape that would have missed the
         // unversioned "deepseek-flash" id).
+        // The curated catalog IS the OpenCode runtime, so the scoped rule is
+        // asked (MiMo is recognized there only — Codex R2, 2026-09-22).
         for choice in OpenCodeGo.choices {
             let expected = !choice.id.hasPrefix("gpt-")
-            check("curated OpenCode model \(choice.id) reasoning_content recognition is \(expected)",
-                  OpenRouterService.isOpenCodeReasoningContentModel(choice.id) == expected)
+            check("curated OpenCode model \(choice.id) reasoning_content recognition on the OpenCode runtime is \(expected)",
+                  OpenRouterService.usesReasoningContent(model: choice.id, onOpenCodeRuntime: true) == expected)
         }
         // 5d. The catalog now carries the canonical "deepseek-v4.1-flash"
         // (models.dev rename, 2026-09-10), but installs that selected DeepSeek
@@ -646,6 +648,7 @@ struct ProviderSelftest: AsyncParsableCommand {
         failures += try await hostPinScopeChecks()
         failures += try await openCodeProtocolChecks()
         failures += try await mimoChecks()
+        failures += try await mimoAuxiliaryChecks()
 
         print(failures == 0
               ? "\nAll provider-profile checks passed."
@@ -1238,11 +1241,19 @@ struct ProviderSelftest: AsyncParsableCommand {
 
         // X1 — predicate: both 2.6 ids, the web backend's 2.5, case/whitespace
         // tolerant; never a non-MiMo id.
-        check("X1 MiMo ids drive reasoning_content (2.6 flash/pro, 2.5, case-insensitive), non-MiMo ids untouched",
-              OpenRouterService.isOpenCodeReasoningContentModel("mimo-v2.6-flash")
-              && OpenRouterService.isOpenCodeReasoningContentModel("mimo-v2.6-pro")
-              && OpenRouterService.isOpenCodeReasoningContentModel("MiMo-V2.6-Pro")
-              && OpenRouterService.isOpenCodeReasoningContentModel("mimo-v2.5")
+        // Codex R2 (2026-09-22): MiMo drives reasoning_content on the OpenCode
+        // runtime ONLY; the bare predicate (any OpenAI-compatible endpoint)
+        // leaves it out, the established families keep their scope.
+        check("X1 MiMo ids drive reasoning_content on the OpenCode runtime only (2.6 flash/pro, 2.5, case-insensitive); off-runtime and the bare predicate leave them out; Kimi keeps its any-endpoint scope; non-MiMo ids untouched",
+              OpenRouterService.usesReasoningContent(model: "mimo-v2.6-flash", onOpenCodeRuntime: true)
+              && OpenRouterService.usesReasoningContent(model: "mimo-v2.6-pro", onOpenCodeRuntime: true)
+              && OpenRouterService.usesReasoningContent(model: "MiMo-V2.6-Pro", onOpenCodeRuntime: true)
+              && OpenRouterService.usesReasoningContent(model: "mimo-v2.5", onOpenCodeRuntime: true)
+              && !OpenRouterService.usesReasoningContent(model: "mimo-v2.6-flash", onOpenCodeRuntime: false)
+              && !OpenRouterService.usesReasoningContent(model: "mimo-v2.6-pro", onOpenCodeRuntime: false)
+              && !OpenRouterService.isOpenCodeReasoningContentModel("mimo-v2.6-flash")
+              && OpenRouterService.usesReasoningContent(model: "kimi-k2.6", onOpenCodeRuntime: false)
+              && OpenRouterService.usesReasoningContent(model: "glm-5.3-flash", onOpenCodeRuntime: false)
               && OpenRouterService.isOpenCodeMiMoModel("mimo-v2.6-flash")
               && !OpenRouterService.isOpenCodeMiMoModel("minimax-m3")
               && !OpenRouterService.isOpenCodeMiMoModel("gpt-5.6-luna"))
@@ -1329,5 +1340,218 @@ struct ProviderSelftest: AsyncParsableCommand {
               "slot=\(snap[ProviderProfiles.runtimeProtocolKey] ?? "nil") textOnly=\(snap[KeychainHelper.textOnlyModelEnabledKey] ?? "nil") \(reply)")
         return failures
     }
-}
 
+    /// Codex review of 2269ec8 (2026-09-22), two corrections:
+    ///   R1 the auxiliary chat-completions builders — archive maintenance
+    ///      (`ConversationArchiveService.callLLM`), user-context structuring
+    ///      (`UserContextStructurer.structure`) and file descriptions
+    ///      (`generateFileDescriptions`) — go through the same request-time
+    ///      rule as the main turn. Asserted on the HTTP body each REAL
+    ///      builder sends to a loopback fixture, never on a helper.
+    ///   R2 the MiMo rule is scoped to the OpenCode runtime: a custom profile
+    ///      (unrelated host, or the OpenCode URL itself) keeps its
+    ///      pre-0.2.32 bytes on every builder; a pre-profile install on the
+    ///      OpenCode base URL is OpenCode.
+    @MainActor
+    private func mimoAuxiliaryChecks() async throws -> Int {
+        var failures = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            print("\(ok ? "✔" : "✖") \(label)\(ok || detail.isEmpty ? "" : " — \(detail)")")
+            if !ok { failures += 1 }
+        }
+        UserDefaults.standard.setVolatileDomain(["should_resume_polling_on_launch": false], forName: UserDefaults.argumentDomain)
+        let server = try WebFixtureServer()
+        defer { server.stop() }
+        server.route = { _ in .init(body: WebFixtureServer.chatBody("note.txt: Brief description.")) }
+        let endpoint = "http://127.0.0.1:\(server.port)/v1"
+        let service = OpenRouterService()
+        let archive = ConversationArchiveService()
+
+        struct Sent: Equatable, CustomStringConvertible {
+            var model: String; var effort: String?; var thinking: String?; var path: String
+            var description: String { "model=\(model) effort=\(effort ?? "nil") thinking=\(thinking ?? "nil") path=\(path)" }
+        }
+        func last() -> Sent {
+            guard let req = server.requests.last,
+                  let obj = try? JSONSerialization.jsonObject(with: req.body) as? [String: Any] else {
+                return Sent(model: "NO REQUEST", effort: nil, thinking: nil, path: "")
+            }
+            return Sent(model: obj["model"] as? String ?? "nil", effort: obj["reasoning_effort"] as? String,
+                        thinking: (obj["thinking"] as? [String: Any])?["type"] as? String, path: req.path)
+        }
+        /// Runs the three real builders in turn and returns what each sent.
+        func auxiliaryBodies() async throws -> (archive: Sent, userContext: Sent, description: Sent) {
+            server.clear()
+            _ = try await archive.callLLM(systemPrompt: "Summarize.", userPrompt: "Synthetic archive input.")
+            let a = last()
+            server.clear()
+            _ = try await UserContextStructurer.structure(assistantName: "Review", userName: "Test",
+                rawContext: "Prefers concise answers.", existingContext: "", config: .fromKeychain())
+            let u = last()
+            server.clear()
+            _ = try await service.generateFileDescriptions(files: [(filename: "note.txt", data: Data("Test".utf8), mimeType: "text/plain")])
+            let d = last()
+            return (a, u, d)
+        }
+        func namedOpenCode(model: String, effort: String?) throws {
+            try ProviderProfiles.saveProfile(.opencode, apiKey: "oc-synthetic-key-1234567890", baseURL: nil,
+                                             model: model, effort: effort, textOnly: false)
+            try ProviderProfiles.activate(.opencode)
+            // Local capture only: the NAMED profile is what identifies the
+            // OpenCode runtime; its runtime URL is redirected to the fixture.
+            try KeychainHelper.save(key: KeychainHelper.openAICompatibleBaseURLKey, value: endpoint)
+            try? KeychainHelper.delete(key: KeychainHelper.lmStudioDescriptionModelKey)
+            try? KeychainHelper.delete(key: KeychainHelper.lmStudioDescriptionBaseURLKey)
+        }
+
+        // X6 — R1: every stored tier through all three auxiliary builders on
+        // the named OpenCode profile with MiMo Flash: the three folded values
+        // arrive folded, the accepted ones untouched, no thinking field,
+        // stored value never rewritten.
+        for (stored, sent) in [("minimal", "low"), ("xhigh", "high"), ("max", "high"), ("high", "high"), ("medium", "medium"), ("low", "low")] {
+            try namedOpenCode(model: "mimo-v2.6-flash", effort: stored)
+            let bodies = try await auxiliaryBodies()
+            let expected = Sent(model: "mimo-v2.6-flash", effort: sent, thinking: nil, path: "/v1/chat/completions")
+            check("X6 archive body on stored '\(stored)' sends '\(sent)' (MiMo Flash, named OpenCode profile)",
+                  bodies.archive == expected, "\(bodies.archive)")
+            check("X6 user-context body on stored '\(stored)' sends '\(sent)'",
+                  bodies.userContext == expected, "\(bodies.userContext)")
+            check("X6 file-description body on stored '\(stored)' sends '\(sent)'",
+                  bodies.description == expected, "\(bodies.description)")
+            check("X6 stored effort '\(stored)' is never rewritten by request-time resolution",
+                  KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey) == stored)
+        }
+        // MiMo Pro on the archive (the same predicate/fold, the other id).
+        try namedOpenCode(model: "mimo-v2.6-pro", effort: "max")
+        let pro = try await auxiliaryBodies()
+        check("X6 MiMo Pro: all three auxiliary bodies fold 'max' to 'high'",
+              pro.archive.effort == "high" && pro.userContext.effort == "high" && pro.description.effort == "high"
+              && [pro.archive, pro.userContext, pro.description].allSatisfy { $0.model == "mimo-v2.6-pro" && $0.thinking == nil },
+              "\(pro)")
+        // No stored effort: the archive (which carries the thinking toggle)
+        // sends thinking:enabled and no effort, as the main transport does
+        // for a MiMo request with no effort (X3); the two builders that never
+        // sent a thinking field still send neither.
+        try namedOpenCode(model: "mimo-v2.6-flash", effort: nil)
+        try? KeychainHelper.delete(key: KeychainHelper.openAICompatibleReasoningEffortKey)
+        let none = try await auxiliaryBodies()
+        check("X6 no stored effort: archive sends thinking:enabled and no effort; user-context and description send neither",
+              none.archive.effort == nil && none.archive.thinking == "enabled"
+              && none.userContext.effort == nil && none.userContext.thinking == nil
+              && none.description.effort == nil && none.description.thinking == nil,
+              "\(none)")
+        // Effective target model: a separate description MODEL on the same
+        // OpenCode runtime resolves the stored value against THAT model
+        // (GLM 5.3 accepts 'max' unchanged) while the archive, on the main
+        // MiMo model, still folds.
+        try namedOpenCode(model: "mimo-v2.6-flash", effort: "max")
+        try KeychainHelper.save(key: KeychainHelper.lmStudioDescriptionModelKey, value: "glm-5.3-flash")
+        let separateModel = try await auxiliaryBodies()
+        check("X6 a separate description model (GLM 5.3) on the OpenCode runtime is resolved against ITS fold ('max' kept) while the archive on MiMo folds to 'high'",
+              separateModel.description == Sent(model: "glm-5.3-flash", effort: "max", thinking: nil, path: "/v1/chat/completions")
+              && separateModel.archive.effort == "high",
+              "description=\(separateModel.description) archive=\(separateModel.archive)")
+        try KeychainHelper.save(key: KeychainHelper.lmStudioDescriptionModelKey, value: "kimi-k2.6")
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "minimal")
+        let separateKimi = try await auxiliaryBodies()
+        check("X6 a separate description model (Kimi K2.6) on the OpenCode runtime folds 'minimal' to 'low' (its own rule), archive on MiMo too",
+              separateKimi.description == Sent(model: "kimi-k2.6", effort: "low", thinking: nil, path: "/v1/chat/completions")
+              && separateKimi.archive.effort == "low",
+              "description=\(separateKimi.description) archive=\(separateKimi.archive)")
+        // A separately configured description ENDPOINT is a foreign host:
+        // the stored value goes there raw, the archive on the runtime folds.
+        try namedOpenCode(model: "mimo-v2.6-flash", effort: "max")
+        try KeychainHelper.save(key: KeychainHelper.lmStudioDescriptionBaseURLKey, value: "http://127.0.0.1:\(server.port)/foreign/v1")
+        let foreign = try await auxiliaryBodies()
+        check("X6 an explicitly configured separate description endpoint is not the OpenCode runtime: 'max' sent raw there, archive still folds to 'high'",
+              foreign.description == Sent(model: "mimo-v2.6-flash", effort: "max", thinking: nil, path: "/foreign/v1/chat/completions")
+              && foreign.archive.effort == "high" && foreign.userContext.effort == "high",
+              "description=\(foreign.description) archive=\(foreign.archive)")
+        try? KeychainHelper.delete(key: KeychainHelper.lmStudioDescriptionBaseURLKey)
+        // The established families are untouched by the MiMo work on the
+        // auxiliary builders: GLM 5.3 'xhigh' → 'max' (its own map), and a
+        // non-MiMo family's accepted value passes through.
+        try namedOpenCode(model: "glm-5.3-flash", effort: "xhigh")
+        let glm = try await auxiliaryBodies()
+        check("X6 the MiMo fold does not leak into other families on the auxiliary builders: GLM 5.3 'xhigh' → 'max' on all three",
+              glm.archive.effort == "max" && glm.userContext.effort == "max" && glm.description.effort == "max", "\(glm)")
+
+        // X7 — R2: custom profiles keep their pre-0.2.32 bytes for a MiMo id,
+        // at an unrelated host AND at the OpenCode URL (an explicit custom
+        // profile pointed at the Go gateway is not the OpenCode runtime —
+        // the same rule /model and the protocol derivation use).
+        func context(_ lane: AffinityLane = .main) async -> ProviderExecutionContext {
+            await service.executionContext(modelOverride: nil, providerOverride: nil,
+                reasoningEffortOverride: nil, textOnlyOverride: nil, lane: lane)
+        }
+        for base in [endpoint, OpenCodeGo.baseURL] {
+            let label = base == endpoint ? "unrelated host" : "OpenCode URL"
+            try ProviderProfiles.saveProfile(.custom, apiKey: "custom-synthetic-key-1234567890", baseURL: base,
+                                             model: "mimo-v2.6-flash", effort: "max", textOnly: false)
+            try ProviderProfiles.activate(.custom)
+            try? KeychainHelper.delete(key: KeychainHelper.lmStudioDescriptionModelKey)
+            try? KeychainHelper.delete(key: KeychainHelper.lmStudioDescriptionBaseURLKey)
+            let pinned = await context()
+            check("X7 custom profile at \(label), MiMo on 'max': main context keeps 'max', no native replay, no thinking",
+                  pinned.reasoningEffort == "max" && !pinned.useReasoningContent && pinned.thinkingType == nil
+                  && pinned.wireProtocol == .chatCompletions,
+                  "effort=\(pinned.reasoningEffort ?? "nil") rc=\(pinned.useReasoningContent) thinking=\(pinned.thinkingType ?? "nil")")
+            let lane = await service.executionContext(modelOverride: "mimo-v2.6-pro", providerOverride: nil,
+                reasoningEffortOverride: "minimal", textOnlyOverride: nil, lane: .subagent("x7-\(label)"))
+            check("X7 custom profile at \(label): a MiMo Pro lane on 'minimal' keeps 'minimal', no native replay",
+                  lane.reasoningEffort == "minimal" && !lane.useReasoningContent && lane.thinkingType == nil,
+                  "effort=\(lane.reasoningEffort ?? "nil") rc=\(lane.useReasoningContent)")
+            if base == endpoint {
+                // Real bodies only against the loopback host.
+                let bodies = try await auxiliaryBodies()
+                check("X7 custom profile at \(label): all three auxiliary bodies send 'max' raw, no thinking",
+                      bodies.archive.effort == "max" && bodies.userContext.effort == "max" && bodies.description.effort == "max"
+                      && [bodies.archive, bodies.userContext, bodies.description].allSatisfy { $0.thinking == nil && $0.model == "mimo-v2.6-flash" },
+                      "\(bodies)")
+                // Replay on the wire: a stored MiMo message is downgraded to
+                // the historical note, exactly as before v0.2.32.
+                let storedMessage = OpenRouterAPIMessage(role: "assistant", content: .text("Done."), toolCalls: nil, toolCallId: nil,
+                    reasoning: JSONValue.string("CODE=4827"), reasoningDetails: nil, reasoningContent: JSONValue.string("CODE=4827"))
+                let (downgraded, note) = storedMessage.sanitizedForProvider(.openAICompatible, useReasoningContent: pinned.useReasoningContent)
+                check("X7 custom profile at \(label): stored MiMo reasoning replays as the historical note, not reasoning_content",
+                      downgraded.reasoningContent == nil && note != nil)
+            }
+            try KeychainHelper.delete(key: KeychainHelper.openAICompatibleReasoningEffortKey)
+            let noEffort = await context()
+            check("X7 custom profile at \(label), MiMo with no effort: no thinking field appears",
+                  noEffort.reasoningEffort == nil && noEffort.thinkingType == nil && !noEffort.useReasoningContent,
+                  "thinking=\(noEffort.thinkingType ?? "nil")")
+            if base == endpoint {
+                let bodies = try await auxiliaryBodies()
+                check("X7 custom profile at \(label), no effort: no auxiliary body gains a thinking field",
+                      bodies.archive.thinking == nil && bodies.archive.effort == nil
+                      && bodies.userContext.thinking == nil && bodies.description.thinking == nil, "\(bodies)")
+            }
+        }
+        // Pre-profile install (no active profile yet): the OpenCode base URL
+        // identifies the runtime, so the MiMo rule applies; an unrelated
+        // base URL without a profile does not.
+        try namedOpenCode(model: "mimo-v2.6-flash", effort: "max")
+        try KeychainHelper.delete(key: ProviderProfiles.activeProfileKey)
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleBaseURLKey, value: OpenCodeGo.baseURL)
+        let preProfile = await context()
+        check("X7 pre-profile install on the OpenCode base URL: MiMo 'max' → 'high' with native replay (context only)",
+              preProfile.reasoningEffort == "high" && preProfile.useReasoningContent && preProfile.thinkingType == nil,
+              "effort=\(preProfile.reasoningEffort ?? "nil") rc=\(preProfile.useReasoningContent)")
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleBaseURLKey, value: endpoint)
+        let preProfileForeign = await context()
+        let preProfileBodies = try await auxiliaryBodies()
+        check("X7 pre-profile install on an unrelated base URL: MiMo keeps 'max' raw on the main context and all three auxiliary bodies",
+              preProfileForeign.reasoningEffort == "max" && !preProfileForeign.useReasoningContent
+              && preProfileBodies.archive.effort == "max" && preProfileBodies.userContext.effort == "max" && preProfileBodies.description.effort == "max",
+              "context=\(preProfileForeign.reasoningEffort ?? "nil") \(preProfileBodies)")
+        // Named OpenCode again, so the rule and the main context agree (the
+        // positive control for the X7 rows): same profile, same builders.
+        try namedOpenCode(model: "mimo-v2.6-flash", effort: "max")
+        let named = await context()
+        check("X7 positive control — named OpenCode profile: main context 'max' → 'high' with native replay",
+              named.reasoningEffort == "high" && named.useReasoningContent && named.thinkingType == nil,
+              "effort=\(named.reasoningEffort ?? "nil") rc=\(named.useReasoningContent)")
+        return failures
+    }
+}

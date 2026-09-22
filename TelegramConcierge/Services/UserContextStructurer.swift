@@ -226,7 +226,22 @@ struct UserContextStructurer {
             case .openRouter:
                 requestPayload["reasoning"] = ["effort": configuredReasoningEffort]
             case .openAICompatible:
-                requestPayload["reasoning_effort"] = configuredReasoningEffort
+                // On the OpenCode runtime the stored effort goes through the
+                // same request-time rule as the main turn (transport
+                // resolution, per-model fold: MiMo on `max` reaches the
+                // gateway as `high` — Codex R1, 2026-09-22), identified from
+                // the endpoint this request hits. Any other OpenAI-compatible
+                // profile sends the stored value raw, as before.
+                var scope = KeychainHelper.loadSnapshot()
+                scope[KeychainHelper.openAICompatibleBaseURLKey] = config.openAICompatibleBaseURL
+                if ProviderProfiles.isOpenCodeRuntime(stored: scope) {
+                    if let effort = OpenRouterService.openAICompatibleChatReasoning(
+                        effort: configuredReasoningEffort, model: configuredModel, onOpenCodeRuntime: true).reasoningEffort {
+                        requestPayload["reasoning_effort"] = effort
+                    }
+                } else {
+                    requestPayload["reasoning_effort"] = configuredReasoningEffort
+                }
             case .lmStudio:
                 break
             }
