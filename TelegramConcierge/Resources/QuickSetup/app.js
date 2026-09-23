@@ -135,7 +135,7 @@
 
   function subscriptionEfforts(model) {
     if (/^gpt-6-astra(?:-20.*)?$/.test(model)) return ['low', 'medium', 'high', 'xhigh', 'max'];
-    if (/^gpt-5\.6(?:-luna|-terra|-sol)?(?:-20.*)?$/.test(model)) return ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
+    if (/^gpt-6-(?:sol|luna)(?:-20.*)?$/.test(model) || /^gpt-5\.6(?:-luna|-terra|-sol)?(?:-20.*)?$/.test(model)) return ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
     return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
   }
   function renderSubscriptionEfforts() {

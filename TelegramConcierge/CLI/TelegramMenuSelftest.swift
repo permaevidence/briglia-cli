@@ -94,7 +94,7 @@ struct TelegramMenuSelftest: ParsableCommand {
               && Menu.keyboard(for: Menu.providerMenu(statusLines: status, configured: [])) == nil)
 
         // ---- 3. /model menu: OpenCode catalog in catalog order + typed button,
-        // every button bound to the profile; ChatGPT exactly the owner's four.
+        // every button bound to the profile; ChatGPT exactly the owner's six.
         let opencodeChoices = OpenCodeGo.choices.map { Menu.ModelChoice(id: $0.id, label: $0.label, textOnly: $0.textOnly) }
         let ocMenu = Menu.modelMenu(catalog: .opencode(opencodeChoices), profile: "opencode", current: "kimi-k3")
         let ocData = ocMenu.rows.map { $0.map(\.data) }
@@ -111,9 +111,9 @@ struct TelegramMenuSelftest: ParsableCommand {
               && taggedMenu.rows.first?.first?.label == "Text Model · text-only"
               && ocMenu.rows.last?.first?.label == "Type a model name…" && ocMenu.text.contains("Current model: kimi-k3"))
         let gptMenu = Menu.modelMenu(catalog: .chatgpt, profile: "chatgpt", current: "gpt-6-astra")
-        check("model menu (ChatGPT): exactly Luna, Terra, Sol, Astra bound to chatgpt + typed button",
-              gptMenu.rows.map { $0.map(\.data) } == [["bm1:m:chatgpt:gpt-5.6-luna"], ["bm1:m:chatgpt:gpt-5.6-terra"], ["bm1:m:chatgpt:gpt-5.6-sol"], ["bm1:m:chatgpt:gpt-6-astra"], ["bm1:m:?"]]
-              && gptMenu.rows[3].first?.label == "✓ GPT-6 Astra", "\(gptMenu.rows.map { $0.map(\.label) })")
+        check("model menu (ChatGPT): exactly GPT-6 Sol, Luna, Astra, then 5.6 Luna, Terra, Sol, bound to chatgpt + typed button",
+              gptMenu.rows.map { $0.map(\.data) } == [["bm1:m:chatgpt:gpt-6-sol"], ["bm1:m:chatgpt:gpt-6-luna"], ["bm1:m:chatgpt:gpt-6-astra"], ["bm1:m:chatgpt:gpt-5.6-luna"], ["bm1:m:chatgpt:gpt-5.6-terra"], ["bm1:m:chatgpt:gpt-5.6-sol"], ["bm1:m:?"]]
+              && gptMenu.rows[2].first?.label == "✓ GPT-6 Astra", "\(gptMenu.rows.map { $0.map(\.label) })")
         check("model menu: keeps the typed-command hint for users who prefer typing",
               ocMenu.text.contains("/model <model-id>") && gptMenu.text.contains("/model <model-id>"))
 
@@ -198,8 +198,8 @@ struct TelegramMenuSelftest: ParsableCommand {
         // ---- 8. The ChatGPT list is one source: both browser pages' pickers
         // must list exactly these ids, in this order, plus "custom".
         let expected = ResponsesAdapter.subscriptionModelChoices.map(\.id)
-        check("chatgpt list: exactly the owner's four, in order",
-              expected == ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"])
+        check("chatgpt list: exactly the owner's six, in order",
+              expected == ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"])
         if let quickSetup = Bundle.module.resourceURL?.appendingPathComponent("QuickSetup", isDirectory: true) {
             for page in ["index.html", "settings.html"] {
                 let html = (try? String(contentsOf: quickSetup.appendingPathComponent(page), encoding: .utf8)) ?? ""

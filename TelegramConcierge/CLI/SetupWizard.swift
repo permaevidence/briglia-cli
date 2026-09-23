@@ -236,7 +236,7 @@ struct SetupWizard {
                     print("Open \(url) and enter code: \(code). Enable device login in ChatGPT security settings if needed.")
                 }
             }
-            let model = ask("Model", ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna")
+            let model = ask("Model", ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel)
             let effort = ask("Reasoning effort", ProviderProfiles.configuredEffort(.chatgpt) ?? "high")
             let request: [String: Any] = ["action": "probe", "model": model, "effort": effort]
             let probe: [String: Any]

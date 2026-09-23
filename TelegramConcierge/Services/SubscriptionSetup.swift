@@ -60,7 +60,7 @@ struct SubscriptionSetup {
                 return ok(["state": usable ? "signed_in" : state?.requiresLogin == true ? "login_required" : "signed_out",
                            "pending": state?.pendingLogin != nil, "quota": "unknown",
                            "generation": usable ? state!.generation : "",
-                           "model": ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna",
+                           "model": ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel,
                            "effort": ProviderProfiles.configuredEffort(.chatgpt) ?? "high"])
             }
             try IdentityMigration.gateMutatingEntry()
@@ -118,7 +118,7 @@ struct SubscriptionSetup {
             }
             if action == "logout" { try await store.logout(checkpoint: checkpoint); return ok(["state": "signed_out"]) }
             guard action == "select" || action == "probe" else { throw SubscriptionError("Unknown subscription action") }
-            let model = request["model"] as? String ?? ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna"
+            let model = request["model"] as? String ?? ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel
             let effort = request["effort"] as? String ?? ProviderProfiles.configuredEffort(.chatgpt) ?? "high"
             guard !model.isEmpty, ResponsesAdapter.allowedEfforts(model: model).contains(effort) else { throw SubscriptionError("Unsupported model/effort") }
             guard let state = try store.read(), state.credential != nil, state.requiresLogin != true else { throw SubscriptionError("Sign in first") }

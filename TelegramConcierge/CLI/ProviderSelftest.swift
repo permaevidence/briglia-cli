@@ -991,6 +991,13 @@ struct ProviderSelftest: AsyncParsableCommand {
               && ProviderProfiles.wireProtocol(.local, model: "gpt-5.6-luna") == .chatCompletions)
         check("P1 the Responses effort list for Luna is the one the Go gateway accepts (none…max, no minimal)",
               ResponsesAdapter.allowedEfforts(model: "gpt-5.6-luna") == ["none", "low", "medium", "high", "xhigh", "max"])
+        check("P1 GPT-6 Sol/Luna take the live-verified subscription efforts (none…max, no minimal); GPT-6 Sol is the subscription default and first in the catalog",
+              ["gpt-6-sol", "gpt-6-luna", "gpt-6-sol-2026-09-22"].allSatisfy {
+                  ResponsesAdapter.allowedEfforts(model: $0) == ["none", "low", "medium", "high", "xhigh", "max"]
+              }
+              && ResponsesAdapter.subscriptionDefaultModel == "gpt-6-sol"
+              && ResponsesAdapter.subscriptionModelChoices.first?.id == "gpt-6-sol"
+              && ResponsesAdapter.subscriptionModelChoices.contains { $0.id == "gpt-6-luna" })
 
         // P2 — activation stamps the slot; requests resolve per effective model.
         try ProviderProfiles.saveProfile(.opencode, apiKey: "oc-synthetic-key-1234567890", baseURL: nil,

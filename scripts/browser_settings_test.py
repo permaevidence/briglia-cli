@@ -173,7 +173,7 @@ def run():
                     verified_models.append(route.request.post_data_json)
                     route.fulfill(json={'ok': True, 'message': 'Verified fixture'})
                 page.route('**/api/verify', model_verify)
-                for model in ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra']:
+                for model in ['gpt-6-sol', 'gpt-6-luna', 'gpt-6-astra', 'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']:
                     page.select_option('#subscription-model-choice', model)
                     assert page.locator('#model').input_value() == model
                     assert page.locator('#model-row').is_hidden()

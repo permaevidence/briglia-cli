@@ -25,7 +25,7 @@ struct SubscriptionCommand: AsyncParsableCommand {
             try IdentityMigration.gateMutatingEntry()
             // Profile changes need daemon exclusion. Logout may invalidate an
             // active session; each queued dispatch checks its captured generation.
-            let model = model ?? ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna"
+            let model = model ?? ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel
             let effort = effort ?? ProviderProfiles.configuredEffort(.chatgpt) ?? "high"
             if action == "login" || action == "select" {
                 guard ResponsesAdapter.allowedEfforts(model: model).contains(effort) else { throw ValidationError("Unsupported reasoning effort") }

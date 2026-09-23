@@ -5065,7 +5065,7 @@ class ConversationManager: ObservableObject {
                 try Task.checkCancellation()
                 guard self.subscriptionLoginRunID == runID, self.pairedChatId == paired else { throw CancellationError() }
                 try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil,
-                    model: ProviderProfiles.configuredModel(.chatgpt) ?? "gpt-5.6-luna",
+                    model: ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel,
                     effort: ProviderProfiles.configuredEffort(.chatgpt) ?? "high", textOnly: false)
                 try await channel.sendText(chatId: address.chatId, text: "ChatGPT login saved. Send /provider chatgpt when idle to activate this login, including if ChatGPT is already selected. If ChatGPT is already selected, turns will keep failing until you send /provider chatgpt.")
             } catch {

@@ -6,16 +6,24 @@ import FoundationNetworking
 struct ResponsesAdapter {
     let context: ProviderExecutionContext
 
-    /// The subscription models Briglia documents (owner list, 2026-09-06):
-    /// Luna, Terra, Sol, Astra. One source for the Telegram /model buttons,
+    /// The subscription models Briglia documents (owner list, 2026-09-06;
+    /// GPT-6 Sol/Luna added 2026-09-23, verified live on the subscription
+    /// backend: vision, tools, encrypted reasoning replay, effort
+    /// none/low/medium/high/xhigh/max, minimal rejected). GPT-6 Sol is the
+    /// default for new subscription profiles. One source for the Telegram /model buttons,
     /// the `briglia subscription` hint and — drift-checked by the
     /// telegram-menu selftest — the two browser pages' model pickers.
     static let subscriptionModelChoices: [(id: String, label: String)] = [
+        ("gpt-6-sol", "GPT-6 Sol"),
+        ("gpt-6-luna", "GPT-6 Luna"),
+        ("gpt-6-astra", "GPT-6 Astra"),
         ("gpt-5.6-luna", "GPT-5.6 Luna"),
         ("gpt-5.6-terra", "GPT-5.6 Terra"),
         ("gpt-5.6-sol", "GPT-5.6 Sol"),
-        ("gpt-6-astra", "GPT-6 Astra"),
     ]
+
+    /// Default model for a new ChatGPT subscription profile.
+    static let subscriptionDefaultModel = "gpt-6-sol"
 
     /// Documented model capabilities, separate from Codex subscription settings.
     /// Unknown models retain the common API enum; max is opt-in for documented models.
@@ -23,7 +31,7 @@ struct ResponsesAdapter {
         if model == "gpt-6-astra" || model.hasPrefix("gpt-6-astra-20") {
             return ["low", "medium", "high", "xhigh", "max"]
         }
-        if ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].contains(where: {
+        if ["gpt-6-sol", "gpt-6-luna", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].contains(where: {
             model == $0 || model.hasPrefix($0 + "-20")
         }) {
             return ["none", "low", "medium", "high", "xhigh", "max"]
