@@ -401,7 +401,7 @@ struct SetupWizard {
         let key = await WizardIO.askSecretValidated("OpenAI Platform API key",
             current: KeychainHelper.load(key: ProviderProfiles.openaiApiKeyKey),
             probe: { await Probes.responses(baseURL: "https://api.openai.com/v1", apiKey: $0, model: model) })
-        let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: false)
+        let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: true)
         saveProfile(.openai, apiKey: key, baseURL: nil, model: model, effort: nil, textOnly: textOnly)
         return true
     }
@@ -422,7 +422,7 @@ struct SetupWizard {
                 return await Probes.chatCompletion(baseURL: baseURL, apiKey: key, model: model)
             }
         )
-        let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: false)
+        let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: true)
         if textOnly { printTextOnlyWarning() }
         saveProfile(.custom, apiKey: key, baseURL: baseURL, model: model,
                     effort: protocolChoice == .responses ? nil : "high", textOnly: textOnly, wireProtocol: protocolChoice)
@@ -449,7 +449,7 @@ struct SetupWizard {
         } else {
             print("✔")
         }
-        let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: false)
+        let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: true)
         if textOnly { printTextOnlyWarning() }
         saveProfile(.local, apiKey: nil, baseURL: baseURL, model: model,
                     effort: nil, textOnly: textOnly)

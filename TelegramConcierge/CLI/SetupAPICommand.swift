@@ -707,8 +707,9 @@ enum SetupAPICore {
         }
 
         // Vision state: explicit wins; the OpenCode catalog fills it for
-        // known models; anything else must say so — a silently-guessed
-        // wrong value would break image handling until noticed.
+        // known models; anything else defaults to vision (owner decision,
+        // 2026-09-23: text-only models are the exception now, so a caller
+        // that says nothing gets native images, like the wizard's default).
         let textOnly: Bool
         if let explicit = section["text_only"] as? Bool {
             textOnly = explicit
@@ -716,10 +717,7 @@ enum SetupAPICore {
                   let entry = OpenCodeGo.catalogEntry(for: model) {
             textOnly = entry.textOnly
         } else {
-            throw APIError(code: "missing_field",
-                           message: profile == .opencode
-                           ? "provider.text_only is required for a model outside the OpenCode catalog"
-                           : "provider.text_only is required (can the model see images?)")
+            textOnly = false
         }
 
         let requestedProtocol: ProviderWireProtocol?

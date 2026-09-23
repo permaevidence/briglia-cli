@@ -147,7 +147,7 @@ final class BrowserSettingsWorkflow {
                 throw Invalid(text: "Unsupported reasoning effort.")
             }
             var provider: [String: Any] = ["profile": profile.rawValue, "model": model, "effort": effort,
-                "text_only": try boolean("text_only", default: ProviderProfiles.textOnly(profile) ?? true),
+                "text_only": try boolean("text_only", default: ProviderProfiles.textOnly(profile) ?? false),
                 "activate": try boolean("activate", default: ProviderProfiles.activeProfile() == nil || ProviderProfiles.activeProfile() == profile)]
             // Updating the active profile must also update its runtime slots.
             if ProviderProfiles.activeProfile() == profile { provider["activate"] = true }
@@ -210,7 +210,7 @@ final class BrowserSettingsWorkflow {
                 "configured": ProviderProfiles.isConfigured(p), "model": model,
                 "effort": ProviderProfiles.configuredEffort(p) ?? (p == .local || (ProviderProfiles.isConfigured(p) && p != .opencode && ProviderProfiles.wireProtocol(p) == .responses) ? "" : "high"),
                 "endpoint": ProviderProfiles.configuredEndpoint(p) ?? "",
-                "text_only": ProviderProfiles.textOnly(p) ?? !(p == .chatgpt || p == .openai),
+                "text_only": ProviderProfiles.textOnly(p) ?? false,
                 "protocol": ProviderProfiles.wireProtocol(p).rawValue,
                 "native_tool_media": p == .custom && KeychainHelper.load(key: ProviderProfiles.customNativeMediaKey) != "false",
                 "has_key": Self.key(p)?.isEmpty == false])

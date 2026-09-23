@@ -352,10 +352,11 @@ struct SetupAPISelftest: AsyncParsableCommand {
                   isOK(switched) && ProviderProfiles.activeProfile() == .local
                   && KeychainHelper.load(key: KeychainHelper.llmProviderKey)
                       == LLMProvider.lmStudio.rawValue)
-            check("apply provider: non-catalog model without text_only → missing_field",
-                  errorCode(await SetupAPICore.apply(
-                      ["provider": ["profile": "openrouter", "api_key": "sk-or-x",
-                                    "model": "some/model"]])) == "missing_field")
+            let omitted = await SetupAPICore.apply(
+                ["provider": ["profile": "openrouter", "api_key": "sk-or-x",
+                              "model": "some/model"]])
+            check("apply provider: non-catalog model without text_only → saved as vision (default)",
+                  isOK(omitted) && ProviderProfiles.textOnly(.openrouter) == false)
         }
 
         // 8. OpenAI fan-out (wizard step 2 parity) through the defaults seam.

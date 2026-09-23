@@ -103,9 +103,10 @@ struct QuickSetupRequest: Equatable {
                 values[field] = .telegram(token: try str("token"), chatId: try str("chat_id"))
             case .custom:
                 guard keys.isSubset(of: ["api_key", "base_url", "model", "vision"]) else { throw BadRequest(description: "custom: unknown key") }
-                // Conservative like the terminal wizard: an unknown endpoint is
-                // text-only unless the page's checkbox says it can see images.
-                let vision = entry["vision"] as? Bool ?? false
+                // Like the terminal wizard: an endpoint is vision unless the
+                // page's checkbox was cleared (text-only models are the
+                // exception now).
+                let vision = entry["vision"] as? Bool ?? true
                 values[field] = .custom(key: try str("api_key"), baseURL: try str("base_url"), model: try str("model"), vision: vision)
             default:
                 guard keys.isSubset(of: ["value"]) else { throw BadRequest(description: "\(field.rawValue): unknown key") }

@@ -636,7 +636,10 @@ final class SelftestContext: @unchecked Sendable {
         check("kept must be alone in its object", threw)
         let parsedCustom = try QuickSetupRequest.parse(["name": "x", "opencode": ["value": "a"], "openai": ["value": "a"], "serper": ["value": "a"], "jina": ["value": "a"], "telegram": ["token": "t", "chat_id": "1"], "custom": ["api_key": "k", "base_url": "u", "model": "m"]])
         let customPayload = QuickSetupWorkflow.applyPayload(section: "custom", request: parsedCustom)?["provider"] as? [String: Any]
-        check("custom endpoint without the vision checkbox → text_only true (conservative, like the wizard)", customPayload?["text_only"] as? Bool == true)
+        check("custom endpoint without the vision key → text_only false (vision by default, like the wizard)", customPayload?["text_only"] as? Bool == false)
+        let parsedCustomTextOnly = try QuickSetupRequest.parse(["name": "x", "opencode": ["value": "a"], "openai": ["value": "a"], "serper": ["value": "a"], "jina": ["value": "a"], "telegram": ["token": "t", "chat_id": "1"], "custom": ["api_key": "k", "base_url": "u", "model": "m", "vision": false]])
+        let customTextOnlyPayload = QuickSetupWorkflow.applyPayload(section: "custom", request: parsedCustomTextOnly)?["provider"] as? [String: Any]
+        check("custom endpoint with the vision checkbox cleared → text_only true", customTextOnlyPayload?["text_only"] as? Bool == true)
         // Payload shapes.
         var full = goodRequest()
         full.values[.openrouter] = .key("or-good")

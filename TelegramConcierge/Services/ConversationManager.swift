@@ -4544,6 +4544,12 @@ class ConversationManager: ObservableObject {
             if match.id.lowercased() != argument.lowercased() {
                 note += " (\"\(argument)\" is the legacy alias; stored as \(match.id).)"
             }
+        } else {
+            // No catalog for this model: the stored vision flag is kept as-is,
+            // so say which image mode stays in effect instead of staying silent.
+            note = KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey) == "true"
+                ? " Text-only mode stays on (images go through the OCR preprocessor); rerun the provider setup to change it."
+                : " Vision mode stays on (images flow natively)."
         }
         // OpenCode Go: the protocol follows the model (GPT ids → Responses),
         // so the runtime protocol slot flips in the SAME write as the model,

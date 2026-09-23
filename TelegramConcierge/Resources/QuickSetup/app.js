@@ -21,7 +21,7 @@
       { id: 'custom_key', label: 'Custom endpoint key', purpose: 'Any OpenAI-compatible server. Needs the base URL and model below.' },
       { id: 'custom_base', label: 'Custom endpoint base URL', purpose: 'e.g. https://my-server.example/v1', plain: true },
       { id: 'custom_model', label: 'Custom endpoint model', purpose: 'The model id the server expects', plain: true },
-      { id: 'custom_vision', label: 'Custom endpoint can see images', purpose: 'Leave off unless you know the model accepts image input (text-only is the safe default).', checkbox: true }
+      { id: 'custom_vision', label: 'Custom endpoint can see images', purpose: 'On by default. Turn off only for a text-only model; images then go through the OCR preprocessor.', checkbox: true, defaultOn: true }
     ]
   };
 
@@ -94,7 +94,7 @@
     }
     if (f.checkbox) {
       var crow = el('div', 'row');
-      var cb = el('input'); cb.type = 'checkbox'; cb.id = 'f-' + f.id; cb.checked = !!state.values[f.id];
+      var cb = el('input'); cb.type = 'checkbox'; cb.id = 'f-' + f.id; cb.checked = (f.id in state.values) ? !!state.values[f.id] : !!f.defaultOn;
       cb.addEventListener('change', function () { state.values[f.id] = cb.checked; });
       crow.appendChild(cb);
       wrap.appendChild(crow);
@@ -208,7 +208,7 @@
     else {
       var ck = state.values.custom_key || '', cb = state.values.custom_base || '', cm = state.values.custom_model || '';
       if (ck || cb || cm) {
-        if (ck && cb && cm) req.custom = { api_key: ck, base_url: cb, model: cm, vision: !!state.values.custom_vision };
+        if (ck && cb && cm) req.custom = { api_key: ck, base_url: cb, model: cm, vision: state.values.custom_vision !== false };
         else missing.push('custom endpoint (key, base URL and model together)');
       }
     }
