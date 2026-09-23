@@ -36,6 +36,11 @@ extension WebSubagentSelftest {
             func clear() { lock.lock(); items = []; lock.unlock() }
         }
         let captured = Captured()
+        /// Never let one broken path abort the group: an error becomes the
+        /// value "ERROR: …", so every later row still runs and reports.
+        func attempt(_ work: () async throws -> String) async -> String {
+            do { return try await work() } catch { return "ERROR: \(error.localizedDescription)" }
+        }
 
         // 16.1 Defaults moved to GPT-6 Luna (web stages, researcher default, OCR).
         check("16.1 GPT-6 Luna everywhere by default: extraction, deep excerpt, web_fetch compression, the web model and the OCR preprocessor",
@@ -119,8 +124,8 @@ extension WebSubagentSelftest {
             return Data(WebFixtureServer.responsesBody("SUBSCRIPTION COMPRESSED", id: "s1").utf8)
         }
         h.serverB.clear()
-        let compressed = try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/p", pageTitle: nil,
-            markdown: "Some page", prompt: "what?", executionID: UUID())
+        let compressed = await attempt { try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/p", pageTitle: nil,
+            markdown: "Some page", prompt: "what?", executionID: UUID()) }
         let sent = captured.all.first.map(body) ?? [:]
         check("16.9 web_fetch compression on the subscription: one Responses request, GPT-6 Luna, medium effort, instructions from the system prompt; nothing on the OpenCode fixture",
               compressed == "SUBSCRIPTION COMPRESSED" && captured.all.count == 1 && sent["model"] as? String == "gpt-6-luna"
@@ -135,8 +140,8 @@ extension WebSubagentSelftest {
             captured.add(request)
             throw SubscriptionEndpoint.providerError(status: 429, body: Data("{\"error\":{\"code\":\"usage_limit_reached\"}}".utf8))!
         }
-        let fallback = try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/p", pageTitle: nil,
-            markdown: "Fallback page", prompt: "what?", executionID: UUID())
+        let fallback = await attempt { try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/p", pageTitle: nil,
+            markdown: "Fallback page", prompt: "what?", executionID: UUID()) }
         check("16.10 usage limit: one subscription attempt (never retried), the stage answered by the configured backend, active leaves the subscription for the cooldown",
               captured.all.count == 1 && fallback.hasPrefix("COMPRESSED:") && h.serverB.requests.count == 1
               && WebSearchBackend.active == .opencode, "\(captured.all.count) \(fallback.prefix(40)) \(h.serverB.requests.count)")
@@ -151,8 +156,8 @@ extension WebSubagentSelftest {
             if counter.n == 1 { throw ResponsesFailure.http(503, 0) }
             return Data(WebFixtureServer.responsesBody("after retry", id: "s2").utf8)
         }
-        let retried = try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/p", pageTitle: nil,
-            markdown: "x", prompt: "y", executionID: UUID())
+        let retried = await attempt { try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/p", pageTitle: nil,
+            markdown: "x", prompt: "y", executionID: UUID()) }
         counter.n = 0; captured.clear()
         SubscriptionWebTransport.sendOverride = { request in captured.add(request); throw ResponsesFailure.http(400, nil) }
         var badRequestThrew = false
@@ -162,8 +167,8 @@ extension WebSubagentSelftest {
               retried == "after retry" && badRequestThrew && captured.all.count == 1 && !SubscriptionWebTransport.isExhausted(), retried)
 
         // 16.12 The Web researcher's context on the subscription.
-        let web = try await h.service.webExecutionContextWithNote(lane: .subagent("sub-web"))
-        let adapterRequest = try ResponsesAdapter(context: web.context).request(input: [ResponsesAdapter.message(role: "system", text: "S"), ResponsesAdapter.message(role: "user", text: "U")], tools: nil)
+        if let web = try? await h.service.webExecutionContextWithNote(lane: .subagent("sub-web")),
+           let adapterRequest = try? ResponsesAdapter(context: web.context).request(input: [ResponsesAdapter.message(role: "system", text: "S"), ResponsesAdapter.message(role: "user", text: "U")], tools: nil) {
         let ab = body(adapterRequest)
         check("16.12 researcher context: subscription endpoint + login generation, GPT-6 Luna, high effort, Responses, no bearer in the context; the adapter builds a streamed subscription request",
               web.note == nil && web.context.endpoint == SubscriptionEndpoint.inference && web.context.subscriptionGeneration == "gen-fixture"
@@ -172,11 +177,13 @@ extension WebSubagentSelftest {
               && adapterRequest.url?.absoluteString == SubscriptionEndpoint.inference && ab["stream"] as? Bool == true
               && ab["instructions"] as? String == "S" && adapterRequest.value(forHTTPHeaderField: "Authorization") == nil,
               "\(web.context.endpoint) \(web.context.model)")
+        } else { check("16.12 researcher context on the subscription", false, "context or adapter request threw") }
         SubscriptionWebTransport.markExhausted()
-        let exhaustedWeb = try await h.service.webExecutionContextWithNote(lane: .subagent("sub-web-2"))
+        if let exhaustedWeb = try? await h.service.webExecutionContextWithNote(lane: .subagent("sub-web-2")) {
         check("16.13 while exhausted a new researcher run starts on the configured backend (OpenCode here)",
               exhaustedWeb.context.endpoint != SubscriptionEndpoint.inference && exhaustedWeb.context.subscriptionGeneration == nil
               && exhaustedWeb.context.model == WebOrchestrator.opencodeResearchModel, exhaustedWeb.context.endpoint)
+        } else { check("16.13 exhausted researcher start", false, "context threw") }
         SubscriptionWebTransport.resetForTests()
 
         // 16.14 Legacy loop (web_search tool): rounds on the subscription.
@@ -191,7 +198,7 @@ extension WebSubagentSelftest {
         }
         await orchestrator.configure(openRouterKey: "", serperKey: "synthetic-serper-key", jinaKey: "synthetic-jina-key")
         h.fixtures.serperMode = .normal
-        let legacy = try await orchestrator.answer(userPrompt: "alpha?", historyPairs: [], executionID: UUID())
+        let legacy = await attempt { try await orchestrator.answer(userPrompt: "alpha?", historyPairs: [], executionID: UUID()) }
         let rounds = captured.all.map(body)
         check("16.14 legacy web_search loop on the subscription: Responses rounds with the search tools, reasoning replay include, GPT-6 Luna",
               legacy.contains("Legacy answer") && rounds.count == 2
