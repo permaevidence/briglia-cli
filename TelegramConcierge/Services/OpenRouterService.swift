@@ -600,7 +600,7 @@ actor OpenRouterService {
             // OpenRouter (AI Studio retains data and is excluded by ZDR routing).
             return ["google-vertex"]
         }
-        // Other models (incl. the GPT-5.6 Luna default) rely on zdr:true alone —
+        // Other models (incl. the GPT-6 Luna default) rely on zdr:true alone —
         // OpenRouter then routes only to ZDR-eligible endpoints (Azure for Luna).
         return nil
     }
@@ -706,17 +706,18 @@ actor OpenRouterService {
         let label: String
 
         /// OpenAI responses carry token counts but no cost field; estimate
-        /// Luna at its published rates ($0.20/M in, $1.20/M out as of
-        /// 2026-08-03, with a 2x-in/1.5x-out surcharge on requests whose
-        /// input exceeds 272K tokens) so OCR still feeds the spend limits.
-        /// Slightly high (cached input billed full), which is the safe
-        /// direction for a limit.
+        /// Luna at its published rates (`WebOrchestrator.openAIRates`: GPT-6
+        /// Luna $0.10/M in, $0.50/M out; GPT-5.6 Luna $0.20/$1.20; a
+        /// 2x-in/1.5x-out surcharge on requests whose input exceeds 272K
+        /// tokens) so OCR still feeds the spend limits. Slightly high
+        /// (cached input billed full), which is the safe direction for a limit.
         func estimatedSpendUSD(promptTokens: Int?, completionTokens: Int?) -> Double? {
             guard url.contains("api.openai.com"), model.contains("luna"),
                   let p = promptTokens, let c = completionTokens else { return nil }
             let isLarge = p > WebOrchestrator.openAILargeRequestInputTokens
-            let inputRate = 0.20 * (isLarge ? WebOrchestrator.openAILargeRequestInputMultiplier : 1)
-            let outputRate = 1.20 * (isLarge ? WebOrchestrator.openAILargeRequestOutputMultiplier : 1)
+            let rates = WebOrchestrator.openAIRates(forModel: model)
+            let inputRate = rates.input * (isLarge ? WebOrchestrator.openAILargeRequestInputMultiplier : 1)
+            let outputRate = rates.output * (isLarge ? WebOrchestrator.openAILargeRequestOutputMultiplier : 1)
             return Double(p) * inputRate / 1_000_000 + Double(c) * outputRate / 1_000_000
         }
     }
@@ -1575,8 +1576,13 @@ actor OpenRouterService {
     ///   through the same per-model fold as the main transport.
     /// - `.openai`: `api.openai.com/v1` over the Responses transport
     ///   (`store:false`, encrypted-reasoning replay), the configured web
-    ///   model with the `openai/` prefix stripped (default gpt-5.6-luna),
+    ///   model with the `openai/` prefix stripped (default gpt-6-luna),
     ///   effort high.
+    /// - `.chatgpt` (derived: the main provider is the ChatGPT subscription,
+    ///   owner decision 2026-09-23): the subscription's pinned Responses
+    ///   endpoint with the active login generation, same model resolution
+    ///   as `.openai`, effort high. A usage-exhausted subscription resolves
+    ///   `WebSearchBackend.active` to the configured backend instead.
     /// - `.openrouter`: the configured slug on OpenRouter with the existing
     ///   provider preferences for that model, effort high.
     /// Researcher rounds run at HIGH effort (owner decision 2026-09-16 after
@@ -1639,6 +1645,22 @@ actor OpenRouterService {
                 textOnly: false, anthropicCacheControl: false, renderPDFAsImages: true,
                 wireProtocol: .responses, profileIdentity: "web-openai", nativeToolMedia: true,
                 usageLaneLabel: "subagent:web"), note)
+        case .chatgpt:
+            let model = resolution.model
+            // `key` is the login generation; the adapter reads the credential
+            // per request and never sends the generation as a bearer.
+            var context = ProviderExecutionContext(
+                provider: .openAICompatible, model: model,
+                endpoint: SubscriptionEndpoint.inference,
+                authorization: "", affinityKey: key, lane: lane,
+                provenance: model + "#responses",
+                providerPreferences: nil, reasoning: nil, reasoningEffort: effort,
+                thinkingType: nil, useReasoningContent: false,
+                textOnly: false, anthropicCacheControl: false, renderPDFAsImages: true,
+                wireProtocol: .responses, profileIdentity: "web-chatgpt", nativeToolMedia: false,
+                usageLaneLabel: "subagent:web")
+            context.subscriptionGeneration = key
+            return (context, note)
         case .openrouter:
             let model = resolution.model
             // Web research keeps OpenRouter's automatic routing: this

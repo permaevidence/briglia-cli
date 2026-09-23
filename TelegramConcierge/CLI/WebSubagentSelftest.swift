@@ -400,10 +400,10 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             let cRequests = agentRequests(serverC)
             check("3.11 OpenAI backend: Responses transport on C (store:false, encrypted reasoning include, high effort, luna), zero on A",
                   openaiRun.error == nil && cRequests.count == 2 && serverA.requests.isEmpty
-                  && cRequests.allSatisfy { $0.path == "/v1/responses" && body($0)["model"] as? String == "gpt-5.6-luna" && body($0)["store"] as? Bool == false
+                  && cRequests.allSatisfy { $0.path == "/v1/responses" && body($0)["model"] as? String == "gpt-6-luna" && body($0)["store"] as? Bool == false
                       && (body($0)["include"] as? [String]) == ["reasoning.encrypted_content"] && ((body($0)["reasoning"] as? [String: Any])?["effort"] as? String) == "high"
                       && $0.headers["authorization"] == "Bearer synthetic-web-openai-key" }
-                  && openaiRun.modelUsed == "gpt-5.6-luna (web backend: openai)", openaiRun.error ?? "\(cRequests.count) \(openaiRun.modelUsed ?? "")")
+                  && openaiRun.modelUsed == "gpt-6-luna (web backend: openai)", openaiRun.error ?? "\(cRequests.count) \(openaiRun.modelUsed ?? "")")
             // OpenRouter backend → D with the configured slug.
             WebSearchBackend.processOverride = .openrouter
             try KeychainHelper.save(key: KeychainHelper.openRouterApiKeyKey, value: "synthetic-openrouter-key")
@@ -672,6 +672,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         try await Self.runLateGroups(harness)
         try await Self.runNestingGroups(harness)
         try await Self.runR2Groups(harness)
+        try await Self.runSubscriptionGroups(harness)
 
         print("Web subagent selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }

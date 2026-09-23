@@ -19,6 +19,9 @@ struct WebLiveTest: AsyncParsableCommand {
     @Flag(name: .customLong("deep"), help: "Run web_research_sweep instead of web_search.")
     var deep = false
 
+    @Flag(name: .customLong("researcher"), help: "Run the Web researcher subagent (the R2 default path) instead of the legacy loop.")
+    var researcher = false
+
     @Option(name: .customLong("backend"), help: "Force a backend for this run (openai|opencode|openrouter); process-local, the stored selection is untouched.")
     var backend: String?
 
@@ -46,6 +49,30 @@ struct WebLiveTest: AsyncParsableCommand {
 
         let orchestrator = WebOrchestrator()
         await orchestrator.configure(openRouterKey: openRouterKey, serperKey: serperKey, jinaKey: jinaKey)
+
+        if researcher {
+            let executor = ToolExecutor(outputMode: .subagent)
+            await executor.webOrchestrator.configure(openRouterKey: openRouterKey, serperKey: serperKey, jinaKey: jinaKey)
+            let service = OpenRouterService()
+            let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("briglia-web-live-\(UUID().uuidString)")
+            let images = scratch.appendingPathComponent("images"), documents = scratch.appendingPathComponent("documents")
+            try FileManager.default.createDirectory(at: images, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: scratch) }
+            print("=== Web researcher on backend \(WebSearchBackend.active.rawValue) ===")
+            print("Q: \(query)\n")
+            let start = Date()
+            let result = await SubagentRunner().run(
+                invocation: SubagentRunner.Invocation(subagentType: "Web", description: "live test", taskPrompt: query,
+                                                      modelOverride: nil, runInBackground: false, deliverable: .short),
+                sessionId: nil, openRouterService: service, toolExecutor: executor,
+                imagesDirectory: images, documentsDirectory: documents,
+                parentTools: AvailableTools.all(includeWebSearch: true))
+            print(result.asJSON())
+            print("\nelapsed: \(String(format: "%.1f", Date().timeIntervalSince(start)))s")
+            if result.error != nil { throw ExitCode.failure }
+            return
+        }
 
         let mode = deep ? "web_research_sweep" : "web_search"
         print("=== \(mode) on backend \(WebSearchBackend.active.rawValue) ===")

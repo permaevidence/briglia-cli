@@ -306,9 +306,16 @@ enum SetupAPICore {
             stored: storedBackend,
             hasOpenAIKey: !WebSearchBackend.storedKey(for: .openai).isEmpty,
             hasLegacyOpenRouterKey: !(KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? "").isEmpty)
+        // `active` keeps its meaning for existing clients (the stored or
+        // inferred choice, one of the selectable backends). `serving` is what
+        // answers now: "chatgpt" while the main provider is the ChatGPT
+        // subscription (derived, never stored).
+        let serving: WebSearchBackend = WebSearchBackend.subscriptionFollowActive ? .chatgpt : resolvedBackend
         payload["web_search"] = [
             "active": resolvedBackend.rawValue,
-            "explicit": storedBackend.flatMap(WebSearchBackend.init(rawValue:)) != nil,
+            "serving": serving.rawValue,
+            "follows_subscription": serving == .chatgpt,
+            "explicit": WebSearchBackend.parseSelectable(storedBackend) != nil,
         ] as [String: Any]
         payload["text_only_mode"] = KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey) == "true"
         payload["toolchain"] = [
@@ -548,7 +555,7 @@ enum SetupAPICore {
             }
             if let backend = request["web_search_backend"] {
                 guard let raw = nonEmptyString(backend),
-                      let parsed = WebSearchBackend(rawValue: raw) else {
+                      let parsed = WebSearchBackend.parseSelectable(raw) else {
                     throw APIError(code: "invalid_value",
                                    message: "web_search_backend must be openrouter|openai|opencode")
                 }

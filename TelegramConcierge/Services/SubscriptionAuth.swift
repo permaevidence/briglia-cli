@@ -11,6 +11,9 @@ import Darwin
 struct SubscriptionError: Error, LocalizedError {
     let message: String
     var requiresLogin: Bool
+    /// The subscription reported its usage limit (never retried; the web
+    /// pipeline falls back to its configured backend).
+    var usageExhausted = false
     init(_ message: String, requiresLogin: Bool = false) { self.message = message; self.requiresLogin = requiresLogin }
     var errorDescription: String? { message }
 }
@@ -33,7 +36,12 @@ enum SubscriptionEndpoint {
         let error = object?["error"] as? [String: Any]
         let code = error?["code"] as? String ?? error?["type"] as? String ?? ""
         if ["usage_limit_reached", "usage_not_included", "insufficient_quota"].contains(code) {
-            return SubscriptionError("ChatGPT subscription usage is exhausted or not included. Check your plan/usage before retrying; no API billing fallback was attempted.")
+            // Web research leaves the subscription for a while (it serves on
+            // the configured web backend); the main agent is unaffected.
+            SubscriptionWebTransport.markExhausted()
+            var failure = SubscriptionError("ChatGPT subscription usage is exhausted or not included. Check your plan/usage before retrying; no API billing fallback was attempted.")
+            failure.usageExhausted = true
+            return failure
         }
         if ["model_not_found", "model_not_available", "unsupported_model"].contains(code) {
             return SubscriptionError("This model is unavailable for the selected ChatGPT account. Choose another subscription model.")

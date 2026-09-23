@@ -250,22 +250,22 @@ extension WebSubagentSelftest {
                                               sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             let foreignRequests = agentRequests(serverC)
             check("13.1 R1: a foreign OpenRouter slug configured for the OpenAI backend → the default native model in the context AND on the wire, a note in the result, main profile untouched",
-                  foreign.context.model == "gpt-5.6-luna" && foreign.note?.contains("google/gemini-test") == true
-                  && foreignRun.error == nil && !foreignRequests.isEmpty && foreignRequests.allSatisfy { body($0)["model"] as? String == "gpt-5.6-luna" } && serverA.requests.isEmpty
+                  foreign.context.model == "gpt-6-luna" && foreign.note?.contains("google/gemini-test") == true
+                  && foreignRun.error == nil && !foreignRequests.isEmpty && foreignRequests.allSatisfy { body($0)["model"] as? String == "gpt-6-luna" } && serverA.requests.isEmpty
                   && (resultJSON(foreignRun)["note"] as? String)?.contains("not usable on the openai web backend") == true
-                  && foreignRun.modelUsed == "gpt-5.6-luna (web backend: openai)" && KeychainHelper.loadSnapshot() == profileBefore, foreignRun.asJSON())
+                  && foreignRun.modelUsed == "gpt-6-luna (web backend: openai)" && KeychainHelper.loadSnapshot() == profileBefore, foreignRun.asJSON())
             try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "openai/gpt-5.6-terra")
             let terra = try await service.webExecutionContextWithNote(lane: .subagent("terra"))
             try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "gpt-5.6-terra")
             let bare = try await service.webExecutionContextWithNote(lane: .subagent("bare"))
             check("13.2 R1: an openai/ slug is honoured without a note; a bare id (no vendor prefix) is not honoured — default plus a note, exactly the pipeline's rule",
-                  terra.context.model == "gpt-5.6-terra" && terra.note == nil && bare.context.model == "gpt-5.6-luna" && bare.note != nil, "\(terra.context.model) \(bare.context.model)")
+                  terra.context.model == "gpt-5.6-terra" && terra.note == nil && bare.context.model == "gpt-6-luna" && bare.note != nil, "\(terra.context.model) \(bare.context.model)")
             let shared = [WebSearchBackend.researchModel(for: .openrouter, requested: "google/gemini-test"),
                           WebSearchBackend.researchModel(for: .openai, requested: "google/gemini-test"),
-                          WebSearchBackend.researchModel(for: .openai, requested: "openai/gpt-5.6-luna"),
+                          WebSearchBackend.researchModel(for: .openai, requested: "openai/gpt-6-luna"),
                           WebSearchBackend.researchModel(for: .opencode, requested: "google/gemini-test")]
             check("13.3 R1: the shared resolver — OpenRouter honours any slug, OpenAI only openai/…, OpenCode pins by design (honoured, no note)",
-                  shared[0] == ("google/gemini-test", true) && shared[1] == ("gpt-5.6-luna", false) && shared[2] == ("gpt-5.6-luna", true) && shared[3] == ("mimo-v2.6-flash", true))
+                  shared[0] == ("google/gemini-test", true) && shared[1] == ("gpt-6-luna", false) && shared[2] == ("gpt-6-luna", true) && shared[3] == ("mimo-v2.6-flash", true))
             try KeychainHelper.delete(key: KeychainHelper.openRouterWebSearchModelKey)
             WebSearchBackend.processOverride = .opencode
 

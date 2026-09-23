@@ -350,10 +350,11 @@ extension KeychainHelper {
     // Model Settings
     static let openRouterModelKey = "openrouter_model"
     static let openRouterWebSearchModelKey = "openrouter_websearch_model"
-    // GPT-5.6 Luna: cheaper than Gemini 3 Flash on OpenRouter ($0.10/$0.60 vs
-    // $0.50/$3.00 per M tokens, 2026-08-01) and stronger at legal synthesis.
-    // Effort comes from openrouter_reasoning_effort (defaults to high).
-    static let defaultWebSearchModel = "openai/gpt-5.6-luna"
+    // GPT-6 Luna (2026-09-23, was GPT-5.6 Luna): $0.10/$0.50 per M tokens,
+    // half of 5.6 Luna, 1M context, served by the OpenAI API, OpenRouter and
+    // the ChatGPT subscription. Effort comes from openrouter_reasoning_effort
+    // (defaults to high).
+    static let defaultWebSearchModel = "openai/gpt-6-luna"
     static let openRouterProvidersKey = "openrouter_providers"
     static let openRouterReasoningEffortKey = "openrouter_reasoning_effort"
     // Dedicated key slots for the alternative web-search backends (see
@@ -392,10 +393,10 @@ extension KeychainHelper {
     static let visionPreprocessorProviderKey = "vision_preprocessor_provider"
     static let visionPreprocessorBackendKey = "vision_preprocessor_backend"  // "openai" (default when an OpenAI key exists) or "openrouter"
     static let visionPreprocessorReasoningEffortKey = "vision_preprocessor_reasoning_effort"
-    // GPT-5.6 Luna: cheaper than Gemini 3 Flash on OpenRouter and verified
-    // (2026-08-01) to OCR correctly with zdr-only routing (lands on Azure's
+    // GPT-6 Luna (2026-09-23, was GPT-5.6 Luna): verified to OCR correctly on
+    // the OpenAI key and with zdr-only OpenRouter routing (lands on Azure's
     // ZDR endpoint; OpenAI first-party is not ZDR-eligible).
-    static let defaultVisionPreprocessorModel = "openai/gpt-5.6-luna"
+    static let defaultVisionPreprocessorModel = "openai/gpt-6-luna"
 
     // Archive Settings
     static let archiveChunkSizeKey = "archive_chunk_size"

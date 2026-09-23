@@ -5150,18 +5150,27 @@ class ConversationManager: ObservableObject {
 
     /// `/websearch` — show or switch the backend serving the web research
     /// pipeline (web_search, web_research_sweep, web_fetch compression).
-    /// Deliberately separate from /provider: the main agent's gateway and
-    /// the web pipeline's gateway are independent choices.
+    /// Separate from /provider, with one exception (owner decision
+    /// 2026-09-23): while the main provider is the ChatGPT subscription, web
+    /// research follows it automatically; the stored choice serves every
+    /// other provider and the subscription's usage-limit fallback.
     private func handleWebSearchBackendCommand(argument: String) async {
         guard replyAddress != nil else { return }
 
         guard !argument.isEmpty else {
             let active = WebSearchBackend.active
             var lines = ["Web research backend (switch with /websearch <name>):"]
-            for backend in [WebSearchBackend.openai, .opencode, .openrouter] {
+            if active == .chatgpt {
+                lines.append("▸ chatgpt — \(WebSearchBackend.chatgpt.modelSummary)  [ACTIVE: follows /provider chatgpt]")
+            } else if WebSearchBackend.followsSubscription(stored: KeychainHelper.loadSnapshot(), exhausted: false) {
+                lines.append("  chatgpt — paused: the subscription reported its usage limit; the choice below serves for now")
+            }
+            let fallbackNote = active == .chatgpt ? "  [used on other providers and if the subscription hits its limit]" : "  [ACTIVE]"
+            for backend in WebSearchBackend.selectable {
                 let marker = backend == active ? "▸" : " "
                 let key = WebSearchBackend.storedKey(for: backend).isEmpty ? "no key" : "key ✔"
-                let activeSuffix = backend == active ? "  [ACTIVE]" : ""
+                let isServing = active == .chatgpt ? backend == WebSearchBackend.configured : backend == active
+                let activeSuffix = isServing ? fallbackNote : ""
                 lines.append("\(marker) \(backend.rawValue) — \(backend.modelSummary) (\(key))\(activeSuffix)")
             }
             if WebSearchBackend.explicitlyStored == nil {
@@ -5172,7 +5181,11 @@ class ConversationManager: ObservableObject {
         }
 
         let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let backend = WebSearchBackend(rawValue: normalized) else {
+        if normalized == WebSearchBackend.chatgpt.rawValue {
+            try? await sendText("The ChatGPT subscription can't be picked here: web research uses it automatically while /provider is chatgpt. /websearch sets the backend for other providers (openai, opencode, openrouter).")
+            return
+        }
+        guard let backend = WebSearchBackend.parseSelectable(normalized) else {
             try? await sendText("Unknown backend \"\(argument)\" — use one of: openai, opencode, openrouter.")
             return
         }
@@ -5182,20 +5195,25 @@ class ConversationManager: ObservableObject {
             case .openai:     hint = "add an OpenAI key with `briglia setup` (step 2)"
             case .opencode:   hint = "it needs OpenCode Go as the main provider, or a dedicated OpenCode web key"
             case .openrouter: hint = "add an OpenRouter key with `briglia setup` (step 1, openrouter)"
+            case .chatgpt:    hint = "it follows /provider chatgpt automatically"
             }
             try? await sendText("✖ No key configured for \(backend.displayName) — \(hint).")
             return
         }
+        let followsSubscription = WebSearchBackend.active == .chatgpt
+        let followNote = followsSubscription
+            ? " While /provider is chatgpt, web research keeps using the subscription; this choice applies on other providers and if the subscription hits its limit."
+            : ""
         if WebSearchBackend.explicitlyStored == backend {
-            try? await sendText("\(backend.displayName) is already the active web research backend.")
+            try? await sendText("\(backend.displayName) is already the saved web research backend.\(followNote)")
             return
         }
-        if WebSearchBackend.active == backend {
+        if WebSearchBackend.configured == backend {
             // Same backend, but only by inference (or an unparseable stored
             // value): persist it so the choice survives whatever key changes
             // drove the inference. No behavior change → no idle guard needed.
             UserDefaults.standard.set(backend.rawValue, forKey: WebSearchBackend.selectionKey)
-            try? await sendText("\(backend.displayName) was active by inference — now saved as the explicit choice.")
+            try? await sendText("\(backend.displayName) was active by inference — now saved as the explicit choice.\(followNote)")
             return
         }
         // Idle guard (same shape as /provider hops): the pipeline re-reads
@@ -5208,7 +5226,7 @@ class ConversationManager: ObservableObject {
             return
         }
         UserDefaults.standard.set(backend.rawValue, forKey: WebSearchBackend.selectionKey)
-        try? await sendText("✅ Web research backend: \(backend.displayName) — \(backend.modelSummary). Takes effect from the next search.")
+        try? await sendText("✅ Web research backend: \(backend.displayName) — \(backend.modelSummary). Takes effect from the next search.\(followNote)")
     }
 
     /// `/subagents` — turn the model-facing delegation tools (Agent +

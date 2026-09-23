@@ -73,7 +73,11 @@ struct Doctor: AsyncParsableCommand {
         note("Telegram: \(TelegramConfig.isConfigured ? "configured" : "not configured (optional)")")
         let backendSource = WebSearchBackend.explicitlyStored != nil
             ? "explicit" : "inferred from keys — set with /websearch"
-        note("web search backend: \(WebSearchBackend.active.rawValue) (\(backendSource))")
+        if WebSearchBackend.active == .chatgpt {
+            note("web search backend: chatgpt (follows the ChatGPT subscription provider; \(WebSearchBackend.configured.rawValue) on other providers, \(backendSource))")
+        } else {
+            note("web search backend: \(WebSearchBackend.active.rawValue) (\(backendSource))")
+        }
         note("web subagent: \(AvailableTools.webSubagentEnabled ? "on" : "off"); Web preset available: \(serperKey.isEmpty ? "no (Serper key missing)" : (AvailableTools.webSubagentActive ? "yes" : "no (switch off)"))")
         let ocrBackend = KeychainHelper.load(key: KeychainHelper.visionPreprocessorBackendKey)
             ?? (openAIKey.isEmpty ? "openrouter (no OpenAI key)" : "openai")

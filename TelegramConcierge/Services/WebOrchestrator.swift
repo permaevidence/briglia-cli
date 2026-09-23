@@ -6,18 +6,19 @@ import FoundationNetworking
 // MARK: - OpenRouter Configuration for Web Search Pipeline
 enum ORModel {
     // Agent loop and final answer run on the configured main model (default
-    // GPT-5.6 Luna) in BOTH modes. The mechanical stages below also run on
+    // GPT-6 Luna) in BOTH modes. The mechanical stages below also run on
     // Luna, at medium effort: benchmarked 2026-08-01 against gpt-oss-120b on
     // Groq, Luna is ~2x faster on 90k-token extraction inputs (prefill-bound)
-    // and missed fewer excerpts. (Priced $0.10/$0.60 at benchmark time;
-    // OpenAI doubled it to $0.20/$1.20 + a >272K-input surcharge on
-    // 2026-08-03 — see openAIInputUSDPerMTok below.)
-    // Its 1M window also lifts the 131k ceiling that forced small chunks.
-    static let webExcerpts       = "openai/gpt-5.6-luna"
-    static let deepExcerpt       = "openai/gpt-5.6-luna"
+    // and missed fewer excerpts. GPT-6 Luna replaced GPT-5.6 Luna on
+    // 2026-09-23 (owner decision; verified live on the API key, OpenRouter
+    // and the ChatGPT subscription: strict-JSON extraction up to 170k-token
+    // pages, tools over Responses, vision). Its 1M window keeps the large
+    // extraction chunks; pricing in openAIRates(forModel:).
+    static let webExcerpts       = "openai/gpt-6-luna"
+    static let deepExcerpt       = "openai/gpt-6-luna"
     /// web_fetch page compression: what this model drops from a page is
     /// invisible to the calling agent, so selection judgment matters here.
-    static let webFetchCompression = "openai/gpt-5.6-luna"
+    static let webFetchCompression = "openai/gpt-6-luna"
     static let defaultMainModel  = KeychainHelper.defaultWebSearchModel
 }
 
@@ -57,7 +58,7 @@ enum WebSearchBackend: String {
     /// The ONE backend/model resolver of the web pipeline and the Web
     /// researcher subagent (Codex R1a review R1). `requested` is the stored
     /// web model setting (an OpenRouter-style `vendor/model` slug; default
-    /// `openai/gpt-5.6-luna`). `honoured` says whether the requested value is
+    /// `openai/gpt-6-luna`). `honoured` says whether the requested value is
     /// what runs:
     /// - `.openrouter`: the slug as configured, always honoured.
     /// - `.openai`: only an `openai/<id>` slug is honoured (native id = the
@@ -73,7 +74,7 @@ enum WebSearchBackend: String {
         switch backend {
         case .openrouter:
             return (requested, true)
-        case .openai:
+        case .openai, .chatgpt:
             if requested.hasPrefix("openai/") { return (String(requested.dropFirst("openai/".count)), true) }
             return (nativeFallback, requested == fallback)
         case .opencode:
@@ -84,8 +85,27 @@ enum WebSearchBackend: String {
     case openrouter   // current OpenRouter envelope, models as configured
     case openai       // api.openai.com — same models, native slugs (no "openai/" prefix)
     case opencode     // default — OpenCode Go, mimo-v2.6-flash on every stage (huge usage limits, slower)
+    /// The user's ChatGPT subscription (chatgpt.com Responses, streamed).
+    /// Never stored and never selectable with /websearch: it is DERIVED —
+    /// active exactly while the main provider is the ChatGPT subscription
+    /// (owner decision 2026-09-23, "the researcher, extractor and web fetch
+    /// should follow"), unless the subscription recently reported its usage
+    /// limit, in which case the stored/inferred backend below serves.
+    case chatgpt
 
     static let selectionKey = "ada.webSearchBackend"
+
+    /// Backends the user can store with /websearch or setup-api. `.chatgpt`
+    /// is derived from the main provider, never stored.
+    static let selectable: [WebSearchBackend] = [.openai, .opencode, .openrouter]
+
+    /// Parse a stored or user-typed selection. Rejects `chatgpt`: a stored
+    /// "chatgpt" is not a valid explicit choice (it would pin the web
+    /// pipeline to a subscription the main provider may no longer use).
+    static func parseSelectable(_ raw: String?) -> WebSearchBackend? {
+        guard let raw, let parsed = WebSearchBackend(rawValue: raw), parsed != .chatgpt else { return nil }
+        return parsed
+    }
 
     /// Process-local override for the __web-live-test harness. Never
     /// persisted, so a killed test run cannot leave the machine's stored
@@ -93,20 +113,46 @@ enum WebSearchBackend: String {
     static var processOverride: WebSearchBackend?
 
     static var active: WebSearchBackend {
+        if let processOverride { return processOverride }
+        if subscriptionFollowActive { return .chatgpt }
+        return configured
+    }
+
+    /// The stored/inferred backend, ignoring the subscription follow — what
+    /// serves when the main provider is not the subscription, and the
+    /// fallback while the subscription reports its usage limit.
+    static var configured: WebSearchBackend {
         resolve(
-            override: processOverride,
+            override: nil,
             stored: UserDefaults.standard.string(forKey: selectionKey),
             hasOpenAIKey: !storedKey(for: .openai).isEmpty,
             hasLegacyOpenRouterKey: !(KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? "").isEmpty
         )
     }
 
+    /// True while the main provider is the ChatGPT subscription with a
+    /// login generation and the subscription has not reported its usage
+    /// limit recently (`SubscriptionWebTransport.exhaustion`).
+    static var subscriptionFollowActive: Bool {
+        followsSubscription(stored: KeychainHelper.loadSnapshot(),
+                            exhausted: SubscriptionWebTransport.isExhausted())
+    }
+
+    /// Pure rule behind `subscriptionFollowActive` (selftest seam).
+    static func followsSubscription(stored: [String: String], exhausted: Bool) -> Bool {
+        guard !exhausted,
+              stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue,
+              stored[KeychainHelper.llmProviderKey] == LLMProvider.openAICompatible.rawValue,
+              !(stored[KeychainHelper.openAICompatibleApiKeyKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return false }
+        return true
+    }
+
     /// The VALID saved choice, or nil when the backend is being inferred.
     /// An unparseable stored value is not explicit — resolve() ignores it,
     /// so /websearch and doctor must not present it as a saved choice.
     static var explicitlyStored: WebSearchBackend? {
-        UserDefaults.standard.string(forKey: selectionKey)
-            .flatMap(WebSearchBackend.init(rawValue:))
+        parseSelectable(UserDefaults.standard.string(forKey: selectionKey))
     }
 
     /// Pure resolution logic, separated so the selftest can exercise every
@@ -125,7 +171,7 @@ enum WebSearchBackend: String {
         hasLegacyOpenRouterKey: Bool
     ) -> WebSearchBackend {
         if let override { return override }
-        if let stored, let parsed = WebSearchBackend(rawValue: stored) { return parsed }
+        if let parsed = parseSelectable(stored) { return parsed }
         if hasOpenAIKey { return .openai }
         return hasLegacyOpenRouterKey ? .openrouter : .opencode
     }
@@ -147,6 +193,11 @@ enum WebSearchBackend: String {
             return first(KeychainHelper.webSearchOpenAIApiKeyKey,
                          KeychainHelper.openAITranscriptionApiKeyKey,
                          KeychainHelper.openAIImageApiKeyKey)
+        case .chatgpt:
+            // The login generation, not a secret: the credential itself is
+            // read per request from the subscription store.
+            guard followsSubscription(stored: KeychainHelper.loadSnapshot(), exhausted: false) else { return "" }
+            return first(KeychainHelper.openAICompatibleApiKeyKey)
         case .opencode:
             let dedicated = first(KeychainHelper.webSearchOpenCodeApiKeyKey)
             if !dedicated.isEmpty { return dedicated }
@@ -169,6 +220,7 @@ enum WebSearchBackend: String {
         case .openrouter: return "OpenRouter"
         case .openai:     return "OpenAI"
         case .opencode:   return "OpenCode Go"
+        case .chatgpt:    return "ChatGPT subscription"
         }
     }
 
@@ -176,8 +228,9 @@ enum WebSearchBackend: String {
     var modelSummary: String {
         switch self {
         case .openrouter: return "configured models via openrouter.ai"
-        case .openai:     return "GPT-5.6 Luna via api.openai.com"
+        case .openai:     return "GPT-6 Luna via api.openai.com"
         case .opencode:   return "mimo-v2.6-flash (slower, huge usage limits)"
+        case .chatgpt:    return "GPT-6 Luna via your ChatGPT subscription"
         }
     }
 
@@ -191,7 +244,7 @@ enum WebSearchBackend: String {
                 if let raw = env["BRIGLIA_DEV_AFFINITY_OPENCODE_BASE"], !raw.isEmpty, let url = URL(string: raw + "/zen/go/v1/chat/completions") { return url }
             case .openrouter:
                 if let raw = env["BRIGLIA_DEV_AFFINITY_OPENROUTER_BASE"], !raw.isEmpty, let url = URL(string: raw + "/api/v1/chat/completions") { return url }
-            case .openai:
+            case .openai, .chatgpt:
                 break
             }
         }
@@ -199,6 +252,8 @@ enum WebSearchBackend: String {
         case .openrouter: return Endpoints.openrouter
         case .openai:     return URL(string: "https://api.openai.com/v1/chat/completions")!
         case .opencode:   return URL(string: "https://opencode.ai/zen/go/v1/chat/completions")!
+        // Responses only (SubscriptionWebTransport); never a chat endpoint.
+        case .chatgpt:    return URL(string: SubscriptionEndpoint.inference)!
         }
     }
 
@@ -550,6 +605,11 @@ actor WebOrchestrator {
     }
 
     private var executionStates: [UUID: ExecutionState] = [:]
+    /// The legacy loop's agent-round backend per run, fixed at run start so a
+    /// mid-run /provider hop (which moves `WebSearchBackend.active` on or off
+    /// the subscription) never switches a transcript's transport. A
+    /// subscription run moves to the OpenAI key once on usage exhaustion.
+    private var agentBackend: [UUID: WebSearchBackend] = [:]
 
     // MARK: - web_fetch Cache
     // Two-tier LRU cache with 15-minute TTL (matches Claude Code WebFetch behavior).
@@ -739,6 +799,8 @@ actor WebOrchestrator {
         executionID: UUID
     ) async throws -> String {
         let backend = WebSearchBackend.active
+        agentBackend[executionID] = backend
+        defer { agentBackend[executionID] = nil }
         let userContent = buildConversationContext(historyPairs: historyPairs, currentQuestion: userPrompt)
         let maxRounds = maxSteps(for: mode)
         let systemPrompt = agentSystemPrompt(mode: mode, maxRounds: maxRounds)
@@ -749,7 +811,7 @@ actor WebOrchestrator {
         // with tools for OpenRouter/OpenCode.
         let chat: WebAgentChatTranscript?
         let responses: WebAgentResponsesTranscript?
-        if backend == .openai {
+        if backend == .openai || backend == .chatgpt {
             chat = nil
             responses = WebAgentResponsesTranscript(instructions: systemPrompt, user: userContent)
         } else {
@@ -1005,7 +1067,7 @@ actor WebOrchestrator {
         stage: String,
         executionID: UUID
     ) async throws -> WebAgentRound {
-        let backend = WebSearchBackend.active
+        let backend = agentBackend[executionID] ?? WebSearchBackend.configured
         let agentMdl = agentModel(for: mode)
         // Deep-research rounds and the forced final answer reason over a
         // large transcript — same generous non-retried ceiling as before;
@@ -1075,7 +1137,7 @@ actor WebOrchestrator {
                 let completionTok = resp.usage?.completionTokens.map(String.init) ?? "?"
                 webLog("[WebOrchestrator] \(backend.rawValue) response stage=\(stage) mode=\(modeLabel(mode)) content_chars=\(content.count) tool_calls=\(toolCalls.count) finish=\(finish) provider=\(resp.provider ?? "-") tokens=\(promptTok)/\(completionTok)")
                 if !content.isEmpty || !toolCalls.isEmpty {
-                    addSpend(callSpendUSD(for: backend, usage: resp.usage), executionID: executionID)
+                    addSpend(callSpendUSD(for: backend, model: self.resolvedModel(for: backend, requested: agentMdl), usage: resp.usage), executionID: executionID)
                     if let finishReason = choice.finish_reason, finishReason != "stop", finishReason != "tool_calls" {
                         webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) finish=\(finishReason) completion_tokens=\(completionTok)")
                     }
@@ -1113,6 +1175,20 @@ actor WebOrchestrator {
         stage: String,
         executionID: UUID
     ) async throws -> WebAgentRound {
+        if agentBackend[executionID] == .chatgpt {
+            do {
+                return try await callSubscriptionResponsesRound(
+                    transcript, mode: mode, toolChoice: toolChoice, stage: stage, executionID: executionID)
+            } catch let failure as SubscriptionError where failure.usageExhausted {
+                // Only the OpenAI key can continue a Responses transcript;
+                // subscription reasoning items are bound to the subscription,
+                // so they are dropped before the transcript moves.
+                guard WebSearchBackend.configured == .openai, !WebSearchBackend.storedKey(for: .openai).isEmpty else { throw failure }
+                webLog("[WebOrchestrator] \(stage) SUBSCRIPTION_USAGE_EXHAUSTED → openai for the rest of this research run")
+                transcript.dropReasoningItems()
+                agentBackend[executionID] = .openai
+            }
+        }
         let generous = mode == .deepResearch || stage == "agent.final"
         let model = resolvedModel(for: .openai, requested: agentModel(for: mode))
         let effort = agentReasoning(for: mode)?.effort
@@ -1156,7 +1232,7 @@ actor WebOrchestrator {
                         webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) status=incomplete output_tokens=\(outTok.map(String.init) ?? "?") max=32000")
                     }
                     if !round.visibleText.isEmpty || !round.toolCalls.isEmpty {
-                        addSpend(estimatedOpenAISpendUSD(promptTokens: inTok, completionTokens: outTok), executionID: executionID)
+                        addSpend(estimatedOpenAISpendUSD(model: model, promptTokens: inTok, completionTokens: outTok), executionID: executionID)
                         transcript.appendOutputItems(output)
                         return round
                     }
@@ -1174,6 +1250,55 @@ actor WebOrchestrator {
                 ])
             }
             webLog("[WebOrchestrator] openai stage=\(stage) empty agent round (attempt \(attempt)/\(maxAttempts)): \(detail). Retrying...")
+            try await Task.sleep(nanoseconds: UInt64(Double(attempt) * 1_500_000_000))
+            attempt += 1
+        }
+    }
+
+    /// Legacy-loop agent round over the ChatGPT subscription: the same
+    /// Responses transcript, tools and effort as the OpenAI-key round, sent
+    /// through SubscriptionWebTransport (streamed; no max_output_tokens).
+    private func callSubscriptionResponsesRound(
+        _ transcript: WebAgentResponsesTranscript,
+        mode: ResearchMode,
+        toolChoice: String?,
+        stage: String,
+        executionID: UUID
+    ) async throws -> WebAgentRound {
+        let model = resolvedModel(for: .chatgpt, requested: agentModel(for: mode))
+        let effort = agentReasoning(for: mode)?.effort
+        var body: [String: JSONValue] = [
+            "model": .string(model),
+            "instructions": .string(transcript.instructions),
+            "input": .array(transcript.input),
+            "tools": .array(WebAgentTools.responsesTools),
+            "include": .array([.string("reasoning.encrypted_content")]),
+        ]
+        if let toolChoice { body["tool_choice"] = .string(toolChoice) }
+        if let effort { body["reasoning"] = .object(["effort": .string(effort)]) }
+        webLog("[WebOrchestrator] chatgpt request stage=\(stage) mode=\(modeLabel(mode)) model=\(model) api=responses reasoning=\(effort ?? "default") input_items=\(transcript.input.count) tool_choice=\(toolChoice ?? "auto")")
+        let generous = mode == .deepResearch || stage == "agent.final"
+        let maxAttempts = 3
+        var attempt = 1
+        while true {
+            let data = try await SubscriptionWebTransport.post(body: body, lane: .ephemeral(executionID), timeout: generous ? 600 : 180)
+            var detail = "empty response body"
+            if let resp = try? JSONDecoder().decode(OAIResponsesResp.self, from: data) {
+                let output = resp.output ?? []
+                let round = WebAgentResponsesTranscript.parseRound(outputItems: output)
+                webLog("[WebOrchestrator] chatgpt response stage=\(stage) mode=\(modeLabel(mode)) status=\(resp.status ?? "nil") output_items=\(output.count) content_chars=\(round.visibleText.count) tool_calls=\(round.toolCalls.count) tokens=\(resp.usage?.input_tokens.map(String.init) ?? "?")/\(resp.usage?.output_tokens.map(String.init) ?? "?")")
+                if !round.visibleText.isEmpty || !round.toolCalls.isEmpty {
+                    transcript.appendOutputItems(output)
+                    return round
+                }
+                detail = "no message or tool call in \(output.count) output items (status \(resp.status ?? "nil"))"
+            }
+            guard attempt < maxAttempts else {
+                throw NSError(domain: "WebOrchestrator", code: 4, userInfo: [
+                    NSLocalizedDescriptionKey: "chatgpt returned no usable agent round for '\(stage)' (model \(model)): \(detail)"
+                ])
+            }
+            webLog("[WebOrchestrator] chatgpt stage=\(stage) empty agent round (attempt \(attempt)/\(maxAttempts)): \(detail). Retrying...")
             try await Task.sleep(nanoseconds: UInt64(Double(attempt) * 1_500_000_000))
             attempt += 1
         }
@@ -1484,7 +1609,9 @@ actor WebOrchestrator {
                 provider: providerToUse,
                 response_format: attachedFormat
             )
-        case .openai:
+        case .openai, .chatgpt:
+            // (.chatgpt never reaches here: callOpenRouter routes it through
+            // SubscriptionWebTransport before building a chat body.)
             // OpenAI-native shape: reasoning models take max_completion_tokens
             // plus a top-level reasoning_effort, and reject max_tokens,
             // non-default temperature, and the OpenRouter provider block.
@@ -1534,9 +1661,26 @@ actor WebOrchestrator {
         timeout: TimeInterval = 120,
         retryTimeouts: Bool = true,
         responseFormat: ORResponseFormat? = nil,
+        backendOverride: WebSearchBackend? = nil,
         executionID: UUID
     ) async throws -> String {
-        let backend = WebSearchBackend.active
+        let backend = backendOverride ?? WebSearchBackend.active
+        if backend == .chatgpt {
+            do {
+                return try await callSubscriptionStage(
+                    stage: stage, mode: mode, model: model, messages: messages,
+                    reasoning: reasoning, timeout: timeout, responseFormat: responseFormat,
+                    executionID: executionID)
+            } catch let failure as SubscriptionError where failure.usageExhausted {
+                let fallback = WebSearchBackend.configured
+                webLog("[WebOrchestrator] \(stage) SUBSCRIPTION_USAGE_EXHAUSTED → \(fallback.rawValue) for the next \(Int(SubscriptionWebTransport.exhaustionCooldown / 60)) min")
+                return try await callOpenRouter(
+                    stage: stage, mode: mode, model: model, messages: messages, maxTokens: maxTokens,
+                    reasoning: reasoning, provider: provider, temperature: temperature, timeout: timeout,
+                    retryTimeouts: retryTimeouts, responseFormat: responseFormat,
+                    backendOverride: fallback, executionID: executionID)
+            }
+        }
         let resolvedModel = self.resolvedModel(for: backend, requested: model)
         var body = buildChatBody(
             backend: backend,
@@ -1579,7 +1723,7 @@ actor WebOrchestrator {
                let rawContent = choice.message.content,
                !rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let content = rawContent
-                addSpend(callSpendUSD(for: backend, usage: resp.usage), executionID: executionID)
+                addSpend(callSpendUSD(for: backend, model: resolvedModel, usage: resp.usage), executionID: executionID)
                 let finish = choice.finish_reason ?? "nil"
                 let native = choice.native_finish_reason ?? "nil"
                 let promptTok = resp.usage?.promptTokens.map(String.init) ?? "?"
@@ -1623,6 +1767,53 @@ actor WebOrchestrator {
         }
     }
     
+    /// One non-agent stage (excerpt extraction, web_fetch compression) over
+    /// the ChatGPT subscription: Responses, streamed, strict JSON schema as
+    /// `text.format` when the stage asks for one. Spend is $0 (flat
+    /// subscription allowance). Empty output retries like the chat path;
+    /// usage exhaustion propagates to the caller's fallback.
+    private func callSubscriptionStage(
+        stage: String,
+        mode: ResearchMode,
+        model: String,
+        messages: [ORChatReq.Msg],
+        reasoning: ORChatReq.Reasoning?,
+        timeout: TimeInterval,
+        responseFormat: ORResponseFormat?,
+        executionID: UUID
+    ) async throws -> String {
+        let resolvedModel = self.resolvedModel(for: .chatgpt, requested: model)
+        let schema = responseFormat.map { (name: $0.json_schema.name, schema: $0.json_schema.schema) }
+        let body = SubscriptionWebTransport.stageBody(
+            model: resolvedModel,
+            messages: messages.map { (role: $0.role, text: $0.content ?? "") },
+            effort: reasoning?.effort, jsonSchema: schema)
+        webLog("[WebOrchestrator] chatgpt request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) api=responses reasoning=\(reasoning?.effort ?? "default") rf=\(schema?.name ?? "none")")
+        let maxAttempts = 3
+        var attempt = 1
+        while true {
+            let data = try await SubscriptionWebTransport.post(body: body, lane: .ephemeral(executionID), timeout: max(timeout, 120))
+            var detail = "empty response body"
+            if let resp = try? JSONDecoder().decode(OAIResponsesResp.self, from: data) {
+                let text = SubscriptionWebTransport.outputText(resp)
+                webLog("[WebOrchestrator] chatgpt response stage=\(stage) mode=\(modeLabel(mode)) status=\(resp.status ?? "nil") chars=\(text.count) tokens=\(resp.usage?.input_tokens.map(String.init) ?? "?")/\(resp.usage?.output_tokens.map(String.init) ?? "?")")
+                if resp.status == "incomplete" {
+                    webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) status=incomplete backend=chatgpt content_chars=\(text.count)")
+                }
+                if !text.isEmpty { return text }
+                detail = "no output text (status \(resp.status ?? "nil"))"
+            }
+            guard attempt < maxAttempts else {
+                throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "chatgpt returned no completion for stage '\(stage)' (model \(resolvedModel)): \(detail)"
+                ])
+            }
+            webLog("[WebOrchestrator] chatgpt stage=\(stage) returned no completion (attempt \(attempt)/\(maxAttempts)): \(detail). Retrying...")
+            try await Task.sleep(nanoseconds: UInt64(Double(attempt) * 1_500_000_000))
+            attempt += 1
+        }
+    }
+
     /// gpt-5.6-luna pricing (verified 2026-08-03 — DOUBLED from the Aug 1
     /// rates): $0.20/M input, $1.20/M output (hidden reasoning bills as
     /// output, so completion_tokens already includes it). Requests whose
@@ -1632,8 +1823,14 @@ actor WebOrchestrator {
     /// billed here at the full input rate — erring high is the safe
     /// direction for a spend limit. A non-Luna override configured for the
     /// OpenAI backend is also estimated at these rates.
-    private static let openAIInputUSDPerMTok = 0.20
-    private static let openAIOutputUSDPerMTok = 1.20
+    /// gpt-6-luna (2026-09-23): $0.10/M input, $0.50/M output, same >272K
+    /// surcharge (2x input / 1.5x output; OpenRouter's pricing overrides for
+    /// the OpenAI endpoint, checked 2026-09-23).
+    static func openAIRates(forModel model: String) -> (input: Double, output: Double) {
+        let id = model.hasPrefix("openai/") ? String(model.dropFirst("openai/".count)) : model
+        if id == "gpt-6-luna" || id.hasPrefix("gpt-6-luna-20") { return (0.10, 0.50) }
+        return (0.20, 1.20)
+    }
     static let openAILargeRequestInputTokens = 272_000
     static let openAILargeRequestInputMultiplier = 2.0
     static let openAILargeRequestOutputMultiplier = 1.5
@@ -1643,7 +1840,7 @@ actor WebOrchestrator {
     /// OpenAI-direct searches would register as $0 and bypass the per-turn/
     /// daily/monthly tool spend limits. OpenCode Go is a flat subscription,
     /// so $0 there is accurate.
-    private func callSpendUSD(for backend: WebSearchBackend, usage: OpenRouterUsage?) -> Double? {
+    private func callSpendUSD(for backend: WebSearchBackend, model: String, usage: OpenRouterUsage?) -> Double? {
         switch backend {
         case .openrouter:
             let directCost = usage?.cost?.value
@@ -1655,22 +1852,25 @@ actor WebOrchestrator {
         case .openai:
             guard let usage else { return nil }
             return estimatedOpenAISpendUSD(
+                model: model,
                 promptTokens: usage.promptTokens,
                 completionTokens: usage.completionTokens)
-        case .opencode:
+        case .opencode, .chatgpt:
+            // Flat subscriptions: no per-request dollars.
             return nil
         }
     }
 
     /// Shared by chat completions (usage.prompt/completion_tokens) and the
     /// Responses API (usage.input/output_tokens).
-    private func estimatedOpenAISpendUSD(promptTokens: Int?, completionTokens: Int?) -> Double? {
+    nonisolated func estimatedOpenAISpendUSD(model: String, promptTokens: Int?, completionTokens: Int?) -> Double? {
         let prompt = Double(promptTokens ?? 0)
         let completion = Double(completionTokens ?? 0)
         let isLarge = Int(prompt) > Self.openAILargeRequestInputTokens
-        let inputRate = Self.openAIInputUSDPerMTok
+        let rates = Self.openAIRates(forModel: model)
+        let inputRate = rates.input
             * (isLarge ? Self.openAILargeRequestInputMultiplier : 1)
-        let outputRate = Self.openAIOutputUSDPerMTok
+        let outputRate = rates.output
             * (isLarge ? Self.openAILargeRequestOutputMultiplier : 1)
         let estimate = (prompt * inputRate + completion * outputRate) / 1_000_000
         return estimate > 0 ? estimate : nil
@@ -2446,6 +2646,12 @@ actor WebOrchestrator {
     /// load throws; OpenRouter's optional session header). One
     /// `.ephemeral(executionID)` lane per web run (plan §7.1 site 8).
     func requestHeaders(for backend: WebSearchBackend, url: URL, lane: AffinityLane) throws -> [String: String] {
+        // The subscription never takes a bearer from here: its credential is
+        // read per request by SubscriptionWebTransport.
+        guard backend != .chatgpt else {
+            throw NSError(domain: "WebOrchestrator", code: 5, userInfo: [
+                NSLocalizedDescriptionKey: "internal: chatgpt web requests go through SubscriptionWebTransport"])
+        }
         let key = apiKey(for: backend)
         var headers = ["Authorization": "Bearer \(key)"]
         for (name, value) in try SessionAffinity.headers(url: url, apiKey: key, lane: lane) {
