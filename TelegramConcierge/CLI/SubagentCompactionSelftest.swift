@@ -691,6 +691,82 @@ struct SubagentCompactionSelftest: AsyncParsableCommand {
             check("8.20 saved state has one summary and newest rounds six and seven", breeStored.messages.filter(SubagentRunner.isCompactionSummary).count == 1
                   && breeStored.toolInteractions.count == 2 && breeStored.toolInteractions.last?.assistantMessage.toolCalls.first?.id == "bree_7_0")
 
+            // Project instructions evicted by a subagent compaction are
+            // released, so the next touch of that project re-injects them
+            // (the main agent's pruner already did this; subagents did not).
+            server.clear()
+            let project = root.appendingPathComponent("agents-project")
+            try FileManager.default.createDirectory(at: project.appendingPathComponent(".git"), withIntermediateDirectories: true)
+            let agentsFile = project.appendingPathComponent("AGENTS.md")
+            try Data("AGENTS_RULE_7731: run make check before reporting.\n".utf8).write(to: agentsFile)
+            let projectFile = project.appendingPathComponent("notes.txt")
+            try Data((String(repeating: String(repeating: "y", count: 430) + "\n", count: 105) + "AGENTS_NEWEST\n").utf8).write(to: projectFile)
+            let instructionMarker = ProjectInstructionsTracker.markerPrefix + agentsFile.standardizedFileURL.resolvingSymlinksInPath().path + "]"
+            func projectRead(_ id: Int, prompt: Int) throws -> String {
+                let args = String(data: try JSONSerialization.data(withJSONObject: ["path": projectFile.path]), encoding: .utf8)!
+                let calls = (0..<2).map { i -> [String: Any] in
+                    ["id": "agm_\(id)_\(i)", "type": "function", "function": ["name": "read_file", "arguments": args]]
+                }
+                return String(data: try JSONSerialization.data(withJSONObject: [
+                    "id": "agm_\(id)", "choices": [["message": ["role": "assistant", "content": "", "tool_calls": calls], "finish_reason": "tool_calls"]],
+                    "usage": ["prompt_tokens": prompt, "completion_tokens": 1]], options: .sortedKeys), encoding: .utf8)!
+            }
+            var agentsScript: [String] = []
+            for (i, prompt) in [100, 23_000, 46_000, 24_000].enumerated() {
+                agentsScript.append(try projectRead(i, prompt: prompt))
+                if i == 2 { agentsScript.append(try response("AGENTS_SUMMARY: earlier reads of notes.txt completed.")) }
+            }
+            agentsScript.append(try response("AGENTS_DONE", prompt: 47_000))
+            server.script(agentsScript)
+            let agentsRun = await runner.run(invocation: breeInvocation, sessionId: nil, openRouterService: service,
+                toolExecutor: ToolExecutor(outputMode: .subagent), imagesDirectory: images, documentsDirectory: documents,
+                parentTools: [AvailableTools.readFile])
+            let agentsBodies = requestBodies()
+            func instructionCount(_ body: String) -> Int { body.components(separatedBy: instructionMarker).count - 1 }
+            check("8.41 project-instruction run completes with one compaction", agentsRun.error == nil && agentsRun.finalMessage == "AGENTS_DONE"
+                  && server.remainingResponses == 0 && agentsBodies.filter { $0.contains("0. DIALOGUE WITH THE MAIN AGENT") }.count == 1,
+                  "\(agentsRun.error ?? agentsRun.finalMessage) remaining \(server.remainingResponses)")
+            let firstTouch = agentsBodies.count > 1 ? agentsBodies[1] : ""
+            check("8.42 first touch injects AGENTS.md once", instructionCount(firstTouch) == 1 && firstTouch.contains("AGENTS_RULE_7731"), "\(instructionCount(firstTouch))")
+            let postCompaction = agentsBodies.first { $0.contains("AGENTS_SUMMARY") && $0.contains("agm_2_0") } ?? ""
+            check("8.43 compaction evicted the carrying round (control: the block is gone)", !postCompaction.isEmpty
+                  && instructionCount(postCompaction) == 0 && !postCompaction.contains("agm_0_0"))
+            let afterNextTouch = agentsBodies.last ?? ""
+            check("8.44 next touch after compaction re-injects the unchanged AGENTS.md, exactly once",
+                  afterNextTouch.contains("agm_3_0") && instructionCount(afterNextTouch) == 1 && afterNextTouch.contains("AGENTS_RULE_7731"),
+                  "\(instructionCount(afterNextTouch))")
+
+            // Marker bookkeeping itself: only markers that actually left are
+            // released; embedded (completed-reply) rounds count; a summary
+            // quoting the marker line in text does not keep it loaded.
+            do {
+                func carrier(_ id: String, _ content: String) -> ToolInteraction {
+                    ToolInteraction(assistantMessage: AssistantToolCallMessage(content: nil, toolCalls: [
+                        ToolCall(id: id, type: "function", function: FunctionCall(name: "read_file", arguments: "{}"))], reasoning: nil),
+                        results: [ToolResultMessage(toolCallId: id, content: content)])
+                }
+                let block = { (path: String) in "x\n\n" + ProjectInstructionsTracker.markerPrefix + path + "]\nrules\n" + ProjectInstructionsTracker.markerEnd }
+                let embedded = Message(role: .assistant, content: "done", timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                                       toolInteractions: [carrier("e1", block("/p/AGENTS.md"))])
+                let before = InjectedContextMarkers(messages: [embedded], interactions: [carrier("p1", block("/p/app/AGENTS.md")), carrier("p2", block("/q/AGENTS.md"))])
+                check("8.45 markers are collected from embedded and pending rounds",
+                      before.instructionFiles == ["/p/AGENTS.md", "/p/app/AGENTS.md", "/q/AGENTS.md"])
+                let quoting = Message(role: .user, content: SubagentRunner.compactionSummaryHeader + " quoted " + ProjectInstructionsTracker.markerPrefix + "/p/AGENTS.md]")
+                let left = before.removing(InjectedContextMarkers(messages: [quoting], interactions: [carrier("p2", block("/q/AGENTS.md"))]))
+                check("8.46 only evicted markers are released; a retained result keeps its file loaded; quoted text is not a carrier",
+                      left.instructionFiles == ["/p/AGENTS.md", "/p/app/AGENTS.md"])
+                let tracker = ToolExecutor(outputMode: .subagent)
+                let file = project.appendingPathComponent("notes.txt").path
+                let args = String(data: try JSONSerialization.data(withJSONObject: ["path": file]), encoding: .utf8)!
+                let loadedOnce = tracker.projectInstructions.payload(toolName: "read_file", argumentsJSON: args) != nil
+                let suppressed = tracker.projectInstructions.payload(toolName: "read_file", argumentsJSON: args) == nil
+                var released = InjectedContextMarkers(); released.instructionFiles = [agentsFile.standardizedFileURL.resolvingSymlinksInPath().path]
+                tracker.releaseContextMarkers(released)
+                let reloaded = tracker.projectInstructions.payload(toolName: "read_file", argumentsJSON: args) != nil
+                check("8.47 releaseContextMarkers makes the executor re-inject on the next touch", loadedOnce && suppressed && reloaded)
+            }
+            try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "80000")
+
             // Moderate ~23k batches need more than three ordinary compactions,
             // including at the default 250k budget. New work renews the allowance.
             for (budget, rounds) in [(80_000, 12), (250_000, 40)] {

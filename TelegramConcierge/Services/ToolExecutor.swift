@@ -35,6 +35,15 @@ actor ToolExecutor {
     /// contract as projectInstructions).
     nonisolated let gitCheckpoints = GitCheckpointTracker()
 
+    /// Release context markers whose carrying tool results left this
+    /// executor's context outside the main pruner (subagent compaction and
+    /// cutoff paths); the next touch of each project re-injects its blocks.
+    nonisolated func releaseContextMarkers(_ markers: InjectedContextMarkers) {
+        for path in markers.instructionFiles { projectInstructions.clearLoaded(instructionFilePath: path) }
+        for root in markers.verificationRoots { projectInstructions.clearVerification(root: root) }
+        for root in markers.checkpointRoots { gitCheckpoints.clearCheckpoint(root: root) }
+    }
+
     let webOrchestrator = WebOrchestrator()
     private let archiveService = ConversationArchiveService()
 

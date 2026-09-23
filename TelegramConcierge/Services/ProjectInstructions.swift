@@ -353,3 +353,45 @@ final class ProjectInstructionsTracker: @unchecked Sendable {
         return paths.filter { $0.hasPrefix("/") || $0.hasPrefix("~") }
     }
 }
+
+/// The context-marker blocks (project instructions, verification checks, git
+/// checkpoints) carried by the tool results of one context: rounds still
+/// pending plus rounds embedded in completed replies. Only tool results are
+/// scanned; a summary that quotes a marker line does not carry the block.
+///
+/// Every path that removes tool results without going through the main
+/// pruner (subagent compaction, emergency summarization, the oversized-batch
+/// cutoff) compares the context before and after and releases the markers
+/// that left, so the next touch of that project re-injects them. A marker
+/// still carried by a retained result stays loaded.
+struct InjectedContextMarkers: Equatable {
+    var instructionFiles = Set<String>()
+    var verificationRoots = Set<String>()
+    var checkpointRoots = Set<String>()
+
+    init() {}
+
+    init(messages: [Message], interactions: [ToolInteraction]) {
+        for message in messages { for round in message.toolInteractions { add(round) } }
+        for round in interactions { add(round) }
+    }
+
+    mutating func add(_ round: ToolInteraction) {
+        for result in round.results {
+            instructionFiles.formUnion(ProjectInstructionsTracker.markerPaths(in: result.content))
+            verificationRoots.formUnion(ProjectInstructionsTracker.verificationMarkerRoots(in: result.content))
+            checkpointRoots.formUnion(GitCheckpointTracker.markerRoots(in: result.content))
+        }
+    }
+
+    var isEmpty: Bool { instructionFiles.isEmpty && verificationRoots.isEmpty && checkpointRoots.isEmpty }
+
+    /// Markers present here and absent from `retained`.
+    func removing(_ retained: InjectedContextMarkers) -> InjectedContextMarkers {
+        var left = InjectedContextMarkers()
+        left.instructionFiles = instructionFiles.subtracting(retained.instructionFiles)
+        left.verificationRoots = verificationRoots.subtracting(retained.verificationRoots)
+        left.checkpointRoots = checkpointRoots.subtracting(retained.checkpointRoots)
+        return left
+    }
+}

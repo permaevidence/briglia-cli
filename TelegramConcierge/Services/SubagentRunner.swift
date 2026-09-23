@@ -498,6 +498,15 @@ actor SubagentRunner {
             for round in interactions { for result in round.results where !Self.isInterruptedToolIntent(result.content) { ids.insert(result.toolCallId) } }
             return ids
         }
+        /// Release the context markers (AGENTS.md, verification checks, git
+        /// checkpoints) whose carrying results this run just removed from its
+        /// context. The main agent's pruner does this in applyPrunePlan;
+        /// without it an evicted, unchanged AGENTS.md stayed marked loaded and
+        /// was never re-injected for the rest of the run.
+        func releaseEvictedMarkers(before: InjectedContextMarkers, messages: [Message], interactions: [ToolInteraction]) {
+            let left = before.removing(InjectedContextMarkers(messages: messages, interactions: interactions))
+            if !left.isEmpty { toolExecutor.releaseContextMarkers(left) }
+        }
         func persistWebEvidence() async {
             guard let webLedger else { return }
             await registry.updateWebEvidence(sessionId: resolvedSessionId, evidence: webLedger.allRecords, queries: webLedger.queriesUsed)
@@ -732,8 +741,10 @@ actor SubagentRunner {
                        textOnlyOverride: effectiveTextOnlyOverride,
                    execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle
 ) {
+                    let markersBefore = InjectedContextMarkers(messages: messagesForLLM, interactions: toolInteractions)
                     messagesForLLM = compacted.messages
                     toolInteractions = compacted.interactions
+                    releaseEvictedMarkers(before: markersBefore, messages: messagesForLLM, interactions: toolInteractions)
                     priorToolInteractions = compacted.interactions  // commitRun appends relative to this baseline
                     lastPromptTokens = compacted.estimatedTokens
                     compactionsUsed += 1
@@ -959,8 +970,10 @@ actor SubagentRunner {
                                execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle
 ),
                                compacted.estimatedTokens < turnTokenBudget {
+                                let markersBefore = InjectedContextMarkers(messages: messagesForLLM, interactions: toolInteractions)
                                 messagesForLLM = compacted.messages
                                 toolInteractions = compacted.interactions
+                                releaseEvictedMarkers(before: markersBefore, messages: messagesForLLM, interactions: toolInteractions)
                                 priorToolInteractions = compacted.interactions
                                 lastPromptTokens = compacted.estimatedTokens
                                 compactionsUsed += 1
@@ -999,8 +1012,10 @@ actor SubagentRunner {
                                        reasoningEffortOverride: effectiveReasoningOverride, textOnlyOverride: effectiveTextOnlyOverride,
                                        execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle),
                                    compacted.estimatedTokens + requestOverhead < turnTokenBudget {
+                                    let markersBefore = InjectedContextMarkers(messages: messagesForLLM, interactions: toolInteractions)
                                     messagesForLLM = compacted.messages
                                     toolInteractions = compacted.interactions
+                                    releaseEvictedMarkers(before: markersBefore, messages: messagesForLLM, interactions: toolInteractions)
                                     priorToolInteractions = compacted.interactions
                                     lastPromptTokens = compacted.estimatedTokens + requestOverhead
                                     compactionsUsed += 1
@@ -1021,7 +1036,9 @@ actor SubagentRunner {
                             try Task.checkCancellation()
                             if !compactedNow && projected >= turnTokenBudget {
                                 stoppedForContext = true
+                                let markersBefore = InjectedContextMarkers(messages: messagesForLLM, interactions: toolInteractions)
                                 let dropped = toolInteractions.removeLast()
+                                releaseEvictedMarkers(before: markersBefore, messages: messagesForLLM, interactions: toolInteractions)
                                 let droppedTools = dropped.assistantMessage.toolCalls.map { $0.function.name }.joined(separator: ", ")
                                 omittedToolNames = MarkerNeutralizer.escape(droppedTools)
                                 // R4: the dropped round's results are gone from the
