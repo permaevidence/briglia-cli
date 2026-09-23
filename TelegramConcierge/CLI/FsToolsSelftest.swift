@@ -588,6 +588,41 @@ struct FsToolsSelftest: AsyncParsableCommand {
               contents(logDecoy) == "" && isLink(webLog))
         try fm.removeItem(atPath: webLog)
 
+        // 10. Project instructions: the whole AGENTS.md chain from the repo
+        //     root down to the touched path, root first, never above .git.
+        let outer = tempRoot.appendingPathComponent("outer")
+        let repo = outer.appendingPathComponent("repo")
+        let app = repo.appendingPathComponent("app")
+        let deep = app.appendingPathComponent("src/deep")
+        try fm.createDirectory(at: deep, withIntermediateDirectories: true)
+        try fm.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try "OUTER-RULE\n".write(to: outer.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+        try "ROOT-RULE\n".write(to: repo.appendingPathComponent("AGENTS.md"), atomically: true, encoding: .utf8)
+        try "APP-RULE\n".write(to: app.appendingPathComponent("CLAUDE.md"), atomically: true, encoding: .utf8)
+        try "x\n".write(to: deep.appendingPathComponent("f.swift"), atomically: true, encoding: .utf8)
+        let chain = ProjectInstructionsTracker.instructionFiles(
+            forTouchedPath: deep.appendingPathComponent("f.swift").path).map { $0.standardizedFileURL.path }
+        check("10.1 chain is repo root then nested file, root first, nothing above .git",
+              chain == [repo.appendingPathComponent("AGENTS.md").standardizedFileURL.path,
+                        app.appendingPathComponent("CLAUDE.md").standardizedFileURL.path], "\(chain)")
+        let tracker = ProjectInstructionsTracker()
+        let args = #"{"path":""# + deep.appendingPathComponent("f.swift").path + #""}"#
+        let first = tracker.payload(toolName: "read_file", argumentsJSON: args) ?? ""
+        let rootAt = first.range(of: "ROOT-RULE")?.lowerBound
+        let appAt = first.range(of: "APP-RULE")?.lowerBound
+        check("10.2 first touch injects both files, root before nested",
+              rootAt != nil && appAt != nil && rootAt! < appAt! && !first.contains("OUTER-RULE"), first)
+        check("10.3 second touch injects nothing new",
+              tracker.payload(toolName: "read_file", argumentsJSON: args) == nil)
+        tracker.clearLoaded(instructionFilePath: repo.appendingPathComponent("AGENTS.md").standardizedFileURL.path)
+        let reload = tracker.payload(toolName: "read_file", argumentsJSON: args) ?? ""
+        check("10.4 a pruned root file re-injects alone on the next nested touch",
+              reload.contains("ROOT-RULE") && !reload.contains("APP-RULE"), reload)
+        let rootOnly = ProjectInstructionsTracker.instructionFiles(
+            forTouchedPath: repo.appendingPathComponent("README.md").path).map { $0.standardizedFileURL.path }
+        check("10.5 a root-level touch loads only the root file",
+              rootOnly == [repo.appendingPathComponent("AGENTS.md").standardizedFileURL.path], "\(rootOnly)")
+
         print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
         if failures > 0 { throw ExitCode(1) }
     }

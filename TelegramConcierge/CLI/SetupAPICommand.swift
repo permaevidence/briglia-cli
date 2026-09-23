@@ -710,8 +710,15 @@ enum SetupAPICore {
         // known models; anything else defaults to vision (owner decision,
         // 2026-09-23: text-only models are the exception now, so a caller
         // that says nothing gets native images, like the wizard's default).
+        // Absent and malformed are different: only an absent field takes a
+        // default. A present value must be a real JSON boolean ("true", 1,
+        // null are refused before anything is saved), so a caller that
+        // meant text-only can never silently get vision.
         let textOnly: Bool
-        if let explicit = section["text_only"] as? Bool {
+        if let raw = section["text_only"] {
+            guard BashTools.isJSONBoolean(raw), let explicit = raw as? Bool else {
+                throw APIError(code: "invalid_value", message: "provider.text_only must be a boolean (true or false)")
+            }
             textOnly = explicit
         } else if profile == .opencode,
                   let entry = OpenCodeGo.catalogEntry(for: model) {

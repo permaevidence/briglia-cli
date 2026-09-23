@@ -357,6 +357,35 @@ struct SetupAPISelftest: AsyncParsableCommand {
                               "model": "some/model"]])
             check("apply provider: non-catalog model without text_only → saved as vision (default)",
                   isOK(omitted) && ProviderProfiles.textOnly(.openrouter) == false)
+
+            // Absent ≠ malformed: a present text_only must be a real JSON
+            // boolean. Decoded from JSON text (not hand-built dictionaries)
+            // so 1/"true"/null carry their true Foundation types. The active
+            // local profile is text-only here; a refused call must leave
+            // both the profile flag and the runtime flag untouched.
+            let runtimeBefore = KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey)
+            for (label, literal) in [("string \"true\"", "\"true\""), ("integer 1", "1"),
+                                     ("integer 0", "0"), ("integer 2", "2"),
+                                     ("null", "null"), ("array", "[true]")] {
+                let json = #"{"provider":{"profile":"local","model":"qwen-local","text_only":"#
+                    + literal + #"}}"#
+                let decoded = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+                let refused = await SetupAPICore.apply(decoded)
+                check("apply provider: text_only \(label) → invalid_value, text-only profile preserved",
+                      errorCode(refused) == "invalid_value"
+                      && ProviderProfiles.textOnly(.local) == true
+                      && KeychainHelper.load(key: KeychainHelper.textOnlyModelEnabledKey) == runtimeBefore,
+                      "\(refused)")
+            }
+            for (literal, expected) in [("true", true), ("false", false)] {
+                let json = #"{"provider":{"profile":"custom","base_url":"http://127.0.0.1:9/v1","api_key":"k","model":"m","text_only":"#
+                    + literal + #"}}"#
+                let decoded = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+                let accepted = await SetupAPICore.apply(decoded)
+                check("apply provider: JSON boolean text_only \(literal) accepted",
+                      isOK(accepted) && ProviderProfiles.textOnly(.custom) == expected,
+                      "\(accepted)")
+            }
         }
 
         // 8. OpenAI fan-out (wizard step 2 parity) through the defaults seam.

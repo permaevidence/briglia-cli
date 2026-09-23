@@ -314,11 +314,11 @@ def main():
                 raise RuntimeError("Wrong baseline compiler")
             compare(frozen["fixtures"], results.get("reference", results["candidate"]))
         if not args.candidate_only:
-            from harness_identity_migration import verify_migration
+            from agents_md_migration import verify_migration
             from read_file_description_migration import migrate_lifecycle
             from reasoning_history_removal_migration import migrate_lifecycle as migrate_reasoning_history_removal_lifecycle
             from subagent_dialogue_compaction_lifecycle_migration import migrate_lifecycle as migrate_subagent_dialogue_lifecycle
-            # r9 (runtime identity), r8 (reply policy) and r7 (chronology) restore the candidate; earlier gates remain unchanged.
+            # r10 (AGENTS.md bullet), r9 (runtime identity), r8 (reply policy) and r7 (chronology) restore the candidate; earlier gates remain unchanged.
             verify_migration(migrate_subagent_dialogue_lifecycle(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"]))), results["candidate"], compare)
             # New-binary export MUST open with the pinned release's actual importer.
             imported = root / "cross-import"
@@ -329,7 +329,7 @@ def main():
                     json.loads((imported / "import.json").read_text()))
             wire.command(["python3", str(ROOT / "scripts/chat_lifecycle_client_test.py"),
                           str(root / "candidate-capture/status.json")])
-        print("DIAGNOSTIC ONLY" if args.candidate_only else "Lifecycle r3–r9 migrations and shipped-client differential PASS")
+        print("DIAGNOSTIC ONLY" if args.candidate_only else "Lifecycle r3–r10 migrations and shipped-client differential PASS")
     finally:
         print(f"Evidence: {root}", flush=True)
         if not args.keep_trees:

@@ -4,9 +4,10 @@ import Foundation
 /// (AGENTS.md / CLAUDE.md), the cross-tool standard for repo-level agent
 /// guidance (build/test commands, conventions, gotchas).
 ///
-/// When a tool touches a path inside a project, the nearest instruction file —
-/// found by walking up from the touched path to the repository root — is
-/// loaded once and appended to that tool's result, the same way LSP
+/// When a tool touches a path inside a project, every instruction file on the
+/// way from the touched path up to the repository root is loaded once (root
+/// first, nearest last, so a nested file refines the repo-wide one instead of
+/// hiding it) and appended to that tool's result, the same way LSP
 /// diagnostics ride on edit results. Loaded state is tracked per executor
 /// (the main agent and each subagent context inject independently), keyed by
 /// instruction-file path + mtime so an edited file re-injects automatically.
@@ -58,8 +59,7 @@ final class ProjectInstructionsTracker: @unchecked Sendable {
         var blocks: [String] = []
         var seenThisCall = Set<String>()
 
-        for path in touched {
-            guard let fileURL = Self.instructionFile(forTouchedPath: path) else { continue }
+        for (path, fileURL) in touched.flatMap({ p in Self.instructionFiles(forTouchedPath: p).map { (p, $0) } }) {
             let filePath = fileURL.path
             guard !seenThisCall.contains(filePath) else { continue }
             seenThisCall.insert(filePath)
@@ -287,10 +287,11 @@ final class ProjectInstructionsTracker: @unchecked Sendable {
 
     // MARK: - Discovery
 
-    /// Walks up from a touched path looking for the nearest instruction file.
-    /// Stops at the repository root (a directory containing .git) and never
-    /// treats the home directory or filesystem root as a project.
-    static func instructionFile(forTouchedPath path: String) -> URL? {
+    /// Every instruction file from the repository root down to the touched
+    /// path, root first and nearest last (at most one per directory). Stops at
+    /// the repository root (a directory containing .git) and never treats the
+    /// home directory or filesystem root as a project.
+    static func instructionFiles(forTouchedPath path: String) -> [URL] {
         let fm = FileManager.default
         let standardized = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL
 
@@ -299,6 +300,7 @@ final class ProjectInstructionsTracker: @unchecked Sendable {
         var dir = (exists && isDir.boolValue) ? standardized : standardized.deletingLastPathComponent()
 
         let home = fm.homeDirectoryForCurrentUser.standardizedFileURL.path
+        var nearestFirst: [URL] = []
 
         for _ in 0..<64 {
             let dirPath = dir.path
@@ -308,19 +310,19 @@ final class ProjectInstructionsTracker: @unchecked Sendable {
                 let candidate = dir.appendingPathComponent(name)
                 var candidateIsDir: ObjCBool = false
                 if fm.fileExists(atPath: candidate.path, isDirectory: &candidateIsDir), !candidateIsDir.boolValue {
-                    return candidate
+                    nearestFirst.append(candidate)
+                    break
                 }
             }
 
-            // Repo root reached and no instruction file found anywhere below
-            // it — don't escape into parent directories above the repo.
+            // Repo root reached — don't escape into parent directories above the repo.
             if fm.fileExists(atPath: dir.appendingPathComponent(".git").path) { break }
 
             let parent = dir.deletingLastPathComponent()
             if parent.path == dirPath { break }
             dir = parent
         }
-        return nil
+        return nearestFirst.reversed()
     }
 
     /// Extracts candidate filesystem paths from a tool call's arguments.
