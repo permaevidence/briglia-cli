@@ -402,7 +402,13 @@ echo
 # Always end with a command that works VERBATIM in this very terminal:
 # a piped installer cannot export PATH into the parent shell, so `briglia`
 # alone would fail right now even when future terminals are fine.
+# Desktops open the browser menu; phones use the Briglia app, headless
+# machines the terminal wizard.
 NEXT="setup"
+if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || [ "$(uname -s)" = "Darwin" ]; then
+    # Ubuntu Touch (a Lomiri session) sets up through the Briglia app.
+    [ -z "${SSH_CONNECTION:-}" ] && [ ! -e /etc/system-image ] && [ ! -e /usr/bin/lomiri-session ] && NEXT="menu"
+fi
 [ "$MIGRATED" = "1" ] && NEXT=""
 if [ "$MIGRATE_STATE" = "4" ]; then
     # A conflict was reported above: `briglia setup` would only refuse.

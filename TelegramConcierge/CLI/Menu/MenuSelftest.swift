@@ -42,6 +42,8 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.chatgptVariants()
         await t.telegramVariants()
         await t.keysAndEmail()
+        await t.providerLanes()
+        t.localServerParsing()
         await t.linuxComputer()
         await t.finishGuards()
         await t.staleOperations()
@@ -62,7 +64,10 @@ final class MenuFakeWorld: @unchecked Sendable {
     var snap = MenuSnapshot()
     let good = ["serper": "srp-good-0123456789abcdef", "jina": "jina_good_0123456789abcdef",
                 "openai": "sk-good-0123456789abcdefghij", "agentmail": "am_good_0123456789abcdef",
-                "telegram": "123456789:AAgoodtoken0123456789"]
+                "telegram": "123456789:AAgoodtoken0123456789",
+                "opencode": "oc-good-0123456789abcdef", "openrouter": "sk-or-good-0123456789abcdef"]
+    var localModels: Result<[String], MenuLocalModelsError> = .success(["qwen3.8-27b", "gemma-4-12b"])
+    var localModelAsks: [String] = []
     var applied: [[String: Any]] = []
     var probes: [String] = []
     var scan: MenuTelegramScan = .waiting
@@ -108,6 +113,22 @@ final class MenuFakeWorld: @unchecked Sendable {
             snap.telegramConfigured = true
             snap.telegramChatId = tg["chat_id"] as? String ?? ""
         }
+        if let pr = req["provider"] as? [String: Any], let profile = pr["profile"] as? String {
+            var p = snap.providers[profile] ?? MenuSnapshot.Provider()
+            p.configured = true
+            p.model = pr["model"] as? String ?? p.model
+            p.effort = pr["effort"] as? String ?? (profile == "local" ? "" : p.effort)
+            if let t = pr["text_only"] as? Bool { p.textOnly = t }
+            else if profile == "opencode" { p.textOnly = OpenCodeGo.catalogEntry(for: p.model)?.textOnly ?? false }
+            if let b = pr["base_url"] as? String { p.endpoint = b }
+            if let k = pr["api_key"] as? String { p.keyMasked = WizardIO.masked(k) }
+            snap.providers[profile] = p
+            if pr["activate"] as? Bool == true {
+                snap.activeProfile = profile
+                snap.otherProvider = ProviderProfiles.Profile(rawValue: profile)?.displayName
+                if case .signedIn(_, let m, let e, let g) = snap.chatgpt { snap.chatgpt = .signedIn(active: false, model: m, effort: e, generation: g) }
+            }
+        }
         if let em = req["email_calendar"] as? [String: Any] {
             snap.emailProvider = em["provider"] as? String ?? "none"
             if let k = em["api_key"] as? String { snap.agentMailMasked = WizardIO.masked(k); snap.agentMailInbox = "bree@agentmail.to" }
@@ -118,6 +139,13 @@ final class MenuFakeWorld: @unchecked Sendable {
     func probe(_ req: [String: Any]) -> [String: Any] {
         let kind = req["kind"] as? String ?? ""
         probes.append(kind)
+        if kind == "custom" || kind == "responses" {
+            return req["model"] as? String == "deepseek-v4.1-flash" ? ["ok": false, "reason": "HTTP 403 RegionError"] : ["ok": true]
+        }
+        if kind == "local" {
+            return req["base_url"] as? String == "http://localhost:1234/v1" ? ["ok": true] : ["ok": false, "reason": "connection refused"]
+        }
+        if kind == "openrouter", req["model"] as? String == "nobody/nothing" { return ["ok": false, "reason": "HTTP 400 — not a valid model ID"] }
         if kind == "telegram" {
             return req["token"] as? String == good["telegram"] ? ["ok": true, "bot_username": "sofia_test_bot"] : ["ok": false, "reason": "Telegram returned HTTP 401"]
         }
@@ -133,6 +161,7 @@ final class MenuFakeWorld: @unchecked Sendable {
             if selectFails { return ["ok": false, "error": ["message": "Stop Briglia first"]] }
             snap.chatgpt = .signedIn(active: true, model: req["model"] as? String ?? "", effort: req["effort"] as? String ?? "", generation: "g1")
             snap.otherProvider = nil
+            snap.activeProfile = "chatgpt"
             return ["ok": true, "state": "signed_in"]
         case "probe":
             return subscriptionProbeFails ? ["ok": false, "error": ["message": "model not available on this plan"]] : ["ok": true, "state": "verified"]
@@ -221,6 +250,8 @@ final class MenuSelftestContext {
             if let f = world.loginFailure { throw SubscriptionError(f) }
         }
         env.telegramScan = { _, _ in world.scanCount += 1; return world.scan }
+        env.localModels = { base in world.localModelAsks.append(base); return world.localModels }
+        env.providerKey = { profile in world.snap.providers[profile.rawValue]?.configured == true ? world.good[profile.rawValue] : nil }
         env.telegramChatProbe = { _, chatId in
             if let gate = world.holds["chat:" + chatId] { await gate.wait() }
             var p = SetupAPICore.TelegramChatProbe()
@@ -324,7 +355,7 @@ final class MenuSelftestContext {
 
         r = await act(wf, ["action": "chatgpt_browser"])
         check("browser sign-in opens the ChatGPT link", ok(r) && w.urlsOpened.first?.hasPrefix("https://auth.example/") == true)
-        check("after sign-in ChatGPT is selected with GPT-6 Sol + high and checked", w.snap.chatgpt == .signedIn(active: true, model: "gpt-6-sol", effort: "high", generation: "g1") && done(wf, "chatgpt"))
+        check("after sign-in ChatGPT is selected with GPT-6 Sol + high and checked", w.snap.chatgpt == .signedIn(active: true, model: "gpt-6-sol", effort: "high", generation: "g1") && done(wf, "ai"))
         st = wf.status()
         check("a finished sign-in leaves no login state behind", (st["chatgpt"] as? [String: Any])?["login"] == nil)
 
@@ -418,7 +449,7 @@ final class MenuSelftestContext {
         let c = wf.status()["chatgpt"] as? [String: Any]
         check("a signed-in but unused login reports the other provider", c?["active"] as? Bool == false && c?["other_provider"] as? String == "OpenCode Go")
         r = await act(wf, ["action": "chatgpt_use"])
-        check("“Use ChatGPT for Briglia” selects it", ok(r) && done(wf, "chatgpt"))
+        check("“Use ChatGPT for Briglia” selects it", ok(r) && done(wf, "ai"))
     }
 
     // MARK: 4. Telegram variants
@@ -481,6 +512,147 @@ final class MenuSelftestContext {
         check("the email tool is installed right after", w.agentMailInstalls == 1 && (wf.status()["email"] as? [String: Any])?["tool_installed"] as? Bool == true)
         r = await act(wf, ["action": "email_off"])
         check("email can be turned off (key kept)", ok(r) && w.snap.emailProvider == "none" && w.snap.agentMailMasked != nil && !done(wf, "email"))
+    }
+
+    // MARK: 5b. Provider lanes (OpenCode Go, OpenRouter, local), switching,
+    // thinking level, the OpenAI-key rule and Stop.
+
+    func lastProvider(_ w: MenuFakeWorld) -> [String: Any]? { w.applied.last?["provider"] as? [String: Any] }
+    func ai(_ wf: MenuWorkflow) -> [String: Any] { wf.status()["ai"] as? [String: Any] ?? [:] }
+    func aiProvider(_ wf: MenuWorkflow, _ id: String) -> [String: Any] { (ai(wf)["providers"] as? [String: Any])?[id] as? [String: Any] ?? [:] }
+
+    func providerLanes() async {
+        // First run: ChatGPT is the default lane and the OpenAI key optional.
+        var w = world()
+        var wf = await make(w)
+        check("a fresh install shows the ChatGPT lane with the OpenAI key optional",
+              ai(wf)["lane"] as? String == "chatgpt" && ai(wf)["openai_required"] as? Bool == false && step(wf, "openai")["required"] as? Bool == false && step(wf, "ai")["title"] as? String == "ChatGPT")
+        var r = await act(wf, ["action": "lane", "lane": "opencode"])
+        check("choosing OpenCode makes the OpenAI key required and renames the steps",
+              ok(r) && ai(wf)["planned"] as? String == "opencode" && wf.missingRequired.contains(.openai)
+              && step(wf, "ai")["title"] as? String == "OpenCode Go" && step(wf, "openai")["title"] as? String == "OpenAI key")
+        r = await act(wf, ["action": "lane", "lane": "gemini"])
+        check("an unknown lane is refused", !ok(r) && ai(wf)["planned"] as? String == "opencode")
+
+        let appliedBefore = w.applied.count
+        r = await act(wf, ["action": "provider_key", "profile": "opencode", "key": "oc-wrong-000000000000"])
+        check("a refused OpenCode key is explained and nothing is saved", !ok(r) && msg(r).contains("OpenCode Go refused this key") && w.applied.count == appliedBefore)
+        r = await act(wf, ["action": "provider_key", "profile": "opencode", "key": w.good["opencode"]!])
+        var pr = lastProvider(w)
+        check("a good OpenCode key saves GLM 5.3 Flash at high and switches to it",
+              ok(r) && pr?["profile"] as? String == "opencode" && pr?["model"] as? String == OpenCodeGo.defaultModel && pr?["effort"] as? String == "high"
+              && pr?["activate"] as? Bool == true && pr?["api_key"] as? String == w.good["opencode"] && done(wf, "ai") && ai(wf)["active"] as? String == "opencode" && ai(wf)["planned"] is NSNull)
+        check("without an OpenAI key the research backend is left alone", w.applied.last?["web_search_backend"] == nil)
+        check("the page never gets the provider key back, only its masked form",
+              !json(wf.status()).contains(w.good["opencode"]!) && (aiProvider(wf, "opencode")["key"] as? String)?.isEmpty == false)
+        check("the OpenAI key is still required after the switch", step(wf, "openai")["required"] as? Bool == true && !done(wf, "openai"))
+        r = await act(wf, ["action": "key", "kind": "openai", "key": w.good["openai"]!])
+        check("with OpenCode the OpenAI key turns on web research too", ok(r) && msg(r).contains("Web research") && done(wf, "openai"))
+        r = await act(wf, ["action": "key_remove", "kind": "openai"])
+        check("the required OpenAI key can't be removed", !ok(r) && msg(r).contains("can\u{2019}t be removed") && done(wf, "openai"))
+
+        let probesBefore = w.probes.count
+        r = await act(wf, ["action": "provider_model", "profile": "opencode", "model": "kimi-k3"])
+        pr = lastProvider(w)
+        check("a new OpenCode model is checked with the saved key, then saved; research set to OpenAI",
+              ok(r) && w.probes.count == probesBefore + 1 && w.probes.last == "custom" && pr?["model"] as? String == "kimi-k3" && pr?["api_key"] == nil
+              && w.applied.last?["web_search_backend"] as? String == "openai")
+        r = await act(wf, ["action": "provider_model", "profile": "opencode", "model": "deepseek-v4.1-flash"])
+        check("a model the account can't use is refused, the old one stays", !ok(r) && msg(r).contains("RegionError") && aiProvider(wf, "opencode")["model"] as? String == "kimi-k3")
+        r = await act(wf, ["action": "provider_model", "profile": "opencode", "model": "glm-5.3"])
+        check("a model outside the OpenCode picker is refused", !ok(r))
+        r = await act(wf, ["action": "provider_model", "profile": "opencode", "model": "gpt-5.6-luna"])
+        check("a Responses model on OpenCode is checked over Responses", ok(r) && w.probes.last == "responses")
+        check("GPT on OpenCode offers the Responses thinking levels incl. Deepest", (aiProvider(wf, "opencode")["efforts"] as? [String]) == ["low", "medium", "high", "xhigh"])
+        await act(wf, ["action": "provider_model", "profile": "opencode", "model": "glm-5.3-flash"])
+        check("GLM on OpenCode offers Light/Balanced/Deep", (aiProvider(wf, "opencode")["efforts"] as? [String]) == ["low", "medium", "high"])
+        r = await act(wf, ["action": "effort", "effort": "xhigh"])
+        check("a thinking level the model doesn't take is refused", !ok(r))
+        r = await act(wf, ["action": "effort", "effort": "medium"])
+        pr = lastProvider(w)
+        check("the thinking level is saved on the running provider", ok(r) && pr?["effort"] as? String == "medium" && pr?["model"] as? String == "glm-5.3-flash" && aiProvider(wf, "opencode")["effort"] as? String == "medium")
+
+        // OpenRouter, added from "Switch or add a provider" while OpenCode runs.
+        r = await act(wf, ["action": "lane", "lane": "openrouter"])
+        check("setting up OpenRouter keeps OpenCode running meanwhile", ok(r) && ai(wf)["lane"] as? String == "openrouter" && ai(wf)["active"] as? String == "opencode" && done(wf, "ai"))
+        r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]!])
+        pr = lastProvider(w)
+        check("an OpenRouter key is checked with the default model and switched to",
+              ok(r) && pr?["profile"] as? String == "openrouter" && pr?["model"] as? String == MenuWorkflow.openRouterDefaultModel && ai(wf)["active"] as? String == "openrouter")
+        r = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "nobody/nothing"])
+        check("an OpenRouter model id OpenRouter doesn't know is refused", !ok(r) && msg(r).contains("not a valid model"))
+        r = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "moonshotai/kimi-k3", "text_only": true])
+        check("an OpenRouter model can be saved as text-only", ok(r) && lastProvider(w)?["text_only"] as? Bool == true && aiProvider(wf, "openrouter")["text_only"] as? Bool == true)
+        r = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "moonshotai/kimi-k3", "text_only": "yes"])
+        check("a non-boolean text-only value is refused", !ok(r))
+        r = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "two words"])
+        check("a model id with spaces is refused", !ok(r))
+
+        // Switching back keeps each provider's own setup.
+        r = await act(wf, ["action": "provider_use", "profile": "opencode"])
+        pr = lastProvider(w)
+        check("switching back to OpenCode reuses its saved model, level and key",
+              ok(r) && pr?["model"] as? String == "glm-5.3-flash" && pr?["effort"] as? String == "medium" && pr?["api_key"] == nil && ai(wf)["active"] as? String == "opencode")
+        r = await act(wf, ["action": "provider_use", "profile": "local"])
+        check("a lane that isn't set up can't be switched to", !ok(r) && msg(r).contains("Set up"))
+        r = await act(wf, ["action": "provider_use", "profile": "chatgpt"])
+        check("ChatGPT can't be switched to before signing in", !ok(r) && msg(r).contains("Sign in"))
+        check("the dashboard names the running provider and model", step(wf, "ai")["title"] as? String == "OpenCode Go" && step(wf, "ai")["summary"] as? String == "GLM 5.3 Flash")
+
+        // Local model: find the server's models, pick one.
+        await act(wf, ["action": "lane", "lane": "local"])
+        r = await act(wf, ["action": "local_models", "base_url": "ftp://nas.local/models"])
+        check("a non-HTTP server address is refused", !ok(r) && w.localModelAsks.isEmpty)
+        r = await act(wf, ["action": "local_models", "base_url": "localhost:1234/v1/"])
+        let listing = ai(wf)["local"] as? [String: Any]
+        check("the local server's models are listed (address normalized)",
+              ok(r) && w.localModelAsks.last == "http://localhost:1234/v1" && listing?["state"] as? String == "ok" && (listing?["models"] as? [String]) == ["qwen3.8-27b", "gemma-4-12b"])
+        w.localModels = .failure(.unreachable)
+        r = await act(wf, ["action": "local_models", "base_url": "http://localhost:11434/v1"])
+        check("a server that doesn't answer is explained", !ok(r) && msg(r).contains("Nothing answered") && (ai(wf)["local"] as? [String: Any])?["state"] as? String == "error")
+        r = await act(wf, ["action": "provider_model", "profile": "local", "model": "qwen3.8-27b", "base_url": "http://localhost:11434/v1"])
+        check("a local model the server doesn't answer with is refused", !ok(r) && msg(r).contains("didn\u{2019}t answer"))
+        r = await act(wf, ["action": "provider_model", "profile": "local", "model": "qwen3.8-27b", "base_url": "http://localhost:1234/v1"])
+        pr = lastProvider(w)
+        check("a local model is saved with its address, no thinking level, and switched to",
+              ok(r) && pr?["profile"] as? String == "local" && pr?["base_url"] as? String == "http://localhost:1234/v1" && pr?["effort"] == nil && ai(wf)["active"] as? String == "local")
+        check("a local model offers no thinking level", (aiProvider(wf, "local")["efforts"] as? [String]) == [])
+
+        // Superseded: a key still checking when the user picks another lane writes nothing.
+        do {
+            let w2 = world(); let wf2 = await make(w2)
+            await act(wf2, ["action": "lane", "lane": "openrouter"])
+            let gate = MenuGate(); w2.holds[w2.good["openrouter"]!] = gate
+            let held = await parked(wf2, gate, ["action": "provider_key", "profile": "openrouter", "key": w2.good["openrouter"]!])
+            await act(wf2, ["action": "lane", "lane": "opencode"])
+            gate.open()
+            let late = await held.value ?? [:]
+            check("a key still checking when another lane is picked saves nothing",
+                  late["superseded"] as? Bool == true && lastProvider(w2) == nil && ai(wf2)["active"] is NSNull)
+        }
+
+        // ChatGPT effort + Stop.
+        w = world()
+        w.snap.chatgpt = .signedIn(active: true, model: "gpt-6-sol", effort: "high", generation: "g0")
+        wf = await make(w)
+        check("ChatGPT offers Light to Deepest", (aiProvider(wf, "chatgpt")["efforts"] as? [String]) == ["low", "medium", "high", "xhigh"] && ai(wf)["openai_required"] as? Bool == false)
+        r = await act(wf, ["action": "effort", "effort": "xhigh"])
+        check("the ChatGPT thinking level goes through the subscription", ok(r) && w.snap.chatgpt == .signedIn(active: true, model: "gpt-6-sol", effort: "xhigh", generation: "g1"))
+        r = await act(wf, ["action": "finish", "what": "stop"])
+        check("Stop is allowed with steps still missing and closes as stop", ok(r) && wf.closing == "stop")
+    }
+
+    func localServerParsing() {
+        func models(_ obj: [String: Any], _ status: Int = 200) -> Result<[String], MenuLocalModelsError> {
+            MenuEnvironment.interpretModels(data: try! JSONSerialization.data(withJSONObject: obj), status: status)
+        }
+        check("an OpenAI-style model list is read, sorted", models(["data": [["id": "b"], ["id": "a"], ["id": "a"]]]) == .success(["a", "b"]))
+        check("an Ollama-style list is read", models(["models": [["name": "llama4:8b"]]]) == .success(["llama4:8b"]))
+        check("an empty list says no model is loaded", models(["data": []]) == .failure(.noModels))
+        check("an HTTP error is reported", models([:], 404) == .failure(.http(404)))
+        check("addresses: scheme added, trailing slash dropped", MenuEnvironment.localBase("192.168.1.9:8000/v1/") == "http://192.168.1.9:8000/v1")
+        check("addresses with credentials or queries are refused",
+              MenuEnvironment.localBase("http://u:p@host/v1") == nil && MenuEnvironment.localBase("http://host/v1?x=1") == nil && MenuEnvironment.localBase("file:///etc") == nil)
     }
 
     // MARK: 6. Linux computer step

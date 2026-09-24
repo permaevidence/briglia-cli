@@ -14,10 +14,24 @@ struct MenuSnapshot: Equatable {
         case signedIn(active: Bool, model: String, effort: String, generation: String)
     }
 
+    /// One non-ChatGPT provider profile as the menu shows it.
+    struct Provider: Equatable {
+        var configured = false
+        var model = ""
+        var effort = ""
+        var textOnly = false
+        var endpoint = ""
+        var keyMasked: String?
+    }
+
     var userName = ""
     var chatgpt: ChatGPT = .signedOut
     /// Display name of the active main provider when it is NOT ChatGPT.
     var otherProvider: String?
+    /// The active provider profile (raw value), nil when none is set.
+    var activeProfile: String?
+    /// The OpenCode Go, OpenRouter and local profiles, by raw value.
+    var providers: [String: Provider] = [:]
     var telegramConfigured = false
     var telegramChatId = ""
     var serperMasked: String?
@@ -42,6 +56,14 @@ struct MenuSnapshot: Equatable {
         if case .signedIn(let active, _, _, _) = chatgpt { return active }
         return false
     }
+}
+
+/// Why a local server's model list couldn't be read.
+enum MenuLocalModelsError: Error, Equatable {
+    case badAddress
+    case unreachable
+    case http(Int)
+    case noModels
 }
 
 /// Outcome of looking for the user's first message to a fresh bot.
@@ -89,6 +111,21 @@ struct MenuEnvironment {
     }
     var deviceLogin: (_ show: @escaping @Sendable (String, String) -> Void) async throws -> Void = { show in
         _ = try await SubscriptionLogin().device { show($0, $1) }
+    }
+    /// The model ids a local OpenAI-compatible server offers (GET /models),
+    /// or why it couldn't be asked.
+    var localModels: (_ baseURL: String) async -> Result<[String], MenuLocalModelsError> = { await MenuEnvironment.listLocalModels(baseURL: $0) }
+    /// The saved API key of a provider profile (never sent to the page;
+    /// used to check a new model before switching to it).
+    var providerKey: (ProviderProfiles.Profile) -> String? = { profile in
+        let name: String
+        switch profile {
+        case .opencode: name = ProviderProfiles.opencodeApiKeyKey
+        case .openrouter: name = KeychainHelper.openRouterApiKeyKey
+        default: return nil
+        }
+        guard let v = KeychainHelper.load(key: name)?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty else { return nil }
+        return v
     }
     var telegramScan: (_ token: String, _ since: Date) async -> MenuTelegramScan = { await MenuEnvironment.scanTelegram(token: $0, since: $1) }
     var telegramChatProbe: (_ token: String, _ chatId: String) async -> SetupAPICore.TelegramChatProbe = {
@@ -148,6 +185,17 @@ struct MenuEnvironment {
         if let active, active != .chatgpt, ProviderProfiles.isConfigured(active) {
             s.otherProvider = active.displayName
         }
+        s.activeProfile = active?.rawValue
+        for profile in [ProviderProfiles.Profile.opencode, .openrouter, .local] {
+            var p = MenuSnapshot.Provider()
+            p.configured = ProviderProfiles.isConfigured(profile)
+            p.model = ProviderProfiles.configuredModel(profile) ?? ""
+            p.effort = ProviderProfiles.configuredEffort(profile) ?? ""
+            p.textOnly = ProviderProfiles.textOnly(profile) ?? false
+            p.endpoint = profile == .local ? (ProviderProfiles.configuredEndpoint(.local) ?? "") : ""
+            p.keyMasked = ProviderProfiles.maskedKey(profile)
+            s.providers[profile.rawValue] = p
+        }
         s.telegramConfigured = TelegramConfig.isConfigured
         s.telegramChatId = KeychainHelper.load(key: KeychainHelper.telegramChatIdKey) ?? ""
         func masked(_ key: String) -> String? {
@@ -185,6 +233,45 @@ struct MenuEnvironment {
             .output.trimmingCharacters(in: .whitespacesAndNewlines) == "active"
         #endif
         return s
+    }
+
+    /// Asks a local server which models it serves. Keyless, short timeout:
+    /// the page offers the answer as a list to pick from.
+    static func listLocalModels(baseURL: String) async -> Result<[String], MenuLocalModelsError> {
+        guard let base = MenuEnvironment.localBase(baseURL), let url = URL(string: base + "/models") else { return .failure(.badAddress) }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            return interpretModels(data: data, status: status)
+        } catch {
+            return .failure(.unreachable)
+        }
+    }
+
+    /// Pure: the /models reply → model ids (OpenAI shape `data[].id`;
+    /// Ollama's `models[].name` too), sorted, de-duplicated, at most 200.
+    static func interpretModels(data: Data, status: Int) -> Result<[String], MenuLocalModelsError> {
+        guard status == 200 else { return .failure(.http(status)) }
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        var ids: [String] = []
+        for item in (json?["data"] as? [[String: Any]]) ?? [] { if let id = item["id"] as? String { ids.append(id) } }
+        for item in (json?["models"] as? [[String: Any]]) ?? [] { if let id = (item["name"] as? String) ?? (item["model"] as? String) { ids.append(id) } }
+        let clean = Array(Set(ids.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty && $0.count <= 300 })).sorted().prefix(200)
+        return clean.isEmpty ? .failure(.noModels) : .success(Array(clean))
+    }
+
+    /// A usable local base URL: http(s), a host, no credentials, query or
+    /// fragment; trailing slashes dropped. Nil when it isn't one.
+    static func localBase(_ raw: String) -> String? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.count <= 500, !text.contains(where: { $0.isNewline || $0 == " " }) else { return nil }
+        if !text.contains("://") { text = "http://" + text }
+        while text.hasSuffix("/") { text.removeLast() }
+        guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let host = url.host, !host.isEmpty,
+              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return nil }
+        return text
     }
 
     /// Looks for the user's message to the bot, without consuming updates

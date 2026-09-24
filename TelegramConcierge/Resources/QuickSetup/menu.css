@@ -1,4 +1,4 @@
-/* briglia menu — the ChatGPT-subscription setup and settings page.
+/* briglia menu — setup and settings page for every provider.
    No external fonts or assets (CSP: self only); system font stack. */
 :root {
   --bg1: #f4f1ea;
@@ -209,3 +209,32 @@ body { min-height: 100vh; }
   .langcard { flex: 1 1 140px; min-width: 0; padding: 18px; }
 }
 @media (min-width: 781px) { .shell { padding-top: 70px; } }
+
+/* AI provider lanes */
+.lanes { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; max-width: 680px; margin: 6px 0 16px; }
+.lanecard { text-align: left; font: inherit; background: var(--card); color: var(--ink); border: 2px solid var(--line); border-radius: 16px; padding: 16px 18px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; transition: border-color .15s, box-shadow .15s; }
+.lanecard:hover { border-color: var(--accent-2); }
+.lanecard.sel { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(47, 111, 214, .12); }
+.lanecard:disabled { opacity: .6; cursor: default; }
+.lanecard .top { display: flex; align-items: center; gap: 10px; }
+.lanecard .n { font-weight: 700; font-size: 17px; }
+.lanecard .s { color: var(--soft); font-size: 14px; }
+.lanecard .m { color: var(--muted); font-size: 13px; }
+
+/* Thinking level */
+.effort { margin: 4px 0 18px; max-width: 620px; }
+.effort .label { font-weight: 600; margin-bottom: 8px; }
+.seg { display: inline-flex; flex-wrap: wrap; background: var(--accent-soft); border-radius: 12px; padding: 4px; gap: 4px; margin-bottom: 6px; }
+.seg button { font: inherit; font-size: 14px; font-weight: 600; border: 0; border-radius: 9px; padding: 8px 14px; background: transparent; color: var(--accent); cursor: pointer; }
+.seg button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(16, 24, 40, .12); }
+.seg button:disabled { cursor: default; }
+
+/* Running state on the dashboard */
+.runstate { display: flex; align-items: center; gap: 10px; background: var(--warn-soft); color: var(--warn); border-radius: 12px; padding: 10px 14px; margin: 0 0 16px; max-width: 620px; font-size: 15px; }
+.runstate b { color: var(--warn); }
+.pausedot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); flex: 0 0 10px; }
+
+details.more { margin: 0 0 14px; }
+label.check { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--soft); margin: 6px 0; cursor: pointer; }
+.links.switch { margin: 14px 0 0; }
+@media (max-width: 780px) { .lanes { grid-template-columns: 1fr; } }

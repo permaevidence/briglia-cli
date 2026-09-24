@@ -41,11 +41,15 @@ MODELS = [{"id": "gpt-6-sol", "label": "GPT-6 Sol", "recommended": True}, {"id":
           {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"}, {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"}]
 TITLES_IT = {"name": "Il tuo nome", "serper": "Ricerca web", "jina": "Lettura pagine web", "openai": "Voce e immagini",
              "computer": "Questo computer", "tools": "Strumenti documenti e media"}
-TITLES = [("name", "Your name", True), ("chatgpt", "ChatGPT", True), ("telegram", "Telegram", True), ("serper", "Web search", True),
+TITLES = [("name", "Your name", True), ("ai", "ChatGPT", True), ("telegram", "Telegram", True), ("serper", "Web search", True),
           ("jina", "Reading web pages", True), ("openai", "Voice & images", False), ("email", "Email", False),
           ("computer", "This computer", True), ("tools", "Document & media tools", True)]
 GOOD = {"serper": "srp-good-0123456789abcdef", "jina": "jina_good_0123456789abcdef", "openai": "sk-good-0123456789abcdef",
-        "agentmail": "am_good_0123456789abcdef", "telegram": "123456789:AAgoodtoken0123456789"}
+        "agentmail": "am_good_0123456789abcdef", "telegram": "123456789:AAgoodtoken0123456789",
+        "opencode": "oc-good-0123456789abcdef", "openrouter": "sk-or-good-0123456789abcdef"}
+OC_MODELS = [{"id": "glm-5.3-flash", "label": "GLM 5.3 Flash", "recommended": True}, {"id": "kimi-k3", "label": "Kimi K3"},
+             {"id": "qwen3.8-max", "label": "Qwen 3.8 Max"}]
+LANE_TITLES = {"chatgpt": "ChatGPT", "opencode": "OpenCode Go", "openrouter": "OpenRouter", "local": "Local model"}
 
 
 class Fake:
@@ -60,23 +64,63 @@ class Fake:
                          "keep_awake_summary": "Briglia keeps this Mac awake while it runs.", "can_fix_gnome": False, "can_mask": False}
         self.tools = {"checking": False, "complete": False, "missing": ["pandoc", "LibreOffice"], "installing": False, "label": "", "lines": []}
         self.closing = None
+        self.planned = None
+        self.providers = {k: {"configured": False, "active": False, "model": "", "model_label": "", "effort": "high", "text_only": False,
+                              "efforts": ["low", "medium", "high"] if k != "local" else []} for k in ("opencode", "openrouter", "local")}
+        self.local = None
         self.lang = "en"
         self.calls = []
         self.poll_count = 0
 
+    def active(self):
+        if self.chatgpt["state"] == "signed_in" and self.chatgpt["active"]:
+            return "chatgpt"
+        for k, p in self.providers.items():
+            if p["active"] and p["configured"]:
+                return k
+        return None
+
+    def lane(self):
+        return self.planned or self.active() or "chatgpt"
+
+    def openai_required(self):
+        a = self.active()
+        return (a != "chatgpt") if a else (self.planned not in (None, "chatgpt"))
+
+    def use(self, k):
+        self.chatgpt["active"] = k == "chatgpt"
+        for kk, p in self.providers.items():
+            p["active"] = kk == k
+        self.planned = None
+
     def done(self, sid):
-        return {"name": bool(self.name), "chatgpt": self.chatgpt["state"] == "signed_in" and self.chatgpt["active"],
+        return {"name": bool(self.name), "ai": self.active() is not None,
                 "telegram": self.telegram["configured"], "serper": bool(self.keys["serper"]), "jina": bool(self.keys["jina"]),
                 "openai": bool(self.keys["openai"]), "email": self.email["on"],
                 "computer": self.computer["fda"] and self.computer["keep_awake_ok"], "tools": self.tools["complete"]}[sid]
 
     def status(self):
-        steps = [{"id": i, "title": TITLES_IT.get(i, t) if self.lang == "it" else t, "required": r, "done": self.done(i), "summary": ""} for i, t, r in TITLES]
+        req = self.openai_required()
+        def title(i, t):
+            if i == "ai":
+                return LANE_TITLES[self.active() or self.lane()]
+            if i == "openai" and req:
+                return "OpenAI key"
+            return TITLES_IT.get(i, t) if self.lang == "it" else t
+        steps = [{"id": i, "title": title(i, t), "required": req if i == "openai" else r, "done": self.done(i), "summary": ""} for i, t, r in TITLES]
+        provs = {k: dict(v, active=(self.active() == k)) for k, v in self.providers.items()}
+        provs["chatgpt"] = {"configured": self.chatgpt["state"] == "signed_in", "active": self.active() == "chatgpt", "model": self.chatgpt["model"],
+                            "model_label": [m["label"] for m in MODELS if m["id"] == self.chatgpt["model"]][0], "effort": self.chatgpt["effort"],
+                            "efforts": ["low", "medium", "high", "xhigh"]}
+        ai = {"lane": self.lane(), "active": self.active(), "planned": self.planned, "ready": self.active() is not None, "openai_required": req,
+              "providers": provs, "opencode_models": OC_MODELS, "openrouter_default": "google/gemini-3-flash-preview"}
+        if self.local:
+            ai["local"] = self.local
         c = dict(self.chatgpt)
         c["models"] = MODELS
         c["model_label"] = [m["label"] for m in MODELS if m["id"] == c["model"]][0]
         return {"platform": self.platform, "lang": self.lang, "complete": all(s["done"] for s in steps if s["required"]), "steps": steps, "name": self.name,
-                "chatgpt": c, "telegram": self.telegram, "keys": self.keys, "email": self.email, "computer": self.computer,
+                "chatgpt": c, "ai": ai, "telegram": self.telegram, "keys": self.keys, "email": self.email, "computer": self.computer,
                 "tools": self.tools, "busy": None, "service_was_running": False, "browser_likely": True, "closing": self.closing,
                 "startup": getattr(self, "startup", None)}
 
@@ -103,6 +147,42 @@ class Fake:
             self.chatgpt["login"] = {"kind": "code", "state": "waiting", "url": "https://auth.openai.com/codex/device", "code": "VA6Y-XQ0M"}
         elif a == "chatgpt_cancel":
             self.chatgpt["login"] = None; msg = "Sign-in cancelled."
+        elif a == "lane":
+            self.planned = body["lane"] or None
+            if self.planned == self.active():
+                self.planned = None
+        elif a == "provider_key":
+            k = body["profile"]
+            if body["key"] != GOOD[k]:
+                ok, msg = False, LANE_TITLES[k] + " refused this key. Make sure you copied the whole key, then paste it again."
+            else:
+                p = self.providers[k]
+                p.update({"configured": True, "key": body["key"][:5] + "…" + body["key"][-4:]})
+                if not p["model"]:
+                    p["model"] = "glm-5.3-flash" if k == "opencode" else "google/gemini-3-flash-preview"
+                p["model_label"] = {"glm-5.3-flash": "GLM 5.3 Flash"}.get(p["model"], p["model"])
+                self.use(k)
+                msg = "Briglia now thinks with %s on %s." % (p["model_label"], LANE_TITLES[k])
+        elif a == "provider_model":
+            k = body["profile"]
+            p = self.providers[k]
+            if k == "local":
+                p.update({"configured": True, "endpoint": body["base_url"]})
+            p.update({"model": body["model"], "model_label": {m["id"]: m["label"] for m in OC_MODELS}.get(body["model"], body["model"]),
+                      "text_only": bool(body.get("text_only"))})
+            self.use(k)
+            msg = "Briglia now thinks with %s on %s." % (p["model_label"], LANE_TITLES[k])
+        elif a == "provider_use":
+            self.use(body["profile"]); msg = "Briglia now thinks with %s." % LANE_TITLES[body["profile"]]
+        elif a == "effort":
+            a2 = self.active()
+            if a2 == "chatgpt":
+                self.chatgpt["effort"] = body["effort"]
+            else:
+                self.providers[a2]["effort"] = body["effort"]
+            msg = "Saved. It applies from the next message."
+        elif a == "local_models":
+            self.local = {"base": body["base_url"], "state": "ok", "models": ["qwen3.8-27b", "gemma-4-12b"]}
         elif a == "chatgpt_model":
             self.chatgpt["model"] = body["model"]; msg = "Briglia now thinks with " + [m["label"] for m in MODELS if m["id"] == body["model"]][0] + "."
         elif a == "telegram_token":
@@ -137,7 +217,8 @@ class Fake:
         self.poll_count += 1
         login = self.chatgpt.get("login")
         if login and login["state"] == "waiting" and getattr(self, "auto_signin", False):
-            self.chatgpt.update({"state": "signed_in", "active": True, "login": None})
+            self.chatgpt.update({"state": "signed_in", "login": None})
+            self.use("chatgpt")
         p = self.telegram.get("pending")
         if p and p["state"] == "waiting" and getattr(self, "auto_found", False):
             p.update({"state": "found", "name": "Sofia (@sofia)", "chat_id": "5551234567"})
@@ -186,8 +267,14 @@ def main():
         check("a first run asks for the language first", page.is_visible("text=Italiano") and page.is_visible(".lang-switch"))
         shot(page, "00-language")
         page.click(".langcard:has-text('English')")
+        page.wait_for_selector("text=How should Briglia think?")
+        check("then it asks how Briglia should think, ChatGPT pre-selected as the easiest",
+              page.locator(".lanecard").count() == 4 and "sel" in page.get_attribute(".lanecard[data-lane=chatgpt]", "class")
+              and page.is_visible(".lanecard[data-lane=chatgpt] >> text=Easiest"))
+        shot(page, "00b-lanes")
+        page.click("#lane-continue")
         page.wait_for_selector("text=Let’s set up Briglia")
-        check("first run shows the welcome screen", page.is_visible("text=Let’s start"))
+        check("first run shows the welcome screen", page.is_visible("text=Let’s start") and f.planned == "chatgpt" or f.planned is None)
         shot(page, "01-welcome")
         page.click("text=Let’s start")
         page.wait_for_selector("text=What should Bree call you?")
@@ -286,6 +373,17 @@ def main():
         page.wait_for_selector("text=Briglia now thinks with GPT-6 Luna.")
         check("a model can be changed with one click", g.chatgpt["model"] == "gpt-6-luna")
         shot(page, "21-dashboard-chatgpt")
+        page.click(".seg button[data-effort=xhigh]")
+        page.wait_for_selector(".seg button.on[data-effort=xhigh]")
+        check("the thinking level is one click", g.chatgpt["effort"] == "xhigh")
+        page.click("text=← Back")
+        page.wait_for_selector(".grid")
+        check("the dashboard says Briglia is stopped while the page is open and offers Start and Stop",
+              page.is_visible("text=Briglia is stopped") and page.is_visible("button:has-text('Start Briglia')") and page.is_visible("button:has-text('Stop Briglia')"))
+        shot(page, "22-dashboard-startstop")
+        page.click("button:has-text('Stop Briglia')")
+        page.wait_for_selector("h1:has-text('Briglia is stopped')")
+        check("Stop closes the page and says Briglia stays off", g.closing == "stop")
         check("no page errors on the dashboard", not errors, errors)
         ctx.close()
 
@@ -294,6 +392,9 @@ def main():
         ctx, page, errors = session(it)
         page.wait_for_selector("text=Choose your language")
         page.click(".langcard:has-text('Italiano')")
+        page.wait_for_selector("text=Come deve ragionare Briglia?")
+        check("the AI choice is in Italian too", page.is_visible("text=Il più semplice"))
+        page.click("#lane-continue")
         page.wait_for_selector("text=Configuriamo Briglia")
         check("choosing Italiano switches the page and tells the server", it.lang == "it" and page.is_visible("text=Iniziamo"))
         check("the side list is in Italian", page.is_visible(".steps >> text=Il tuo nome") if False else page.is_visible("text=Tutto quello che inserisci viene salvato subito."))
@@ -315,6 +416,11 @@ def main():
         page.wait_for_selector("text=Choose your language")
         shot(page, "29-phone-language")
         page.click(".langcard:has-text('English')")
+        page.wait_for_selector("text=How should Briglia think?")
+        overflow = page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")
+        check("no horizontal scrolling on the AI choice at phone width", not overflow)
+        shot(page, "29b-phone-lanes")
+        page.click("#lane-continue")
         page.wait_for_selector("text=Let’s set up Briglia")
         overflow = page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")
         check("no horizontal scrolling at phone width", not overflow)
@@ -328,11 +434,80 @@ def main():
         ctx, page, errors = session(d, dark=True)
         page.wait_for_selector("text=Choose your language")
         page.click(".langcard:has-text('English')")
+        page.wait_for_selector("text=How should Briglia think?")
+        shot(page, "39-dark-lanes")
+        page.click("#lane-continue")
         page.wait_for_selector("text=Let’s set up Briglia")
         page.click("text=See all settings")
         page.wait_for_selector(".grid")
         shot(page, "40-dark-dashboard")
         check("no page errors in dark mode", not errors, errors)
+        ctx.close()
+
+        # ---- OpenCode lane, then switching and adding providers ----
+        o = Fake()
+        ctx, page, errors = session(o)
+        page.wait_for_selector("text=Choose your language")
+        page.click(".langcard:has-text('English')")
+        page.wait_for_selector("text=How should Briglia think?")
+        page.click(".lanecard[data-lane=opencode]")
+        check("picking another lane says the OpenAI key is needed too", page.is_visible("text=also need an OpenAI API key"))
+        page.click("#lane-continue")
+        page.wait_for_selector("text=Let’s set up Briglia")
+        check("the welcome lists what OpenCode needs, OpenAI key included",
+              o.planned == "opencode" and page.is_visible("text=an OpenCode Go subscription") and page.is_visible("text=Briglia’s web research runs on it"))
+        check("the OpenAI key is a required step on this lane", page.is_visible("#steps li.todo >> text=OpenAI key"))
+        shot(page, "60-opencode-welcome")
+        page.click("text=Let’s start")
+        page.wait_for_selector("#f-name"); page.fill("#f-name", "Sofia"); page.click("button:has-text('Save')")
+        page.wait_for_selector("text=Connect OpenCode Go")
+        shot(page, "61-opencode-key")
+        page.fill("#f-ai", "oc-wrong-00000000000000")
+        page.wait_for_selector("text=OpenCode Go refused this key", timeout=6000)
+        page.fill("#f-ai", GOOD["opencode"])
+        page.wait_for_selector("text=Connect Telegram", timeout=6000)
+        check("a good OpenCode key is saved automatically and the setup moves on", o.active() == "opencode")
+        page.click("#steps button:has-text('OpenCode Go')")
+        page.wait_for_selector(".choice[data-model='kimi-k3']")
+        page.click(".choice[data-model='kimi-k3']")
+        page.wait_for_selector("text=Briglia now thinks with Kimi K3 on OpenCode Go.")
+        page.click(".seg button[data-effort=medium]")
+        page.wait_for_selector(".seg button.on[data-effort=medium]")
+        check("model and thinking level change with one click each", o.providers["opencode"]["model"] == "kimi-k3" and o.providers["opencode"]["effort"] == "medium")
+        shot(page, "62-opencode-settings")
+        page.click("#switch-provider")
+        page.wait_for_selector("text=Switch or add a provider")
+        check("the switcher shows every lane with what's in use",
+              page.locator(".lanecard").count() == 4 and page.is_visible(".lanecard[data-lane=opencode] >> text=In use"))
+        shot(page, "63-switcher")
+        page.click(".lanecard[data-lane=openrouter]")
+        page.wait_for_selector("h1:has-text('Connect OpenRouter')")
+        check("adding OpenRouter keeps OpenCode running until it's set up", page.is_visible("text=Briglia keeps using OpenCode Go"))
+        page.fill("#f-ai", GOOD["openrouter"])
+        page.wait_for_selector("text=Briglia now thinks with google/gemini-3-flash-preview on OpenRouter.", timeout=6000)
+        check("an OpenRouter key switches Briglia to OpenRouter", o.active() == "openrouter")
+        page.fill("#f-or-model", "moonshotai/kimi-k3")
+        page.click("button:has-text('Use this model')")
+        page.wait_for_selector("text=Briglia now thinks with moonshotai/kimi-k3 on OpenRouter.")
+        shot(page, "64-openrouter")
+        page.click("#switch-provider")
+        page.wait_for_selector(".lanecard[data-lane=local]")
+        page.click(".lanecard[data-lane=local]")
+        page.wait_for_selector("text=Use a local model")
+        check("the local server address starts at LM Studio's default", page.input_value("#f-local-url") == "http://localhost:1234/v1")
+        page.click("button:has-text('Find models')")
+        page.wait_for_selector(".choice[data-model='gemma-4-12b']")
+        page.click(".choice[data-model='gemma-4-12b']")
+        page.wait_for_selector("text=Briglia now thinks with gemma-4-12b on Local model.")
+        check("a local model is one click from the server's list", o.active() == "local" and o.providers["local"]["endpoint"] == "http://localhost:1234/v1")
+        shot(page, "65-local")
+        page.click("#switch-provider")
+        page.wait_for_selector(".lanecard[data-lane=opencode]")
+        page.click(".lanecard[data-lane=opencode]")
+        page.wait_for_selector("text=Briglia now thinks with OpenCode Go.")
+        check("switching back to a saved provider is one click", o.active() == "opencode")
+        overflow = page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")
+        check("no page errors or overflow while switching providers", not errors and not overflow, errors)
         ctx.close()
 
         # ---- Linux start failure (Codex R3): shown on the page with Retry,

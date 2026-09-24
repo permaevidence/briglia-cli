@@ -1,11 +1,13 @@
-/* briglia menu — ChatGPT-subscription setup and settings.
+/* briglia menu — setup and settings for everyone: pick how Briglia thinks
+   (ChatGPT subscription by default, OpenCode Go, OpenRouter or a local
+   model), then Telegram, keys, this computer and tools; start or stop it.
    State lives on the server (GET /api/menu/status); every change is one
    POST /api/menu {action, ...} that checks and saves in one go and answers
    with the fresh status. No inline script/style (CSP), no storage. */
 (function () {
   'use strict';
 
-  var ORDER = ['name', 'chatgpt', 'telegram', 'serper', 'jina', 'openai', 'email', 'computer', 'tools'];
+  var ORDER = ['name', 'ai', 'telegram', 'serper', 'jina', 'openai', 'email', 'computer', 'tools'];
   var S = null;                 // last status from the server
   var view = { kind: 'loading', step: null };
   var guided = false;
@@ -13,6 +15,9 @@
   var gone = false;
   var inflight = 0;
   var langPicked = false;       // first run: the language question comes first
+  var lanePicked = false;       // first run: then how Briglia thinks
+  var laneChoice = 'chatgpt';   // the highlighted card on that screen
+  var laneTouched = false;
 
   function lang() { return S && S.lang === 'it' ? 'it' : 'en'; }
   function T(en, it) { return lang() === 'it' ? it : en; }
@@ -181,6 +186,7 @@
     if (view.kind === 'welcome') v = welcomeView();
     else if (view.kind === 'dashboard') v = dashboardView();
     else if (view.kind === 'finish') v = finishView();
+    else if (view.kind === 'providers') v = providersView();
     else v = stepView(view.step);
     v.forEach(function (n) { if (n) card.appendChild(n); });
   }
@@ -206,19 +212,18 @@
         h('p', { class: 'small', text: 'You can switch any time with the flags at the top. · Puoi cambiarla quando vuoi con le bandiere in alto.' }),
       ];
     }
+    if (fresh && !lanePicked && !(S.ai && (S.ai.ready || S.ai.planned))) return lanePickView();
     var back = (S.steps || []).some(function (s) { return s.done && ['computer', 'tools'].indexOf(s.id) < 0; });
     var left = S.steps.filter(function (s) { return s.required && !s.done; }).length;
+    var ln = S.ai ? S.ai.lane : 'chatgpt';
     return [
       h('div', { class: 'eyebrow', text: back ? T('Welcome back', 'Bentornato') : T('Welcome', 'Benvenuto') }),
       h('h1', { text: back ? T('Let’s finish setting up Briglia', 'Completiamo la configurazione di Briglia') : T('Let’s set up Briglia', 'Configuriamo Briglia') }),
       h('p', { class: 'lead', text: back ? (left === 1 ? T('1 step left. Everything you entered before is saved.', 'Manca 1 passaggio. Tutto quello che hai inserito è salvato.') : T(left + ' steps left. Everything you entered before is saved.', 'Mancano ' + left + ' passaggi. Tutto quello che hai inserito è salvato.'))
-        : T('Briglia is your personal assistant. You talk to it on Telegram and it thinks with your ChatGPT subscription. This takes about 10 minutes, and everything is saved as you go.', 'Briglia è il tuo assistente personale. Gli parli su Telegram e ragiona con il tuo abbonamento ChatGPT. Ci vogliono circa 10 minuti, e tutto viene salvato man mano.') }),
+        : T('Briglia is your personal assistant. You talk to it on Telegram and it thinks with ' + LANE_THINK()[ln][0] + '. This takes about 10 minutes, and everything is saved as you go.', 'Briglia è il tuo assistente personale. Gli parli su Telegram e ragiona con ' + LANE_THINK()[ln][1] + '. Ci vogliono circa 10 minuti, e tutto viene salvato man mano.') }),
       back ? null : h('p', { class: 'small', text: T('You’ll need:', 'Ti serviranno:') }),
-      back ? null : h('ul', { class: 'bullets' }, [
-        h('li', { text: T('a ChatGPT account with Plus or Pro', 'un account ChatGPT Plus o Pro') }),
-        h('li', { text: T('Telegram on your phone', 'Telegram sul telefono') }),
-        h('li', { text: T('free accounts at serper.dev and jina.ai — we’ll show you exactly where to click', 'due account gratuiti su serper.dev e jina.ai: ti mostriamo esattamente dove cliccare') }),
-      ]),
+      back ? null : h('ul', { class: 'bullets' }, needList(ln).map(function (t) { return h('li', { text: t }); })),
+      back ? null : h('div', { class: 'actions', style: null }, [h('button', { class: 'btn ghost small', type: 'button', onclick: function () { lanePicked = false; act('lane', { lane: '' }); } }, [T('← Choose a different AI', '← Scegli un’altra AI')])]),
       h('div', { class: 'actions' }, [
         h('button', { class: 'btn primary', type: 'button', onclick: function () { guided = true; var first = ORDER.filter(function (id) { return !isDone(id); })[0]; if (first) openStep(first, true); else { view = { kind: 'finish' }; render(); } } }, [back ? T('Continue', 'Continua') : T('Let’s start', 'Iniziamo')]),
         h('button', { class: 'btn ghost', type: 'button', onclick: backToDashboard }, [T('See all settings', 'Vedi tutte le impostazioni')]),
@@ -234,19 +239,27 @@
       return h('button', { class: 'tile', type: 'button', onclick: function () { openStep(s.id, false); } },
         [h('div', { class: 'top' }, [h('span', { class: 'ttl', text: s.title }), badge]), h('div', { class: 'val', text: s.summary || '' })]);
     }));
-    var startLabel = S.platform === 'linux' ? (S.service_was_running ? T('Save and restart Briglia', 'Salva e riavvia Briglia') : T('Start Briglia', 'Avvia Briglia')) : T('Start Briglia', 'Avvia Briglia');
+    var paused = h('div', { class: 'runstate' }, [h('span', { class: 'pausedot' }),
+      h('span', {}, [h('b', { text: S.service_was_running ? T('Briglia is paused', 'Briglia è in pausa') : T('Briglia is stopped', 'Briglia è fermo') }),
+        ' · ' + T('it can’t run while this page is open.', 'non può funzionare mentre questa pagina è aperta.')])]);
     return [
       h('div', { class: 'eyebrow', text: T('Settings', 'Impostazioni') }),
       h('h1', { text: missing.length ? T('Almost there', 'Ci siamo quasi') : T('Everything’s ready', 'È tutto pronto') }),
       h('p', { class: 'lead', text: missing.length ? (T('Still needed: ', 'Mancano ancora: ') + missing.map(function (s) { return s.title; }).join(', ') + '.') : T('Click anything to change it. Changes are saved right away.', 'Clicca su qualsiasi voce per modificarla. Le modifiche vengono salvate subito.') }),
       notice('dashboard'),
+      missing.length ? null : paused,
       grid,
-      h('div', { class: 'actions' }, [
-        missing.length ? h('button', { class: 'btn primary', type: 'button', onclick: function () { guided = true; openStep(missing[0].id, true); } }, [T('Continue setup', 'Continua la configurazione')])
-          : h('button', { class: 'btn primary', type: 'button', onclick: function () { finish('start'); } }, [startLabel]),
+      h('div', { class: 'actions' }, missing.length ? [
+        h('button', { class: 'btn primary', type: 'button', onclick: function () { guided = true; openStep(missing[0].id, true); } }, [T('Continue setup', 'Continua la configurazione')]),
         h('span', { class: 'spacer' }),
-        h('button', { class: 'btn ghost', type: 'button', onclick: function () { finish('quit'); } }, [S.service_was_running ? T('Close and restart Briglia', 'Chiudi e riavvia Briglia') : T('Close', 'Chiudi')]),
+        h('button', { class: 'btn ghost', type: 'button', onclick: function () { finish('quit'); } }, [T('Close for now', 'Chiudi per ora')]),
+      ] : [
+        h('button', { class: 'btn primary', type: 'button', disabled: inflight > 0, onclick: function () { finish('start'); } }, ['▶  ' + T('Start Briglia', 'Avvia Briglia')]),
+        h('button', { class: 'btn secondary', type: 'button', disabled: inflight > 0, onclick: function () { finish('stop'); } }, ['■  ' + T('Stop Briglia', 'Ferma Briglia')]),
       ]),
+      missing.length ? null : h('p', { class: 'small', text: S.platform === 'linux'
+        ? T('Start runs Briglia in the background and at every startup of this computer. Stop keeps it off, also after a restart.', 'Avvia fa funzionare Briglia in background e a ogni accensione del computer. Ferma lo tiene spento, anche dopo un riavvio.')
+        : T('Start runs Briglia in the Terminal window you opened this from. Stop closes this page and leaves Briglia off.', 'Avvia fa funzionare Briglia nella finestra del Terminale da cui hai aperto questa pagina. Ferma chiude la pagina e lascia Briglia spento.') }),
     ];
   }
 
@@ -270,6 +283,13 @@
   function closingView() {
     var start = S.closing === 'start';
     var mac = S.platform !== 'linux';
+    if (S.closing === 'stop') {
+      return h('div', { class: 'gone' }, [
+        h('h1', { text: T('Briglia is stopped', 'Briglia è fermo') }),
+        h('p', { class: 'lead', text: mac ? T('Everything is saved. You can close this page. To start Briglia again, type briglia menu and press Start.', 'È tutto salvato. Puoi chiudere questa pagina. Per riavviare Briglia, scrivi briglia menu e premi Avvia.')
+          : T('Everything is saved, and Briglia won’t start by itself when this computer turns on. To start it again, type briglia menu and press Start.', 'È tutto salvato, e Briglia non partirà da solo all’accensione del computer. Per riavviarlo, scrivi briglia menu e premi Avvia.') }),
+      ]);
+    }
     return h('div', { class: 'gone' }, [
       h('div', { class: 'celebrate' }, [svg(CHECK, { width: '3' })]),
       h('h1', { text: start ? T('Briglia is starting', 'Briglia si sta avviando') : T('All saved', 'Tutto salvato') }),
@@ -383,10 +403,14 @@
     jina: { title: T('Reading web pages', 'Lettura pagine web'), lead: T('Jina lets Briglia open and read web pages. You can start for free.', 'Jina permette a Briglia di aprire e leggere le pagine web. Puoi iniziare gratis.'),
       steps: [[T('Open ', 'Apri '), link('https://jina.ai/reader', 'jina.ai/reader'), '.'], [T('Copy your API key (it starts with ', 'Copia la tua chiave API (inizia con '), h('b', { text: 'jina_' }), T('). Sign in to keep your free credits.', '). Accedi per conservare i crediti gratuiti.')], [T('Paste it below.', 'Incollala qui sotto.')]],
       placeholder: 'jina_…' },
-    openai: { title: T('Voice messages & images', 'Messaggi vocali e immagini'), lead: T('Optional. An OpenAI API key lets Briglia understand your voice messages and create images. Without it, everything else works.', 'Facoltativo. Una chiave API di OpenAI permette a Briglia di capire i tuoi messaggi vocali e di creare immagini. Senza, tutto il resto funziona.'),
+    openai: S.ai && S.ai.openai_required ? { title: T('OpenAI key', 'Chiave OpenAI'),
+      lead: T('Needed with ' + stepInfo('ai').title + ': Briglia’s web research runs on OpenAI (it reads web pages much faster than other models). The same key also lets Briglia understand voice messages and create images.', 'Serve con ' + stepInfo('ai').title + ': le ricerche web di Briglia usano OpenAI (legge le pagine web molto più velocemente degli altri modelli). La stessa chiave permette anche di capire i messaggi vocali e creare immagini.'),
+      extra: T('OpenAI bills API use per request, so you add a few dollars of credit. Web research costs cents per question.', 'OpenAI fa pagare l’uso delle API a richiesta, quindi aggiungi qualche dollaro di credito. Una ricerca web costa pochi centesimi.'),
+      steps: null, placeholder: 'sk-…' } : { title: T('Voice messages & images', 'Messaggi vocali e immagini'), lead: T('Optional. An OpenAI API key lets Briglia understand your voice messages and create images. Without it, everything else works.', 'Facoltativo. Una chiave API di OpenAI permette a Briglia di capire i tuoi messaggi vocali e di creare immagini. Senza, tutto il resto funziona.'),
       extra: T('This is separate from ChatGPT: OpenAI bills API use per request, so you add a few dollars of credit.', 'È separata da ChatGPT: OpenAI fa pagare l’uso delle API a richiesta, quindi aggiungi qualche dollaro di credito.'),
       steps: [[T('Open ', 'Apri '), link('https://platform.openai.com/api-keys', 'platform.openai.com/api-keys'), T(' and sign in.', ' e accedi.')], [T('Click ', 'Clicca '), h('b', { text: 'Create new secret key' }), T(' and copy it.', ' e copiala.')], [T('Add a little credit under ', 'Aggiungi un po’ di credito in '), h('b', { text: 'Settings → Billing' }), '.'], [T('Paste the key below.', 'Incolla la chiave qui sotto.')]],
       placeholder: 'sk-…' },
+    openaiSteps: [[T('Open ', 'Apri '), link('https://platform.openai.com/api-keys', 'platform.openai.com/api-keys'), T(' and sign in.', ' e accedi.')], [T('Click ', 'Clicca '), h('b', { text: 'Create new secret key' }), T(' and copy it.', ' e copiala.')], [T('Add a little credit under ', 'Aggiungi un po’ di credito in '), h('b', { text: 'Settings → Billing' }), '.'], [T('Paste the key below.', 'Incolla la chiave qui sotto.')]],
     email: { title: 'Email', lead: T('Optional. AgentMail gives Briglia its own email address, so it can receive and send email for you, and a calendar.', 'Facoltativo. AgentMail dà a Briglia un suo indirizzo email, così può ricevere e inviare email per te, e un calendario.'),
       steps: [[T('Sign up at ', 'Registrati su '), link('https://agentmail.to', 'agentmail.to'), T(' (there’s a free plan).', ' (c’è un piano gratuito).')], [T('Create an inbox, then an ', 'Crea una casella, poi una '), h('b', { text: 'API key' }), T(', and copy it.', ' e copiala.')], [T('Paste it below.', 'Incollala qui sotto.')]],
       placeholder: T('Paste your AgentMail key', 'Incolla la chiave AgentMail') },
@@ -395,9 +419,9 @@
   function stepView(id) {
     var st = local[id] = local[id] || {};
     if (id === 'name') return nameView(st);
-    if (id === 'chatgpt') return chatgptView(st);
     if (id === 'telegram') return telegramView(st);
-    if (KEYS()[id]) return keyView(id, st);
+    if (id === 'ai') return aiView(st);
+    if (id !== 'openaiSteps' && KEYS()[id]) return keyView(id, st);
     if (id === 'computer') return computerView(st);
     if (id === 'tools') return toolsView(st);
     return [h('p', { text: '?' })];
@@ -419,7 +443,9 @@
   }
 
   function keyView(id, st) {
-    var k = KEYS()[id];
+    var all = KEYS();
+    var k = all[id];
+    if (!k.steps) k.steps = all.openaiSteps;
     var masked = id === 'email' ? (S.email && S.email.on ? S.keys.agentmail : null) : S.keys[id];
     var out = stepHeader(id, null, k.title, k.lead);
     out.push(notice(id));
@@ -430,7 +456,7 @@
         if (S.busy === 'email_tool') out.push(h('div', { class: 'waiting' }, [h('span', { class: 'spinner' }), T('Installing the email tool…', 'Installo lo strumento email…')]));
       } else out.push(savedBox(T('Key saved', 'Chiave salvata'), masked));
       var btns = [h('button', { class: 'btn secondary', type: 'button', onclick: function () { st.editing = true; st.value = ''; local[id].notice = null; render(); } }, [T('Paste a new key', 'Incolla una nuova chiave')])];
-      if (id === 'openai') btns.push(h('button', { class: 'btn danger', type: 'button', onclick: function () { act('key_remove', { kind: 'openai' }, id); } }, [T('Remove', 'Rimuovi')]));
+      if (id === 'openai' && !(S.ai && S.ai.openai_required)) btns.push(h('button', { class: 'btn danger', type: 'button', onclick: function () { act('key_remove', { kind: 'openai' }, id); } }, [T('Remove', 'Rimuovi')]));
       if (id === 'email') {
         if (!S.email.tool_installed && S.busy !== 'email_tool') btns.push(h('button', { class: 'btn secondary', type: 'button', onclick: function () { act('email_tool', {}, id); } }, [T('Install the email tool', 'Installa lo strumento email')]));
         btns.push(h('button', { class: 'btn danger', type: 'button', onclick: function () { act('email_off', {}, id); } }, [T('Turn email off', 'Disattiva l’email')]));
@@ -450,10 +476,245 @@
     return out;
   }
 
+  // ---------- AI provider ----------
+  function LANE_THINK() { return {
+    chatgpt: ['your ChatGPT subscription', 'il tuo abbonamento ChatGPT'],
+    opencode: ['OpenCode Go', 'OpenCode Go'],
+    openrouter: ['OpenRouter', 'OpenRouter'],
+    local: ['a model on your own computer', 'un modello sul tuo computer'],
+  }; }
+  function LANES() { return [
+    { id: 'chatgpt', name: 'ChatGPT', badge: T('Easiest', 'Il più semplice'),
+      text: T('Use your ChatGPT Plus or Pro subscription. Nothing extra to pay per message — just sign in.', 'Usa il tuo abbonamento ChatGPT Plus o Pro. Nessun costo extra a messaggio: basta accedere.') },
+    { id: 'opencode', name: 'OpenCode Go', text: T('A low-cost monthly plan with many AI models: GLM, Kimi, Qwen, MiMo and more.', 'Un abbonamento mensile economico con tanti modelli AI: GLM, Kimi, Qwen, MiMo e altri.') },
+    { id: 'openrouter', name: 'OpenRouter', text: T('Pay as you go, with hundreds of models from every AI company.', 'Paghi a consumo, con centinaia di modelli di tutte le aziende AI.') },
+    { id: 'local', name: T('Local model', 'Modello locale'), text: T('A model running on your own computer or network (LM Studio, Ollama). For advanced users.', 'Un modello sul tuo computer o nella tua rete (LM Studio, Ollama). Per utenti esperti.') },
+  ]; }
+  function laneName(id) { return (LANES().filter(function (l) { return l.id === id; })[0] || { name: id }).name; }
+  function needList(ln) {
+    var first = {
+      chatgpt: T('a ChatGPT account with Plus or Pro', 'un account ChatGPT Plus o Pro'),
+      opencode: T('an OpenCode Go subscription (opencode.ai)', 'un abbonamento OpenCode Go (opencode.ai)'),
+      openrouter: T('an OpenRouter account with some credit (openrouter.ai)', 'un account OpenRouter con un po’ di credito (openrouter.ai)'),
+      local: T('a model server running (LM Studio, Ollama, vLLM…) with a model loaded', 'un server di modelli acceso (LM Studio, Ollama, vLLM…) con un modello caricato'),
+    }[ln];
+    var out = [first];
+    if (ln !== 'chatgpt') out.push(T('an OpenAI API key with a little credit — Briglia’s web research runs on it', 'una chiave API di OpenAI con un po’ di credito: le ricerche web di Briglia la usano'));
+    out.push(T('Telegram on your phone', 'Telegram sul telefono'));
+    out.push(T('free accounts at serper.dev and jina.ai — we’ll show you exactly where to click', 'due account gratuiti su serper.dev e jina.ai: ti mostriamo esattamente dove cliccare'));
+    return out;
+  }
+  function laneCard(l, opts) {
+    var badge = null;
+    var p = (opts.status && S.ai.providers[l.id]) || {};
+    if (opts.status) {
+      if (p.active) badge = h('span', { class: 'badge ok', text: T('In use', 'In uso') });
+      else if (p.configured) badge = h('span', { class: 'badge opt', text: T('Set up', 'Configurato') });
+    } else if (l.badge) badge = h('span', { class: 'badge ok', text: l.badge });
+    return h('button', { class: 'lanecard' + (opts.selected ? ' sel' : ''), type: 'button', 'data-lane': l.id, disabled: inflight > 0, onclick: opts.onclick },
+      [h('div', { class: 'top' }, [h('span', { class: 'n', text: l.name }), badge]), h('div', { class: 's', text: l.text }),
+       opts.status && p.configured && p.model_label ? h('div', { class: 'm', text: p.model_label }) : null]);
+  }
+  function lanePickView() {
+    if (!laneTouched && S.ai && S.ai.planned) laneChoice = S.ai.planned;
+    return [
+      h('div', { class: 'eyebrow', text: T('Welcome', 'Benvenuto') }),
+      h('h1', { text: T('How should Briglia think?', 'Come deve ragionare Briglia?') }),
+      h('p', { class: 'lead', text: T('Briglia needs an AI to think with. If you have ChatGPT Plus or Pro, that’s the easiest way. You can change this any time.', 'Briglia ha bisogno di un’AI con cui ragionare. Se hai ChatGPT Plus o Pro, è il modo più semplice. Puoi cambiarlo quando vuoi.') }),
+      h('div', { class: 'lanes' }, LANES().map(function (l) {
+        return laneCard(l, { selected: laneChoice === l.id, onclick: function () { laneChoice = l.id; laneTouched = true; render(); } });
+      })),
+      laneChoice !== 'chatgpt' ? h('p', { class: 'small', text: T('With this choice you’ll also need an OpenAI API key: Briglia’s web research runs on OpenAI.', 'Con questa scelta serve anche una chiave API di OpenAI: le ricerche web di Briglia usano OpenAI.') }) : null,
+      h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', id: 'lane-continue', disabled: inflight > 0, onclick: function () {
+        act('lane', { lane: laneChoice }).then(function (j) { if (j.ok) { lanePicked = true; render(); } });
+      } }, [T('Continue', 'Continua')])]),
+    ];
+  }
+  // "Switch or add a provider": every lane, with what's saved and in use.
+  function providersView() {
+    var out = [
+      h('div', { class: 'eyebrow', text: T('AI provider', 'Fornitore AI') }),
+      h('h1', { text: T('Switch or add a provider', 'Cambia o aggiungi un fornitore') }),
+      h('p', { class: 'lead', text: T('Pick how Briglia thinks. Providers you’ve set up stay saved, so you can switch back any time.', 'Scegli come ragiona Briglia. I fornitori configurati restano salvati, così puoi tornare indietro quando vuoi.') }),
+      notice('providers'),
+    ];
+    if (S.ai.other) out.push(h('div', { class: 'notice info' }, [T('Right now Briglia uses ' + S.ai.other + ' (set up with briglia setup).', 'Adesso Briglia usa ' + S.ai.other + ' (configurato con briglia setup).')]));
+    out.push(h('div', { class: 'lanes' }, LANES().map(function (l) {
+      return laneCard(l, { status: true, onclick: function () {
+        var p = S.ai.providers[l.id] || {};
+        if (p.active) { act('lane', { lane: '' }).then(function () { openStep('ai', false); }); return; }
+        if (p.configured) {
+          act('provider_use', { profile: l.id }, 'providers').then(function (j) {
+            if (j.ok && !j.stale) { openStep('ai', false); local.ai.notice = { kind: 'ok', text: j.message || '' }; render(); }
+          });
+          return;
+        }
+        act('lane', { lane: l.id }).then(function (j) { if (j.ok) openStep('ai', false); });
+      } });
+    })));
+    out.push(h('p', { class: 'small', text: T('Every choice except ChatGPT also needs an OpenAI API key, for web research.', 'Ogni scelta tranne ChatGPT richiede anche una chiave API di OpenAI, per le ricerche web.') }));
+    out.push(h('div', { class: 'actions' }, [h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', type: 'button', onclick: function () { openStep('ai', false); } }, [T('← Back', '← Indietro')])]));
+    return out;
+  }
+  function switchRow() {
+    return h('div', { class: 'links switch' }, [h('button', { class: 'btn ghost small', type: 'button', id: 'switch-provider', onclick: function () { cancelTimers(); view = { kind: 'providers' }; local.providers = {}; render(); window.scrollTo(0, 0); } },
+      [T('Switch or add a provider', 'Cambia o aggiungi un fornitore')])]);
+  }
+  function EFFORT_LABELS() { return { low: T('Light', 'Leggero'), medium: T('Balanced', 'Bilanciato'), high: T('Deep', 'Approfondito'), xhigh: T('Deepest', 'Massimo') }; }
+  function effortRow(id) {
+    var p = S.ai.providers[id] || {};
+    var list = p.efforts || [];
+    if (!list.length) return null;
+    var labels = EFFORT_LABELS();
+    return h('div', { class: 'effort' }, [
+      h('div', { class: 'label', text: T('Thinking', 'Ragionamento') }),
+      h('div', { class: 'seg', role: 'group' }, list.map(function (e) {
+        return h('button', { type: 'button', class: e === p.effort ? 'on' : '', disabled: inflight > 0, 'data-effort': e,
+          onclick: function () { if (e !== p.effort) act('effort', { effort: e }, 'ai'); } }, [labels[e] || e]);
+      })),
+      h('div', { class: 'small', text: T('Deeper thinking gives better answers to hard questions, but replies take longer.', 'Un ragionamento più profondo dà risposte migliori alle domande difficili, ma ci mette di più.') }),
+    ]);
+  }
+  // Setting up a lane while another provider runs: say what runs now.
+  function keepCurrent() {
+    if (!S.ai.planned || !(S.ai.active || S.ai.other)) return null;
+    var now = S.ai.active ? laneName(S.ai.active) : S.ai.other;
+    return h('div', { class: 'notice info' }, [h('span', {}, [T('Briglia keeps using ' + now + ' until this is set up. ', 'Briglia continua a usare ' + now + ' finché questo non è configurato. '),
+      h('button', { class: 'btn ghost small', type: 'button', onclick: function () { act('lane', { lane: '' }); } }, [T('Keep ' + now, 'Tieni ' + now)])])]);
+  }
+  function useButton(id, name) {
+    var p = S.ai.providers[id] || {};
+    if (!p.configured || p.active) return null;
+    return h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', disabled: inflight > 0, onclick: function () { act('provider_use', { profile: id }, 'ai'); } }, [T('Use ' + name + ' for Briglia', 'Usa ' + name + ' per Briglia')])]);
+  }
+  function aiView(st) {
+    var ln = S.ai ? S.ai.lane : 'chatgpt';
+    if (ln === 'opencode') return opencodeView(st);
+    if (ln === 'openrouter') return openrouterView(st);
+    if (ln === 'local') return localView(st);
+    return chatgptView(st);
+  }
+  function afterSave(j) { if (j && j.ok && !j.stale && guided) next('ai'); return j; }
+  function newKeyButton(st) {
+    return h('div', { class: 'actions' }, [h('button', { class: 'btn secondary', type: 'button', onclick: function () { st.editing = true; st.value = ''; st.notice = null; render(); } }, [T('Paste a new key', 'Incolla una nuova chiave')])]);
+  }
+
+  function opencodeView(st) {
+    var p = S.ai.providers.opencode || {};
+    var out = stepHeader('ai', null, p.configured ? 'OpenCode Go' : T('Connect OpenCode Go', 'Collega OpenCode Go'), T('OpenCode Go is a low-cost monthly subscription with many AI models. One key covers all of them.', 'OpenCode Go è un abbonamento mensile economico con tanti modelli AI. Una sola chiave li copre tutti.'));
+    out.push(keepCurrent());
+    out.push(notice('ai'));
+    if (p.configured && !st.editing) {
+      out.push(savedBox(p.active ? T('Connected', 'Collegato') : T('Saved, not in use', 'Salvato, non in uso'), p.key ? T('Key ', 'Chiave ') + p.key : ''));
+      out.push(useButton('opencode', 'OpenCode Go'));
+      out.push(h('p', { class: 'small', text: T('Model — all included in your plan.', 'Modello: tutti inclusi nel tuo abbonamento.') }));
+      out.push(h('div', { class: 'choices' }, (S.ai.opencode_models || []).map(function (m) {
+        return h('button', { class: 'choice' + (m.id === p.model ? ' sel' : ''), type: 'button', disabled: inflight > 0, 'data-model': m.id,
+          onclick: function () { if (m.id !== p.model) act('provider_model', { profile: 'opencode', model: m.id }, 'ai'); } },
+          [h('div', { class: 'n', text: m.label }), h('div', { class: 's', text: m.id === p.model ? T('In use', 'In uso') : (m.recommended ? T('Recommended', 'Consigliato') : '') })]);
+      })));
+      if (p.active) out.push(effortRow('opencode'));
+      out.push(newKeyButton(st));
+      out.push(switchRow());
+      out.push(navButtons('ai'));
+      return out;
+    }
+    out.push(h('ol', { class: 'howto' }, [
+      h('li', {}, [T('Open ', 'Apri '), link('https://opencode.ai', 'opencode.ai'), T(' and sign in.', ' e accedi.')]),
+      h('li', {}, [T('Subscribe to ', 'Abbonati a '), h('b', { text: 'OpenCode Go' }), '.']),
+      h('li', {}, [T('Create an ', 'Crea una '), h('b', { text: 'API key' }), T(' in your workspace and copy it.', ' nel tuo workspace e copiala.')]),
+      h('li', {}, [T('Paste it below. It’s checked automatically.', 'Incollala qui sotto. Viene controllata in automatico.')]),
+    ]));
+    out.push(field('ai', { secret: true, label: T('Your OpenCode key', 'La tua chiave OpenCode'), placeholder: 'sk-…', checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
+      return act('provider_key', { profile: 'opencode', key: v }, 'ai', current).then(afterSave);
+    } }));
+    if (st.editing && p.configured) out.push(h('button', { class: 'btn ghost', type: 'button', onclick: function () { st.editing = false; render(); } }, [T('Cancel', 'Annulla')]));
+    out.push(switchRow());
+    out.push(navButtons('ai'));
+    return out;
+  }
+
+  function visionToggle(key) {
+    var st = local[key] = local[key] || {};
+    var box = h('input', { type: 'checkbox', id: 'to-' + key });
+    box.checked = !!st.textOnly;
+    box.addEventListener('change', function () { st.textOnly = box.checked; });
+    return h('details', { class: 'more', open: st.textOnly ? true : null }, [h('summary', { text: T('More options', 'Altre opzioni') }),
+      h('label', { class: 'check', for: 'to-' + key }, [box, ' ' + T('This model can’t see images (text-only)', 'Questo modello non vede le immagini (solo testo)')])]);
+  }
+
+  function openrouterView(st) {
+    var p = S.ai.providers.openrouter || {};
+    var out = stepHeader('ai', null, p.configured ? 'OpenRouter' : T('Connect OpenRouter', 'Collega OpenRouter'), T('OpenRouter gives Briglia access to hundreds of models. You pay only for what you use.', 'OpenRouter dà a Briglia accesso a centinaia di modelli. Paghi solo quello che usi.'));
+    out.push(keepCurrent());
+    out.push(notice('ai'));
+    if (p.configured && !st.editing) {
+      out.push(savedBox(p.active ? T('Connected', 'Collegato') : T('Saved, not in use', 'Salvato, non in uso'), p.key ? T('Key ', 'Chiave ') + p.key : ''));
+      out.push(useButton('openrouter', 'OpenRouter'));
+      var ms = local['or-model'] = local['or-model'] || {};
+      if (ms.value === undefined || ms.value === null) ms.value = p.model || '';
+      out.push(field('or-model', { label: T('Model', 'Modello'), placeholder: S.ai.openrouter_default, auto: false, button: T('Use this model', 'Usa questo modello'), onSubmit: function (v, current) {
+        return act('provider_model', { profile: 'openrouter', model: v, text_only: !!ms.textOnly }, 'ai', current);
+      } }));
+      out.push(h('p', { class: 'small' }, [T('In use: ', 'In uso: '), h('b', { text: p.model }), ' · ', link('https://openrouter.ai/models', T('browse models', 'sfoglia i modelli'))]));
+      out.push(visionToggle('or-model'));
+      if (p.active) out.push(effortRow('openrouter'));
+      out.push(newKeyButton(st));
+      out.push(switchRow());
+      out.push(navButtons('ai'));
+      return out;
+    }
+    out.push(h('ol', { class: 'howto' }, [
+      h('li', {}, [T('Open ', 'Apri '), link('https://openrouter.ai/settings/credits', 'openrouter.ai'), T(', sign in and add a little credit.', ', accedi e aggiungi un po’ di credito.')]),
+      h('li', {}, [T('Open ', 'Apri '), link('https://openrouter.ai/keys', 'openrouter.ai/keys'), T(', create a key and copy it.', ', crea una chiave e copiala.')]),
+      h('li', {}, [T('Paste it below. Briglia starts with ', 'Incollala qui sotto. Briglia parte con '), h('b', { text: S.ai.openrouter_default }), T(' — you can pick any other model right after.', ': subito dopo puoi scegliere qualsiasi altro modello.')]),
+    ]));
+    out.push(field('ai', { secret: true, label: T('Your OpenRouter key', 'La tua chiave OpenRouter'), placeholder: 'sk-or-…', checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
+      return act('provider_key', { profile: 'openrouter', key: v }, 'ai', current).then(afterSave);
+    } }));
+    if (st.editing && p.configured) out.push(h('button', { class: 'btn ghost', type: 'button', onclick: function () { st.editing = false; render(); } }, [T('Cancel', 'Annulla')]));
+    out.push(switchRow());
+    out.push(navButtons('ai'));
+    return out;
+  }
+
+  function localView(st) {
+    var p = S.ai.providers.local || {};
+    var l = S.ai.local;
+    var out = stepHeader('ai', null, p.configured ? T('Local model', 'Modello locale') : T('Use a local model', 'Usa un modello locale'), T('Briglia can think with a model running on this computer or on your network — LM Studio, Ollama, vLLM and similar. It needs a powerful computer.', 'Briglia può ragionare con un modello in esecuzione su questo computer o nella tua rete: LM Studio, Ollama, vLLM e simili. Serve un computer potente.'));
+    out.push(keepCurrent());
+    out.push(notice('ai'));
+    if (p.configured) {
+      out.push(savedBox(p.active ? T('Connected', 'Collegato') : T('Saved, not in use', 'Salvato, non in uso'), p.model + (p.endpoint ? ' · ' + p.endpoint : '')));
+      out.push(useButton('local', T('the local model', 'il modello locale')));
+    }
+    var as = local['local-url'] = local['local-url'] || {};
+    if (as.value === undefined || as.value === null) as.value = p.endpoint || 'http://localhost:1234/v1';
+    out.push(field('local-url', { label: T('Server address', 'Indirizzo del server'), placeholder: 'http://localhost:1234/v1', auto: false, button: T('Find models', 'Trova i modelli'),
+      checkingText: T('Asking the server…', 'Chiedo al server…'), onSubmit: function (v, current) {
+        // Listing saves nothing: keep the address in the field.
+        return act('local_models', { base_url: v }, 'ai', current).then(function (j) { return { ok: false, stale: true }; });
+      } }));
+    out.push(h('p', { class: 'small', text: 'LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1' }));
+    if (l && l.state === 'ok') {
+      out.push(h('p', { class: 'small', text: T('Pick the model Briglia should use:', 'Scegli il modello che Briglia deve usare:') }));
+      out.push(h('div', { class: 'choices' }, l.models.map(function (m) {
+        var inUse = p.configured && m === p.model && l.base === p.endpoint;
+        return h('button', { class: 'choice' + (inUse ? ' sel' : ''), type: 'button', disabled: inflight > 0, 'data-model': m,
+          onclick: function () { if (!inUse) act('provider_model', { profile: 'local', model: m, base_url: l.base, text_only: !!(local['local-url'] || {}).textOnly }, 'ai').then(afterSave); } },
+          [h('div', { class: 'n', text: m }), h('div', { class: 's', text: inUse ? T('In use', 'In uso') : '' })]);
+      })));
+      out.push(visionToggle('local-url'));
+    }
+    out.push(switchRow());
+    out.push(navButtons('ai'));
+    return out;
+  }
+
   function chatgptView(st) {
     var c = S.chatgpt || {};
-    var out = stepHeader('chatgpt', null, T('Sign in to ChatGPT', 'Accedi a ChatGPT'), T('Briglia thinks with your ChatGPT subscription (Plus or Pro). You don’t pay per message: it counts toward your normal ChatGPT limits, and Briglia’s web research uses it too.', 'Briglia ragiona con il tuo abbonamento ChatGPT (Plus o Pro). Non paghi a messaggio: conta nei normali limiti di ChatGPT, e anche le ricerche web di Briglia lo usano.'));
-    out.push(notice('chatgpt'));
+    var out = stepHeader('ai', null, T('Sign in to ChatGPT', 'Accedi a ChatGPT'), T('Briglia thinks with your ChatGPT subscription (Plus or Pro). You don’t pay per message: it counts toward your normal ChatGPT limits, and Briglia’s web research uses it too.', 'Briglia ragiona con il tuo abbonamento ChatGPT (Plus o Pro). Non paghi a messaggio: conta nei normali limiti di ChatGPT, e anche le ricerche web di Briglia lo usano.'));
+    out.push(notice('ai'));
     var login = c.login;
     if (login && login.state === 'error' && login.message) out.push(h('div', { class: 'notice bad' }, [login.message]));
     if (login && (login.state === 'waiting' || login.state === 'finishing')) {
@@ -468,35 +729,38 @@
         out.push(h('div', { class: 'waiting' }, [h('span', { class: 'spinner' }), T('A ChatGPT tab opened — sign in there and approve Briglia.', 'Si è aperta una scheda di ChatGPT: accedi lì e approva Briglia.')]));
         out.push(h('p', { class: 'small' }, [T('Nothing opened? ', 'Non si è aperto nulla? '), h('a', { href: login.url, target: '_blank', rel: 'noopener noreferrer', text: T('Open the sign-in page', 'Apri la pagina di accesso') }), '.']));
       }
-      out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn ghost', type: 'button', onclick: function () { act('chatgpt_cancel', {}, 'chatgpt'); } }, [T('Cancel', 'Annulla')])]));
+      out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn ghost', type: 'button', onclick: function () { act('chatgpt_cancel', {}, 'ai'); } }, [T('Cancel', 'Annulla')])]));
       return out;
     }
     if (c.state === 'signed_in') {
       out.push(savedBox(c.active ? T('Signed in', 'Accesso fatto') : T('Signed in, but not in use', 'Accesso fatto, ma non in uso'), c.active ? T('Briglia thinks with ', 'Briglia ragiona con ') + c.model_label : ''));
       if (!c.active && c.other_provider) {
         out.push(h('p', { text: T('Right now Briglia uses ', 'Adesso Briglia usa ') + c.other_provider + '.' }));
-        out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', onclick: function () { act('chatgpt_use', {}, 'chatgpt'); } }, [T('Use ChatGPT for Briglia', 'Usa ChatGPT per Briglia')])]));
+        out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', onclick: function () { act('chatgpt_use', {}, 'ai'); } }, [T('Use ChatGPT for Briglia', 'Usa ChatGPT per Briglia')])]));
       }
       out.push(h('p', { class: 'small', text: T('Model — GPT-6 Sol is recommended. Not every plan includes every model.', 'Modello: consigliato GPT-6 Sol. Non tutti i piani includono tutti i modelli.') }));
       out.push(h('div', { class: 'choices' }, (c.models || []).map(function (m) {
         return h('button', { class: 'choice' + (m.id === c.model ? ' sel' : ''), type: 'button', disabled: inflight > 0,
-          onclick: function () { if (m.id !== c.model) act('chatgpt_model', { model: m.id }, 'chatgpt'); } },
+          onclick: function () { if (m.id !== c.model) act('chatgpt_model', { model: m.id }, 'ai'); } },
           [h('div', { class: 'n', text: m.label }), h('div', { class: 's', text: m.id === c.model ? T('In use', 'In uso') : (m.recommended ? T('Recommended', 'Consigliato') : '') })]);
       })));
+      if (c.active) out.push(effortRow('chatgpt'));
       out.push(h('div', { class: 'actions' }, [
-        h('button', { class: 'btn secondary', type: 'button', onclick: function () { act('chatgpt_logout', { again: true }, 'chatgpt'); } }, [T('Use a different account', 'Usa un altro account')]),
-        h('button', { class: 'btn danger', type: 'button', onclick: function () { act('chatgpt_logout', {}, 'chatgpt'); } }, [T('Sign out', 'Esci')]),
+        h('button', { class: 'btn secondary', type: 'button', onclick: function () { act('chatgpt_logout', { again: true }, 'ai'); } }, [T('Use a different account', 'Usa un altro account')]),
+        h('button', { class: 'btn danger', type: 'button', onclick: function () { act('chatgpt_logout', {}, 'ai'); } }, [T('Sign out', 'Esci')]),
       ]));
-      out.push(navButtons('chatgpt'));
+      out.push(switchRow());
+      out.push(navButtons('ai'));
       return out;
     }
     if (c.state === 'login_required') out.push(h('div', { class: 'notice warn' }, [T('Your ChatGPT sign-in has expired. Please sign in again.', 'L’accesso a ChatGPT è scaduto. Accedi di nuovo.')]));
     if (c.other_provider) out.push(h('p', { class: 'small', text: T('Right now Briglia uses ' + c.other_provider + '. Signing in switches it to ChatGPT.', 'Adesso Briglia usa ' + c.other_provider + '. Accedendo passerà a ChatGPT.') }));
-    var browserBtn = h('button', { class: 'btn dark', type: 'button', disabled: inflight > 0, onclick: function () { act('chatgpt_browser', {}, 'chatgpt'); } }, [T('Sign in with ChatGPT', 'Accedi con ChatGPT')]);
-    var codeBtn = h('button', { class: 'btn secondary', type: 'button', disabled: inflight > 0, onclick: function () { act('chatgpt_code', {}, 'chatgpt'); } }, [T('Use a code instead', 'Usa un codice')]);
+    var browserBtn = h('button', { class: 'btn dark', type: 'button', disabled: inflight > 0, onclick: function () { act('chatgpt_browser', {}, 'ai'); } }, [T('Sign in with ChatGPT', 'Accedi con ChatGPT')]);
+    var codeBtn = h('button', { class: 'btn secondary', type: 'button', disabled: inflight > 0, onclick: function () { act('chatgpt_code', {}, 'ai'); } }, [T('Use a code instead', 'Usa un codice')]);
     out.push(h('div', { class: 'actions' }, S.browser_likely === false ? [codeBtn, browserBtn] : [browserBtn, codeBtn]));
     out.push(h('p', { class: 'small', text: T('“Use a code” works from your phone or another computer.', '“Usa un codice” funziona dal telefono o da un altro computer.') }));
-    out.push(navButtons('chatgpt'));
+    out.push(switchRow());
+    out.push(navButtons('ai'));
     return out;
   }
 

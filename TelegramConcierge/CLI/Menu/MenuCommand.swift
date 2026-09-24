@@ -6,10 +6,11 @@ import Glibc
 import Darwin
 #endif
 
-/// `briglia menu` — setup and settings for people who use their ChatGPT
-/// subscription, in a page in the browser: sign in, Telegram, the web keys,
-/// optional voice/images and email, and this computer's permissions and
-/// tools. The page is served by this process on 127.0.0.1 with quick setup's
+/// `briglia menu` — the way in for everyone: setup and settings in a page
+/// in the browser. Pick how Briglia thinks (the ChatGPT subscription — the
+/// default and the easiest — OpenCode Go, OpenRouter or a local model), then
+/// Telegram, the web keys, the OpenAI key (optional only with ChatGPT),
+/// email, and this computer's permissions and tools; start or stop Briglia. The page is served by this process on 127.0.0.1 with quick setup's
 /// server and authorization (single-use link → HttpOnly cookie, exact host
 /// and origin, custom header, strict CSP). Saves go through setup-api and
 /// SubscriptionSetup, installers through the quick setup's own seams.
@@ -17,7 +18,7 @@ import Darwin
 struct MenuCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "menu",
-        abstract: "Easy setup and settings in your browser, for ChatGPT subscribers."
+        abstract: "Set up Briglia, change its settings, start or stop it — in your browser."
     )
 
     func run() async throws {
@@ -190,6 +191,19 @@ struct MenuCommand: AsyncParsableCommand {
             print("\n✓ Briglia is running in the background and starts by itself when this computer turns on.")
             print("Talk to Briglia on Telegram. To change settings later, type: briglia menu")
             #endif
+            return
+        }
+        if closing == "stop" {
+            // "Stop Briglia": it stays off — a paused service is not started
+            // again, and on Linux it no longer starts at boot either.
+            leaseBox.release()
+            #if os(Linux)
+            _ = AgentServiceSupport.run("systemctl", ["--user", "disable", "--now", AgentServiceSupport.userUnitName])
+            print("■ Briglia is stopped and won't start by itself when this computer turns on.")
+            #else
+            print("■ Briglia is stopped.")
+            #endif
+            print("To start it again, type: briglia menu")
             return
         }
         if await menu.leaseHandedOff {

@@ -104,6 +104,6 @@ case ":$PATH:" in
 esac
 if [ "$MIGRATED" != "1" ] && [ "$MIGRATE_STATE" = "0" ]; then
     echo
-    echo "Next: briglia quicksetup   (verify every key on a local page in your browser, then install the tools)"
-    echo "  or: briglia setup        (the step-by-step wizard in the terminal)"
+    echo "Next: briglia menu    (set up Briglia in your browser: ChatGPT, OpenCode, OpenRouter or a local model)"
+    echo "  or: briglia setup   (the step-by-step wizard in the terminal)"
 fi
