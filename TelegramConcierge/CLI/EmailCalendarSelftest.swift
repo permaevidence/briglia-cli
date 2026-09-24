@@ -656,7 +656,8 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
             let crafted = AgentMailService.PollState(
                 watermark: Date(timeIntervalSinceNow: -1800),
                 drains: [:],
-                savedAt: Date(timeIntervalSinceNow: -600))
+                savedAt: Date(timeIntervalSinceNow: -600),
+                account: AgentMailService.currentAccountFingerprint())
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             try (try encoder.encode(crafted)).write(to: stateURL, options: [.atomic])

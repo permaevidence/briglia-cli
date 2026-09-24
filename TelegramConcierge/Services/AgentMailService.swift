@@ -93,17 +93,12 @@ actor AgentMailService {
     /// The account the running poller was started for (stamped into every
     /// checkpoint it writes).
     private var pollAccount: String?
-    /// Checkpoints from before accounts were stamped are adopted only by the
-    /// first start after the upgrade. That window is closed DURABLY (Codex,
-    /// menu round 4): the first start writes `legacyClosedURL`, and so does
-    /// an account change before it tries to remove the old file. A fresh
-    /// process therefore never assigns a surviving unstamped checkpoint to
-    /// whichever account happens to be configured. The in-memory flag covers
-    /// the (reported) case where even the marker can't be written.
-    private var legacyCheckpointAdoptable = true
-    private var legacyAdoptionOpen: Bool {
-        legacyCheckpointAdoptable && !FileManager.default.fileExists(atPath: Self.legacyClosedURL.path)
-    }
+    // Checkpoints from before accounts were stamped (≤0.2.35) are never
+    // adopted: nothing durable proves which account wrote them, and every
+    // marker/ordering scheme failed on a shared data-directory write failure
+    // or on a key edited straight into secrets.json (Codex, menu rounds 4–5).
+    // The one-time cost at the upgrade: arrivals during that restart get no
+    // proactive notice; they still show in the unread snapshot.
 
     // MARK: - Public API — polling lifecycle (mirrors GoogleWorkspaceService)
 
@@ -175,9 +170,6 @@ actor AgentMailService {
         if !restorePollStateIfFresh() {
             persistPollState()
         }
-        // The upgrade-time adoption decision has been made (adopted and
-        // stamped, refused, or nothing to adopt): close the window for good.
-        if legacyAdoptionOpen { _ = closeLegacyAdoption() }
         pollerTask = Task.detached { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: intervalNs)
@@ -193,47 +185,17 @@ actor AgentMailService {
     /// quiesced: cursors discovered under the old key must not be restored
     /// for the new one.
     /// False when the file exists but couldn't be removed. Harmless for
-    /// correctness — the checkpoint is account-stamped, so another account
-    /// never restores it — but reported so the stale file is visible.
-    ///
-    /// The legacy-adoption window is closed durably FIRST, so an unstamped
-    /// pre-upgrade checkpoint that survives a failed removal stays inert in
-    /// a later process too (Codex, menu round 4). If neither the marker nor
-    /// the removal succeeds, a maintenance alert says so.
+    /// correctness: a surviving checkpoint is either stamped for the old
+    /// account or unstamped, and neither is ever restored for another
+    /// account, in this process or a later one.
     @discardableResult
     func discardPersistedPollState() -> Bool {
-        let closed = closeLegacyAdoption()
         do {
             try FileManager.default.removeItem(at: Self.pollStateURL)
             return true
         } catch {
             if !FileManager.default.fileExists(atPath: Self.pollStateURL.path) { return true }
-            print("[AgentMailService] WARNING: couldn't remove the old account's poll checkpoint (\(error.localizedDescription)); it stays inert (account-stamped\(closed ? ", legacy adoption closed" : ""))")
-            if !closed {
-                let detail = error.localizedDescription
-                Task {
-                    await MaintenanceAlertCenter.shared.reportFailure(
-                        .agentMail,
-                        error: "after an AgentMail account change the old account's poll checkpoint could not be removed (\(detail)) and its closure could not be recorded. Remove \(Self.pollStateURL.path) by hand before restarting Briglia, so the new account can't pick up the old account's position.",
-                        deterministic: false
-                    )
-                }
-            }
-            return false
-        }
-    }
-
-    /// Durably records that unstamped checkpoints are never adopted again.
-    /// Returns false (and keeps only the in-memory flag) when it can't.
-    @discardableResult
-    private func closeLegacyAdoption() -> Bool {
-        legacyCheckpointAdoptable = false
-        if FileManager.default.fileExists(atPath: Self.legacyClosedURL.path) { return true }
-        do {
-            _ = try PrivateStorage.writeAtomically(Data("closed\n".utf8), to: Self.legacyClosedURL)
-            return true
-        } catch {
-            print("[AgentMailService] WARNING: couldn't record that legacy poll checkpoints are closed (\(error.localizedDescription)) — refused in this process only")
+            print("[AgentMailService] WARNING: couldn't remove the old account's poll checkpoint (\(error.localizedDescription)); it stays inert (stamped for the old account, or unstamped and never adopted)")
             return false
         }
     }
@@ -578,11 +540,6 @@ actor AgentMailService {
     private static var pollStateURL: URL {
         StoragePaths.dataRoot.appendingPathComponent("agentmail_poll_state.json")
     }
-    /// Presence = unstamped (pre-upgrade) checkpoints are never adopted.
-    private static var legacyClosedURL: URL {
-        StoragePaths.dataRoot.appendingPathComponent("agentmail_poll_state.legacy-closed")
-    }
-    static var legacyClosedURLForTesting: URL { legacyClosedURL }
 
     /// Restore gate, pure for the selftest: state older than 48h is stale —
     /// restoring it would replay days of backlog into the session, so the
@@ -629,31 +586,15 @@ actor AgentMailService {
         guard let data = try? Data(contentsOf: Self.pollStateURL) else { return false }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard var state = try? decoder.decode(PollState.self, from: data),
+        guard let state = try? decoder.decode(PollState.self, from: data),
               Self.shouldRestorePollState(savedAt: state.savedAt, now: Date()),
               let account = pollAccount else { return false }
-        if let owner = state.account {
-            // Another account's checkpoint: never adopted (the caller then
-            // persists a fresh baseline for this account over it).
-            guard owner == account else {
-                print("[AgentMailService] Ignored a poll checkpoint written for a different AgentMail account")
-                return false
-            }
-        } else {
-            guard legacyAdoptionOpen else {
-                print("[AgentMailService] Ignored an unstamped poll checkpoint (legacy adoption closed)")
-                return false
-            }
-            // A pre-stamp checkpoint belongs to the account configured when
-            // it is first read after the upgrade: stamp it now, keeping its
-            // original savedAt (re-dating it would defeat the 48h gate).
-            state.account = account
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            // Unstamped and unwritable: don't adopt it (the anti-flood seed
-            // wins), so it can never later pass to another account either.
-            guard let stamped = try? encoder.encode(state),
-                  (try? PrivateStorage.writeAtomically(stamped, to: Self.pollStateURL)) != nil else { return false }
+        // Only this account's own checkpoint is restored. Another account's,
+        // or an unstamped pre-upgrade one (owner unknown), is ignored; the
+        // caller then persists a fresh baseline for this account over it.
+        guard let owner = state.account, owner == account else {
+            print("[AgentMailService] Ignored a poll checkpoint \(state.account == nil ? "without an account stamp (pre-upgrade)" : "written for a different AgentMail account")")
+            return false
         }
         lastArrivalPollTime = state.watermark
         drainStates = state.drains
