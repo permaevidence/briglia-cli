@@ -36,8 +36,9 @@
   }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
-  function api(method, path, body) {
+  function api(method, path, body, signal) {
     var opts = { method: method, credentials: 'same-origin', headers: {} };
+    if (signal) opts.signal = signal;
     if (method === 'POST') {
       opts.headers['Content-Type'] = 'application/json';
       opts.headers['X-Briglia-Quick-Setup'] = '1';
@@ -63,7 +64,7 @@
   }
 
   function showPhase(name) {
-    ['intro', 'rows', 'system', 'poison', 'done'].forEach(function (p) {
+    ['intro', 'system', 'poison', 'done'].forEach(function (p) {
       $('phase-' + p).hidden = (p !== name);
     });
   }
@@ -87,7 +88,7 @@
       row.appendChild(el('span', 'kept', '✓ configured, keeping current'));
       var btn = el('button', 'tiny', 'Replace');
       btn.type = 'button';
-      btn.addEventListener('click', function (ev) { ev.preventDefault(); state.replace[keptId] = true; renderIntro(); });
+      btn.addEventListener('click', function (ev) { ev.preventDefault(); state.replace[keptId] = true; renderIntro(); scheduleVerify(DELAY_CHANGE); });
       row.appendChild(btn);
       wrap.appendChild(row);
       return wrap;
@@ -95,7 +96,7 @@
     if (f.checkbox) {
       var crow = el('div', 'row');
       var cb = el('input'); cb.type = 'checkbox'; cb.id = 'f-' + f.id; cb.checked = (f.id in state.values) ? !!state.values[f.id] : !!f.defaultOn;
-      cb.addEventListener('change', function () { state.values[f.id] = cb.checked; });
+      cb.addEventListener('change', function () { state.values[f.id] = cb.checked; renderStatuses(); scheduleVerify(DELAY_CHANGE); });
       crow.appendChild(cb);
       wrap.appendChild(crow);
       return wrap;
@@ -115,7 +116,12 @@
         input.style.borderColor = bad ? '#b42318' : '';
         input.title = bad ? 'The chat ID is numeric (letters mean it is a username)' : '';
       }
+      // Editing invalidates the row at once; the check itself waits for a
+      // pause (or leaving the field) so a half-typed key is not probed.
+      renderStatuses();
+      scheduleVerify(DELAY_TYPING);
     });
+    input.addEventListener('change', function () { scheduleVerify(DELAY_CHANGE); });
     row2.appendChild(input);
     if (!f.plain) {
       var show = el('button', 'tiny', 'show');
@@ -124,8 +130,14 @@
       row2.appendChild(show);
     }
     wrap.appendChild(row2);
+    var host = STATUS_HOST[f.id];
+    if (host) { var vs = el('div', 'vstatus'); vs.id = 'vs-' + host; wrap.appendChild(vs); }
     return wrap;
   }
+
+  // The inline verification line of a server row lives under the field that
+  // completes it (Telegram: the chat ID; custom endpoint: the model).
+  var STATUS_HOST = { opencode: 'opencode', openai: 'openai', serper: 'serper', jina: 'jina', telegram_chat: 'telegram', agentmail: 'agentmail', openrouter: 'openrouter', custom_model: 'custom' };
 
   function keptFor(fieldId) {
     var map = { telegram_token: 'telegram', telegram_chat: 'telegram', custom_key: 'custom', custom_base: 'custom', custom_model: 'custom', custom_vision: 'custom' };
@@ -151,8 +163,11 @@
     $('subscription-custom-model-row').hidden = !custom;
     $('subscription-model').value = custom ? '' : this.value;
     renderSubscriptionEfforts();
+    renderStatuses(); scheduleVerify(DELAY_CHANGE);
   });
-  $('subscription-model').addEventListener('input', renderSubscriptionEfforts);
+  $('subscription-model').addEventListener('input', function () { renderSubscriptionEfforts(); renderStatuses(); scheduleVerify(DELAY_TYPING); });
+  $('subscription-model').addEventListener('change', function () { scheduleVerify(DELAY_CHANGE); });
+  $('subscription-effort').addEventListener('change', function () { renderStatuses(); scheduleVerify(DELAY_CHANGE); });
   renderSubscriptionEfforts();
 
   function usesSubscription() { return $("main-provider").value === "chatgpt"; }
@@ -175,10 +190,16 @@
     FIELDS.extra.forEach(function (f) { ex.appendChild(fieldNode(f)); });
     if (state.status && state.status.stored_name && !$('f-name').value) $('f-name').value = state.status.stored_name;
     updateCount();
+    renderStatuses();
   }
 
-  function buildRequest() {
-    var missing = [];
+  /* The request as it stands: every field that is complete enough to be
+     checked. `missing` lists what a save still needs; `incomplete` explains,
+     per server row, why a half-filled group is not sent yet. The verify
+     request (partial) and the save request are the same object, so "what was
+     verified" and "what is saved" compare by value. */
+  function collectRequest() {
+    var missing = [], incomplete = {};
     var req = { name: $('f-name').value.trim() };
     if (!req.name) missing.push('your name');
     function keyField(id, apiName, required) {
@@ -186,11 +207,12 @@
       if (k && !state.replace[k]) { req[apiName] = { kept: true }; return; }
       var v = state.values[id] || '';
       if (v) req[apiName] = { value: v };
-      else if (required) missing.push(apiName);
+      else if (required) missing.push(TITLES[apiName] || apiName);
     }
     if (usesSubscription()) {
-      if (!subscriptionGeneration) missing.push('ChatGPT sign-in');
-      req.chatgpt = {model: $('subscription-model').value.trim(), effort: $('subscription-effort').value, generation: subscriptionGeneration};
+      if (subscriptionGeneration) req.chatgpt = {model: $('subscription-model').value.trim(), effort: $('subscription-effort').value, generation: subscriptionGeneration};
+      else missing.push('ChatGPT sign-in');
+      if (req.chatgpt && !req.chatgpt.model) { delete req.chatgpt; missing.push('ChatGPT model'); }
     } else keyField('opencode', 'opencode', true);
     keyField('openai', 'openai', true);
     keyField('serper', 'serper', true);
@@ -198,9 +220,11 @@
     if (keptFor('telegram_token') && !state.replace.telegram) req.telegram = { kept: true };
     else {
       var t = state.values.telegram_token || '', c = state.values.telegram_chat || '';
-      if (!t) missing.push('telegram token');
-      if (!c) missing.push('telegram chat ID');
-      if (t && c) req.telegram = { token: t, chat_id: c };
+      if (!t) missing.push('Telegram bot token');
+      if (!c) missing.push('Telegram chat ID');
+      if (t && c && !/^-?\d+$/.test(c)) { missing.push('a numeric Telegram chat ID'); incomplete.telegram = 'The chat ID is numeric (letters mean it is a username).'; }
+      else if (t && c) req.telegram = { token: t, chat_id: c };
+      else if (t || c) incomplete.telegram = 'Fill in both the bot token and the chat ID.';
     }
     keyField('agentmail', 'agentmail', false);
     keyField('openrouter', 'openrouter', false);
@@ -209,16 +233,27 @@
       var ck = state.values.custom_key || '', cb = state.values.custom_base || '', cm = state.values.custom_model || '';
       if (ck || cb || cm) {
         if (ck && cb && cm) req.custom = { api_key: ck, base_url: cb, model: cm, vision: state.values.custom_vision !== false };
-        else missing.push('custom endpoint (key, base URL and model together)');
+        else { missing.push('custom endpoint (key, base URL and model together)'); incomplete.custom = 'Needs the key, the base URL and the model together.'; }
       }
     }
-    return { request: req, missing: missing };
+    return { request: req, missing: missing, incomplete: incomplete };
   }
+  function buildRequest() { return collectRequest(); }
 
   $('subscription-url').href = 'https://auth.openai.com/codex/device';
   var subscriptionGeneration = '', subscriptionPending = '', subscriptionTimer = null;
-  function subscriptionCall(body) {
+  var subscriptionCalls = 0;
+  function subscriptionCall(body, busyTries) {
+    // A verify still running on the server makes it answer "busy"; the
+    // one-shot actions wait it out (polls already retry on their own).
+    subscriptionCalls += 1;
+    var tries = busyTries === undefined ? (body.action === 'poll' ? 0 : 20) : busyTries;
     return api('POST', '/api/subscription', body).then(function(r) {
+      if (r.status === 409 && r.json.error === 'busy' && tries > 0) {
+        subscriptionCalls -= 1;
+        return new Promise(function (resolve) { setTimeout(resolve, 500); }).then(function () { return subscriptionCall(body, tries - 1); });
+      }
+      subscriptionCalls -= 1;
       if (!r.json.ok) {
         var detail = r.json.error;
         var error = new Error((typeof detail === 'string' ? detail : detail && detail.message) || 'ChatGPT login failed; retry.');
@@ -226,12 +261,13 @@
         throw error;
       }
       return r.json;
-    });
+    }, function (e) { subscriptionCalls -= 1; throw e; });
   }
   function subscriptionStatus() {
     return subscriptionCall({action: 'status'}).then(function(r) {
       subscriptionGeneration = r.generation || '';
-      $('subscription-status').textContent = r.state === 'signed_in' ? 'Signed in. Your selected model will be checked before saving.' : 'Sign in to continue. Enable device login in ChatGPT security settings if needed.';
+      $('subscription-status').textContent = r.state === 'signed_in' ? 'Signed in. Your selected model is checked automatically.' : 'Sign in to continue. Enable device login in ChatGPT security settings if needed.';
+      renderStatuses(); scheduleVerify(DELAY_CHANGE);
     });
   }
   function subscriptionError(e) { $('subscription-status').textContent = e.message || 'Login interrupted; reload and retry.'; }
@@ -255,12 +291,12 @@
     });
   }
   $('main-provider').addEventListener('change', function() {
-    $('subscription-panel').hidden = !usesSubscription(); renderIntro();
+    $('subscription-panel').hidden = !usesSubscription(); renderIntro(); scheduleVerify(DELAY_CHANGE);
     if (usesSubscription()) subscriptionStatus().catch(subscriptionError);
   });
   $('subscription-start').addEventListener('click', function() {
     $('subscription-start').disabled = true;
-    subscriptionGeneration = ''; clearTimeout(subscriptionTimer);
+    subscriptionGeneration = ''; clearTimeout(subscriptionTimer); renderStatuses();
     subscriptionCall({action: 'start'}).then(function(r) {
       subscriptionPending = r.pending; $('subscription-code').textContent = 'Enter code: ' + r.code;
       // The URL is a compiled fixed endpoint, not an arbitrary provider redirect.
@@ -272,7 +308,7 @@
   function subscriptionEnd(action) {
     clearTimeout(subscriptionTimer);
     var body = {action: action}; if (action === 'cancel') body.pending = subscriptionPending;
-    subscriptionPending = ''; subscriptionGeneration = '';
+    subscriptionPending = ''; subscriptionGeneration = ''; renderStatuses();
     subscriptionCall(body).then(function() {
       $('subscription-code').textContent = ''; $('subscription-url').hidden = true; $('subscription-cancel').hidden = true;
       return subscriptionStatus();
@@ -281,105 +317,154 @@
   $('subscription-cancel').addEventListener('click', function() { subscriptionEnd('cancel'); });
   $('subscription-logout').addEventListener('click', function() { subscriptionEnd('logout'); });
 
-  // ---- verify rows ----------------------------------------------------------
+  // ---- automatic verification --------------------------------------------
+  //
+  // Every field is checked with its provider as soon as it is complete: after
+  // a pause in typing (DELAY_TYPING) or at once when the field is left
+  // (DELAY_CHANGE). One /api/verify carries every complete field (partial:
+  // true); the server re-probes only fields whose value changed, so a new
+  // key costs one probe. A newer check aborts the older request and its
+  // answer is ignored by sequence number (the server bumps its own request
+  // generation and discards the older probes). Save is enabled only when the
+  // last answer said "verified" for exactly the values now on the page.
 
-  var lastRequest = null;
+  var DELAY_TYPING = 1200, DELAY_CHANGE = 150;
+  var auto = { seq: 0, ctl: null, inflight: false, timer: null, sentKey: null, sentSig: {}, rows: {}, sig: {}, phase: null, verifiedKey: null, saving: false };
+  var TITLES = { opencode: 'OpenCode Go key', chatgpt: 'ChatGPT subscription', openai: 'OpenAI key', serper: 'Serper key', jina: 'Jina key', telegram: 'Telegram bot + chat', agentmail: 'AgentMail key', openrouter: 'OpenRouter key', custom: 'Custom endpoint' };
+  var ROW_IDS = ['opencode', 'chatgpt', 'openai', 'serper', 'jina', 'telegram', 'agentmail', 'openrouter', 'custom'];
 
-  function verify() {
-    var built = buildRequest();
-    if (built.missing.length) { banner('Missing: ' + built.missing.join(', '), true); return; }
-    banner(null);
-    lastRequest = built.request;
-    showPhase('rows');
-    $('rows-title').textContent = 'Verifying';
-    renderVerifyRows(rowsPending(built.request));
-    $('btn-verify').disabled = true;
-    api('POST', '/api/verify', built.request).then(function (r) {
-      $('btn-verify').disabled = false;
-      if (r.status === 409 && r.json.error === 'kept') { banner(r.json.message, true); showPhase('intro'); return; }
-      if (r.status !== 200) { banner('Verification failed (' + r.status + ')', true); showPhase('intro'); return; }
-      renderVerifyRows(r.json.rows);
-      var allOK = r.json.phase === 'verified';
-      $('rows-title').textContent = allOK ? 'Everything verified' : 'Some keys need attention';
-      $('btn-save').hidden = !allOK;
-      $('btn-retry-verify').hidden = allOK;
-    }).catch(handleFetchError);
+  function sigOf(value) { return value === undefined ? null : JSON.stringify(value); }
+  function hasAnyField(req) { return ROW_IDS.some(function (id) { return req[id] !== undefined; }); }
+
+  function scheduleVerify(delay) {
+    if (auto.saving) return;
+    clearTimeout(auto.timer);
+    auto.timer = setTimeout(runVerify, delay);
   }
 
-  function rowsPending(req) {
-    var out = [];
-    ['opencode', 'openai', 'serper', 'jina', 'telegram', 'agentmail', 'openrouter', 'custom'].forEach(function (id) {
-      if (req[id]) out.push({ id: id, title: id, state: req[id].kept ? 'ok' : 'running' });
-    });
-    return out;
-  }
-
-  var TITLES = { opencode: 'OpenCode Go key', openai: 'OpenAI key', serper: 'Serper key', jina: 'Jina key', telegram: 'Telegram bot + chat', agentmail: 'AgentMail key', openrouter: 'OpenRouter key', custom: 'Custom endpoint' };
-
-  function renderVerifyRows(rows) {
-    var list = $('verify-rows'); clear(list);
-    rows.forEach(function (row) {
-      var li = el('li', row.state);
-      var head = el('div', 'head');
-      head.appendChild(el('span', 'mark', row.state === 'ok' ? '✓' : (row.state === 'failed' ? '✗' : '…')));
-      head.appendChild(el('span', 'title', row.title || TITLES[row.id] || row.id));
-      li.appendChild(head);
-      if (row.resolved) li.appendChild(el('div', 'detail', row.resolved));
-      if (row.detail) li.appendChild(el('div', 'detail', row.detail));
-      if (row.state === 'failed') {
-        li.appendChild(el('div', 'reason', row.reason || 'verification failed'));
-        li.appendChild(editControls(row.id));
+  function runVerify() {
+    auto.timer = null;
+    if (auto.saving || $('phase-intro').hidden) return;
+    // Sign-in calls are refused by the server while a verify runs; wait.
+    if (subscriptionCalls > 0) { scheduleVerify(500); return; }
+    var built = collectRequest(), req = built.request;
+    if (!hasAnyField(req)) {
+      if (auto.ctl) auto.ctl.abort();
+      auto.ctl = null; auto.inflight = false; auto.sentKey = null; auto.rows = {}; auto.sig = {}; auto.phase = null; auto.verifiedKey = null;
+      renderStatuses(); return;
+    }
+    var key = sigOf(req);
+    if (key === auto.sentKey) return;   // this exact request is in flight or answered
+    if (auto.ctl) auto.ctl.abort();
+    var ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    var my = ++auto.seq;
+    auto.ctl = ctl; auto.inflight = true; auto.sentKey = key; auto.verifiedKey = null;
+    auto.sentSig = {};
+    ROW_IDS.forEach(function (id) { auto.sentSig[id] = sigOf(req[id]); });
+    renderStatuses();
+    var body = { partial: true };
+    Object.keys(req).forEach(function (k) { body[k] = req[k]; });
+    api('POST', '/api/verify', body, ctl ? ctl.signal : undefined).then(function (r) {
+      if (my !== auto.seq) return;          // superseded by a newer check
+      auto.inflight = false; auto.ctl = null;
+      if (r.status === 200) {
+        banner(null);
+        auto.rows = {}; auto.sig = {};
+        (r.json.rows || []).forEach(function (row) { auto.rows[row.id] = row; auto.sig[row.id] = auto.sentSig[row.id]; });
+        auto.phase = r.json.phase;
+        auto.verifiedKey = r.json.phase === 'verified' ? key : null;
+      } else {
+        auto.sentKey = null;   // let the next edit (or "Check again") retry
+        if (r.status === 409 && r.json.error === 'kept') banner(r.json.message, true);
+        else if (r.status === 409 && r.json.error === 'phase') { /* saving or past it: the status loop takes over */ }
+        else banner((r.json && r.json.message) || ('Could not check the keys (' + r.status + ')'), true);
       }
-      list.appendChild(li);
+      renderStatuses();
+    }).catch(function (e) {
+      if (my !== auto.seq) return;          // aborted or superseded: ignore
+      auto.inflight = false; auto.ctl = null; auto.sentKey = null;
+      renderStatuses();
+      handleFetchError(e);
     });
   }
 
-  function editControls(id) {
-    var wrap = el('div', 'edit');
-    function input(fieldId, placeholder, plain) {
-      var i = el('input'); i.type = plain ? 'text' : 'password'; i.autocomplete = 'off'; i.placeholder = placeholder;
-      i.value = state.values[fieldId] || '';
-      i.addEventListener('input', function () { state.values[fieldId] = i.value.trim(); });
-      return i;
+  function checkAgain() { auto.sentKey = null; scheduleVerify(0); }
+
+  // What to show for one server row, given the values now on the page.
+  function rowView(id, built) {
+    var current = sigOf(built.request[id]);
+    if (current === null) return built.incomplete[id] ? { state: 'pending', text: built.incomplete[id] } : null;
+    if (built.request[id] && built.request[id].kept) return null;
+    var row = auto.rows[id];
+    if (auto.inflight && auto.sentSig[id] === current && !(row && auto.sig[id] === current && row.state === 'ok')) return { state: 'running', text: 'Checking…' };
+    if (row && auto.sig[id] === current) {
+      if (row.state === 'ok') return { state: 'ok', text: 'Verified', detail: row.resolved || row.detail };
+      if (row.state === 'failed') return { state: 'failed', text: row.reason || 'verification failed', retry: true };
+      if (row.state === 'running') return { state: 'running', text: 'Checking…' };
     }
-    if (id === 'telegram') {
-      wrap.appendChild(input('telegram_token', 'bot token'));
-      wrap.appendChild(input('telegram_chat', 'chat ID', true));
-    } else if (id === 'custom') {
-      wrap.appendChild(input('custom_key', 'key'));
-      wrap.appendChild(input('custom_base', 'base URL', true));
-      wrap.appendChild(input('custom_model', 'model', true));
-    } else {
-      wrap.appendChild(input(id, 'new value'));
-    }
-    var k = keptFor(id === 'telegram' ? 'telegram_token' : (id === 'custom' ? 'custom_key' : id));
-    if (k) state.replace[k] = true;
-    var retry = el('button', 'tiny', 'Retry');
-    retry.type = 'button';
-    retry.addEventListener('click', function () { verify(); });
-    wrap.appendChild(retry);
-    return wrap;
+    return { state: 'pending', text: 'Will be checked when you pause or leave the field.' };
+  }
+
+  function renderStatuses() {
+    var built = collectRequest(), failed = 0, pending = 0;
+    ROW_IDS.forEach(function (id) {
+      var view = rowView(id, built);
+      if (view && view.state === 'failed') failed += 1;
+      if (view && (view.state === 'pending' || view.state === 'running')) pending += 1;
+      var box = $('vs-' + id);
+      if (!box) return;
+      clear(box);
+      box.className = 'vstatus' + (view ? ' ' + view.state : '');
+      box.setAttribute('data-state', view ? view.state : '');
+      if (!view) return;
+      box.appendChild(el('span', 'mark', view.state === 'ok' ? '✓' : (view.state === 'failed' ? '✗' : (view.state === 'running' ? '…' : '·'))));
+      box.appendChild(el('span', 'text', view.text));
+      if (view.detail) box.appendChild(el('span', 'detail', view.detail));
+      if (view.retry) {
+        var b = el('button', 'tiny', 'Check again'); b.type = 'button';
+        b.addEventListener('click', function (ev) { ev.preventDefault(); checkAgain(); });
+        box.appendChild(b);
+      }
+    });
+    var ready = canSave(built);
+    var btn = $('btn-save');
+    btn.disabled = !ready || auto.saving;
+    btn.textContent = auto.saving ? 'Saving…' : 'Save and continue';
+    var hint = auto.saving ? '' : ready ? 'Everything is verified.'
+      : built.missing.length ? 'Still needed: ' + built.missing.join(', ') + '.'
+      : failed ? 'Fix the entries marked ✗ (they are checked again automatically).'
+      : 'Checking your keys…';
+    $('save-hint').textContent = hint;
+  }
+
+  function canSave(built) {
+    return !built.missing.length && !auto.inflight && auto.phase === 'verified' && auto.verifiedKey !== null && auto.verifiedKey === sigOf(built.request);
   }
 
   function save() {
-    if (!lastRequest) return;
-    var built = buildRequest();
-    if (built.missing.length) { banner('Missing: ' + built.missing.join(', '), true); return; }
-    $('btn-save').disabled = true;
+    var built = collectRequest();
+    if (!canSave(built)) { renderStatuses(); return; }
+    auto.saving = true; clearTimeout(auto.timer);
+    renderStatuses();
     api('POST', '/api/save', built.request).then(function (r) {
-      $('btn-save').disabled = false;
-      if (r.status === 409) {
-        banner('These changed after verification and must be verified again: ' + ((r.json.fields || []).join(', ') || r.json.message || ''), true);
-        verify();
+      auto.saving = false;
+      if (r.status === 409 && r.json.error === 'phase' && INTRO_PHASES.indexOf(r.json.phase) < 0) { refresh(); return; }
+      if (r.status === 409 && (r.json.error === 'not_verified' || r.json.error === 'phase')) {
+        // The server no longer holds a verification matching these values
+        // (edited, or dropped by an earlier refused save): check again.
+        banner('Some entries changed after they were verified and are being checked again' + ((r.json.fields || []).length ? ': ' + r.json.fields.join(', ') : '') + '. Press Save again when they are verified.', true);
+        auto.verifiedKey = null; auto.phase = null; auto.sentKey = null; auto.rows = {}; auto.sig = {};
+        renderStatuses(); scheduleVerify(0);
         return;
       }
-      if (r.status !== 200) { banner((r.json && r.json.message) || ('Save failed (' + r.status + ')'), true); return; }
+      if (r.status !== 200) { banner((r.json && (r.json.message || (r.json.error && r.json.error.message))) || ('Save failed (' + r.status + ')'), true); renderStatuses(); return; }
       // Drop keys from memory now that they are saved.
       state.values = {}; state.replace = {};
+      auto.rows = {}; auto.sig = {}; auto.verifiedKey = null; auto.sentKey = null;
       FIELDS.required.concat(FIELDS.agentmail, FIELDS.extra).forEach(function (f) { var i = $('f-' + f.id); if (i) i.value = ''; });
       banner(null);
       refresh();
-    }).catch(handleFetchError);
+    }).catch(function (e) { auto.saving = false; renderStatuses(); handleFetchError(e); });
   }
 
   // ---- system phase ---------------------------------------------------------
@@ -466,6 +551,7 @@
   // ---- status loop ------------------------------------------------------------
 
   var failedFetches = 0;
+  var INTRO_PHASES = ['intro', 'verifying', 'verified', 'saving', 'saved'];
 
   function handleFetchError(e) {
     if (e && e.replaced) { banner('This session was replaced; use the new link from the terminal.', true); stopPolling(); return; }
@@ -489,15 +575,17 @@
       if (st.wizard_requested) { banner('Continue in the terminal.'); showPhase('done'); $('done-text').textContent = 'The step-by-step wizard is running in the terminal. You can close this tab.'; stopPolling(); return; }
       switch (st.phase) {
         case 'intro':
-          if (state.lastPhase !== 'intro') { renderIntro(); showPhase('intro'); }
-          break;
         case 'verifying':
         case 'verified':
-          if (state.lastPhase !== st.phase && state.lastPhase !== 'rows') { showPhase('rows'); }
-          break;
         case 'saving':
         case 'saved':
-          showPhase('rows');
+          // The form stays in place through automatic checks and the save.
+          if (INTRO_PHASES.indexOf(state.lastPhase) < 0) { renderIntro(); showPhase('intro'); }
+          // Something else dropped the server back to intro (a save refused
+          // for changed values): what the page thinks is verified is stale.
+          if (st.phase === 'intro' && auto.phase === 'verified' && !auto.inflight && !auto.saving) {
+            auto.phase = null; auto.verifiedKey = null; auto.sentKey = null; renderStatuses(); scheduleVerify(0);
+          }
           break;
         case 'system':
         case 'systemComplete':
@@ -519,9 +607,9 @@
 
   // ---- wiring ----------------------------------------------------------------
 
-  $('btn-verify').addEventListener('click', verify);
-  $('btn-retry-verify').addEventListener('click', verify);
   $('btn-save').addEventListener('click', save);
+  $('f-name').addEventListener('input', function () { renderStatuses(); scheduleVerify(DELAY_TYPING); });
+  $('f-name').addEventListener('change', function () { scheduleVerify(DELAY_CHANGE); });
   $('btn-wizard').addEventListener('click', function () {
     api('POST', '/api/stepbystep', {}).then(function (r) {
       if (r.status === 200) { $('done-text').textContent = 'Continue in the terminal.'; showPhase('done'); stopPolling(); }

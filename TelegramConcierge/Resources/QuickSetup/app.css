@@ -31,6 +31,14 @@ h3 { font-size: 16px; margin: 22px 0 8px; }
 .field .row input { flex: 1; }
 .field .kept { color: var(--ok); font-size: 14px; }
 .field.small { margin-top: 4px; }
+.vstatus { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 14px; margin-top: 6px; }
+.vstatus:empty { display: none; }
+.vstatus .mark { width: 16px; text-align: center; font-weight: 700; }
+.vstatus.ok { color: var(--ok); }
+.vstatus.failed { color: var(--bad); }
+.vstatus.running { color: var(--warn); }
+.vstatus.pending { color: var(--muted); }
+.vstatus .detail { color: var(--muted); font-size: 13px; flex-basis: 100%; margin-left: 22px; }
 button { font: inherit; border-radius: 8px; padding: 9px 16px; cursor: pointer; border: 1px solid transparent; }
 button.primary { background: var(--blue); color: #fff; }
 button.secondary { background: #fff; color: var(--blue); border-color: var(--blue); }

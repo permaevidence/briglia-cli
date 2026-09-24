@@ -693,6 +693,45 @@ final class SelftestContext: @unchecked Sendable {
               serperRow?["state"] as? String == "failed" && latest?["state"] as? String == "failed", "\(String(describing: latest))")
         let (stS, _) = try await wfS.save(goodRequest(), generation: gS)
         check("save after a stale-probe race is refused", stS == 409)
+        // Per-key (partial) verification: the page verifies each key as it is filled in.
+        threw = false
+        do { _ = try QuickSetupRequest.parse(["openai": ["value": "a"]]) } catch { threw = true }
+        check("strict parse (save) still requires the name and the required keys", threw)
+        let partialOne = try? QuickSetupRequest.parse(["openai": ["value": "a"]], partial: true)
+        check("partial parse (verify) accepts one key without a name", partialOne?.values.count == 1 && partialOne?.name == "")
+        threw = false
+        do { _ = try QuickSetupRequest.parse(["name": "x", "custom": ["api_key": "k"]], partial: true) } catch { threw = true }
+        check("partial parse still validates every field it carries", threw)
+        threw = false
+        do { _ = try QuickSetupRequest.parse(["opencode": ["value": "a"], "bogus": 1], partial: true) } catch { threw = true }
+        check("partial parse still rejects unknown fields", threw)
+        do {
+            var countingEnv = env
+            let inner = env.probe
+            let probes = Counter()
+            countingEnv.probe = { r in _ = probes.next(); return await inner(r) }
+            let (wfPart, _) = try makeWorkflow(countingEnv)
+            let gPart = await wfPart.generation
+            let full = goodRequest()
+            let nameBefore = await wfPart.storedName
+            var partial = QuickSetupRequest(name: "", values: [.openai: full.values[.openai]!])
+            var (stPart, jsPart) = try await wfPart.verify(partial, generation: gPart)
+            check("partial verify of one key → 200 with only that row", stPart == 200 && (jsPart["rows"] as? [[String: Any]])?.map { $0["id"] as? String ?? "" } == ["openai"], "\(jsPart)")
+            let nameAfterPartial = await wfPart.storedName
+            check("a nameless partial verify keeps the stored name", nameAfterPartial == nameBefore)
+            (stPart, _) = try await wfPart.save(full, generation: gPart)
+            check("save after a partial verify of a subset → 409", stPart == 409)
+            partial.values[.serper] = full.values[.serper]
+            _ = try await wfPart.verify(partial, generation: gPart)
+            check("adding a key probes only the new key (verified ones are not re-probed)", probes.next() == 3)
+            partial.values[.serper] = nil
+            _ = try await wfPart.verify(partial, generation: gPart)
+            let rowsAfterRemoval = ((await wfPart.status())["rows"] as? [[String: Any]] ?? []).map { $0["id"] as? String ?? "" }
+            check("a key cleared from the page loses its verification", rowsAfterRemoval == ["openai"], "\(rowsAfterRemoval)")
+            _ = try await wfPart.verify(full, generation: gPart)
+            (stPart, jsPart) = try await wfPart.save(full, generation: gPart)
+            check("once the partial verifies cover the full request, save succeeds", stPart == 200, "\(jsPart)")
+        }
     }
 
     // MARK: 7. Mandatory rows
@@ -797,6 +836,8 @@ final class SelftestContext: @unchecked Sendable {
         check("app.js external URLs are only the documented anchors", foreign.isEmpty, "\(foreign)")
         check("index.html has no external URLs", html.range(of: "https?://", options: .regularExpression) == nil)
         check("anchors open with noopener noreferrer", js.contains("rel = 'noopener noreferrer'"))
+        check("keys verify automatically: no manual Verify button, the page sends partial verifies",
+              !html.contains("btn-verify") && js.contains("partial: true") && html.contains("id=\"btn-save\""))
     }
 
     // MARK: 11. Refusals

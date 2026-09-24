@@ -223,9 +223,17 @@ final class QuickSetupRouter: @unchecked Sendable {
                 return Self.json(status, payload)
             } catch { return .status(404) }
         case ("POST", "/api/verify"), ("POST", "/api/save"):
-            guard let body = parseBody(request) else { return Self.json(400, ["error": "bad_json"]) }
+            guard var body = parseBody(request) else { return Self.json(400, ["error": "bad_json"]) }
+            // Only verify accepts the page's per-key `partial` flag; on save it
+            // stays an unknown field (400), so a save is always a full request.
+            var partial = false
+            if request.path == "/api/verify", let flag = body["partial"] {
+                guard let on = flag as? Bool else { return Self.json(400, ["error": "bad_request", "message": "partial must be a boolean"]) }
+                partial = on
+                body.removeValue(forKey: "partial")
+            }
             let typed: QuickSetupRequest
-            do { typed = try QuickSetupRequest.parse(body) } catch { return Self.json(400, ["error": "bad_request", "message": "\(error)"]) }
+            do { typed = try QuickSetupRequest.parse(body, partial: partial) } catch { return Self.json(400, ["error": "bad_request", "message": "\(error)"]) }
             do {
                 let (status, payload) = request.path == "/api/verify"
                     ? try await workflow.verify(typed, generation: g)

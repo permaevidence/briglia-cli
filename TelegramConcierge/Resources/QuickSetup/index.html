@@ -17,7 +17,7 @@
   <section id="banner" class="banner" hidden></section>
 
   <section id="phase-intro" class="phase">
-    <p class="lead">Type your keys below. Each one is verified with its provider from this computer before anything is saved. Nothing goes to briglia.dev.</p>
+    <p class="lead">Type your keys below. Each one is checked with its provider from this computer as soon as you have entered it; nothing is saved until you press Save. Nothing goes to briglia.dev.</p>
 
     <label class="field">
       <span class="label">Your name</span>
@@ -35,6 +35,7 @@
       <p id="subscription-status" role="status"></p>
       <a id="subscription-url" href="#" target="_blank" rel="noopener noreferrer" hidden>Open ChatGPT sign-in</a>
       <p id="subscription-code"></p>
+      <div id="vs-chatgpt" class="vstatus"></div>
       <button id="subscription-start" type="button">Sign in</button>
       <button id="subscription-cancel" type="button" hidden>Cancel login</button>
       <button id="subscription-logout" type="button">Sign out locally</button>
@@ -52,18 +53,10 @@
     <div id="extra-fields"></div>
 
     <div class="actions">
-      <button id="btn-verify" class="primary" type="button">Verify and set up</button>
+      <button id="btn-save" class="primary" type="button" disabled>Save and continue</button>
       <button id="btn-wizard" class="link" type="button">Set up step by step instead</button>
     </div>
-  </section>
-
-  <section id="phase-rows" class="phase" hidden>
-    <h2 id="rows-title">Verifying</h2>
-    <ul id="verify-rows" class="rows"></ul>
-    <div class="actions">
-      <button id="btn-save" class="primary" type="button" hidden>Save and continue</button>
-      <button id="btn-retry-verify" class="secondary" type="button" hidden>Retry</button>
-    </div>
+    <p id="save-hint" class="hint" role="status" aria-live="polite"></p>
   </section>
 
   <section id="phase-system" class="phase" hidden>

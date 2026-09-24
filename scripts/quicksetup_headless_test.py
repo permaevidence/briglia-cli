@@ -63,6 +63,8 @@ class Mock(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/openai/"):
             return self._send(200 if self._auth_ok("openai") else 401, {"data": []})
         if self.path.startswith("/jina/"):
+            if "slow" in (self.headers.get("Authorization", "") or ""):
+                time.sleep(2.5)   # the browser test's in-flight supersession case
             return self._send(200 if self._auth_ok("jina") else 401, {"ok": True})
         if self.path.startswith("/agentmail/"):
             return self._send(200 if self._auth_ok("agentmail") else 401, {"inboxes": [{"inbox_id": "bree@agentmail.to"}]})
@@ -223,6 +225,20 @@ def main():
         check("verify: all ok → phase verified", st == 200 and js.get("phase") == "verified", str(js)[:300])
         st, js = call("POST", "/api/verify", {"name": "x", "bogus": 1}, cookie=cookie)
         check("unknown JSON field → 400", st == 400)
+        # Per-key (partial) verification — how the page checks each key as it is filled in.
+        st, js = call("POST", "/api/verify", {"partial": True, "openai": {"value": GOOD["openai"]}}, cookie=cookie)
+        check("partial verify: one key, no name → 200 with only that row",
+              st == 200 and [r["id"] for r in js.get("rows", [])] == ["openai"] and js["rows"][0]["state"] == "ok", str(js)[:300])
+        st, js = call("POST", "/api/verify", {"partial": "yes", "openai": {"value": GOOD["openai"]}}, cookie=cookie)
+        check("partial must be a boolean → 400", st == 400, str(js))
+        st, js = call("POST", "/api/verify", {"partial": True, "custom": {"api_key": "k"}}, cookie=cookie)
+        check("partial verify still validates each field it carries → 400", st == 400, str(js))
+        st, js = call("POST", "/api/save", dict(request(), partial=True), cookie=cookie)
+        check("save never accepts the partial flag → 400", st == 400, str(js))
+        st, js = call("POST", "/api/save", request(), cookie=cookie)
+        check("save after a partial verify of a subset → 409", st == 409, str(js))
+        st, js = call("POST", "/api/verify", dict(request(), partial=True), cookie=cookie)
+        check("partial verify of the complete form → verified", st == 200 and js.get("phase") == "verified", str(js)[:300])
         # Tampered save.
         st, js = call("POST", "/api/save", request(opencode=GOOD["opencode"] + "x"), cookie=cookie)
         check("save with a value that differs from the verified one → 409 naming the field",

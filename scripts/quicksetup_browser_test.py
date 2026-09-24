@@ -3,9 +3,11 @@
 Chromium drives the real page served by the real binary, against the same
 mock provider server and dev stubs as the headless test.
 
-Covers: the full happy path; a wrong key expands only its row; editing after
-verification returns the row to unverified and save is refused until
-re-verified; reload mid-job re-attaches to the job log; the server-restart
+Covers: the full happy path with no Verify click (keys are checked
+automatically after a pause or when a field is left, never mid-typing); a
+wrong key marks only its row; editing after verification returns the row to
+unverified and disables Save until the automatic re-check passes; rapid edits
+settle on the newest value; a refused save re-verifies by itself; reload mid-job re-attaches to the job log; the server-restart
 sentence appears when the server is killed; token rotation from the terminal
 invalidates the open tab; a direct fetch from the page with a tampered value
 gets 409; a page on another origin cannot reach the API.
@@ -144,24 +146,91 @@ def main():
             page.goto(base + "/start?t=" + token)
             page.wait_for_selector("#phase-intro:not([hidden])")
             check("exchange landed on the page", page.url.rstrip("/") == base)
+            verify_bodies = []
+
+            def remember_verify(request):
+                if request.url.endswith("/api/verify") and request.method == "POST":
+                    try:
+                        verify_bodies.append(request.post_data_json or {})
+                    except Exception:
+                        verify_bodies.append({})
+            page.on("request", remember_verify)
+
+            def vstate(row):
+                el = page.query_selector("#vs-" + row)
+                return el.get_attribute("data-state") if el else None
+
+            def wait_state(row, want, timeout=30):
+                end = time.time() + timeout
+                while time.time() < end:
+                    if vstate(row) == want:
+                        return True
+                    time.sleep(0.1)
+                return False
+
+            def save_enabled():
+                return page.is_enabled("#btn-save")
+
+            def wait_save(enabled, timeout=30):
+                end = time.time() + timeout
+                while time.time() < end:
+                    if save_enabled() == enabled:
+                        return True
+                    time.sleep(0.1)
+                return False
+
+            check("no manual Verify button on the page", page.query_selector("#btn-verify") is None)
+            check("Save starts disabled", not save_enabled())
             page.fill("#f-name", "Sofia Bruni")
-            page.fill("#f-opencode", "sk-oc-WRONG")
+            # A key typed character by character is not probed mid-typing.
+            page.type("#f-opencode", "sk-oc-WRONG", delay=60)
+            check("typing a key fires no check before a pause", len(verify_bodies) == 0, str(len(verify_bodies)))
+            check("the typed row waits for the pause", vstate("opencode") == "pending", str(vstate("opencode")))
+            check("the pause checks it automatically (no Verify click)", wait_state("opencode", "failed"), str(vstate("opencode")))
+            check("the automatic check is a partial verify of the filled fields only",
+                  len(verify_bodies) == 1 and verify_bodies[0].get("partial") is True
+                  and set(verify_bodies[0]) == {"partial", "name", "opencode"}, str([sorted(b) for b in verify_bodies]))
             page.fill("#f-openai", GOOD["openai"])
             page.fill("#f-serper", GOOD["serper"])
             page.fill("#f-jina", GOOD["jina"])
             page.fill("#f-telegram_token", GOOD["telegram"])
             page.fill("#f-telegram_chat", CHAT_ID)
             check("counter reads 6 of 6 filled", page.text_content("#req-count").strip() == "6 of 6 filled")
-            page.click("#btn-verify")
-            page.wait_for_selector("#verify-rows li.failed", timeout=30000)
-            failed = page.query_selector_all("#verify-rows li.failed")
-            ok = page.query_selector_all("#verify-rows li.ok")
-            check("wrong key expands only its row", len(failed) == 1 and len(ok) == 4, "failed=%d ok=%d" % (len(failed), len(ok)))
-            check("failed row shows the reason and an edit field", page.query_selector("#verify-rows li.failed .edit input") is not None)
-            page.fill("#verify-rows li.failed .edit input", GOOD["opencode"])
-            page.click("#verify-rows li.failed .edit button")
-            page.wait_for_selector("#btn-save:not([hidden])", timeout=30000)
-            check("all verified → Save shown", True)
+            ok_rows = all(wait_state(r, "ok") for r in ["openai", "serper", "jina", "telegram"])
+            check("wrong key marks only its row (others verified inline)", ok_rows and vstate("opencode") == "failed",
+                  str({r: vstate(r) for r in ["opencode", "openai", "serper", "jina", "telegram"]}))
+            check("failed row shows the reason inline", "401" in (page.text_content("#vs-opencode") or "") or len((page.text_content("#vs-opencode") or "").strip()) > 3,
+                  page.text_content("#vs-opencode") or "")
+            check("telegram row shows the resolved bot", "sofia_test_bot" in (page.text_content("#vs-telegram") or ""), page.text_content("#vs-telegram") or "")
+            check("Save stays disabled while a row failed", not save_enabled())
+            page.fill("#f-opencode", GOOD["opencode"])
+            page.press("#f-opencode", "Tab")
+            check("correcting the key re-checks it automatically → Save enabled", wait_save(True) and vstate("opencode") == "ok", str(vstate("opencode")))
+            # Editing a verified field invalidates it at once.
+            page.fill("#f-jina", "jina_wrong")
+            check("editing a verified field disables Save immediately", not save_enabled() and vstate("jina") in ("pending", "running"), str(vstate("jina")))
+            check("…and the edited value is checked automatically", wait_state("jina", "failed"), str(vstate("jina")))
+            # Rapid edits: the newest value wins over an older in-flight check.
+            page.fill("#f-jina", "jina_wrong_again")
+            page.press("#f-jina", "Tab")
+            page.fill("#f-jina", GOOD["jina"])
+            page.press("#f-jina", "Tab")
+            check("rapid edits settle on the newest value (older checks superseded)", wait_save(True) and vstate("jina") == "ok", str(vstate("jina")))
+            # A slow check still in flight is superseded by a newer value: its
+            # (failing) answer must never land on the page.
+            n0 = len(verify_bodies)
+            page.fill("#f-jina", "jina_slow_wrong")
+            page.press("#f-jina", "Tab")
+            check("slow check in flight shows 'checking'", wait_state("jina", "running", 5), str(vstate("jina")))
+            page.fill("#f-jina", GOOD["jina"])
+            page.press("#f-jina", "Tab")
+            check("newer value verified while the older check was still running", wait_save(True, 10) and vstate("jina") == "ok", str(vstate("jina")))
+            time.sleep(3.5)
+            check("the superseded slow answer never lands (row stays verified, Save enabled)",
+                  vstate("jina") == "ok" and save_enabled() and len(verify_bodies) >= n0 + 2, "%s %d" % (vstate("jina"), len(verify_bodies) - n0))
+            time.sleep(1.5)
+            check("no stray banner after superseded checks", page.is_hidden("#banner"), page.text_content("#banner") or "")
+            check("all verified → Save enabled", save_enabled())
             # Direct fetch with a tampered value → 409.
             status = page.evaluate("""async () => {
                 const body = {name: 'Sofia Bruni', opencode: {value: '%s'}, openai: {value: '%s'}, serper: {value: '%s'}, jina: {value: '%s'}, telegram: {token: '%s', chat_id: '%s'}};
@@ -169,10 +238,21 @@ def main():
                 return r.status;
             }""" % (GOOD["opencode"] + "x", GOOD["openai"], GOOD["serper"], GOOD["jina"], GOOD["telegram"], CHAT_ID))
             check("direct fetch with a tampered value → 409", status == 409, str(status))
-            # The tamper attempt dropped the phase to intro: the page must re-verify before saving.
-            page.click("#btn-save")
-            page.wait_for_selector("#btn-save:not([hidden])", timeout=30000)
-            check("edit after verification → save refused until re-verified (page re-verified automatically)", True)
+            partial_save = page.evaluate("""async () => (await fetch('/api/save', {method: 'POST', credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json', 'X-Briglia-Quick-Setup': '1'},
+                body: JSON.stringify({partial: true, name: 'Sofia Bruni', openai: {value: 'x'}})})).status""")
+            check("save never accepts the partial flag (400)", partial_save == 400, str(partial_save))
+            # The tamper attempt dropped the server phase to intro: the page must
+            # re-verify (by itself) before a save goes through.
+            before = len(verify_bodies)
+            end = time.time() + 45
+            while time.time() < end and page.is_hidden("#phase-system"):
+                if page.is_visible("#btn-save") and save_enabled():
+                    page.click("#btn-save")
+                time.sleep(0.3)
+            check("after a refused save the page re-verifies automatically, then saves", page.is_visible("#phase-system") and len(verify_bodies) > before,
+                  "verifies after tamper: %d" % (len(verify_bodies) - before))
+            check("save → system phase shown", page.is_visible("#phase-system"))
             # Foreign origin cannot reach the API.
             other = browser.new_page()
             other.goto("http://127.0.0.1:%d/#%s" % (foreign.server_address[1], base))
@@ -180,10 +260,6 @@ def main():
             result = other.evaluate("window.result")
             check("a page on another origin cannot read the API (CORS/preflight blocked)", result == "blocked" or result.startswith("status:4"), str(result))
             other.close()
-            # Save.
-            page.click("#btn-save")
-            page.wait_for_selector("#phase-system:not([hidden])", timeout=30000)
-            check("save → system phase shown", True)
             # A job runs (slow stub toolchain): reload mid-job re-attaches to the log.
             page.wait_for_selector("#job-log:not([hidden])", timeout=30000)
             page.reload()

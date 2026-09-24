@@ -74,12 +74,19 @@ try:
         assert page.locator('#subscription-effort option[value="max"]').count() == 0
         page.select_option('#subscription-model-choice', 'gpt-6-astra')
         page.select_option('#subscription-effort', 'max')
-        page.click('#btn-verify')
-        page.wait_for_timeout(100)
+        assert page.locator('#btn-verify').count() == 0, 'no manual Verify button'
+        # No click: the model/effort change is verified automatically.
+        for _ in range(100):
+            req = state['verified'] or {}
+            if (req.get('chatgpt') or {}).get('effort') == 'max': break
+            page.wait_for_timeout(50)
         req = state['verified']
+        assert req['partial'] is True
         assert req['chatgpt'] == {'model': 'gpt-6-astra', 'effort': 'max', 'generation': generation}
         assert 'opencode' not in req and req['openai']['value'] == 'synthetic'
+        page.wait_for_selector('#btn-save:not([disabled])', timeout=5000)
+        assert page.locator('#vs-chatgpt').get_attribute('data-state') != 'failed'
         assert not errors, errors
         browser.close()
 finally: server.shutdown()
-print('Subscription browser: login, polling, inert code, model/effort choices, alternate provider and API-tool separation PASS')
+print('Subscription browser: login, polling, inert code, model/effort choices, automatic verification without a Verify click, alternate provider and API-tool separation PASS')

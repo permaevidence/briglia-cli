@@ -61,17 +61,25 @@ struct QuickSetupRequest: Equatable {
     var name: String
     var values: [QuickSetupField: Value]
 
-    static func parse(_ json: Any) throws -> QuickSetupRequest {
+    /// `partial` (verify only, never save): the page verifies each key as
+    /// soon as it is filled in, so the name and required fields may still be
+    /// missing. Every field present is validated exactly as in a full
+    /// request; save always parses the full, strict shape and still demands
+    /// a digest-equal verification of every field it carries.
+    static func parse(_ json: Any, partial: Bool = false) throws -> QuickSetupRequest {
         guard let object = json as? [String: Any] else { throw BadRequest(description: "body must be a JSON object") }
         let allowed: Set<String> = Set(["name"] + QuickSetupField.allCases.map(\.rawValue))
         let unknown = Set(object.keys).subtracting(allowed)
         guard unknown.isEmpty else { throw BadRequest(description: "unknown field(s): \(unknown.sorted().joined(separator: ", "))") }
-        guard let name = (object["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+        let trimmedName = (object["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard partial || !trimmedName.isEmpty else {
             throw BadRequest(description: "name is required")
         }
+        let name = trimmedName
         var values: [QuickSetupField: Value] = [:]
         for field in QuickSetupField.allCases {
             guard let raw = object[field.rawValue] else {
+                if partial { continue }
                 if [.openai, .serper, .jina, .telegram].contains(field) || (field == .opencode && object["chatgpt"] == nil) {
                     throw BadRequest(description: "\(field.rawValue) is required")
                 }
@@ -661,7 +669,7 @@ actor QuickSetupWorkflow {
         requestGeneration += 1
         let r = requestGeneration
         lastRequest = request
-        storedName = request.name
+        if !request.name.isEmpty { storedName = request.name }
 
         // Which fields need a probe: non-kept whose digest changed (or never verified).
         var toProbe: [(QuickSetupField, String, [String: Any])] = []
