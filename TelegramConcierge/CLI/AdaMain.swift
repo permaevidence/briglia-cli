@@ -24,7 +24,7 @@ struct AdaCLI: AsyncParsableCommand {
         commandName: "briglia",
         abstract: "Briglia — your personal AI agent, in the terminal.",
         version: adaCLIVersion,
-        subcommands: [CacheStatsCommand.self, SubscriptionCommand.self, Chat.self, Setup.self, QuickSetup.self, SetupAPI.self, Daemon.self, Doctor.self, Upgrade.self,
+        subcommands: [CacheStatsCommand.self, SubscriptionCommand.self, Chat.self, Setup.self, MenuCommand.self, QuickSetup.self, SetupAPI.self, Daemon.self, Doctor.self, Upgrade.self,
                       AdaService.self, Trigger.self, MediaSelftest.self, BundleCheck.self,
                       ToolchainCommand.self, ToolchainPrefixSelftest.self,
                       SetsidExec.self, GateExec.self, TTYHandoffSelftest.self, GateTTYSelftest.self, BashPipelineSelftest.self,
@@ -43,7 +43,7 @@ struct AdaCLI: AsyncParsableCommand {
                       AppChatSocketSelftest.self,
                       CommandMenuSelftest.self, TelegramMenuSelftest.self, ImageToolSelftest.self, BotSwitchSelftest.self, TelegramTransportSelftest.self, ParkedOutboundSelftest.self,
                       EmailCalendarSelftest.self, AgentMailKeyCommand.self, AgentMailCommand.self,
-                      WebLiveTest.self, QuickSetupSelftest.self],
+                      WebLiveTest.self, QuickSetupSelftest.self, MenuSelftest.self],
         defaultSubcommand: Chat.self
     )
 }

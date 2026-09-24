@@ -126,7 +126,7 @@ enum QuickSetupPreflight {
     static func pageDirectory() -> URL? {
         if let pageDirectoryOverride { return pageDirectoryOverride }
         guard let url = Bundle.module.resourceURL?.appendingPathComponent("QuickSetup", isDirectory: true) else { return nil }
-        for file in ["index.html", "app.js", "app.css"] where !FileManager.default.fileExists(atPath: url.appendingPathComponent(file).path) {
+        for file in ["index.html", "app.js", "app.css", "menu.html", "menu.js", "menu.css"] where !FileManager.default.fileExists(atPath: url.appendingPathComponent(file).path) {
             return nil
         }
         return url
@@ -140,6 +140,9 @@ final class QuickSetupRouter: @unchecked Sendable {
     let port: () -> UInt16
     let pageDirectory: URL
     var settings: BrowserSettingsWorkflow?
+    /// `briglia menu`: the ChatGPT-subscription page (menu.html) on the same
+    /// authorization, same-origin and header rules as quick setup.
+    var menu: MenuWorkflow?
 
     init(workflow: QuickSetupWorkflow, pageDirectory: URL, port: @escaping () -> UInt16) {
         self.workflow = workflow
@@ -178,6 +181,24 @@ final class QuickSetupRouter: @unchecked Sendable {
         // One actor call: the cookie check and the generation it authorizes.
         guard let g = await workflow.authorizedGeneration(cookie: request.cookieBQS) else { return .status(404) }
 
+        if let menu {
+            switch (request.method, request.path) {
+            case ("GET", "/"): return staticFile("menu.html", type: "text/html; charset=utf-8")
+            case ("GET", "/menu.js"): return staticFile("menu.js", type: "text/javascript; charset=utf-8")
+            case ("GET", "/menu.css"): return staticFile("menu.css", type: "text/css; charset=utf-8")
+            case ("GET", "/api/menu/status"):
+                return Self.json(200, await menu.status())
+            case ("POST", "/api/menu"):
+                guard let body = parseBody(request) else { return Self.json(400, ["error": "bad_json"]) }
+                let result = await menu.handle(body)
+                var response = Self.json(200, result)
+                // The reply that closes the page is the one the session
+                // waits to see delivered before it stops the server.
+                response.completesSetup = (result["status"] as? [String: Any])?["closing"] is String
+                return response
+            default: return .status(404)
+            }
+        }
         if let settings {
             switch (request.method, request.path) {
             case ("GET", "/"): return staticFile("settings.html", type: "text/html; charset=utf-8")

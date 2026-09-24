@@ -684,6 +684,21 @@ def main():
     check("quicksetup headless end-to-end (mock providers, dev stubs)", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3f3. `briglia menu`: the offline battery (Telegram detection, every
+    # page action of the real MenuWorkflow with fake services, the router in
+    # front of the menu), then the real binary end to end over HTTP against
+    # the mock provider server (link → cookie, saving, Telegram detection,
+    # Italian, closing, a second run, a refused parallel run, Ctrl-C).
+    result = run_selftest([os.path.abspath(ADA), "__menu-selftest"],
+                          capture_output=True, text=True, timeout=240)
+    menu_out = result.stdout + result.stderr
+    menu_failed = "\n".join(l for l in menu_out.splitlines() if l.startswith("✖") or "FAILED" in l)
+    check("menu-selftest", result.returncode == 0, (menu_failed or menu_out)[-3000:])
+    result = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "menu_headless_test.py"), os.path.abspath(ADA)],
+                            capture_output=True, text=True, timeout=300)
+    check("menu end-to-end (real server, mock providers)", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     # 3g. companion-app chat socket: the selftest
     # covers rendering rules, the live protocol, privacy withhold/replay,
     # and socket hygiene; poller phase 10 later proves the same wire on a

@@ -10,7 +10,8 @@ and Linux.
 
 ```sh
 curl -fsSL https://github.com/permaevidence/briglia-cli/releases/latest/download/install.sh | bash
-briglia setup                   # first-run wizard (~5 minutes)
+briglia menu                    # easiest: setup in your browser with a ChatGPT subscription (reopen any time)
+briglia setup                   # or: the full wizard, every provider (~5 minutes)
 briglia                         # chat; leave with /quit, /exit or Ctrl-C
 ```
 
@@ -57,6 +58,7 @@ Commands:
 | --- | --- |
 | `briglia` / `briglia chat` | interactive chat REPL (`/stop`, `/status`, `/prune`, `/attach`, `/quit`) |
 | `briglia setup` | setup wizard; rerun any single section later. Step 1 can configure SEVERAL main-agent providers (OpenCode Go, OpenRouter, OpenAI API, ChatGPT subscription, custom endpoint, local server) — hop between them anytime with `/provider <name>` in chat. On Telegram, `/provider`, `/model` and `/effort` sent alone show tap buttons (providers you configured; the OpenCode Go catalog or the four ChatGPT models; the provider's effort levels) — a tap runs the same command as typing it |
+| `briglia menu` | setup and settings in the browser for ChatGPT-subscription users (English or Italian): sign in (browser or code), Telegram (paste the bot token, send the bot a message — the chat ID is detected), Serper and Jina keys, optional OpenAI key (voice messages, images) and AgentMail email, Full Disk Access / keep-awake, the document and media toolchain, then start Briglia (a background service on Linux). Each key is checked and saved the moment it is pasted. Same local server and link/cookie protection as `briglia quicksetup`. Reopen it any time; on Linux it pauses the background service while open |
 | `briglia quicksetup` | browser Quick Setup on a new installation; provider, model, ChatGPT account and tool-key settings on an existing installation |
 | session affinity | requests to OpenCode Go carry the required `x-opencode-session` header and requests to OpenRouter the optional `x-session-id` (one opaque HMAC-derived value per conversation, subagent session or background run; state in `~/.local/share/briglia/affinity.json`, never exported, wiped by `/deleteuserdata`, refreshed by the hidden `/rotateaffinity`). The header is sent only to `opencode.ai` / `openrouter.ai` hosts directly — a proxy in front of OpenCode must add its own |
 | `briglia daemon` | headless mode — Telegram channel only. One conversation-owning instance at a time: `briglia` and `briglia daemon` share state, so the second refuses to start |
@@ -122,7 +124,7 @@ briglia subscription select --model gpt-5.6-luna --effort high
 briglia subscription logout
 ```
 
-Choose **ChatGPT subscription** in `briglia setup` or in desktop Quick Setup.
+Choose **ChatGPT subscription** in `briglia menu`, `briglia setup` or in desktop Quick Setup.
 Both use the same native device-code sign-in and check the selected model before
 saving. Quick Setup replaces the OpenCode-key requirement with subscription login;
 its OpenAI API tool key remains separate. The companion Ubuntu Touch app exposes

@@ -1,0 +1,525 @@
+import ArgumentParser
+import Foundation
+
+/// `briglia __menu-selftest` — offline battery for `briglia menu`: the
+/// Telegram chat detection, every page action of the real `MenuWorkflow`
+/// driven with fake services (no network, no real sign-in), and the router's
+/// authorization in front of the menu routes. Isolation: XDG roots and TMPDIR point at a temp directory
+/// before anything touches storage; the one real process step (a toolchain
+/// job through SetupJobRunner) runs `/bin/sh` inside that directory.
+struct MenuSelftest: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "__menu-selftest",
+        abstract: "Internal: verify the briglia menu (flows, page state, router).",
+        shouldDisplay: false
+    )
+
+    func run() async throws {
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("briglia-menu-selftest-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        setenv("XDG_CONFIG_HOME", tempRoot.path, 1)
+        setenv("XDG_DATA_HOME", tempRoot.path, 1)
+        setenv("TMPDIR", tempRoot.path + "/", 1)
+        StoragePaths.ensureRoots()
+
+        let watchdog = Task.detached {
+            try? await Task.sleep(nanoseconds: 180_000_000_000)
+            if !Task.isCancelled { print("WATCHDOG: menu selftest exceeded 180s — hung; aborting"); Foundation.exit(3) }
+        }
+        defer { watchdog.cancel() }
+
+        let failures = await Self.battery(tempRoot: tempRoot)
+        if failures > 0 { throw ExitCode(1) }
+    }
+
+    @MainActor
+    static func battery(tempRoot: URL) async -> Int {
+        let t = MenuSelftestContext(tempRoot: tempRoot)
+        t.telegramDetection()
+        await t.guidedFirstRun()
+        await t.chatgptVariants()
+        await t.telegramVariants()
+        await t.keysAndEmail()
+        await t.linuxComputer()
+        await t.finishGuards()
+        await t.router()
+        print(t.failures == 0 ? "\nmenu selftest: all \(t.checks) checks passed"
+                              : "\nmenu selftest: \(t.failures) of \(t.checks) FAILED")
+        return t.failures
+    }
+}
+
+// MARK: - Fake world
+
+/// Everything the fake services know. Touched from the app (main actor) and
+/// from the env closures the app awaits one at a time.
+final class MenuFakeWorld: @unchecked Sendable {
+    var snap = MenuSnapshot()
+    let good = ["serper": "srp-good-0123456789abcdef", "jina": "jina_good_0123456789abcdef",
+                "openai": "sk-good-0123456789abcdefghij", "agentmail": "am_good_0123456789abcdef",
+                "telegram": "123456789:AAgoodtoken0123456789"]
+    var applied: [[String: Any]] = []
+    var probes: [String] = []
+    var scan: MenuTelegramScan = .waiting
+    var scanCount = 0
+    var loginFailure: String?
+    var loginBlocks = false
+    var loginShown: [String] = []
+    var subscriptionProbeFails = false
+    var selectFails = false
+    var markedComplete = false
+    var fda = false
+    var settingsOpened = 0
+    var urlsOpened: [String] = []
+    var toolMarker: URL
+    var toolchainChecks = 0
+    var agentMailInstalls = 0
+    var gnomeFixed = false
+    var clock = Date(timeIntervalSince1970: 2_000_000_000)
+
+    init(toolMarker: URL) { self.toolMarker = toolMarker }
+
+    func toolchain() -> ToolchainService.DesktopStatus {
+        toolchainChecks += 1
+        let installed = FileManager.default.fileExists(atPath: toolMarker.path)
+        return ToolchainService.DesktopStatus(doctorRan: true, missing: installed ? [] : ["pandoc"],
+                                              libreOffice: true, mandatoryMissing: installed ? [] : ["pandoc"])
+    }
+
+    func apply(_ req: [String: Any]) -> [String: Any] {
+        applied.append(req)
+        if let id = req["identity"] as? [String: Any] { snap.userName = id["user_name"] as? String ?? "" }
+        for (section, path) in [("serper", \MenuSnapshot.serperMasked), ("jina", \MenuSnapshot.jinaMasked), ("openai", \MenuSnapshot.openAIMasked)] {
+            guard let body = req[section] as? [String: Any] else { continue }
+            if body["remove"] as? Bool == true { snap[keyPath: path] = nil }
+            else if let k = body["api_key"] as? String { snap[keyPath: path] = WizardIO.masked(k) }
+        }
+        if let tg = req["telegram"] as? [String: Any] {
+            snap.telegramConfigured = true
+            snap.telegramChatId = tg["chat_id"] as? String ?? ""
+        }
+        if let em = req["email_calendar"] as? [String: Any] {
+            snap.emailProvider = em["provider"] as? String ?? "none"
+            if let k = em["api_key"] as? String { snap.agentMailMasked = WizardIO.masked(k); snap.agentMailInbox = "bree@agentmail.to" }
+        }
+        return ["ok": true]
+    }
+
+    func probe(_ req: [String: Any]) -> [String: Any] {
+        let kind = req["kind"] as? String ?? ""
+        probes.append(kind)
+        if kind == "telegram" {
+            return req["token"] as? String == good["telegram"] ? ["ok": true, "bot_username": "sofia_test_bot"] : ["ok": false, "reason": "Telegram returned HTTP 401"]
+        }
+        if req["api_key"] as? String == good[kind] {
+            return kind == "agentmail" ? ["ok": true, "inboxes": ["bree@agentmail.to"]] : ["ok": true]
+        }
+        return ["ok": false, "reason": "\(kind) returned HTTP 401 — unauthorized"]
+    }
+
+    func subscription(_ req: [String: Any]) -> [String: Any] {
+        switch req["action"] as? String {
+        case "select":
+            if selectFails { return ["ok": false, "error": ["message": "Stop Briglia first"]] }
+            snap.chatgpt = .signedIn(active: true, model: req["model"] as? String ?? "", effort: req["effort"] as? String ?? "", generation: "g1")
+            snap.otherProvider = nil
+            return ["ok": true, "state": "signed_in"]
+        case "probe":
+            return subscriptionProbeFails ? ["ok": false, "error": ["message": "model not available on this plan"]] : ["ok": true, "state": "verified"]
+        case "logout":
+            snap.chatgpt = .signedOut
+            return ["ok": true, "state": "signed_out"]
+        default:
+            return ["ok": true]
+        }
+    }
+}
+
+
+@MainActor
+final class MenuSelftestContext {
+    let tempRoot: URL
+    var checks = 0
+    var failures = 0
+    init(tempRoot: URL) { self.tempRoot = tempRoot }
+
+    func check(_ label: String, _ ok: Bool, _ detail: @autoclosure () -> String = "") {
+        checks += 1
+        if ok { print("✔ \(label)") } else { failures += 1; print("✖ \(label)\(detail().isEmpty ? "" : " — \(detail())")") }
+    }
+
+    func env(_ world: MenuFakeWorld, linux: Bool = false, browserLikely: Bool = true) -> MenuEnvironment {
+        var env = MenuEnvironment()
+        env.isLinux = linux
+        env.browserLikely = browserLikely
+        env.language = "en"
+        env.snapshot = { world.snap }
+        env.toolchainStatus = { world.toolchain() }
+        env.probe = { world.probe($0) }
+        env.apply = { world.apply($0) }
+        env.subscription = { world.subscription($0) }
+        env.browserLogin = { show in
+            show("https://auth.example/oauth/authorize?state=x")
+            world.loginShown.append("browser")
+            if world.loginBlocks { try await Task.sleep(nanoseconds: 60_000_000_000) }
+            if let f = world.loginFailure { throw SubscriptionError(f) }
+        }
+        env.deviceLogin = { show in
+            show("https://auth.example/codex/device", "ABCD-1234")
+            world.loginShown.append("device")
+            if world.loginBlocks { try await Task.sleep(nanoseconds: 60_000_000_000) }
+            if let f = world.loginFailure { throw SubscriptionError(f) }
+        }
+        env.telegramScan = { _, _ in world.scanCount += 1; return world.scan }
+        env.telegramChatProbe = { _, chatId in
+            var p = SetupAPICore.TelegramChatProbe()
+            if chatId != "5551234567" { p.failure = "chat not found — open @sofia_test_bot in Telegram, send /start, then tap Retry" }
+            return p
+        }
+        env.openURL = { world.urlsOpened.append($0) }
+        env.markComplete = { world.markedComplete = true }
+        env.quick.fullDiskAccessGranted = { world.fda }
+        env.quick.openSettingsPane = { world.settingsOpened += 1 }
+        env.quick.disableGnomeAutoSuspend = { world.gnomeFixed = true; world.snap.keepAwakeOK = true; return true }
+        env.quick.maskSleepTargetsJob = { nil }
+        let marker = world.toolMarker.path
+        env.quick.toolchainJobs = { _ in
+            [SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "echo installing pandoc; touch '\(marker)'; echo done"],
+                                 mode: .detached, timeout: 30, label: "brew install pandoc")]
+        }
+        env.quick.installAgentMail = { progress, _, _ in
+            progress("downloading agentmail")
+            world.agentMailInstalls += 1
+            world.snap.agentMailCLIInstalled = true
+            return nil
+        }
+        return env
+    }
+
+    func make(_ world: MenuFakeWorld, linux: Bool = false, browserLikely: Bool = true) async -> MenuWorkflow {
+        let wf = MenuWorkflow(env: env(world, linux: linux, browserLikely: browserLikely), runner: SetupJobRunner(secrets: [:]))
+        wf.now = { world.clock }
+        await wf.start()
+        await wf.settle()
+        return wf
+    }
+
+    func world() -> MenuFakeWorld {
+        let w = MenuFakeWorld(toolMarker: tempRoot.appendingPathComponent("tools-\(UUID().uuidString)"))
+        w.snap.fdaGranted = false
+        w.snap.terminalApp = "Terminal"
+        w.snap.keepAwakeOK = true
+        w.snap.keepAwakeSummary = "Briglia keeps this Mac awake while it runs"
+        return w
+    }
+
+    /// One page action, then wait for the background work it started.
+    @discardableResult
+    func act(_ wf: MenuWorkflow, _ body: [String: Any], settle: Bool = true) async -> [String: Any] {
+        let r = await wf.handle(body)
+        if settle { await wf.settle() }
+        return r
+    }
+
+    func ok(_ r: [String: Any]) -> Bool { r["ok"] as? Bool == true }
+    func msg(_ r: [String: Any]) -> String { r["message"] as? String ?? "" }
+    func json(_ any: Any) -> String {
+        String(decoding: (try? JSONSerialization.data(withJSONObject: any, options: [.sortedKeys])) ?? Data(), as: UTF8.self)
+    }
+    func step(_ wf: MenuWorkflow, _ id: String) -> [String: Any] {
+        ((wf.status()["steps"] as? [[String: Any]]) ?? []).first { $0["id"] as? String == id } ?? [:]
+    }
+    func done(_ wf: MenuWorkflow, _ id: String) -> Bool { step(wf, id)["done"] as? Bool == true }
+
+    // MARK: 1. Telegram detection
+
+    func telegramDetection() {
+        let since = Date(timeIntervalSince1970: 2_000_000_000)
+        func upd(_ chat: Int64, type: String = "private", from: Int64? = nil, date: Double = 2_000_000_010, name: String = "Sofia", bot: Bool = false) -> [String: Any] {
+            ["update_id": 1, "message": ["date": date, "chat": ["id": chat, "type": type],
+                                          "from": ["id": from ?? chat, "first_name": name, "username": name.lowercased(), "is_bot": bot]]]
+        }
+        func verdict(_ updates: [[String: Any]]) -> MenuTelegramScan {
+            let body = try! JSONSerialization.data(withJSONObject: ["ok": true, "result": updates])
+            return MenuEnvironment.interpretUpdates(data: body, status: 200, since: since)
+        }
+        check("a private message from the chat owner is found", verdict([upd(5551234567)]) == .found(chatId: "5551234567", name: "Sofia (@sofia)"))
+        check("group messages are ignored", verdict([upd(-100123, type: "group", from: 42)]) == .waiting)
+        check("a chat whose sender differs is ignored", verdict([upd(777, from: 888)]) == .waiting)
+        check("messages from bots are ignored", verdict([upd(777, bot: true)]) == .waiting)
+        check("messages from before the waiting screen are ignored", verdict([upd(777, date: 1_999_999_000)]) == .waiting)
+        check("the newest private message wins", verdict([upd(111, date: 2_000_000_005, name: "Old"), upd(222, date: 2_000_000_020, name: "New")]) == .found(chatId: "222", name: "New (@new)"))
+        func error(_ status: Int, _ description: String) -> MenuTelegramScan {
+            MenuEnvironment.interpretUpdates(data: try! JSONSerialization.data(withJSONObject: ["ok": false, "description": description]), status: status, since: since)
+        }
+        if case .failed(let why) = error(409, "Conflict: can't use getUpdates method while webhook is active") { check("webhook conflict is explained", why.contains("webhook")) } else { check("webhook conflict is explained", false) }
+        if case .failed(let why) = error(409, "Conflict: terminated by other getUpdates request") { check("a competing poller is explained", why.contains("Another program")) } else { check("a competing poller is explained", false) }
+        if case .failed(let why) = error(401, "Unauthorized") { check("a revoked token is explained", why.contains("BotFather")) } else { check("a revoked token is explained", false) }
+    }
+
+    // MARK: 2. Guided first run
+
+    func guidedFirstRun() async {
+        let w = world()
+        let wf = await make(w)
+        var st = wf.status()
+        check("a fresh install is not complete and every required step is open", st["complete"] as? Bool == false && wf.missingRequired.count == 7)
+        check("the page learns the platform and that a desktop browser is likely", st["platform"] as? String == "macos" && st["browser_likely"] as? Bool == true)
+
+        var r = await act(wf, ["action": "name", "name": "  "])
+        check("an empty name is refused", !ok(r))
+        r = await act(wf, ["action": "name", "name": "Sofia"])
+        check("the name is saved through setup-api identity", ok(r) && (w.applied.last?["identity"] as? [String: Any])?["user_name"] as? String == "Sofia" && done(wf, "name"))
+
+        r = await act(wf, ["action": "chatgpt_browser"])
+        check("browser sign-in opens the ChatGPT link", ok(r) && w.urlsOpened.first?.hasPrefix("https://auth.example/") == true)
+        check("after sign-in ChatGPT is selected with GPT-6 Sol + high and checked", w.snap.chatgpt == .signedIn(active: true, model: "gpt-6-sol", effort: "high", generation: "g1") && done(wf, "chatgpt"))
+        st = wf.status()
+        check("a finished sign-in leaves no login state behind", (st["chatgpt"] as? [String: Any])?["login"] == nil)
+
+        r = await act(wf, ["action": "telegram_token", "token": "not-a-token"])
+        check("a token without a colon is refused before any network call", !ok(r) && msg(r).contains("doesn\u{2019}t look like a bot token") && !w.probes.contains("telegram"))
+        r = await act(wf, ["action": "telegram_token", "token": "123456789:AAwrong"])
+        check("a wrong token is refused by the probe", !ok(r) && msg(r).contains("didn\u{2019}t accept this token"))
+        r = await act(wf, ["action": "telegram_token", "token": w.good["telegram"]!])
+        let pending = ((r["status"] as? [String: Any])?["telegram"] as? [String: Any])?["pending"] as? [String: Any]
+        check("a good token waits for a message to the bot", ok(r) && pending?["state"] as? String == "waiting" && pending?["bot"] as? String == "sofia_test_bot")
+        check("the bot token never appears in the page state", !json(r).contains(w.good["telegram"]!))
+        _ = wf.status(); await wf.settle()
+        check("polling the status scans Telegram", w.scanCount == 1)
+        _ = wf.status(); await wf.settle()
+        check("scans are throttled to every 2 seconds", w.scanCount == 1)
+        w.scan = .found(chatId: "5551234567", name: "Sofia (@sofia)")
+        w.clock = w.clock.addingTimeInterval(3)
+        _ = wf.status(); await wf.settle()
+        let found = ((wf.status()["telegram"] as? [String: Any])?["pending"] as? [String: Any])
+        check("the detected chat is offered for confirmation", found?["state"] as? String == "found" && found?["name"] as? String == "Sofia (@sofia)")
+        r = await act(wf, ["action": "telegram_confirm", "chat_id": "5551234567"])
+        let tg = w.applied.last?["telegram"] as? [String: Any]
+        check("confirming saves token + chat id", ok(r) && tg?["chat_id"] as? String == "5551234567" && tg?["token"] as? String == w.good["telegram"] && done(wf, "telegram"))
+        check("the connected bot is shown by name", (wf.status()["telegram"] as? [String: Any])?["bot"] as? String == "sofia_test_bot")
+
+        r = await act(wf, ["action": "key", "kind": "serper", "key": "srp-wrong-0123456789"])
+        check("a refused key is explained in plain words", !ok(r) && msg(r).contains("Serper refused this key"))
+        r = await act(wf, ["action": "key", "kind": "serper", "key": w.good["serper"]!])
+        check("a good key is checked and saved in one action (no verify step)", ok(r) && msg(r) == "Web search is on." && done(wf, "serper") && w.probes.filter { $0 == "serper" }.count == 2)
+        r = await act(wf, ["action": "key", "kind": "jina", "key": w.good["jina"]!])
+        check("Jina saved", ok(r) && done(wf, "jina"))
+        check("no full key appears in the page state", !w.good.values.contains { json(wf.status()).contains($0) })
+
+        check("Full Disk Access is still missing", !done(wf, "computer") && step(wf, "computer")["summary"] as? String == "Needs Full Disk Access")
+        r = await act(wf, ["action": "fda_open"])
+        check("“Open System Settings” opens the pane", ok(r) && w.settingsOpened == 1)
+        w.fda = true
+        w.clock = w.clock.addingTimeInterval(2)
+        check("granting Full Disk Access is noticed on the next status", done(wf, "computer"))
+
+        check("the tools step shows what's missing", ((wf.status()["tools"] as? [String: Any])?["missing"] as? [String]) == ["pandoc"])
+        check("setup is not marked complete before the tools", !w.markedComplete)
+        r = await act(wf, ["action": "tools_install"])
+        check("installing runs the toolchain job for real", ok(r) && FileManager.default.fileExists(atPath: w.toolMarker.path))
+        check("the installer output is kept for the page", wf.jobLines.contains("installing pandoc"))
+        check("after a complete install setup is marked complete", w.markedComplete && wf.status()["complete"] as? Bool == true)
+        r = await act(wf, ["action": "finish", "what": "start"])
+        check("“Start Briglia” closes the page with start", ok(r) && (r["status"] as? [String: Any])?["closing"] as? String == "start" && wf.closing == "start")
+        r = await act(wf, ["action": "name", "name": "Other"])
+        check("nothing changes once the page is closing", !ok(r) && w.snap.userName == "Sofia")
+    }
+
+    // MARK: 3. ChatGPT variants
+
+    func chatgptVariants() async {
+        var w = world()
+        w.loginBlocks = true
+        var wf = await make(w, browserLikely: false)
+        check("without a desktop browser the page is told to put the code first", wf.status()["browser_likely"] as? Bool == false)
+        var r = await act(wf, ["action": "chatgpt_code"], settle: false)
+        let login = ((r["status"] as? [String: Any])?["chatgpt"] as? [String: Any])?["login"] as? [String: Any]
+        check("code sign-in answers with the URL and the code", ok(r) && login?["code"] as? String == "ABCD-1234" && login?["url"] as? String == "https://auth.example/codex/device")
+        r = await act(wf, ["action": "chatgpt_cancel"])
+        check("cancel ends a waiting sign-in", ok(r) && (wf.status()["chatgpt"] as? [String: Any])?["login"] == nil && msg(r) == "Sign-in cancelled.")
+        w.loginBlocks = false
+        w.loginFailure = "Device login unavailable (HTTP 403); enable device login in ChatGPT security settings or use browser login"
+        r = await act(wf, ["action": "chatgpt_code"])
+        let failed = ((wf.status()["chatgpt"] as? [String: Any])?["login"] as? [String: Any])
+        check("a disabled device login gets the settings hint", (failed?["message"] as? String ?? msg(r)).contains("Enable device code authorization for Codex"))
+
+        w = world(); w.subscriptionProbeFails = true
+        wf = await make(w)
+        r = await act(wf, ["action": "chatgpt_browser"])
+        let err = ((wf.status()["chatgpt"] as? [String: Any])?["login"] as? [String: Any])
+        check("a model the plan lacks is explained and another model suggested", err?["state"] as? String == "error" && (err?["message"] as? String ?? "").contains("pick another one"))
+
+        w = world()
+        w.snap.chatgpt = .signedIn(active: true, model: "gpt-6-sol", effort: "max", generation: "g0")
+        wf = await make(w)
+        r = await act(wf, ["action": "chatgpt_model", "model": "gpt-6-astra"])
+        check("a new model keeps a compatible thinking level", ok(r) && w.snap.chatgpt == .signedIn(active: true, model: "gpt-6-astra", effort: "max", generation: "g1"))
+        r = await act(wf, ["action": "chatgpt_model", "model": "gpt-9-imaginary"])
+        check("an unknown model is refused", !ok(r))
+        r = await act(wf, ["action": "chatgpt_logout"])
+        check("sign out works and says Briglia can't answer", ok(r) && w.snap.chatgpt == .signedOut && msg(r).contains("can\u{2019}t answer"))
+
+        w = world()
+        w.snap.otherProvider = "OpenCode Go"
+        w.snap.chatgpt = .signedIn(active: false, model: "gpt-6-sol", effort: "high", generation: "g")
+        wf = await make(w)
+        let c = wf.status()["chatgpt"] as? [String: Any]
+        check("a signed-in but unused login reports the other provider", c?["active"] as? Bool == false && c?["other_provider"] as? String == "OpenCode Go")
+        r = await act(wf, ["action": "chatgpt_use"])
+        check("“Use ChatGPT for Briglia” selects it", ok(r) && done(wf, "chatgpt"))
+    }
+
+    // MARK: 4. Telegram variants
+
+    func telegramVariants() async {
+        let w = world()
+        let wf = await make(w)
+        var r = await act(wf, ["action": "telegram_confirm", "chat_id": "5551234567"])
+        check("confirming before a token is refused", !ok(r))
+        await act(wf, ["action": "telegram_token", "token": w.good["telegram"]!])
+        r = await act(wf, ["action": "telegram_manual"])
+        check("the ID can be typed by hand", ok(r) && ((wf.status()["telegram"] as? [String: Any])?["pending"] as? [String: Any])?["state"] as? String == "manual")
+        r = await act(wf, ["action": "telegram_confirm", "chat_id": "sofia"])
+        check("a username instead of an ID is refused", !ok(r) && msg(r).contains("is a number"))
+        r = await act(wf, ["action": "telegram_confirm", "chat_id": "42"])
+        check("an ID the bot can't see yet explains /start", !ok(r) && msg(r).contains("send /start"))
+        r = await act(wf, ["action": "telegram_confirm", "chat_id": "5551234567"])
+        check("a typed ID is verified and saved", ok(r) && w.snap.telegramChatId == "5551234567")
+
+        let w2 = world()
+        let wf2 = await make(w2)
+        await act(wf2, ["action": "telegram_token", "token": w2.good["telegram"]!])
+        w2.scan = .failed("This bot is connected to another service (a webhook)")
+        w2.clock = w2.clock.addingTimeInterval(3)
+        _ = wf2.status(); await wf2.settle()
+        let t = wf2.status()["telegram"] as? [String: Any]
+        check("a scan failure clears the pending bot and explains why", t?["pending"] == nil && (t?["error"] as? String ?? "").contains("webhook"))
+        w2.scan = .waiting
+        await act(wf2, ["action": "telegram_token", "token": w2.good["telegram"]!])
+        check("a new token clears the old error", (wf2.status()["telegram"] as? [String: Any])?["error"] == nil)
+        w2.scan = .found(chatId: "999", name: "Someone")
+        w2.clock = w2.clock.addingTimeInterval(3)
+        _ = wf2.status(); await wf2.settle()
+        r = await act(wf2, ["action": "telegram_wait"])
+        check("“No” (not me) keeps waiting", ok(r) && ((wf2.status()["telegram"] as? [String: Any])?["pending"] as? [String: Any])?["state"] as? String == "waiting")
+        r = await act(wf2, ["action": "telegram_reset"])
+        check("“Use another bot” starts over", ok(r) && (wf2.status()["telegram"] as? [String: Any])?["pending"] == nil)
+    }
+
+    // MARK: 5. Keys and email
+
+    func keysAndEmail() async {
+        let w = world()
+        let wf = await make(w)
+        var r = await act(wf, ["action": "key", "kind": "openai", "key": w.good["openai"]!])
+        check("the optional OpenAI key is saved", ok(r) && done(wf, "openai") && msg(r).contains("Voice messages"))
+        r = await act(wf, ["action": "key_remove", "kind": "openai"])
+        check("the OpenAI key can be removed", ok(r) && !done(wf, "openai") && (w.applied.last?["openai"] as? [String: Any])?["remove"] as? Bool == true)
+        r = await act(wf, ["action": "key_remove", "kind": "serper"])
+        check("a required key can't be removed", !ok(r))
+        r = await act(wf, ["action": "key", "kind": "rogue", "key": "x"])
+        check("an unknown key kind is refused", !ok(r))
+        r = await act(wf, ["action": "key", "kind": "serper", "key": "srp-good\nsecond-line"])
+        check("a multi-line paste is refused", !ok(r))
+        r = await act(wf, ["action": "key", "kind": "agentmail", "key": "am_wrong_000000000000"])
+        check("a refused AgentMail key is explained", !ok(r) && msg(r).contains("AgentMail refused this key"))
+        r = await act(wf, ["action": "key", "kind": "agentmail", "key": w.good["agentmail"]!])
+        let em = w.applied.last?["email_calendar"] as? [String: Any]
+        check("a good AgentMail key turns email on and names the address", ok(r) && em?["provider"] as? String == "agentmail" && msg(r).contains("bree@agentmail.to"))
+        check("the email tool is installed right after", w.agentMailInstalls == 1 && (wf.status()["email"] as? [String: Any])?["tool_installed"] as? Bool == true)
+        r = await act(wf, ["action": "email_off"])
+        check("email can be turned off (key kept)", ok(r) && w.snap.emailProvider == "none" && w.snap.agentMailMasked != nil && !done(wf, "email"))
+    }
+
+    // MARK: 6. Linux computer step
+
+    func linuxComputer() async {
+        let w = world()
+        w.snap.keepAwakeOK = false
+        w.snap.keepAwakeSummary = "may suspend — GNOME auto-suspend is on"
+        w.snap.keepAwakeGnomeFixable = true
+        let wf = await make(w, linux: true)
+        let c = wf.status()["computer"] as? [String: Any]
+        check("Linux reports the suspend risk with the GNOME fix", wf.status()["platform"] as? String == "linux" && c?["can_fix_gnome"] as? Bool == true && !done(wf, "computer"))
+        let r = await act(wf, ["action": "keepawake", "how": "gnome"])
+        check("turning off auto-suspend fixes the row", ok(r) && w.gnomeFixed && done(wf, "computer"))
+        let r2 = await act(wf, ["action": "keepawake", "how": "mask"])
+        check("never-sleep without sudo/systemctl explains itself", !ok(r2))
+    }
+
+    // MARK: 7. Finish guards
+
+    func finishGuards() async {
+        let w = world()
+        let wf = await make(w)
+        var r = await act(wf, ["action": "finish", "what": "start"])
+        check("Start is refused while required steps are missing, naming them", !ok(r) && msg(r).contains("Finish these first: Your name, ChatGPT, Telegram") && wf.closing == nil)
+        r = await act(wf, ["action": "finish", "what": "maybe"])
+        check("an unknown finish choice is refused", !ok(r))
+        r = await act(wf, ["action": "nonsense"])
+        check("an unknown action is refused", !ok(r))
+        r = await act(wf, ["action": "lang", "lang": "it"])
+        check("the page can switch to Italian", ok(r) && (r["status"] as? [String: Any])?["lang"] as? String == "it" && step(wf, "serper")["title"] as? String == "Ricerca web")
+        r = await act(wf, ["action": "key", "kind": "serper", "key": "srp-wrong-0123456789"])
+        check("server messages follow the language", msg(r) == "Serper ha rifiutato questa chiave. Controlla di averla copiata tutta, poi incollala di nuovo.")
+        r = await act(wf, ["action": "finish", "what": "start"])
+        check("“finish these first” in Italian names the steps in Italian", msg(r).hasPrefix("Prima completa: Il tuo nome, ChatGPT"))
+        r = await act(wf, ["action": "lang", "lang": "fr"])
+        check("an unsupported language is refused, Italian stays", !ok(r) && wf.lang == "it")
+        r = await act(wf, ["action": "finish", "what": "quit"])
+        check("Close is always allowed", ok(r) && wf.closing == "quit")
+    }
+
+    // MARK: 8. Router in front of the menu
+
+    func router() async {
+        let w = world()
+        let wf = await make(w)
+        var qenv = QuickSetupEnvironment()
+        qenv.storedValue = { _ in nil }
+        guard let auth = try? QuickSetupWorkflow(env: qenv, runner: SetupJobRunner(secrets: [:]), resume: .fresh) else {
+            check("quick-setup authorization builds", false); return
+        }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("menu-page-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for f in ["menu.html", "menu.js", "menu.css"] { try? Data("x".utf8).write(to: dir.appendingPathComponent(f)) }
+        let router = QuickSetupRouter(workflow: auth, pageDirectory: dir) { 4242 }
+        router.menu = wf
+        let host = "127.0.0.1:4242"
+        func req(_ method: String, _ path: String, query: String? = nil, cookie: String? = nil, headers extra: [String: String] = [:], body: [String: Any]? = nil) async -> QuickSetupHTTPServer.Response {
+            var headers = ["host": host]
+            for (k, v) in extra { headers[k] = v }
+            let data = body.map { (try? JSONSerialization.data(withJSONObject: $0)) ?? Data() } ?? Data()
+            return await router.handle(.init(method: method, path: path, query: query, headers: headers, body: data, cookieBQS: cookie, contentLength: data.count))
+        }
+        var resp = await req("GET", "/")
+        check("the menu page needs the link first (no cookie → 404)", resp.status == 404)
+        let token = await auth.launchToken
+        resp = await req("GET", "/start", query: "t=\(token)")
+        let setCookie = resp.headers.first { $0.0 == "Set-Cookie" }?.1 ?? ""
+        let cookie = setCookie.split(separator: ";").first.map { String($0.dropFirst(4)) } ?? ""
+        check("the single-use link sets the session cookie", resp.status == 303 && !cookie.isEmpty)
+        resp = await req("GET", "/start", query: "t=\(token)")
+        check("the link works only once", resp.status == 404)
+        resp = await req("GET", "/", cookie: cookie)
+        check("with the cookie the menu page is served (not the quick-setup page)", resp.status == 200 && String(decoding: resp.body, as: UTF8.self) == "x")
+        resp = await req("GET", "/api/menu/status", cookie: cookie)
+        let status = (try? JSONSerialization.jsonObject(with: resp.body)) as? [String: Any]
+        check("the page state is served", resp.status == 200 && (status?["steps"] as? [Any])?.count == 9)
+        resp = await req("POST", "/api/menu", cookie: cookie, body: ["action": "name", "name": "Evil"])
+        check("a POST without origin/header is refused", resp.status == 403 && w.snap.userName.isEmpty)
+        resp = await req("POST", "/api/menu", cookie: cookie, headers: ["origin": "http://evil.example", "content-type": "application/json", "x-briglia-quick-setup": "1"], body: ["action": "name", "name": "Evil"])
+        check("a cross-origin POST is refused", resp.status == 403 && w.snap.userName.isEmpty)
+        resp = await req("POST", "/api/menu", cookie: cookie, headers: ["origin": "http://\(host)", "content-type": "application/json", "x-briglia-quick-setup": "1"], body: ["action": "name", "name": "Sofia"])
+        check("a same-origin POST with the header works", resp.status == 200 && w.snap.userName == "Sofia")
+        resp = await req("GET", "/index.html", cookie: cookie)
+        check("quick-setup routes are not reachable from the menu session", resp.status == 404)
+        _ = await auth.rotate()
+        resp = await req("GET", "/api/menu/status", cookie: cookie)
+        check("after Enter (new link) the old cookie stops working", resp.status == 404)
+        try? FileManager.default.removeItem(at: dir)
+    }
+}

@@ -128,7 +128,7 @@ final class TerminalSession {
         await manager.startPolling()
         if let error = manager.error {
             print("✖ \(error)")
-            print("  Run `briglia setup` to configure Briglia, then try again.")
+            print("  Run `briglia menu` (or `briglia setup`) to configure Briglia, then try again.")
             throw ExitCode(1)
         }
 

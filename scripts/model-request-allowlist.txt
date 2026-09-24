@@ -3,6 +3,7 @@
 # <path> :: <trimmed source line> :: <reason>. A reason of 'unreviewed' fails the scan.
 # Regenerate missing entries with scripts/model_request_scan.py --regen; prune stale
 # ones with --prune. Sorted by path so merges are trivial.
+TelegramConcierge/CLI/Menu/MenuEnvironment.swift :: var request = URLRequest(url: url) :: Telegram Bot API getUpdates (menu chat-ID detection, no offset), not a model request
 TelegramConcierge/CLI/ReleaseSigning.swift :: var request = URLRequest(url: url) :: signed-release download (GitHub Releases), not a model request
 TelegramConcierge/CLI/SetupAPICommand.swift :: var request = URLRequest(url: url) :: Telegram Bot API probe (getMe/getChat), not a model request
 TelegramConcierge/CLI/TranscriptionService.swift :: var request = URLRequest(url: endpoint) :: OpenAI audio transcription endpoint; OpenAI direct carries no session header (plan §6)
