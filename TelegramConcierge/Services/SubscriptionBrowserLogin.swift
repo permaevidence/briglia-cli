@@ -72,11 +72,11 @@ extension SubscriptionLogin {
                         "code_verifier": verifier, "client_id": SubscriptionEndpoint.clientID,
                         "redirect_uri": "http://localhost:1455/auth/callback"], true)
                     guard status == 200 else { throw SubscriptionError("Browser token exchange failed (HTTP \(status))") }
-                    return try await store.commitLogin(Self.token(data), pending: pending)
+                    return try await commit(Self.token(data), pending: pending)
                 }
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
             throw SubscriptionError("Browser login expired")
-        } catch { try? await store.cancelLogin(pending); throw error }
+        } catch { await store.cancelLoginDetached(pending); throw error }
     }
 }

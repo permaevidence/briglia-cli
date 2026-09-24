@@ -124,6 +124,14 @@ final class MenuValidity: @unchecked Sendable {
     func isValid(_ t: Ticket) -> Bool { (try? check(t)) != nil }
 }
 
+/// The saved AI settings a menu write is based on (`MenuWorkflow.aiState`).
+struct MenuAIState: Equatable {
+    var active: String?
+    var chatgpt: String
+    var providers: [String: String]
+    var openAIKey: Bool
+}
+
 /// The server side of the `briglia menu` page (menu.html/menu.js): every
 /// page action is one call that checks AND saves (no separate verify step),
 /// and `status()` is the whole page state. Side effects go through
@@ -206,9 +214,18 @@ final class MenuWorkflow {
     }
 
     func reload() async {
+        snapshotEpoch &+= 1
         snapshot = await env.snapshot()
         markCompleteIfReady()
     }
+    /// Bumped by every reload: a background refresh that started before a
+    /// newer reload doesn't overwrite it with older settings.
+    private var snapshotEpoch = 0
+    private var liveRefreshInFlight = false
+    private var lastLiveRefresh = Date.distantPast
+    /// Seconds between re-reads of the settings while Briglia runs, so a
+    /// /model, /provider or /effort sent on Telegram shows on the open page.
+    static let liveRefreshInterval: TimeInterval = 3
 
     func refreshToolchain() {
         toolchain = nil
@@ -500,6 +517,21 @@ final class MenuWorkflow {
 
     private var lastFDACheck = Date.distantPast
     private func pollOutsideWorld(_ g: Int) {
+        if env.live != nil, !liveRefreshInFlight, now().timeIntervalSince(lastLiveRefresh) >= Self.liveRefreshInterval {
+            lastLiveRefresh = now()
+            liveRefreshInFlight = true
+            let epoch = snapshotEpoch
+            let t = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let fresh = await self.env.snapshot()
+                self.liveRefreshInFlight = false
+                guard self.snapshotEpoch == epoch, self.closing == nil else { return }
+                self.snapshotEpoch &+= 1
+                self.snapshot = fresh
+                self.markCompleteIfReady()
+            }
+            pending.append(t)
+        }
         if !env.isLinux, !snapshot.fdaGranted, now().timeIntervalSince(lastFDACheck) >= 1.5 {
             lastFDACheck = now()
             if env.quick.fullDiskAccessGranted() { snapshot.fdaGranted = true; markCompleteIfReady() }
@@ -592,6 +624,9 @@ final class MenuWorkflow {
         /// Checked before every write; handed to setup-api / the subscription
         /// store, which call it again right before their own writes.
         let checkpoint: @Sendable () throws -> Void = { try validity.check(ticket) }
+        /// The AI settings this action was chosen against: its write is
+        /// refused if they changed before it (see `guardedAIWrite`).
+        let basis = Self.aiState(snapshot)
         switch action {
         case "lang":
             let value = str(body, "lang")
@@ -657,13 +692,16 @@ final class MenuWorkflow {
             let model = str(body, "model")
             guard ResponsesAdapter.subscriptionModelChoices.contains(where: { $0.id == model }) else { return (false, L("Unknown model.", "Modello sconosciuto.")) }
             try checkpoint()
-            let result = await env.subscription(["action": "select", "model": model, "effort": compatibleEffort(currentEffort ?? "high", model: model)], checkpoint)
+            let effort = compatibleEffort(currentEffort ?? "high", model: model)
+            guard let result = try await guardedAIWrite(basis, { await self.env.subscription(["action": "select", "model": model, "effort": effort], checkpoint) }) else {
+                return (false, staleMessage)
+            }
             try checkpoint()
             await reload()
             return result["ok"] as? Bool == true ? (true, L("Briglia now thinks with \(Self.modelLabel(model)).", "Ora Briglia ragiona con \(Self.modelLabel(model)).")) : (false, applyError(result))
 
         case "chatgpt_use":
-            return try await selectAndProbe(checkpoint)
+            return try await selectAndProbe(basis: basis, checkpoint)
 
         case "lane":
             let raw = str(body, "lane")
@@ -673,28 +711,28 @@ final class MenuWorkflow {
             return (true, nil)
 
         case "provider_key":
-            return try await saveProviderKey(profile: str(body, "profile"), key: str(body, "key"), model: str(body, "model"), checkpoint: checkpoint)
+            return try await saveProviderKey(profile: str(body, "profile"), key: str(body, "key"), model: str(body, "model"), basis: basis, checkpoint: checkpoint)
 
         case "provider_model":
-            return try await changeProviderModel(body, checkpoint: checkpoint)
+            return try await changeProviderModel(body, basis: basis, checkpoint: checkpoint)
 
         case "provider_use":
             guard let chosen = MenuLane(rawValue: str(body, "profile")) else { return (false, L("Unknown provider.", "Fornitore sconosciuto.")) }
             if chosen == .chatgpt {
                 guard case .signedIn = snapshot.chatgpt else { return (false, L("Sign in to ChatGPT first.", "Prima accedi a ChatGPT.")) }
-                return try await selectAndProbe(checkpoint)
+                return try await selectAndProbe(basis: basis, checkpoint)
             }
             guard let p = snapshot.providers[chosen.rawValue], p.configured else {
                 return (false, L("Set up \(chosen.title(lang)) first.", "Prima configura \(chosen.title(lang))."))
             }
             return try await saveProvider(chosen, apiKey: nil, model: p.model, baseURL: nil, textOnly: p.textOnly,
-                                          effort: p.effort.isEmpty ? nil : p.effort, checkpoint: checkpoint)
+                                          effort: p.effort.isEmpty ? nil : p.effort, basis: basis, checkpoint: checkpoint)
 
         case "local_models":
             return await listLocalModels(str(body, "base_url"), generation: g)
 
         case "effort":
-            return try await changeEffort(str(body, "effort"), checkpoint: checkpoint)
+            return try await changeEffort(str(body, "effort"), basis: basis, checkpoint: checkpoint)
 
         case "telegram_token":
             let token = str(body, "token")
@@ -923,33 +961,42 @@ final class MenuWorkflow {
     }
 
     private func startSignIn(browser: Bool, checkpoint: @escaping @Sendable () throws -> Void) async -> (Bool, String?) {
+        // The server enforces what the signed-in page only offers: a working
+        // active login is signed out before another account signs in.
+        if let block = await env.loginBlock() { return (false, loginBlockMessage(block)) }
         loginTask?.cancel()
         let attempt = UUID()
         loginAttempt = attempt
         login = Login(kind: browser ? "browser" : "code", state: "starting")
         let openURL = env.openURL
         let loginEnv = env
+        let commit: SubscriptionLogin.CommitHook = { [weak self] write in
+            guard let self else { throw CancellationError() }
+            return try await self.commitSignIn(write, attempt: attempt, browser: browser, checkpoint: checkpoint)
+        }
         loginTask = Task { @MainActor [weak self] in
             do {
                 if browser {
-                    try await loginEnv.browserLogin { url in
+                    try await loginEnv.browserLogin({ url in
                         openURL(url)
                         Task { @MainActor [weak self] in
                             guard let self, self.loginAttempt == attempt else { return }
                             self.login = Login(kind: "browser", state: "waiting", url: url)
                         }
-                    }
+                    }, commit)
                 } else {
-                    try await loginEnv.deviceLogin { url, code in
+                    try await loginEnv.deviceLogin({ url, code in
                         Task { @MainActor [weak self] in
                             guard let self, self.loginAttempt == attempt else { return }
                             self.login = Login(kind: "code", state: "waiting", url: url, code: code)
                         }
-                    }
+                    }, commit)
                 }
                 guard let self, self.loginAttempt == attempt, !Task.isCancelled else { return }
-                self.login = Login(kind: browser ? "browser" : "code", state: "finishing")
-                let (ok, message) = try await self.selectAndProbe(checkpoint)
+                let selection = self.signInSelection ?? (false, nil)
+                self.signInSelection = nil
+                var (ok, message) = selection
+                if ok { (ok, message) = try await self.probeChatGPT(checkpoint) }
                 guard self.loginAttempt == attempt else { return }
                 self.loginAttempt = nil
                 self.login = ok ? nil : Login(kind: browser ? "browser" : "code", state: "error", message: message)
@@ -959,6 +1006,10 @@ final class MenuWorkflow {
                 guard let self, self.loginAttempt == attempt else { return }
                 self.loginAttempt = nil
                 self.login = nil
+            } catch let refused as MenuSignInRefused {
+                guard let self, self.loginAttempt == attempt else { return }
+                self.loginAttempt = nil
+                self.login = Login(kind: browser ? "browser" : "code", state: "error", message: self.signInRefusedMessage(refused))
             } catch {
                 guard let self, self.loginAttempt == attempt, !Task.isCancelled else { return }
                 self.loginAttempt = nil
@@ -975,9 +1026,57 @@ final class MenuWorkflow {
         return (true, nil)
     }
 
-    /// After a successful login: save + activate the profile (keeping a
-    /// previously chosen model), then one real request to prove it answers.
-    private func selectAndProbe(_ checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+    /// Why the final step of a sign-in wrote nothing.
+    enum MenuSignInRefused: Error { case busy, activeLogin }
+    /// How long the final sign-in step waits for the running Briglia to be
+    /// idle (it holds the new login only in memory meanwhile).
+    static var signInCommitWait: Double = 120
+    /// The switch made together with a sign-in's commit, read by the sign-in
+    /// task once the login returns.
+    private var signInSelection: (Bool, String?)?
+
+    /// The last step of a sign-in: the human wait is over and the new login
+    /// is only in memory. Under the live barrier (the agent idle, up to
+    /// `signInCommitWait` for a turn to finish), re-check that the action is
+    /// still current and that no working active login would be replaced,
+    /// write the credential, and switch Briglia to it. Nothing is written
+    /// when the barrier isn't reached, so the running agent keeps a
+    /// coherent login either way.
+    private func commitSignIn(_ write: () async throws -> String, attempt: UUID, browser: Bool,
+                              checkpoint: @escaping @Sendable () throws -> Void) async throws -> String {
+        if loginAttempt == attempt { login = Login(kind: browser ? "browser" : "code", state: "finishing") }
+        var generation = ""
+        var selection: (Bool, String?) = (false, nil)
+        let entered = try await env.barrier(Self.signInCommitWait) {
+            try checkpoint()
+            if await self.env.loginBlock() == .activeLogin { throw MenuSignInRefused.activeLogin }
+            generation = try await write()
+            await self.reload()
+            selection = try await self.selectChatGPT(checkpoint)
+        }
+        guard entered else { throw MenuSignInRefused.busy }
+        signInSelection = selection
+        return generation
+    }
+
+    /// After a successful login, or "use ChatGPT": save + activate the
+    /// profile (keeping a previously chosen model), then one real request to
+    /// prove it answers.
+    private func selectAndProbe(basis: MenuAIState, _ checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+        var selection: (Bool, String?) = (false, nil)
+        let entered = try await env.barrier(0) {
+            guard Self.aiState(await self.env.snapshot()) == basis else { selection = (false, nil); return }
+            selection = try await self.selectChatGPT(checkpoint)
+            if selection == (false, nil) { selection = (false, self.applyError(MenuHost.busyAnswer)) }
+        }
+        guard entered else { return (false, applyError(MenuHost.busyAnswer)) }
+        if selection == (false, nil) { await reload(); return (false, staleMessage) }
+        guard selection.0 else { return selection }
+        return try await probeChatGPT(checkpoint)
+    }
+
+    /// Saves and activates the ChatGPT profile from the current snapshot.
+    private func selectChatGPT(_ checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         let model = currentModel ?? ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel
         let effort = compatibleEffort(currentEffort ?? ProviderProfiles.configuredEffort(.chatgpt) ?? "high", model: model)
         try checkpoint()
@@ -987,6 +1086,13 @@ final class MenuWorkflow {
         guard selected["ok"] as? Bool == true else {
             return (false, L("Signed in, but Briglia couldn\u{2019}t switch to ChatGPT: ", "Accesso fatto, ma Briglia non è riuscita a passare a ChatGPT: ") + applyError(selected))
         }
+        return (true, nil)
+    }
+
+    /// One real request with the selected model (a read: no barrier).
+    private func probeChatGPT(_ checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+        let model = currentModel ?? ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel
+        let effort = compatibleEffort(currentEffort ?? ProviderProfiles.configuredEffort(.chatgpt) ?? "high", model: model)
         let probe = await env.subscription(["action": "probe", "model": model, "effort": effort], checkpoint)
         try checkpoint()
         guard probe["ok"] as? Bool == true else {
@@ -996,12 +1102,73 @@ final class MenuWorkflow {
         return (true, L("Signed in! Briglia now thinks with \(Self.modelLabel(model)).", "Accesso fatto! Ora Briglia ragiona con \(Self.modelLabel(model))."))
     }
 
+    // MARK: Stale settings
+
+    /// The saved AI settings a write depends on: which provider runs, and
+    /// each profile's model, thinking level and image mode.
+    static func aiState(_ s: MenuSnapshot) -> MenuAIState {
+        var chatgpt = "signed_out"
+        switch s.chatgpt {
+        case .signedIn(let active, let model, let effort, _): chatgpt = "signed_in|\(active)|\(model)|\(effort)"
+        case .loginRequired: chatgpt = "login_required"
+        case .signedOut: break
+        }
+        var providers: [String: String] = [:]
+        for (id, p) in s.providers {
+            providers[id] = "\(p.configured)|\(p.model)|\(p.effort)|\(p.textOnly)|\(p.endpoint)"
+        }
+        return MenuAIState(active: s.activeProfile, chatgpt: chatgpt, providers: providers, openAIKey: s.openAIMasked != nil)
+    }
+
+    /// Runs an AI-settings write only while the saved settings are still the
+    /// ones the action was chosen against (`basis`), compared inside the
+    /// running agent's settings barrier (Telegram commands are refused
+    /// there) and after any probe the action awaited. nil = they changed
+    /// (a /model, /provider or /effort from Telegram, the settings page…):
+    /// nothing is written and the page is refreshed.
+    private func guardedAIWrite(_ basis: MenuAIState, _ write: @escaping () async -> [String: Any]) async throws -> [String: Any]? {
+        var result = MenuHost.busyAnswer
+        var stale = false
+        let entered = try await env.barrier(0) {
+            guard Self.aiState(await self.env.snapshot()) == basis else { stale = true; return }
+            result = await write()
+        }
+        guard entered else { return MenuHost.busyAnswer }
+        if stale { await reload(); return nil }
+        return result
+    }
+
+    var staleMessage: String {
+        L("Your settings were changed elsewhere (for example from Telegram) while this page was open, so nothing was saved. The page now shows the current settings \u{2014} check them and try again.",
+          "Le impostazioni sono state cambiate altrove (per esempio da Telegram) mentre questa pagina era aperta, quindi non ho salvato nulla. Ora la pagina mostra quelle attuali: controllale e riprova.")
+    }
+
+    func loginBlockMessage(_ block: MenuLoginBlock) -> String {
+        switch block {
+        case .activeLogin:
+            return L("Briglia is using this ChatGPT login right now. To sign in with another account, sign out first.",
+                     "Briglia sta usando questo accesso ChatGPT. Per entrare con un altro account, prima esci.")
+        case .telegramLogin:
+            return L("A ChatGPT sign-in started from Telegram is still waiting. Finish it there, or send /subscription cancel, then try again.",
+                     "C\u{2019}è ancora un accesso a ChatGPT avviato da Telegram in attesa. Completalo lì, oppure invia /subscription cancel, poi riprova.")
+        }
+    }
+
+    func signInRefusedMessage(_ refused: MenuSignInRefused) -> String {
+        switch refused {
+        case .activeLogin: return loginBlockMessage(.activeLogin)
+        case .busy:
+            return L("Briglia stayed busy answering, so the new sign-in wasn\u{2019}t saved. Sign in again when it has answered.",
+                     "Briglia è rimasta occupata a rispondere, quindi il nuovo accesso non è stato salvato. Accedi di nuovo quando ha risposto.")
+        }
+    }
+
     // MARK: OpenCode Go, OpenRouter, local
 
     /// A new OpenCode Go or OpenRouter key: checked against the service,
     /// then saved with the lane's current (or default) model and switched
     /// to. The key never goes back to the page.
-    private func saveProviderKey(profile: String, key: String, model requested: String, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+    private func saveProviderKey(profile: String, key: String, model requested: String, basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         guard let lane = MenuLane(rawValue: profile), lane == .opencode || lane == .openrouter else { return (false, L("Unknown provider.", "Fornitore sconosciuto.")) }
         guard !key.isEmpty, key.count <= 4096, !key.contains(where: { $0.isNewline }) else { return (false, L("Paste your key first.", "Incolla prima la chiave.")) }
         let stored = snapshot.providers[lane.rawValue] ?? MenuSnapshot.Provider()
@@ -1014,13 +1181,13 @@ final class MenuWorkflow {
         guard probe["ok"] as? Bool == true else { return (false, keyError(service: lane.title(lang), Self.probeReason(probe))) }
         return try await saveProvider(lane, apiKey: key, model: model, baseURL: nil,
                                       textOnly: model == stored.model && stored.configured ? stored.textOnly : nil,
-                                      effort: stored.effort.isEmpty ? nil : stored.effort, checkpoint: checkpoint)
+                                      effort: stored.effort.isEmpty ? nil : stored.effort, basis: basis, checkpoint: checkpoint)
     }
 
     /// A different model (OpenCode Go catalog, an OpenRouter id, or a local
     /// server's model with its address): one real request with the saved key
     /// first, so a model the account can't use is refused before it's saved.
-    private func changeProviderModel(_ body: [String: Any], checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+    private func changeProviderModel(_ body: [String: Any], basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         guard let lane = MenuLane(rawValue: str(body, "profile")), lane != .chatgpt else { return (false, L("Unknown provider.", "Fornitore sconosciuto.")) }
         let model = str(body, "model")
         guard !model.isEmpty, model.count <= 300, !model.contains(where: { $0.isWhitespace }) else {
@@ -1061,7 +1228,7 @@ final class MenuWorkflow {
         // theirs unless the page says otherwise (a new id defaults to vision).
         let vision: Bool? = lane == .opencode ? nil : (textOnly ?? (model == stored.model ? stored.textOnly : false))
         return try await saveProvider(lane, apiKey: nil, model: model, baseURL: baseURL, textOnly: vision,
-                                      effort: stored.effort.isEmpty ? nil : stored.effort, checkpoint: checkpoint)
+                                      effort: stored.effort.isEmpty ? nil : stored.effort, basis: basis, checkpoint: checkpoint)
     }
 
     /// Saves one provider profile through setup-api and makes it the one
@@ -1069,7 +1236,7 @@ final class MenuWorkflow {
     /// rule for every lane but ChatGPT), so the stored research backend is
     /// set to OpenAI whenever that key is there.
     private func saveProvider(_ lane: MenuLane, apiKey: String?, model: String, baseURL: String?, textOnly: Bool?, effort: String?,
-                              checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+                              basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         var section: [String: Any] = ["profile": lane.profile.rawValue, "model": model, "activate": true]
         if let apiKey { section["api_key"] = apiKey }
         if let baseURL { section["base_url"] = baseURL }
@@ -1078,7 +1245,8 @@ final class MenuWorkflow {
         var payload: [String: Any] = ["provider": section]
         if snapshot.openAIMasked != nil { payload["web_search_backend"] = WebSearchBackend.openai.rawValue }
         try checkpoint()
-        let result = await env.apply(payload, checkpoint)
+        let apply = env.apply
+        guard let result = try await guardedAIWrite(basis, { await apply(payload, checkpoint) }) else { return (false, staleMessage) }
         try checkpoint()
         await reload()
         guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
@@ -1088,19 +1256,27 @@ final class MenuWorkflow {
     }
 
     /// The reasoning level of the running provider.
-    private func changeEffort(_ effort: String, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+    private func changeEffort(_ effort: String, basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         guard let active = activeLane else { return (false, L("Set up an AI provider first.", "Prima configura un fornitore AI.")) }
         let model = active == .chatgpt ? (currentModel ?? "") : (snapshot.providers[active.rawValue]?.model ?? "")
         guard effortChoices(active, model: model).contains(effort) else { return (false, L("Unknown thinking level.", "Livello di ragionamento sconosciuto.")) }
         try checkpoint()
-        let result: [String: Any]
-        if active == .chatgpt {
-            result = await env.subscription(["action": "select", "model": model, "effort": effort], checkpoint)
+        let request: [String: Any]
+        let viaSubscription = active == .chatgpt
+        if viaSubscription {
+            request = ["action": "select", "model": model, "effort": effort]
         } else {
             let p = snapshot.providers[active.rawValue] ?? MenuSnapshot.Provider()
-            result = await env.apply(["provider": ["profile": active.profile.rawValue, "model": p.model, "effort": effort,
-                                                   "text_only": p.textOnly, "activate": true] as [String: Any]], checkpoint)
+            request = ["provider": ["profile": active.profile.rawValue, "model": p.model, "effort": effort,
+                                    "text_only": p.textOnly, "activate": true] as [String: Any]]
         }
+        // Rebuilt from the snapshot above, so only written while the saved
+        // model/provider are still the ones the page showed: an effort
+        // change never restores a model or provider switched elsewhere.
+        let env = self.env
+        guard let result = try await guardedAIWrite(basis, {
+            viaSubscription ? await env.subscription(request, checkpoint) : await env.apply(request, checkpoint)
+        }) else { return (false, staleMessage) }
         try checkpoint()
         await reload()
         guard result["ok"] as? Bool == true else { return (false, applyError(result)) }

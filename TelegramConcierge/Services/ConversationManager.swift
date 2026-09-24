@@ -35,6 +35,8 @@ class ConversationManager: ObservableObject {
     private var archiveRecoveryTask: Task<Void, Never>?
     private var activeProcessingTask: Task<Void, Never>?
     private var subscriptionLoginTask: Task<Void, Never>?
+    /// A /subscription login from Telegram is waiting for the user.
+    var subscriptionLoginInProgress: Bool { subscriptionLoginTask != nil }
     private var subscriptionLoginRunID: UUID?
     private var activeRunId: UUID? {
         didSet { isTurnActive = activeRunId != nil }
@@ -1292,26 +1294,7 @@ class ConversationManager: ObservableObject {
         // (dedicated agent inbox via REST), or none (no polling, no context).
         // Both services retry + fail gracefully when unconfigured, so startup
         // never blocks on them.
-        switch EmailCalendarProvider.current {
-        case .gws:
-            await GoogleWorkspaceService.shared.setNewEmailHandler { [weak self] newEmails in
-                // nil self = manager gone (shutdown race) → NOT durable:
-                // fail-safe false holds the checkpoint so the mail redelivers
-                // on the next launch instead of being silently skipped.
-                await self?.processNewUnreadEmails(newEmails) ?? false
-            }
-            await GoogleWorkspaceService.shared.startBackgroundPoll()
-        case .agentmail:
-            await AgentMailService.shared.setNewEmailHandler { [weak self] newEmails in
-                // nil self = manager gone (shutdown race) → NOT durable:
-                // fail-safe false holds the checkpoint so the mail redelivers
-                // on the next launch instead of being silently skipped.
-                await self?.processNewUnreadEmails(newEmails) ?? false
-            }
-            await AgentMailService.shared.startBackgroundPoll()
-        case .none:
-            break
-        }
+        await startEmailProvider()
         
         // Configure Gemini image service if API key is available
         if let geminiApiKey = KeychainHelper.load(key: KeychainHelper.geminiApiKeyKey), !geminiApiKey.isEmpty {
@@ -10744,6 +10727,76 @@ class ConversationManager: ObservableObject {
         }
         NotificationCenter.default.post(name: .adaLLMProviderDidChange, object: nil,
             userInfo: ["provider": LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)).rawValue])
+        await applyEmailSettingsChange()
+    }
+
+    /// The email provider and AgentMail account the running pollers were
+    /// started for. nil = not started by this process yet.
+    struct AppliedEmailState: Equatable {
+        var provider: EmailCalendarProvider
+        var agentMailKey: String
+        var inbox: String
+        static var current: AppliedEmailState {
+            AppliedEmailState(provider: EmailCalendarProvider.current,
+                              agentMailKey: AgentMailService.apiKey() ?? "",
+                              inbox: EmailCalendarProvider.agentMailInboxAddress)
+        }
+    }
+    private var appliedEmailState: AppliedEmailState?
+
+    /// Starts the poller of the configured email provider (startup, restore,
+    /// and a live settings change) and records what it was started for.
+    private func startEmailProvider() async {
+        let state = AppliedEmailState.current
+        appliedEmailState = state
+        // Ambient inbox + calendar awareness, routed by the email/calendar
+        // provider setting: gws (user's Gmail via the CLI), agentmail
+        // (dedicated agent inbox via REST), or none (no polling, no context).
+        // Both services retry + fail gracefully when unconfigured, so startup
+        // never blocks on them.
+        switch state.provider {
+        case .gws:
+            await GoogleWorkspaceService.shared.setNewEmailHandler { [weak self] newEmails in
+                // nil self = manager gone (shutdown race) → NOT durable:
+                // fail-safe false holds the checkpoint so the mail redelivers
+                // on the next launch instead of being silently skipped.
+                await self?.processNewUnreadEmails(newEmails) ?? false
+            }
+            await GoogleWorkspaceService.shared.startBackgroundPoll()
+        case .agentmail:
+            await AgentMailService.shared.setNewEmailHandler { [weak self] newEmails in
+                await self?.processNewUnreadEmails(newEmails) ?? false
+            }
+            await AgentMailService.shared.startBackgroundPoll()
+        case .none:
+            break
+        }
+    }
+
+    /// A live settings change (briglia menu / browser settings, under the
+    /// settings barrier) that touched the email provider or the AgentMail
+    /// account: quiesce both pollers and drop their in-memory state, forget
+    /// the old account's persisted drain checkpoint when the account
+    /// changed, drop the frozen inbox/agenda prompt context, then start the
+    /// selected provider. No-op when nothing email-related changed, so an
+    /// ordinary save doesn't reseed the pollers.
+    func applyEmailSettingsChange() async {
+        let current = AppliedEmailState.current
+        guard current != appliedEmailState else { return }
+        let previous = appliedEmailState
+        if !(await AgentMailService.shared.resetForWipe()) {
+            print("[ConversationManager] WARNING: AgentMail poller not quiescent at provider change — late ticks are discarded by the generation token")
+        }
+        if let previous, previous.agentMailKey != current.agentMailKey || previous.inbox != current.inbox {
+            await AgentMailService.shared.discardPersistedPollState()
+        }
+        if previous == nil || previous?.provider == .gws || current.provider == .gws {
+            _ = await GoogleWorkspaceService.shared.resetForWipe()
+        }
+        frozenEmailContext = nil
+        frozenCalendarContext = nil
+        await startEmailProvider()
+        print("[ConversationManager] Email provider applied live: \(current.provider.rawValue)")
     }
 
     func beginMindRestore() -> Bool {
@@ -10811,6 +10864,7 @@ class ConversationManager: ObservableObject {
             }
             await AgentMailService.shared.startBackgroundPoll()
         }
+        appliedEmailState = .current
         print("[ConversationManager] Reloaded data after Mind restore")
     }
     

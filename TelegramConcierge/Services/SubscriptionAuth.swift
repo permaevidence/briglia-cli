@@ -204,6 +204,13 @@ struct SubscriptionAuthStore {
         }
     }
 
+    /// `cancelLogin` that still runs when the calling task was cancelled
+    /// (it only clears this exact pending ID).
+    func cancelLoginDetached(_ pending: String) async {
+        let store = self
+        await Task.detached { try? await store.cancelLogin(pending) }.value
+    }
+
     func cancelLogin(_ pending: String) async throws {
         try await locked {
             guard var state = try read(), state.pendingLogin == pending else { return }
@@ -334,6 +341,17 @@ struct SubscriptionLogin {
     var store = SubscriptionAuthStore()
     var deviceTimeout: TimeInterval = 900
     var post: Post = { try await SubscriptionAuthHTTP().post(path: $0, fields: $1, form: $2) }
+    /// Wraps the final credential commit (default: commit directly). The
+    /// live menu runs it inside the running agent's settings barrier, with
+    /// its own validity and replacement checks, so the new login and the
+    /// agent's switch to it happen together.
+    typealias CommitHook = (_ commit: () async throws -> String) async throws -> String
+    var commitHook: CommitHook? = nil
+    func commit(_ credential: SubscriptionCredential, pending: String) async throws -> String {
+        let direct = { try await store.commitLogin(credential, pending: pending) }
+        if let commitHook { return try await commitHook(direct) }
+        return try await direct()
+    }
 
     static func object(_ data: Data) throws -> [String: Any] {
         guard data.count <= 131072, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -405,7 +423,7 @@ struct SubscriptionLogin {
                     let (tokens, tokenStatus) = try await post("/oauth/token", ["grant_type": "authorization_code", "code": code,
                         "code_verifier": verifier, "client_id": SubscriptionEndpoint.clientID, "redirect_uri": SubscriptionEndpoint.deviceCallback], true)
                     guard tokenStatus == 200 else { throw SubscriptionError("Device token exchange failed (HTTP \(tokenStatus))") }
-                    return try await store.commitLogin(Self.token(tokens), pending: pending)
+                    return try await commit(Self.token(tokens), pending: pending)
                 }
                 let reason = (try? Self.object(reply)["error"] as? String) ?? ""
                 if reason == "slow_down" || codeStatus == 429 { interval = min(900, interval + 5); continue }
@@ -414,9 +432,11 @@ struct SubscriptionLogin {
             }
             throw SubscriptionError("Device login expired; start again")
         } catch {
-            // Cleanup is best effort on cancellation only; pending IDs are inert
-            // and a later login/logout supersedes them durably.
-            try? await store.cancelLogin(pending)
+            // Cleanup is best effort; pending IDs are inert and a later
+            // login/logout supersedes them durably. It runs outside this
+            // task's cancellation, so a cancelled sign-in doesn't leave a
+            // pending ID that blocks selecting ChatGPT until the next login.
+            await store.cancelLoginDetached(pending)
             throw error
         }
     }

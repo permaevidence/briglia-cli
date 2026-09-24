@@ -38,26 +38,7 @@ final class MenuHost {
         auth = try QuickSetupWorkflow(env: env.quick, runner: runner, resume: .fresh)
         let mode = Self.runMode()
         env.live = MenuLive(mode: mode, stop: { MenuHost.stopRunningBriglia(mode: mode) })
-        // Saves pass the agent's idle gate and reload its settings; the
-        // agent holds the instance lease, so setup-api writes as its owner.
-        env.apply = { [weak manager] request, checkpoint in
-            guard let manager, await manager.beginBrowserSettingsMutation() else { return MenuHost.busyAnswer }
-            let result = await SetupAPICore.apply(request, ownsLease: true, checkpoint: checkpoint)
-            await manager.reloadBrowserSettings()
-            manager.endBrowserSettingsMutation()
-            return result
-        }
-        env.subscription = { [weak manager] request, checkpoint in
-            // Reads (status, the one-request probe) need no gate.
-            guard ["select", "logout"].contains(request["action"] as? String ?? "") else {
-                return await SubscriptionSetup().perform(request, ownsLease: true, checkpoint: checkpoint)
-            }
-            guard let manager, await manager.beginBrowserSettingsMutation() else { return MenuHost.busyAnswer }
-            let result = await SubscriptionSetup().perform(request, ownsLease: true, checkpoint: checkpoint)
-            await manager.reloadBrowserSettings()
-            manager.endBrowserSettingsMutation()
-            return result
-        }
+        Self.wireLive(&env, manager: manager)
         menu = MenuWorkflow(env: env, runner: runner)
         let box = QuickSetupSession.PortBox()
         let router = QuickSetupRouter(workflow: auth, pageDirectory: directory) { box.port }
@@ -66,6 +47,57 @@ final class MenuHost {
         try server.start()
         box.port = server.port
         await menu.start()
+    }
+
+    /// The live seams: every write runs inside the agent's settings barrier
+    /// and reloads its settings (AI, tools, email pollers) before lifting
+    /// it; ChatGPT sign-in also refuses while a Telegram login waits.
+    static func wireLive(_ env: inout MenuEnvironment, manager: ConversationManager) {
+        // Saves pass the agent's idle gate and reload its settings; the
+        // agent holds the instance lease, so setup-api writes as its owner.
+        let barrier: (Double, () async throws -> Void) async throws -> Bool = { [weak manager] wait, body in
+            if MenuBarrier.held { try await body(); return true }
+            guard let manager else { return false }
+            let deadline = ProcessInfo.processInfo.systemUptime + wait
+            while !(await manager.beginBrowserSettingsMutation()) {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
+            do {
+                try await MenuBarrier.$held.withValue(true) { try await body() }
+            } catch {
+                await manager.reloadBrowserSettings()
+                manager.endBrowserSettingsMutation()
+                throw error
+            }
+            // Reload (AI, tools, email pollers) before lifting the barrier.
+            await manager.reloadBrowserSettings()
+            manager.endBrowserSettingsMutation()
+            return true
+        }
+        env.barrier = barrier
+        env.apply = { request, checkpoint in
+            var result = MenuHost.busyAnswer
+            guard (try? await barrier(0) { result = await SetupAPICore.apply(request, ownsLease: true, checkpoint: checkpoint) }) == true else {
+                return MenuHost.busyAnswer
+            }
+            return result
+        }
+        env.subscription = { request, checkpoint in
+            // Reads (status, the one-request probe) need no gate.
+            guard ["select", "logout"].contains(request["action"] as? String ?? "") else {
+                return await SubscriptionSetup().perform(request, ownsLease: true, checkpoint: checkpoint)
+            }
+            var result = MenuHost.busyAnswer
+            guard (try? await barrier(0) { result = await SubscriptionSetup().perform(request, ownsLease: true, checkpoint: checkpoint) }) == true else {
+                return MenuHost.busyAnswer
+            }
+            return result
+        }
+        env.loginBlock = { [weak manager] in
+            if manager?.subscriptionLoginInProgress == true { return .telegramLogin }
+            return (try? SubscriptionSetup.checkLoginReplacement()) == nil ? .activeLogin : nil
+        }
     }
 
     /// A link to the live menu, opening it when it isn't open (a second

@@ -156,6 +156,14 @@ actor AgentMailService {
         print("[AgentMailService] Arrival poll started (every \(pollIntervalSeconds)s, query: labels=unread&after=<lastPollTime>)")
     }
 
+    /// Forgets the persisted arrival checkpoint (watermark + drain cursors).
+    /// Called after a live AgentMail account change, once the poller is
+    /// quiesced: cursors discovered under the old key must not be restored
+    /// for the new one.
+    func discardPersistedPollState() {
+        try? FileManager.default.removeItem(at: Self.pollStateURL)
+    }
+
     func stopBackgroundPoll() {
         // Bump so a tick already in flight discards its commits — a plain
         // stop must be as final as a wipe (the caller may delete state next).

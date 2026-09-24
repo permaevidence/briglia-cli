@@ -45,6 +45,9 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.providerLanes()
         t.localServerParsing()
         await t.liveHub()
+        await t.staleSettings()
+        await t.liveSignIn()
+        await t.liveEmail()
         await t.linuxComputer()
         await t.finishGuards()
         await t.staleOperations()
@@ -92,6 +95,9 @@ final class MenuFakeWorld: @unchecked Sendable {
     var holds: [String: MenuGate] = [:]
     /// Writes refused by the operation's checkpoint.
     var voidedWrites = 0
+    /// ChatGPT credentials written by a sign-in's commit.
+    var loginCommits = 0
+    var loginBlock: MenuLoginBlock?
 
     init(toolMarker: URL) { self.toolMarker = toolMarker }
 
@@ -238,18 +244,23 @@ final class MenuSelftestContext {
             do { try checkpoint() } catch { world.voidedWrites += 1; return ["ok": false, "error": ["code": "subscription", "message": "superseded"]] }
             return world.subscription(req)
         }
-        env.browserLogin = { show in
+        // Like SubscriptionLogin: the credential is written through the
+        // commit hook once the human part is done.
+        env.browserLogin = { show, commit in
             show("https://auth.example/oauth/authorize?state=x")
             world.loginShown.append("browser")
             if world.loginBlocks { try await Task.sleep(nanoseconds: 60_000_000_000) }
             if let f = world.loginFailure { throw SubscriptionError(f) }
+            _ = try await commit { world.loginCommits += 1; return "gen-fake" }
         }
-        env.deviceLogin = { show in
+        env.deviceLogin = { show, commit in
             show("https://auth.example/codex/device", "ABCD-1234")
             world.loginShown.append("device")
             if world.loginBlocks { try await Task.sleep(nanoseconds: 60_000_000_000) }
             if let f = world.loginFailure { throw SubscriptionError(f) }
+            _ = try await commit { world.loginCommits += 1; return "gen-fake" }
         }
+        env.loginBlock = { world.loginBlock }
         env.telegramScan = { _, _ in world.scanCount += 1; return world.scan }
         env.localModels = { base in world.localModelAsks.append(base); return world.localModels }
         env.providerKey = { profile in world.snap.providers[profile.rawValue]?.configured == true ? world.good[profile.rawValue] : nil }

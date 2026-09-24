@@ -75,6 +75,21 @@ enum MenuTelegramScan: Equatable {
 
 // MARK: - Side effects (every one behind a closure, for the selftest)
 
+/// Why a ChatGPT sign-in is refused.
+enum MenuLoginBlock: Equatable {
+    /// ChatGPT is the active provider with a working login: replacing it
+    /// under the running agent would leave it on a stale login.
+    case activeLogin
+    /// A /subscription login started from Telegram is still waiting.
+    case telegramLogin
+}
+
+/// Set while the current task holds the live settings barrier, so the
+/// writes it makes don't try to take it again.
+enum MenuBarrier {
+    @TaskLocal static var held = false
+}
+
 /// The menu served by a RUNNING Briglia (the live hub): saves go through
 /// the agent's idle gate and reload its settings (wired into `apply` and
 /// `subscription` by `MenuHost`); Stop ends the running agent.
@@ -120,11 +135,33 @@ struct MenuEnvironment {
     var subscription: ([String: Any], @escaping () throws -> Void) async -> [String: Any] = {
         await SubscriptionSetup().perform($0, ownsLease: true, checkpoint: $1)
     }
-    var browserLogin: (_ show: @escaping @Sendable (String) -> Void) async throws -> Void = { show in
-        _ = try await SubscriptionLogin().browser { show($0) }
+    /// ChatGPT sign-in. `commit` wraps the final credential write (see
+    /// `SubscriptionLogin.commitHook`): the menu checks the action is still
+    /// valid, refuses to replace a working active login, and on the live
+    /// hub holds the agent's settings barrier across the commit and the
+    /// switch to it.
+    var browserLogin: (_ show: @escaping @Sendable (String) -> Void, _ commit: @escaping SubscriptionLogin.CommitHook) async throws -> Void = { show, commit in
+        var login = SubscriptionLogin(); login.commitHook = commit
+        _ = try await login.browser { show($0) }
     }
-    var deviceLogin: (_ show: @escaping @Sendable (String, String) -> Void) async throws -> Void = { show in
-        _ = try await SubscriptionLogin().device { show($0, $1) }
+    var deviceLogin: (_ show: @escaping @Sendable (String, String) -> Void, _ commit: @escaping SubscriptionLogin.CommitHook) async throws -> Void = { show, commit in
+        var login = SubscriptionLogin(); login.commitHook = commit
+        _ = try await login.device { show($0, $1) }
+    }
+    /// Why a ChatGPT sign-in can't start (or commit) right now, nil when it
+    /// can. The live hub adds a Telegram /subscription login in progress.
+    var loginBlock: () async -> MenuLoginBlock? = {
+        (try? SubscriptionSetup.checkLoginReplacement()) == nil ? .activeLogin : nil
+    }
+    /// Runs one write inside the running agent's settings barrier (no turn,
+    /// subagent, watcher or maintenance; Telegram commands refused), waiting
+    /// up to `wait` seconds for it, then reloads the agent's settings. False
+    /// = the agent stayed busy and `body` never ran. Offline (no running
+    /// Briglia) it just runs `body`. Writes inside see `MenuBarrier.held` and
+    /// don't take the barrier again.
+    var barrier: (_ wait: Double, _ body: () async throws -> Void) async throws -> Bool = { _, body in
+        try await MenuBarrier.$held.withValue(true) { try await body() }
+        return true
     }
     /// The model ids a local OpenAI-compatible server offers (GET /models),
     /// or why it couldn't be asked.
