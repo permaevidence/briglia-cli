@@ -238,3 +238,6 @@ details.more { margin: 0 0 14px; }
 label.check { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--soft); margin: 6px 0; cursor: pointer; }
 .links.switch { margin: 14px 0 0; }
 @media (max-width: 780px) { .lanes { grid-template-columns: 1fr; } }
+.runstate.on { background: var(--ok-soft); color: var(--ok); }
+.runstate.on b { color: var(--ok); }
+.runstate.on .pausedot { background: var(--ok); box-shadow: 0 0 0 4px rgba(21, 128, 61, .15); }

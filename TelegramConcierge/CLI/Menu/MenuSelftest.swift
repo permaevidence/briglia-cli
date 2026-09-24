@@ -44,6 +44,7 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.keysAndEmail()
         await t.providerLanes()
         t.localServerParsing()
+        await t.liveHub()
         await t.linuxComputer()
         await t.finishGuards()
         await t.staleOperations()
@@ -640,6 +641,52 @@ final class MenuSelftestContext {
         check("the ChatGPT thinking level goes through the subscription", ok(r) && w.snap.chatgpt == .signedIn(active: true, model: "gpt-6-sol", effort: "xhigh", generation: "g1"))
         r = await act(wf, ["action": "finish", "what": "stop"])
         check("Stop is allowed with steps still missing and closes as stop", ok(r) && wf.closing == "stop")
+    }
+
+    // MARK: 5c. Live hub: the page served by a running Briglia.
+
+    func liveHub() async {
+        let w = world()
+        w.snap.userName = "Sofia"
+        w.snap.chatgpt = .signedIn(active: true, model: "gpt-6-sol", effort: "high", generation: "g0")
+        w.snap.telegramConfigured = true; w.snap.telegramChatId = "5551234567"
+        var stops = 0
+        var busy = false
+        var e = env(w)
+        let stopBox = MenuGenerationBox(); stopBox.value = 0
+        e.live = MenuLive(mode: "service", stop: { stopBox.value += 1 })
+        // The host's idle gate: a busy agent answers agent_busy, nothing written.
+        let inner = e.apply
+        e.apply = { req, cp in busy ? MenuHost.busyAnswer : await inner(req, cp) }
+        let wf = MenuWorkflow(env: e, runner: SetupJobRunner(secrets: [:]))
+        wf.now = { w.clock }
+        await wf.start(); await wf.settle()
+        let st = wf.status()
+        check("the live page knows Briglia runs, and how", st["running"] as? Bool == true && st["run_mode"] as? String == "service")
+        busy = true
+        let before = w.applied.count
+        var r = await act(wf, ["action": "name", "name": "Giulia"])
+        check("a save while Briglia is answering is refused as busy, nothing written", !ok(r) && msg(r).contains("busy") && w.applied.count == before && w.snap.userName == "Sofia")
+        busy = false
+        r = await act(wf, ["action": "name", "name": "Giulia"])
+        check("the same save goes through once Briglia is idle", ok(r) && w.snap.userName == "Giulia")
+        r = await act(wf, ["action": "lang", "lang": "it"])
+        busy = true
+        r = await act(wf, ["action": "key", "kind": "serper", "key": w.good["serper"]!])
+        check("the busy answer follows the page language", !ok(r) && msg(r).hasPrefix("Briglia sta rispondendo"))
+        busy = false
+        await act(wf, ["action": "lang", "lang": "en"])
+        r = await act(wf, ["action": "telegram_token", "token": w.good["telegram"]!])
+        check("the bot Briglia is polling can't be swapped live (points to Stop or /switchbot)", !ok(r) && msg(r).contains("/switchbot") && w.probes.filter { $0 == "telegram" }.isEmpty)
+        r = await act(wf, ["action": "keepawake", "how": "mask"])
+        check("a password-asking fix is refused live", !ok(r) && msg(r).contains("password"))
+        r = await act(wf, ["action": "finish", "what": "start"])
+        check("Start is refused: Briglia already runs", !ok(r) && msg(r).contains("already running") && wf.closing == nil)
+        r = await act(wf, ["action": "finish", "what": "stop"])
+        check("Stop closes the page and asks the host to stop Briglia", ok(r) && wf.closing == "stop" && wf.stopRequested && stopBox.value == 0)
+        _ = stops
+        check("run mode: a systemd unit is the service, anything else a terminal",
+              MenuHost.runMode(environment: ["INVOCATION_ID": "abc"]) == (MenuEnvironment().isLinux ? "service" : "terminal") && MenuHost.runMode(environment: [:]) == "terminal")
     }
 
     func localServerParsing() {

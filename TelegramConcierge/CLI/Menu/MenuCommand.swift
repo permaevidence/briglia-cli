@@ -43,6 +43,21 @@ struct MenuCommand: AsyncParsableCommand {
         case .success(let held):
             lease = held
         case .failure:
+            // Briglia is running: it serves the menu itself (the live hub),
+            // so nothing has to stop. Older versions can't; fall back below.
+            if let link = try? await Task.detached(operation: { try BrowserSettingsHost.requestRunningOwner(type: "menu") }).value {
+                print("""
+
+                ── Briglia menu ────────────────────────────────────────────
+                Briglia is running, so it opens the menu itself. Your browser is
+                opening it; if it doesn't, open this link on THIS computer:
+                  \(link)
+
+                Changes apply while Briglia keeps running. You can close this window.
+                """)
+                QuickSetupSession.openBrowser(link)
+                return
+            }
             #if os(Linux)
             guard Self.serviceActive() else {
                 print("""

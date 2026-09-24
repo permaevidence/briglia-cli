@@ -450,6 +450,8 @@ final class MenuWorkflow {
                          "can_mask": s.keepAwakeMaskable] as [String: Any],
             "tools": tools,
             "service_was_running": serviceWasRunning,
+            "running": env.live != nil,
+            "run_mode": env.live?.mode ?? NSNull(),
             "browser_likely": env.browserLikely,
         ]
         if let startup {
@@ -584,6 +586,7 @@ final class MenuWorkflow {
         if startup?.state == "running", action != "lang" {
             return (false, L("Briglia is starting \u{2014} one moment.", "Briglia si sta avviando: un momento."))
         }
+        if env.live != nil, let refusal = liveRefusal(action, body) { return (false, refusal) }
         let ticket = validity.ticket(generation: g, slot: Self.slot(action, body), claim: true)
         let validity = self.validity
         /// Checked before every write; handed to setup-api / the subscription
@@ -748,6 +751,16 @@ final class MenuWorkflow {
             // start: run Briglia; stop: close and keep it off (Linux: also
             // off at boot); quit: close, leaving things as they were.
             guard ["start", "stop", "quit"].contains(what) else { return (false, L("Unknown choice.", "Scelta sconosciuta.")) }
+            if env.live != nil {
+                // The live hub: Briglia already runs. Stop ends it once the
+                // page has its answer; Close only closes the page.
+                guard what != "start" else { return (false, L("Briglia is already running.", "Briglia è già in funzione.")) }
+                closing = what
+                validity.revokeAll()
+                loginTask?.cancel()
+                if what == "stop" { stopRequested = true }
+                return (true, nil)
+            }
             if what == "start" {
                 let missing = missingRequired
                 if toolchain == nil && missing == [.tools] { return (false, L("Still checking the document tools \u{2014} try again in a moment.", "Sto ancora controllando gli strumenti per i documenti: riprova tra un attimo.")) }
@@ -770,6 +783,35 @@ final class MenuWorkflow {
 
         default:
             return (false, L("Unknown action.", "Azione sconosciuta."))
+        }
+    }
+
+    // MARK: Live hub
+
+    /// Stop was chosen on the live hub: the host stops Briglia after the
+    /// page received its answer.
+    private(set) var stopRequested = false
+
+    /// Actions the live hub can't do while Briglia runs, with why. The bot
+    /// Briglia is polling can't be swapped under it (and scanning it would
+    /// collide with Briglia's own polling); jobs that ask for a password
+    /// need the terminal, which a running Briglia doesn't have.
+    private func liveRefusal(_ action: String, _ body: [String: Any]) -> String? {
+        switch action {
+        case "telegram_token", "telegram_wait", "telegram_manual", "telegram_confirm":
+            return L("Briglia is using this Telegram bot right now. To connect a different one, press Stop, then open briglia menu again \u{2014} or send /switchbot to Briglia on Telegram.",
+                     "Briglia sta usando questo bot Telegram. Per collegarne un altro premi Ferma, poi riapri briglia menu, oppure invia /switchbot a Briglia su Telegram.")
+        case "keepawake" where str(body, "how") == "mask":
+            return L("This asks for your password in the terminal. Press Stop, then open briglia menu again to do it.",
+                     "Questo chiede la password nel terminale. Premi Ferma, poi riapri briglia menu per farlo.")
+        case "tools_install":
+            if let status = toolchain, env.quick.toolchainJobs(status).contains(where: { $0.mode == .terminalHandoff }) {
+                return L("Installing these asks for your password in the terminal. Press Stop, then open briglia menu again to install them.",
+                         "L\u{2019}installazione chiede la password nel terminale. Premi Ferma, poi riapri briglia menu per installarli.")
+            }
+            return nil
+        default:
+            return nil
         }
     }
 
@@ -1196,7 +1238,10 @@ final class MenuWorkflow {
     }
 
     func applyError(_ payload: [String: Any]) -> String {
-        ((payload["error"] as? [String: Any])?["message"] as? String) ?? L("something went wrong while saving", "qualcosa è andato storto durante il salvataggio")
+        if (payload["error"] as? [String: Any])?["code"] as? String == "agent_busy" {
+            return L("Briglia is busy with a message right now. Try again when it has answered.", "Briglia sta rispondendo a un messaggio. Riprova quando ha finito.")
+        }
+        return ((payload["error"] as? [String: Any])?["message"] as? String) ?? L("something went wrong while saving", "qualcosa è andato storto durante il salvataggio")
     }
 
     /// Telegram getChat failures from setup-api (English) in page language.

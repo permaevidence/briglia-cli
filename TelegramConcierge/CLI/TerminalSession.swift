@@ -471,6 +471,7 @@ final class TerminalSession {
         let shutdown = ShutdownSignalCoordinator(settle: {
             print("\nShutting down… (press Ctrl-C again to force exit)")
             await BrowserSettingsHost.stopShared()
+            await MenuHost.stopShared()
         }, gracefulExit: {
             AppChatSocketServer.shared.stop()
             TerminalSession.shutdownChildProcesses()
@@ -500,6 +501,7 @@ final class TerminalSession {
     /// `InstanceLease` never fires for a session that ended cleanly.
     private func releaseLease() async {
         await BrowserSettingsHost.stopShared()
+        await MenuHost.stopShared()
         AppChatSocketServer.shared.stop()
         Self.releaseLeaseForShutdown()
         lease = nil

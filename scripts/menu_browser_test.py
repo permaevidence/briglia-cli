@@ -121,7 +121,7 @@ class Fake:
         c["model_label"] = [m["label"] for m in MODELS if m["id"] == c["model"]][0]
         return {"platform": self.platform, "lang": self.lang, "complete": all(s["done"] for s in steps if s["required"]), "steps": steps, "name": self.name,
                 "chatgpt": c, "ai": ai, "telegram": self.telegram, "keys": self.keys, "email": self.email, "computer": self.computer,
-                "tools": self.tools, "busy": None, "service_was_running": False, "browser_likely": True, "closing": self.closing,
+                "tools": self.tools, "busy": None, "service_was_running": False, "running": getattr(self, "running", False), "run_mode": getattr(self, "run_mode", None), "browser_likely": True, "closing": self.closing,
                 "startup": getattr(self, "startup", None)}
 
     def act(self, body):
@@ -442,6 +442,25 @@ def main():
         page.wait_for_selector(".grid")
         shot(page, "40-dark-dashboard")
         check("no page errors in dark mode", not errors, errors)
+        ctx.close()
+
+        # ---- live hub: the page served by a running Briglia ----
+        lv = Fake(platform="linux")
+        lv.running, lv.run_mode = True, "service"
+        lv.name = "Sofia"; lv.chatgpt.update({"state": "signed_in", "active": True}); lv.telegram.update({"configured": True, "chat_id": "5551234567", "bot": "sofia_test_bot"})
+        lv.keys.update({"serper": "srp-g…cdef", "jina": "jina_…cdef"}); lv.computer["fda"] = True; lv.tools.update({"complete": True, "missing": []})
+        ctx, page, errors = session(lv)
+        page.wait_for_selector("text=Briglia is running")
+        check("live: the dashboard says Briglia is running, with Stop and Close but no Start",
+              page.is_visible("button:has-text('Stop Briglia')") and page.is_visible("button:has-text('Close this page')") and not page.is_visible("button:has-text('Start Briglia')"))
+        shot(page, "70-live-dashboard")
+        page.click("#steps button:has-text('Telegram')")
+        page.wait_for_selector("text=Briglia is using this bot now")
+        check("live: a different bot isn't offered while Briglia uses this one", not page.is_visible("text=Connect a different bot"))
+        page.click("text=← Back")
+        page.click("button:has-text('Stop Briglia')")
+        page.wait_for_selector("text=Stopping Briglia")
+        check("live: Stop says Briglia is shutting down", lv.closing == "stop" and not errors, errors)
         ctx.close()
 
         # ---- OpenCode lane, then switching and adding providers ----

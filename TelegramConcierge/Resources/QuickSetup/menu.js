@@ -239,6 +239,7 @@
       return h('button', { class: 'tile', type: 'button', onclick: function () { openStep(s.id, false); } },
         [h('div', { class: 'top' }, [h('span', { class: 'ttl', text: s.title }), badge]), h('div', { class: 'val', text: s.summary || '' })]);
     }));
+    if (S.running) return liveDashboard(missing, grid);
     var paused = h('div', { class: 'runstate' }, [h('span', { class: 'pausedot' }),
       h('span', {}, [h('b', { text: S.service_was_running ? T('Briglia is paused', 'Briglia è in pausa') : T('Briglia is stopped', 'Briglia è fermo') }),
         ' · ' + T('it can’t run while this page is open.', 'non può funzionare mentre questa pagina è aperta.')])]);
@@ -263,6 +264,28 @@
     ];
   }
 
+  // The live hub: Briglia keeps running while this page is open.
+  function liveDashboard(missing, grid) {
+    var service = S.run_mode === 'service';
+    return [
+      h('div', { class: 'eyebrow', text: T('Settings', 'Impostazioni') }),
+      h('h1', { text: T('Briglia', 'Briglia') }),
+      h('div', { class: 'runstate on' }, [h('span', { class: 'pausedot' }), h('span', {}, [h('b', { text: T('Briglia is running', 'Briglia è in funzione') }),
+        ' · ' + T('changes apply right away, between messages.', 'le modifiche valgono subito, tra un messaggio e l’altro.')])]),
+      missing.length ? h('div', { class: 'notice warn' }, [T('Still needed: ', 'Mancano ancora: ') + missing.map(function (s) { return s.title; }).join(', ') + '.']) : null,
+      notice('dashboard'),
+      grid,
+      h('div', { class: 'actions' }, [
+        h('button', { class: 'btn secondary', type: 'button', disabled: inflight > 0, onclick: function () { finish('stop'); } }, ['■  ' + T('Stop Briglia', 'Ferma Briglia')]),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'btn ghost', type: 'button', onclick: function () { finish('quit'); } }, [T('Close this page', 'Chiudi questa pagina')]),
+      ]),
+      h('p', { class: 'small', text: service
+        ? T('Stop turns Briglia off, also after a restart of this computer. To start it again, type briglia menu.', 'Ferma spegne Briglia, anche dopo un riavvio del computer. Per riavviarlo, scrivi briglia menu.')
+        : T('Stop closes Briglia in its Terminal window. To start it again, type briglia menu.', 'Ferma chiude Briglia nella sua finestra del Terminale. Per riavviarlo, scrivi briglia menu.') }),
+    ];
+  }
+
   function finishView() {
     var mac = S.platform !== 'linux';
     return [
@@ -283,6 +306,12 @@
   function closingView() {
     var start = S.closing === 'start';
     var mac = S.platform !== 'linux';
+    if (S.closing === 'stop' && S.running) {
+      return h('div', { class: 'gone' }, [
+        h('h1', { text: T('Stopping Briglia', 'Fermo Briglia') }),
+        h('p', { class: 'lead', text: T('Briglia is shutting down. Everything is saved; you can close this page. To start it again, type briglia menu.', 'Briglia si sta spegnendo. È tutto salvato; puoi chiudere questa pagina. Per riavviarlo, scrivi briglia menu.') }),
+      ]);
+    }
     if (S.closing === 'stop') {
       return h('div', { class: 'gone' }, [
         h('h1', { text: T('Briglia is stopped', 'Briglia è fermo') }),
@@ -294,7 +323,8 @@
       h('div', { class: 'celebrate' }, [svg(CHECK, { width: '3' })]),
       h('h1', { text: start ? T('Briglia is starting', 'Briglia si sta avviando') : T('All saved', 'Tutto salvato') }),
       h('p', { class: 'lead', text: start ? (mac ? T('Keep the Terminal window open. Now say hello to your bot on Telegram! You can close this page.', 'Lascia aperta la finestra del Terminale. Ora saluta il tuo bot su Telegram! Puoi chiudere questa pagina.') : T('It runs in the background now. Say hello to your bot on Telegram! You can close this page.', 'Ora funziona in background. Saluta il tuo bot su Telegram! Puoi chiudere questa pagina.'))
-        : T('You can close this page. Type briglia menu any time to come back.', 'Puoi chiudere questa pagina. Scrivi briglia menu quando vuoi per tornare qui.') }),
+        : (S.running ? T('Briglia keeps running. You can close this page; type briglia menu any time to come back.', 'Briglia continua a funzionare. Puoi chiudere questa pagina; scrivi briglia menu quando vuoi per tornare qui.')
+          : T('You can close this page. Type briglia menu any time to come back.', 'Puoi chiudere questa pagina. Scrivi briglia menu quando vuoi per tornare qui.')) }),
     ]);
   }
 
@@ -801,7 +831,8 @@
     if (t.configured && !st.editing) {
       out.push(savedBox(T('Connected', 'Collegato'), t.bot ? '@' + t.bot : ''));
       out.push(h('p', { class: 'small', text: T('Your Telegram ID: ', 'Il tuo ID Telegram: ') + t.chat_id }));
-      out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn secondary', type: 'button', onclick: function () { st.editing = true; render(); } }, [T('Connect a different bot', 'Collega un altro bot')])]));
+      if (S.running) out.push(h('p', { class: 'small', text: T('Briglia is using this bot now. To connect a different one, stop Briglia first, or send /switchbot to Briglia on Telegram.', 'Briglia sta usando questo bot. Per collegarne un altro ferma prima Briglia, oppure invia /switchbot a Briglia su Telegram.') }));
+      else out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn secondary', type: 'button', onclick: function () { st.editing = true; render(); } }, [T('Connect a different bot', 'Collega un altro bot')])]));
       out.push(navButtons('telegram'));
       return out;
     }
@@ -843,7 +874,7 @@
     if (!mac && !c.keep_awake_ok) {
       var fixes = [];
       if (c.can_fix_gnome) fixes.push(h('button', { class: 'btn primary', type: 'button', onclick: function () { act('keepawake', { how: 'gnome' }, 'computer'); } }, [T('Turn off automatic suspend', 'Disattiva la sospensione automatica')]));
-      if (c.can_mask) fixes.push(h('button', { class: 'btn secondary', type: 'button', onclick: function () { act('keepawake', { how: 'mask' }, 'computer'); } }, [T('Never sleep (asks for your password in the terminal)', 'Mai in sospensione (chiede la password nel terminale)')]));
+      if (c.can_mask && !S.running) fixes.push(h('button', { class: 'btn secondary', type: 'button', onclick: function () { act('keepawake', { how: 'mask' }, 'computer'); } }, [T('Never sleep (asks for your password in the terminal)', 'Mai in sospensione (chiede la password nel terminale)')]));
       fixes.push(h('button', { class: 'btn ghost', type: 'button', onclick: function () { act('recheck', {}, 'computer'); } }, [T('Check again', 'Ricontrolla')]));
       out.push(h('div', { class: 'actions' }, fixes));
     }

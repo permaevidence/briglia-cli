@@ -527,6 +527,12 @@ final class AppChatSocketServer {
                 ack(["url": url])
             } catch { nack("Could not open browser settings: \(error.localizedDescription)") }
 
+        case "menu":
+            do {
+                let url = try await MenuHost.open(manager: manager)
+                ack(["url": url])
+            } catch { nack("Could not open the menu: \(error.localizedDescription)") }
+
         case "ping":
             var event: [String: Any] = ["type": "pong"]
             if let ref { event["ref"] = ref }

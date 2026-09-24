@@ -75,7 +75,21 @@ enum MenuTelegramScan: Equatable {
 
 // MARK: - Side effects (every one behind a closure, for the selftest)
 
+/// The menu served by a RUNNING Briglia (the live hub): saves go through
+/// the agent's idle gate and reload its settings (wired into `apply` and
+/// `subscription` by `MenuHost`); Stop ends the running agent.
+struct MenuLive {
+    /// "service" (the Linux background service) or "terminal" (a Briglia
+    /// running in a terminal window).
+    var mode: String
+    /// Stops the running Briglia once the page said goodbye. Linux service:
+    /// stopped and off at boot; terminal: a graceful shutdown.
+    var stop: @Sendable () -> Void
+}
+
 struct MenuEnvironment {
+    /// Set when the page is served by the running Briglia.
+    var live: MenuLive?
     var isLinux: Bool = {
         #if os(Linux)
         return true

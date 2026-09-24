@@ -134,7 +134,9 @@ final class BrowserSettingsHost {
         print("\nBriglia settings: \(link)\n")
         QuickSetupSession.openBrowser(link)
     }
-    nonisolated private static func requestRunningOwner() throws -> String {
+    /// Asks the running Briglia (over the app socket) to open a local page:
+    /// `browser_settings` (quick setup's settings) or `menu` (the live hub).
+    nonisolated static func requestRunningOwner(type: String = "browser_settings") throws -> String {
         struct Failure: LocalizedError { var errorDescription: String? { "The local agent socket is unavailable or does not support browser settings" } }
         var addr = sockaddr_un()
         let path = AppChatSocketServer.socketURL.path.utf8CString
@@ -154,7 +156,7 @@ final class BrowserSettingsHost {
         let connected = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
         guard connected == 0, AppChatSocketServer.peerUID(of: fd) == getuid() else { throw Failure() }
         let ref = UUID().uuidString
-        let data = try JSONSerialization.data(withJSONObject: ["type": "browser_settings", "ref": ref]) + Data([10])
+        let data = try JSONSerialization.data(withJSONObject: ["type": type, "ref": ref]) + Data([10])
         try FileHandle(fileDescriptor: fd, closeOnDealloc: false).write(contentsOf: data)
         var buffer = Data(); var chunk = [UInt8](repeating: 0, count: 8192)
         let deadline = Date().addingTimeInterval(45)
