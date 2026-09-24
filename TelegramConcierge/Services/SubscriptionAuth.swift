@@ -11,8 +11,9 @@ import Darwin
 struct SubscriptionError: Error, LocalizedError {
     let message: String
     var requiresLogin: Bool
-    /// The subscription reported its usage limit (never retried; the web
-    /// pipeline falls back to its configured backend).
+    /// The subscription reported its usage limit. Never retried, and never
+    /// moved to API billing: the main agent is on the same allowance, so web
+    /// research fails with this message like every other subscription request.
     var usageExhausted = false
     init(_ message: String, requiresLogin: Bool = false) { self.message = message; self.requiresLogin = requiresLogin }
     var errorDescription: String? { message }
@@ -29,20 +30,38 @@ enum SubscriptionEndpoint {
     static let deviceCallback = issuer + "/deviceauth/callback"
     static let storeName = "subscription-auth.json"
 
+    /// Allowlisted usage-exhaustion codes. Ordinary transient rate limits
+    /// (`rate_limit_exceeded`, bare 429s) are not in this set and stay retryable.
+    static let usageCodes: Set<String> = ["usage_limit_reached", "usage_not_included", "insufficient_quota"]
+
+    static func usageExhaustedError() -> SubscriptionError {
+        var failure = SubscriptionError("ChatGPT subscription usage is exhausted or not included. Check your plan/usage before retrying; no API billing fallback was attempted.")
+        failure.usageExhausted = true
+        return failure
+    }
+
+    /// The same classification for errors delivered INSIDE an HTTP-200 stream:
+    /// a top-level SSE `error` (`code`, or nested `error.code`/`error.type`)
+    /// or a `response.failed` whose `response.error` carries the code. Only
+    /// the allowlisted codes are read; message text never escapes.
+    static func streamedUsageError(_ event: [String: JSONValue]) -> SubscriptionError? {
+        func codes(_ object: [String: JSONValue]?) -> [String] {
+            guard let object else { return [] }
+            return [object["code"]?.responsesString, object["type"]?.responsesString].compactMap { $0 }
+        }
+        var candidates = [event["code"]?.responsesString].compactMap { $0 }
+        candidates += codes(event["error"]?.responsesObject)
+        candidates += codes(event["response"]?.responsesObject?["error"]?.responsesObject)
+        return candidates.contains(where: usageCodes.contains) ? usageExhaustedError() : nil
+    }
+
     /// Inspect only fixed error codes; provider body text may contain secrets or
     /// echoed inputs and never becomes a user-facing authentication exception.
     static func providerError(status: Int, body: Data) -> SubscriptionError? {
         let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
         let error = object?["error"] as? [String: Any]
         let code = error?["code"] as? String ?? error?["type"] as? String ?? ""
-        if ["usage_limit_reached", "usage_not_included", "insufficient_quota"].contains(code) {
-            // Web research leaves the subscription for a while (it serves on
-            // the configured web backend); the main agent is unaffected.
-            SubscriptionWebTransport.markExhausted()
-            var failure = SubscriptionError("ChatGPT subscription usage is exhausted or not included. Check your plan/usage before retrying; no API billing fallback was attempted.")
-            failure.usageExhausted = true
-            return failure
-        }
+        if usageCodes.contains(code) { return usageExhaustedError() }
         if ["model_not_found", "model_not_available", "unsupported_model"].contains(code) {
             return SubscriptionError("This model is unavailable for the selected ChatGPT account. Choose another subscription model.")
         }

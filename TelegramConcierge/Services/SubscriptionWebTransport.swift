@@ -11,38 +11,21 @@ import FoundationNetworking
 /// pinned endpoint, always streamed, `store:false`, no `max_output_tokens`
 /// or `truncation`, `originator`/`session_id`/`ChatGPT-Account-Id`, the
 /// credential read per attempt from the subscription store, one refresh on
-/// 401. Returns the validated terminal response object (the stream
-/// assembler commits `output_item.done` items when the backend's
-/// `response.completed` carries an empty output), which decodes as
-/// `OAIResponsesResp`.
+/// 401. Returns the terminal response object only after checking it
+/// (`validatedTerminal`): `completed`, or `incomplete` for callers that
+/// handle a truncated text answer themselves; a `failed` response or an error
+/// envelope never becomes output or tool calls. The stream assembler commits
+/// `output_item.done` items when the backend's `response.completed` carries
+/// an empty output, so the result decodes as `OAIResponsesResp`.
 ///
-/// Usage exhaustion (`usage_limit_reached` & co.) is never retried: it
-/// throws `SubscriptionError` with `usageExhausted`, and
-/// `SubscriptionEndpoint.providerError` marks the process-wide cooldown so
-/// the next web request resolves to the configured backend instead.
+/// Usage exhaustion (`usage_limit_reached` & co., as an HTTP error body, an
+/// SSE `error` or a `response.failed`) is never retried and never moved to
+/// API billing: it throws `SubscriptionError` with `usageExhausted`, the
+/// same message the main agent gets on the same allowance (owner decision
+/// 2026-09-23: a web fallback is useless while the main agent is out too).
 enum SubscriptionWebTransport {
-    /// How long a reported usage limit keeps the web pipeline off the
-    /// subscription. Re-armed by every further exhausted response; the main
-    /// agent's own subscription requests are unaffected.
-    static let exhaustionCooldown: TimeInterval = 15 * 60
-
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var exhaustedUntil: Date?
-
-    static func markExhausted(now: Date = Date()) {
-        lock.lock(); exhaustedUntil = now.addingTimeInterval(exhaustionCooldown); lock.unlock()
-    }
-
-    static func isExhausted(now: Date = Date()) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard let until = exhaustedUntil else { return false }
-        if now >= until { exhaustedUntil = nil; return false }
-        return true
-    }
-
     /// Selftest only.
     static func resetForTests() {
-        lock.lock(); exhaustedUntil = nil; lock.unlock()
         sendOverride = nil
     }
 
@@ -53,7 +36,7 @@ enum SubscriptionWebTransport {
     /// The login generation of the active subscription profile, or nil.
     static func activeGeneration() -> String? {
         let stored = KeychainHelper.loadSnapshot()
-        guard WebSearchBackend.followsSubscription(stored: stored, exhausted: false) else { return nil }
+        guard WebSearchBackend.followsSubscription(stored: stored) else { return nil }
         let generation = (stored[KeychainHelper.openAICompatibleApiKeyKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return generation.isEmpty ? nil : generation
     }
@@ -100,7 +83,7 @@ enum SubscriptionWebTransport {
             try Task.checkCancellation()
             do {
                 if adaCLIVersion.hasSuffix("-dev"), let sendOverride {
-                    return try await sendOverride(request)
+                    return try validatedTerminal(try await sendOverride(request))
                 }
                 let login = SubscriptionLogin()
                 let credential = try await login.store.credential(generation: generation, refresh: login.refresh)
@@ -109,7 +92,7 @@ enum SubscriptionWebTransport {
                 request.setValue("Bearer " + credential.access, forHTTPHeaderField: "Authorization")
                 request.setValue(credential.account, forHTTPHeaderField: "ChatGPT-Account-Id")
                 usedAccess = credential.access
-                return try await ResponsesHTTPTransport().send(request, overallTimeout: timeout, subscription: true)
+                return try validatedTerminal(try await ResponsesHTTPTransport().send(request, overallTimeout: timeout, subscription: true))
             } catch {
                 try Task.checkCancellation()
                 if let failure = error as? SubscriptionError, failure.usageExhausted { throw failure }
@@ -138,6 +121,30 @@ enum SubscriptionWebTransport {
                 attempt += 1
             }
         }
+    }
+
+    /// Terminal-envelope check shared by every raw web request (the adapter
+    /// path has the same gate in `ResponsesRoundDecoder`). `completed` passes;
+    /// `incomplete` passes so extraction can keep its truncated-text handling,
+    /// and agent rounds refuse to execute tool calls from it; `failed`, an
+    /// error object, or any other status throws. Quota codes in the failed
+    /// envelope become the typed usage error.
+    static func validatedTerminal(_ data: Data) throws -> Data {
+        guard let object = (try? JSONDecoder().decode(JSONValue.self, from: data))?.responsesObject,
+              let status = object["status"]?.responsesString else {
+            throw ResponsesFailure.malformed("subscription response has no status")
+        }
+        let error = object["error"].flatMap { value -> JSONValue? in
+            if case .null = value { return nil }; return value
+        }
+        if status == "failed" || error != nil {
+            if let usage = SubscriptionEndpoint.streamedUsageError(["response": .object(object)]) { throw usage }
+            throw ResponsesFailure.failed(error?.responsesObject?["code"]?.responsesString ?? "provider failure")
+        }
+        guard status == "completed" || status == "incomplete" else {
+            throw ResponsesFailure.malformed("subscription response status \(status)")
+        }
+        return data
     }
 
     /// Plain (non-agent) web stage over the subscription: chat-style

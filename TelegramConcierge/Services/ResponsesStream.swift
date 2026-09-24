@@ -80,7 +80,10 @@ struct ResponsesStreamAssembler {
             "response.completed", "response.failed", "response.incomplete", "error"
         ]
         guard semanticEvents.contains(type) else { return }
-        if type == "error" { throw ResponsesFailure.failed(event["code"]?.responsesString ?? "stream error") }
+        if type == "error" {
+            if subscription, let usage = SubscriptionEndpoint.streamedUsageError(event) { throw usage }
+            throw ResponsesFailure.failed(event["code"]?.responsesString ?? "stream error")
+        }
         guard terminal == nil else { throw ResponsesFailure.malformed("semantic event after terminal response") }
         switch type {
         case "response.created", "response.in_progress":
@@ -119,6 +122,12 @@ struct ResponsesStreamAssembler {
                 throw ResponsesFailure.malformed("terminal event/status mismatch")
             }
             try identify(id)
+            // A usage limit reported as a failed terminal response is the
+            // same typed error as the HTTP 429 body (never retried, no API
+            // fallback), for the raw web transport and the adapter alike.
+            if subscription && type == "response.failed", let usage = SubscriptionEndpoint.streamedUsageError(event) {
+                throw usage
+            }
             if type == "response.completed" {
                 if subscription { try completeSubscriptionOutput(&response) }
                 try reconcile(response)

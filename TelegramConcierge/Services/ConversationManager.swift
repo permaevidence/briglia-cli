@@ -5153,7 +5153,8 @@ class ConversationManager: ObservableObject {
     /// Separate from /provider, with one exception (owner decision
     /// 2026-09-23): while the main provider is the ChatGPT subscription, web
     /// research follows it automatically; the stored choice serves every
-    /// other provider and the subscription's usage-limit fallback.
+    /// other provider. No usage-limit fallback: the main agent is on the same
+    /// allowance, so a fallback would only serve an agent that can't answer.
     private func handleWebSearchBackendCommand(argument: String) async {
         guard replyAddress != nil else { return }
 
@@ -5162,15 +5163,13 @@ class ConversationManager: ObservableObject {
             var lines = ["Web research backend (switch with /websearch <name>):"]
             if active == .chatgpt {
                 lines.append("▸ chatgpt — \(WebSearchBackend.chatgpt.modelSummary)  [ACTIVE: follows /provider chatgpt]")
-            } else if WebSearchBackend.followsSubscription(stored: KeychainHelper.loadSnapshot(), exhausted: false) {
-                lines.append("  chatgpt — paused: the subscription reported its usage limit; the choice below serves for now")
             }
-            let fallbackNote = active == .chatgpt ? "  [used on other providers and if the subscription hits its limit]" : "  [ACTIVE]"
+            let servingNote = active == .chatgpt ? "  [used on other providers]" : "  [ACTIVE]"
             for backend in WebSearchBackend.selectable {
                 let marker = backend == active ? "▸" : " "
                 let key = WebSearchBackend.storedKey(for: backend).isEmpty ? "no key" : "key ✔"
                 let isServing = active == .chatgpt ? backend == WebSearchBackend.configured : backend == active
-                let activeSuffix = isServing ? fallbackNote : ""
+                let activeSuffix = isServing ? servingNote : ""
                 lines.append("\(marker) \(backend.rawValue) — \(backend.modelSummary) (\(key))\(activeSuffix)")
             }
             if WebSearchBackend.explicitlyStored == nil {
@@ -5202,7 +5201,7 @@ class ConversationManager: ObservableObject {
         }
         let followsSubscription = WebSearchBackend.active == .chatgpt
         let followNote = followsSubscription
-            ? " While /provider is chatgpt, web research keeps using the subscription; this choice applies on other providers and if the subscription hits its limit."
+            ? " While /provider is chatgpt, web research keeps using the subscription; this choice applies on other providers."
             : ""
         if WebSearchBackend.explicitlyStored == backend {
             try? await sendText("\(backend.displayName) is already the saved web research backend.\(followNote)")

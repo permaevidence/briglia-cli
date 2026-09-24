@@ -61,12 +61,11 @@ extension WebSubagentSelftest {
         var other = sub; other[ProviderProfiles.activeProfileKey] = "openai"
         var noGeneration = sub; noGeneration[KeychainHelper.openAICompatibleApiKeyKey] = " "
         var routerMain = sub; routerMain[KeychainHelper.llmProviderKey] = LLMProvider.openRouter.rawValue
-        check("16.3 follow rule: only the active ChatGPT subscription profile with a login generation; never while exhausted",
-              WebSearchBackend.followsSubscription(stored: sub, exhausted: false)
-              && !WebSearchBackend.followsSubscription(stored: sub, exhausted: true)
-              && !WebSearchBackend.followsSubscription(stored: other, exhausted: false)
-              && !WebSearchBackend.followsSubscription(stored: noGeneration, exhausted: false)
-              && !WebSearchBackend.followsSubscription(stored: routerMain, exhausted: false), "")
+        check("16.3 follow rule: only the active ChatGPT subscription profile with a login generation",
+              WebSearchBackend.followsSubscription(stored: sub)
+              && !WebSearchBackend.followsSubscription(stored: other)
+              && !WebSearchBackend.followsSubscription(stored: noGeneration)
+              && !WebSearchBackend.followsSubscription(stored: routerMain), "")
         check("16.4 chatgpt is never a stored choice: parseSelectable and resolve reject it; the selectable list is unchanged",
               WebSearchBackend.parseSelectable("chatgpt") == nil && WebSearchBackend.parseSelectable("openai") == .openai
               && WebSearchBackend.resolve(override: nil, stored: "chatgpt", hasOpenAIKey: true, hasLegacyOpenRouterKey: false) == .openai
@@ -81,18 +80,24 @@ extension WebSubagentSelftest {
         UserDefaults.standard.setVolatileDomain(volatile, forName: UserDefaults.argumentDomain)
         WebSearchBackend.processOverride = nil
         SubscriptionWebTransport.resetForTests()
-        check("16.5 active follows the subscription; configured stays the stored choice; exhaustion hands back to it; the cooldown expires",
+        check("16.5 active follows the subscription; configured stays the stored choice; the chatgpt key is the login generation",
               WebSearchBackend.active == .chatgpt && WebSearchBackend.configured == .opencode
-              && { SubscriptionWebTransport.markExhausted(); defer { SubscriptionWebTransport.resetForTests() }
-                   return WebSearchBackend.active == .opencode && SubscriptionWebTransport.isExhausted()
-                       && !SubscriptionWebTransport.isExhausted(now: Date().addingTimeInterval(SubscriptionWebTransport.exhaustionCooldown + 1)) }()
               && WebSearchBackend.storedKey(for: .chatgpt) == "gen-fixture", "\(WebSearchBackend.active)")
         let usage = SubscriptionEndpoint.providerError(status: 429, body: Data("{\"error\":{\"code\":\"usage_limit_reached\"}}".utf8))
-        check("16.6 a usage_limit_reached response is typed as exhausted and arms the web cooldown; other provider errors do not",
-              usage?.usageExhausted == true && SubscriptionWebTransport.isExhausted()
-              && SubscriptionEndpoint.providerError(status: 404, body: Data("{\"error\":{\"code\":\"model_not_found\"}}".utf8))?.usageExhausted == false,
+        func streamed(_ json: String) -> SubscriptionError? {
+            guard let event = (try? JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))?.responsesObject else { return nil }
+            return SubscriptionEndpoint.streamedUsageError(event)
+        }
+        check("16.6 usage codes are typed as exhausted from an HTTP body, a top-level or nested SSE error and a response.failed; rate limits, server errors and model errors are not",
+              usage?.usageExhausted == true
+              && SubscriptionEndpoint.providerError(status: 404, body: Data("{\"error\":{\"code\":\"model_not_found\"}}".utf8))?.usageExhausted == false
+              && streamed("{\"type\":\"error\",\"code\":\"usage_limit_reached\"}")?.usageExhausted == true
+              && streamed("{\"type\":\"error\",\"error\":{\"code\":\"usage_not_included\"}}")?.usageExhausted == true
+              && streamed("{\"type\":\"error\",\"error\":{\"type\":\"insufficient_quota\"}}")?.usageExhausted == true
+              && streamed("{\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"usage_limit_reached\"}}}")?.usageExhausted == true
+              && streamed("{\"type\":\"error\",\"code\":\"rate_limit_exceeded\"}") == nil
+              && streamed("{\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\"}}}") == nil,
               "")
-        SubscriptionWebTransport.resetForTests()
 
         // 16.7 Request construction (pure).
         let request = try SubscriptionWebTransport.buildRequest(
@@ -133,18 +138,20 @@ extension WebSubagentSelftest {
               && (sent["instructions"] as? String)?.contains("You extract information from a web page") == true
               && h.serverB.requests.isEmpty, "\(compressed) \(captured.all.count)")
 
-        // 16.10 Usage exhaustion: the same stage is served by the configured
-        // backend (fixture B) and the cooldown moves `active` off the subscription.
+        // 16.10 Usage exhaustion (owner decision 2026-09-23): no fallback and
+        // no cooldown; the main agent is on the same allowance, so the stage
+        // fails with the subscription's usage message like the main agent.
         captured.clear(); h.serverB.clear()
         SubscriptionWebTransport.sendOverride = { request in
             captured.add(request)
             throw SubscriptionEndpoint.providerError(status: 429, body: Data("{\"error\":{\"code\":\"usage_limit_reached\"}}".utf8))!
         }
-        let fallback = await attempt { try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/p", pageTitle: nil,
-            markdown: "Fallback page", prompt: "what?", executionID: UUID()) }
-        check("16.10 usage limit: one subscription attempt (never retried), the stage answered by the configured backend, active leaves the subscription for the cooldown",
-              captured.all.count == 1 && fallback.hasPrefix("COMPRESSED:") && h.serverB.requests.count == 1
-              && WebSearchBackend.active == .opencode, "\(captured.all.count) \(fallback.prefix(40)) \(h.serverB.requests.count)")
+        let exhausted = await attempt { try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/p", pageTitle: nil,
+            markdown: "Exhausted page", prompt: "what?", executionID: UUID()) }
+        check("16.10 usage limit: one subscription attempt (never retried), a clear usage error, nothing sent to the configured backend, research still follows the subscription",
+              captured.all.count == 1 && exhausted.hasPrefix("ERROR:") && exhausted.contains("usage is exhausted")
+              && h.serverB.requests.isEmpty && WebSearchBackend.active == .chatgpt,
+              "\(captured.all.count) \(exhausted.prefix(80)) \(h.serverB.requests.count)")
         SubscriptionWebTransport.resetForTests()
 
         // 16.11 Transient failures are retried; an HTTP 400 is not.
@@ -164,7 +171,7 @@ extension WebSubagentSelftest {
         do { _ = try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/p", pageTitle: nil, markdown: "x", prompt: "y", executionID: UUID()) }
         catch { badRequestThrew = true }
         check("16.11 a 503 is retried and succeeds; a 400 fails at once without falling back",
-              retried == "after retry" && badRequestThrew && captured.all.count == 1 && !SubscriptionWebTransport.isExhausted(), retried)
+              retried == "after retry" && badRequestThrew && captured.all.count == 1, retried)
 
         // 16.12 The Web researcher's context on the subscription.
         if let web = try? await h.service.webExecutionContextWithNote(lane: .subagent("sub-web")),
@@ -178,13 +185,20 @@ extension WebSubagentSelftest {
               && ab["instructions"] as? String == "S" && adapterRequest.value(forHTTPHeaderField: "Authorization") == nil,
               "\(web.context.endpoint) \(web.context.model)")
         } else { check("16.12 researcher context on the subscription", false, "context or adapter request threw") }
-        SubscriptionWebTransport.markExhausted()
-        if let exhaustedWeb = try? await h.service.webExecutionContextWithNote(lane: .subagent("sub-web-2")) {
-        check("16.13 while exhausted a new researcher run starts on the configured backend (OpenCode here)",
-              exhaustedWeb.context.endpoint != SubscriptionEndpoint.inference && exhaustedWeb.context.subscriptionGeneration == nil
-              && exhaustedWeb.context.model == WebOrchestrator.opencodeResearchModel, exhaustedWeb.context.endpoint)
-        } else { check("16.13 exhausted researcher start", false, "context threw") }
-        SubscriptionWebTransport.resetForTests()
+        // The persistent researcher's adapter reads the same stream assembler:
+        // a failed terminal with a quota code is the typed usage error there
+        // too; on a non-subscription stream the same event is left to the
+        // round decoder's generic failure (API-key paths are unchanged).
+        func assemble(_ event: String, subscription: Bool) -> Result<Data, Error> {
+            var stream = ResponsesStreamAssembler(); stream.subscription = subscription
+            return Result { try stream.append(Data("data: \(event)\n\n".utf8)); return try stream.finish() }
+        }
+        let failedQuota = "{\"type\":\"response.failed\",\"response\":{\"id\":\"resp_q\",\"status\":\"failed\",\"error\":{\"code\":\"usage_limit_reached\"},\"output\":[]}}"
+        let onSubscription = assemble(failedQuota, subscription: true)
+        let onAPI = assemble(failedQuota, subscription: false)
+        check("16.13 stream assembler: a quota response.failed on the subscription throws the usage error (researcher adapter included); the API-key stream keeps its terminal snapshot for the decoder",
+              { if case .failure(let e) = onSubscription { return (e as? SubscriptionError)?.usageExhausted == true }; return false }()
+              && { if case .success = onAPI { return true }; return false }(), "\(onSubscription) \(onAPI)")
 
         // 16.14 Legacy loop (web_search tool): rounds on the subscription.
         captured.clear()
@@ -205,9 +219,8 @@ extension WebSubagentSelftest {
               && rounds.allSatisfy { $0["model"] as? String == "gpt-6-luna" && ($0["tools"] as? [[String: Any]])?.count == 2
                   && ($0["include"] as? [String]) == ["reasoning.encrypted_content"] && $0["stream"] as? Bool == true },
               "\(rounds.count) \(legacy.prefix(60))")
-        // Exhaustion mid-loop with a non-OpenAI configured backend: the loop
-        // cannot move its Responses transcript, so it fails clearly (the next
-        // search resolves to the configured backend through the cooldown).
+        // Exhaustion mid-loop: the loop fails with the usage message; nothing
+        // moves to the configured backend.
         captured.clear()
         SubscriptionWebTransport.sendOverride = { request in
             captured.add(request)
@@ -216,15 +229,82 @@ extension WebSubagentSelftest {
         var legacyError = ""
         do { _ = try await orchestrator.answer(userPrompt: "beta?", historyPairs: [], executionID: UUID()) }
         catch { legacyError = error.localizedDescription }
-        check("16.15 legacy loop exhausted with a non-OpenAI configured backend: a clear usage error, one attempt, cooldown armed",
-              legacyError.contains("usage is exhausted") && captured.all.count == 1 && WebSearchBackend.active == .opencode, legacyError)
+        check("16.15 legacy loop exhausted: a clear usage error, one attempt, research still follows the subscription",
+              legacyError.contains("usage is exhausted") && captured.all.count == 1 && WebSearchBackend.active == .chatgpt, legacyError)
         SubscriptionWebTransport.resetForTests()
-        let transcript = WebAgentResponsesTranscript(instructions: "i", user: "u")
-        transcript.appendOutputItems([.object(["type": .string("reasoning"), "id": .string("rs_1"), "encrypted_content": .string("x")]),
-                                      .object(["type": .string("function_call"), "call_id": .string("c1"), "name": .string("search"), "arguments": .string("{}")])])
-        transcript.dropReasoningItems()
-        check("16.16 moving a legacy transcript off the subscription drops only its reasoning items",
-              transcript.input.count == 2 && transcript.input.allSatisfy { $0.objectValue?["type"]?.stringValue != "reasoning" }, "\(transcript.input.count)")
+
+        // 16.16 Codex review 2026-09-23 (R1/R2), through the production
+        // stream assembler over real SSE framing: streamed quota errors are
+        // the typed usage error, and a failed/incomplete terminal never
+        // becomes output or executed tool calls.
+        func sse(_ event: [String: Any]) -> (URLRequest) async throws -> Data {
+            return { request in
+                captured.add(request)
+                var stream = ResponsesStreamAssembler(); stream.subscription = true
+                let json = try JSONSerialization.data(withJSONObject: event)
+                try stream.append(Data("data: ".utf8) + json + Data("\n\n".utf8))
+                return try stream.finish()
+            }
+        }
+        for nested in [false, true] {
+            captured.clear(); h.serverB.clear()
+            SubscriptionWebTransport.sendOverride = sse(nested
+                ? ["type": "error", "error": ["code": "usage_limit_reached", "message": "fixture"]]
+                : ["type": "error", "code": "usage_limit_reached", "message": "fixture"])
+            let value = await attempt { try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/sse", pageTitle: nil,
+                markdown: "x", prompt: "y", executionID: UUID()) }
+            check("16.16\(nested ? "b" : "a") SSE error with a quota code (\(nested ? "nested" : "top-level")): the usage error, one send, no fallback",
+                  value.contains("usage is exhausted") && captured.all.count == 1 && h.serverB.requests.isEmpty,
+                  "value=\(value.prefix(80)) sends=\(captured.all.count) fallback=\(h.serverB.requests.count)")
+        }
+        for partial in [false, true] {
+            captured.clear(); h.serverB.clear()
+            let output: [[String: Any]] = partial ? [["type": "message", "id": "msg_failed", "role": "assistant",
+                "status": "completed", "content": [["type": "output_text", "text": "FAILED_PARTIAL_MUST_NOT_SUCCEED", "annotations": []]]]] : []
+            SubscriptionWebTransport.sendOverride = sse(["type": "response.failed", "response": ["id": "resp_failed", "status": "failed",
+                "error": ["code": "usage_limit_reached", "message": "fixture"], "output": output]])
+            let value = await attempt { try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/failed", pageTitle: nil,
+                markdown: "x", prompt: "y", executionID: UUID()) }
+            check("16.16\(partial ? "d" : "c") response.failed with a quota code (\(partial ? "partial text" : "empty output")): the usage error after one send, partial text never returned, no fallback",
+                  value.contains("usage is exhausted") && !value.contains("FAILED_PARTIAL") && captured.all.count == 1 && h.serverB.requests.isEmpty,
+                  "value=\(value.prefix(80)) sends=\(captured.all.count) fallback=\(h.serverB.requests.count)")
+        }
+        captured.clear()
+        SubscriptionWebTransport.sendOverride = sse(["type": "response.failed", "response": ["id": "resp_err", "status": "failed",
+            "error": ["code": "server_error", "message": "fixture"], "output": [["type": "message", "id": "msg_x", "role": "assistant",
+            "status": "completed", "content": [["type": "output_text", "text": "FAILED_TEXT_MUST_NOT_SUCCEED", "annotations": []]]]]]])
+        let failedStage = await attempt { try await orchestrator.compressPageForPrompt(pageURL: "https://example.test/err", pageTitle: nil,
+            markdown: "x", prompt: "y", executionID: UUID()) }
+        check("16.16e a failed (non-quota) response with text is an error, never a compression result",
+              failedStage.hasPrefix("ERROR:") && !failedStage.contains("FAILED_TEXT") && captured.all.count == 1, failedStage)
+        for incomplete in [false, true] {
+            captured.clear()
+            let searchesBefore = h.fixtures.serperCalls
+            SubscriptionWebTransport.sendOverride = { request in
+                captured.add(request)
+                if captured.all.count > 1 && incomplete {
+                    return Data(WebFixtureServer.responsesBody("Answer after refused round", id: "r_after").utf8)
+                }
+                var response = try JSONSerialization.jsonObject(with: Data(WebFixtureServer.responsesBody("", id: "r_bad",
+                    calls: [("search", "{\"queries\":[\"must-never-run\"]}")]).utf8)) as! [String: Any]
+                if incomplete {
+                    response["status"] = "incomplete"
+                    response["incomplete_details"] = ["reason": "max_output_tokens"]
+                    return try JSONSerialization.data(withJSONObject: response)
+                }
+                response["status"] = "failed"
+                response["error"] = ["code": "server_error", "message": "fixture"]
+                var stream = ResponsesStreamAssembler(); stream.subscription = true
+                let json = try JSONSerialization.data(withJSONObject: ["type": "response.failed", "response": response])
+                try stream.append(Data("data: ".utf8) + json + Data("\n\n".utf8))
+                return try stream.finish()
+            }
+            let result = await attempt { try await orchestrator.answer(userPrompt: "tool round \(incomplete)", historyPairs: [], executionID: UUID()) }
+            check("16.16\(incomplete ? "g" : "f") legacy loop never executes tool calls from \(incomplete ? "an incomplete" : "a failed") response",
+                  h.fixtures.serperCalls == searchesBefore && (incomplete ? captured.all.count >= 2 : (result.hasPrefix("ERROR:") && captured.all.count == 1)),
+                  "searches=\(h.fixtures.serperCalls - searchesBefore) sends=\(captured.all.count) result=\(result.prefix(80))")
+        }
+        SubscriptionWebTransport.resetForTests()
 
         // 16.17 Other providers never touch the subscription path.
         try KeychainHelper.save(key: ProviderProfiles.activeProfileKey, value: "openai")

@@ -119,8 +119,7 @@ enum WebSearchBackend: String {
     }
 
     /// The stored/inferred backend, ignoring the subscription follow — what
-    /// serves when the main provider is not the subscription, and the
-    /// fallback while the subscription reports its usage limit.
+    /// serves when the main provider is not the subscription.
     static var configured: WebSearchBackend {
         resolve(
             override: nil,
@@ -131,17 +130,16 @@ enum WebSearchBackend: String {
     }
 
     /// True while the main provider is the ChatGPT subscription with a
-    /// login generation and the subscription has not reported its usage
-    /// limit recently (`SubscriptionWebTransport.exhaustion`).
+    /// login generation. A usage limit does not switch web research away:
+    /// the main agent is on the same allowance, so both fail with the
+    /// subscription's usage message.
     static var subscriptionFollowActive: Bool {
-        followsSubscription(stored: KeychainHelper.loadSnapshot(),
-                            exhausted: SubscriptionWebTransport.isExhausted())
+        followsSubscription(stored: KeychainHelper.loadSnapshot())
     }
 
     /// Pure rule behind `subscriptionFollowActive` (selftest seam).
-    static func followsSubscription(stored: [String: String], exhausted: Bool) -> Bool {
-        guard !exhausted,
-              stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue,
+    static func followsSubscription(stored: [String: String]) -> Bool {
+        guard stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue,
               stored[KeychainHelper.llmProviderKey] == LLMProvider.openAICompatible.rawValue,
               !(stored[KeychainHelper.openAICompatibleApiKeyKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return false }
@@ -196,7 +194,7 @@ enum WebSearchBackend: String {
         case .chatgpt:
             // The login generation, not a secret: the credential itself is
             // read per request from the subscription store.
-            guard followsSubscription(stored: KeychainHelper.loadSnapshot(), exhausted: false) else { return "" }
+            guard followsSubscription(stored: KeychainHelper.loadSnapshot()) else { return "" }
             return first(KeychainHelper.openAICompatibleApiKeyKey)
         case .opencode:
             let dedicated = first(KeychainHelper.webSearchOpenCodeApiKeyKey)
@@ -1176,18 +1174,8 @@ actor WebOrchestrator {
         executionID: UUID
     ) async throws -> WebAgentRound {
         if agentBackend[executionID] == .chatgpt {
-            do {
-                return try await callSubscriptionResponsesRound(
-                    transcript, mode: mode, toolChoice: toolChoice, stage: stage, executionID: executionID)
-            } catch let failure as SubscriptionError where failure.usageExhausted {
-                // Only the OpenAI key can continue a Responses transcript;
-                // subscription reasoning items are bound to the subscription,
-                // so they are dropped before the transcript moves.
-                guard WebSearchBackend.configured == .openai, !WebSearchBackend.storedKey(for: .openai).isEmpty else { throw failure }
-                webLog("[WebOrchestrator] \(stage) SUBSCRIPTION_USAGE_EXHAUSTED → openai for the rest of this research run")
-                transcript.dropReasoningItems()
-                agentBackend[executionID] = .openai
-            }
+            return try await callSubscriptionResponsesRound(
+                transcript, mode: mode, toolChoice: toolChoice, stage: stage, executionID: executionID)
         }
         let generous = mode == .deepResearch || stage == "agent.final"
         let model = resolvedModel(for: .openai, requested: agentModel(for: mode))
@@ -1287,11 +1275,19 @@ actor WebOrchestrator {
                 let output = resp.output ?? []
                 let round = WebAgentResponsesTranscript.parseRound(outputItems: output)
                 webLog("[WebOrchestrator] chatgpt response stage=\(stage) mode=\(modeLabel(mode)) status=\(resp.status ?? "nil") output_items=\(output.count) content_chars=\(round.visibleText.count) tool_calls=\(round.toolCalls.count) tokens=\(resp.usage?.input_tokens.map(String.init) ?? "?")/\(resp.usage?.output_tokens.map(String.init) ?? "?")")
-                if !round.visibleText.isEmpty || !round.toolCalls.isEmpty {
+                if resp.status == "incomplete" && !round.toolCalls.isEmpty {
+                    // A truncated round may carry half-formed calls: never
+                    // execute them (the transport already refuses `failed`).
+                    detail = "incomplete response with \(round.toolCalls.count) tool call(s), not executed"
+                } else if !round.visibleText.isEmpty || !round.toolCalls.isEmpty {
+                    if resp.status == "incomplete" {
+                        webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) status=incomplete backend=chatgpt content_chars=\(round.visibleText.count)")
+                    }
                     transcript.appendOutputItems(output)
                     return round
+                } else {
+                    detail = "no message or tool call in \(output.count) output items (status \(resp.status ?? "nil"))"
                 }
-                detail = "no message or tool call in \(output.count) output items (status \(resp.status ?? "nil"))"
             }
             guard attempt < maxAttempts else {
                 throw NSError(domain: "WebOrchestrator", code: 4, userInfo: [
@@ -1661,25 +1657,14 @@ actor WebOrchestrator {
         timeout: TimeInterval = 120,
         retryTimeouts: Bool = true,
         responseFormat: ORResponseFormat? = nil,
-        backendOverride: WebSearchBackend? = nil,
         executionID: UUID
     ) async throws -> String {
-        let backend = backendOverride ?? WebSearchBackend.active
+        let backend = WebSearchBackend.active
         if backend == .chatgpt {
-            do {
-                return try await callSubscriptionStage(
-                    stage: stage, mode: mode, model: model, messages: messages,
-                    reasoning: reasoning, timeout: timeout, responseFormat: responseFormat,
-                    executionID: executionID)
-            } catch let failure as SubscriptionError where failure.usageExhausted {
-                let fallback = WebSearchBackend.configured
-                webLog("[WebOrchestrator] \(stage) SUBSCRIPTION_USAGE_EXHAUSTED → \(fallback.rawValue) for the next \(Int(SubscriptionWebTransport.exhaustionCooldown / 60)) min")
-                return try await callOpenRouter(
-                    stage: stage, mode: mode, model: model, messages: messages, maxTokens: maxTokens,
-                    reasoning: reasoning, provider: provider, temperature: temperature, timeout: timeout,
-                    retryTimeouts: retryTimeouts, responseFormat: responseFormat,
-                    backendOverride: fallback, executionID: executionID)
-            }
+            return try await callSubscriptionStage(
+                stage: stage, mode: mode, model: model, messages: messages,
+                reasoning: reasoning, timeout: timeout, responseFormat: responseFormat,
+                executionID: executionID)
         }
         let resolvedModel = self.resolvedModel(for: backend, requested: model)
         var body = buildChatBody(
@@ -1770,8 +1755,8 @@ actor WebOrchestrator {
     /// One non-agent stage (excerpt extraction, web_fetch compression) over
     /// the ChatGPT subscription: Responses, streamed, strict JSON schema as
     /// `text.format` when the stage asks for one. Spend is $0 (flat
-    /// subscription allowance). Empty output retries like the chat path;
-    /// usage exhaustion propagates to the caller's fallback.
+    /// subscription allowance). Empty output retries like the chat path; a
+    /// failed response or usage exhaustion throws (no API fallback).
     private func callSubscriptionStage(
         stage: String,
         mode: ResearchMode,

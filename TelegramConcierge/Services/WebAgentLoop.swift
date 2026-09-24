@@ -404,13 +404,6 @@ final class WebAgentResponsesTranscript {
         input.append(.object(["role": .string("user"), "content": .string(text)]))
     }
 
-    /// Remove replayed reasoning items (encrypted content is bound to the
-    /// account that produced it) before the transcript moves from the
-    /// ChatGPT subscription to the OpenAI key.
-    func dropReasoningItems() {
-        input.removeAll { $0.objectValue?["type"]?.stringValue == "reasoning" }
-    }
-
     /// Parse one response's output items into the round shape. Every item is
     /// also replayed verbatim into `input` for the next round.
     static func parseRound(outputItems: [JSONValue]) -> WebAgentRound {

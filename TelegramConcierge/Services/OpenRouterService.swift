@@ -1581,8 +1581,8 @@ actor OpenRouterService {
     /// - `.chatgpt` (derived: the main provider is the ChatGPT subscription,
     ///   owner decision 2026-09-23): the subscription's pinned Responses
     ///   endpoint with the active login generation, same model resolution
-    ///   as `.openai`, effort high. A usage-exhausted subscription resolves
-    ///   `WebSearchBackend.active` to the configured backend instead.
+    ///   as `.openai`, effort high. A usage-exhausted subscription fails the
+    ///   run with the subscription's usage message (no API fallback).
     /// - `.openrouter`: the configured slug on OpenRouter with the existing
     ///   provider preferences for that model, effort high.
     /// Researcher rounds run at HIGH effort (owner decision 2026-09-16 after
