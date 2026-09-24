@@ -79,7 +79,13 @@ def main():
         anchor = '                let bytes = try await transport.send('
         assert text.count(anchor) == 1
         text = text.replace(anchor, '                try P2Life.claimLiveRequest()\n' + anchor)
-        text = text.replace('.send(request, overallTimeout: request.timeoutInterval, subscription: context.subscriptionGeneration != nil)', '.send(P2Life.route(request), overallTimeout: request.timeoutInterval, subscription: context.subscriptionGeneration != nil)')
+        # Route the one transport call to the fixture server. Asserted, so a
+        # reshaped call site fails here instead of silently reaching the
+        # real network (the send gained connect/idle clocks in the 6-minute
+        # stall change).
+        anchor = 'transport.send(request, overallTimeout: request.timeoutInterval,'
+        assert text.count(anchor) == 1
+        text = text.replace(anchor, 'transport.send(P2Life.route(request), overallTimeout: request.timeoutInterval,')
         anchor = '        if let error = context.configurationError { throw ResponsesFailure.malformed(error) }'
         assert text.count(anchor) == 1
         text = text.replace(anchor, '        P2Life.recordContext(context)\n' + anchor)
