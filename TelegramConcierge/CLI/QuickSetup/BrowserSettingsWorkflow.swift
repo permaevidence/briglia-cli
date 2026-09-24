@@ -205,7 +205,7 @@ final class BrowserSettingsWorkflow {
     func status() -> [String: Any] {
         var profiles: [[String: Any]] = []
         for p in ProviderProfiles.Profile.allCases {
-            let model = ProviderProfiles.configuredModel(p) ?? (p == .opencode ? OpenCodeGo.defaultModel : p == .openrouter ? "google/gemini-3-flash-preview" : p == .chatgpt ? ResponsesAdapter.subscriptionDefaultModel : p == .openai ? "gpt-5.6-luna" : "")
+            let model = ProviderProfiles.configuredModel(p) ?? (p == .opencode ? OpenCodeGo.defaultModel : p == .openrouter ? ProviderProfiles.openRouterSetupDefaultModel : p == .chatgpt ? ResponsesAdapter.subscriptionDefaultModel : p == .openai ? "gpt-5.6-luna" : "")
             profiles.append(["id": p.rawValue, "label": p.displayName,
                 "configured": ProviderProfiles.isConfigured(p), "model": model,
                 "effort": ProviderProfiles.configuredEffort(p) ?? (p == .local || (ProviderProfiles.isConfigured(p) && p != .opencode && ProviderProfiles.wireProtocol(p) == .responses) ? "" : "high"),

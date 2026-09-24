@@ -113,7 +113,7 @@ class Fake:
                             "model_label": [m["label"] for m in MODELS if m["id"] == self.chatgpt["model"]][0], "effort": self.chatgpt["effort"],
                             "efforts": ["low", "medium", "high", "xhigh"]}
         ai = {"lane": self.lane(), "active": self.active(), "planned": self.planned, "ready": self.active() is not None, "openai_required": req,
-              "providers": provs, "opencode_models": OC_MODELS, "openrouter_default": "google/gemini-3-flash-preview"}
+              "providers": provs, "opencode_models": OC_MODELS, "openrouter_default": "deepseek/deepseek-v4.1-flash"}
         if self.local:
             ai["local"] = self.local
         c = dict(self.chatgpt)
@@ -121,7 +121,7 @@ class Fake:
         c["model_label"] = [m["label"] for m in MODELS if m["id"] == c["model"]][0]
         return {"platform": self.platform, "lang": self.lang, "complete": all(s["done"] for s in steps if s["required"]), "steps": steps, "name": self.name,
                 "chatgpt": c, "ai": ai, "telegram": self.telegram, "keys": self.keys, "email": self.email, "computer": self.computer,
-                "tools": self.tools, "busy": None, "service_was_running": False, "running": getattr(self, "running", False), "run_mode": getattr(self, "run_mode", None), "browser_likely": True, "closing": self.closing,
+                "tools": self.tools, "busy": None, "service_was_running": getattr(self, "service_was_running", False), "running": getattr(self, "running", False), "run_mode": getattr(self, "run_mode", None), "browser_likely": True, "closing": self.closing,
                 "startup": getattr(self, "startup", None)}
 
     def act(self, body):
@@ -159,7 +159,7 @@ class Fake:
                 p = self.providers[k]
                 p.update({"configured": True, "key": body["key"][:5] + "…" + body["key"][-4:]})
                 if not p["model"]:
-                    p["model"] = "glm-5.3-flash" if k == "opencode" else "google/gemini-3-flash-preview"
+                    p["model"] = "glm-5.3-flash" if k == "opencode" else "deepseek/deepseek-v4.1-flash"
                 p["model_label"] = {"glm-5.3-flash": "GLM 5.3 Flash"}.get(p["model"], p["model"])
                 self.use(k)
                 msg = "Briglia now thinks with %s on %s." % (p["model_label"], LANE_TITLES[k])
@@ -352,6 +352,7 @@ def main():
         page.click("text=Continue →")
         page.wait_for_selector("text=Everything’s ready!")
         shot(page, "16-finish")
+        check("the corner Start/Stop isn't shown on the first run's finish screen", not page.is_visible("#power .pbtn"))
         page.click("text=Start Briglia")
         page.wait_for_selector("text=Briglia is starting")
         check("Start Briglia closes the setup", f.closing == "start")
@@ -366,6 +367,8 @@ def main():
         ctx, page, errors = session(g)
         page.wait_for_selector("text=Everything’s ready")
         check("a finished setup opens on the dashboard", page.is_visible(".grid"))
+        check("the corner shows Briglia stopped, with Start and no Stop",
+              page.is_visible("#power >> text=Stopped") and page.is_visible("#power-start") and not page.is_visible("#power-stop"))
         shot(page, "20-dashboard")
         page.click(".tile:has-text('ChatGPT')")
         page.wait_for_selector(".choices")
@@ -373,18 +376,39 @@ def main():
         page.wait_for_selector("text=Briglia now thinks with GPT-6 Luna.")
         check("a model can be changed with one click", g.chatgpt["model"] == "gpt-6-luna")
         shot(page, "21-dashboard-chatgpt")
+        check("each thinking level shows its real name in small text, Deep (high) selected by default",
+              page.inner_text(".seg button[data-effort=medium] .ename") == "Balanced" and page.inner_text(".seg button[data-effort=medium] .etech") == "medium"
+              and page.inner_text(".seg button[data-effort=xhigh] .etech") == "xhigh" and page.is_visible(".seg button.on[data-effort=high]"))
+        check("the corner Start/Stop stays visible on a settings screen", page.is_visible("#power-start"))
         page.click(".seg button[data-effort=xhigh]")
         page.wait_for_selector(".seg button.on[data-effort=xhigh]")
         check("the thinking level is one click", g.chatgpt["effort"] == "xhigh")
         page.click("text=← Back")
         page.wait_for_selector(".grid")
-        check("the dashboard says Briglia is stopped while the page is open and offers Start and Stop",
-              page.is_visible("text=Briglia is stopped") and page.is_visible("button:has-text('Start Briglia')") and page.is_visible("button:has-text('Stop Briglia')"))
+        check("the dashboard says Briglia is stopped and has one Start (in the corner), no bottom Start/Stop",
+              page.is_visible("text=Briglia is stopped") and page.locator("button:has-text('Start')").count() == 1 and page.locator("button:has-text('Stop')").count() == 0)
         shot(page, "22-dashboard-startstop")
-        page.click("button:has-text('Stop Briglia')")
-        page.wait_for_selector("h1:has-text('Briglia is stopped')")
-        check("Stop closes the page and says Briglia stays off", g.closing == "stop")
+        page.click("#power-start")
+        page.wait_for_selector("text=Briglia is starting")
+        check("corner Start starts Briglia", g.closing == "start")
         check("no page errors on the dashboard", not errors, errors)
+        ctx.close()
+
+        # ---- paused service (Linux): the corner offers Start and Stop ----
+        ps = Fake(platform="linux")
+        ps.service_was_running = True
+        ps.name = "Sofia"; ps.chatgpt.update({"state": "signed_in", "active": True}); ps.telegram.update({"configured": True, "chat_id": "5551234567", "bot": "sofia_test_bot"})
+        ps.keys.update({"serper": "srp-g…cdef", "jina": "jina_…cdef"}); ps.computer["fda"] = True; ps.tools.update({"complete": True, "missing": []})
+        ctx, page, errors = session(ps)
+        page.wait_for_selector(".grid")
+        check("paused: the corner says Paused with Stop and Start", page.is_visible("#power >> text=Paused") and page.is_visible("#power-stop") and page.is_visible("#power-start"))
+        page.click("#power-stop")
+        check("paused: Stop asks once before acting", page.is_visible("#power >> text=Stop Briglia?") and ps.closing is None)
+        page.click("#power >> text=Cancel")
+        check("paused: Cancel keeps Briglia as it was", page.is_visible("#power-stop") and ps.closing is None)
+        page.click("#power-stop"); page.click("#power-yes")
+        page.wait_for_selector("h1:has-text('Briglia is stopped')")
+        check("paused: confirmed Stop keeps it off and says so", ps.closing == "stop" and not errors, errors)
         ctx.close()
 
         # ---- Italian ----
@@ -451,14 +475,15 @@ def main():
         lv.keys.update({"serper": "srp-g…cdef", "jina": "jina_…cdef"}); lv.computer["fda"] = True; lv.tools.update({"complete": True, "missing": []})
         ctx, page, errors = session(lv)
         page.wait_for_selector("text=Briglia is running")
-        check("live: the dashboard says Briglia is running, with Stop and Close but no Start",
-              page.is_visible("button:has-text('Stop Briglia')") and page.is_visible("button:has-text('Close this page')") and not page.is_visible("button:has-text('Start Briglia')"))
+        check("live: the corner says Running, with Stop and no Start; the page offers Close",
+              page.is_visible("#power >> text=Running") and page.is_visible("#power-stop") and not page.is_visible("#power-start") and page.is_visible("button:has-text('Close this page')"))
         shot(page, "70-live-dashboard")
         page.click("#steps button:has-text('Telegram')")
         page.wait_for_selector("text=Briglia is using this bot now")
         check("live: a different bot isn't offered while Briglia uses this one", not page.is_visible("text=Connect a different bot"))
+        check("live: the corner Stop is there on a step screen too", page.is_visible("#power-stop"))
         page.click("text=← Back")
-        page.click("button:has-text('Stop Briglia')")
+        page.click("#power-stop"); page.click("#power-yes")
         page.wait_for_selector("text=Stopping Briglia")
         check("live: Stop says Briglia is shutting down", lv.closing == "stop" and not errors, errors)
         ctx.close()
@@ -503,7 +528,7 @@ def main():
         page.wait_for_selector("h1:has-text('Connect OpenRouter')")
         check("adding OpenRouter keeps OpenCode running until it's set up", page.is_visible("text=Briglia keeps using OpenCode Go"))
         page.fill("#f-ai", GOOD["openrouter"])
-        page.wait_for_selector("text=Briglia now thinks with google/gemini-3-flash-preview on OpenRouter.", timeout=6000)
+        page.wait_for_selector("text=Briglia now thinks with deepseek/deepseek-v4.1-flash on OpenRouter.", timeout=6000)
         check("an OpenRouter key switches Briglia to OpenRouter", o.active() == "openrouter")
         page.fill("#f-or-model", "moonshotai/kimi-k3")
         page.click("button:has-text('Use this model')")
@@ -539,8 +564,8 @@ def main():
         lf.computer.update({"fda": True})
         lf.tools.update({"complete": True, "missing": []})
         ctx, page, errors = session(lf)
-        page.wait_for_selector("button:has-text('Start Briglia')")
-        page.click("button:has-text('Start Briglia')")
+        page.wait_for_selector("#power-start")
+        page.click("#power-start")
         page.wait_for_selector("text=Briglia didn’t start")
         check("Linux: a failed start stays on the page with the reason",
               page.is_visible("text=stability window") and page.is_visible("button:has-text('Try again')") and not page.is_visible("text=runs in the background now"))

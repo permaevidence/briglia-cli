@@ -10760,12 +10760,17 @@ class ConversationManager: ObservableObject {
                 // nil self = manager gone (shutdown race) → NOT durable:
                 // fail-safe false holds the checkpoint so the mail redelivers
                 // on the next launch instead of being silently skipped.
-                await self?.processNewUnreadEmails(newEmails) ?? false
+                // A Gmail arrival reaches the agent only while gws is still
+                // the selected provider (belt and braces behind the
+                // service's own epoch guard).
+                guard EmailCalendarProvider.current == .gws else { return false }
+                return await self?.processNewUnreadEmails(newEmails) ?? false
             }
             await GoogleWorkspaceService.shared.startBackgroundPoll()
         case .agentmail:
             await AgentMailService.shared.setNewEmailHandler { [weak self] newEmails in
-                await self?.processNewUnreadEmails(newEmails) ?? false
+                guard EmailCalendarProvider.current == .agentmail else { return false }
+                return await self?.processNewUnreadEmails(newEmails) ?? false
             }
             await AgentMailService.shared.startBackgroundPoll()
         case .none:
@@ -10788,10 +10793,18 @@ class ConversationManager: ObservableObject {
             print("[ConversationManager] WARNING: AgentMail poller not quiescent at provider change — late ticks are discarded by the generation token")
         }
         if let previous, previous.agentMailKey != current.agentMailKey || previous.inbox != current.inbox {
-            await AgentMailService.shared.discardPersistedPollState()
+            // A failed removal is safe: checkpoints are account-stamped and
+            // the new account never restores the old one's.
+            _ = await AgentMailService.shared.discardPersistedPollState()
         }
         if previous == nil || previous?.provider == .gws || current.provider == .gws {
-            _ = await GoogleWorkspaceService.shared.resetForWipe()
+            // A gws subprocess can outlive this wait (they ignore
+            // cancellation); the reset bumps the service's epoch, so such an
+            // operation finishes inertly: no cache write, no retry, no
+            // delivery. The handler also re-checks the selected provider.
+            if !(await GoogleWorkspaceService.shared.resetForWipe()) {
+                print("[ConversationManager] gws still finishing an operation at provider change — its result will be discarded (epoch guard)")
+            }
         }
         frozenEmailContext = nil
         frozenCalendarContext = nil

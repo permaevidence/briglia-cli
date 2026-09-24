@@ -77,6 +77,27 @@ actor AgentMailService {
 
     static func isConfigured() -> Bool { apiKey() != nil }
 
+    /// Which account a persisted poll checkpoint belongs to: a one-way hash
+    /// of the API key and inbox address (never the key itself). A checkpoint
+    /// is restored only by the account that wrote it, so a failed cleanup
+    /// after an account change can't hand the old account's watermark and
+    /// drain cursors to the new one (Codex, menu round 3).
+    static func accountFingerprint(key: String, inbox: String) -> String {
+        let digest = SHA256.hash(data: Data("briglia-agentmail-poll-v1\u{0}\(key)\u{0}\(inbox)".utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+    static func currentAccountFingerprint() -> String? {
+        guard let key = apiKey() else { return nil }
+        return accountFingerprint(key: key, inbox: EmailCalendarProvider.agentMailInboxAddress)
+    }
+    /// The account the running poller was started for (stamped into every
+    /// checkpoint it writes).
+    private var pollAccount: String?
+    /// Checkpoints from before accounts were stamped are adopted only by the
+    /// first start in a process. After a live account change they can't be
+    /// attributed to either account, so they are never adopted.
+    private var legacyCheckpointAdoptable = true
+
     // MARK: - Public API — polling lifecycle (mirrors GoogleWorkspaceService)
 
     func setNewEmailHandler(_ handler: @escaping @Sendable ([GoogleWorkspaceService.UnreadEmail]) async -> Bool) {
@@ -123,6 +144,7 @@ actor AgentMailService {
         pollGeneration &+= 1
         let generation = pollGeneration
         pollerTask?.cancel()
+        pollAccount = Self.currentAccountFingerprint()
         let intervalNs: UInt64 = pollIntervalSeconds * 1_000_000_000
         // Seed the watermark to "now": pre-existing unread must not flood the
         // session at launch — it is surfaced by the snapshot context instead.
@@ -160,8 +182,20 @@ actor AgentMailService {
     /// Called after a live AgentMail account change, once the poller is
     /// quiesced: cursors discovered under the old key must not be restored
     /// for the new one.
-    func discardPersistedPollState() {
-        try? FileManager.default.removeItem(at: Self.pollStateURL)
+    /// False when the file exists but couldn't be removed. Harmless for
+    /// correctness — the checkpoint is account-stamped, so another account
+    /// never restores it — but reported so the stale file is visible.
+    @discardableResult
+    func discardPersistedPollState() -> Bool {
+        legacyCheckpointAdoptable = false
+        do {
+            try FileManager.default.removeItem(at: Self.pollStateURL)
+            return true
+        } catch {
+            if !FileManager.default.fileExists(atPath: Self.pollStateURL.path) { return true }
+            print("[AgentMailService] WARNING: couldn't remove the old account's poll checkpoint (\(error.localizedDescription)); it stays inert (account-stamped)")
+            return false
+        }
     }
 
     func stopBackgroundPoll() {
@@ -496,6 +530,9 @@ actor AgentMailService {
         var watermark: Date
         var drains: [String: DrainState]
         var savedAt: Date
+        /// `accountFingerprint` of the writer; nil in checkpoints written
+        /// before accounts were stamped.
+        var account: String? = nil
     }
 
     private static var pollStateURL: URL {
@@ -518,7 +555,7 @@ actor AgentMailService {
 
     private func persistPollState() {
         guard let watermark = lastArrivalPollTime else { return }
-        let state = PollState(watermark: watermark, drains: drainStates, savedAt: Date())
+        let state = PollState(watermark: watermark, drains: drainStates, savedAt: Date(), account: pollAccount)
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
@@ -547,8 +584,32 @@ actor AgentMailService {
         guard let data = try? Data(contentsOf: Self.pollStateURL) else { return false }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let state = try? decoder.decode(PollState.self, from: data),
-              Self.shouldRestorePollState(savedAt: state.savedAt, now: Date()) else { return false }
+        guard var state = try? decoder.decode(PollState.self, from: data),
+              Self.shouldRestorePollState(savedAt: state.savedAt, now: Date()),
+              let account = pollAccount else { return false }
+        if let owner = state.account {
+            // Another account's checkpoint: never adopted (the caller then
+            // persists a fresh baseline for this account over it).
+            guard owner == account else {
+                print("[AgentMailService] Ignored a poll checkpoint written for a different AgentMail account")
+                return false
+            }
+        } else {
+            guard legacyCheckpointAdoptable else {
+                print("[AgentMailService] Ignored an unstamped poll checkpoint after an account change")
+                return false
+            }
+            // A pre-stamp checkpoint belongs to the account configured when
+            // it is first read after the upgrade: stamp it now, keeping its
+            // original savedAt (re-dating it would defeat the 48h gate).
+            state.account = account
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            // Unstamped and unwritable: don't adopt it (the anti-flood seed
+            // wins), so it can never later pass to another account either.
+            guard let stamped = try? encoder.encode(state),
+                  (try? PrivateStorage.writeAtomically(stamped, to: Self.pollStateURL)) != nil else { return false }
+        }
         lastArrivalPollTime = state.watermark
         drainStates = state.drains
         print("[AgentMailService] Restored poll state (watermark \(state.watermark), \(state.drains.count) drain cursor(s)) — downtime arrivals will be caught up")

@@ -52,6 +52,20 @@ actor GoogleWorkspaceService {
     private var recentlyNotifiedIds: [String] = []
 
     private var pollerTask: Task<Void, Never>?
+    /// Bumped by start/stop/resetForWipe. Every operation captures it on
+    /// entry and re-checks it after each await before touching caches,
+    /// watermarks or the delivery handler, so a gws subprocess that outlives
+    /// a provider switch (they ignore task cancellation) finishes inertly —
+    /// its result is dropped, it launches no retry, and nothing reaches the
+    /// agent (Codex, menu round 3).
+    private var stateEpoch: UInt64 = 0
+    func stateEpochForTesting() -> UInt64 { stateEpoch }
+    /// Test seam: replaces the gws arrival query (no subprocess, no Gmail).
+    private var arrivalFetchForTesting: (@Sendable (Int) async -> [UnreadEmail]?)?
+    func setArrivalFetchForTesting(_ fetch: (@Sendable (Int) async -> [UnreadEmail]?)?) { arrivalFetchForTesting = fetch }
+    /// One real poll tick (tracked, epoch-stamped) on demand.
+    func pollOnceForTesting() async { await pollOnce() }
+    func arrivalWatermarkForTesting() -> Date? { lastArrivalPollTime }
     /// Returns whether the event was made durable — the gws poller ignores
     /// it (its watermark is in-memory only, so a crash naturally redelivers),
     /// but the shared handler signature lets the AgentMail poller gate its
@@ -109,6 +123,7 @@ actor GoogleWorkspaceService {
 
     private func gwsUsableBody() async -> Bool {
         if let cachedGwsUsable { return cachedGwsUsable }
+        let epoch = stateEpoch
         var usable = false
         if Self.gwsInstalled(),
            let out = await runGws(args: ["auth", "status"], timeoutSeconds: 10),
@@ -117,6 +132,7 @@ actor GoogleWorkspaceService {
            let method = json["auth_method"] as? String {
             usable = method != "none"
         }
+        guard epoch == stateEpoch else { return false }
         cachedGwsUsable = usable
         if !usable {
             print("[GoogleWorkspaceService] gws \(Self.gwsInstalled() ? "installed but not authorized" : "not installed") — email/calendar disabled (optional; `briglia setup` toolchain step, then restart Briglia)")
@@ -147,6 +163,7 @@ actor GoogleWorkspaceService {
     func stopBackgroundPoll() {
         pollerTask?.cancel()
         pollerTask = nil
+        stateEpoch &+= 1
     }
 
     /// Stop the poller, wait for GENUINE quiescence, and drop cached
@@ -203,8 +220,10 @@ actor GoogleWorkspaceService {
     /// NEW arrivals since the last watermark.
     func getEmailContextForSystemPrompt() async -> String {
         await trackedOp {
-            guard await gwsUsable() else { return "" }
-            _ = await fetchUnreadSnapshotWithRetry()
+            let epoch = stateEpoch
+            guard await gwsUsable(), epoch == stateEpoch else { return "" }
+            _ = await fetchUnreadSnapshotWithRetry(epoch: epoch)
+            guard epoch == stateEpoch else { return "" }
             return formatUnreadEmails(cachedUnread)
         }
     }
@@ -217,14 +236,16 @@ actor GoogleWorkspaceService {
     }
 
     private func getCalendarContextBody(forceRefresh: Bool) async -> String {
-        guard await gwsUsable() else { return "" }
+        let epoch = stateEpoch
+        guard await gwsUsable(), epoch == stateEpoch else { return "" }
         let today = Calendar.current.startOfDay(for: Date())
         if !forceRefresh,
            let cached = cachedCalendarContext,
            cachedCalendarDay == today {
             return cached
         }
-        if let events = await fetchAgendaWithRetry() {
+        if let events = await fetchAgendaWithRetry(epoch: epoch) {
+            guard epoch == stateEpoch else { return "" }
             let formatted = formatAgenda(events: events)
             cachedCalendarContext = formatted
             cachedCalendarDay = today
@@ -249,10 +270,10 @@ actor GoogleWorkspaceService {
     // MARK: - Poll tick (arrival-only — does NOT surface pre-existing unread)
 
     private func pollOnce() async {
-        await trackedOp { await pollOnceBody() }
+        await trackedOp { await pollOnceBody(epoch: stateEpoch) }
     }
 
-    private func pollOnceBody() async {
+    private func pollOnceBody(epoch: UInt64) async {
         // Watermark was seeded at startBackgroundPoll time. On a failed fetch we
         // leave it untouched so the next successful poll widens the window to
         // cover the gap — no missed arrivals.
@@ -260,7 +281,8 @@ actor GoogleWorkspaceService {
         let sinceEpoch = Int(since.timeIntervalSince1970)
         let pollStartedAt = Date()
 
-        guard let arrived = await fetchEmailsArrivedSinceWithRetry(sinceEpoch: sinceEpoch) else {
+        guard let arrived = await fetchEmailsArrivedSinceWithRetry(sinceEpoch: sinceEpoch, epoch: epoch),
+              epoch == stateEpoch else {
             return
         }
 
@@ -359,10 +381,12 @@ actor GoogleWorkspaceService {
 
     /// Snapshot fetch: "top N unread right now" for the system-prompt block.
     /// Not time-windowed — always returns the user's freshest unread mail.
-    private func fetchUnreadSnapshotWithRetry() async -> [UnreadEmail]? {
+    private func fetchUnreadSnapshotWithRetry(epoch: UInt64) async -> [UnreadEmail]? {
         var delayNs: UInt64 = 1_000_000_000
         for attempt in 1...3 {
+            guard epoch == stateEpoch else { return nil }
             if let emails = await fetchUnreadSnapshotOnce() {
+                guard epoch == stateEpoch else { return nil }
                 cachedUnread = emails
                 lastSuccessfulFetch = Date()
                 await noteGwsFetchOutcome(success: true, context: "fetchUnreadSnapshot")
@@ -381,9 +405,10 @@ actor GoogleWorkspaceService {
     /// Arrival fetch: "unread mail delivered after <epoch>" for the poller.
     /// Returns ONLY new arrivals; a mailbox with 500 pre-existing unread will
     /// return 0 rows if nothing new landed in the poll window.
-    private func fetchEmailsArrivedSinceWithRetry(sinceEpoch: Int) async -> [UnreadEmail]? {
+    private func fetchEmailsArrivedSinceWithRetry(sinceEpoch: Int, epoch: UInt64) async -> [UnreadEmail]? {
         var delayNs: UInt64 = 1_000_000_000
         for attempt in 1...3 {
+            guard epoch == stateEpoch else { return nil }
             if let emails = await fetchEmailsArrivedSinceOnce(sinceEpoch: sinceEpoch) {
                 await noteGwsFetchOutcome(success: true, context: "fetchEmailsArrivedSince")
                 return emails
@@ -398,9 +423,10 @@ actor GoogleWorkspaceService {
         return nil
     }
 
-    private func fetchAgendaWithRetry() async -> [AgendaEvent]? {
+    private func fetchAgendaWithRetry(epoch: UInt64) async -> [AgendaEvent]? {
         var delayNs: UInt64 = 1_000_000_000
         for attempt in 1...3 {
+            guard epoch == stateEpoch else { return nil }
             if let events = await fetchAgendaOnce() {
                 await noteGwsFetchOutcome(success: true, context: "fetchAgenda")
                 return events
@@ -435,6 +461,7 @@ actor GoogleWorkspaceService {
     /// — a dormant account suddenly receiving a burst — is still bounded, and
     /// triage + snippet fetches are cheap.
     private func fetchEmailsArrivedSinceOnce(sinceEpoch: Int) async -> [UnreadEmail]? {
+        if let arrivalFetchForTesting { return await arrivalFetchForTesting(sinceEpoch) }
         return await triageAndEnrich(query: "is:unread after:\(sinceEpoch)", maxResults: 50)
     }
 

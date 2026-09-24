@@ -151,9 +151,39 @@
     $('side-note').textContent = T('Everything you enter is saved right away. Close this page any time and type briglia menu to come back.', 'Tutto quello che inserisci viene salvato subito. Chiudi questa pagina quando vuoi e scrivi briglia menu per tornare.');
     $('footer').textContent = T('This page runs only on this computer. Your keys go straight to each service to be checked, and nowhere else.', 'Questa pagina funziona solo su questo computer. Le tue chiavi vanno direttamente a ciascun servizio per essere controllate, e da nessun’altra parte.');
     document.documentElement.lang = lang();
+    renderPower();
     var sw = $('lang-switch'); clear(sw);
     sw.appendChild(h('button', { type: 'button', class: 'langbtn' + (lang() === 'en' ? ' on' : ''), 'aria-label': 'English', title: 'English', onclick: function () { if (lang() !== 'en') setLang('en'); } }, [h('span', { class: 'flag', text: '\ud83c\uddec\ud83c\udde7' }), h('span', { text: 'EN' })]));
     sw.appendChild(h('button', { type: 'button', class: 'langbtn' + (lang() === 'it' ? ' on' : ''), 'aria-label': 'Italiano', title: 'Italiano', onclick: function () { if (lang() !== 'it') setLang('it'); } }, [h('span', { class: 'flag', text: '\ud83c\uddee\ud83c\uddf9' }), h('span', { text: 'IT' })]));
+  }
+
+  // Start/Stop in the corner: shown on every screen once the first setup is
+  // done (not during the first run, its finish screen, or while closing).
+  // Stop asks once, so a stray tap can't turn Briglia off.
+  var powerConfirm = false;
+  function renderPower() {
+    var el = $('power'); clear(el); el.className = 'power';
+    if (!S || gone || !S.complete || S.closing || S.startup || view.kind === 'finish' || view.kind === 'welcome' || view.kind === 'loading') { powerConfirm = false; return; }
+    var paused = !S.running && S.service_was_running;
+    var stop = function () { powerConfirm = false; finish('stop'); };
+    if (powerConfirm) {
+      el.className = 'power confirm';
+      el.appendChild(h('span', { class: 'ptext', text: T('Stop Briglia?', 'Fermare Briglia?') }));
+      el.appendChild(h('button', { class: 'pbtn stop', type: 'button', id: 'power-yes', disabled: inflight > 0, onclick: stop }, [T('Yes, stop', 'Sì, ferma')]));
+      el.appendChild(h('button', { class: 'pbtn plain', type: 'button', onclick: function () { powerConfirm = false; render(); } }, [T('Cancel', 'Annulla')]));
+      return;
+    }
+    el.className = 'power' + (S.running ? ' on' : paused ? ' paused' : '');
+    el.appendChild(h('span', { class: 'dot' }));
+    el.appendChild(h('span', { class: 'ptext', text: S.running ? T('Running', 'In funzione') : paused ? T('Paused', 'In pausa') : T('Stopped', 'Fermo') }));
+    if (S.running || paused) {
+      el.appendChild(h('button', { class: 'pbtn stop', type: 'button', id: 'power-stop', title: T('Stop Briglia', 'Ferma Briglia'), disabled: inflight > 0,
+        onclick: function () { powerConfirm = true; render(); } }, ['■ ' + T('Stop', 'Ferma')]));
+    }
+    if (!S.running) {
+      el.appendChild(h('button', { class: 'pbtn go', type: 'button', id: 'power-start', title: T('Start Briglia', 'Avvia Briglia'), disabled: inflight > 0,
+        onclick: function () { finish('start'); } }, ['▶ ' + T('Start', 'Avvia')]));
+    }
   }
 
   // ---------- views ----------
@@ -255,12 +285,11 @@
         h('span', { class: 'spacer' }),
         h('button', { class: 'btn ghost', type: 'button', onclick: function () { finish('quit'); } }, [T('Close for now', 'Chiudi per ora')]),
       ] : [
-        h('button', { class: 'btn primary', type: 'button', disabled: inflight > 0, onclick: function () { finish('start'); } }, ['▶  ' + T('Start Briglia', 'Avvia Briglia')]),
-        h('button', { class: 'btn secondary', type: 'button', disabled: inflight > 0, onclick: function () { finish('stop'); } }, ['■  ' + T('Stop Briglia', 'Ferma Briglia')]),
+        h('button', { class: 'btn ghost', type: 'button', onclick: function () { finish('quit'); } }, [T('Close this page', 'Chiudi questa pagina')]),
       ]),
       missing.length ? null : h('p', { class: 'small', text: S.platform === 'linux'
-        ? T('Start runs Briglia in the background and at every startup of this computer. Stop keeps it off, also after a restart.', 'Avvia fa funzionare Briglia in background e a ogni accensione del computer. Ferma lo tiene spento, anche dopo un riavvio.')
-        : T('Start runs Briglia in the Terminal window you opened this from. Stop closes this page and leaves Briglia off.', 'Avvia fa funzionare Briglia nella finestra del Terminale da cui hai aperto questa pagina. Ferma chiude la pagina e lascia Briglia spento.') }),
+        ? T('Start (top right) runs Briglia in the background and at every startup of this computer. Stop keeps it off, also after a restart.', 'Avvia (in alto a destra) fa funzionare Briglia in background e a ogni accensione del computer. Ferma lo tiene spento, anche dopo un riavvio.')
+        : T('Start (top right) runs Briglia in the Terminal window you opened this from.', 'Avvia (in alto a destra) fa funzionare Briglia nella finestra del Terminale da cui hai aperto questa pagina.') }),
     ];
   }
 
@@ -276,13 +305,11 @@
       notice('dashboard'),
       grid,
       h('div', { class: 'actions' }, [
-        h('button', { class: 'btn secondary', type: 'button', disabled: inflight > 0, onclick: function () { finish('stop'); } }, ['■  ' + T('Stop Briglia', 'Ferma Briglia')]),
-        h('span', { class: 'spacer' }),
         h('button', { class: 'btn ghost', type: 'button', onclick: function () { finish('quit'); } }, [T('Close this page', 'Chiudi questa pagina')]),
       ]),
       h('p', { class: 'small', text: service
-        ? T('Stop turns Briglia off, also after a restart of this computer. To start it again, type briglia menu.', 'Ferma spegne Briglia, anche dopo un riavvio del computer. Per riavviarlo, scrivi briglia menu.')
-        : T('Stop closes Briglia in its Terminal window. To start it again, type briglia menu.', 'Ferma chiude Briglia nella sua finestra del Terminale. Per riavviarlo, scrivi briglia menu.') }),
+        ? T('Stop (top right) turns Briglia off, also after a restart of this computer. To start it again, type briglia menu.', 'Ferma (in alto a destra) spegne Briglia, anche dopo un riavvio del computer. Per riavviarlo, scrivi briglia menu.')
+        : T('Stop (top right) closes Briglia in its Terminal window. To start it again, type briglia menu.', 'Ferma (in alto a destra) chiude Briglia nella sua finestra del Terminale. Per riavviarlo, scrivi briglia menu.') }),
     ];
   }
 
@@ -593,16 +620,20 @@
   function EFFORT_LABELS() { return { low: T('Light', 'Leggero'), medium: T('Balanced', 'Bilanciato'), high: T('Deep', 'Approfondito'), xhigh: T('Deepest', 'Massimo') }; }
   function effortRow(id) {
     var p = S.ai.providers[id] || {};
-    var list = p.efforts || [];
+    var list = (p.efforts || []).slice();
     if (!list.length) return null;
+    // A level set elsewhere (/effort on Telegram) stays visible as selected.
+    if (p.effort && list.indexOf(p.effort) < 0) list.push(p.effort);
     var labels = EFFORT_LABELS();
     return h('div', { class: 'effort' }, [
       h('div', { class: 'label', text: T('Thinking', 'Ragionamento') }),
       h('div', { class: 'seg', role: 'group' }, list.map(function (e) {
         return h('button', { type: 'button', class: e === p.effort ? 'on' : '', disabled: inflight > 0, 'data-effort': e,
-          onclick: function () { if (e !== p.effort) act('effort', { effort: e }, 'ai'); } }, [labels[e] || e]);
+          onclick: function () { if (e !== p.effort && (p.efforts || []).indexOf(e) >= 0) act('effort', { effort: e }, 'ai'); } },
+          // The friendly name, with the provider's own level name in small text under it.
+          labels[e] ? [h('span', { class: 'ename', text: labels[e] }), h('span', { class: 'etech', text: e })] : [e]);
       })),
-      h('div', { class: 'small', text: T('Deeper thinking gives better answers to hard questions, but replies take longer.', 'Un ragionamento più profondo dà risposte migliori alle domande difficili, ma ci mette di più.') }),
+      h('div', { class: 'small', text: T('Deep (high) is the default. Deeper thinking gives better answers to hard questions, but replies take longer.', 'Approfondito (high) è il valore predefinito. Un ragionamento più profondo dà risposte migliori alle domande difficili, ma ci mette di più.') }),
     ]);
   }
   // Setting up a lane while another provider runs: say what runs now.

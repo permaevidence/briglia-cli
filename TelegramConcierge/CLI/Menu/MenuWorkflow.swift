@@ -341,7 +341,7 @@ final class MenuWorkflow {
         }
     }
 
-    static let openRouterDefaultModel = "google/gemini-3-flash-preview"
+    static let openRouterDefaultModel = ProviderProfiles.openRouterSetupDefaultModel
 
     static func modelLabel(_ lane: MenuLane, _ id: String) -> String {
         switch lane {
@@ -1042,7 +1042,7 @@ final class MenuWorkflow {
     /// write the credential, and switch Briglia to it. Nothing is written
     /// when the barrier isn't reached, so the running agent keeps a
     /// coherent login either way.
-    private func commitSignIn(_ write: () async throws -> String, attempt: UUID, browser: Bool,
+    private func commitSignIn(_ write: SubscriptionLogin.Commit, attempt: UUID, browser: Bool,
                               checkpoint: @escaping @Sendable () throws -> Void) async throws -> String {
         if loginAttempt == attempt { login = Login(kind: browser ? "browser" : "code", state: "finishing") }
         var generation = ""
@@ -1050,7 +1050,10 @@ final class MenuWorkflow {
         let entered = try await env.barrier(Self.signInCommitWait) {
             try checkpoint()
             if await self.env.loginBlock() == .activeLogin { throw MenuSignInRefused.activeLogin }
-            generation = try await write()
+            // The store waits for its cross-process lock before writing;
+            // the ticket is checked again under that lock, so a newer action
+            // taken meanwhile leaves the saved credential untouched.
+            generation = try await write(checkpoint)
             await self.reload()
             selection = try await self.selectChatGPT(checkpoint)
         }

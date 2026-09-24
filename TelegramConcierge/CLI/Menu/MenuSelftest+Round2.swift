@@ -1,5 +1,14 @@
 import Foundation
 
+/// A thread-safe counter for callbacks off the main actor.
+final class MenuCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func add(_ k: Int) { lock.lock(); n += k; lock.unlock() }
+    func reset() { lock.lock(); n = 0; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+}
+
 /// Live-hub integration rows (Codex round 2 on 61db419): stale settings,
 /// ChatGPT sign-in against the real auth store and the real manager's
 /// settings barrier, and email pollers following a live settings change.
@@ -296,6 +305,57 @@ extension MenuSelftestContext {
                 check("sign-in: signing in again now asks to sign out first", !ok(blocked) && msg(blocked) == m.loginBlockMessage(.activeLogin))
                 await m.shutdown()
             }
+            do {
+                // Codex round 3: the commit passed the menu check but waits
+                // for the auth-store lock (a token refresh elsewhere); a newer
+                // choice lands meanwhile. The store re-checks the ticket under
+                // its lock, so the saved login stays the old one.
+                let old = try await seed(active: false, usable: true)
+                let tokenGate = MenuGate()
+                let m = liveWorkflow(tokenGate)
+                await m.start(); await m.settle()
+                _ = await act(m, ["action": "chatgpt_code"], settle: false)
+                _ = await waitArrived(tokenGate)
+                let lockGate = MenuGate()
+                let holder = Task { try await store.locked { await lockGate.wait() } }
+                while !lockGate.hasArrived { try? await Task.sleep(nanoseconds: 5_000_000) }
+                tokenGate.open()
+                for _ in 0..<400 {
+                    if manager.isRestoringMind { break }
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                }
+                check("sign-in: the commit reached the live barrier while the auth lock was held", manager.isRestoringMind)
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                _ = await act(m, ["action": "lane", "lane": "openrouter"], settle: false)
+                lockGate.open(); try await holder.value
+                await m.settle()
+                let state = try store.read()
+                check("sign-in: a sign-in superseded while waiting for the auth lock saves no credential", state?.generation == old,
+                      "generation changed=\(state?.generation != old), provider=\(ProviderProfiles.activeProfile()?.rawValue ?? "nil")")
+                check("sign-in: …and leaves no pending login behind", state?.pendingLogin == nil)
+                check("sign-in: …and Briglia isn't switched to ChatGPT", ProviderProfiles.activeProfile() != .chatgpt)
+                await m.shutdown()
+            }
+            do {
+                // Positive control for the same path: the lock is held, then
+                // released with nothing newer chosen — the login is saved.
+                let old = try await seed(active: false, usable: true)
+                let tokenGate = MenuGate()
+                let m = liveWorkflow(tokenGate)
+                await m.start(); await m.settle()
+                _ = await act(m, ["action": "chatgpt_code"], settle: false)
+                _ = await waitArrived(tokenGate)
+                let lockGate = MenuGate()
+                let holder = Task { try await store.locked { await lockGate.wait() } }
+                while !lockGate.hasArrived { try? await Task.sleep(nanoseconds: 5_000_000) }
+                tokenGate.open()
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                lockGate.open(); try await holder.value
+                await m.settle()
+                let state = try store.read()
+                check("sign-in: after waiting for the auth lock, a still-current sign-in is saved", state?.generation != nil && state?.generation != old)
+                await m.shutdown()
+            }
         } catch {
             check("sign-in: real auth fixture ran", false, error.localizedDescription)
         }
@@ -351,6 +411,116 @@ extension MenuSelftestContext {
             before = await service.currentGenerationForTesting()
             await manager.reloadBrowserSettings()
             check("email: switching from Google Workspace to AgentMail starts AgentMail", await service.currentGenerationForTesting() > before)
+
+            // Codex round 3, R2: a Google check still running when the
+            // provider changes. The transition doesn't wait it out; the
+            // reset voids it, so its late result is dropped: nothing reaches
+            // the agent, no watermark or cache is written, no retry starts.
+            let gws = GoogleWorkspaceService.shared
+            let delivered = MenuCount(), fetches = MenuCount()
+            let sample = GoogleWorkspaceService.UnreadEmail(id: "m-late", threadId: nil, from: "a@example.com", subject: "late", date: "", snippet: "")
+            func gwsSelected() async throws {
+                try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: "gws")
+                await manager.reloadBrowserSettings()
+                await gws.setNewEmailHandler { emails in delivered.add(emails.count); return true }
+            }
+            try await gwsSelected()
+            await gws.setArrivalFetchForTesting { _ in fetches.add(1); return [sample] }
+            await gws.pollOnceForTesting()
+            check("email: control — a Google check that finishes normally is delivered", delivered.value == 1 && fetches.value == 1)
+            for target in ["agentmail", "none"] {
+                try await gwsSelected()
+                delivered.reset(); fetches.reset()
+                let gate = MenuGate()
+                // "agentmail": the late fetch returns mail; "none": it fails,
+                // which would normally start the retry ladder.
+                let late = target == "agentmail"
+                let fresh = GoogleWorkspaceService.UnreadEmail(id: "m-late-\(target)", threadId: nil, from: "a@example.com", subject: "late", date: "", snippet: "")
+                await gws.setArrivalFetchForTesting { _ in fetches.add(1); await gate.wait(); return late ? [fresh] : nil }
+                let tick = Task { await gws.pollOnceForTesting() }
+                while !gate.hasArrived { try? await Task.sleep(nanoseconds: 5_000_000) }
+                let epoch = await gws.stateEpochForTesting()
+                try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: target)
+                let started = Date()
+                let switching = Task { await manager.reloadBrowserSettings() }
+                // Let the switch reach its wait for the old check (bounded:
+                // without the epoch bump this would otherwise never change).
+                for _ in 0..<200 where await gws.stateEpochForTesting() == epoch { try? await Task.sleep(nanoseconds: 5_000_000) }
+                let voided = await gws.stateEpochForTesting() != epoch
+                gate.open()
+                await switching.value; await tick.value
+                try? await Task.sleep(nanoseconds: 1_300_000_000)   // past the first retry delay
+                check("email: Google → \(target) with a check still running: its result never reaches the agent",
+                      voided && delivered.value == 0, "voided \(voided) delivered \(delivered.value)")
+                let wm = await gws.arrivalWatermarkForTesting()
+                check("email: Google → \(target): the late check writes no watermark and starts no retry",
+                      wm == nil && fetches.value == 1, "fetches \(fetches.value)")
+                let elapsed = Date().timeIntervalSince(started)
+                let inFlight = await gws.opsInFlightForTesting()
+                check("email: Google → \(target): the switch finishes once the old check returns (no 10 s stall)",
+                      elapsed < 5 && inFlight == 0, "elapsed \(elapsed) in flight \(inFlight)")
+                check("email: Google → \(target): the selected provider is applied", EmailCalendarProvider.current.rawValue == target)
+            }
+            await gws.setArrivalFetchForTesting(nil)
+            try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: "agentmail")
+            await manager.reloadBrowserSettings()
+
+            // Codex round 3, R3: the old account's checkpoint can't be
+            // removed. It is account-stamped, so the new account never
+            // adopts it — in this process or after a restart.
+            func writePosition(account: String?) throws {
+                let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+                let hourAgo = Date().addingTimeInterval(-3600)
+                try PrivateStorage.writeAtomically(try encoder.encode(AgentMailService.PollState(watermark: hourAgo, drains: [:], savedAt: hourAgo, account: account)), to: checkpoint)
+            }
+            func adoptedOld() async -> Bool { await service.watermarkForTesting().map { $0 < Date().addingTimeInterval(-1800) } ?? false }
+            #if os(macOS)
+            for (label, stamped) in [("an unstamped (pre-upgrade)", false), ("the old account's stamped", true)] {
+                try writePosition(account: stamped ? AgentMailService.currentAccountFingerprint() : nil)
+                let originalBytes = try Data(contentsOf: checkpoint)
+                try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: checkpoint.path)
+                do {
+                    try KeychainHelper.save(key: KeychainHelper.agentMailApiKeyKey, value: "synthetic-menu-review-key-\(stamped ? 4 : 3)")
+                    await manager.reloadBrowserSettings()
+                    let adopted = await adoptedOld()
+                    check("email: a new account never adopts \(label) checkpoint that couldn't be removed", !adopted,
+                          "adopted \(adopted), file kept \((try? Data(contentsOf: checkpoint)) == originalBytes)")
+                    // Restart: a fresh start of the poller, same stuck file.
+                    await service.stopBackgroundPoll()
+                    await service.startBackgroundPoll()
+                    let adoptedAfterRestart = await adoptedOld()
+                    check("email: …nor after a restart (\(label))", !adoptedAfterRestart)
+                } catch {
+                    try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: checkpoint.path)
+                    throw error
+                }
+                try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: checkpoint.path)
+            }
+            #endif
+            // Restart path on every platform: another account's stamped
+            // checkpoint is ignored and replaced by this account's baseline;
+            // this account's own checkpoint is still restored (control).
+            await service.stopBackgroundPoll()
+            try writePosition(account: AgentMailService.accountFingerprint(key: "another-account", inbox: ""))
+            await service.startBackgroundPoll()
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            let rewritten = (try? Data(contentsOf: checkpoint)).flatMap { try? decoder.decode(AgentMailService.PollState.self, from: $0) }
+            let adoptedOther = await adoptedOld()
+            check("email: at start, another account's checkpoint is ignored and replaced by this account's",
+                  !adoptedOther && rewritten?.account == AgentMailService.currentAccountFingerprint())
+            // An unstamped checkpoint that appears after an account change
+            // in this process (writable, so the stamp would succeed) is
+            // still never adopted: it can't be attributed to either account.
+            await service.stopBackgroundPoll()
+            try writePosition(account: nil)
+            await service.startBackgroundPoll()
+            let adoptedUnstamped = await adoptedOld()
+            check("email: after an account change, an unstamped checkpoint is never adopted", !adoptedUnstamped)
+            await service.stopBackgroundPoll()
+            try writePosition(account: AgentMailService.currentAccountFingerprint())
+            await service.startBackgroundPoll()
+            let adoptedOwn = await adoptedOld()
+            check("email: control — the same account's checkpoint is restored at start", adoptedOwn)
             await service.stopBackgroundPoll()
             try KeychainHelper.delete(key: KeychainHelper.agentMailApiKeyKey)
             try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: "none")

@@ -188,11 +188,16 @@ struct SubscriptionAuthStore {
         }
     }
 
-    func commitLogin(_ credential: SubscriptionCredential, pending: String) async throws -> String {
+    /// `precondition` runs under the acquired lock, right before the write:
+    /// a caller whose own validity can change while this waits for the lock
+    /// (the menu's action ticket) gets a last say, and throwing writes nothing.
+    func commitLogin(_ credential: SubscriptionCredential, pending: String,
+                     precondition: (@Sendable () throws -> Void)? = nil) async throws -> String {
         try await locked {
             guard var state = try read(), state.pendingLogin == pending else {
                 throw SubscriptionError("Login was cancelled or superseded; start login again")
             }
+            try precondition?()
             state.generation = UUID().uuidString
             state.pendingLogin = nil
             state.deviceChallenge = nil
@@ -345,12 +350,15 @@ struct SubscriptionLogin {
     /// live menu runs it inside the running agent's settings barrier, with
     /// its own validity and replacement checks, so the new login and the
     /// agent's switch to it happen together.
-    typealias CommitHook = (_ commit: () async throws -> String) async throws -> String
+    /// The hook's `commit` takes a precondition that the store re-checks
+    /// under its lock immediately before writing the credential.
+    typealias Commit = (_ precondition: (@Sendable () throws -> Void)?) async throws -> String
+    typealias CommitHook = (_ commit: Commit) async throws -> String
     var commitHook: CommitHook? = nil
     func commit(_ credential: SubscriptionCredential, pending: String) async throws -> String {
-        let direct = { try await store.commitLogin(credential, pending: pending) }
+        let direct: Commit = { try await store.commitLogin(credential, pending: pending, precondition: $0) }
         if let commitHook { return try await commitHook(direct) }
-        return try await direct()
+        return try await direct(nil)
     }
 
     static func object(_ data: Data) throws -> [String: Any] {

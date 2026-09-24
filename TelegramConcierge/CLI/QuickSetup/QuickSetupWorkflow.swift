@@ -873,7 +873,7 @@ actor QuickSetupWorkflow {
             return ["email_calendar": ["provider": "agentmail", "api_key": k, "install_cli": false] as [String: Any]]
         case "openrouter":
             guard let k = key(.openrouter) else { return nil }
-            return ["provider": ["profile": "openrouter", "api_key": k, "model": "google/gemini-3-flash-preview", "text_only": false, "activate": false] as [String: Any]]
+            return ["provider": ["profile": "openrouter", "api_key": k, "model": ProviderProfiles.openRouterSetupDefaultModel, "text_only": false, "activate": false] as [String: Any]]
         case "custom":
             if case .custom(let k, let b, let m, let vision)? = request.values[.custom] {
                 return ["provider": ["profile": "custom", "api_key": k, "base_url": b, "model": m, "text_only": !vision, "activate": false] as [String: Any]]

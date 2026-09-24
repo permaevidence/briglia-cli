@@ -21,6 +21,11 @@ import Foundation
 /// only OpenCode and custom need dedicated namespaces because they share the
 /// `openai_compatible_*` runtime slots.
 enum ProviderProfiles {
+    /// The model a NEW OpenRouter setup suggests (wizard, setup-api probe,
+    /// quick setup, briglia menu). Vision-capable on OpenRouter. Existing
+    /// profiles keep their stored model.
+    static let openRouterSetupDefaultModel = "deepseek/deepseek-v4.1-flash"
+
 
     enum Profile: String, CaseIterable {
         case opencode
@@ -182,6 +187,8 @@ enum ProviderProfiles {
         case .opencode: return value(opencodeModelKey)
         case .openrouter:
             guard isConfigured(.openrouter) else { return nil }
+            // Runtime fallback for a profile saved without a model id: kept
+            // equal to OpenRouterService's, so existing installs don't move.
             return value(KeychainHelper.openRouterModelKey) ?? "google/gemini-3-flash-preview"
         case .custom: return value(customModelKey)
         case .local: return value(KeychainHelper.lmStudioModelKey)

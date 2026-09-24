@@ -370,7 +370,7 @@ enum SetupAPICore {
                     model: OpenCodeGo.defaultModel, fallbackModels: OpenCodeGo.probeFallbacks))
             case "openrouter":
                 let key = try require("api_key")
-                let model = nonEmptyString(request["model"]) ?? "google/gemini-3-flash-preview"
+                let model = nonEmptyString(request["model"]) ?? ProviderProfiles.openRouterSetupDefaultModel
                 return verdict(await Probes.chatCompletion(
                     baseURL: "https://openrouter.ai/api/v1", apiKey: key, model: model))
             case "custom":

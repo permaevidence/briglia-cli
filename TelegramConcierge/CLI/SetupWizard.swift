@@ -380,7 +380,7 @@ struct SetupWizard {
         """)
         let currentModel = KeychainHelper.load(key: KeychainHelper.openRouterModelKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let defaultModel = currentModel.isEmpty ? "google/gemini-3-flash-preview" : currentModel
+        let defaultModel = currentModel.isEmpty ? ProviderProfiles.openRouterSetupDefaultModel : currentModel
         let model = WizardIO.ask("Model ID (e.g. moonshotai/kimi-k3) [\(defaultModel)]", default: defaultModel)
         let key = await WizardIO.askSecretValidated(
             "OpenRouter API key",

@@ -251,14 +251,14 @@ final class MenuSelftestContext {
             world.loginShown.append("browser")
             if world.loginBlocks { try await Task.sleep(nanoseconds: 60_000_000_000) }
             if let f = world.loginFailure { throw SubscriptionError(f) }
-            _ = try await commit { world.loginCommits += 1; return "gen-fake" }
+            _ = try await commit { pre in try pre?(); world.loginCommits += 1; return "gen-fake" }
         }
         env.deviceLogin = { show, commit in
             show("https://auth.example/codex/device", "ABCD-1234")
             world.loginShown.append("device")
             if world.loginBlocks { try await Task.sleep(nanoseconds: 60_000_000_000) }
             if let f = world.loginFailure { throw SubscriptionError(f) }
-            _ = try await commit { world.loginCommits += 1; return "gen-fake" }
+            _ = try await commit { pre in try pre?(); world.loginCommits += 1; return "gen-fake" }
         }
         env.loginBlock = { world.loginBlock }
         env.telegramScan = { _, _ in world.scanCount += 1; return world.scan }
