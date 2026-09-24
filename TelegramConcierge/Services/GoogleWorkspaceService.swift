@@ -63,6 +63,16 @@ actor GoogleWorkspaceService {
     /// Test seam: replaces the gws arrival query (no subprocess, no Gmail).
     private var arrivalFetchForTesting: (@Sendable (Int) async -> [UnreadEmail]?)?
     func setArrivalFetchForTesting(_ fetch: (@Sendable (Int) async -> [UnreadEmail]?)?) { arrivalFetchForTesting = fetch }
+    /// Test seam: replaces every gws subprocess (args in, result out).
+    private var runGwsForTesting: (@Sendable ([String]) async -> ProcessRunResult)?
+    func setRunGwsForTesting(_ run: (@Sendable ([String]) async -> ProcessRunResult)?) { runGwsForTesting = run }
+    /// Test seam: the maintenance counter the late-result rows check.
+    func consecutiveFailuresForTesting() -> Int { consecutiveGwsFailures }
+    func setConsecutiveFailuresForTesting(_ n: Int) { consecutiveGwsFailures = n }
+    /// Test seam: one real snapshot fetch (retries + outcome), epoch-stamped.
+    func fetchUnreadSnapshotForTesting() async -> [UnreadEmail]? {
+        await trackedOp { await fetchUnreadSnapshotWithRetry(epoch: stateEpoch) }
+    }
     /// One real poll tick (tracked, epoch-stamped) on demand.
     func pollOnceForTesting() async { await pollOnce() }
     func arrivalWatermarkForTesting() -> Date? { lastArrivalPollTime }
@@ -126,7 +136,7 @@ actor GoogleWorkspaceService {
         let epoch = stateEpoch
         var usable = false
         if Self.gwsInstalled(),
-           let out = await runGws(args: ["auth", "status"], timeoutSeconds: 10),
+           let out = await runGws(args: ["auth", "status"], timeoutSeconds: 10, epoch: epoch),
            let data = out.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let method = json["auth_method"] as? String {
@@ -264,7 +274,7 @@ actor GoogleWorkspaceService {
     /// no retries. True means gws answered with a decodable (possibly empty)
     /// result — i.e. the CLI is installed, authenticated, and the token works.
     func verifyGwsAccess() async -> Bool {
-        await trackedOp { await fetchAgendaOnce() != nil }
+        await trackedOp { await fetchAgendaOnce(epoch: stateEpoch) != nil }
     }
 
     // MARK: - Poll tick (arrival-only — does NOT surface pre-existing unread)
@@ -339,7 +349,8 @@ actor GoogleWorkspaceService {
     /// Google's APIs no longer accept, and unlike Homebrew installs nobody
     /// ever runs `brew upgrade` on ours. Cheap (~6 MB), idempotent, and a
     /// no-op for auth failures — the maintenance alert still fires either way.
-    private func attemptGwsSelfHealIfManaged() async {
+    private func attemptGwsSelfHealIfManaged(epoch: UInt64) async {
+        guard epoch == stateEpoch else { return }
         let managedPath = "\(NSHomeDirectory())/.local/bin/gws"
         guard Self.locateGws() == managedPath else { return }
         if let last = lastGwsSelfUpdateAttempt, Date().timeIntervalSince(last) < 86_400 { return }
@@ -351,7 +362,12 @@ actor GoogleWorkspaceService {
         }
     }
 
-    private func noteGwsFetchOutcome(success: Bool, context: String) async {
+    /// Every completion side effect — clearing or opening a maintenance
+    /// episode, the failure counter, the self-heal reinstall — belongs to
+    /// the operation's epoch: a result that outlives a stop or provider
+    /// switch changes nothing (Codex, menu round 4).
+    private func noteGwsFetchOutcome(success: Bool, context: String, epoch: UInt64) async {
+        guard epoch == stateEpoch else { return }
         if success {
             // Unconditional: the in-memory failure counter resets on app
             // restart while the alert-center episode persists on disk. Gating
@@ -365,7 +381,8 @@ actor GoogleWorkspaceService {
         } else {
             consecutiveGwsFailures += 1
             if consecutiveGwsFailures % gwsFailureAlertThreshold == 0 {
-                await attemptGwsSelfHealIfManaged()
+                await attemptGwsSelfHealIfManaged(epoch: epoch)
+                guard epoch == stateEpoch else { return }
                 var errorText = "\(context): all retries exhausted (\(consecutiveGwsFailures) consecutive failed fetch passes)"
                 if let detail = lastGwsFailureDetail {
                     errorText += ". Underlying error: \(detail)"
@@ -385,11 +402,11 @@ actor GoogleWorkspaceService {
         var delayNs: UInt64 = 1_000_000_000
         for attempt in 1...3 {
             guard epoch == stateEpoch else { return nil }
-            if let emails = await fetchUnreadSnapshotOnce() {
+            if let emails = await fetchUnreadSnapshotOnce(epoch: epoch) {
                 guard epoch == stateEpoch else { return nil }
                 cachedUnread = emails
                 lastSuccessfulFetch = Date()
-                await noteGwsFetchOutcome(success: true, context: "fetchUnreadSnapshot")
+                await noteGwsFetchOutcome(success: true, context: "fetchUnreadSnapshot", epoch: epoch)
                 return emails
             }
             if attempt < 3 {
@@ -397,8 +414,9 @@ actor GoogleWorkspaceService {
                 delayNs *= 2
             }
         }
+        guard epoch == stateEpoch else { return nil }
         print("[GoogleWorkspaceService] fetchUnreadSnapshot: all retries exhausted — continuing without email context")
-        await noteGwsFetchOutcome(success: false, context: "fetchUnreadSnapshot")
+        await noteGwsFetchOutcome(success: false, context: "fetchUnreadSnapshot", epoch: epoch)
         return nil
     }
 
@@ -409,8 +427,9 @@ actor GoogleWorkspaceService {
         var delayNs: UInt64 = 1_000_000_000
         for attempt in 1...3 {
             guard epoch == stateEpoch else { return nil }
-            if let emails = await fetchEmailsArrivedSinceOnce(sinceEpoch: sinceEpoch) {
-                await noteGwsFetchOutcome(success: true, context: "fetchEmailsArrivedSince")
+            if let emails = await fetchEmailsArrivedSinceOnce(sinceEpoch: sinceEpoch, epoch: epoch) {
+                guard epoch == stateEpoch else { return nil }
+                await noteGwsFetchOutcome(success: true, context: "fetchEmailsArrivedSince", epoch: epoch)
                 return emails
             }
             if attempt < 3 {
@@ -418,8 +437,9 @@ actor GoogleWorkspaceService {
                 delayNs *= 2
             }
         }
+        guard epoch == stateEpoch else { return nil }
         print("[GoogleWorkspaceService] fetchEmailsArrivedSince(\(sinceEpoch)): all retries exhausted — skipping this tick")
-        await noteGwsFetchOutcome(success: false, context: "fetchEmailsArrivedSince")
+        await noteGwsFetchOutcome(success: false, context: "fetchEmailsArrivedSince", epoch: epoch)
         return nil
     }
 
@@ -427,8 +447,9 @@ actor GoogleWorkspaceService {
         var delayNs: UInt64 = 1_000_000_000
         for attempt in 1...3 {
             guard epoch == stateEpoch else { return nil }
-            if let events = await fetchAgendaOnce() {
-                await noteGwsFetchOutcome(success: true, context: "fetchAgenda")
+            if let events = await fetchAgendaOnce(epoch: epoch) {
+                guard epoch == stateEpoch else { return nil }
+                await noteGwsFetchOutcome(success: true, context: "fetchAgenda", epoch: epoch)
                 return events
             }
             if attempt < 3 {
@@ -436,8 +457,9 @@ actor GoogleWorkspaceService {
                 delayNs *= 2
             }
         }
+        guard epoch == stateEpoch else { return nil }
         print("[GoogleWorkspaceService] fetchAgenda: all retries exhausted — continuing without calendar context")
-        await noteGwsFetchOutcome(success: false, context: "fetchAgenda")
+        await noteGwsFetchOutcome(success: false, context: "fetchAgenda", epoch: epoch)
         return nil
     }
 
@@ -453,29 +475,29 @@ actor GoogleWorkspaceService {
         let date: String?
     }
 
-    private func fetchUnreadSnapshotOnce() async -> [UnreadEmail]? {
-        return await triageAndEnrich(query: "is:unread", maxResults: maxUnread)
+    private func fetchUnreadSnapshotOnce(epoch: UInt64) async -> [UnreadEmail]? {
+        return await triageAndEnrich(query: "is:unread", maxResults: maxUnread, epoch: epoch)
     }
 
     /// The arrival path uses a wider cap (50) because the realistic worst case
     /// — a dormant account suddenly receiving a burst — is still bounded, and
     /// triage + snippet fetches are cheap.
-    private func fetchEmailsArrivedSinceOnce(sinceEpoch: Int) async -> [UnreadEmail]? {
+    private func fetchEmailsArrivedSinceOnce(sinceEpoch: Int, epoch: UInt64) async -> [UnreadEmail]? {
         if let arrivalFetchForTesting { return await arrivalFetchForTesting(sinceEpoch) }
-        return await triageAndEnrich(query: "is:unread after:\(sinceEpoch)", maxResults: 50)
+        return await triageAndEnrich(query: "is:unread after:\(sinceEpoch)", maxResults: 50, epoch: epoch)
     }
 
     /// Runs `gws gmail +triage` for the given query, then enriches each result
     /// with `users.messages.get(format=metadata).snippet` so the preview lines
     /// match the legacy EmailService format.
-    private func triageAndEnrich(query: String, maxResults: Int) async -> [UnreadEmail]? {
+    private func triageAndEnrich(query: String, maxResults: Int, epoch: UInt64) async -> [UnreadEmail]? {
         let triageArgs = [
             "gmail", "+triage",
             "--query", query,
             "--max", "\(maxResults)",
             "--format", "json",
         ]
-        guard let out = await runGws(args: triageArgs, timeoutSeconds: 20) else { return nil }
+        guard let out = await runGws(args: triageArgs, timeoutSeconds: 20, epoch: epoch) else { return nil }
         let stripped = stripLogPreamble(out)
         if isZeroResultNotice(stdout: stripped, marker: "No messages found") {
             return []
@@ -493,7 +515,10 @@ actor GoogleWorkspaceService {
         // parallelizing would risk burning through OAuth rate limits on bursts.
         var results: [UnreadEmail] = []
         for msg in triage.messages {
-            let snippet = await fetchSnippet(messageId: msg.id) ?? ""
+            // A stop/provider switch mid-loop: launch no further snippet
+            // subprocesses for a result nobody will use (round 4).
+            guard epoch == stateEpoch else { return nil }
+            let snippet = await fetchSnippet(messageId: msg.id, epoch: epoch) ?? ""
             results.append(UnreadEmail(
                 id: msg.id,
                 threadId: nil,
@@ -511,10 +536,10 @@ actor GoogleWorkspaceService {
         let threadId: String?
     }
 
-    private func fetchSnippet(messageId: String) async -> String? {
+    private func fetchSnippet(messageId: String, epoch: UInt64) async -> String? {
         let paramsJSON = "{\"userId\":\"me\",\"id\":\"\(messageId)\",\"format\":\"metadata\"}"
         let args = ["gmail", "users", "messages", "get", "--params", paramsJSON]
-        guard let out = await runGws(args: args, timeoutSeconds: 15) else { return nil }
+        guard let out = await runGws(args: args, timeoutSeconds: 15, epoch: epoch) else { return nil }
         let stripped = stripLogPreamble(out)
         guard let data = stripped.data(using: .utf8),
               let meta = try? JSONDecoder().decode(MessageMetadata.self, from: data) else {
@@ -549,13 +574,13 @@ actor GoogleWorkspaceService {
         let timeZone: String?
     }
 
-    private func fetchAgendaOnce() async -> [AgendaEvent]? {
+    private func fetchAgendaOnce(epoch: UInt64) async -> [AgendaEvent]? {
         let args = [
             "calendar", "+agenda",
             "--days", "\(agendaDaysAhead)",
             "--format", "json",
         ]
-        guard let out = await runGws(args: args, timeoutSeconds: 20) else { return nil }
+        guard let out = await runGws(args: args, timeoutSeconds: 20, epoch: epoch) else { return nil }
         let stripped = stripLogPreamble(out)
         if isZeroResultNotice(stdout: stripped, marker: "No events found") {
             return []
@@ -745,18 +770,27 @@ actor GoogleWorkspaceService {
     }
 
     /// Returns stdout on success, nil on any failure (missing binary, non-zero exit,
-    /// timeout, or I/O error).
-    private func runGws(args: [String], timeoutSeconds: Int) async -> String? {
-        guard let binary = Self.locateGws() else {
-            // Soft-fail: the user may not have gws installed on this machine. That's
-            // fine — the system prompt simply skips the gws-backed blocks.
-            return nil
+    /// timeout, or I/O error). Stale-epoch runs (a stop/provider switch
+    /// happened) launch nothing, and a run that outlives one returns nil
+    /// without touching the diagnostic state (round 4).
+    private func runGws(args: [String], timeoutSeconds: Int, epoch: UInt64) async -> String? {
+        guard epoch == stateEpoch else { return nil }
+        let result: ProcessRunResult
+        if let runGwsForTesting {
+            result = await runGwsForTesting(args)
+        } else {
+            guard let binary = Self.locateGws() else {
+                // Soft-fail: the user may not have gws installed on this machine. That's
+                // fine — the system prompt simply skips the gws-backed blocks.
+                return nil
+            }
+            result = await Self.runProcessAsync(
+                executable: binary,
+                args: args,
+                timeoutSeconds: timeoutSeconds
+            )
         }
-        let result = await Self.runProcessAsync(
-            executable: binary,
-            args: args,
-            timeoutSeconds: timeoutSeconds
-        )
+        guard epoch == stateEpoch else { return nil }
         if let detail = result.failureDetail {
             lastGwsFailureDetail = detail
         }

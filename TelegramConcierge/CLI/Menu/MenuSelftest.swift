@@ -48,6 +48,7 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.staleSettings()
         await t.liveSignIn()
         await t.liveEmail()
+        await t.lateEmailEffects()
         await t.linuxComputer()
         await t.finishGuards()
         await t.staleOperations()
