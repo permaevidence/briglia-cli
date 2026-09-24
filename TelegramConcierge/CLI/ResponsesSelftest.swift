@@ -358,6 +358,16 @@ struct ResponsesSelftest: AsyncParsableCommand {
                 $0.responsesObject?["encrypted_content"]?.responsesString == "opaque-ciphertext"
             } == true)
         c.check("edited canonical round omits native state", ResponsesAdapter.nativeItems(envelope: envelope, scope: context.responsesScope, text: "Edited", calls: round.calls) == nil)
+        func hosted(_ url: String, _ timeout: TimeInterval) -> TimeInterval? {
+            var request = URLRequest(url: URL(string: url)!); request.timeoutInterval = timeout
+            return ResponsesAdapter.hostedIdleTimeout(request)
+        }
+        c.check("subscription stall clock is 360 s", hosted(SubscriptionEndpoint.inference, 1200) == 360)
+        c.check("OpenAI API stall clock is 360 s", hosted("https://api.openai.com/v1/responses", 1200) == 360)
+        c.check("local server keeps its long idle clock", hosted("http://127.0.0.1:1234/v1/responses", 1200) == nil)
+        c.check("other custom host keeps its long idle clock", hosted("https://opencode.ai/zen/go/v1/responses", 1200) == nil)
+        c.check("look-alike host keeps its long idle clock", hosted("https://api.openai.com.example.net/v1/responses", 1200) == nil)
+        c.check("shorter request budget is not raised", hosted("https://api.openai.com/v1/responses", 120) == nil)
         var assistant = AssistantToolCallMessage(content: round.text, toolCalls: round.calls)
         assistant.responsesReplay = envelope
         let encoded = try JSONEncoder().encode(assistant)

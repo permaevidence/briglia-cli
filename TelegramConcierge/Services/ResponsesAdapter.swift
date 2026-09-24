@@ -174,7 +174,9 @@ struct ResponsesAdapter {
                         catch { ResponsesUsageStore.warn() }
                     }
                 }
-                let bytes = try await transport.send(request, overallTimeout: request.timeoutInterval, subscription: context.subscriptionGeneration != nil)
+                let bytes = try await transport.send(request, overallTimeout: request.timeoutInterval,
+                    connectTimeout: Self.hostedIdleTimeout(request), idleTimeout: Self.hostedIdleTimeout(request),
+                    subscription: context.subscriptionGeneration != nil)
                 counts = ResponsesUsageCounts.parse(bytes)
                 try Task.checkCancellation()
                 let round = try ResponsesRoundDecoder.decode(bytes, scope: context.responsesScope, receipt: receipt, allowedTools: allowed)
@@ -218,6 +220,20 @@ struct ResponsesAdapter {
             }
         }
         throw ResponsesFailure.disconnected
+    }
+
+    /// The ChatGPT subscription and the OpenAI API are hosted endpoints even
+    /// though their profiles count as custom (the 1200 s budget meant for local
+    /// servers). There, six minutes without a byte (before or after the response
+    /// headers) is a stalled response: the connect and
+    /// idle clocks drop to 360 s so the retry starts sooner, while the 1200 s
+    /// overall bound still lets a long, actively streaming answer finish.
+    /// Local and other custom endpoints are unchanged (idle = overall).
+    static let hostedIdleSeconds: TimeInterval = 360
+    static func hostedIdleTimeout(_ request: URLRequest) -> TimeInterval? {
+        guard let host = request.url?.host?.lowercased(), ["chatgpt.com", "api.openai.com"].contains(host),
+              request.timeoutInterval > hostedIdleSeconds else { return nil }
+        return hostedIdleSeconds
     }
 
     static func message(role: String, text: String) -> JSONValue {
