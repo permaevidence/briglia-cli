@@ -44,6 +44,9 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.keysAndEmail()
         await t.linuxComputer()
         await t.finishGuards()
+        await t.staleOperations()
+        await t.routerRotation()
+        await t.linuxStartup()
         await t.router()
         print(t.failures == 0 ? "\nmenu selftest: all \(t.checks) checks passed"
                               : "\nmenu selftest: \(t.failures) of \(t.checks) FAILED")
@@ -78,6 +81,11 @@ final class MenuFakeWorld: @unchecked Sendable {
     var agentMailInstalls = 0
     var gnomeFixed = false
     var clock = Date(timeIntervalSince1970: 2_000_000_000)
+    /// Probes (by key/token, or "chat:<id>" for the Telegram chat check)
+    /// held until the row opens the gate.
+    var holds: [String: MenuGate] = [:]
+    /// Writes refused by the operation's checkpoint.
+    var voidedWrites = 0
 
     init(toolMarker: URL) { self.toolMarker = toolMarker }
 
@@ -113,7 +121,7 @@ final class MenuFakeWorld: @unchecked Sendable {
         if kind == "telegram" {
             return req["token"] as? String == good["telegram"] ? ["ok": true, "bot_username": "sofia_test_bot"] : ["ok": false, "reason": "Telegram returned HTTP 401"]
         }
-        if req["api_key"] as? String == good[kind] {
+        if let k = req["api_key"] as? String, let g = good[kind], k == g || k.hasPrefix(g + "-alt") {
             return kind == "agentmail" ? ["ok": true, "inboxes": ["bree@agentmail.to"]] : ["ok": true]
         }
         return ["ok": false, "reason": "\(kind) returned HTTP 401 — unauthorized"]
@@ -138,6 +146,35 @@ final class MenuFakeWorld: @unchecked Sendable {
 }
 
 
+final class MenuGenerationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var v = 1
+    var value: Int {
+        get { lock.lock(); defer { lock.unlock() }; return v }
+        set { lock.lock(); v = newValue; lock.unlock() }
+    }
+}
+
+/// A one-shot gate: probes wait on it until the row opens it.
+final class MenuGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var arrived = 0
+    func wait() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            arrived += 1
+            if isOpen { lock.unlock(); c.resume() } else { waiters.append(c); lock.unlock() }
+        }
+    }
+    func open() {
+        lock.lock(); isOpen = true; let w = waiters; waiters = []; lock.unlock()
+        for c in w { c.resume() }
+    }
+    var hasArrived: Bool { lock.lock(); defer { lock.unlock() }; return arrived > 0 }
+}
+
 @MainActor
 final class MenuSelftestContext {
     let tempRoot: URL
@@ -157,9 +194,20 @@ final class MenuSelftestContext {
         env.language = "en"
         env.snapshot = { world.snap }
         env.toolchainStatus = { world.toolchain() }
-        env.probe = { world.probe($0) }
-        env.apply = { world.apply($0) }
-        env.subscription = { world.subscription($0) }
+        env.probe = { req in
+            if let gate = world.holds[(req["api_key"] as? String) ?? (req["token"] as? String) ?? ""] { await gate.wait() }
+            return world.probe(req)
+        }
+        // Like setup-api / SubscriptionSetup: the checkpoint runs right
+        // before the write and a throw means nothing is written.
+        env.apply = { req, checkpoint in
+            do { try checkpoint() } catch { world.voidedWrites += 1; return ["ok": false, "error": ["code": "superseded", "message": "superseded"]] }
+            return world.apply(req)
+        }
+        env.subscription = { req, checkpoint in
+            do { try checkpoint() } catch { world.voidedWrites += 1; return ["ok": false, "error": ["code": "subscription", "message": "superseded"]] }
+            return world.subscription(req)
+        }
         env.browserLogin = { show in
             show("https://auth.example/oauth/authorize?state=x")
             world.loginShown.append("browser")
@@ -174,6 +222,7 @@ final class MenuSelftestContext {
         }
         env.telegramScan = { _, _ in world.scanCount += 1; return world.scan }
         env.telegramChatProbe = { _, chatId in
+            if let gate = world.holds["chat:" + chatId] { await gate.wait() }
             var p = SetupAPICore.TelegramChatProbe()
             if chatId != "5551234567" { p.failure = "chat not found — open @sofia_test_bot in Telegram, send /start, then tap Retry" }
             return p
@@ -218,7 +267,7 @@ final class MenuSelftestContext {
     /// One page action, then wait for the background work it started.
     @discardableResult
     func act(_ wf: MenuWorkflow, _ body: [String: Any], settle: Bool = true) async -> [String: Any] {
-        let r = await wf.handle(body)
+        let r = await wf.handle(body) ?? ["ok": false, "revoked": true]
         if settle { await wf.settle() }
         return r
     }
@@ -471,6 +520,285 @@ final class MenuSelftestContext {
         check("an unsupported language is refused, Italian stays", !ok(r) && wf.lang == "it")
         r = await act(wf, ["action": "finish", "what": "quit"])
         check("Close is always allowed", ok(r) && wf.closing == "quit")
+    }
+
+    // MARK: 7b. Stale operations (Codex R1): a check still running when the
+    // user replaces the link, closes the page, removes the key or resets
+    // Telegram writes nothing; an untouched one still saves.
+
+    /// Starts a page action that will park on `gate`, and returns once it has.
+    func parked(_ wf: MenuWorkflow, _ gate: MenuGate, _ body: [String: Any], generation g: Int = 0) async -> Task<[String: Any]?, Never> {
+        let task = Task { @MainActor in await wf.handle(body, generation: g) }
+        for _ in 0..<400 where !gate.hasArrived { try? await Task.sleep(nanoseconds: 5_000_000) }
+        return task
+    }
+
+    func staleOperations() async {
+        // Control: nothing interferes → the held check saves when released.
+        do {
+            let w = world(); let wf = await make(w)
+            let gate = MenuGate(); w.holds[w.good["serper"]!] = gate
+            let t = await parked(wf, gate, ["action": "key", "kind": "serper", "key": w.good["serper"]!])
+            gate.open()
+            let r = await t.value ?? [:]
+            check("stale control: an unsuperseded slow check still saves", ok(r) && w.snap.serperMasked != nil && w.voidedWrites == 0)
+        }
+        // Remove while the OpenAI check runs → the late check doesn't restore it.
+        do {
+            let w = world(); let wf = await make(w)
+            let gate = MenuGate(); w.holds[w.good["openai"]!] = gate
+            let t = await parked(wf, gate, ["action": "key", "kind": "openai", "key": w.good["openai"]!])
+            let removed = await act(wf, ["action": "key_remove", "kind": "openai"])
+            gate.open()
+            let r = await t.value ?? [:]
+            check("stale: Remove during a pending OpenAI check wins (no key restored)",
+                  ok(removed) && r["superseded"] as? Bool == true && w.snap.openAIMasked == nil
+                  && !w.applied.contains { ($0["openai"] as? [String: Any])?["api_key"] != nil })
+        }
+        // A newer key for the same service replaces an older pending one.
+        do {
+            let w = world(); let wf = await make(w)
+            let first = w.good["jina"]! + "-alt-FIRST"
+            let gate = MenuGate(); w.holds[first] = gate
+            let t = await parked(wf, gate, ["action": "key", "kind": "jina", "key": first])
+            let second = await act(wf, ["action": "key", "kind": "jina", "key": w.good["jina"]!])
+            gate.open()
+            let r = await t.value ?? [:]
+            let saved = w.applied.compactMap { ($0["jina"] as? [String: Any])?["api_key"] as? String }
+            check("stale: a newer key beats an older check that finishes later", ok(second) && r["superseded"] as? Bool == true && saved == [w.good["jina"]!])
+        }
+        // Close while a check runs → nothing saved after the page closed.
+        do {
+            let w = world(); let wf = await make(w)
+            let gate = MenuGate(); w.holds[w.good["serper"]!] = gate
+            let t = await parked(wf, gate, ["action": "key", "kind": "serper", "key": w.good["serper"]!])
+            let closed = await act(wf, ["action": "finish", "what": "quit"], settle: false)
+            gate.open()
+            let r = await t.value
+            check("stale: a check finishing after Close saves nothing", ok(closed) && r == nil && w.snap.serperMasked == nil && w.applied.isEmpty)
+        }
+        // Telegram reset while the chat check runs → no pairing.
+        do {
+            let w = world(); let wf = await make(w)
+            _ = await act(wf, ["action": "telegram_token", "token": w.good["telegram"]!])
+            let gate = MenuGate(); w.holds["chat:5551234567"] = gate
+            let t = await parked(wf, gate, ["action": "telegram_confirm", "chat_id": "5551234567"])
+            _ = await act(wf, ["action": "telegram_reset"])
+            gate.open()
+            let r = await t.value ?? [:]
+            check("stale: Telegram reset during the chat check pairs nothing", r["superseded"] as? Bool == true && !w.snap.telegramConfigured && !w.applied.contains { $0["telegram"] != nil })
+        }
+        // Link rotation: the old generation is revoked, revoke() waits for
+        // the admitted request, and the late check writes nothing.
+        do {
+            let w = world(); let wf = await make(w)
+            let current = MenuGenerationBox()
+            wf.validity.authCheck = { g in if g != current.value { throw QuickSetupWorkflow.Superseded() } }
+            let gate = MenuGate(); w.holds[w.good["serper"]!] = gate
+            let t = await parked(wf, gate, ["action": "key", "kind": "serper", "key": w.good["serper"]!], generation: 1)
+            current.value = 2
+            let revoking = Task { @MainActor in await wf.revoke() }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            gate.open()
+            await revoking.value
+            let r = await t.value
+            check("stale: a request admitted before a new link saves nothing after it", r == nil && w.snap.serperMasked == nil && w.applied.isEmpty)
+            let fresh = await wf.handle(["action": "key", "kind": "serper", "key": w.good["serper"]!], generation: 2)
+            check("stale: the new link's requests still save", fresh.map(ok) == true && w.snap.serperMasked != nil)
+        }
+        // A ChatGPT sign-in waiting in the browser is cancelled by a new link
+        // and never switches the provider afterwards.
+        do {
+            let w = world(); let wf = await make(w)
+            w.loginBlocks = true
+            let r = await act(wf, ["action": "chatgpt_browser"], settle: false)
+            let started = Date()
+            await wf.revoke()
+            let st = wf.status()
+            check("stale: a new link cancels a pending ChatGPT sign-in promptly",
+                  ok(r) && Date().timeIntervalSince(started) < 5 && (st["chatgpt"] as? [String: Any])?["login"] == nil && w.snap.chatgpt == .signedOut)
+        }
+        // Sign-out while a sign-in is finishing → the sign-in doesn't re-select.
+        do {
+            let w = world(); let wf = await make(w)
+            w.loginBlocks = true
+            _ = await act(wf, ["action": "chatgpt_code"], settle: false)
+            let out = await act(wf, ["action": "chatgpt_logout"])
+            check("stale: sign-out cancels a sign-in in progress", ok(out) && w.snap.chatgpt == .signedOut && (wf.status()["chatgpt"] as? [String: Any])?["login"] == nil)
+        }
+    }
+
+    // Codex's reproduction through the real router + authorizer: a request
+    // admitted before Enter's rotation writes nothing after it; rotation
+    // waits for it (it is released while the rotation is settling).
+    func routerRotation() async {
+        let w = world()
+        let gate = MenuGate()
+        var e = env(w)
+        e.probe = { request in await gate.wait(); return w.probe(request) }
+        let runner = SetupJobRunner(secrets: [:])
+        let wf = MenuWorkflow(env: e, runner: runner)
+        await wf.start(); await wf.settle()
+        var qe = QuickSetupEnvironment(); qe.storedValue = { _ in nil }
+        guard let auth = try? QuickSetupWorkflow(env: qe, runner: runner, resume: .fresh) else { check("rotation: authorizer", false); return }
+        let token = await auth.launchToken
+        guard let cookie = await auth.exchange(token: token) else { check("rotation: exchange", false); return }
+        let router = QuickSetupRouter(workflow: auth, pageDirectory: tempRoot) { 4242 }
+        router.menu = wf
+        func post(_ body: [String: Any], _ cookie: String) async -> QuickSetupHTTPServer.Response {
+            let data = try! JSONSerialization.data(withJSONObject: body)
+            return await router.handle(.init(method: "POST", path: "/api/menu", query: nil,
+                headers: ["host": "127.0.0.1:4242", "origin": "http://127.0.0.1:4242", "content-type": "application/json", "x-briglia-quick-setup": "1"],
+                body: data, cookieBQS: cookie, contentLength: data.count))
+        }
+        let save = Task { await post(["action": "key", "kind": "serper", "key": w.good["serper"]!], cookie) }
+        for _ in 0..<400 where !gate.hasArrived { try? await Task.sleep(nanoseconds: 5_000_000) }
+        let rotation = Task { await auth.rotate() }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        gate.open()
+        _ = await rotation.value
+        let response = await save.value
+        check("rotation: a request admitted before a new link answers 404 and saves nothing",
+              response.status == 404 && w.snap.serperMasked == nil && w.applied.isEmpty, "status \(response.status)")
+        // The new link works for new requests.
+        let token2 = await auth.launchToken
+        if let cookie2 = await auth.exchange(token: token2) {
+            let fresh = await post(["action": "key", "kind": "serper", "key": w.good["serper"]!], cookie2)
+            check("rotation: the new link's cookie saves", fresh.status == 200 && w.snap.serperMasked != nil)
+        } else { check("rotation: the new link's cookie saves", false) }
+    }
+
+    // MARK: 7c. Linux start (Codex R3): the page says "running" only after
+    // the service passed its health check; every failure stays on the page
+    // with Retry, and the lease comes back.
+
+    final class ServiceFake: @unchecked Sendable {
+        var systemd = true
+        var unitFails: String?
+        var enableFails: String?
+        var evidenceFails: String?
+        var log: [String] = []
+        var leaseHeld = true
+        var reacquireWorks = true
+    }
+
+    func linuxReady(_ w: MenuFakeWorld) {
+        w.snap.userName = "Sofia"
+        w.snap.chatgpt = .signedIn(active: true, model: "gpt-6-sol", effort: "high", generation: "g1")
+        w.snap.telegramConfigured = true
+        w.snap.serperMasked = "srp-…cdef"
+        w.snap.jinaMasked = "jina…cdef"
+        try? FileManager.default.createDirectory(at: w.toolMarker.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: w.toolMarker.path, contents: Data())
+    }
+
+    func linuxStartupWorkflow(_ w: MenuFakeWorld, _ sf: ServiceFake) async -> MenuWorkflow {
+        var e = env(w, linux: true)
+        e.systemdSessionAvailable = { sf.systemd }
+        e.quick.installUnit = {
+            sf.log.append("unit")
+            if let f = sf.unitFails { throw NSError(domain: "t", code: 1, userInfo: [NSLocalizedDescriptionKey: f]) }
+        }
+        e.quick.releaseLease = { sf.log.append("release"); sf.leaseHeld = false }
+        e.quick.reacquireLease = { sf.log.append("reacquire"); if sf.reacquireWorks { sf.leaseHeld = true }; return sf.reacquireWorks }
+        e.quick.enableService = { _ in sf.log.append("enable"); return sf.enableFails }
+        e.quick.serviceEvidence = { sf.log.append("evidence"); return (sf.evidenceFails == nil, true, sf.evidenceFails ?? "active, stable") }
+        e.quick.stopService = { sf.log.append("stop"); return true }
+        let wf = MenuWorkflow(env: e, runner: SetupJobRunner(secrets: [:]))
+        wf.now = { w.clock }
+        await wf.start()
+        await wf.settle()
+        return wf
+    }
+
+    func startupState(_ wf: MenuWorkflow) -> [String: Any]? { wf.status()["startup"] as? [String: Any] }
+
+    func runStart(_ wf: MenuWorkflow) async -> [String: Any] {
+        let r = await act(wf, ["action": "finish", "what": "start"], settle: false)
+        for _ in 0..<400 where wf.startup?.state == "running" { try? await Task.sleep(nanoseconds: 5_000_000) }
+        return r
+    }
+
+    func linuxStartup() async {
+        // Success: install → hand over the lease → start → health check → close.
+        do {
+            let w = world(); linuxReady(w); let sf = ServiceFake()
+            let wf = await linuxStartupWorkflow(w, sf)
+            let r = await runStart(wf)
+            check("Linux start: a healthy service closes the page as running",
+                  ok(r) && wf.closing == "start" && startupState(wf) == nil && sf.log == ["unit", "release", "enable", "evidence"] && wf.leaseHandedOff)
+        }
+        // No systemd user session: refused before anything is installed.
+        do {
+            let w = world(); linuxReady(w); let sf = ServiceFake(); sf.systemd = false
+            let wf = await linuxStartupWorkflow(w, sf)
+            _ = await runStart(wf)
+            let u = startupState(wf)
+            check("Linux start: no systemd user session is reported on the page, nothing installed",
+                  wf.closing == nil && u?["state"] as? String == "failed" && (u?["message"] as? String ?? "").contains("systemd") && sf.log.isEmpty && sf.leaseHeld)
+        }
+        // The unit can't be written/reloaded: lease never handed over.
+        do {
+            let w = world(); linuxReady(w); let sf = ServiceFake(); sf.unitFails = "systemctl --user daemon-reload failed"
+            let wf = await linuxStartupWorkflow(w, sf)
+            _ = await runStart(wf)
+            let u = startupState(wf)
+            check("Linux start: an install/daemon-reload failure stays on the page, lease kept",
+                  wf.closing == nil && u?["state"] as? String == "failed" && (u?["message"] as? String ?? "").contains("daemon-reload") && sf.log == ["unit"] && sf.leaseHeld && !wf.leaseHandedOff)
+        }
+        // enable --now fails: service stopped, lease taken back.
+        do {
+            let w = world(); linuxReady(w); let sf = ServiceFake(); sf.enableFails = "enable --now failed: unit masked"
+            let wf = await linuxStartupWorkflow(w, sf)
+            _ = await runStart(wf)
+            let u = startupState(wf)
+            check("Linux start: an enable failure stops the service and takes the lease back",
+                  wf.closing == nil && u?["state"] as? String == "failed" && (u?["message"] as? String ?? "").contains("unit masked")
+                  && sf.log == ["unit", "release", "enable", "stop", "reacquire"] && sf.leaseHeld && !wf.leaseHandedOff)
+        }
+        // Started but unhealthy (crash loop / socket silent): same recovery;
+        // Retry then succeeds once the cause is gone.
+        do {
+            let w = world(); linuxReady(w); let sf = ServiceFake(); sf.evidenceFails = "the service restarted within the stability window"
+            let wf = await linuxStartupWorkflow(w, sf)
+            _ = await runStart(wf)
+            let u = startupState(wf)
+            check("Linux start: an unhealthy service is never reported as running",
+                  wf.closing == nil && u?["state"] as? String == "failed" && (u?["message"] as? String ?? "").contains("stability window") && sf.log.suffix(3) == ["evidence", "stop", "reacquire"] && sf.leaseHeld)
+            let blocked = await act(wf, ["action": "name", "name": "Other"])
+            check("Linux start: settings still work after a failed start", ok(blocked))
+            sf.evidenceFails = nil
+            sf.log = []
+            _ = await runStart(wf)
+            check("Linux start: Retry after the fix starts and closes", wf.closing == "start" && startupState(wf) == nil && sf.log == ["unit", "release", "enable", "evidence"])
+        }
+        // Lease can't be taken back: the page says to reopen, the command
+        // knows not to touch a lease it no longer holds.
+        do {
+            let w = world(); linuxReady(w); let sf = ServiceFake(); sf.enableFails = "boom"; sf.reacquireWorks = false
+            let wf = await linuxStartupWorkflow(w, sf)
+            _ = await runStart(wf)
+            let u = startupState(wf)
+            check("Linux start: a lost lease is reported and remembered", (u?["message"] as? String ?? "").contains("briglia menu again") && wf.leaseHandedOff)
+            let closed = await act(wf, ["action": "finish", "what": "quit"])
+            check("Linux start: Close without starting still closes", ok(closed) && wf.closing == "quit" && startupState(wf) == nil)
+        }
+        // While starting, other actions wait.
+        do {
+            let w = world(); linuxReady(w); let sf = ServiceFake()
+            let gate = MenuGate()
+            var e = await linuxStartupWorkflow(w, sf).env
+            e.quick.serviceEvidence = { await gate.wait(); return (true, true, "ok") }
+            let wf = MenuWorkflow(env: e, runner: SetupJobRunner(secrets: [:]))
+            await wf.start(); await wf.settle()
+            _ = await act(wf, ["action": "finish", "what": "start"], settle: false)
+            for _ in 0..<400 where !gate.hasArrived { try? await Task.sleep(nanoseconds: 5_000_000) }
+            let during = await act(wf, ["action": "key", "kind": "serper", "key": w.good["serper"]!], settle: false)
+            let running = startupState(wf)?["state"] as? String == "running" && wf.closing == nil
+            gate.open()
+            for _ in 0..<400 where wf.startup != nil { try? await Task.sleep(nanoseconds: 5_000_000) }
+            check("Linux start: the page shows 'starting' until the check passes, and changes wait", running && !ok(during) && wf.closing == "start")
+        }
     }
 
     // MARK: 8. Router in front of the menu

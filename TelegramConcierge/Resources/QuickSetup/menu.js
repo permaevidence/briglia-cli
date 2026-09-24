@@ -71,13 +71,18 @@
       if (r.json && r.json.steps) { S = r.json; if (view.kind === 'loading') start(); render(); }
     }).catch(function () {});
   }
-  function act(action, extra, step) {
+  // `current` (optional): false once the field this action came from has
+  // moved on (edited, or a newer submission) — its reply then updates the
+  // page state but shows no message and reports `stale`.
+  function act(action, extra, step, current) {
     var body = extra || {}; body.action = action;
     inflight++; render();
     return api('POST', '/api/menu', body).then(function (r) {
       inflight--;
       var j = r.json || {};
       if (j.status && j.status.steps) S = j.status;
+      // Replaced on the server by a newer change to the same setting.
+      if (j.superseded || (current && !current())) { j.stale = true; render(); return j; }
       if (step) {
         local[step] = local[step] || {};
         local[step].notice = j.ok ? (j.message ? { kind: 'ok', text: j.message } : null)
@@ -95,7 +100,12 @@
     if (S.complete) { view = { kind: 'dashboard' }; return; }
     view = { kind: 'welcome' };
   }
+  // Pending auto-checks belong to the screen they were typed on.
+  function cancelTimers() {
+    for (var k in local) if (Object.prototype.hasOwnProperty.call(local, k) && local[k].timer) { clearTimeout(local[k].timer); local[k].timer = null; }
+  }
   function openStep(id, asGuided) {
+    cancelTimers();
     if (asGuided !== undefined) guided = asGuided;
     view = { kind: 'step', step: id };
     local[id] = local[id] || {};
@@ -112,7 +122,7 @@
     else { openStep(missing[0].id); return; }
     render();
   }
-  function backToDashboard() { guided = false; view = { kind: 'dashboard' }; render(); }
+  function backToDashboard() { cancelTimers(); guided = false; view = { kind: 'dashboard' }; render(); }
 
   // ---------- chrome ----------
   function renderChrome() {
@@ -166,6 +176,7 @@
     if (!S) { card.appendChild(h('div', { class: 'waiting' }, [h('span', { class: 'spinner' }), T('Loading…', 'Caricamento…')])); return; }
     renderChrome();
     if (S.closing) { card.appendChild(closingView()); return; }
+    if (S.startup) { startupView().forEach(function (n) { if (n) card.appendChild(n); }); return; }
     var v;
     if (view.kind === 'welcome') v = welcomeView();
     else if (view.kind === 'dashboard') v = dashboardView();
@@ -267,6 +278,25 @@
     ]);
   }
 
+  // Linux: the service is started and health-checked while this page stays
+  // open; "running" appears only after that check passed.
+  function startupView() {
+    var u = S.startup;
+    if (u.state === 'running') {
+      return [h('h1', { text: T('Starting Briglia', 'Avvio Briglia') }),
+        h('div', { class: 'waiting' }, [h('span', { class: 'spinner' }), u.step || T('One moment…', 'Un momento…')]),
+        h('p', { class: 'small', text: T('Keep this page open until it’s done.', 'Lascia aperta questa pagina finché non ha finito.') })];
+    }
+    return [h('h1', { text: T('Briglia didn’t start', 'Briglia non si è avviato') }),
+      h('div', { class: 'notice bad' }, [u.message || T('Something went wrong.', 'Qualcosa è andato storto.')]),
+      notice('startup'),
+      h('p', { class: 'small', text: T('Your settings are saved. You can try again, or close and look at it later.', 'Le impostazioni sono salvate. Puoi riprovare, oppure chiudere e guardarci più tardi.') }),
+      h('div', { class: 'actions' }, [
+        h('button', { class: 'btn primary', type: 'button', disabled: inflight > 0, onclick: function () { act('finish', { what: 'start' }, 'startup'); } }, [T('Try again', 'Riprova')]),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'btn ghost', type: 'button', disabled: inflight > 0, onclick: function () { act('finish', { what: 'quit' }, 'startup'); } }, [T('Close without starting', 'Chiudi senza avviare')])])];
+  }
+
   function finish(what) {
     act('finish', { what: what }, view.kind === 'finish' ? 'finish' : 'dashboard');
   }
@@ -288,32 +318,51 @@
     ]);
   }
 
-  // Secret / text field with automatic checking.
+  // Secret / text field with automatic checking. Its state (value, timer,
+  // submission number) lives in local[step], not in the DOM node, so it
+  // survives re-renders. A reply counts only for the submission that is
+  // still the newest AND whose value is still in the field; a value edited
+  // while its check ran is checked next instead of being dropped.
   function field(step, opts) {
     var st = local[step] = local[step] || {};
     var input = h('input', { type: opts.secret && !st.show ? 'password' : 'text', id: 'f-' + step, autocomplete: 'off', spellcheck: 'false',
       placeholder: opts.placeholder || '', 'aria-label': opts.label || 'value' });
     input.value = st.value || '';
-    var timer = null;
+    function typed() { return (st.value || '').trim(); }
+    function schedule(delay) {
+      if (st.timer) clearTimeout(st.timer);
+      st.timer = null;
+      if (opts.auto !== false && typed().length >= (opts.minAuto || 12)) st.timer = setTimeout(submit, delay);
+    }
     function submit() {
-      var v = input.value.trim();
-      if (!v || inflight) return;
-      if (st.lastSent === v && st.lastOk) return;
-      st.lastSent = v; st.checking = true; st.value = v; render();
-      opts.onSubmit(v).then(function (j) {
-        st.checking = false; st.lastOk = !!(j && j.ok);
-        if (j && j.ok) { st.value = ''; st.editing = false; }
+      if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+      var v = typed();
+      if (!v) return;
+      if (st.sent === v && (st.checking || st.lastOk)) return;   // already checking / saved this exact value
+      var seq = (st.seq || 0) + 1;
+      st.seq = seq; st.sent = v; st.checking = true; st.lastOk = false;
+      render();
+      function current() { return st.seq === seq && typed() === v; }
+      opts.onSubmit(v, current).then(function (j) {
+        if (st.seq !== seq) return;              // a newer submission owns the field
+        st.checking = false;
+        if (typed() !== v) {                     // edited while checking: keep the new value, check it
+          st.sent = null; st.editing = true;
+          render(); schedule(300);
+          return;
+        }
+        st.lastOk = !!(j && j.ok && !j.stale);
+        if (st.lastOk) { st.value = ''; st.sent = null; st.editing = false; }
         render();
-        var again = $('f-' + step); if (again && !(j && j.ok)) again.focus();
+        var again = $('f-' + step); if (again && !st.lastOk) again.focus();
       });
     }
     input.addEventListener('input', function () {
       st.value = input.value; st.lastOk = false;
-      if (timer) clearTimeout(timer);
-      if (opts.auto !== false && input.value.trim().length >= (opts.minAuto || 12)) timer = setTimeout(submit, 1200);
+      schedule(1200);
     });
-    input.addEventListener('paste', function () { if (opts.auto !== false) setTimeout(submit, 60); });
-    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); if (timer) clearTimeout(timer); submit(); } });
+    input.addEventListener('paste', function () { if (opts.auto !== false) setTimeout(function () { st.value = input.value; submit(); }, 60); });
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); st.value = input.value; submit(); } });
     var row = h('div', { class: 'input-row' }, [input,
       opts.secret ? h('button', { class: 'btn secondary small', type: 'button', onclick: function () { st.show = !st.show; render(); } }, [st.show ? T('Hide', 'Nascondi') : T('Show', 'Mostra')]) : null,
       opts.button ? h('button', { class: 'btn primary', type: 'button', onclick: submit, disabled: !!st.checking }, [opts.button]) : null]);
@@ -362,8 +411,8 @@
       out.push(navButtons('name', h('button', { class: 'btn secondary', type: 'button', onclick: function () { st.editing = true; st.value = S.name; render(); } }, [T('Change', 'Cambia')])));
       return out;
     }
-    out.push(field('name', { label: T('Your first name', 'Il tuo nome'), placeholder: T('e.g. Sofia', 'es. Sofia'), auto: false, button: T('Save', 'Salva'), onSubmit: function (v) {
-      return act('name', { name: v }, 'name').then(function (j) { if (j.ok && guided) next('name'); return j; });
+    out.push(field('name', { label: T('Your first name', 'Il tuo nome'), placeholder: T('e.g. Sofia', 'es. Sofia'), auto: false, button: T('Save', 'Salva'), onSubmit: function (v, current) {
+      return act('name', { name: v }, 'name', current).then(function (j) { if (j.ok && !j.stale && guided) next('name'); return j; });
     } }));
     out.push(navButtons('name'));
     return out;
@@ -393,8 +442,8 @@
     out.push(h('ol', { class: 'howto' }, k.steps.map(function (parts) { return h('li', {}, parts); })));
     if (k.extra) out.push(h('p', { class: 'small', text: k.extra }));
     if (id === 'email' && S.keys.agentmail && !S.email.on) out.push(h('p', { class: 'small', text: T('Your saved key ' + S.keys.agentmail + ' is kept — paste it again to turn email back on.', 'La chiave salvata ' + S.keys.agentmail + ' resta: incollala di nuovo per riattivare l’email.') }));
-    out.push(field(id, { secret: true, placeholder: k.placeholder, label: T('Your key', 'La tua chiave'), checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v) {
-      return act('key', { kind: id === 'email' ? 'agentmail' : id, key: v }, id);
+    out.push(field(id, { secret: true, placeholder: k.placeholder, label: T('Your key', 'La tua chiave'), checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
+      return act('key', { kind: id === 'email' ? 'agentmail' : id, key: v }, id, current);
     } }));
     if (st.editing && masked) out.push(h('button', { class: 'btn ghost', type: 'button', onclick: function () { st.editing = false; render(); } }, [T('Cancel', 'Annulla')]));
     out.push(navButtons(id));
@@ -470,8 +519,8 @@
       out.push(savedBox(T('Your bot: @', 'Il tuo bot: @') + p.bot));
       if (p.state === 'manual') {
         out.push(h('p', { text: T('Type your numeric Telegram ID. To find it, open @userinfobot in Telegram and send it any message: it replies with your ID (a number like 123456789).', 'Scrivi il tuo ID Telegram numerico. Per trovarlo apri @userinfobot su Telegram e mandagli un messaggio qualsiasi: ti risponde con il tuo ID (un numero tipo 123456789).') }));
-        out.push(field('telegram-id', { label: T('Your Telegram ID', 'Il tuo ID Telegram'), placeholder: '123456789', auto: false, button: T('Connect', 'Collega'), onSubmit: function (v) {
-          return act('telegram_confirm', { chat_id: v }, 'telegram').then(function (j) { if (j.ok && guided) next('telegram'); return j; });
+        out.push(field('telegram-id', { label: T('Your Telegram ID', 'Il tuo ID Telegram'), placeholder: '123456789', auto: false, button: T('Connect', 'Collega'), onSubmit: function (v, current) {
+          return act('telegram_confirm', { chat_id: v }, 'telegram', current).then(function (j) { if (j.ok && !j.stale && guided) next('telegram'); return j; });
         } }));
         out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn ghost', type: 'button', onclick: function () { act('telegram_wait', {}, 'telegram'); } }, [T('← Detect it automatically instead', '← Rilevalo in automatico')])]));
         return out;
@@ -497,8 +546,8 @@
       h('li', {}, [T('Send ', 'Invia '), h('b', { text: '/newbot' }), T(', then pick a name and a username that ends in “bot”.', ', poi scegli un nome e un nome utente che finisca con “bot”.')]),
       h('li', {}, [T('BotFather replies with a ', 'BotFather ti risponde con un '), h('b', { text: 'token' }), T(' — a long code like 123456789:AAE… Copy it and paste it below.', ': un codice lungo tipo 123456789:AAE… Copialo e incollalo qui sotto.')]),
     ]));
-    out.push(field('telegram', { secret: true, label: T('Bot token', 'Token del bot'), placeholder: '123456789:AAE…', minAuto: 30, checkingText: T('Checking the token…', 'Controllo il token…'), onSubmit: function (v) {
-      return act('telegram_token', { token: v }, 'telegram');
+    out.push(field('telegram', { secret: true, label: T('Bot token', 'Token del bot'), placeholder: '123456789:AAE…', minAuto: 30, checkingText: T('Checking the token…', 'Controllo il token…'), onSubmit: function (v, current) {
+      return act('telegram_token', { token: v }, 'telegram', current);
     } }));
     if (st.editing) out.push(h('button', { class: 'btn ghost', type: 'button', onclick: function () { st.editing = false; render(); } }, [T('Cancel', 'Annulla')]));
     out.push(navButtons('telegram'));

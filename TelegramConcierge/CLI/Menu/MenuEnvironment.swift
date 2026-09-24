@@ -75,9 +75,15 @@ struct MenuEnvironment {
     /// setup-api probe (same request/response shape).
     var probe: ([String: Any]) async -> [String: Any] = { await SetupAPICore.probe($0) }
     /// setup-api apply; the menu holds the instance lease for its lifetime.
-    var apply: ([String: Any]) async -> [String: Any] = { await SetupAPICore.apply($0, ownsLease: true) }
-    /// Subscription setup actions (status/select/probe/logout).
-    var subscription: ([String: Any]) async -> [String: Any] = { await SubscriptionSetup().perform($0, ownsLease: true) }
+    /// The checkpoint is the operation's ticket: setup-api calls it right
+    /// before its writes, so a revoked or superseded action writes nothing.
+    var apply: ([String: Any], @escaping () throws -> Void) async -> [String: Any] = {
+        await SetupAPICore.apply($0, ownsLease: true, checkpoint: $1)
+    }
+    /// Subscription setup actions (status/select/probe/logout), same checkpoint.
+    var subscription: ([String: Any], @escaping () throws -> Void) async -> [String: Any] = {
+        await SubscriptionSetup().perform($0, ownsLease: true, checkpoint: $1)
+    }
     var browserLogin: (_ show: @escaping @Sendable (String) -> Void) async throws -> Void = { show in
         _ = try await SubscriptionLogin().browser { show($0) }
     }
@@ -91,6 +97,15 @@ struct MenuEnvironment {
     var openURL: (String) -> Void = { QuickSetupSession.openBrowser($0) }
     var markComplete: () throws -> Void = {
         try KeychainHelper.saveBatch([SetupWizard.completeKey: "true", SetupWizard.progressKey: String?.none])
+    }
+    /// Linux: whether a systemd user session can run the background service
+    /// (the quick setup's preflight check).
+    var systemdSessionAvailable: () -> Bool = {
+        #if os(Linux)
+        return AgentServiceSupport.systemdUserSessionAvailable()
+        #else
+        return true
+        #endif
     }
     /// The quick setup's system-step seams (Full Disk Access pane, keep-awake
     /// fixes, toolchain installers, AgentMail CLI) — reused as-is so both

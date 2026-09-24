@@ -141,8 +141,18 @@ final class QuickSetupRouter: @unchecked Sendable {
     let pageDirectory: URL
     var settings: BrowserSettingsWorkflow?
     /// `briglia menu`: the ChatGPT-subscription page (menu.html) on the same
-    /// authorization, same-origin and header rules as quick setup.
-    var menu: MenuWorkflow?
+    /// authorization, same-origin and header rules as quick setup. Attaching
+    /// it binds the menu to this authorizer: every menu write re-checks the
+    /// link generation that admitted it, and a rotation cancels and settles
+    /// the menu's own work before the new link is minted.
+    var menu: MenuWorkflow? {
+        didSet {
+            guard let menu else { return }
+            let auth = workflow
+            menu.validity.authCheck = { try auth.checkpointSync($0) }
+            auth.setRevocationHook { await menu.revoke() }
+        }
+    }
 
     init(workflow: QuickSetupWorkflow, pageDirectory: URL, port: @escaping () -> UInt16) {
         self.workflow = workflow
@@ -187,10 +197,12 @@ final class QuickSetupRouter: @unchecked Sendable {
             case ("GET", "/menu.js"): return staticFile("menu.js", type: "text/javascript; charset=utf-8")
             case ("GET", "/menu.css"): return staticFile("menu.css", type: "text/css; charset=utf-8")
             case ("GET", "/api/menu/status"):
-                return Self.json(200, await menu.status())
+                return Self.json(200, await menu.status(generation: g))
             case ("POST", "/api/menu"):
                 guard let body = parseBody(request) else { return Self.json(400, ["error": "bad_json"]) }
-                let result = await menu.handle(body)
+                // nil: the link was replaced or the page closed while this
+                // request ran — no answer, like every other revoked request.
+                guard let result = await menu.handle(body, generation: g) else { return .status(404) }
                 var response = Self.json(200, result)
                 // The reply that closes the page is the one the session
                 // waits to see delivered before it stops the server.

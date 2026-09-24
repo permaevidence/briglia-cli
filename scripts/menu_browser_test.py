@@ -77,7 +77,8 @@ class Fake:
         c["model_label"] = [m["label"] for m in MODELS if m["id"] == c["model"]][0]
         return {"platform": self.platform, "lang": self.lang, "complete": all(s["done"] for s in steps if s["required"]), "steps": steps, "name": self.name,
                 "chatgpt": c, "telegram": self.telegram, "keys": self.keys, "email": self.email, "computer": self.computer,
-                "tools": self.tools, "busy": None, "service_was_running": False, "browser_likely": True, "closing": self.closing}
+                "tools": self.tools, "busy": None, "service_was_running": False, "browser_likely": True, "closing": self.closing,
+                "startup": getattr(self, "startup", None)}
 
     def act(self, body):
         a = body.get("action")
@@ -117,7 +118,18 @@ class Fake:
         elif a == "tools_install":
             self.tools.update({"installing": True, "label": "Step 1 of 2: brew install pandoc", "lines": ["▶ brew install pandoc", "==> Downloading pandoc-3.8.tar.gz", "==> Pouring pandoc--3.8.arm64_sequoia.bottle.tar.gz"]})
         elif a == "finish":
-            self.closing = body["what"]
+            if body["what"] == "start" and self.platform == "linux":
+                # Linux: the real server starts and health-checks the service
+                # first; this fake fails the first try and succeeds on Retry.
+                self.start_tries = getattr(self, "start_tries", 0) + 1
+                if self.start_tries == 1:
+                    self.startup = {"state": "failed", "step": "", "message": "Briglia didn't start: the service restarted within the stability window."}
+                else:
+                    self.startup = None
+                    self.closing = "start"
+            else:
+                self.startup = None
+                self.closing = body["what"]
         return {"ok": ok, "message": msg, "status": self.status()}
 
     def tick(self):
@@ -321,6 +333,137 @@ def main():
         page.wait_for_selector(".grid")
         shot(page, "40-dark-dashboard")
         check("no page errors in dark mode", not errors, errors)
+        ctx.close()
+
+        # ---- Linux start failure (Codex R3): shown on the page with Retry,
+        # never "running in the background" before the service is healthy.
+        lf = Fake(platform="linux")
+        lf.name = "Sofia"
+        lf.chatgpt.update({"state": "signed_in", "active": True})
+        lf.telegram.update({"configured": True, "chat_id": "5551234567", "bot": "sofia_test_bot"})
+        lf.keys.update({"serper": "srp-…cdef", "jina": "jina_…cdef"})
+        lf.computer.update({"fda": True})
+        lf.tools.update({"complete": True, "missing": []})
+        ctx, page, errors = session(lf)
+        page.wait_for_selector("button:has-text('Start Briglia')")
+        page.click("button:has-text('Start Briglia')")
+        page.wait_for_selector("text=Briglia didn’t start")
+        check("Linux: a failed start stays on the page with the reason",
+              page.is_visible("text=stability window") and page.is_visible("button:has-text('Try again')") and not page.is_visible("text=runs in the background now"))
+        shot(page, "50-linux-start-failed")
+        page.click("button:has-text('Try again')")
+        page.wait_for_selector("text=Briglia is starting")
+        check("Linux: Retry that succeeds shows the running page", page.is_visible("text=It runs in the background now") and not errors, errors)
+        ctx.close()
+
+        # ---- auto-check races (Codex R2): a value edited while its check
+        # runs is never lost; old replies show nothing; other fields still
+        # submit. Key POSTs are held until the test releases them; like the
+        # real server, a newer key for the same service supersedes an older
+        # pending one.
+        def race_session():
+            rf = Fake()
+            rf.name = "Sofia"
+            rf.chatgpt.update({"state": "signed_in", "active": True})
+            rf.telegram.update({"configured": True, "chat_id": "5551234567", "bot": "sofia_test_bot"})
+            rf.keys["jina"] = "jina_…cdef"
+            rf.computer["fda"] = True
+            rf.tools.update({"complete": True, "missing": []})
+            held, rev = [], {}
+            ctx = browser.new_context(viewport={"width": 1280, "height": 860})
+            page = ctx.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+
+            def api(route):
+                if route.request.url.endswith("/api/menu/status"):
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps(rf.status()))
+                    return
+                body = route.request.post_data_json or {}
+                rf.calls.append(body)
+                if body.get("action") != "key":
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps(rf.act(body)))
+                    return
+                rev[body["kind"]] = rev.get(body["kind"], 0) + 1
+                held.append((route, body, rev[body["kind"]]))
+
+            def release(key):
+                for i, (route, body, mine) in enumerate(held):
+                    if body["key"] != key:
+                        continue
+                    held.pop(i)
+                    kind = body["key"] and body["kind"]
+                    if rev[kind] != mine:
+                        out = {"ok": False, "superseded": True, "status": rf.status()}
+                    elif "BAD" in key:
+                        out = {"ok": False, "message": "Serper refused this key. Make sure you copied the whole key, then paste it again.", "status": rf.status()}
+                    else:
+                        rf.keys[kind] = key[:4] + "…" + key[-4:]
+                        out = {"ok": True, "message": "Web search is on.", "status": rf.status()}
+                    route.fulfill(status=200, content_type="application/json", body=json.dumps(out))
+                    return
+
+            def wait_held(n):
+                for _ in range(300):
+                    if len(held) >= n:
+                        return True
+                    page.wait_for_timeout(10)
+                return False
+
+            page.route("**/api/**", api)
+            page.goto(base)
+            page.click("#steps button:has-text('Web search')")
+            page.wait_for_selector("#f-serper")
+            return rf, ctx, page, errors, release, wait_held
+
+        def sent(rf, kind="serper"):
+            return [c["key"] for c in rf.calls if c.get("action") == "key" and c.get("kind") == kind]
+
+        first, second, bad = "srp-FIRST-0123456789", "srp-SECOND-9876543210", "srp-BAD-0123456789"
+        # Codex's exact case: edit during the check, old reply arrives last.
+        rf, ctx, page, errors, release, wait_held = race_session()
+        page.fill("#f-serper", first); page.press("#f-serper", "Enter")
+        wait_held(1)
+        page.fill("#f-serper", second)
+        check("race: a value edited during a check is sent too", wait_held(2) and sent(rf) == [first, second], sent(rf))
+        release(second); page.wait_for_timeout(200)
+        release(first); page.wait_for_timeout(600)
+        check("race: the newer key is the one saved and shown", rf.keys["serper"] == "srp-…3210" and page.is_visible("text=Key saved") and not page.is_visible("#f-serper"), rf.keys)
+        check("race: the old reply shows no message", not page.is_visible(".notice.bad"))
+        ctx.close()
+        # Old reply arrives first, before the new value's check is sent.
+        rf, ctx, page, errors, release, wait_held = race_session()
+        page.fill("#f-serper", first); page.press("#f-serper", "Enter")
+        wait_held(1)
+        page.fill("#f-serper", second)
+        page.wait_for_timeout(150)
+        release(first)
+        page.wait_for_timeout(150)
+        check("race: an old success doesn't clear the newer value", page.is_visible("#f-serper") and page.input_value("#f-serper") == second)
+        check("race: the newer value is then checked by itself", wait_held(1) and sent(rf) == [first, second], sent(rf))
+        release(second); page.wait_for_timeout(600)
+        check("race: …and saved", rf.keys["serper"] == "srp-…3210" and page.is_visible("text=Key saved"), rf.keys)
+        ctx.close()
+        # The old value is refused while a newer one is typed.
+        rf, ctx, page, errors, release, wait_held = race_session()
+        page.fill("#f-serper", bad); page.press("#f-serper", "Enter")
+        wait_held(1)
+        page.fill("#f-serper", second)
+        page.wait_for_timeout(150)
+        release(bad); page.wait_for_timeout(150)
+        check("race: an old refusal isn't shown over a newer value", not page.is_visible(".notice.bad") and page.input_value("#f-serper") == second)
+        wait_held(1); release(second); page.wait_for_timeout(600)
+        check("race: the newer value is saved after an old refusal", rf.keys["serper"] == "srp-…3210", rf.keys)
+        ctx.close()
+        # Another field typed while a check runs still submits by itself.
+        rf, ctx, page, errors, release, wait_held = race_session()
+        page.fill("#f-serper", second); page.press("#f-serper", "Enter")
+        wait_held(1)
+        page.click("#steps button:has-text('Voice & images')")
+        page.fill("#f-openai", GOOD["openai"])
+        check("race: another field auto-submits while a check runs", wait_held(2) and sent(rf, "openai") == [GOOD["openai"]], rf.calls)
+        release(second); release(GOOD["openai"]); page.wait_for_timeout(300)
+        check("race: no page errors", not errors, errors)
         ctx.close()
         browser.close()
     server.shutdown()

@@ -80,8 +80,18 @@ struct MenuCommand: AsyncParsableCommand {
         func restartServiceIfPaused() {
             #if os(Linux)
             if serviceWasRunning {
+                // Same health rule as `setup-api service restart`: only a
+                // settled "active" a moment after the start counts.
                 let result = AgentServiceSupport.run("systemctl", ["--user", "start", AgentServiceSupport.userUnitName])
-                print(result.status == 0 ? "✓ Briglia is running in the background again." : "✖ Couldn't start Briglia again: \(result.output)\n  Try: briglia service install")
+                Thread.sleep(forTimeInterval: 2.0)
+                let state = AgentServiceSupport.run("systemctl", ["--user", "is-active", AgentServiceSupport.userUnitName]).output
+                if result.status == 0 && SetupAPICore.restartLeftUnitHealthy(isActiveOutput: state) {
+                    print("✓ Briglia is running in the background again.")
+                } else {
+                    print("✖ Briglia didn't start again (\(result.status == 0 ? state.trimmingCharacters(in: .whitespacesAndNewlines) : result.output)).")
+                    print("  See what went wrong: journalctl --user -u \(AgentServiceSupport.userUnitName) -n 40")
+                    print("  Then try: briglia service install")
+                }
             }
             #endif
         }
@@ -94,6 +104,10 @@ struct MenuCommand: AsyncParsableCommand {
         var env = MenuEnvironment()
         QuickSetupEnvironment.applyDevStubsIfRequested(&env.quick)
         env.openURL = { QuickSetupSession.openBrowser($0) }
+        // Linux "Start Briglia" hands the lease to the service it starts and
+        // takes it back if that service fails its health check.
+        env.quick.releaseLease = { leaseBox.release() }
+        env.quick.reacquireLease = { leaseBox.reacquire() }
 
         // Authorization (link, cookie, generations) is the quick setup's.
         let auth: QuickSetupWorkflow
@@ -171,12 +185,17 @@ struct MenuCommand: AsyncParsableCommand {
                 try await session.runChat(adopting: held)
             }
             #else
-            leaseBox.release()
-            print("\nStarting Briglia in the background…")
-            _ = AgentServiceSupport.installUserService()
-            AgentServiceSupport.offerUbuntuTouchKeepAwake()
-            print("\nDone. Talk to Briglia on Telegram. To change settings later, type: briglia menu")
+            // Only reached after the page's startup passed the service health
+            // check (active, starts at boot, socket answers, stable).
+            print("\n✓ Briglia is running in the background and starts by itself when this computer turns on.")
+            print("Talk to Briglia on Telegram. To change settings later, type: briglia menu")
             #endif
+            return
+        }
+        if await menu.leaseHandedOff {
+            // A failed start whose lease couldn't be taken back: the service
+            // was stopped; say so instead of touching a lease we don't hold.
+            print("✖ Briglia isn't running. Type briglia menu to try again.")
             return
         }
         leaseBox.release()

@@ -531,6 +531,18 @@ actor QuickSetupWorkflow {
     private var rotating = false
     private var rotationWaiters: [CheckedContinuation<Void, Never>] = []
 
+    /// Work owned by a host of this authorizer (the `briglia menu` page)
+    /// that must be cancelled and settled before a new link is minted.
+    /// Lock-held so a router can attach it synchronously.
+    private nonisolated let revocationHookBox = RevocationHookBox()
+    final class RevocationHookBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var hook: (@Sendable () async -> Void)?
+        func set(_ h: @escaping @Sendable () async -> Void) { lock.lock(); hook = h; lock.unlock() }
+        func get() -> (@Sendable () async -> Void)? { lock.lock(); defer { lock.unlock() }; return hook }
+    }
+    nonisolated func setRevocationHook(_ hook: @escaping @Sendable () async -> Void) { revocationHookBox.set(hook) }
+
     func rotate() async -> RotationResult {
         // (1) REVOKE FIRST, before any await: no cookie authorizes, no token
         // exchanges, every checkpoint of the old generation throws. An
@@ -561,6 +573,7 @@ actor QuickSetupWorkflow {
         if let t = finishTask { await t.value }
         await settleInFlight()                     // (3) suspended operations unwound
         await cancelSetupLogin()
+        if let hook = revocationHookBox.get() { await hook() }   // e.g. the menu's own work
         // (4) mint — or abort: the revoked token/cookie were already cleared.
         guard let newToken = Self.randomHex(), let newCookie = Self.randomHex() else {
             return RotationResult(poison: poison, randomnessFailed: true)

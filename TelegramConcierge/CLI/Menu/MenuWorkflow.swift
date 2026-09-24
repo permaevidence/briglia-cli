@@ -36,6 +36,64 @@ enum MenuItem: String, CaseIterable {
     }
 }
 
+/// Which menu operations may still write. Every action takes a ticket:
+/// the link generation that authorized it, the menu epoch (bumped by Close,
+/// link rotation and shutdown), and — for actions that change one setting —
+/// that setting's revision (bumped by every later action on the same
+/// setting: a newer key, Remove, Telegram reset, sign-out…). A ticket is
+/// checked right before every write, including inside setup-api's and the
+/// subscription store's own checkpoints, so a late probe or sign-in whose
+/// ticket was voided writes nothing. Lock-based: those checkpoints run off
+/// the main actor.
+final class MenuValidity: @unchecked Sendable {
+    struct Ticket: Sendable {
+        let generation: Int
+        let epoch: Int
+        let slot: String?
+        let revision: Int
+    }
+    /// Why a ticket stopped being valid.
+    enum Voided: Error, Equatable {
+        /// The link was replaced, the page closed or the menu is shutting
+        /// down: the request gets no answer (HTTP 404, like the quick setup).
+        case revoked
+        /// A newer action on the same setting replaced this one.
+        case superseded
+    }
+
+    private let lock = NSLock()
+    private var epoch = 0
+    private var revisions: [String: Int] = [:]
+    /// The authorizer's generation check (the quick setup's checkpointSync).
+    var authCheck: @Sendable (Int) throws -> Void = { _ in }
+
+    /// A ticket for a new action; `claim` makes it the newest on `slot`,
+    /// voiding every earlier ticket on that slot.
+    func ticket(generation: Int, slot: String?, claim: Bool) -> Ticket {
+        lock.lock(); defer { lock.unlock() }
+        var rev = 0
+        if let slot {
+            rev = revisions[slot, default: 0] + (claim ? 1 : 0)
+            revisions[slot] = rev
+        }
+        return Ticket(generation: generation, epoch: epoch, slot: slot, revision: rev)
+    }
+
+    /// Voids every outstanding ticket (Close, link rotation, shutdown).
+    func revokeAll() {
+        lock.lock(); epoch += 1; lock.unlock()
+    }
+
+    func check(_ t: Ticket) throws {
+        do { try authCheck(t.generation) } catch { throw Voided.revoked }
+        lock.lock(); defer { lock.unlock() }
+        guard t.epoch == epoch else { throw Voided.revoked }
+        if let slot = t.slot, revisions[slot, default: 0] != t.revision { throw Voided.superseded }
+    }
+
+    func isValid(_ t: Ticket) -> Bool { (try? check(t)) != nil }
+}
+
 /// The server side of the `briglia menu` page (menu.html/menu.js): every
 /// page action is one call that checks AND saves (no separate verify step),
 /// and `status()` is the whole page state. Side effects go through
@@ -78,6 +136,22 @@ final class MenuWorkflow {
     private(set) var jobLabel = ""
     private(set) var toolsError: String?
     private var pending: [Task<Void, Never>] = []
+    /// Linux "Start Briglia": the service is installed and started while the
+    /// page is still open, and the page only says it runs once the service
+    /// passed the quick setup's health check (active, starts at boot, its
+    /// socket answers, stable). A failure stays on the page with Retry.
+    struct Startup { var state: String; var step: String; var message: String? }
+    private(set) var startup: Startup?
+    private var startupTask: Task<Void, Never>?
+    /// The instance lease was handed to the running service: the command must
+    /// neither release it again nor restart a paused service.
+    private(set) var leaseHandedOff = false
+
+    /// Page requests still executing; `revoke()` cancels them (so a probe
+    /// waiting on the network returns at once) and waits for them.
+    private var inFlight = 0
+    private var requestTasks: [UUID: Task<(Bool, String?), Error>] = [:]
+    let validity = MenuValidity()
 
     init(env: MenuEnvironment, runner: SetupJobRunner, serviceWasRunning: Bool = false) {
         self.env = env
@@ -116,9 +190,34 @@ final class MenuWorkflow {
         while !pending.isEmpty { let p = pending; pending = []; for t in p { await t.value } }
     }
 
-    func shutdown() {
+    /// Link rotation, Close and shutdown: void every ticket, cancel sign-in
+    /// and background work, and wait (bounded) until requests and tasks have
+    /// unwound, so nothing of the old session writes after this returns.
+    /// Idempotent. `cancelJob` also stops a running installer (shutdown; a
+    /// rotation's authorizer already cancels the shared job runner).
+    func revoke(cancelJob: Bool = false) async {
+        validity.revokeAll()
         loginTask?.cancel()
+        loginAttempt = nil
+        login = nil
+        telegram = nil
+        for t in pending { t.cancel() }
+        for t in requestTasks.values { t.cancel() }
+        if cancelJob { _ = await runner.cancelRunning() }
+        if let t = loginTask { await t.value }
+        loginTask = nil
+        if let t = startupTask { await t.value }
+        while !pending.isEmpty { let p = pending; pending = []; for t in p { await t.value } }
+        var waited = 0
+        while inFlight > 0, waited < 600 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            waited += 1
+        }
+    }
+
+    func shutdown() async {
         toolchainTask?.cancel()
+        await revoke(cancelJob: true)
     }
 
     // MARK: Status
@@ -182,8 +281,8 @@ final class MenuWorkflow {
 
     /// The whole page state. Polling side effects live here: re-checking Full
     /// Disk Access and scanning Telegram for the user's first message.
-    func status() -> [String: Any] {
-        pollOutsideWorld()
+    func status(generation g: Int = 0) -> [String: Any] {
+        pollOutsideWorld(g)
         let s = snapshot
         let steps: [[String: Any]] = MenuItem.allCases.map {
             ["id": $0.rawValue, "title": $0.title(lang), "required": $0.required, "done": isDone($0), "summary": summary($0)]
@@ -235,13 +334,18 @@ final class MenuWorkflow {
             "service_was_running": serviceWasRunning,
             "browser_likely": env.browserLikely,
         ]
+        if let startup {
+            var d: [String: Any] = ["state": startup.state, "step": startup.step]
+            if let m = startup.message { d["message"] = m }
+            out["startup"] = d
+        } else { out["startup"] = NSNull() }
         out["busy"] = busy ?? NSNull()
         out["closing"] = closing ?? NSNull()
         return out
     }
 
     private var lastFDACheck = Date.distantPast
-    private func pollOutsideWorld() {
+    private func pollOutsideWorld(_ g: Int) {
         if !env.isLinux, !snapshot.fdaGranted, now().timeIntervalSince(lastFDACheck) >= 1.5 {
             lastFDACheck = now()
             if env.quick.fullDiskAccessGranted() { snapshot.fdaGranted = true; markCompleteIfReady() }
@@ -251,11 +355,12 @@ final class MenuWorkflow {
         telegram = p
         scanInFlight = true
         let token = p.token, since = p.since
+        let ticket = validity.ticket(generation: g, slot: "telegram", claim: false)
         let t = Task { @MainActor [weak self] in
             guard let self else { return }
             let result = await self.env.telegramScan(token, since)
             self.scanInFlight = false
-            guard var current = self.telegram, current.token == token, current.state == "waiting" else { return }
+            guard self.validity.isValid(ticket), var current = self.telegram, current.token == token, current.state == "waiting" else { return }
             switch result {
             case .waiting: break
             case .found(let chatId, _) where current.rejected.contains(chatId):
@@ -275,12 +380,28 @@ final class MenuWorkflow {
 
     // MARK: Actions
 
-    /// One page action → `{ok, message?, status}`.
-    func handle(_ body: [String: Any]) async -> [String: Any] {
+    /// One page action → `{ok, message?, status}`, or nil when the action's
+    /// link was revoked (the router answers 404). An action replaced by a
+    /// newer one on the same setting answers `{ok: false, superseded: true}`
+    /// with nothing written.
+    func handle(_ body: [String: Any], generation g: Int = 0) async -> [String: Any]? {
+        guard validity.isValid(validity.ticket(generation: g, slot: nil, claim: false)) else { return nil }
+        inFlight += 1
+        defer { inFlight -= 1 }
         let action = body["action"] as? String ?? ""
-        let (ok, message) = await perform(action, body)
-        var out: [String: Any] = ["ok": ok, "status": status()]
-        if let message { out["message"] = message }
+        let id = UUID()
+        let work = Task { @MainActor in try await self.perform(action, body, g) }
+        requestTasks[id] = work
+        defer { requestTasks[id] = nil }
+        let result: (Bool, String?)
+        do { result = try await work.value }
+        catch MenuValidity.Voided.superseded {
+            return ["ok": false, "superseded": true, "status": status(generation: g)]
+        } catch {
+            return nil
+        }
+        var out: [String: Any] = ["ok": result.0, "status": status(generation: g)]
+        if let message = result.1 { out["message"] = message }
         return out
     }
 
@@ -288,8 +409,30 @@ final class MenuWorkflow {
         ((body[key] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func perform(_ action: String, _ body: [String: Any]) async -> (Bool, String?) {
+    /// The setting an action changes: a newer action on it voids older ones.
+    static func slot(_ action: String, _ body: [String: Any]) -> String? {
+        switch action {
+        case "name": return "name"
+        case "key", "key_remove":
+            let kind = (body["kind"] as? String) ?? ""
+            return kind == "agentmail" ? "email" : "key:\(kind)"
+        case "email_off": return "email"
+        case "chatgpt_browser", "chatgpt_code", "chatgpt_cancel", "chatgpt_logout", "chatgpt_model", "chatgpt_use": return "chatgpt"
+        case "telegram_token", "telegram_wait", "telegram_manual", "telegram_reset", "telegram_confirm": return "telegram"
+        default: return nil
+        }
+    }
+
+    private func perform(_ action: String, _ body: [String: Any], _ g: Int) async throws -> (Bool, String?) {
         guard closing == nil else { return (false, L("This page is closing.", "Questa pagina si sta chiudendo.")) }
+        if startup?.state == "running", action != "lang" {
+            return (false, L("Briglia is starting \u{2014} one moment.", "Briglia si sta avviando: un momento."))
+        }
+        let ticket = validity.ticket(generation: g, slot: Self.slot(action, body), claim: true)
+        let validity = self.validity
+        /// Checked before every write; handed to setup-api / the subscription
+        /// store, which call it again right before their own writes.
+        let checkpoint: @Sendable () throws -> Void = { try validity.check(ticket) }
         switch action {
         case "lang":
             let value = str(body, "lang")
@@ -300,31 +443,37 @@ final class MenuWorkflow {
         case "name":
             let name = str(body, "name")
             guard !name.isEmpty, name.count <= 100 else { return (false, L("Type your name first.", "Scrivi prima il tuo nome.")) }
-            let result = await env.apply(["identity": ["user_name": name]])
+            try checkpoint()
+            let result = await env.apply(["identity": ["user_name": name]], checkpoint)
+            try checkpoint()
             await reload()
             return result["ok"] as? Bool == true ? (true, L("Nice to meet you, \(name)!", "Piacere di conoscerti, \(name)!")) : (false, applyError(result))
 
         case "key":
-            return await saveKey(kind: str(body, "kind"), key: str(body, "key"))
+            return try await saveKey(kind: str(body, "kind"), key: str(body, "key"), checkpoint: checkpoint)
 
         case "key_remove":
             guard str(body, "kind") == "openai" else { return (false, L("Only the optional OpenAI key can be removed.", "Si può rimuovere solo la chiave OpenAI, che è facoltativa.")) }
-            let result = await env.apply(["openai": ["remove": true]])
+            try checkpoint()
+            let result = await env.apply(["openai": ["remove": true]], checkpoint)
+            try checkpoint()
             await reload()
             return result["ok"] as? Bool == true ? (true, L("Key removed. Voice messages and image creation are off.", "Chiave rimossa. Messaggi vocali e creazione di immagini sono disattivati.")) : (false, applyError(result))
 
         case "email_off":
-            let result = await env.apply(["email_calendar": ["provider": "none"]])
+            try checkpoint()
+            let result = await env.apply(["email_calendar": ["provider": "none"]], checkpoint)
+            try checkpoint()
             await reload()
             return result["ok"] as? Bool == true ? (true, L("Email is off. Your key is kept, so you can turn it back on any time.", "Email disattivata. La chiave resta salvata, così puoi riattivarla quando vuoi.")) : (false, applyError(result))
 
         case "email_tool":
             guard busy == nil else { return (false, L("Please wait for the current installation to finish.", "Aspetta che finisca l\u{2019}installazione in corso.")) }
-            startEmailToolInstall()
+            startEmailToolInstall(checkpoint)
             return (true, nil)
 
         case "chatgpt_browser", "chatgpt_code":
-            return await startSignIn(browser: action == "chatgpt_browser")
+            return await startSignIn(browser: action == "chatgpt_browser", checkpoint: checkpoint)
 
         case "chatgpt_cancel":
             loginTask?.cancel(); loginTask = nil; loginAttempt = nil; login = nil
@@ -332,7 +481,11 @@ final class MenuWorkflow {
 
         case "chatgpt_logout":
             let again = body["again"] as? Bool == true
-            let result = await env.subscription(["action": "logout"])
+            // Sign-out supersedes a sign-in still in progress.
+            loginTask?.cancel(); loginTask = nil; loginAttempt = nil; login = nil
+            try checkpoint()
+            let result = await env.subscription(["action": "logout"], checkpoint)
+            try checkpoint()
             await reload()
             guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
             return (true, again ? L("Signed out. Now sign in with the account you want.", "Disconnesso. Ora accedi con l\u{2019}account che vuoi usare.") : L("Signed out. Briglia can\u{2019}t answer until you sign in again.", "Disconnesso. Briglia non può rispondere finché non accedi di nuovo."))
@@ -340,12 +493,14 @@ final class MenuWorkflow {
         case "chatgpt_model":
             let model = str(body, "model")
             guard ResponsesAdapter.subscriptionModelChoices.contains(where: { $0.id == model }) else { return (false, L("Unknown model.", "Modello sconosciuto.")) }
-            let result = await env.subscription(["action": "select", "model": model, "effort": compatibleEffort(currentEffort ?? "high", model: model)])
+            try checkpoint()
+            let result = await env.subscription(["action": "select", "model": model, "effort": compatibleEffort(currentEffort ?? "high", model: model)], checkpoint)
+            try checkpoint()
             await reload()
             return result["ok"] as? Bool == true ? (true, L("Briglia now thinks with \(Self.modelLabel(model)).", "Ora Briglia ragiona con \(Self.modelLabel(model)).")) : (false, applyError(result))
 
         case "chatgpt_use":
-            return await selectAndProbe()
+            return try await selectAndProbe(checkpoint)
 
         case "telegram_token":
             let token = str(body, "token")
@@ -354,6 +509,7 @@ final class MenuWorkflow {
                 return (false, L("That doesn\u{2019}t look like a bot token. It looks like 123456789:AAE\u{2026} \u{2014} copy the whole line from BotFather.", "Questo non sembra il token di un bot. Somiglia a 123456789:AAE\u{2026}: copia l\u{2019}intera riga da BotFather."))
             }
             let probe = await env.probe(["kind": "telegram", "token": token])
+            try checkpoint()
             guard probe["ok"] as? Bool == true else {
                 return (false, L("Telegram didn\u{2019}t accept this token. Copy it again from @BotFather (the whole line, like 123456789:AAE\u{2026}).", "Telegram non ha accettato questo token. Copialo di nuovo da @BotFather (l\u{2019}intera riga, tipo 123456789:AAE\u{2026})."))
             }
@@ -379,14 +535,14 @@ final class MenuWorkflow {
             return (true, nil)
 
         case "telegram_confirm":
-            return await confirmTelegram(chatId: str(body, "chat_id"))
+            return try await confirmTelegram(chatId: str(body, "chat_id"), checkpoint: checkpoint)
 
         case "fda_open":
             env.quick.openSettingsPane()
             return (true, L("System Settings is open. Turn on \(snapshot.terminalApp) in the list \u{2014} this page notices by itself.", "Impostazioni di Sistema è aperto. Attiva \(snapshot.terminalApp) nell\u{2019}elenco: questa pagina se ne accorge da sola."))
 
         case "keepawake":
-            return await fixKeepAwake(how: str(body, "how"))
+            return try await fixKeepAwake(how: str(body, "how"), checkpoint: checkpoint)
 
         case "recheck":
             await reload()
@@ -394,7 +550,7 @@ final class MenuWorkflow {
             return (true, nil)
 
         case "tools_install":
-            return installTools()
+            return installTools(checkpoint)
 
         case "finish":
             let what = str(body, "what")
@@ -405,8 +561,18 @@ final class MenuWorkflow {
                 guard missing.isEmpty else { return (false, L("Finish these first: ", "Prima completa: ") + missing.map { $0.title(lang) }.joined(separator: ", ") + ".") }
             }
             guard busy == nil else { return (false, L("Please wait for the current installation to finish.", "Aspetta che finisca l\u{2019}installazione in corso.")) }
-            loginTask?.cancel()
+            if what == "start" && env.isLinux {
+                // Close only once the service really runs (see Startup).
+                beginStartup(checkpoint)
+                return (true, nil)
+            }
+            startup = nil
             closing = what
+            // Close voids every other ticket at once: a check still running
+            // cannot save after the page said goodbye. `revoke()` (at
+            // shutdown) cancels and waits for the rest.
+            validity.revokeAll()
+            loginTask?.cancel()
             return (true, nil)
 
         default:
@@ -414,36 +580,92 @@ final class MenuWorkflow {
         }
     }
 
+    // MARK: Linux start
+
+    private func beginStartup(_ checkpoint: @escaping @Sendable () throws -> Void) {
+        startup = Startup(state: "running", step: L("Checking this computer\u{2026}", "Controllo questo computer\u{2026}"), message: nil)
+        busy = "starting"
+        startupTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runStartup(checkpoint)
+            self.startupTask = nil
+        }
+    }
+
+    private func runStartup(_ checkpoint: @escaping @Sendable () throws -> Void) async {
+        func step(_ en: String, _ it: String) { startup?.step = L(en, it) }
+        func fail(_ message: String) {
+            busy = nil
+            startup = Startup(state: "failed", step: "", message: message)
+        }
+        guard env.systemdSessionAvailable() else {
+            fail(L("This computer can\u{2019}t run Briglia as a background service (there is no systemd user session). Close this page and type briglia setup in the terminal, or run briglia daemon in a terminal window.",
+                   "Questo computer non può far funzionare Briglia in background (manca la sessione utente di systemd). Chiudi questa pagina e scrivi briglia setup nel terminale, oppure avvia briglia daemon in una finestra del terminale."))
+            return
+        }
+        step("Installing the background service\u{2026}", "Installo il servizio in background\u{2026}")
+        do { try env.quick.installUnit() } catch {
+            fail(L("The background service couldn\u{2019}t be installed: \(error.localizedDescription)", "Non è stato possibile installare il servizio in background: \(error.localizedDescription)"))
+            return
+        }
+        guard (try? checkpoint()) != nil else { fail(L("Cancelled.", "Annullato.")); return }
+        // The service's daemon needs the instance lease the menu holds.
+        env.quick.releaseLease()
+        leaseHandedOff = true
+        step("Starting Briglia\u{2026}", "Avvio Briglia\u{2026}")
+        var failure = await env.quick.enableService(runner)
+        if failure == nil {
+            step("Checking that Briglia is running (about 30 seconds)\u{2026}", "Controllo che Briglia sia in funzione (circa 30 secondi)\u{2026}")
+            let evidence = await env.quick.serviceEvidence()
+            if !evidence.ok { failure = evidence.detail }
+        }
+        if let failure {
+            // Take the settings back so Retry (or closing) works from a clean state.
+            _ = env.quick.stopService()
+            let back = env.quick.reacquireLease()
+            if back { leaseHandedOff = false }
+            fail(L("Briglia didn\u{2019}t start: \(failure).", "Briglia non si è avviato: \(failure).")
+                 + (back ? "" : L(" Close this page and type briglia menu again.", " Chiudi questa pagina e scrivi di nuovo briglia menu.")))
+            return
+        }
+        busy = nil
+        startup = nil
+        closing = "start"
+        validity.revokeAll()
+    }
+
     // MARK: Keys
 
-    private func saveKey(kind: String, key: String) async -> (Bool, String?) {
+    private func saveKey(kind: String, key: String, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         guard ["serper", "jina", "openai", "agentmail"].contains(kind) else { return (false, L("Unknown key.", "Chiave sconosciuta.")) }
         guard !key.isEmpty, key.count <= 4096, !key.contains(where: { $0.isNewline }) else { return (false, L("Paste your key first.", "Incolla prima la chiave.")) }
         let item: MenuItem = kind == "agentmail" ? .email : MenuItem(rawValue: kind)!
         let probe = await env.probe(["kind": kind, "api_key": key])
+        try checkpoint()
         guard probe["ok"] as? Bool == true else { return (false, keyError(item, Self.probeReason(probe))) }
         let payload: [String: Any] = kind == "agentmail"
             ? ["email_calendar": ["provider": "agentmail", "api_key": key, "install_cli": false] as [String: Any]]
             : [kind: ["api_key": key]]
-        let result = await env.apply(payload)
+        let result = await env.apply(payload, checkpoint)
+        try checkpoint()
         await reload()
         guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
         if kind == "agentmail" {
             let inbox = (probe["inboxes"] as? [String])?.first.map { self.L(" Briglia\u{2019}s address: \($0).", " Indirizzo di Briglia: \($0).") } ?? ""
-            if !snapshot.agentMailCLIInstalled && busy == nil { startEmailToolInstall() }
+            if !snapshot.agentMailCLIInstalled && busy == nil { startEmailToolInstall(checkpoint) }
             return (true, L("Email connected.\(inbox)", "Email collegata.\(inbox)"))
         }
         return (true, keySavedMessage(item))
     }
 
-    private func startEmailToolInstall() {
+    private func startEmailToolInstall(_ checkpoint: @escaping @Sendable () throws -> Void) {
         busy = "email_tool"
         jobLines = []
         let t = Task { @MainActor [weak self] in
             guard let self else { return }
             let failure = await self.env.quick.installAgentMail({ line in
                 Task { @MainActor [weak self] in self?.appendJobLine(line) }
-            }, {}, self.runner)
+            }, { try checkpoint(); try Task.checkCancellation() }, self.runner)
             await self.reload()
             self.busy = nil
             if let failure { self.toolsError = self.L("The email tool didn\u{2019}t install: \(failure)", "Lo strumento email non si è installato: \(failure)") }
@@ -465,7 +687,7 @@ final class MenuWorkflow {
         ResponsesAdapter.allowedEfforts(model: model).contains(effort) ? effort : "high"
     }
 
-    private func startSignIn(browser: Bool) async -> (Bool, String?) {
+    private func startSignIn(browser: Bool, checkpoint: @escaping @Sendable () throws -> Void) async -> (Bool, String?) {
         loginTask?.cancel()
         let attempt = UUID()
         loginAttempt = attempt
@@ -492,10 +714,16 @@ final class MenuWorkflow {
                 }
                 guard let self, self.loginAttempt == attempt, !Task.isCancelled else { return }
                 self.login = Login(kind: browser ? "browser" : "code", state: "finishing")
-                let (ok, message) = await self.selectAndProbe()
+                let (ok, message) = try await self.selectAndProbe(checkpoint)
                 guard self.loginAttempt == attempt else { return }
                 self.loginAttempt = nil
                 self.login = ok ? nil : Login(kind: browser ? "browser" : "code", state: "error", message: message)
+            } catch is MenuValidity.Voided {
+                // A newer ChatGPT action or the end of the session replaced
+                // this sign-in: nothing more is written; clear its spinner.
+                guard let self, self.loginAttempt == attempt else { return }
+                self.loginAttempt = nil
+                self.login = nil
             } catch {
                 guard let self, self.loginAttempt == attempt, !Task.isCancelled else { return }
                 self.loginAttempt = nil
@@ -514,15 +742,18 @@ final class MenuWorkflow {
 
     /// After a successful login: save + activate the profile (keeping a
     /// previously chosen model), then one real request to prove it answers.
-    private func selectAndProbe() async -> (Bool, String?) {
+    private func selectAndProbe(_ checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         let model = currentModel ?? ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel
         let effort = compatibleEffort(currentEffort ?? ProviderProfiles.configuredEffort(.chatgpt) ?? "high", model: model)
-        let selected = await env.subscription(["action": "select", "model": model, "effort": effort])
+        try checkpoint()
+        let selected = await env.subscription(["action": "select", "model": model, "effort": effort], checkpoint)
+        try checkpoint()
         await reload()
         guard selected["ok"] as? Bool == true else {
             return (false, L("Signed in, but Briglia couldn\u{2019}t switch to ChatGPT: ", "Accesso fatto, ma Briglia non è riuscita a passare a ChatGPT: ") + applyError(selected))
         }
-        let probe = await env.subscription(["action": "probe", "model": model, "effort": effort])
+        let probe = await env.subscription(["action": "probe", "model": model, "effort": effort], checkpoint)
+        try checkpoint()
         guard probe["ok"] as? Bool == true else {
             return (false, L("Signed in, but ChatGPT didn\u{2019}t answer with \(Self.modelLabel(model)): \(applyError(probe)). Your plan may not include this model \u{2014} pick another one below.", "Accesso fatto, ma ChatGPT non ha risposto con \(Self.modelLabel(model)): \(applyError(probe)). Il tuo piano potrebbe non includere questo modello: scegline un altro qui sotto."))
         }
@@ -531,7 +762,7 @@ final class MenuWorkflow {
 
     // MARK: Telegram
 
-    private func confirmTelegram(chatId: String) async -> (Bool, String?) {
+    private func confirmTelegram(chatId: String, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         guard let p = telegram else { return (false, L("Paste your bot token first.", "Incolla prima il token del bot.")) }
         switch TelegramPairing.parseChatId(chatId) {
         case .success: break
@@ -539,11 +770,13 @@ final class MenuWorkflow {
         case .failure(.notPrivate): return (false, L(TelegramPairing.privateChatExplanation, "Briglia risponde solo a una chat privata con te: usa il tuo ID personale, non quello di un gruppo o di un canale."))
         }
         let check = await env.telegramChatProbe(p.token, chatId)
+        try checkpoint()
         if let failure = check.failure {
             if var again = telegram, again.state == "found" { again.state = "waiting"; again.since = now(); again.lastScan = .distantPast; telegram = again }
             return (false, telegramChatFailure(failure, bot: p.bot))
         }
-        let result = await env.apply(["telegram": ["token": p.token, "chat_id": chatId]])
+        let result = await env.apply(["telegram": ["token": p.token, "chat_id": chatId]], checkpoint)
+        try checkpoint()
         await reload()
         guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
         telegram = nil
@@ -555,9 +788,10 @@ final class MenuWorkflow {
 
     // MARK: This computer + tools
 
-    private func fixKeepAwake(how: String) async -> (Bool, String?) {
+    private func fixKeepAwake(how: String, checkpoint: @Sendable () throws -> Void) async throws -> (Bool, String?) {
         switch how {
         case "gnome":
+            try checkpoint()
             let ok = env.quick.disableGnomeAutoSuspend()
             await reload()
             return ok && snapshot.keepAwakeOK ? (true, L("Done \u{2014} this computer won\u{2019}t suspend by itself.", "Fatto: questo computer non andrà più in sospensione da solo."))
@@ -565,6 +799,7 @@ final class MenuWorkflow {
         case "mask":
             guard let spec = env.quick.maskSleepTargetsJob() else { return (false, L("sudo or systemctl is missing on this system.", "Su questo sistema mancano sudo o systemctl.")) }
             guard busy == nil else { return (false, L("Please wait for the current installation to finish.", "Aspetta che finisca l\u{2019}installazione in corso.")) }
+            try checkpoint()
             busy = "keepawake"
             let r = await runner.run(spec)
             busy = nil
@@ -576,7 +811,7 @@ final class MenuWorkflow {
         }
     }
 
-    private func installTools() -> (Bool, String?) {
+    private func installTools(_ checkpoint: @escaping @Sendable () throws -> Void) -> (Bool, String?) {
         guard busy == nil else { return (false, L("Please wait for the current installation to finish.", "Aspetta che finisca l\u{2019}installazione in corso.")) }
         guard let status = toolchain else { return (false, L("Still checking what\u{2019}s installed \u{2014} try again in a moment.", "Sto ancora controllando cosa è installato: riprova tra un attimo.")) }
         let jobs = env.quick.toolchainJobs(status)
@@ -592,6 +827,8 @@ final class MenuWorkflow {
             guard let self else { return }
             var failure: String?
             for (index, job) in jobs.enumerated() {
+                // A revoked session (new link, Close, shutdown) starts no further step.
+                if (try? checkpoint()) == nil || Task.isCancelled { failure = self.L("stopped", "interrotta"); break }
                 self.jobLabel = self.L("Step \(index + 1) of \(jobs.count): \(job.label)", "Passo \(index + 1) di \(jobs.count): \(job.label)")
                 self.appendJobLine("\u{25B6} \(job.label)")
                 let r = await self.runner.run(job)
