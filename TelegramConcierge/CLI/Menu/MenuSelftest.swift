@@ -606,6 +606,25 @@ final class MenuSelftestContext {
             let fresh = await wf.handle(["action": "key", "kind": "serper", "key": w.good["serper"]!], generation: 2)
             check("stale: the new link's requests still save", fresh.map(ok) == true && w.snap.serperMasked != nil)
         }
+        // A check stuck on the network is cancelled by a new link, so the new
+        // link doesn't wait for it (and it writes nothing).
+        do {
+            let w = world()
+            var e = env(w)
+            e.probe = { request in
+                do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch { return ["ok": false, "reason": "cancelled"] }
+                return w.probe(request)
+            }
+            let wf = MenuWorkflow(env: e, runner: SetupJobRunner(secrets: [:]))
+            await wf.start(); await wf.settle()
+            let t = Task { @MainActor in await wf.handle(["action": "key", "kind": "serper", "key": w.good["serper"]!]) }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            let started = Date()
+            await wf.revoke()
+            let r = await t.value
+            check("stale: a new link cancels a check waiting on the network, at once",
+                  Date().timeIntervalSince(started) < 5 && r == nil && w.applied.isEmpty)
+        }
         // A ChatGPT sign-in waiting in the browser is cancelled by a new link
         // and never switches the provider afterwards.
         do {
@@ -623,8 +642,12 @@ final class MenuSelftestContext {
             let w = world(); let wf = await make(w)
             w.loginBlocks = true
             _ = await act(wf, ["action": "chatgpt_code"], settle: false)
-            let out = await act(wf, ["action": "chatgpt_logout"])
-            check("stale: sign-out cancels a sign-in in progress", ok(out) && w.snap.chatgpt == .signedOut && (wf.status()["chatgpt"] as? [String: Any])?["login"] == nil)
+            let out = await act(wf, ["action": "chatgpt_logout"], settle: false)
+            let loginGone = (wf.status()["chatgpt"] as? [String: Any])?["login"] == nil
+            let started = Date()
+            await wf.settle()   // the 60 s fake sign-in must already be cancelled
+            check("stale: sign-out cancels a sign-in in progress at once",
+                  ok(out) && loginGone && w.snap.chatgpt == .signedOut && Date().timeIntervalSince(started) < 5)
         }
     }
 
