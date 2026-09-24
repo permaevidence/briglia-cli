@@ -306,6 +306,97 @@ extension WebSubagentSelftest {
         }
         SubscriptionWebTransport.resetForTests()
 
+        // 16.16h–n (Codex round 2): usage exhaustion is terminal through the
+        // OUTER pipeline — no salvage request, no raw-page fallback, no
+        // further sequential requests — and never reaches another backend.
+        let quotaText = "usage is exhausted"
+        captured.clear(); h.serverB.clear(); h.serverC.clear(); h.serverD.clear()
+        SubscriptionWebTransport.sendOverride = { request in
+            captured.add(request)
+            if captured.all.count == 1 {
+                return Data(WebFixtureServer.responsesBody("searching", id: "r_before_quota", calls: [("search", "{\"queries\":[\"quota after evidence\"]}")]).utf8)
+            }
+            throw SubscriptionEndpoint.usageExhaustedError()
+        }
+        let midLoopQuota = await attempt { try await orchestrator.answer(userPrompt: "quota after evidence", historyPairs: [], executionID: UUID()) }
+        check("16.16h quota after a successful search is terminal: no forced-final request",
+              midLoopQuota.contains(quotaText) && captured.all.count == 2,
+              "sends=\(captured.all.count) result=\(midLoopQuota.prefix(80))")
+        check("16.16i mid-loop quota never reaches another backend",
+              h.serverB.requests.isEmpty && h.serverC.requests.isEmpty && h.serverD.requests.isEmpty, "")
+
+        captured.clear()
+        SubscriptionWebTransport.sendOverride = { request in captured.add(request); throw SubscriptionEndpoint.usageExhaustedError() }
+        h.fixtures.pages["https://example.test/r2-short"] = "# Page\n\nRAW_PAGE_RETURNED_AFTER_QUOTA"
+        let shortQuota = await attempt { try await orchestrator.readUrlContentWithMetadata(url: "https://example.test/r2-short", prompt: "extract", refresh: true).result.content }
+        check("16.16j web_fetch (small page): quota is an error, never the raw page",
+              shortQuota.hasPrefix("ERROR:") && shortQuota.contains(quotaText) && !shortQuota.contains("RAW_PAGE_RETURNED_AFTER_QUOTA"),
+              "sends=\(captured.all.count) result=\(shortQuota.prefix(80))")
+        // Not cached as a success: the next read asks the model again.
+        captured.clear()
+        _ = await attempt { try await orchestrator.readUrlContentWithMetadata(url: "https://example.test/r2-short", prompt: "extract", refresh: false).result.content }
+        check("16.16k web_fetch quota result is not cached", captured.all.count == 1, "sends=\(captured.all.count)")
+
+        captured.clear()
+        h.fixtures.pages["https://example.test/r2-large"] = String(repeating: "large fetch content ", count: 90000)
+        let largeQuota = await attempt { try await orchestrator.readUrlContentWithMetadata(url: "https://example.test/r2-large", prompt: "extract", refresh: true).result.content }
+        check("16.16l web_fetch (chunked page): quota is an error, never the raw-window fallback",
+              largeQuota.hasPrefix("ERROR:") && largeQuota.contains(quotaText),
+              "sends=\(captured.all.count) result=\(largeQuota.prefix(80))")
+
+        captured.clear()
+        h.fixtures.pages["https://example.test/r2-long"] = String(repeating: "long source content ", count: 90000)
+        var extractQuota = "", docCount = -1
+        do {
+            let outcome = try await orchestrator.executeWebExtract(requests: [.init(url: "https://example.test/r2-long", focus: "source content")], mode: .webSearch)
+            docCount = outcome.docs.count
+            extractQuota = "returned: " + outcome.failures.joined(separator: ";")
+        } catch { extractQuota = "threw: " + error.localizedDescription }
+        check("16.16m chunked web_extract stops at the first quota and keeps the error",
+              captured.all.count == 1 && extractQuota.hasPrefix("threw: ") && extractQuota.contains(quotaText),
+              "sends=\(captured.all.count) docs=\(docCount) error=\(extractQuota.prefix(80))")
+
+        captured.clear()
+        h.fixtures.pages["https://example.test/r2-assets"] = "# Assets\n\nSee [the spec](https://example.test/spec) for details."
+        var assetQuota = ""
+        do {
+            let outcome = try await orchestrator.executeWebExtract(requests: [.init(url: "https://example.test/r2-assets", focus: "spec")], mode: .webSearch)
+            assetQuota = "docs=\(outcome.docs.count) failures=\(outcome.failures.count)"
+        } catch { assetQuota = error.localizedDescription }
+        check("16.16n web_extract asset step: quota is an error, not an empty best-effort result",
+              captured.all.count == 1 && assetQuota.contains(quotaText),
+              "sends=\(captured.all.count) result=\(assetQuota.prefix(80))")
+
+        // Merge pass: dense sections overflow the 30KB cap, then the merge
+        // request hits the quota — an error, not a hard-truncated stitch.
+        captured.clear()
+        let denseSection = String(repeating: "dense relevant fact. ", count: 800)
+        SubscriptionWebTransport.sendOverride = { request in
+            captured.add(request)
+            if captured.all.count <= 3 { return Data(WebFixtureServer.responsesBody(denseSection, id: "r_section").utf8) }
+            throw SubscriptionEndpoint.usageExhaustedError()
+        }
+        let mergeQuota = await attempt { try await orchestrator.readUrlContentWithMetadata(url: "https://example.test/r2-large", prompt: "extract", refresh: true).result.content }
+        check("16.16p web_fetch merge pass: quota is an error, not a truncated stitch",
+              captured.all.count == 4 && mergeQuota.hasPrefix("ERROR:") && mergeQuota.contains(quotaText),
+              "sends=\(captured.all.count) result=\(mergeQuota.prefix(80))")
+
+        // Control: an ORDINARY failure keeps the old skip-and-continue path.
+        captured.clear()
+        SubscriptionWebTransport.sendOverride = { request in
+            captured.add(request)
+            throw NSError(domain: "fixture", code: 500, userInfo: [NSLocalizedDescriptionKey: "ordinary failure"])
+        }
+        var ordinary = ""
+        do {
+            let outcome = try await orchestrator.executeWebExtract(requests: [.init(url: "https://example.test/r2-long", focus: "source content")], mode: .webSearch)
+            ordinary = "docs=\(outcome.docs.count)"
+        } catch { ordinary = "threw: \(error.localizedDescription)" }
+        check("16.16o ordinary chunk failures still skip and continue",
+              ordinary == "docs=1" && captured.all.count >= 2,
+              "sends=\(captured.all.count) result=\(ordinary)")
+        SubscriptionWebTransport.resetForTests()
+
         // 16.17 Other providers never touch the subscription path.
         try KeychainHelper.save(key: ProviderProfiles.activeProfileKey, value: "openai")
         check("16.17 main provider not the subscription: active is the configured backend; chatgpt has no key",

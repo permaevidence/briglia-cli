@@ -89,8 +89,9 @@ enum WebSearchBackend: String {
     /// Never stored and never selectable with /websearch: it is DERIVED —
     /// active exactly while the main provider is the ChatGPT subscription
     /// (owner decision 2026-09-23, "the researcher, extractor and web fetch
-    /// should follow"), unless the subscription recently reported its usage
-    /// limit, in which case the stored/inferred backend below serves.
+    /// should follow"). When the subscription reports its usage limit, web
+    /// research fails with that error: no API fallback, no cooldown, no
+    /// retry (owner decision 2026-09-24 — the main agent is out too).
     case chatgpt
 
     static let selectionKey = "ada.webSearchBackend"
@@ -850,7 +851,7 @@ actor WebOrchestrator {
             } catch {
                 // A failed round after context has been gathered should not
                 // discard that work: salvage by forcing the final answer.
-                guard anyResultsRetrieved else { throw error }
+                guard anyResultsRetrieved, !Self.isUsageExhausted(error) else { throw error }
                 webLog("[WebOrchestrator] agent.round\(round) failed (\(error.localizedDescription)); forcing final answer from gathered context")
                 appendUser("(A research step failed: \(error.localizedDescription). Write the final answer now using everything gathered so far; no more tool calls are available.)")
                 return try await forcedFinalAnswer(chat: chat, responses: responses, mode: mode, executionID: executionID)
@@ -1517,7 +1518,7 @@ actor WebOrchestrator {
         mode: ResearchMode,
         executionID: UUID
     ) async throws -> (docs: [ScrapedDoc], failures: [String]) {
-        await withTaskGroup(of: (url: String, doc: ScrapedDoc?, errorText: String?).self) { group in
+        let outcome = await withTaskGroup(of: (url: String, doc: ScrapedDoc?, errorText: String?, usageExhausted: Bool).self) { group in
             for req in requests {
                 group.addTask {
                     do {
@@ -1529,25 +1530,31 @@ actor WebOrchestrator {
                             mode: mode,
                             executionID: executionID
                         )
-                        return (req.url, doc, nil)
+                        return (req.url, doc, nil, false)
                     } catch is CancellationError {
-                        return (req.url, nil, nil)
+                        return (req.url, nil, nil, false)
                     } catch {
-                        return (req.url, nil, error.localizedDescription)
+                        return (req.url, nil, error.localizedDescription, Self.isUsageExhausted(error))
                     }
                 }
             }
             var docs: [ScrapedDoc] = []
             var failures: [String] = []
+            var usageExhausted = false
             for await item in group {
+                if item.usageExhausted { usageExhausted = true }
                 if let doc = item.doc {
                     docs.append(doc)
                 } else if let errorText = item.errorText {
                     failures.append("\(item.url): \(errorText)")
                 }
             }
-            return (docs, failures)
+            return (docs, failures, usageExhausted)
         }
+        // Sibling reads already launched may have completed; the call still
+        // fails with the quota error instead of reporting a per-URL failure.
+        if outcome.2 { throw SubscriptionEndpoint.usageExhaustedError() }
+        return (outcome.0, outcome.1)
     }
     
     // MARK: - API Calls
@@ -2017,6 +2024,8 @@ actor WebOrchestrator {
                     prompt: trimmedPrompt,
                     executionID: executionID
                 )
+            } catch where Self.isUsageExhausted(error) {
+                throw error
             } catch {
                 webLog("[WebOrchestrator] web_fetch compression failed, returning truncated raw markdown: \(error.localizedDescription)")
                 // Fall back to truncated raw markdown so the agent still gets something.
@@ -2149,6 +2158,7 @@ actor WebOrchestrator {
         struct ChunkOutcome {
             let index: Int
             let text: String?   // nil = extraction failed
+            var usageExhausted = false
         }
 
         var outcomes: [ChunkOutcome] = []
@@ -2169,13 +2179,18 @@ actor WebOrchestrator {
                         return ChunkOutcome(index: i, text: out)
                     } catch {
                         webLog("[WebOrchestrator] web_fetch chunk \(absoluteSection)/\(totalChunks) failed: \(error.localizedDescription)")
-                        return ChunkOutcome(index: i, text: nil)
+                        return ChunkOutcome(index: i, text: nil, usageExhausted: Self.isUsageExhausted(error))
                     }
                 }
             }
             for await outcome in group { outcomes.append(outcome) }
         }
         try Task.checkCancellation()
+        // Sections already in flight when the quota hit are done; the read
+        // itself fails with the quota error rather than a raw-page fallback.
+        if outcomes.contains(where: \.usageExhausted) {
+            throw SubscriptionEndpoint.usageExhaustedError()
+        }
         outcomes.sort { $0.index < $1.index }
 
         let failedCount = outcomes.filter { $0.text == nil }.count
@@ -2218,6 +2233,8 @@ actor WebOrchestrator {
                     prompt: prompt,
                     executionID: executionID
                 )
+            } catch where Self.isUsageExhausted(error) {
+                throw error
             } catch {
                 webLog("[WebOrchestrator] web_fetch merge pass failed, hard-truncating stitched result: \(error.localizedDescription)")
             }
@@ -2335,14 +2352,21 @@ actor WebOrchestrator {
 
         let candidateLinks = extractLinksFromMarkdown(rawContent)
         let candidateImages = extractImageReferences(rawContent)
-        let relevantAssets = try? await extractRelevantLinksAndImages(
-            page: rawContent,
-            focus: focus,
-            candidateLinks: candidateLinks,
-            candidateImages: candidateImages,
-            mode: mode,
-            executionID: executionID
-        )
+        let relevantAssets: (links: [ExtractedLink], images: [ExtractedImage])?
+        do {
+            relevantAssets = try await extractRelevantLinksAndImages(
+                page: rawContent,
+                focus: focus,
+                candidateLinks: candidateLinks,
+                candidateImages: candidateImages,
+                mode: mode,
+                executionID: executionID
+            )
+        } catch where Self.isUsageExhausted(error) {
+            throw error
+        } catch {
+            relevantAssets = nil   // optional step: ordinary failures stay best-effort
+        }
         let relevantLinks = relevantAssets?.links ?? []
         let relevantImages = relevantAssets?.images ?? []
 
@@ -2389,6 +2413,11 @@ actor WebOrchestrator {
                 )
                 if !ex.isEmpty { allExcerpts.append(contentsOf: ex) }
             } catch is CancellationError { throw CancellationError() }
+            catch where Self.isUsageExhausted(error) {
+                // Stop issuing sequential requests against a known-exhausted
+                // subscription; the quota error reaches the tool boundary.
+                throw error
+            }
             catch { /* continue */ }
         }
 
@@ -2752,5 +2781,18 @@ actor WebOrchestrator {
             if !key.isEmpty, seen.insert(key).inserted { out.append(x) }
         }
         return out
+    }
+}
+
+
+extension WebOrchestrator {
+    /// The typed subscription quota error (never inferred from message
+    /// text). Every generic recovery path in the pipeline — salvage, raw
+    /// fallback, skip-and-continue — must let it through: once the
+    /// subscription is exhausted, no further model request can succeed.
+    nonisolated static func isUsageExhausted(_ error: Error) -> Bool {
+        if let failure = error as? SubscriptionError { return failure.usageExhausted }
+        if let wrapped = error as? ResearchExecutionError { return isUsageExhausted(wrapped.underlyingError) }
+        return false
     }
 }
