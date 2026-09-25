@@ -298,9 +298,12 @@ extension MenuSelftestContext {
                 await m.start(); await m.settle()
                 let r = await act(m, ["action": "chatgpt_code"])
                 let state = try store.read()
-                check("sign-in: an idle sign-in saves, switches and verifies",
-                      ok(r) && state?.credential != nil && state?.pendingLogin == nil && runtimeGeneration() == state?.generation
-                      && ProviderProfiles.activeProfile() == .chatgpt && loginState(m) == nil)
+                check("R4: an idle sign-in while another lane runs saves the login without switching",
+                      ok(r) && state?.credential != nil && state?.pendingLogin == nil
+                      && ProviderProfiles.activeProfile() == .local && loginState(m) == nil)
+                let picked = await act(m, ["action": "lane_select", "lane": "chatgpt"])
+                check("sign-in: choosing ChatGPT in the selector switches and verifies",
+                      ok(picked) && runtimeGeneration() == state?.generation && ProviderProfiles.activeProfile() == .chatgpt, msg(picked))
                 let blocked = await act(m, ["action": "chatgpt_code"])
                 check("sign-in: signing in again now asks to sign out first", !ok(blocked) && msg(blocked) == m.loginBlockMessage(.activeLogin))
                 await m.shutdown()

@@ -20,6 +20,7 @@
   var laneTouched = false;
   var edit = null;              // the lane being edited from the home page: {lane, id}
   var confirmRemove = null;     // the lane card asking "Remove?"
+  var selOpen = false;          // the "Briglia is using" list is open
 
   function lang() { return S && S.lang === 'it' ? 'it' : 'en'; }
   function T(en, it) { return lang() === 'it' ? it : en; }
@@ -276,6 +277,7 @@
       h('span', {}, [h('b', { text: S.service_was_running ? T('Briglia is paused', 'Briglia è in pausa') : T('Briglia is stopped', 'Briglia è fermo') }),
         ' · ' + T('it can’t run while this page is open.', 'non può funzionare mentre questa pagina è aperta.')])]);
     return [
+      usingBar(),
       h('div', { class: 'eyebrow', text: T('Settings', 'Impostazioni') }),
       h('h1', { text: missing.length ? T('Almost there', 'Ci siamo quasi') : T('Everything’s ready', 'È tutto pronto') }),
       h('p', { class: 'lead', text: missing.length ? (T('Still needed: ', 'Mancano ancora: ') + missing.map(function (s) { return s.title; }).join(', ') + '.') : T('Click anything to change it. Changes are saved right away.', 'Clicca su qualsiasi voce per modificarla. Le modifiche vengono salvate subito.') }),
@@ -301,6 +303,7 @@
   function liveDashboard(missing, grid) {
     var service = S.run_mode === 'service';
     return [
+      usingBar(),
       h('div', { class: 'eyebrow', text: T('Settings', 'Impostazioni') }),
       h('h1', { text: T('Briglia', 'Briglia') }),
       h('div', { class: 'runstate on' }, [h('span', { class: 'pausedot' }), h('span', {}, [h('b', { text: T('Briglia is running', 'Briglia è in funzione') }),
@@ -634,10 +637,6 @@
   function laneHomeCard(l) {
     var kind = l.kind === 'server' ? 'server' : l.kind;
     var confirming = confirmRemove === l.key;
-    var use = function () {
-      if (l.kind === 'server') act('server_use', { id: l.id }, 'dashboard');
-      else act('provider_use', { profile: l.kind }, 'dashboard');
-    };
     var editIt = function () {
       if (l.kind === 'openai') { local.dashboard = local.dashboard || {}; local.dashboard.notice = { kind: 'info', text: T('The OpenAI API was set up with briglia setup in the terminal: change it there.', 'L’API di OpenAI è stata configurata con briglia setup nel terminale: modificala da lì.') }; render(); return; }
       edit = { lane: l.kind === 'server' ? 'local' : l.kind, id: l.id || null };
@@ -653,7 +652,6 @@
         h('button', { class: 'btn ghost small', type: 'button', onclick: function () { confirmRemove = null; render(); } }, [T('Cancel', 'Annulla')])];
     } else {
       actions = [
-        l.active ? null : h('button', { class: 'btn primary small', type: 'button', 'data-use': l.key, disabled: inflight > 0, onclick: use }, [T('Use', 'Usa')]),
         h('button', { class: 'btn secondary small', type: 'button', 'data-edit': l.key, onclick: editIt }, [T('Edit', 'Modifica')]),
         l.active ? null : h('button', { class: 'btn ghost small danger-text', type: 'button', 'data-remove': l.key, onclick: function () { confirmRemove = l.key; render(); } }, [T('Remove', 'Rimuovi')]),
       ];
@@ -667,13 +665,42 @@
       h('div', { class: 'lactions' }, actions),
     ]);
   }
+  // "Briglia is using: [lane ▾]" — the primary control once setup is done.
+  // Lanes that need the OpenAI key are disabled while none is saved.
+  function needsKey(l) { return (l.kind === 'opencode' || l.kind === 'server') && !(S.ai && S.ai.openai_key); }
+  function usingBar() {
+    var list = laneList();
+    if (!list.length) return null;
+    var cur = list.filter(function (l) { return l.active; })[0];
+    var blocked = list.filter(function (l) { return !l.active && needsKey(l); });
+    var btn = h('button', { class: 'usingbtn' + (selOpen ? ' open' : ''), type: 'button', id: 'lane-select', 'aria-haspopup': 'listbox', 'aria-expanded': selOpen ? 'true' : 'false', disabled: inflight > 0,
+      onclick: function (e) { e.stopPropagation(); selOpen = !selOpen; render(); } }, [
+      h('span', { class: 'ulabel', text: T('Briglia is using', 'Briglia sta usando') }),
+      h('span', { class: 'uvalue' }, [h('span', { class: 'uname', text: cur ? cur.name : T('Choose a lane', 'Scegli un fornitore') }),
+        cur && cur.model ? h('span', { class: 'umodel', text: cur.model }) : null]),
+      h('span', { class: 'caret', text: '▾' })]);
+    var panel = null;
+    if (selOpen) {
+      panel = h('div', { class: 'usinglist', role: 'listbox', id: 'lane-options' }, list.map(function (l) {
+        var off = !l.active && (needsKey(l) || !!l.note);
+        var sub = off && needsKey(l) ? T('Needs an OpenAI API key', 'Serve una chiave API di OpenAI') : (l.note || [l.model, effortText(l.effort)].filter(function (x) { return !!x; }).join(' · '));
+        return h('button', { class: 'usingopt' + (l.active ? ' on' : ''), type: 'button', role: 'option', 'aria-selected': l.active ? 'true' : 'false', 'data-select': l.key, disabled: off || inflight > 0,
+          onclick: function (e) { e.stopPropagation(); selOpen = false; if (l.active) { render(); return; }
+            act('lane_select', { lane: l.kind === 'server' ? 'server' : l.kind, id: l.id || '' }, 'dashboard'); } },
+          [h('span', { class: 'tick', text: l.active ? '✓' : '' }), h('span', { class: 'otext' }, [h('span', { class: 'oname', text: l.name }), sub ? h('span', { class: 'osub', text: sub }) : null])]);
+      }));
+    }
+    var hint = blocked.length ? h('p', { class: 'small usinghint' }, [T('Lanes marked “Needs an OpenAI API key” can be chosen once the key is saved. ', 'I fornitori con “Serve una chiave API di OpenAI” si possono scegliere dopo aver salvato la chiave. '),
+      h('button', { class: 'btn ghost small', type: 'button', id: 'using-add-key', onclick: function () { selOpen = false; openStep('openai', false); } }, [T('Add the OpenAI key', 'Aggiungi la chiave OpenAI')])]) : null;
+    return h('div', { class: 'usingbar', id: 'usingbar' }, [btn, panel, hint]);
+  }
   function lanesSection() {
     var list = laneList();
     var a = S.ai || {};
     var full = (a.servers || []).length >= (a.max_servers || 20);
     return h('div', { class: 'lanehome' }, [
       h('h2', { class: 'section', text: T('Your AI lanes', 'I tuoi fornitori AI') }),
-      h('p', { class: 'small', text: list.length > 1 ? T('Briglia thinks with the one marked In use. Switch any time; the others stay saved.', 'Briglia ragiona con quello segnato In uso. Puoi cambiare quando vuoi; gli altri restano salvati.')
+      h('p', { class: 'small', text: list.length > 1 ? T('Briglia thinks with the one marked In use. Switch with “Briglia is using” at the top; the others stay saved.', 'Briglia ragiona con quello segnato In uso. Cambia con “Briglia sta usando” in alto; gli altri restano salvati.')
         : T('Add more to switch between them any time.', 'Aggiungine altri per passare dall’uno all’altro quando vuoi.') }),
       a.servers_damaged ? h('div', { class: 'notice bad' }, [T('The saved server list can’t be read (provider_servers in secrets.json is damaged). Run briglia doctor.', 'L’elenco dei server salvati non si legge (provider_servers in secrets.json è danneggiato). Esegui briglia doctor.')]) : null,
       a.other ? h('div', { class: 'notice info' }, [T('Right now Briglia uses ' + a.other + ' (set up with briglia setup).', 'Adesso Briglia usa ' + a.other + ' (configurato con briglia setup).')]) : null,
@@ -739,7 +766,7 @@
   function keepCurrent() {
     if (!S.ai.planned || !(S.ai.active || S.ai.other)) return null;
     var now = S.ai.active === 'local' ? ((S.ai.servers || []).filter(function (x) { return x.active; })[0] || {}).name : (S.ai.active ? laneName(S.ai.active) : S.ai.other);
-    return h('div', { class: 'notice info' }, [h('span', {}, [T('Briglia keeps using ' + now + ' until this is set up.', 'Briglia continua a usare ' + now + ' finché questo non è configurato.')])]);
+    return h('div', { class: 'notice info' }, [h('span', {}, [T('Briglia keeps using ' + now + '. Once this is saved, choose it in “Briglia is using” to switch.', 'Briglia continua a usare ' + now + '. Quando questo è salvato, sceglilo in “Briglia sta usando” per passare.')])]);
   }
   function useButton(id, name) {
     var p = S.ai.providers[id] || {};
@@ -753,7 +780,21 @@
     if (ln === 'local') return serverView(edit ? edit.id : (S.ai.active === 'local' ? S.ai.active_server : null));
     return chatgptView(st);
   }
-  function afterSave(j) { if (j && j.ok && !j.stale && guided) next('ai'); return j; }
+  function afterSave(j) { if (j && j.ok && !j.stale && guided && S.ai && S.ai.ready) next('ai'); return j; }
+  // The OpenAI key a lane needs (OpenCode Go, servers): asked right here
+  // when none is saved, with the same automatic check as Other settings.
+  function openAIInline(kind) {
+    if (kind !== 'opencode' && kind !== 'local') return null;
+    if (S.ai && S.ai.openai_key) return h('p', { class: 'small keyline', id: 'openai-inline-saved', text: T('Uses your saved OpenAI key', 'Usa la tua chiave OpenAI salvata') + (S.keys.openai ? ' (' + S.keys.openai + ')' : '') + '.' });
+    return h('div', { class: 'inlinekey', id: 'openai-inline' }, [
+      h('div', { class: 'ititle', text: T('OpenAI key (needed for this lane)', 'Chiave OpenAI (serve per questo fornitore)') }),
+      h('p', { class: 'small' }, [T('Briglia reads web pages with OpenAI on this lane, so it can’t be used without the key. Get one at ', 'Con questo fornitore Briglia legge le pagine web con OpenAI, quindi senza la chiave non si può usare. La trovi su '),
+        link('https://platform.openai.com/api-keys', 'platform.openai.com/api-keys'), T(' (add a few dollars of credit).', ' (aggiungi qualche dollaro di credito).')]),
+      field('ai-openai', { secret: true, placeholder: 'sk-…', label: null, checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
+        return act('key', { kind: 'openai', key: v }, 'ai', current).then(afterSave);
+      } }),
+    ]);
+  }
   function newKeyButton(st) {
     return h('div', { class: 'actions' }, [h('button', { class: 'btn secondary', type: 'button', onclick: function () { st.editing = true; st.value = ''; st.notice = null; render(); } }, [T('Paste a new key', 'Incolla una nuova chiave')])]);
   }
@@ -773,6 +814,7 @@
           [h('div', { class: 'n', text: m.label }), h('div', { class: 's', text: m.id === p.model ? T('In use', 'In uso') : (m.recommended ? T('Recommended', 'Consigliato') : '') })]);
       })));
       if (p.active) out.push(effortRow('opencode'));
+      out.push(openAIInline('opencode'));
       out.push(newKeyButton(st));
       out.push(switchRow());
       out.push(navButtons('ai'));
@@ -788,6 +830,7 @@
       return act('provider_key', { profile: 'opencode', key: v }, 'ai', current).then(afterSave);
     } }));
     if (st.editing && p.configured) out.push(h('button', { class: 'btn ghost', type: 'button', onclick: function () { st.editing = false; render(); } }, [T('Cancel', 'Annulla')]));
+    out.push(openAIInline('opencode'));
     out.push(switchRow());
     out.push(navButtons('ai'));
     return out;
@@ -910,6 +953,7 @@
     box.addEventListener('change', function () { f.textOnly = box.checked; });
     out.push(h('details', { class: 'more', open: f.textOnly ? true : null }, [h('summary', { text: T('More options', 'Altre opzioni') }),
       h('label', { class: 'check', for: 'to-srv' }, [box, ' ' + T('This model can’t see images (text-only)', 'Questo modello non vede le immagini (solo testo)')])]));
+    out.push(openAIInline('local'));
     function canSave() { return inflight === 0 && !!(f.name || '').trim() && !!f.model && (!!listed || !!sv); }
     out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', id: 'srv-save', disabled: !canSave(), onclick: function () {
       var body = { id: id || '', name: (f.name || '').trim(), base_url: listed ? listed.base : sv.endpoint, model: f.model, text_only: !!f.textOnly };
@@ -1108,5 +1152,9 @@
     if (!typing || fast) refresh();
     setTimeout(tick, fast ? 1500 : 5000);
   }
+  document.addEventListener('click', function (e) {
+    if (selOpen && !(e.target && e.target.closest && e.target.closest('#usingbar'))) { selOpen = false; render(); }
+  });
+  document.addEventListener('keydown', function (e) { if (selOpen && e.key === 'Escape') { selOpen = false; render(); } });
   refresh().then(function () { setTimeout(tick, 1500); });
 })();

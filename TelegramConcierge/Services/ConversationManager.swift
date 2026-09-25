@@ -5134,7 +5134,20 @@ class ConversationManager: ObservableObject {
         case .some(false): note = " Vision model: images flow natively."
         case .none: note = ""
         }
-        try? await sendText("✅ Active provider: \(profile.displayName) — model \(model). Takes effect from the next message.\(note)")
+        try? await sendText("✅ Active provider: \(profile.displayName) — model \(model). Takes effect from the next message.\(note)\(Self.missingPageReaderWarning(for: profile))")
+    }
+
+    /// Round 4: after a switch to a lane whose web-page reading runs on the
+    /// OpenAI key (OpenCode Go, a named server) while the page-reading
+    /// backend is OpenAI and no key is saved, say so. A warning, not a
+    /// refusal: a CLI-configured install may read pages with another
+    /// /websearch backend, and the switch itself only moves stored slots
+    /// (no request bytes change).
+    static func missingPageReaderWarning(for profile: ProviderProfiles.Profile) -> String {
+        guard profile == .opencode || profile == .custom || profile == .local,
+              WebSearchBackend.configured == .openai,
+              WebSearchBackend.storedKey(for: .openai).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+        return "\n⚠️ No OpenAI API key is saved, and web pages are read with OpenAI on this provider, so web research will fail. Add the key in briglia menu (Voice & images), or pick another page-reading backend with /websearch."
     }
 
     /// The /provider buttons: every configured built-in profile, then every
@@ -5184,7 +5197,7 @@ class ConversationManager: ObservableObject {
             userInfo: ["provider": LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)).rawValue]
         )
         let note = server.textOnly ? " Text-only model: images and scans go through the OCR preprocessor." : " Vision model: images flow natively."
-        try? await sendText("✅ Active provider: \(server.name) — model \(server.model). Takes effect from the next message.\(note)")
+        try? await sendText("✅ Active provider: \(server.name) — model \(server.model). Takes effect from the next message.\(note)\(Self.missingPageReaderWarning(for: .local))")
     }
 
     /// `/websearch` — show or switch the backend that READS web pages for

@@ -285,3 +285,34 @@ h2.section { font-size: 19px; margin: 26px 0 4px; letter-spacing: -.005em; }
 .shell > main, .shell > aside { min-width: 0; }
 .saved > span { min-width: 0; overflow-wrap: anywhere; }
 .choice .n { overflow-wrap: anywhere; }
+
+/* "Briglia is using" — the lane selector, the primary control */
+.usingbar { position: relative; margin: -6px 0 22px; max-width: 620px; }
+.usingbtn { width: 100%; display: flex; align-items: center; gap: 12px; font: inherit; text-align: left; cursor: pointer; background: var(--accent-soft); color: var(--ink); border: 2px solid var(--accent-2); border-radius: 16px; padding: 12px 16px; box-shadow: 0 6px 16px rgba(31, 78, 156, .14); }
+.usingbtn:hover { filter: brightness(.98); }
+.usingbtn:disabled { opacity: .6; cursor: default; }
+.usingbtn .ulabel { flex: 0 0 auto; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+.usingbtn .uvalue { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.usingbtn .uname { font-weight: 700; font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usingbtn .umodel { font-size: 13px; color: var(--soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usingbtn .caret { font-size: 18px; color: var(--accent); transition: transform .15s; }
+.usingbtn.open .caret { transform: rotate(180deg); }
+.usinglist { position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 4; background: var(--card); border: 1.5px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 6px; display: flex; flex-direction: column; gap: 2px; max-height: 60vh; overflow: auto; }
+.usingopt { display: flex; align-items: center; gap: 10px; font: inherit; text-align: left; background: transparent; color: var(--ink); border: 0; border-radius: 12px; padding: 10px 12px; cursor: pointer; }
+.usingopt:hover:not(:disabled) { background: var(--accent-soft); }
+.usingopt.on { background: var(--ok-soft); }
+.usingopt:disabled { opacity: .55; cursor: not-allowed; }
+.usingopt .tick { flex: 0 0 18px; font-weight: 800; color: var(--ok); }
+.usingopt .otext { display: flex; flex-direction: column; min-width: 0; }
+.usingopt .oname { font-weight: 700; overflow-wrap: anywhere; }
+.usingopt .osub { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.usinghint { margin: 8px 2px 0; }
+.inlinekey { border: 1.5px solid var(--warn); background: var(--warn-soft); border-radius: 14px; padding: 12px 16px 4px; margin: 6px 0 16px; max-width: 620px; }
+.inlinekey .ititle { font-weight: 700; color: var(--warn); }
+.keyline { margin: 4px 0 12px; }
+@media (max-width: 780px) {
+  .usingbar { margin-top: 0; }
+  .usingbtn { flex-wrap: wrap; row-gap: 2px; }
+  .usingbtn .ulabel { flex-basis: 100%; }
+  .usingbtn .uvalue { flex: 1 1 0; }
+}

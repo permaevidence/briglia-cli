@@ -220,7 +220,42 @@ extension MenuSelftestContext {
         }
 
         await menuWithRealStore(key: key)
+        await firstLaneWithoutOpenAI()
         wipeStore()
+    }
+
+    /// Round 4: a fresh setup's first lane that needs no OpenAI key (here
+    /// OpenRouter) becomes the one in use at once; ChatGPT and OpenRouter
+    /// are never blocked; OpenCode added next is saved, not switched to,
+    /// and stays blocked until a key is saved.
+    func firstLaneWithoutOpenAI() async {
+        wipeStore()
+        let warn = ConversationManager.missingPageReaderWarning(for: .opencode)
+        check("R4 /provider: switching to a lane that reads pages with OpenAI, with no key saved, warns (never for OpenRouter/ChatGPT)",
+              ConversationManager.missingPageReaderWarning(for: .openrouter).isEmpty && ConversationManager.missingPageReaderWarning(for: .chatgpt).isEmpty
+              && (WebSearchBackend.configured == .openai ? warn.contains("No OpenAI API key") : warn.isEmpty))
+        var env = MenuEnvironment()
+        env.language = "en"
+        env.toolchainStatus = { ToolchainService.DesktopStatus(doctorRan: true, missing: [], libreOffice: true, mandatoryMissing: []) }
+        env.probe = { _ in ["ok": true] }
+        env.markComplete = {}
+        let wf = MenuWorkflow(env: env, runner: SetupJobRunner(secrets: [:]))
+        await wf.start(); await wf.settle()
+        check("R4: without an OpenAI key, ChatGPT and OpenRouter are never blocked; OpenCode and servers are",
+              wf.activationBlocked(.chatgpt) == nil && wf.activationBlocked(.openrouter) == nil
+              && wf.activationBlocked(.opencode) != nil && wf.activationBlocked(.local) != nil)
+        await act(wf, ["action": "lane", "lane": "openrouter"])
+        var r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": "sk-or-v1-0123456789abcdef"])
+        check("R4: the first lane of a fresh setup becomes the one in use automatically", ok(r) && ProviderProfiles.activeProfile() == .openrouter, "\(r)")
+        r = await act(wf, ["action": "provider_key", "profile": "opencode", "key": "oc-0123456789abcdef"])
+        check("R4: a later lane is saved without switching", ok(r) && ProviderProfiles.isConfigured(.opencode) && ProviderProfiles.activeProfile() == .openrouter)
+        r = await act(wf, ["action": "lane_select", "lane": "opencode"])
+        check("R4: …and can't be chosen until the OpenAI key is saved", !ok(r) && ProviderProfiles.activeProfile() == .openrouter)
+        r = await act(wf, ["action": "key", "kind": "openai", "key": "sk-openai-0123456789abcdef"])
+        check("R4: saving the key when a lane already runs doesn't switch", ok(r) && ProviderProfiles.activeProfile() == .openrouter)
+        r = await act(wf, ["action": "lane_select", "lane": "opencode"])
+        check("R4: with the key saved, the selector switches to it", ok(r) && ProviderProfiles.activeProfile() == .opencode, "\(r)")
+        await wf.shutdown()
     }
 
     static func repoRoot() -> URL? {
@@ -254,15 +289,34 @@ extension MenuSelftestContext {
         await act(["action": "local_models", "base_url": "https://api.example.com/v1", "api_key": key])
         var r = await act(["action": "server_save", "name": "Acme cloud", "base_url": "https://api.example.com/v1", "model": "acme-large", "text_only": false])
         let saved = named("Acme cloud")
-        check("page (real store): adding a keyed server saves it with its key and makes it the one in use",
-              ok(r) && saved?.apiKey == key && ProviderServers.activeServer()?.id == saved?.id
-              && KeychainHelper.load(key: KeychainHelper.openAICompatibleApiKeyKey) == key, "\(r)")
+        check("R4 page (real store): a first server added without an OpenAI key is saved but not in use",
+              ok(r) && saved?.apiKey == key && ProviderServers.activeServer() == nil && ProviderProfiles.activeProfile() == nil
+              && msg(r).contains("Add the OpenAI key"), "\(r)")
+        r = await act(["action": "lane_select", "lane": "server", "id": saved?.id ?? ""])
+        let r2 = await act(["action": "server_use", "id": saved?.id ?? ""])
+        check("R4 page (real store): it can't be chosen without the OpenAI key (selector and server_use)",
+              !ok(r) && !ok(r2) && msg(r).contains("OpenAI API key") && ProviderProfiles.activeProfile() == nil)
+        check("R4 page (real store): the selector data marks the lane as needing the key", ai(wf)["openai_key"] as? Bool == false
+              && (ai(wf)["needs_openai"] as? [String])?.contains("local") == true)
+        r = await act(["action": "key", "kind": "openai", "key": "sk-openai-0123456789abcdef"])
+        check("R4 page (real store): saving the OpenAI key makes the waiting first lane the one in use",
+              ok(r) && ProviderServers.activeServer()?.id == saved?.id && KeychainHelper.load(key: KeychainHelper.openAICompatibleApiKeyKey) == key, "\(r)")
         check("page (real store): the key never reaches the page", !json(wf.status()).contains(key) && (aiServers().first?["key"] as? String)?.isEmpty == false)
         await act(["action": "local_models", "base_url": "http://localhost:1234/v1"])
         r = await act(["action": "server_save", "name": "Home GPU", "base_url": "http://localhost:1234/v1", "model": "acme-small"])
-        check("page (real store): a second, keyless server is added and runs", ok(r) && named("Home GPU")?.keyed == false && ai(wf)["active_server"] as? String == named("Home GPU")?.id)
-        r = await act(["action": "server_use", "id": saved?.id ?? ""])
-        check("page (real store): Use switches back to the first server", ok(r) && ProviderServers.activeServer()?.name == "Acme cloud")
+        check("R4 page (real store): a second server is added without switching", ok(r) && named("Home GPU")?.keyed == false
+              && ProviderServers.activeServer()?.name == "Acme cloud" && msg(r).contains("Briglia is using"))
+        r = await act(["action": "lane_select", "lane": "server", "id": named("Home GPU")?.id ?? ""])
+        check("R4 page (real store): the selector switches to it", ok(r) && ProviderServers.activeServer()?.name == "Home GPU")
+        // Telegram /provider while the page is open: the page's next pick is
+        // refused and the page refreshes.
+        try? ProviderServers.use(saved?.id ?? "")
+        let before = runtime()
+        r = await act(["action": "lane_select", "lane": "server", "id": named("Home GPU")?.id ?? ""])
+        check("R4 page (real store): a selector pick based on a page older than a Telegram switch is refused, nothing written",
+              !ok(r) && msg(r).contains("changed elsewhere") && runtime() == before && ai(wf)["active_server"] as? String == saved?.id)
+        r = await act(["action": "lane_select", "lane": "server", "id": saved?.id ?? ""])
+        check("page (real store): choosing the lane already in use is a no-op", ok(r) && ProviderServers.activeServer()?.id == saved?.id)
 
         // A /model sent on Telegram while the page is open: the page's
         // next save on that server is refused, nothing written.

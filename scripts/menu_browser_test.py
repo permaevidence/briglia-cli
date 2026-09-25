@@ -84,6 +84,9 @@ class Fake:
             return "local"
         return None
 
+    def may_run(self, k):
+        return k not in ("opencode", "local") or bool(self.keys["openai"])
+
     def lane(self):
         return self.planned or self.active() or "chatgpt"
 
@@ -130,7 +133,8 @@ class Fake:
               "providers": provs, "opencode_models": OC_MODELS, "openrouter_default": "deepseek/deepseek-v4.1-flash",
               "servers": [dict(x, model_label=x["model"], active=(x["id"] == self.active_server),
                                efforts=(["low", "medium", "high"] if x["keyed"] and x["id"] == self.active_server else [])) for x in self.servers],
-              "active_server": self.active_server, "max_servers": 20, "servers_damaged": False}
+              "active_server": self.active_server, "max_servers": 20, "servers_damaged": False,
+              "openai_key": bool(self.keys["openai"]), "needs_openai": ["opencode", "local"], "nothing_active": self.active() is None}
         if self.local:
             ai["local"] = {k: v for k, v in self.local.items() if k != "key"}
         c = dict(self.chatgpt)
@@ -157,6 +161,11 @@ class Fake:
                 self.keys[kind] = body["key"][:5] + "…" + body["key"][-4:]
                 if kind == "agentmail":
                     self.email = {"on": True, "inbox": "bree@agentmail.to", "tool_installed": True}
+                if kind == "openai" and self.active() is None:
+                    if self.providers["opencode"]["configured"]:
+                        self.use("opencode")
+                    elif self.servers:
+                        self.use("local", self.servers[0]["id"])
                 msg = {"serper": "Web search is on.", "jina": "Briglia can now read web pages.", "openai": "Voice messages and image creation are on.", "agentmail": "Email is ready."}[kind]
         elif a == "chatgpt_browser":
             self.chatgpt["login"] = {"kind": "browser", "state": "waiting", "url": "https://auth.example/authorize", "code": None}
@@ -178,8 +187,13 @@ class Fake:
                 if not p["model"]:
                     p["model"] = "glm-5.3-flash" if k == "opencode" else "deepseek/deepseek-v4.1-flash"
                 p["model_label"] = {"glm-5.3-flash": "GLM 5.3 Flash"}.get(p["model"], p["model"])
-                self.use(k)
-                msg = "Briglia now thinks with %s on %s." % (p["model_label"], LANE_TITLES[k])
+                if self.active() == k or (self.active() is None and self.may_run(k)):
+                    self.use(k)
+                    msg = "Briglia now thinks with %s on %s." % (p["model_label"], LANE_TITLES[k])
+                elif self.active() is None:
+                    msg = "Saved. Add the OpenAI key below: Briglia starts using it as soon as the key is in."
+                else:
+                    msg = "Saved. To use it, choose it in “Briglia is using” at the top."
         elif a == "provider_model":
             k = body["profile"]
             p = self.providers[k]
@@ -187,8 +201,15 @@ class Fake:
                       "text_only": bool(body.get("text_only"))})
             self.use(k)
             msg = "Briglia now thinks with %s on %s." % (p["model_label"], LANE_TITLES[k])
-        elif a == "provider_use":
-            self.use(body["profile"]); msg = "Briglia now thinks with %s." % LANE_TITLES[body["profile"]]
+        elif a in ("provider_use", "lane_select"):
+            k = "local" if body.get("lane") == "server" else (body.get("profile") or body.get("lane"))
+            if not self.may_run(k):
+                ok, msg = False, "This lane needs an OpenAI API key (Briglia reads web pages with it). Add the key first, then choose it."
+            elif k == "local":
+                x = [x for x in self.servers if x["id"] == body["id"]][0]
+                self.use("local", x["id"]); msg = "Briglia now thinks with %s on %s." % (x["model"], x["name"])
+            else:
+                self.use(k); msg = "Briglia now thinks with %s." % LANE_TITLES[k]
         elif a == "server_save":
             sid = body.get("id") or ""
             if not body.get("name", "").strip():
@@ -208,8 +229,10 @@ class Fake:
                 if x["keyed"] and not x["effort"]:
                     x["effort"] = "high"
                 self.local = None
-                if not sid:
+                if not sid and self.active() is None and self.may_run("local"):
                     self.use("local", x["id"]); msg = "Added %s. Briglia now thinks with %s on it." % (x["name"], x["model"])
+                elif not sid:
+                    msg = "Added %s. Saved. To use it, choose it in “Briglia is using” at the top." % x["name"]
                 else:
                     msg = "Saved."
         elif a == "server_use":
@@ -601,9 +624,15 @@ def main():
         shot(page, "61-opencode-key")
         page.fill("#f-ai", "oc-wrong-00000000000000")
         page.wait_for_selector("text=OpenCode Go refused this key", timeout=6000)
+        check("R4: the OpenAI key field is on the OpenCode screen from the start", page.is_visible("#openai-inline"))
         page.fill("#f-ai", GOOD["opencode"])
+        page.wait_for_selector("text=Add the OpenAI key below", timeout=6000)
+        check("R4: the OpenCode key is saved but the lane waits for the OpenAI key, asked right on this screen",
+              o.active() is None and o.providers["opencode"]["configured"] and page.is_visible("text=OpenAI key (needed for this lane)") and page.is_visible("#f-ai-openai"))
+        shot(page, "61b-opencode-inline-openai")
+        page.fill("#f-ai-openai", GOOD["openai"])
         page.wait_for_selector("text=Connect Telegram", timeout=6000)
-        check("a good OpenCode key is saved automatically and the setup moves on", o.active() == "opencode")
+        check("R4: the inline OpenAI key makes OpenCode the one in use and the setup moves on", o.active() == "opencode" and bool(o.keys["openai"]))
         page.click("#steps button:has-text('OpenCode Go')")
         page.wait_for_selector(".choice[data-model='kimi-k3']")
         page.click(".choice[data-model='kimi-k3']")
@@ -625,9 +654,17 @@ def main():
         page.click(".lanecard[data-lane=openrouter]")
         page.wait_for_selector("h1:has-text('Connect OpenRouter')")
         check("adding OpenRouter keeps OpenCode running until it's set up", page.is_visible("text=Briglia keeps using OpenCode Go"))
+        check("R4: OpenRouter never asks for the OpenAI key", not page.is_visible("#openai-inline") and not page.is_visible("#openai-inline-saved"))
         page.fill("#f-ai", GOOD["openrouter"])
-        page.wait_for_selector("text=Briglia now thinks with deepseek/deepseek-v4.1-flash on OpenRouter.", timeout=6000)
-        check("an OpenRouter key switches Briglia to OpenRouter", o.active() == "openrouter")
+        page.wait_for_selector("text=choose it in “Briglia is using” at the top", timeout=6000)
+        check("R4: adding OpenRouter saves it without switching", o.active() == "opencode" and o.providers["openrouter"]["configured"])
+        page.click("text=← Your AI lanes")
+        page.click("#lane-select")
+        page.click("[data-select=openrouter]")
+        page.wait_for_selector("#lane-select >> text=OpenRouter")
+        check("R4: the selector switches to it", o.active() == "openrouter")
+        page.click("[data-edit=openrouter]")
+        page.wait_for_selector("#f-or-model")
         page.fill("#f-or-model", "moonshotai/kimi-k3")
         page.click("button:has-text('Use this model')")
         page.wait_for_selector("text=Briglia now thinks with moonshotai/kimi-k3 on OpenRouter.")
@@ -637,6 +674,7 @@ def main():
         page.click("#add-lane")
         page.click(".lanecard[data-lane=local]")
         page.wait_for_selector("h1:has-text('Add a server')")
+        check("R4: with an OpenAI key saved, a server lane just says it uses it", page.is_visible("#openai-inline-saved") and not page.is_visible("#f-ai-openai"))
         check("the new server's address starts at LM Studio's default", page.input_value("#f-srv-url") == "http://localhost:1234/v1")
         check("the optional API key field hides what's typed", page.get_attribute("#f-local-key", "type") == "password" and page.input_value("#f-local-key") == "")
         check("Add is disabled until a model is picked and the server is named", page.is_disabled("#srv-save"))
@@ -650,9 +688,9 @@ def main():
         page.click("#srv-save")
         page.wait_for_selector("text=Added Home GPU.")
         sv = [c for c in o.calls if c.get("action") == "server_save"][-1]
-        check("the server is saved with its name, address and model, and runs",
+        check("R4: the server is saved with its name, address and model, without switching",
               sv.get("name") == "Home GPU" and sv.get("base_url") == "http://localhost:1234/v1" and sv.get("model") == "gemma-4-12b" and sv.get("id") == ""
-              and o.active() == "local" and page.is_visible(".lanerow[data-lane-card^='srv:'] >> text=Home GPU"))
+              and o.active() == "openrouter" and page.is_visible(".lanerow[data-lane-card^='srv:'] >> text=Home GPU"))
         # A second server, online, with a key.
         page.click("#add-lane")
         page.click(".lanecard[data-lane=local]")
@@ -668,6 +706,11 @@ def main():
         page.click("#srv-save")
         page.wait_for_selector("text=Added Acme cloud.")
         check("the page never shows the typed key back", "sk-fake-server-key-123" not in page.content())
+        acme = [x for x in o.servers if x["name"] == "Acme cloud"][0]
+        page.click("#lane-select")
+        check("R4: the selector lists every lane, servers by name", page.locator(".usingopt").count() == 4 and page.is_visible(".usingopt >> text=Acme cloud"))
+        page.click("[data-select='srv:%s']" % acme["id"])
+        page.wait_for_selector("#lane-select >> text=Acme cloud")
         check("each server is its own card; the one in use is marked",
               page.locator(".lanerow[data-lane-card^='srv:']").count() == 2 and page.is_visible(".lanerow.active >> text=Acme cloud"))
         shot(page, "66-lanes-home")
@@ -685,17 +728,18 @@ def main():
               sv.get("id") == home["id"] and sv.get("name") == "Home box" and sv.get("model") == "gemma-4-12b" and home["name"] == "Home box")
         page.click("text=← Your AI lanes")
         # Remove: refused for the one in use (no button), asks once for another.
-        acme = [x for x in o.servers if x["name"] == "Acme cloud"][0]
         check("the server in use has no Remove button", not page.is_visible("[data-remove='srv:%s']" % acme["id"]))
         page.click("[data-remove='srv:%s']" % home["id"])
         check("Remove asks once before acting", page.is_visible("text=Remove Home box?") and len(o.servers) == 2)
         page.click("[data-confirm-remove='srv:%s']" % home["id"])
         page.wait_for_selector("text=Home box removed.")
         check("a confirmed Remove deletes the server", [x["name"] for x in o.servers] == ["Acme cloud"])
-        # Use: back to a saved built-in lane in one click.
-        page.click("[data-use=opencode]")
+        # The selector: back to a saved built-in lane in two taps; no Use buttons on cards.
+        check("R4: lane cards have no Use button", page.locator("[data-use]").count() == 0)
+        page.click("#lane-select")
+        page.click("[data-select=opencode]")
         page.wait_for_selector(".lanerow[data-lane-card=opencode] >> text=In use")
-        check("Use switches back to a saved lane in one click", o.active() == "opencode")
+        check("R4: the selector switches back to a saved lane", o.active() == "opencode")
         overflow = page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")
         check("no page errors or overflow while managing lanes", not errors and not overflow, errors)
         ctx.close()
@@ -712,6 +756,15 @@ def main():
             pf.use("local", "srv-0002")
             ctx, page, errors = session(pf, width=390, height=844)
             page.wait_for_selector("#add-lane")
+            check("phone (%s): the selector is at the top, naming the lane in use" % lang, page.is_visible("#lane-select >> text=Acme cloud")
+                  and page.evaluate("document.getElementById('lane-select').getBoundingClientRect().top < document.querySelector('.lanehome').getBoundingClientRect().top"))
+            shot(page, "85-phone-selector-closed-" + lang)
+            page.click("#lane-select")
+            page.wait_for_selector("#lane-options")
+            check("phone (%s): the open selector fits the screen" % lang, not page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")
+                  and page.locator(".usingopt").count() == 4)
+            shot(page, "86-phone-selector-open-" + lang)
+            page.keyboard.press("Escape")
             overflow = page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")
             check("phone (%s): the lanes home fits without sideways scrolling" % lang, not overflow and page.locator(".lanerow").count() == 4)
             if lang == "it":
@@ -727,6 +780,47 @@ def main():
                 check("phone: the server edit form fits", not page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1"))
                 shot(page, "84-phone-server-edit")
             check("phone (%s): no page errors" % lang, not errors, errors)
+            ctx.close()
+
+        # ---- R4: lanes that need the OpenAI key are disabled in the selector without it ----
+        nk = Fake()
+        nk.name = "Sofia"; nk.chatgpt.update({"state": "signed_in", "active": True}); nk.telegram.update({"configured": True, "chat_id": "5551234567", "bot": "sofia_test_bot"})
+        nk.keys.update({"serper": "srp-g…cdef", "jina": "jina_…cdef"}); nk.computer["fda"] = True; nk.tools.update({"complete": True, "missing": []})
+        nk.providers["opencode"].update({"configured": True, "model": "glm-5.3-flash", "model_label": "GLM 5.3 Flash", "key": "oc-go…cdef"})
+        ctx, page, errors = session(nk, width=390, height=844)
+        page.wait_for_selector("#lane-select")
+        page.click("#lane-select")
+        check("R4: without an OpenAI key, OpenCode is disabled in the selector with a hint",
+              page.is_disabled("[data-select=opencode]") and page.is_visible("[data-select=opencode] >> text=Needs an OpenAI API key") and page.is_visible("#using-add-key"))
+        shot(page, "87-phone-selector-needs-key")
+        page.keyboard.press("Escape")
+        page.click("[data-edit=opencode]")
+        page.wait_for_selector("#openai-inline")
+        check("R4: editing that lane asks for the OpenAI key inline", page.is_visible("text=OpenAI key (needed for this lane)"))
+        page.fill("#f-ai-openai", GOOD["openai"])
+        page.wait_for_selector("#openai-inline-saved", timeout=6000)
+        check("R4: once saved, the lane says it uses the saved key and the selector enables it; nothing switched",
+              bool(nk.keys["openai"]) and nk.active() == "chatgpt")
+        page.click("text=← Your AI lanes")
+        page.click("#lane-select")
+        check("R4: …OpenCode is now choosable", page.is_enabled("[data-select=opencode]"))
+        page.click("[data-select=opencode]")
+        page.wait_for_selector("#lane-select >> text=OpenCode Go")
+        check("R4: and choosing it switches", nk.active() == "opencode" and not errors, errors)
+        ctx.close()
+        # The add-OpenCode screen at phone width, with the inline key field (EN and IT).
+        for lang in ("en", "it"):
+            ad = Fake(); ad.lang = lang
+            ad.name = "Sofia"; ad.chatgpt.update({"state": "signed_in", "active": True}); ad.telegram.update({"configured": True, "chat_id": "5551234567", "bot": "sofia_test_bot"})
+            ad.keys.update({"serper": "srp-g…cdef", "jina": "jina_…cdef"}); ad.computer["fda"] = True; ad.tools.update({"complete": True, "missing": []})
+            ctx, page, errors = session(ad, width=390, height=844)
+            page.wait_for_selector("#add-lane")
+            page.click("#add-lane")
+            page.click(".lanecard[data-lane=opencode]")
+            page.wait_for_selector("#openai-inline")
+            check("R4 phone (%s): adding OpenCode shows the inline OpenAI key field, no overflow" % lang,
+                  page.is_visible("#f-ai-openai") and not page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1"))
+            shot(page, "88-phone-add-opencode-inline-key-" + lang)
             ctx.close()
 
         # ---- Linux start failure (Codex R3): shown on the page with Retry,

@@ -318,6 +318,40 @@ final class MenuWorkflow {
 
     func server(_ id: String) -> MenuSnapshot.Server? { snapshot.servers.first { $0.id == id } }
 
+    // MARK: Which lane may run (Round 4)
+
+    var openAIKeySaved: Bool { snapshot.openAIMasked != nil }
+
+    /// A fresh setup: no provider runs yet, so the first lane saved becomes
+    /// the one in use. Otherwise adding or editing a lane never switches:
+    /// the "Briglia is using" selector does.
+    var nothingActive: Bool { snapshot.activeProfile == nil && !snapshot.chatgptReady }
+
+    /// Why `lane` can't become the one in use now, nil when it can. OpenCode
+    /// Go and servers read web pages with the OpenAI key (owner rule), so
+    /// they need it saved first.
+    func activationBlocked(_ lane: MenuLane) -> String? {
+        guard lane.needsOpenAI, !openAIKeySaved else { return nil }
+        return L("This lane needs an OpenAI API key (Briglia reads web pages with it). Add the key first, then choose it.",
+                 "Questo fornitore richiede una chiave API di OpenAI (Briglia la usa per leggere le pagine web). Aggiungi prima la chiave, poi sceglilo.")
+    }
+
+    /// Whether saving a lane (added or edited) also makes it the one in use:
+    /// it already is, or nothing runs yet and it's allowed to.
+    func activatesOnSave(_ lane: MenuLane, isActive: Bool) -> Bool {
+        isActive || (nothingActive && activationBlocked(lane) == nil)
+    }
+
+    /// The reply after saving a lane that didn't become the one in use.
+    func savedNotInUse(_ lane: MenuLane) -> String {
+        if nothingActive, activationBlocked(lane) != nil {
+            return L("Saved. Add the OpenAI key below: Briglia starts using it as soon as the key is in.",
+                     "Salvato. Aggiungi qui sotto la chiave OpenAI: Briglia inizia a usarlo appena la chiave è salvata.")
+        }
+        return L("Saved. To use it, choose it in \u{201C}Briglia is using\u{201D} at the top.",
+                 "Salvato. Per usarlo, sceglilo in \u{201C}Briglia sta usando\u{201D} in alto.")
+    }
+
     /// The saved profile a lane edits (the server lane: the active server's
     /// carrier).
     func profile(for lane: MenuLane) -> ProviderProfiles.Profile {
@@ -585,6 +619,10 @@ final class MenuWorkflow {
             "ready": isDone(.ai), "openai_required": openAIRequired, "media_via": mediaVia ?? NSNull(), "providers": providers,
             "servers": servers, "active_server": running ?? NSNull(), "max_servers": ProviderServers.maxServers,
             "servers_damaged": snapshot.serversDamaged,
+            // Round 4: the "Briglia is using" selector disables the lanes that
+            // need the OpenAI key while none is saved.
+            "openai_key": openAIKeySaved, "needs_openai": MenuLane.allCases.filter(\.needsOpenAI).map(\.rawValue),
+            "nothing_active": nothingActive,
             "opencode_models": OpenCodeGo.choices.map { ["id": $0.id, "label": $0.label, "recommended": $0.id == OpenCodeGo.defaultModel] as [String: Any] },
             "openrouter_default": Self.openRouterDefaultModel,
         ]
@@ -690,7 +728,7 @@ final class MenuWorkflow {
         // still checking, so a late check can't switch the provider back.
         case "chatgpt_browser", "chatgpt_code", "chatgpt_cancel", "chatgpt_logout", "chatgpt_model", "chatgpt_use",
              "lane", "provider_key", "provider_model", "provider_use", "effort",
-             "server_save", "server_use", "lane_remove": return "ai"
+             "server_save", "server_use", "lane_remove", "lane_select": return "ai"
         case "telegram_token", "telegram_wait", "telegram_manual", "telegram_reset", "telegram_confirm": return "telegram"
         default: return nil
         }
@@ -803,18 +841,7 @@ final class MenuWorkflow {
             return try await changeProviderModel(body, basis: basis, checkpoint: checkpoint)
 
         case "provider_use":
-            if str(body, "profile") == ProviderProfiles.Profile.openai.rawValue { return try await useOpenAIProfile(basis: basis, checkpoint: checkpoint) }
-            guard let chosen = MenuLane(rawValue: str(body, "profile")), chosen != .local else { return (false, L("Unknown provider.", "Fornitore sconosciuto.")) }
-            if chosen == .chatgpt {
-                guard case .signedIn = snapshot.chatgpt else { return (false, L("Sign in to ChatGPT first.", "Prima accedi a ChatGPT.")) }
-                return try await selectAndProbe(basis: basis, checkpoint)
-            }
-            let p = stored(chosen)
-            guard p.configured else {
-                return (false, L("Set up \(chosen.title(lang)) first.", "Prima configura \(chosen.title(lang))."))
-            }
-            return try await saveProvider(chosen, profile: chosen.profile, apiKey: nil, model: p.model, baseURL: nil, textOnly: p.textOnly,
-                                          effort: p.effort.isEmpty ? nil : p.effort, basis: basis, checkpoint: checkpoint)
+            return try await useLane(str(body, "profile"), basis: basis, checkpoint: checkpoint)
 
         case "local_models":
             return await listLocalModels(str(body, "base_url"), typedKey: str(body, "api_key"), serverId: str(body, "server_id"), generation: g)
@@ -823,22 +850,23 @@ final class MenuWorkflow {
             return try await saveServer(body, basis: basis, checkpoint: checkpoint)
 
         case "server_use":
-            let id = str(body, "id")
-            guard let target = server(id) else { return (false, L("That server was removed. The page now shows your current lanes.", "Quel server è stato rimosso. Ora la pagina mostra le tue AI attuali.")) }
-            if activeServer?.id == id { return (true, nil) }
-            try checkpoint()
-            let apply = env.apply
-            var payload: [String: Any] = ["server": ["action": "use", "id": id]]
-            if snapshot.openAIMasked != nil { payload["web_search_backend"] = WebSearchBackend.openai.rawValue }
-            guard let result = try await guardedAIWrite(basis, { await apply(payload, checkpoint) }) else { return (false, staleMessage) }
-            try checkpoint()
-            await reload()
-            guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
-            plannedLane = nil
-            return (true, L("Briglia now thinks with \(target.model) on \(target.name).", "Ora Briglia ragiona con \(target.model) su \(target.name)."))
+            return try await useServer(str(body, "id"), basis: basis, checkpoint: checkpoint)
 
         case "lane_remove":
             return try await removeLane(body, basis: basis, checkpoint: checkpoint)
+
+        case "lane_select":
+            // The "Briglia is using" selector: one entry per saved lane.
+            let lane = str(body, "lane")
+            // A pick made on a page older than a switch elsewhere (Telegram
+            // /provider, another page) is refused and the page refreshed,
+            // even when it names the lane the old page showed in use.
+            if Self.aiState(await env.snapshot()) != basis { await reload(); return (false, staleMessage) }
+            if lane == "server" { return try await useServer(str(body, "id"), basis: basis, checkpoint: checkpoint) }
+            guard ["chatgpt", "opencode", "openrouter", "openai"].contains(lane) else { return (false, L("Unknown provider.", "Fornitore sconosciuto.")) }
+            if lane == "chatgpt", snapshot.chatgptReady { return (true, nil) }
+            if lane != "chatgpt", snapshot.activeProfile == lane { return (true, nil) }
+            return try await useLane(lane, basis: basis, checkpoint: checkpoint)
 
         case "effort":
             return try await changeEffort(str(body, "effort"), basis: basis, checkpoint: checkpoint)
@@ -1032,6 +1060,12 @@ final class MenuWorkflow {
         try checkpoint()
         await reload()
         guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
+        if kind == "openai", nothingActive, let pending = pendingLaneNeedingKey() {
+            // A fresh setup whose first lane was waiting for this key: it
+            // becomes the one in use now.
+            let (activated, message) = try await activatePending(pending, checkpoint: checkpoint)
+            if activated { return (true, L("Key saved. ", "Chiave salvata. ") + (message ?? "")) }
+        }
         if kind == "agentmail" {
             let inbox = (probe["inboxes"] as? [String])?.first.map { self.L(" Briglia\u{2019}s address: \($0).", " Indirizzo di Briglia: \($0).") } ?? ""
             if !snapshot.agentMailCLIInstalled && busy == nil { startEmailToolInstall(checkpoint) }
@@ -1105,7 +1139,9 @@ final class MenuWorkflow {
                 let selection = self.signInSelection ?? (false, nil)
                 self.signInSelection = nil
                 var (ok, message) = selection
-                if ok { (ok, message) = try await self.probeChatGPT(checkpoint) }
+                let saveOnly = self.signInSaveOnly
+                self.signInSaveOnly = false
+                if ok && !saveOnly { (ok, message) = try await self.probeChatGPT(checkpoint) }
                 guard self.loginAttempt == attempt else { return }
                 self.loginAttempt = nil
                 self.login = ok ? nil : Login(kind: browser ? "browser" : "code", state: "error", message: message)
@@ -1143,6 +1179,8 @@ final class MenuWorkflow {
     /// The switch made together with a sign-in's commit, read by the sign-in
     /// task once the login returns.
     private var signInSelection: (Bool, String?)?
+    /// The sign-in was saved without switching (another lane runs).
+    private var signInSaveOnly = false
 
     /// The last step of a sign-in: the human wait is over and the new login
     /// is only in memory. Under the live barrier (the agent idle, up to
@@ -1163,8 +1201,18 @@ final class MenuWorkflow {
             // the ticket is checked again under that lock, so a newer action
             // taken meanwhile leaves the saved credential untouched.
             generation = try await write(checkpoint)
+            let wasInUse = self.snapshot.activeProfile == ProviderProfiles.Profile.chatgpt.rawValue
+            let fresh = self.nothingActive
             await self.reload()
-            selection = try await self.selectChatGPT(checkpoint)
+            // Adding ChatGPT while another lane runs only saves the sign-in;
+            // the selector switches. A fresh setup, or signing in again to
+            // the lane in use, switches to it as before.
+            if wasInUse || fresh {
+                selection = try await self.selectChatGPT(checkpoint)
+            } else {
+                self.signInSaveOnly = true
+                selection = (true, nil)
+            }
         }
         guard entered else { throw MenuSignInRefused.busy }
         signInSelection = selection
@@ -1300,7 +1348,8 @@ final class MenuWorkflow {
         guard probe["ok"] as? Bool == true else { return (false, keyError(service: lane.title(lang), Self.probeReason(probe))) }
         return try await saveProvider(lane, apiKey: key, model: model, baseURL: nil,
                                       textOnly: model == stored.model && stored.configured ? stored.textOnly : nil,
-                                      effort: stored.effort.isEmpty ? nil : stored.effort, basis: basis, checkpoint: checkpoint)
+                                      effort: stored.effort.isEmpty ? nil : stored.effort,
+                                      activate: activatesOnSave(lane, isActive: activeLane == lane), basis: basis, checkpoint: checkpoint)
     }
 
     /// A different model (OpenCode Go catalog, an OpenRouter id, or a local
@@ -1339,7 +1388,8 @@ final class MenuWorkflow {
         // theirs unless the page says otherwise (a new id defaults to vision).
         let vision: Bool? = lane == .opencode ? nil : (textOnly ?? (model == stored.model ? stored.textOnly : false))
         return try await saveProvider(lane, profile: lane.profile, apiKey: nil, model: model, baseURL: nil, textOnly: vision,
-                                      effort: stored.effort.isEmpty ? nil : stored.effort, basis: basis, checkpoint: checkpoint)
+                                      effort: stored.effort.isEmpty ? nil : stored.effort,
+                                      activate: activatesOnSave(lane, isActive: activeLane == lane), basis: basis, checkpoint: checkpoint)
     }
 
     /// Saves one provider profile through setup-api and makes it the one
@@ -1347,9 +1397,13 @@ final class MenuWorkflow {
     /// rule for every lane but ChatGPT), so the stored research backend is
     /// set to OpenAI whenever that key is there.
     private func saveProvider(_ lane: MenuLane, profile: ProviderProfiles.Profile? = nil, apiKey: String?, model: String, baseURL: String?, textOnly: Bool?, effort: String?,
-                              basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+                              activate: Bool = true, basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         let profile = profile ?? lane.profile
-        var section: [String: Any] = ["profile": profile.rawValue, "model": model, "activate": true]
+        // Switching TO a lane that needs the OpenAI key needs it saved; the
+        // lane already in use (an older install without the key) can still
+        // change its model or level.
+        if activate, activeLane != lane, let blocked = activationBlocked(lane) { return (false, blocked) }
+        var section: [String: Any] = ["profile": profile.rawValue, "model": model, "activate": activate]
         if let apiKey { section["api_key"] = apiKey }
         if let baseURL { section["base_url"] = baseURL }
         if let textOnly { section["text_only"] = textOnly }
@@ -1362,9 +1416,62 @@ final class MenuWorkflow {
         try checkpoint()
         await reload()
         guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
+        guard activate else { return (true, savedNotInUse(lane)) }
         plannedLane = nil
         let label = Self.modelLabel(lane, model)
         return (true, L("Briglia now thinks with \(label) on \(lane.title(lang)).", "Ora Briglia ragiona con \(label) su \(lane.title(lang))."))
+    }
+
+    /// Switch to a saved built-in lane (the selector, the old Use button).
+    private func useLane(_ raw: String, basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+        if raw == ProviderProfiles.Profile.openai.rawValue { return try await useOpenAIProfile(basis: basis, checkpoint: checkpoint) }
+        guard let chosen = MenuLane(rawValue: raw), chosen != .local else { return (false, L("Unknown provider.", "Fornitore sconosciuto.")) }
+        if chosen == .chatgpt {
+            guard case .signedIn = snapshot.chatgpt else { return (false, L("Sign in to ChatGPT first.", "Prima accedi a ChatGPT.")) }
+            return try await selectAndProbe(basis: basis, checkpoint)
+        }
+        if let blocked = activationBlocked(chosen) { return (false, blocked) }
+        let p = stored(chosen)
+        guard p.configured else {
+            return (false, L("Set up \(chosen.title(lang)) first.", "Prima configura \(chosen.title(lang))."))
+        }
+        return try await saveProvider(chosen, profile: chosen.profile, apiKey: nil, model: p.model, baseURL: nil, textOnly: p.textOnly,
+                                      effort: p.effort.isEmpty ? nil : p.effort, basis: basis, checkpoint: checkpoint)
+    }
+
+    /// Switch to a saved named server.
+    private func useServer(_ id: String, basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+        guard let target = server(id) else { return (false, L("That server was removed. The page now shows your current lanes.", "Quel server è stato rimosso. Ora la pagina mostra le tue AI attuali.")) }
+        if activeServer?.id == id { return (true, nil) }
+        if let blocked = activationBlocked(.local) { return (false, blocked) }
+        try checkpoint()
+        let apply = env.apply
+        var payload: [String: Any] = ["server": ["action": "use", "id": id]]
+        if snapshot.openAIMasked != nil { payload["web_search_backend"] = WebSearchBackend.openai.rawValue }
+        guard let result = try await guardedAIWrite(basis, { await apply(payload, checkpoint) }) else { return (false, staleMessage) }
+        try checkpoint()
+        await reload()
+        guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
+        plannedLane = nil
+        return (true, L("Briglia now thinks with \(target.model) on \(target.name).", "Ora Briglia ragiona con \(target.model) su \(target.name)."))
+    }
+
+    /// The saved lane a fresh setup is waiting to run once the OpenAI key is
+    /// in: the lane being set up, else OpenCode Go, else the first server.
+    private func pendingLaneNeedingKey() -> (lane: MenuLane, server: String?)? {
+        if plannedLane == .opencode, stored(.opencode).configured { return (.opencode, nil) }
+        if plannedLane == .local, let s = snapshot.servers.first { return (.local, s.id) }
+        if stored(.opencode).configured { return (.opencode, nil) }
+        if let s = snapshot.servers.first { return (.local, s.id) }
+        return nil
+    }
+
+    private func activatePending(_ pending: (lane: MenuLane, server: String?), checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+        let basis = Self.aiState(snapshot)
+        if let id = pending.server { return try await useServer(id, basis: basis, checkpoint: checkpoint) }
+        let p = stored(.opencode)
+        return try await saveProvider(.opencode, profile: .opencode, apiKey: nil, model: p.model, baseURL: nil, textOnly: p.textOnly,
+                                      effort: p.effort.isEmpty ? nil : p.effort, basis: basis, checkpoint: checkpoint)
     }
 
     // MARK: Named servers
@@ -1430,8 +1537,9 @@ final class MenuWorkflow {
                                  "Il server \(base) non ha risposto con \(model): \(reason). Controlla che il modello sia caricato, poi riprova."))
             }
         }
+        let activateNew = existing == nil && activatesOnSave(.local, isActive: false)
         var section: [String: Any] = ["action": "save", "name": name, "base_url": base, "model": model, "text_only": textOnly,
-                                      "activate": existing == nil]
+                                      "activate": activateNew]
         if let existing { section["id"] = existing.id }
         if let keyForSave { section["api_key"] = keyForSave }
         var payload: [String: Any] = ["server": section]
@@ -1444,6 +1552,7 @@ final class MenuWorkflow {
         guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
         localListing = nil
         if existing == nil {
+            guard activateNew else { return (true, L("Added \(name). ", "Aggiunto \(name). ") + savedNotInUse(.local)) }
             plannedLane = nil
             return (true, L("Added \(name). Briglia now thinks with \(model) on it.", "Aggiunto \(name). Ora Briglia ragiona con \(model) su questo server."))
         }

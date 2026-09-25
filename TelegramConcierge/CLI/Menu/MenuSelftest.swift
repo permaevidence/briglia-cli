@@ -606,15 +606,22 @@ final class MenuSelftestContext {
         check("a refused OpenCode key is explained and nothing is saved", !ok(r) && msg(r).contains("OpenCode Go refused this key") && w.applied.count == appliedBefore)
         r = await act(wf, ["action": "provider_key", "profile": "opencode", "key": w.good["opencode"]!])
         var pr = lastProvider(w)
-        check("a good OpenCode key saves GLM 5.3 Flash at high and switches to it",
+        check("R4: a good OpenCode key on a fresh setup without an OpenAI key is saved, not switched to, and asks for the key",
               ok(r) && pr?["profile"] as? String == "opencode" && pr?["model"] as? String == OpenCodeGo.defaultModel && pr?["effort"] as? String == "high"
-              && pr?["activate"] as? Bool == true && pr?["api_key"] as? String == w.good["opencode"] && done(wf, "ai") && ai(wf)["active"] as? String == "opencode" && ai(wf)["planned"] is NSNull)
+              && pr?["activate"] as? Bool == false && pr?["api_key"] as? String == w.good["opencode"] && !done(wf, "ai") && ai(wf)["active"] is NSNull
+              && msg(r).contains("Add the OpenAI key"))
+        r = await act(wf, ["action": "provider_use", "profile": "opencode"])
+        check("R4: OpenCode can't become the one in use without an OpenAI key (server-side)", !ok(r) && msg(r).contains("needs an OpenAI API key") && ai(wf)["active"] is NSNull)
+        r = await act(wf, ["action": "lane_select", "lane": "opencode"])
+        check("R4: …nor through the selector", !ok(r) && msg(r).contains("needs an OpenAI API key") && ai(wf)["active"] is NSNull)
         check("without an OpenAI key the research backend is left alone", w.applied.last?["web_search_backend"] == nil)
         check("the page never gets the provider key back, only its masked form",
               !json(wf.status()).contains(w.good["opencode"]!) && (aiProvider(wf, "opencode")["key"] as? String)?.isEmpty == false)
         check("the OpenAI key is still required after the switch", step(wf, "openai")["required"] as? Bool == true && !done(wf, "openai"))
         r = await act(wf, ["action": "key", "kind": "openai", "key": w.good["openai"]!])
-        check("with OpenCode the OpenAI key turns on web research too", ok(r) && msg(r).contains("Web research") && done(wf, "openai"))
+        check("R4: saving the OpenAI key makes the waiting first lane the one in use (fresh setup)",
+              ok(r) && done(wf, "openai") && ai(wf)["active"] as? String == "opencode" && done(wf, "ai") && lastProvider(w)?["activate"] as? Bool == true
+              && msg(r).contains("Briglia now thinks with"))
         r = await act(wf, ["action": "key_remove", "kind": "openai"])
         check("the required OpenAI key can't be removed", !ok(r) && msg(r).contains("can\u{2019}t be removed") && done(wf, "openai"))
 
@@ -644,8 +651,11 @@ final class MenuSelftestContext {
         check("setting up OpenRouter keeps OpenCode running meanwhile", ok(r) && ai(wf)["lane"] as? String == "openrouter" && ai(wf)["active"] as? String == "opencode" && done(wf, "ai"))
         r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]!])
         pr = lastProvider(w)
-        check("an OpenRouter key is checked with the default model and switched to",
-              ok(r) && pr?["profile"] as? String == "openrouter" && pr?["model"] as? String == MenuWorkflow.openRouterDefaultModel && ai(wf)["active"] as? String == "openrouter")
+        check("R4: adding OpenRouter while OpenCode runs saves it without switching",
+              ok(r) && pr?["profile"] as? String == "openrouter" && pr?["model"] as? String == MenuWorkflow.openRouterDefaultModel && pr?["activate"] as? Bool == false
+              && ai(wf)["active"] as? String == "opencode" && msg(r).contains("Briglia is using"))
+        r = await act(wf, ["action": "lane_select", "lane": "openrouter"])
+        check("R4: the selector switches to the saved lane", ok(r) && ai(wf)["active"] as? String == "openrouter" && lastProvider(w)?["activate"] as? Bool == true)
         r = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "nobody/nothing"])
         check("an OpenRouter model id OpenRouter doesn't know is refused", !ok(r) && msg(r).contains("not a valid model"))
         r = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "moonshotai/kimi-k3", "text_only": true])
@@ -690,9 +700,12 @@ final class MenuSelftestContext {
         check("a reserved name (a provider's own name) is refused", !ok(r) && msg(r).contains("reserved") && w.serverRequests.isEmpty)
         r = await act(wf, ["action": "server_save", "name": "Home GPU", "model": "qwen3.8-27b", "base_url": "http://localhost:1234/v1"])
         var sr = lastServer(w)
-        check("a keyless server is added with its name, address and model, no key, and switched to",
+        check("R4: a keyless server is added with its name, address and model, no key, and NOT switched to",
               ok(r) && sr?["action"] as? String == "save" && sr?["name"] as? String == "Home GPU" && sr?["base_url"] as? String == "http://localhost:1234/v1"
-              && sr?["api_key"] as? String == "" && sr?["activate"] as? Bool == true && sr?["id"] == nil && ai(wf)["active"] as? String == "local" && w.probes.last == "local")
+              && sr?["api_key"] as? String == "" && sr?["activate"] as? Bool == false && sr?["id"] == nil && ai(wf)["active"] as? String == "opencode" && w.probes.last == "local")
+        let homeID = servers(wf).first?["id"] as? String ?? ""
+        r = await act(wf, ["action": "lane_select", "lane": "server", "id": homeID])
+        check("R4: the selector switches to a named server", ok(r) && ai(wf)["active"] as? String == "local" && ai(wf)["active_server"] as? String == homeID)
         check("a keyless server offers no thinking level", (servers(wf).first?["efforts"] as? [String]) == [])
         check("the dashboard names the running server", step(wf, "ai")["title"] as? String == "Home GPU" && step(wf, "ai")["summary"] as? String == "qwen3.8-27b")
         r = await act(wf, ["action": "server_save", "name": "home gpu", "model": "qwen3.8-27b", "base_url": "http://localhost:1234/v1"])
@@ -722,9 +735,10 @@ final class MenuSelftestContext {
             let probes = w.probes.count
             r = await act(wf, ["action": "server_save", "name": "Acme cloud", "model": "acme-large", "base_url": "https://api.example.com/v1"])
             sr = lastServer(w)
-            check("key: a keyed server is added with its key and switched to (one check first)",
-                  ok(r) && sr?["api_key"] as? String == key && sr?["base_url"] as? String == "https://api.example.com/v1" && sr?["activate"] as? Bool == true
+            check("key: a keyed server is added with its key, not switched to (one check first)",
+                  ok(r) && sr?["api_key"] as? String == key && sr?["base_url"] as? String == "https://api.example.com/v1" && sr?["activate"] as? Bool == false
                   && w.probes.count == probes + 1 && w.probes.last == "custom")
+            await act(wf, ["action": "lane_select", "lane": "server", "id": servers(wf).first { $0["name"] as? String == "Acme cloud" }?["id"] as? String ?? ""])
             let acme = servers(wf).first { $0["name"] as? String == "Acme cloud" } ?? [:]
             check("key: its card shows the masked key only, in use, with thinking levels",
                   acme["active"] as? Bool == true && acme["keyed"] as? Bool == true && (acme["key"] as? String).map { !$0.contains(key) && !$0.isEmpty } == true
