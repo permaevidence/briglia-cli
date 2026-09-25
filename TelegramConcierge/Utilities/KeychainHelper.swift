@@ -353,7 +353,11 @@ extension KeychainHelper {
     // GPT-6 Luna (2026-09-23, was GPT-5.6 Luna): $0.10/$0.50 per M tokens,
     // half of 5.6 Luna, 1M context, served by the OpenAI API, OpenRouter and
     // the ChatGPT subscription. Effort comes from openrouter_reasoning_effort
-    // (defaults to high).
+    // (defaults to high). Since 2026-09-25 the Web researcher and the legacy
+    // loop's agent rounds run the MAIN model instead; this default (and the
+    // openrouter_websearch_model setting) now only picks the legacy loop's
+    // model in harnesses without a service and the backend resolver's
+    // fallback; page extraction has its own pins (ORModel).
     static let defaultWebSearchModel = "openai/gpt-6-luna"
     static let openRouterProvidersKey = "openrouter_providers"
     static let openRouterReasoningEffortKey = "openrouter_reasoning_effort"

@@ -499,7 +499,7 @@ def main():
         page.click("#lane-continue")
         page.wait_for_selector("text=Let’s set up Briglia")
         check("the welcome lists what OpenCode needs, OpenAI key included",
-              o.planned == "opencode" and page.is_visible("text=an OpenCode Go subscription") and page.is_visible("text=Briglia’s web research runs on it"))
+              o.planned == "opencode" and page.is_visible("text=an OpenCode Go subscription") and page.is_visible("text=Briglia reads web pages with it"))
         check("the OpenAI key is a required step on this lane", page.is_visible("#steps li.todo >> text=OpenAI key"))
         shot(page, "60-opencode-welcome")
         page.click("text=Let’s start")

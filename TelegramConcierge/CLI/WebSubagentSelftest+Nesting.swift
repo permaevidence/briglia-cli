@@ -353,12 +353,14 @@ extension WebSubagentSelftest {
             let ambientWeb = await SubagentRunner().run(
                 invocation: SubagentRunner.Invocation(subagentType: "Web", description: "ambient", taskPrompt: "probe", modelOverride: nil, runInBackground: false, deliverable: .short),
                 sessionId: nil, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
-            WebSearchBackend.processOverride = .openai
+            // Responses: the researcher follows a main Responses profile (C).
             serverC.script([WebFixtureServer.responsesBody("Ambient probe.", id: "amb1"), WebFixtureServer.responsesBody("Ambient probe.", id: "amb2")])
-            let ambientResponses = await SubagentRunner().run(
-                invocation: SubagentRunner.Invocation(subagentType: "Web", description: "ambient-responses", taskPrompt: "probe", modelOverride: nil, runInBackground: false, deliverable: .short),
-                sessionId: nil, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
-            WebSearchBackend.processOverride = .opencode
+            let responsesChild = await mainExecutor.makeChildExecutor()
+            let ambientResponses = await Self.withMainSlots(Self.mainSlots(profile: "openai", base: h.baseC + "/v1", model: "gpt-6-sol", key: "synthetic-main-openai-key", effort: "high", responses: true)) {
+                await SubagentRunner().run(
+                    invocation: SubagentRunner.Invocation(subagentType: "Web", description: "ambient-responses", taskPrompt: "probe", modelOverride: nil, runInBackground: false, deliverable: .short),
+                    sessionId: nil, openRouterService: service, toolExecutor: responsesChild, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            }
             let ambientGeneral = await SubagentRunner().run(
                 invocation: SubagentRunner.Invocation(subagentType: "general-purpose", description: "ambient-general", taskPrompt: "probe", modelOverride: nil, runInBackground: false),
                 sessionId: nil, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: [AvailableTools.readFile])
@@ -445,15 +447,17 @@ extension WebSubagentSelftest {
                   && chatBodies.allSatisfy { !$0.contains("PRIVATE-PROFILE-SENTINEL") && !$0.contains("Ambient status") && !$0.contains("Fixture User") }
                   && chatEmergency.allSatisfy { $0.contains("You are the web research subagent of Fixture Assistant.") },
                   "error \(emergencyChat.error ?? "nil") requests \(chatBodies.count) emergency \(chatEmergency.count) profile-leaks \(chatBodies.filter { $0.contains("PRIVATE-PROFILE-SENTINEL") }.count)")
-            WebSearchBackend.processOverride = .openai
+            // Responses: the researcher follows a main Responses profile (C).
             serverC.script([
                 WebFixtureServer.responsesBody("searching", id: "e1", calls: [("web_query", "{\"queries\":[\"emergency topic\"]}")], prompt: 60000),
                 WebFixtureServer.responsesBody("Compact summary.", id: "e2"),
                 WebFixtureServer.responsesBody("Finished. Sources: https://example.test/emergency-topic", id: "e3"), WebFixtureServer.responsesBody("Finished. Sources: https://example.test/emergency-topic", id: "e4")])
-            let emergencyResponses = await SubagentRunner().run(
-                invocation: SubagentRunner.Invocation(subagentType: "Web", description: "emergency-responses", taskPrompt: bigTask, modelOverride: nil, runInBackground: false, deliverable: .short),
-                sessionId: nil, openRouterService: service, toolExecutor: await mainExecutor.makeChildExecutor(), imagesDirectory: images, documentsDirectory: documents, parentTools: all)
-            WebSearchBackend.processOverride = .opencode
+            let emergencyChild = await mainExecutor.makeChildExecutor()
+            let emergencyResponses = await Self.withMainSlots(Self.mainSlots(profile: "openai", base: h.baseC + "/v1", model: "gpt-6-sol", key: "synthetic-main-openai-key", effort: "high", responses: true)) {
+                await SubagentRunner().run(
+                    invocation: SubagentRunner.Invocation(subagentType: "Web", description: "emergency-responses", taskPrompt: bigTask, modelOverride: nil, runInBackground: false, deliverable: .short),
+                    sessionId: nil, openRouterService: service, toolExecutor: emergencyChild, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
+            }
             let responsesBodies = serverC.requests.map { String(decoding: $0.body, as: UTF8.self) }
             let responsesEmergency = responsesBodies.filter { $0.contains("[OVERSIZED BATCH SUMMARY") }
             check("16.2 R1 (Responses): the same on the native transport",

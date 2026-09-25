@@ -649,8 +649,8 @@ final class MenuWorkflow {
         case "key_remove":
             guard str(body, "kind") == "openai" else { return (false, L("Only the optional OpenAI key can be removed.", "Si può rimuovere solo la chiave OpenAI, che è facoltativa.")) }
             guard !openAIRequired else {
-                return (false, L("With \(stepTitle(.ai)), Briglia\u{2019}s web research runs on this key, so it can\u{2019}t be removed. Paste a new key instead.",
-                                 "Con \(stepTitle(.ai)) le ricerche web di Briglia usano questa chiave, quindi non si può rimuovere. Incollane una nuova."))
+                return (false, L("With \(stepTitle(.ai)), Briglia reads web pages with this key, so it can\u{2019}t be removed. Paste a new key instead.",
+                                 "Con \(stepTitle(.ai)) Briglia legge le pagine web con questa chiave, quindi non si può rimuovere. Incollane una nuova."))
             }
             try checkpoint()
             let result = await env.apply(["openai": ["remove": true]], checkpoint)

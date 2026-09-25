@@ -168,6 +168,27 @@ enum WebAgentTools {
         ORToolDef(function: .init(name: fetchName, description: fetchDescription, parameters: fetchParameters)),
     ]
 
+    /// The same two tools as `ToolDefinition`s, for the legacy loop's agent
+    /// rounds on the MAIN transport (owner decision 2026-09-25): the main
+    /// serializers render them per protocol like any other tool.
+    static let mainTransportTools: [ToolDefinition] = [
+        ToolDefinition(function: FunctionDefinition(name: searchName, description: searchDescription,
+            parameters: FunctionParameters(properties: [
+                "queries": ParameterProperty(type: "array",
+                    description: "Search query strings, at most \(maxQueriesPerCall). Vary phrasing and angle rather than repeating one query. Extra queries beyond the cap are dropped.",
+                    items: ArrayItemsSchema(type: "string"))
+            ], required: ["queries"]))),
+        ToolDefinition(function: FunctionDefinition(name: fetchName, description: fetchDescription,
+            parameters: FunctionParameters(properties: [
+                "requests": ParameterProperty(type: "array",
+                    description: "Up to \(maxFetchRequestsPerCall) url+focus requests. Extra requests beyond the cap are dropped.",
+                    items: ArrayItemsSchema(type: "object", properties: [
+                        "url": ParameterProperty(type: "string", description: "The page URL to fetch."),
+                        "focus": ParameterProperty(type: "string", description: "What to look for on this page. The extractor reads the full page and returns only excerpts relevant to this instruction — make it specific ('exact pricing tiers and limits', not 'info about pricing').")
+                    ], required: ["url", "focus"]))
+            ], required: ["requests"]))),
+    ]
+
     /// Responses API `tools` array (openai backend) — flat shape, strict on.
     static let responsesTools: [JSONValue] = [
         .object([
@@ -244,6 +265,52 @@ enum WebExtractionSchemas {
 }
 
 // MARK: - Round result
+
+/// The legacy loop's transcript on the MAIN transport (owner decision
+/// 2026-09-25): one user message with the question, the completed tool
+/// rounds as `ToolInteraction`s (so the main serializers apply their own
+/// reasoning-replay, chronology and marker-neutralization rules), and the
+/// loop's interjected notes ("no search yet", "budget exhausted") carried
+/// as the tail of the next request only. The provider context is the main
+/// snapshot taken once at the start of the loop run.
+final class WebAgentMainTranscript {
+    let context: ProviderExecutionContext
+    let systemPrompt: String
+    let messages: [Message]
+    private(set) var interactions: [ToolInteraction] = []
+    private var notes: [String] = []
+    private var pendingAssistant: AssistantToolCallMessage?
+    private var pendingResults: [String: String] = [:]
+
+    init(context: ProviderExecutionContext, systemPrompt: String, user: String, at date: Date) {
+        self.context = context
+        self.systemPrompt = systemPrompt
+        self.messages = [Message(role: .user, content: user, timestamp: date)]
+    }
+
+    func appendNote(_ text: String) { notes.append(text) }
+    var pendingTail: String? { notes.isEmpty ? nil : notes.joined(separator: "\n\n") }
+    func clearNotes() { notes = [] }
+
+    func recordAssistant(_ message: AssistantToolCallMessage) {
+        pendingAssistant = message
+        pendingResults = [:]
+    }
+
+    func appendToolResult(callID: String, content: String) { pendingResults[callID] = content }
+
+    /// Close the round: every call gets its result (a call with none gets an
+    /// explicit error), in call order.
+    func commitRound() {
+        guard let assistant = pendingAssistant else { return }
+        let results = assistant.toolCalls.map {
+            ToolResultMessage(toolCallId: $0.id, content: pendingResults[$0.id] ?? "{\"error\": \"no result\"}")
+        }
+        interactions.append(ToolInteraction(assistantMessage: assistant, results: results))
+        pendingAssistant = nil
+        pendingResults = [:]
+    }
+}
 
 struct WebAgentRound {
     let visibleText: String

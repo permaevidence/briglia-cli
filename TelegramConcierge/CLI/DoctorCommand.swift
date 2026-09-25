@@ -74,9 +74,9 @@ struct Doctor: AsyncParsableCommand {
         let backendSource = WebSearchBackend.explicitlyStored != nil
             ? "explicit" : "inferred from keys — set with /websearch"
         if WebSearchBackend.active == .chatgpt {
-            note("web search backend: chatgpt (follows the ChatGPT subscription provider; \(WebSearchBackend.configured.rawValue) on other providers, \(backendSource))")
+            note("web page-reading backend (extraction, web_fetch; research runs on the main model): chatgpt (follows the ChatGPT subscription provider; \(WebSearchBackend.configured.rawValue) on other providers, \(backendSource))")
         } else {
-            note("web search backend: \(WebSearchBackend.active.rawValue) (\(backendSource))")
+            note("web page-reading backend (extraction, web_fetch; research runs on the main model): \(WebSearchBackend.active.rawValue) (\(backendSource))")
         }
         note("web subagent: \(AvailableTools.webSubagentEnabled ? "on" : "off"); Web preset available: \(serperKey.isEmpty ? "no (Serper key missing)" : (AvailableTools.webSubagentActive ? "yes" : "no (switch off)"))")
         let ocrBackend = KeychainHelper.load(key: KeychainHelper.visionPreprocessorBackendKey)

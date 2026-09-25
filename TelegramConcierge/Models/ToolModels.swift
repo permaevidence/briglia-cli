@@ -1576,7 +1576,7 @@ enum AvailableTools {
         if configuredLanes.isEmpty && SubagentModelLanes.hostPinBypass() {
             // Pinned host (/orprovider): lanes bypassed by owner decision;
             // this text is only ever rendered while a pin is set.
-            modelDescription = "Optional. Only 'inherit' is available: the user pinned OpenRouter to one host (/orprovider), so subagents run the main model on that host and the cheap lanes are bypassed until the pin is released (the Web researcher keeps its own backend). Leave it unset."
+            modelDescription = "Optional. Only 'inherit' is available: the user pinned OpenRouter to one host (/orprovider), so subagents run the main model on that host and the cheap lanes are bypassed until the pin is released (the Web researcher included). Leave it unset."
         } else if configuredLanes.isEmpty {
             modelDescription = "Optional. Only 'inherit' is available: no per-call preference — the subagent runs the parent model. The user can configure cheap subagent model lanes with the /subagentmodels command."
         } else {

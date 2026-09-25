@@ -487,7 +487,7 @@ struct SetupWizard {
     private func stepOpenAI() async {
         print("""
         One OpenAI API key powers four things:
-          • web research (planning, reading, and writing answers)
+          • web page reading for research (the research itself runs on your main model)
           • voice message transcription (gpt-transcribe)
           • image generation (GPT Image 2.5)
           • OCR of scanned documents

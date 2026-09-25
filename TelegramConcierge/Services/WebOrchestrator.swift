@@ -5,8 +5,10 @@ import FoundationNetworking
 
 // MARK: - OpenRouter Configuration for Web Search Pipeline
 enum ORModel {
-    // Agent loop and final answer run on the configured main model (default
-    // GPT-6 Luna) in BOTH modes. The mechanical stages below also run on
+    // Agent loop and final answer run on the MAIN agent's provider, model
+    // and effort (owner decision 2026-09-25; `answer(agentService:)`), in
+    // BOTH modes; `defaultMainModel` below only serves harnesses that drive
+    // the orchestrator without a service. The mechanical stages below run on
     // Luna, at medium effort: benchmarked 2026-08-01 against gpt-oss-120b on
     // Groq, Luna is ~2x faster on 90k-token extraction inputs (prefill-bound)
     // and missed fewer excerpts. GPT-6 Luna replaced GPT-5.6 Luna on
@@ -42,12 +44,6 @@ enum Endpoints {
         if adaCLIVersion.hasSuffix("-dev"), let raw = ProcessInfo.processInfo.environment["BRIGLIA_DEV_JINA_READER_BASE"],
            !raw.isEmpty { return raw.hasSuffix("/") ? raw : raw + "/" }
         return jinaReaderBase
-    }
-    /// The Web researcher's OpenAI Responses base (`webExecutionContext`).
-    static var webOpenAIBase: String {
-        if adaCLIVersion.hasSuffix("-dev"), let raw = ProcessInfo.processInfo.environment["BRIGLIA_DEV_WEB_OPENAI_BASE"],
-           !raw.isEmpty { return raw }
-        return "https://api.openai.com/v1"
     }
 }
 
@@ -609,6 +605,9 @@ actor WebOrchestrator {
     /// the subscription) never switches a transcript's transport. A
     /// subscription run moves to the OpenAI key once on usage exhaustion.
     private var agentBackend: [UUID: WebSearchBackend] = [:]
+    /// The main-transport service of a legacy loop run (owner decision
+    /// 2026-09-25), for the run's lifetime.
+    private var agentServices: [UUID: OpenRouterService] = [:]
 
     // MARK: - web_fetch Cache
     // Two-tier LRU cache with 15-minute TTL (matches Claude Code WebFetch behavior).
@@ -667,13 +666,13 @@ actor WebOrchestrator {
     // MARK: - Tool Interface
     
     /// Execute web search as a tool and return a condensed result for the main LLM
-    func executeForTool(query: String) async throws -> WebSearchResult {
-        try await executeForTool(query: query, mode: .webSearch)
+    func executeForTool(query: String, agentService: OpenRouterService? = nil) async throws -> WebSearchResult {
+        try await executeForTool(query: query, mode: .webSearch, agentService: agentService)
     }
 
     /// Execute deep research as a tool and return a detailed result for the main LLM
-    func executeDeepResearchForTool(query: String) async throws -> WebSearchResult {
-        try await executeForTool(query: query, mode: .deepResearch)
+    func executeDeepResearchForTool(query: String, agentService: OpenRouterService? = nil) async throws -> WebSearchResult {
+        try await executeForTool(query: query, mode: .deepResearch, agentService: agentService)
     }
 
     // MARK: - Web researcher subagent tools (WEB_SUBAGENT_PLAN §4.2, R1a)
@@ -729,7 +728,7 @@ actor WebOrchestrator {
     /// normalization the search dedup uses).
     func normalizedURL(_ url: String) -> String { normalize(url) }
 
-    private func executeForTool(query: String, mode: ResearchMode) async throws -> WebSearchResult {
+    private func executeForTool(query: String, mode: ResearchMode, agentService: OpenRouterService?) async throws -> WebSearchResult {
         let executionID = UUID()
         executionStates[executionID] = ExecutionState()
 
@@ -738,7 +737,8 @@ actor WebOrchestrator {
                 userPrompt: query,
                 historyPairs: [],
                 mode: mode,
-                executionID: executionID
+                executionID: executionID,
+                agentService: agentService
             )
             let state = executionStates.removeValue(forKey: executionID) ?? ExecutionState()
 
@@ -795,7 +795,8 @@ actor WebOrchestrator {
         userPrompt: String,
         historyPairs: [(user: String, assistant: String)],
         mode: ResearchMode = .webSearch,
-        executionID: UUID
+        executionID: UUID,
+        agentService: OpenRouterService? = nil
     ) async throws -> String {
         let backend = WebSearchBackend.active
         agentBackend[executionID] = backend
@@ -804,20 +805,37 @@ actor WebOrchestrator {
         let maxRounds = maxSteps(for: mode)
         let systemPrompt = agentSystemPrompt(mode: mode, maxRounds: maxRounds)
 
-        // One transcript per transport: Responses API for OpenAI (function
-        // tools + reasoning are chat-completions-incompatible for Luna, and
-        // Responses adds encrypted-reasoning continuity), chat completions
-        // with tools for OpenRouter/OpenCode.
+        // Agent rounds run on the MAIN agent's provider, model and effort
+        // (owner decision 2026-09-25), snapshotted once for the whole loop
+        // run and sent through the main transport; page extraction below
+        // stays on the /websearch backend. Without a service (harnesses
+        // that drive the orchestrator directly) the per-backend transports
+        // remain: Responses for OpenAI/subscription, chat completions with
+        // tools for OpenRouter/OpenCode.
+        let main: WebAgentMainTranscript?
         let chat: WebAgentChatTranscript?
         let responses: WebAgentResponsesTranscript?
-        if backend == .openai || backend == .chatgpt {
+        if let agentService {
+            let context = await agentService.legacyWebAgentExecutionContext(executionID: executionID)
+            main = WebAgentMainTranscript(context: context, systemPrompt: systemPrompt, user: userContent, at: HarnessClock.now())
+            agentServices[executionID] = agentService
+            chat = nil
+            responses = nil
+        } else if backend == .openai || backend == .chatgpt {
+            main = nil
             chat = nil
             responses = WebAgentResponsesTranscript(instructions: systemPrompt, user: userContent)
         } else {
+            main = nil
             chat = WebAgentChatTranscript(system: systemPrompt, user: userContent)
             responses = nil
         }
+        defer {
+            main?.context.responsesTurn.close()
+            agentServices[executionID] = nil
+        }
         func appendUser(_ text: String) {
+            main?.appendNote(text)
             chat?.appendUser(text)
             responses?.appendUser(text)
         }
@@ -839,6 +857,7 @@ actor WebOrchestrator {
             let agentRound: WebAgentRound
             do {
                 agentRound = try await callAgentRound(
+                    main: main,
                     chat: chat,
                     responses: responses,
                     mode: mode,
@@ -854,7 +873,7 @@ actor WebOrchestrator {
                 guard anyResultsRetrieved, !Self.isUsageExhausted(error) else { throw error }
                 webLog("[WebOrchestrator] agent.round\(round) failed (\(error.localizedDescription)); forcing final answer from gathered context")
                 appendUser("(A research step failed: \(error.localizedDescription). Write the final answer now using everything gathered so far; no more tool calls are available.)")
-                return try await forcedFinalAnswer(chat: chat, responses: responses, mode: mode, executionID: executionID)
+                return try await forcedFinalAnswer(main: main, chat: chat, responses: responses, mode: mode, executionID: executionID)
             }
 
             if agentRound.toolCalls.isEmpty {
@@ -900,9 +919,11 @@ actor WebOrchestrator {
                 if outcome.attemptedWebAction { webActionsAttempted = true }
                 if outcome.gotResults { anyResultsRetrieved = true }
                 pipelineFailures.append(contentsOf: outcome.failures)
+                main?.appendToolResult(callID: call.id, content: outcome.payload)
                 chat?.appendToolResult(callID: call.id, content: outcome.payload)
                 responses?.appendToolResult(callID: call.id, content: outcome.payload)
             }
+            main?.commitRound()
         }
 
         // Round budget exhausted with the model still calling tools: force
@@ -915,7 +936,7 @@ actor WebOrchestrator {
         }
         try throwIfOnlyFailures(anyResultsRetrieved: anyResultsRetrieved, pipelineFailures: pipelineFailures)
         appendUser("(Research budget exhausted. Write the final answer now using everything gathered so far; no more tool calls are available.)")
-        return try await forcedFinalAnswer(chat: chat, responses: responses, mode: mode, executionID: executionID)
+        return try await forcedFinalAnswer(main: main, chat: chat, responses: responses, mode: mode, executionID: executionID)
     }
 
     /// Nothing was retrieved AND at least one action failed: answering now
@@ -932,6 +953,7 @@ actor WebOrchestrator {
     /// Final answer with tool calls disabled (`tool_choice: "none"`), used
     /// when the round budget runs out or a round fails after context exists.
     private func forcedFinalAnswer(
+        main: WebAgentMainTranscript?,
         chat: WebAgentChatTranscript?,
         responses: WebAgentResponsesTranscript?,
         mode: ResearchMode,
@@ -939,6 +961,7 @@ actor WebOrchestrator {
     ) async throws -> String {
         onProgress?(.answering)
         let round = try await callAgentRound(
+            main: main,
             chat: chat,
             responses: responses,
             mode: mode,
@@ -1033,6 +1056,7 @@ actor WebOrchestrator {
     // MARK: - Agent Rounds (native tool calling)
 
     private func callAgentRound(
+        main: WebAgentMainTranscript?,
         chat: WebAgentChatTranscript?,
         responses: WebAgentResponsesTranscript?,
         mode: ResearchMode,
@@ -1042,6 +1066,9 @@ actor WebOrchestrator {
     ) async throws -> WebAgentRound {
         if let stub = agentRoundStubForTesting {
             return try await stub(stage, toolChoice)
+        }
+        if let main, let service = agentServices[executionID] {
+            return try await callMainAgentRound(main, service: service, mode: mode, toolChoice: toolChoice, stage: stage, executionID: executionID)
         }
         if let responses {
             return try await callResponsesRound(
@@ -1054,6 +1081,77 @@ actor WebOrchestrator {
         }
         return try await callChatRound(
             chat, mode: mode, toolChoice: toolChoice, stage: stage, executionID: executionID)
+    }
+
+    /// Agent round on the MAIN transport (owner decision 2026-09-25): the
+    /// loop run's main snapshot, the main agent's serializers, retries,
+    /// reasoning replay and spend pricing. `tool_choice: none` (the forced
+    /// final) becomes a tail instruction — the main transport keeps the tool
+    /// list constant — and tool calls in that answer are never executed.
+    /// A round with neither text nor tool calls is retried, then thrown.
+    private func callMainAgentRound(
+        _ transcript: WebAgentMainTranscript,
+        service: OpenRouterService,
+        mode: ResearchMode,
+        toolChoice: String?,
+        stage: String,
+        executionID: UUID
+    ) async throws -> WebAgentRound {
+        let forcedFinal = toolChoice == "none"
+        let model = transcript.context.model
+        let maxAttempts = 3
+        var attempt = 1
+        while true {
+            try Task.checkCancellation()
+            var tail = transcript.pendingTail
+            if forcedFinal {
+                tail = [tail, "(Tool calls are disabled for this final answer. Reply with the answer as text only.)"]
+                    .compactMap { $0 }.joined(separator: "\n\n")
+            }
+            webLog("[WebOrchestrator] main request stage=\(stage) mode=\(modeLabel(mode)) model=\(model) api=\(transcript.context.wireProtocol == .responses ? "responses" : "chat") effort=\(transcript.context.reasoningEffort ?? transcript.context.reasoning?.effort ?? "default") rounds=\(transcript.interactions.count) forced_final=\(forcedFinal)")
+            let response = try await service.generateLegacyWebAgentRound(
+                systemPrompt: transcript.systemPrompt, messages: transcript.messages,
+                tools: WebAgentTools.mainTransportTools, toolResultMessages: transcript.interactions,
+                tailUserMessage: tail, context: transcript.context)
+            let detail: String
+            switch response {
+            case .text(let content, _, _, let promptTokens, let completionTokens, let spend, _):
+                addSpend(spend, executionID: executionID)
+                let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                webLog("[WebOrchestrator] main response stage=\(stage) content_chars=\(text.count) tool_calls=0 tokens=\(promptTokens.map(String.init) ?? "?")/\(completionTokens.map(String.init) ?? "?")")
+                if !text.isEmpty {
+                    transcript.clearNotes()
+                    return WebAgentRound(visibleText: text, toolCalls: [])
+                }
+                detail = "empty text response"
+            case .toolCalls(let assistant, let calls, let promptTokens, let completionTokens, let spend):
+                addSpend(spend, executionID: executionID)
+                let text = (assistant.content ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                webLog("[WebOrchestrator] main response stage=\(stage) content_chars=\(text.count) tool_calls=\(calls.count) tokens=\(promptTokens.map(String.init) ?? "?")/\(completionTokens.map(String.init) ?? "?")")
+                if forcedFinal {
+                    // Never executed: the answer is whatever text came with them.
+                    if !text.isEmpty {
+                        transcript.clearNotes()
+                        return WebAgentRound(visibleText: text, toolCalls: [])
+                    }
+                    detail = "tool calls instead of the forced final answer"
+                } else {
+                    transcript.clearNotes()
+                    transcript.recordAssistant(assistant)
+                    return WebAgentRound(visibleText: text, toolCalls: calls.map {
+                        WebAgentToolCall(id: $0.id, name: $0.function.name, argumentsJSON: $0.function.arguments)
+                    })
+                }
+            }
+            guard attempt < maxAttempts else {
+                throw NSError(domain: "WebOrchestrator", code: 4, userInfo: [
+                    NSLocalizedDescriptionKey: "main model returned no usable agent round for '\(stage)' (model \(model)): \(detail)"
+                ])
+            }
+            webLog("[WebOrchestrator] main stage=\(stage) empty agent round (attempt \(attempt)/\(maxAttempts)): \(detail). Retrying...")
+            try await Task.sleep(nanoseconds: UInt64(Double(attempt) * 1_500_000_000))
+            attempt += 1
+        }
     }
 
     /// Agent round over chat completions (openrouter / opencode backends).
@@ -2638,8 +2736,7 @@ actor WebOrchestrator {
     /// MiMo accepts reasoning_effort low/medium/high only (400 on the rest),
     /// hence the fold in `buildChatBody`.
     private static let opencodeModel = "mimo-v2.6-flash"
-    /// The same pin, for the Web researcher's OpenCode context
-    /// (`OpenRouterService.webExecutionContext`).
+    /// The same pin, for `WebSearchBackend.researchModel`.
     static var opencodeResearchModel: String { opencodeModel }
 
     private func resolvedModel(for backend: WebSearchBackend, requested: String) -> String {

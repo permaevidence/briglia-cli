@@ -123,8 +123,8 @@ extension WebSubagentSelftest {
             let executor = ToolExecutor(outputMode: .subagent)
             await executor.configure(openRouterKey: "", serperKey: "synthetic-serper-key", jinaKey: "synthetic-jina-key")
             // A fresh Web session (the group-3 one was LRU-evicted by group 8's 41 sessions).
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"iota\"]}")]), WebFixtureServer.chatBody("Iota.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"iota\"]}")]), WebFixtureServer.chatBody("Iota.")])
             let seed = await SubagentRunner().run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "seed", taskPrompt: "About iota.", modelOverride: nil, runInBackground: false, deliverable: .short),
                                                   sessionId: nil, openRouterService: service, toolExecutor: executor,
                                                   imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
@@ -200,22 +200,25 @@ extension WebSubagentSelftest {
             let executor = ToolExecutor(outputMode: .subagent)
             await executor.configure(openRouterKey: "", serperKey: "synthetic-serper-key", jinaKey: "synthetic-jina-key")
             state.clock = at(2026, 4, 11, 9, 30, 0)
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"theta\"]}")]), WebFixtureServer.chatBody("Theta.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"theta\"]}")]), WebFixtureServer.chatBody("Theta.")])
             let invocation = SubagentRunner.Invocation(subagentType: "Web", description: "chrono", taskPrompt: "About theta.", modelOverride: nil, runInBackground: false, deliverable: .short)
             let run = await runner.run(invocation: invocation, sessionId: nil, openRouterService: service, toolExecutor: executor,
                                        imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
-            let rows = try chatMessages(agentRequests(serverB)[1])
+            let rows = try chatMessages(agentRequests(serverA)[1])
             check("12.1 Web run (chat): day header + [HH:mm] on the task, issued note, dated tool result, run clock tail",
                   run.error == nil && rows.contains { $0.0 == "user" && $0.1.hasPrefix("--- Saturday, 11 April 2026 ---\n[09:30] About theta.") }
                   && rows.contains { $0 == ("system", "[System Note: The following tool calls were issued at 09:30:00]") }
                   && rows.contains { $0.0 == "tool" && $0.1.hasSuffix("\n\n[System Note: Current time is now 09:30:00]") }
                   && rows.last?.1 == Chronology.runClockNote(startedAt: at(2026, 4, 11, 9, 30, 0)), rows.map { "\($0.0): \($0.1.prefix(60))" }.joined(separator: " || "))
-            WebSearchBackend.processOverride = .openai
+            // Responses: the MAIN profile on the native transport (the
+            // researcher follows it; owner decision 2026-09-25).
             serverC.clear()
             serverC.script([WebFixtureServer.responsesBody("searching", id: "c1", calls: [("web_query", "{\"queries\":[\"theta\"]}")]), WebFixtureServer.responsesBody("Theta.", id: "c2")])
-            let native = await runner.run(invocation: invocation, sessionId: nil, openRouterService: service, toolExecutor: executor,
-                                          imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
+            let native = await Self.withMainSlots(Self.mainSlots(profile: "openai", base: baseC + "/v1", model: "gpt-6-sol", key: "synthetic-main-openai-key", effort: "high", responses: true)) {
+                await runner.run(invocation: invocation, sessionId: nil, openRouterService: service, toolExecutor: executor,
+                                 imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
+            }
             let items = (body(agentRequests(serverC)[1])["input"] as? [[String: Any]]) ?? []
             func text(_ item: [String: Any]) -> String {
                 if let parts = item["content"] as? [[String: Any]] { return parts.compactMap { $0["text"] as? String }.joined() }
@@ -239,27 +242,21 @@ extension WebSubagentSelftest {
             await executor.configure(openRouterKey: "", serperKey: "synthetic-serper-key", jinaKey: "synthetic-jina-key")
             let all = AvailableTools.all(includeWebSearch: true)
             state.clock = at(2026, 4, 10, 10, 0, 0)
-            // ---- R1: one backend/model resolver; the OpenAI backend never receives a foreign slug.
+            // ---- R1 (superseded 2026-09-25): the web model setting no longer picks
+            // the researcher's model — it runs the MAIN model; the setting only
+            // steers the pipeline's own stages (row 13.3's resolver).
             WebSearchBackend.processOverride = .openai
             try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "google/gemini-test")
             let profileBefore = KeychainHelper.loadSnapshot()
-            let foreign = try await service.webExecutionContextWithNote(lane: .subagent("foreign"))
             serverA.clear(); serverC.clear()
-            serverC.script([WebFixtureServer.responsesBody("Foreign answer.", id: "f1"), WebFixtureServer.responsesBody("Foreign answer.", id: "f2")])
+            serverA.script([WebFixtureServer.chatBody("Main answer."), WebFixtureServer.chatBody("Main answer.")])
             let foreignRun = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "foreign", taskPrompt: "stable?", modelOverride: nil, runInBackground: false, deliverable: .short),
                                               sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
-            let foreignRequests = agentRequests(serverC)
-            check("13.1 R1: a foreign OpenRouter slug configured for the OpenAI backend → the default native model in the context AND on the wire, a note in the result, main profile untouched",
-                  foreign.context.model == "gpt-6-luna" && foreign.note?.contains("google/gemini-test") == true
-                  && foreignRun.error == nil && !foreignRequests.isEmpty && foreignRequests.allSatisfy { body($0)["model"] as? String == "gpt-6-luna" } && serverA.requests.isEmpty
-                  && (resultJSON(foreignRun)["note"] as? String)?.contains("not usable on the openai web backend") == true
-                  && foreignRun.modelUsed == "gpt-6-luna (web backend: openai)" && KeychainHelper.loadSnapshot() == profileBefore, foreignRun.asJSON())
-            try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "openai/gpt-5.6-terra")
-            let terra = try await service.webExecutionContextWithNote(lane: .subagent("terra"))
-            try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "gpt-5.6-terra")
-            let bare = try await service.webExecutionContextWithNote(lane: .subagent("bare"))
-            check("13.2 R1: an openai/ slug is honoured without a note; a bare id (no vendor prefix) is not honoured — default plus a note, exactly the pipeline's rule",
-                  terra.context.model == "gpt-5.6-terra" && terra.note == nil && bare.context.model == "gpt-6-luna" && bare.note != nil, "\(terra.context.model) \(bare.context.model)")
+            check("13.1 a configured web model (even a foreign slug on the OpenAI backend) never reaches the researcher: its rounds run the main model on A, no substitution note, main profile untouched",
+                  foreignRun.error == nil && agentRequests(serverC).isEmpty && !serverA.requests.isEmpty
+                  && serverA.requests.allSatisfy { body($0)["model"] as? String == "main-model" }
+                  && resultJSON(foreignRun)["note"] == nil && foreignRun.modelUsed == "main-model (inherited)"
+                  && KeychainHelper.loadSnapshot() == profileBefore, foreignRun.asJSON())
             let shared = [WebSearchBackend.researchModel(for: .openrouter, requested: "google/gemini-test"),
                           WebSearchBackend.researchModel(for: .openai, requested: "google/gemini-test"),
                           WebSearchBackend.researchModel(for: .openai, requested: "openai/gpt-6-luna"),
@@ -270,8 +267,8 @@ extension WebSubagentSelftest {
             WebSearchBackend.processOverride = .opencode
 
             // ---- R3: search-only evidence is durable, distinct from page reads, classified on resume.
-            serverB.clear(); fixtures.serperMode = .normal
-            serverB.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"alpha\"]}")]), WebFixtureServer.chatBody("Alpha, from the snippets.")])
+            serverA.clear(); fixtures.serperMode = .normal
+            serverA.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"alpha\"]}")]), WebFixtureServer.chatBody("Alpha, from the snippets.")])
             let ask = SubagentRunner.Invocation(subagentType: "web", description: "search-only", taskPrompt: "Find alpha using search snippets.", modelOverride: nil, runInBackground: false, deliverable: .short)
             let searched = await runner.run(invocation: ask, sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             let searchedJSON = resultJSON(searched)
@@ -290,8 +287,8 @@ extension WebSubagentSelftest {
                   savedSearch?.subagentType == "Web" && savedSearch?.pool == "web" && savedSearch?.kind == .web && reloadedSearch?.kind == .web && reloadedSearch?.topic != nil
                   && impostor.session.kind == .general,
                   "stored type: \(savedSearch?.subagentType ?? "missing") pool: \(savedSearch?.pool ?? "nil")")
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("Alpha, still from the retained snippets."), WebFixtureServer.chatBody("Alpha, still from the retained snippets.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("Alpha, still from the retained snippets."), WebFixtureServer.chatBody("Alpha, still from the retained snippets.")])
             let continued = await runner.run(invocation: ask, sessionId: searched.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             check("13.6 R3: the no-retrieval follow-up of a search-only session is prior_sources_only (never no_evidence): 0 of 0 extracts, 2 of 2 search results, prefix with both figures, records survive save/reload with their query",
                   continued.error == nil && continued.evidenceProvenance == .priorSourcesOnly
@@ -300,18 +297,18 @@ extension WebSubagentSelftest {
                   && reloadedSearch?.webEvidence?.count == 2 && reloadedSearch?.webEvidence?.allSatisfy { !$0.isExtract && $0.query == "alpha" && $0.inContext } == true, continued.asJSON())
             // Empty and failed searches leave no evidence; the follow-up is no_evidence.
             fixtures.serperMode = .empty
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"omicron\"]}")]), WebFixtureServer.chatBody("Nothing about omicron.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"omicron\"]}")]), WebFixtureServer.chatBody("Nothing about omicron.")])
             let emptyRun = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "empty", taskPrompt: "omicron?", modelOverride: nil, runInBackground: false, deliverable: .short),
                                             sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             fixtures.serperMode = .failing
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"omicron\"]}")]), WebFixtureServer.chatBody("Search failed.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"omicron\"]}")]), WebFixtureServer.chatBody("Search failed.")])
             let failedRun = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "failed", taskPrompt: "more?", modelOverride: nil, runInBackground: false, deliverable: .short),
                                              sessionId: emptyRun.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             fixtures.serperMode = .normal
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("Omicron from memory."), WebFixtureServer.chatBody("Omicron from memory.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("Omicron from memory."), WebFixtureServer.chatBody("Omicron from memory.")])
             let afterEmpty = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "after", taskPrompt: "so?", modelOverride: nil, runInBackground: false, deliverable: .short),
                                               sessionId: emptyRun.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             let emptyEvidence = await SubagentSessionRegistry.shared.get(emptyRun.sessionId)?.webEvidence ?? []
@@ -320,13 +317,13 @@ extension WebSubagentSelftest {
                   && afterEmpty.evidenceProvenance == .noEvidence && (resultJSON(afterEmpty)["queries_used"] as? [String]) == ["omicron", "omicron"], afterEmpty.asJSON())
             // Answer-box-only evidence: usable, URL-less, no URL invented.
             fixtures.serperMode = .answerBoxOnly
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"meaning\"]}")]), WebFixtureServer.chatBody("It is 42.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("searching", calls: [("web_query", "{\"queries\":[\"meaning\"]}")]), WebFixtureServer.chatBody("It is 42.")])
             let boxRun = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "box", taskPrompt: "meaning?", modelOverride: nil, runInBackground: false, deliverable: .short),
                                           sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             fixtures.serperMode = .normal
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("Still 42."), WebFixtureServer.chatBody("Still 42.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("Still 42."), WebFixtureServer.chatBody("Still 42.")])
             let boxFollow = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "box2", taskPrompt: "sure?", modelOverride: nil, runInBackground: false, deliverable: .short),
                                              sessionId: boxRun.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             let boxEvidence = await SubagentSessionRegistry.shared.get(boxRun.sessionId)?.webEvidence ?? []
@@ -343,8 +340,8 @@ extension WebSubagentSelftest {
                 assistantMessage: AssistantToolCallMessage(content: nil, toolCalls: [ToolCall(id: "bulky-1", type: "function", function: FunctionCall(name: "web_extract", arguments: "{}"))]),
                 results: [ToolResultMessage(toolCallId: "bulky-1", content: String(repeating: "bulky result ", count: 200))])
             await SubagentSessionRegistry.shared.applyCompaction(sessionId: searched.sessionId, messages: bigDialogue, toolInteractions: storedSearch.toolInteractions + [bulkyRound])
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("EVICTED_SUMMARY"), WebFixtureServer.chatBody("From the summary: alpha.", prompt: 300), WebFixtureServer.chatBody("From the summary: alpha.", prompt: 300)])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("EVICTED_SUMMARY"), WebFixtureServer.chatBody("From the summary: alpha.", prompt: 300), WebFixtureServer.chatBody("From the summary: alpha.", prompt: 300)])
             let compactedSearch = await runner.run(invocation: ask, sessionId: searched.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "250000")
             let compactedRecords = await SubagentSessionRegistry.shared.get(searched.sessionId)?.webEvidence ?? []
@@ -360,8 +357,8 @@ extension WebSubagentSelftest {
             // ---- R4: in-context flags reconcile against the retained results.
             try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "60000")
             fixtures.pages["https://example.test/cutoff"] = "# Cutoff\n\nCutoff facts."
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("extract", calls: [("web_extract", "{\"requests\":[{\"url\":\"https://example.test/cutoff\",\"focus\":\"facts\"}]}")], prompt: 60000), WebFixtureServer.chatBody("Cutoff; results omitted.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("extract", calls: [("web_extract", "{\"requests\":[{\"url\":\"https://example.test/cutoff\",\"focus\":\"facts\"}]}")], prompt: 60000), WebFixtureServer.chatBody("Cutoff; results omitted.")])
             let cutoff = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "cutoff", taskPrompt: "Read this page.", modelOverride: nil, runInBackground: false, deliverable: .short),
                                           sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             try KeychainHelper.save(key: KeychainHelper.subagentTurnTokenBudgetKey, value: "250000")
@@ -372,15 +369,15 @@ extension WebSubagentSelftest {
                   cutoff.error == nil && retainedIds.isEmpty && cutEvidence.count == 1 && cutEvidence[0].inContext == false && cutEvidence[0].url == "https://example.test/cutoff"
                   && ((resultJSON(cutoff)["sources_consulted"] as? [[String: Any]])?.first?["url"] as? String) == "https://example.test/cutoff", "retained ids: \(retainedIds.count); \(cutoff.asJSON())")
             // Resume after a cutoff: prior_sources_only with 0 of 1 (never claims the extract is available).
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("Cannot recall the page."), WebFixtureServer.chatBody("Cannot recall the page.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("Cannot recall the page."), WebFixtureServer.chatBody("Cannot recall the page.")])
             let afterCut = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "after-cut", taskPrompt: "what did it say?", modelOverride: nil, runInBackground: false, deliverable: .short),
                                             sessionId: cutoff.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             check("13.12 R4: the resume after the cutoff reports 0 of 1 extracts in context", afterCut.evidenceProvenance == .priorSourcesOnly && resultJSON(afterCut)["prior_extracts_in_context"] as? String == "0 of 1", afterCut.asJSON())
             // Orphan record (crash between the ledger write and the result commit) and an uncertain Responses placeholder: both absent at resume.
             fixtures.pages["https://example.test/kept"] = "# Kept\n\nKept facts."
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("extract", calls: [("web_extract", "{\"requests\":[{\"url\":\"https://example.test/kept\",\"focus\":\"facts\"}]}")]), WebFixtureServer.chatBody("Kept.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("extract", calls: [("web_extract", "{\"requests\":[{\"url\":\"https://example.test/kept\",\"focus\":\"facts\"}]}")]), WebFixtureServer.chatBody("Kept.")])
             let kept = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "kept", taskPrompt: "Read kept.", modelOverride: nil, runInBackground: false, deliverable: .short),
                                         sessionId: nil, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             let keptSession = await SubagentSessionRegistry.shared.get(kept.sessionId)!
@@ -392,8 +389,8 @@ extension WebSubagentSelftest {
                 WebEvidenceRecord(url: "https://example.test/uncertain", fetchedAt: state.clock, toolCallId: "uncertain-1")]
             await SubagentSessionRegistry.shared.applyCompaction(sessionId: kept.sessionId, messages: keptSession.messages, toolInteractions: keptSession.toolInteractions + [placeholderRound], webEvidence: doctored)
             await SubagentSessionRegistry.shared.reloadFromDisk()
-            serverB.clear()
-            serverB.script([WebFixtureServer.chatBody("From kept."), WebFixtureServer.chatBody("From kept.")])
+            serverA.clear()
+            serverA.script([WebFixtureServer.chatBody("From kept."), WebFixtureServer.chatBody("From kept.")])
             let resumedKept = await runner.run(invocation: SubagentRunner.Invocation(subagentType: "Web", description: "kept2", taskPrompt: "and?", modelOverride: nil, runInBackground: false, deliverable: .short),
                                                sessionId: kept.sessionId, openRouterService: service, toolExecutor: executor, imagesDirectory: images, documentsDirectory: documents, parentTools: all)
             let reconciled = await SubagentSessionRegistry.shared.get(kept.sessionId)?.webEvidence ?? []
@@ -417,12 +414,12 @@ extension WebSubagentSelftest {
             let bgBody = completions.first.map { ConversationManager.backgroundSubagentCompletionBody($0, durationStr: "1.0s") } ?? ""
             let bgLines = bgBody.components(separatedBy: "\n")
             let bgResult = completions.first?.result
-            check("13.14 R2: a background Web run's [SUBAGENT COMPLETE] message (the manager's template) carries evidence_provenance, queries_used, sources_consulted, search_results_seen, report_path, the backend-fallback note and model_used, before final_message",
+            check("13.14 R2: a background Web run's [SUBAGENT COMPLETE] message (the manager's template) carries evidence_provenance, queries_used, sources_consulted, search_results_seen, report_path and model_used (the main model; no backend note even with the web backend keyless), before final_message",
                   completions.count == 1 && bgResult?.error == nil
                   && bgLines.contains("evidence_provenance: retrieved_this_run") && bgLines.contains("queries_used: [\"kappa\"]")
                   && bgLines.contains("sources_consulted: []") && bgLines.contains("search_results_seen: 2 results across 1 queries") && !bgBody.contains("https://example.test/kappa-2")
                   && bgLines.contains { $0.hasPrefix("report_path: ") && $0.hasSuffix(".md") && FileManager.default.fileExists(atPath: String($0.dropFirst("report_path: ".count))) }
-                  && bgLines.contains { $0.hasPrefix("note: web backend unavailable") } && bgLines.contains("model_used: main-model (inherited)")
+                  && !bgLines.contains { $0.hasPrefix("note:") } && bgLines.contains("model_used: main-model (inherited)")
                   && (bgLines.firstIndex(of: "final_message:") ?? -1) > (bgLines.firstIndex { $0.hasPrefix("report_path: ") } ?? Int.max)
                   && bgBody.hasSuffix("\n# Kappa report\n\nKappa. Sources: https://example.test/kappa"), bgBody.prefix(900).description)
             // Failed/partial and prior-sources shapes through the same template; ordinary runs byte-identical to the legacy layout.

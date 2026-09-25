@@ -39,7 +39,7 @@ enum ChatCommandRegistry {
                     usage: "[name]", inMenu: true, category: "Models"),
         ChatCommand(name: "effort", description: "Show or set the reasoning effort",
                     usage: "[level]", inMenu: true, category: "Models"),
-        ChatCommand(name: "websearch", description: "Show or switch the web research backend",
+        ChatCommand(name: "websearch", description: "Show or switch the web page-reading backend",
                     usage: "[name]", inMenu: false, category: "Models"),
         ChatCommand(name: "subagentmodels", description: "Show or set the cheap subagent model lanes",
                     usage: nil, inMenu: false, category: "Models"),

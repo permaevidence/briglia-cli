@@ -11,10 +11,10 @@ enum SubagentModelChoice {
     case inherit
     case cheapVision
     case cheapText
-    /// The Web researcher's lane: the configured web research backend
-    /// (`WebSearchBackend`), resolved by SubagentRunner into an immutable
-    /// provider context for the whole run (WEB_SUBAGENT_PLAN §4.4). Not a
-    /// user-configurable cheap lane, so `lane` is nil.
+    /// The Web researcher's lane: the MAIN agent's profile, model and effort
+    /// (owner decision 2026-09-25; was the /websearch backend), snapshotted
+    /// by SubagentRunner into an immutable provider context for the whole
+    /// run. Not a user-configurable cheap lane, so `lane` is nil.
     case web
 
     /// The lane this choice targets, nil for `.inherit` and `.web`.
@@ -163,7 +163,8 @@ enum SubagentTypes {
     /// Web researcher (WEB_SUBAGENT_PLAN §4.1–4.5, R1a). Dynamic built-in:
     /// present only when web search is available and the Web switch is on.
     /// Owns the pipeline's tools directly (`web_query`, `web_extract`, plus
-    /// `web_fetch`), runs on the configured web research backend, is
+    /// `web_fetch`), runs on the main agent's model (its page extraction on
+    /// the configured web research backend), is
     /// resumable like every other subagent, and has no bash, files or MCP.
     /// The per-call `deliverable` is rendered into the task message by the
     /// runner, never into this suffix (which is part of the cached prefix).

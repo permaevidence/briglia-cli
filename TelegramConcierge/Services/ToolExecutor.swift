@@ -629,7 +629,7 @@ actor ToolExecutor {
         }
         
         do {
-            let result = try await webOrchestrator.executeForTool(query: args.query)
+            let result = try await webOrchestrator.executeForTool(query: args.query, agentService: openRouterService)
             return ToolResultMessage(
                 toolCallId: call.id,
                 content: result.asJSON(),
@@ -652,7 +652,7 @@ actor ToolExecutor {
         }
 
         do {
-            let result = try await webOrchestrator.executeDeepResearchForTool(query: args.query)
+            let result = try await webOrchestrator.executeDeepResearchForTool(query: args.query, agentService: openRouterService)
             return ToolResultMessage(
                 toolCallId: call.id,
                 content: result.asJSON(),

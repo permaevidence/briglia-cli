@@ -659,8 +659,9 @@ struct ProviderSelftest: AsyncParsableCommand {
     /// 5e″ — Codex review of e3a0b38 (2026-09-19), three corrections:
     ///   R1 pin scope: the /orprovider pin applies to requests on the MAIN
     ///      model only (main agent + subagents, whose cheap lanes are
-    ///      bypassed while pinned — owner decision); the Web researcher and
-    ///      any other model keep automatic routing.
+    ///      bypassed while pinned — owner decision; the Web researcher too
+    ///      since it runs the main model, 2026-09-25); any other model keeps
+    ///      automatic routing.
     ///   R2 retired catalog entries keep their capability facts when typed.
     ///   R3 /orprovider and the /model revalidation re-check state after
     ///      the listing await; a cancelled lookup never writes.
@@ -690,13 +691,14 @@ struct ProviderSelftest: AsyncParsableCommand {
         let service = OpenRouterService()
 
         // R1 — scope of the pin across execution contexts.
-        let web = try await service.webExecutionContextWithNote(lane: .subagent("review-web")).context
-        check("R1 web researcher on the OpenRouter backend never carries the main pin",
-              web.providerPreferences == nil, "model=\(web.model) prefs=\(String(describing: web.providerPreferences))")
-        try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: mainModel)
-        let webSameModel = try await service.webExecutionContextWithNote(lane: .subagent("review-web-same")).context
-        check("R1 web researcher configured on the SAME model as the main agent still never carries the pin (own backend and key)",
-              webSameModel.model == mainModel && webSameModel.providerPreferences == nil, "prefs=\(String(describing: webSameModel.providerPreferences))")
+        // Owner decision 2026-09-25: the Web researcher runs the MAIN model,
+        // so while pinned it carries the main pin like every other subagent
+        // (the configured web model no longer picks the researcher's model).
+        let web = await service.researcherExecutionContext(modelOverride: nil, textOnlyOverride: nil, lane: .subagent("review-web"))
+        check("R1 web researcher runs the main model and carries the main pin (only + no fallbacks), whatever the web model setting",
+              web.model == mainModel && web.providerPreferences?.only == ["deepinfra"] && web.providerPreferences?.allow_fallbacks == false
+              && web.reasoning?.effort == "high" && web.usageLaneLabel == "subagent:web" && web.lane == .subagent("review-web"),
+              "model=\(web.model) prefs=\(String(describing: web.providerPreferences))")
         try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "openai/gpt-5.6-luna")
         let main = await service.executionContext(modelOverride: nil, providerOverride: nil, reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
         check("R1 main-model request carries the pin as only + no fallbacks",
@@ -787,7 +789,7 @@ struct ProviderSelftest: AsyncParsableCommand {
         Pin.fetchOverride = { _, _ in listed }
         let plainPin = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
         check("R3 control: an undisturbed lookup pins and names the scope",
-              Pin.pinnedSlugs() == ["deepinfra"] && plainPin.contains("every subagent except the Web researcher"), plainPin)
+              Pin.pinnedSlugs() == ["deepinfra"] && plainPin.contains("every subagent, the Web researcher included"), plainPin)
         _ = await manager.handleTerminalCommand("/orprovider off")
         check("R3 control: off releases", !Pin.isPinned)
         // Another channel switches the model while the listing is in flight.
@@ -946,7 +948,7 @@ struct ProviderSelftest: AsyncParsableCommand {
             return (Task.isCancelled, (reply ?? []).joined())
         }.value
         check("R3.2 control: the same task shape without cancellation pins normally",
-              !plainTask.0 && Pin.pinnedSlugs() == ["deepinfra"] && plainTask.1.contains("except the Web researcher"), plainTask.1)
+              !plainTask.0 && Pin.pinnedSlugs() == ["deepinfra"] && plainTask.1.contains("the Web researcher included"), plainTask.1)
         try Pin.setPin(nil)
         return failures
     }

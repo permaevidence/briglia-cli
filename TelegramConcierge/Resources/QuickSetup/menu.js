@@ -461,8 +461,8 @@
       steps: [[T('Open ', 'Apri '), link('https://jina.ai/reader', 'jina.ai/reader'), '.'], [T('Copy your API key (it starts with ', 'Copia la tua chiave API (inizia con '), h('b', { text: 'jina_' }), T('). Sign in to keep your free credits.', '). Accedi per conservare i crediti gratuiti.')], [T('Paste it below.', 'Incollala qui sotto.')]],
       placeholder: 'jina_…' },
     openai: S.ai && S.ai.openai_required ? { title: T('OpenAI key', 'Chiave OpenAI'),
-      lead: T('Needed with ' + stepInfo('ai').title + ': Briglia’s web research runs on OpenAI (it reads web pages much faster than other models). The same key also lets Briglia understand voice messages and create images.', 'Serve con ' + stepInfo('ai').title + ': le ricerche web di Briglia usano OpenAI (legge le pagine web molto più velocemente degli altri modelli). La stessa chiave permette anche di capire i messaggi vocali e creare immagini.'),
-      extra: T('OpenAI bills API use per request, so you add a few dollars of credit. Web research costs cents per question.', 'OpenAI fa pagare l’uso delle API a richiesta, quindi aggiungi qualche dollaro di credito. Una ricerca web costa pochi centesimi.'),
+      lead: T('Needed with ' + stepInfo('ai').title + ': Briglia reads web pages with OpenAI (much faster than other models); the research itself runs on your main model. The same key also lets Briglia understand voice messages and create images.', 'Serve con ' + stepInfo('ai').title + ': Briglia legge le pagine web con OpenAI (molto più veloce degli altri modelli); la ricerca vera e propria usa il tuo modello principale. La stessa chiave permette anche di capire i messaggi vocali e creare immagini.'),
+      extra: T('OpenAI bills API use per request, so you add a few dollars of credit. Reading the pages of a search costs cents per question.', 'OpenAI fa pagare l’uso delle API a richiesta, quindi aggiungi qualche dollaro di credito. Leggere le pagine di una ricerca costa pochi centesimi.'),
       steps: null, placeholder: 'sk-…' } : { title: T('Voice messages & images', 'Messaggi vocali e immagini'), lead: T('Optional. An OpenAI API key lets Briglia understand your voice messages and create images. Without it, everything else works.', 'Facoltativo. Una chiave API di OpenAI permette a Briglia di capire i tuoi messaggi vocali e di creare immagini. Senza, tutto il resto funziona.'),
       extra: T('This is separate from ChatGPT: OpenAI bills API use per request, so you add a few dollars of credit.', 'È separata da ChatGPT: OpenAI fa pagare l’uso delle API a richiesta, quindi aggiungi qualche dollaro di credito.'),
       steps: [[T('Open ', 'Apri '), link('https://platform.openai.com/api-keys', 'platform.openai.com/api-keys'), T(' and sign in.', ' e accedi.')], [T('Click ', 'Clicca '), h('b', { text: 'Create new secret key' }), T(' and copy it.', ' e copiala.')], [T('Add a little credit under ', 'Aggiungi un po’ di credito in '), h('b', { text: 'Settings → Billing' }), '.'], [T('Paste the key below.', 'Incolla la chiave qui sotto.')]],
@@ -556,7 +556,7 @@
       local: T('a model server running (LM Studio, Ollama, vLLM…) with a model loaded', 'un server di modelli acceso (LM Studio, Ollama, vLLM…) con un modello caricato'),
     }[ln];
     var out = [first];
-    if (ln !== 'chatgpt') out.push(T('an OpenAI API key with a little credit — Briglia’s web research runs on it', 'una chiave API di OpenAI con un po’ di credito: le ricerche web di Briglia la usano'));
+    if (ln !== 'chatgpt') out.push(T('an OpenAI API key with a little credit — Briglia reads web pages with it', 'una chiave API di OpenAI con un po’ di credito: Briglia la usa per leggere le pagine web'));
     out.push(T('Telegram on your phone', 'Telegram sul telefono'));
     out.push(T('free accounts at serper.dev and jina.ai — we’ll show you exactly where to click', 'due account gratuiti su serper.dev e jina.ai: ti mostriamo esattamente dove cliccare'));
     return out;
@@ -581,7 +581,7 @@
       h('div', { class: 'lanes' }, LANES().map(function (l) {
         return laneCard(l, { selected: laneChoice === l.id, onclick: function () { laneChoice = l.id; laneTouched = true; render(); } });
       })),
-      laneChoice !== 'chatgpt' ? h('p', { class: 'small', text: T('With this choice you’ll also need an OpenAI API key: Briglia’s web research runs on OpenAI.', 'Con questa scelta serve anche una chiave API di OpenAI: le ricerche web di Briglia usano OpenAI.') }) : null,
+      laneChoice !== 'chatgpt' ? h('p', { class: 'small', text: T('With this choice you’ll also need an OpenAI API key: Briglia reads web pages with OpenAI.', 'Con questa scelta serve anche una chiave API di OpenAI: Briglia legge le pagine web con OpenAI.') }) : null,
       h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', id: 'lane-continue', disabled: inflight > 0, onclick: function () {
         act('lane', { lane: laneChoice }).then(function (j) { if (j.ok) { lanePicked = true; render(); } });
       } }, [T('Continue', 'Continua')])]),
@@ -609,7 +609,7 @@
         act('lane', { lane: l.id }).then(function (j) { if (j.ok) openStep('ai', false); });
       } });
     })));
-    out.push(h('p', { class: 'small', text: T('Every choice except ChatGPT also needs an OpenAI API key, for web research.', 'Ogni scelta tranne ChatGPT richiede anche una chiave API di OpenAI, per le ricerche web.') }));
+    out.push(h('p', { class: 'small', text: T('Every choice except ChatGPT also needs an OpenAI API key, for reading web pages.', 'Ogni scelta tranne ChatGPT richiede anche una chiave API di OpenAI, per leggere le pagine web.') }));
     out.push(h('div', { class: 'actions' }, [h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', type: 'button', onclick: function () { openStep('ai', false); } }, [T('← Back', '← Indietro')])]));
     return out;
   }

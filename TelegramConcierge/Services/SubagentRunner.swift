@@ -610,39 +610,20 @@ actor SubagentRunner {
         var compactionAttempts = CompactionAttempts()
         var needsEmergencyContinuationNote = false
 
-        // Web researcher provider context (WEB_SUBAGENT_PLAN §4.4): resolved
-        // ONCE from the configured web research backend and carried through
-        // every request of the run. Hint rule: `model` omitted → the web
-        // backend; `inherit` → the main profile (today's semantics, chosen
-        // deliberately by the caller); a cheap lane → that lane on the main
-        // profile. An unusable backend (no key) falls back to the main
-        // profile LOUDLY: a log line and a `note` in the result.
-        var webExecution: ProviderExecutionContext? = nil
-        var webBackendNote: String? = nil
-        let explicitInherit = invocation.modelOverride?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "inherit"
-        if subagentType.isWebResearcher, perCallLane == nil, !explicitInherit {
-            do {
-                let resolved = try await openRouterService.webExecutionContextWithNote(lane: .subagent(resolvedSessionId))
-                webExecution = resolved.context
-                if let note = resolved.note {
-                    print("[SubagentRunner] Web researcher: \(note)")
-                    webBackendNote = note
-                }
-            } catch {
-                let reason = (error as? OpenRouterService.WebBackendUnavailable)?.description ?? error.localizedDescription
-                print("[SubagentRunner] Web researcher: \(reason); running on the main model instead.")
-                webBackendNote = "web backend unavailable (\(reason)), ran on main model"
-            }
-        }
-        let webBackendLabel = WebSearchBackend.active.rawValue
-
         // Eager compaction on resume. Sessions normally stay under the budget
         let snapshot = await openRouterService.executionContext(modelOverride: effectiveModelOverride,
             providerOverride: effectiveProviderOverride, reasoningEffortOverride: effectiveReasoningOverride,
             textOnlyOverride: effectiveTextOnlyOverride, lane: .subagent(resolvedSessionId))
-        // The context every request of this run carries: the Web context
-        // when resolved, else the main profile's Responses snapshot (chat
-        // completions pass nil and resolve per request as before).
+        // Web researcher (owner decision 2026-09-25): the MAIN agent's
+        // profile, model and effort (or an explicit per-call lane on it),
+        // snapshotted ONCE here and carried through every request of the run
+        // in either protocol, so a mid-run /model or /provider change never
+        // reaches a running research run. Other subagents: the Responses
+        // snapshot, or nil (chat completions resolve per request as before).
+        let webExecution: ProviderExecutionContext? = subagentType.isWebResearcher
+            ? await openRouterService.researcherExecutionContext(modelOverride: effectiveModelOverride,
+                textOnlyOverride: effectiveTextOnlyOverride, lane: .subagent(resolvedSessionId))
+            : nil
         let runExecution: ProviderExecutionContext? = webExecution ?? (snapshot.wireProtocol == .responses ? snapshot : nil)
         let responsesExecution: ProviderExecutionContext? = runExecution?.wireProtocol == .responses ? runExecution : nil
         defer { runExecution?.responsesTurn.close() }
@@ -1205,13 +1186,11 @@ actor SubagentRunner {
         // route name — this is where an unconfigured frontmatter lane that
         // degraded to inherit becomes visible to the parent.
         let modelUsedLabel: String
-        if let webExecution {
-            modelUsedLabel = "\(webExecution.model) (web backend: \(webBackendLabel))"
-        } else if let effectiveModelOverride {
+        if let effectiveModelOverride {
             modelUsedLabel = effectiveModelOverride
         } else {
             let concrete: String
-            if let responsesExecution { concrete = responsesExecution.model }
+            if let runExecution { concrete = runExecution.model }
             else { concrete = await openRouterService.activeModelId }
             modelUsedLabel = concrete.isEmpty ? "inherit" : "\(concrete) (inherited)"
         }
@@ -1235,7 +1214,6 @@ actor SubagentRunner {
             result.searchEvidence = webLedger.searchEvidence
             result.priorEvidence = priorEvidence
             result.reportPath = reportPath
-            result.note = webBackendNote
         }
         return result
     }

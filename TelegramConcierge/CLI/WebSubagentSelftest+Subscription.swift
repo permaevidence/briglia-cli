@@ -13,7 +13,9 @@ extension WebSubagentSelftest {
     static func runSubscriptionGroups(_ h: Harness) async throws {
         print("16. ChatGPT subscription follow + GPT-6 Luna")
         let check = h.check
-        let keys = [ProviderProfiles.activeProfileKey, KeychainHelper.llmProviderKey, KeychainHelper.openAICompatibleApiKeyKey]
+        let keys = [ProviderProfiles.activeProfileKey, KeychainHelper.llmProviderKey, KeychainHelper.openAICompatibleApiKeyKey,
+                    KeychainHelper.openAICompatibleModelKey, KeychainHelper.openAICompatibleReasoningEffortKey,
+                    KeychainHelper.openAICompatibleBaseURLKey, ProviderProfiles.runtimeProtocolKey]
         let snapshot = KeychainHelper.loadSnapshot()
         let savedOverride = WebSearchBackend.processOverride
         let savedVolatile = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
@@ -173,18 +175,25 @@ extension WebSubagentSelftest {
         check("16.11 a 503 is retried and succeeds; a 400 fails at once without falling back",
               retried == "after retry" && badRequestThrew && captured.all.count == 1, retried)
 
-        // 16.12 The Web researcher's context on the subscription.
-        if let web = try? await h.service.webExecutionContextWithNote(lane: .subagent("sub-web")),
-           let adapterRequest = try? ResponsesAdapter(context: web.context).request(input: [ResponsesAdapter.message(role: "system", text: "S"), ResponsesAdapter.message(role: "user", text: "U")], tools: nil) {
+        // 16.12 The Web researcher on the subscription (owner decision
+        // 2026-09-25): the MAIN subscription profile — its model and effort,
+        // not GPT-6 Luna / forced high — through the main Responses adapter.
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleModelKey, value: "gpt-6-sol")
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "medium")
+        try KeychainHelper.save(key: KeychainHelper.openAICompatibleBaseURLKey, value: SubscriptionEndpoint.inference)
+        try KeychainHelper.save(key: ProviderProfiles.runtimeProtocolKey, value: ProviderWireProtocol.responses.rawValue)
+        let web = await h.service.researcherExecutionContext(modelOverride: nil, textOnlyOverride: nil, lane: .subagent("sub-web"))
+        if let adapterRequest = try? ResponsesAdapter(context: web).request(input: [ResponsesAdapter.message(role: "system", text: "S"), ResponsesAdapter.message(role: "user", text: "U")], tools: nil) {
         let ab = body(adapterRequest)
-        check("16.12 researcher context: subscription endpoint + login generation, GPT-6 Luna, high effort, Responses, no bearer in the context; the adapter builds a streamed subscription request",
-              web.note == nil && web.context.endpoint == SubscriptionEndpoint.inference && web.context.subscriptionGeneration == "gen-fixture"
-              && web.context.model == "gpt-6-luna" && web.context.reasoningEffort == "high" && web.context.wireProtocol == .responses
-              && web.context.authorization.isEmpty && web.context.profileIdentity == "web-chatgpt"
+        check("16.12 researcher context: the main subscription profile (login generation, gpt-6-sol, its medium effort, Responses, subagent:web label, the Web session lane); the adapter builds a streamed subscription request with no bearer",
+              web.endpoint == SubscriptionEndpoint.inference && web.subscriptionGeneration == "gen-fixture"
+              && web.model == "gpt-6-sol" && web.reasoningEffort == "medium" && web.wireProtocol == .responses
+              && web.usageLaneLabel == "subagent:web" && web.lane == .subagent("sub-web")
               && adapterRequest.url?.absoluteString == SubscriptionEndpoint.inference && ab["stream"] as? Bool == true
+              && ((ab["reasoning"] as? [String: Any])?["effort"] as? String) == "medium" && ab["model"] as? String == "gpt-6-sol"
               && ab["instructions"] as? String == "S" && adapterRequest.value(forHTTPHeaderField: "Authorization") == nil,
-              "\(web.context.endpoint) \(web.context.model)")
-        } else { check("16.12 researcher context on the subscription", false, "context or adapter request threw") }
+              "\(web.endpoint) \(web.model) \(web.reasoningEffort ?? "nil")")
+        } else { check("16.12 researcher context on the subscription", false, "adapter request threw") }
         // The persistent researcher's adapter reads the same stream assembler:
         // a failed terminal with a quota code is the typed usage error there
         // too; on a non-subscription stream the same event is left to the

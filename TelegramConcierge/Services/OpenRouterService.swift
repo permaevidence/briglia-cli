@@ -1552,136 +1552,63 @@ actor OpenRouterService {
         return context
     }
 
-    // MARK: - Web researcher context (WEB_SUBAGENT_PLAN §4.4)
+    // MARK: - Web researcher context (owner decision 2026-09-25)
 
-    /// Why the Web researcher could not run on the configured web backend.
-    struct WebBackendUnavailable: Error, CustomStringConvertible {
-        let backend: WebSearchBackend
-        let description: String
-    }
-
-    /// The immutable provider context of one Web-subagent run: the
-    /// configured web research backend (`WebSearchBackend.active`) with its
-    /// own stored key, endpoint, model and transport, resolved ONCE at run
-    /// start and carried through every request of the run (rounds,
-    /// transport retries, forced finals, cutoff round, both summarizers).
-    /// The main profile is never read for these requests and never
-    /// modified. Throws `WebBackendUnavailable` when the backend has no key,
-    /// so the caller can fall back to the main profile LOUDLY (a log line
-    /// and a note in the result), never silently.
+    /// The immutable provider context of one Web-researcher run: the MAIN
+    /// agent's active profile, model and reasoning effort — ChatGPT
+    /// subscription, OpenAI API, OpenCode (chat completions or Responses per
+    /// model), OpenRouter with its /orprovider pin, custom endpoint or local
+    /// server — resolved ONCE at run start by the same builder the main agent
+    /// uses and carried through every request of the run (rounds, transport
+    /// retries, forced finals, the cutoff round, both summarizers). A /model
+    /// or /provider change while the run is going does not reach it; the
+    /// next run or resume follows the new main settings. The effort is the
+    /// main agent's own, through the same per-model normalization (MiMo fold,
+    /// GPT-6 none…max, OpenCode Responses). `modelOverride`/`textOnlyOverride`
+    /// carry an explicit per-call cheap lane, which runs on the main profile.
     ///
-    /// - `.opencode`: OpenCode Go chat completions, the pipeline's pinned
-    ///   `mimo-v2.6-flash` (v0.2.32; was mimo-v2.5), a reasoning_content
-    ///   model on the Go gateway: native replay, reasoning_effort high
-    ///   through the same per-model fold as the main transport.
-    /// - `.openai`: `api.openai.com/v1` over the Responses transport
-    ///   (`store:false`, encrypted-reasoning replay), the configured web
-    ///   model with the `openai/` prefix stripped (default gpt-6-luna),
-    ///   effort high.
-    /// - `.chatgpt` (derived: the main provider is the ChatGPT subscription,
-    ///   owner decision 2026-09-23): the subscription's pinned Responses
-    ///   endpoint with the active login generation, same model resolution
-    ///   as `.openai`, effort high. A usage-exhausted subscription fails the
-    ///   run with the subscription's usage message (no API fallback).
-    /// - `.openrouter`: the configured slug on OpenRouter with the existing
-    ///   provider preferences for that model, effort high.
-    /// Researcher rounds run at HIGH effort (owner decision 2026-09-16 after
-    /// the first field test: the legacy pipeline's agent rounds ran at the
-    /// main profile's configured effort — default high — so medium was a
-    /// regression). Extraction (`excerptReasoning`) stays at medium.
-    nonisolated static let webResearcherReasoningEffort = "high"
-
-    func webExecutionContext(lane: AffinityLane) throws -> ProviderExecutionContext {
-        try webExecutionContextWithNote(lane: lane).context
+    /// Only the researcher's reasoning moved to the main model (owner
+    /// decision 2026-09-25): page extraction, web_fetch compression and OCR
+    /// stay on the /websearch backend (or the subscription), unchanged.
+    /// The research prompt, the privacy rules and the per-session affinity
+    /// lane (`.subagent(<web session id>)`) are unchanged; the context only
+    /// adds the `subagent:web` usage label.
+    func researcherExecutionContext(modelOverride: String?, textOnlyOverride: Bool?, lane: AffinityLane) -> ProviderExecutionContext {
+        var context = executionContext(modelOverride: modelOverride, providerOverride: nil,
+            reasoningEffortOverride: nil, textOnlyOverride: textOnlyOverride, lane: lane)
+        context.usageLaneLabel = "subagent:web"
+        return context
     }
 
-    /// `webExecutionContext` plus a note when the configured web model was
-    /// NOT the one used (Codex R1a review R1): the shared resolver
-    /// (`WebSearchBackend.researchModel`) decides, exactly as the legacy
-    /// pipeline does, and the run reports the substitution to the parent
-    /// instead of silently using the default.
-    func webExecutionContextWithNote(lane: AffinityLane) throws -> (context: ProviderExecutionContext, note: String?) {
-        let backend = WebSearchBackend.active
-        // Always the backend's OWN stored credential — never this service's
-        // in-memory key, which is the main profile's.
-        let key = WebSearchBackend.storedKey(for: backend)
-        guard !key.isEmpty else {
-            throw WebBackendUnavailable(backend: backend, description: "web backend \(backend.rawValue) has no API key")
-        }
-        let configured = (KeychainHelper.load(key: KeychainHelper.openRouterWebSearchModelKey) ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let requested = configured.isEmpty ? KeychainHelper.defaultWebSearchModel : configured
-        let effort = Self.webResearcherReasoningEffort
-        // One resolver for the pipeline and the researcher (R1).
-        let resolution = WebSearchBackend.researchModel(for: backend, requested: requested)
-        let note: String? = resolution.honoured ? nil
-            : "configured web model '\(requested)' is not usable on the \(backend.rawValue) web backend; ran on its default \(resolution.model)"
-        switch backend {
-        case .opencode:
-            let model = resolution.model
-            // This context is the OpenCode Go gateway by construction, so the
-            // OpenCode-only MiMo rule applies here (Codex R2, 2026-09-22).
-            let useReasoningContent = Self.usesReasoningContent(model: model, onOpenCodeRuntime: true)
-            return (ProviderExecutionContext(
-                provider: .openAICompatible, model: model,
-                endpoint: backend.endpoint.absoluteString,
-                authorization: "Bearer " + key, affinityKey: key, lane: lane,
-                provenance: model + "#web-opencode",
-                providerPreferences: nil, reasoning: nil,
-                reasoningEffort: useReasoningContent ? Self.normalizedOpenCodeReasoningEffort(effort, for: model) : effort,
-                thinkingType: useReasoningContent ? Self.openCodeThinkingType(for: model, reasoningEffort: effort) : nil,
-                useReasoningContent: useReasoningContent,
-                textOnly: false, anthropicCacheControl: false, renderPDFAsImages: true,
-                profileIdentity: "web-opencode", usageLaneLabel: "subagent:web"), nil)
-        case .openai:
-            let model = resolution.model
-            return (ProviderExecutionContext(
-                provider: .openAICompatible, model: model,
-                endpoint: Endpoints.webOpenAIBase,
-                authorization: "Bearer " + key, affinityKey: key, lane: lane,
-                provenance: model + "#responses",
-                providerPreferences: nil, reasoning: nil, reasoningEffort: effort,
-                thinkingType: nil, useReasoningContent: false,
-                textOnly: false, anthropicCacheControl: false, renderPDFAsImages: true,
-                wireProtocol: .responses, profileIdentity: "web-openai", nativeToolMedia: true,
-                usageLaneLabel: "subagent:web"), note)
-        case .chatgpt:
-            let model = resolution.model
-            // `key` is the login generation; the adapter reads the credential
-            // per request and never sends the generation as a bearer.
-            var context = ProviderExecutionContext(
-                provider: .openAICompatible, model: model,
-                endpoint: SubscriptionEndpoint.inference,
-                authorization: "", affinityKey: key, lane: lane,
-                provenance: model + "#responses",
-                providerPreferences: nil, reasoning: nil, reasoningEffort: effort,
-                thinkingType: nil, useReasoningContent: false,
-                textOnly: false, anthropicCacheControl: false, renderPDFAsImages: true,
-                wireProtocol: .responses, profileIdentity: "web-chatgpt", nativeToolMedia: false,
-                usageLaneLabel: "subagent:web")
-            context.subscriptionGeneration = key
-            return (context, note)
-        case .openrouter:
-            let model = resolution.model
-            // Web research keeps OpenRouter's automatic routing: this
-            // context runs the web backend's own model and key, so the main
-            // model's /orprovider pin never applies here — only Briglia's
-            // model default (Codex R1, 2026-09-19).
-            var prefs: ProviderPreferences? = nil
-            if let order = defaultProviders(for: model), !order.isEmpty {
-                prefs = ProviderPreferences(order: nil, only: order, allow_fallbacks: false, sort: nil)
-            }
-            let lowered = model.lowercased()
-            return (ProviderExecutionContext(
-                provider: .openRouter, model: model, endpoint: backend.endpoint.absoluteString,
-                authorization: "Bearer " + key, affinityKey: key, lane: lane,
-                provenance: Self.reasoningProvenance(model: model, provider: .openRouter),
-                providerPreferences: prefs, reasoning: ReasoningConfig(effort: effort), reasoningEffort: nil,
-                thinkingType: nil, useReasoningContent: false,
-                textOnly: false, anthropicCacheControl: lowered.contains("anthropic") || lowered.contains("claude"),
-                renderPDFAsImages: !lowered.contains("gemini"),
-                profileIdentity: "web-openrouter", usageLaneLabel: "subagent:web"), nil)
-        }
+    /// The legacy research loop's agent rounds (`web_search` /
+    /// `web_research_sweep`, only while `/websubagent off`): the same main
+    /// snapshot, taken once per loop run, on the run's ephemeral affinity
+    /// lane. Its page extraction stays on the /websearch backend.
+    func legacyWebAgentExecutionContext(executionID: UUID) -> ProviderExecutionContext {
+        var context = executionContext(modelOverride: nil, providerOverride: nil,
+            reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .ephemeral(executionID))
+        context.responsesOperation = .webResearch
+        return context
+    }
+
+    /// One agent round of the legacy research loop on `context` (the main
+    /// transport: chat completions or Responses, the main agent's retries,
+    /// reasoning replay rules and spend pricing). The loop's own system
+    /// prompt; no persona, no profile, no ambient status block.
+    func generateLegacyWebAgentRound(
+        systemPrompt: String, messages: [Message], tools: [ToolDefinition],
+        toolResultMessages: [ToolInteraction], tailUserMessage: String?,
+        context: ProviderExecutionContext
+    ) async throws -> LLMResponse {
+        let scratch = FileManager.default.temporaryDirectory
+        let conversation = PreparedConversation(
+            systemPrompt: systemPrompt, messages: messages,
+            imagesDirectory: scratch, documentsDirectory: scratch,
+            tools: tools, toolResultMessages: toolResultMessages.isEmpty ? nil : toolResultMessages,
+            tailSystemMessage: nil, tailUserMessage: tailUserMessage,
+            omitAmbientStatus: true)
+        if context.wireProtocol == .responses { return try await generateResponses(conversation, context: context) }
+        return try await generateChatCompletion(conversation, context: context)
     }
 
     // MARK: - Context Snapshot

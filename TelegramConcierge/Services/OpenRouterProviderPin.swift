@@ -112,7 +112,7 @@ enum OpenRouterProviderPin {
     /// model keeps OpenRouter's automatic routing: the Web researcher and
     /// the legacy web pipeline (their own backend and key), a configured
     /// description model, the OCR/vision preprocessor (own ZDR routing).
-    static let scopeNote = "Applies to the main model: the main agent and every subagent except the Web researcher, which keeps its own backend (cheap lanes are bypassed while pinned)."
+    static let scopeNote = "Applies to the main model: the main agent and every subagent, the Web researcher included (cheap lanes are bypassed while pinned)."
 
     /// Persist a pin (nil or empty clears it). Slugs are stored verbatim
     /// after normalization — the caller validates them first.

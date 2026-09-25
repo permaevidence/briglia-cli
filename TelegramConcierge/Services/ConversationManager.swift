@@ -4950,7 +4950,7 @@ class ConversationManager: ObservableObject {
             let lanes = SubagentModelLanes.storedModel(.cheapVision, provider: .openRouter) != nil
                 || SubagentModelLanes.storedModel(.cheapText, provider: .openRouter) != nil
             let laneNote = lanes ? " Your subagent cheap lanes are bypassed while pinned (/subagentmodels shows them)." : ""
-            try? await sendText("✅ OpenRouter host pinned to \(slugs.joined(separator: ", ")) for the main model from the next message — main agent and every subagent except the Web researcher, which keeps its own backend.\(verification) A base slug allows every endpoint of that host (price and caching vary per endpoint); requests fail instead of hopping when the host is unavailable. /orprovider off releases it.\(laneNote)")
+            try? await sendText("✅ OpenRouter host pinned to \(slugs.joined(separator: ", ")) for the main model from the next message — main agent and every subagent, the Web researcher included.\(verification) A base slug allows every endpoint of that host (price and caching vary per endpoint); requests fail instead of hopping when the host is unavailable. /orprovider off releases it.\(laneNote)")
         } catch {
             try? await sendText("✖ Could not save the setting: \(error.localizedDescription)")
         }
@@ -5131,8 +5131,11 @@ class ConversationManager: ObservableObject {
         try? await sendText("✅ Active provider: \(profile.displayName) — model \(model). Takes effect from the next message.\(note)")
     }
 
-    /// `/websearch` — show or switch the backend serving the web research
-    /// pipeline (web_search, web_research_sweep, web_fetch compression).
+    /// `/websearch` — show or switch the backend that READS web pages for
+    /// research: page extraction (web_extract, the legacy loop's
+    /// fetch_and_extract) and web_fetch compression. The researcher's own
+    /// reasoning — and the legacy loop's agent rounds — run on the main
+    /// agent's provider, model and effort (owner decision 2026-09-25).
     /// Separate from /provider, with one exception (owner decision
     /// 2026-09-23): while the main provider is the ChatGPT subscription, web
     /// research follows it automatically; the stored choice serves every
@@ -5143,7 +5146,7 @@ class ConversationManager: ObservableObject {
 
         guard !argument.isEmpty else {
             let active = WebSearchBackend.active
-            var lines = ["Web research backend (switch with /websearch <name>):"]
+            var lines = ["Web page-reading backend — page extraction and web_fetch (research itself runs on your main model; switch with /websearch <name>):"]
             if active == .chatgpt {
                 lines.append("▸ chatgpt — \(WebSearchBackend.chatgpt.modelSummary)  [ACTIVE: follows /provider chatgpt]")
             }
@@ -5164,7 +5167,7 @@ class ConversationManager: ObservableObject {
 
         let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if normalized == WebSearchBackend.chatgpt.rawValue {
-            try? await sendText("The ChatGPT subscription can't be picked here: web research uses it automatically while /provider is chatgpt. /websearch sets the backend for other providers (openai, opencode, openrouter).")
+            try? await sendText("The ChatGPT subscription can't be picked here: web page reading uses it automatically while /provider is chatgpt. /websearch sets the page-reading backend for other providers (openai, opencode, openrouter).")
             return
         }
         guard let backend = WebSearchBackend.parseSelectable(normalized) else {
@@ -5184,10 +5187,10 @@ class ConversationManager: ObservableObject {
         }
         let followsSubscription = WebSearchBackend.active == .chatgpt
         let followNote = followsSubscription
-            ? " While /provider is chatgpt, web research keeps using the subscription; this choice applies on other providers."
+            ? " While /provider is chatgpt, web page reading keeps using the subscription; this choice applies on other providers."
             : ""
         if WebSearchBackend.explicitlyStored == backend {
-            try? await sendText("\(backend.displayName) is already the saved web research backend.\(followNote)")
+            try? await sendText("\(backend.displayName) is already the saved web page-reading backend.\(followNote)")
             return
         }
         if WebSearchBackend.configured == backend {
@@ -5208,7 +5211,7 @@ class ConversationManager: ObservableObject {
             return
         }
         UserDefaults.standard.set(backend.rawValue, forKey: WebSearchBackend.selectionKey)
-        try? await sendText("✅ Web research backend: \(backend.displayName) — \(backend.modelSummary). Takes effect from the next search.\(followNote)")
+        try? await sendText("✅ Web page-reading backend: \(backend.displayName) — \(backend.modelSummary). Takes effect from the next search; the research itself stays on your main model.\(followNote)")
     }
 
     /// `/subagents` — turn the model-facing delegation tools (Agent +
