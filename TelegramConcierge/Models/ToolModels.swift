@@ -906,7 +906,7 @@ enum AvailableTools {
     private static let geminiGenerateImage = ToolDefinition(
         function: FunctionDefinition(
             name: "generate_image",
-            description: "Generate an image from a text description using Gemini, or use an existing image as reference/input for image-to-image transformation. Use when the user asks you to create, generate, draw, make, edit, transform, restyle, or use an image as inspiration. The generated image will be sent to the user in the chat. Provide source_image when the user refers to a specific prior image; this tool does not infer the most recent image automatically.",
+            description: "Generate an image from a text description using Gemini, or use an existing image as reference/input for image-to-image transformation. Use when the user asks you to create, generate, draw, make, edit, transform, restyle, or use an image as inspiration. The image is saved and shown to you; it is not sent to the user automatically — use send_document_to_chat to share it. Provide source_image when the user refers to a specific prior image; this tool does not infer the most recent image automatically.",
             parameters: FunctionParameters(
                 properties: [
                     "prompt": ParameterProperty(
@@ -931,7 +931,7 @@ enum AvailableTools {
     private static let openAIGenerateImage = ToolDefinition(
         function: FunctionDefinition(
             name: "generate_image",
-            description: "Generate an image using OpenAI GPT Image 2.5, or generate a new image using one stored source image as a reference/input. Use when the user asks you to create, generate, draw, make, edit, transform, restyle, or use an image as inspiration. If source_image is provided, this tool uses OpenAI's image edit/reference endpoint; it can either edit the original or create a new image inspired by it depending on the prompt and source_image_role.",
+            description: "Generate an image using OpenAI GPT Image 2.5, or generate a new image using one stored source image as a reference/input. Use when the user asks you to create, generate, draw, make, edit, transform, restyle, or use an image as inspiration. The image is saved and shown to you; it is not sent to the user automatically — use send_document_to_chat to share it. If source_image is provided, this tool uses OpenAI's image edit/reference endpoint; it can either edit the original or create a new image inspired by it depending on the prompt and source_image_role.",
             parameters: FunctionParameters(
                 properties: [
                     "prompt": ParameterProperty(

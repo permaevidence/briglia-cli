@@ -36,6 +36,7 @@ struct ImageToolSelftest: AsyncParsableCommand {
         try await failures(checks)
         try await verificationFallback(checks)
         try metadata(checks)
+        try await explicitSend(checks)
         print("Image tool selftest: \(checks.total - checks.failures)/\(checks.total)")
         if checks.failures > 0 { throw ValidationError("Image tool checks failed") }
     }

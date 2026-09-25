@@ -42,7 +42,7 @@ protocol ChatChannel: Sendable {
 /// Transport for turns started from the app's own chat composer. Turn replies
 /// and error notices already land in conversation history — which the window
 /// displays — so `sendText` is deliberately a no-op. Photos and documents the
-/// agent explicitly sends (generate_image, send_document_to_chat) are handed
+/// agent explicitly sends (send_document_to_chat) are handed
 /// to ConversationManager, which persists them and appends a visible message.
 struct AppLocalChannel: ChatChannel {
     nonisolated var kind: ChannelKind { .app }

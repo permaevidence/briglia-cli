@@ -21,6 +21,21 @@ QUALITY = "Optional rendering quality. Use 'auto' by default; use 'high' when de
 BACKGROUND = "Optional background behavior. GPT Image 2.5 supports 'transparent' with png or webp; transparent with jpeg is rejected. Older configured models use 'auto' instead of transparent, with a note in the result."
 
 
+EXPLICIT_SEND = "The image is saved and shown to you; it is not sent to the user automatically \u2014 use send_document_to_chat to share it."
+EXPLICIT_SEND_ANCHOR = "use an image as inspiration. "
+
+
+def explicit_send(schema):
+    """Reviewed r11 step (2026-09-25): the one explicit-send sentence, inserted once
+    after the use-when sentence of the migrated OpenAI description. Nothing else."""
+    description = schema["function"]["description"]
+    if description.count(EXPLICIT_SEND_ANCHOR) != 1 or "send_document_to_chat" in description:
+        raise ValueError("Unexpected OpenAI image description; review the change explicitly")
+    after = copy.deepcopy(schema)
+    after["function"]["description"] = description.replace(EXPLICIT_SEND_ANCHOR, EXPLICIT_SEND_ANCHOR + EXPLICIT_SEND + " ", 1)
+    return after
+
+
 def migrate(before):
     """Only the exact reviewed legacy OpenAI schema is eligible."""
     expected = json.loads(FIXTURE.read_text())["before"]
@@ -60,6 +75,17 @@ class Tests(unittest.TestCase):
             mutation(candidate)
             with self.assertRaises(ValueError):
                 migrate(candidate)
+
+    def test_explicit_send_step(self):
+        fixture = json.loads(FIXTURE.read_text())
+        after = explicit_send(migrate(fixture["before"]))
+        description = after["function"]["description"]
+        self.assertEqual(description.count(EXPLICIT_SEND), 1)
+        self.assertEqual(description.replace(EXPLICIT_SEND + " ", "", 1), fixture["after"]["function"]["description"])
+        after["function"]["description"] = fixture["after"]["function"]["description"]
+        self.assertEqual(after, fixture["after"])
+        with self.assertRaises(ValueError):
+            explicit_send(explicit_send(migrate(fixture["before"])))
 
     def test_candidate_negative_controls(self):
         fixture = json.loads(FIXTURE.read_text())
@@ -120,6 +146,6 @@ if __name__ == "__main__":
             output = pathlib.Path(tmp) / "schema.json"
             subprocess.run([str(binary), "__image-tool-selftest", "--capture-schema", str(output)], check=True, timeout=60)
             fixture = json.loads(FIXTURE.read_text())
-            if json.loads(output.read_text()) != migrate(fixture["before"]):
+            if json.loads(output.read_text()) != explicit_send(migrate(fixture["before"])):
                 raise RuntimeError("Built OpenAI schema differs from the reviewed migration")
-            print("Built OpenAI schema matches the narrow migration; frozen P0 fixtures unchanged.")
+            print("Built OpenAI schema matches the narrow migration plus the r11 explicit-send sentence; frozen P0 fixtures unchanged.")

@@ -353,6 +353,34 @@ class ConversationManager: ObservableObject {
         }
     }
 
+    /// End-of-turn delivery of what send_document_to_chat queued (an image
+    /// file goes as a photo, anything else as a document). This is the only
+    /// automatic media send: generate_image queues nothing, so a generated
+    /// image reaches the user only through an explicit send_document_to_chat.
+    /// Returns false when the turn was superseded mid-delivery.
+    static func deliverQueuedTurnMedia(
+        stillCurrent: () -> Bool,
+        sendPhoto: (Data, String?, String) async throws -> Void,
+        sendDocument: (Data, String, String?, String) async throws -> Void
+    ) async throws -> Bool {
+        for (documentData, filename, mimeType, caption) in ToolExecutor.getPendingDocuments() {
+            try Task.checkCancellation()
+            guard stillCurrent() else { return false }
+            do {
+                if mimeType.hasPrefix("image/") {
+                    try await sendPhoto(documentData, caption, mimeType)
+                    print("[ConversationManager] Sent image as photo: \(filename) (\(documentData.count) bytes)")
+                } else {
+                    try await sendDocument(documentData, filename, caption, mimeType)
+                    print("[ConversationManager] Sent document: \(filename) (\(documentData.count) bytes)")
+                }
+            } catch {
+                print("[ConversationManager] Failed to send document \(filename): \(error)")
+            }
+        }
+        return true
+    }
+
     private func sendPhoto(_ imageData: Data, caption: String?, mimeType: String, to address: ChannelAddress? = nil) async throws {
         guard let address = address ?? replyAddress,
               let channel = channels[address.kind] else { return }
@@ -719,7 +747,7 @@ class ConversationManager: ObservableObject {
         }
     }
 
-    /// Persist an agent-sent photo (generate_image / send_document_to_chat on
+    /// Persist an agent-sent photo (send_document_to_chat with an image, on
     /// an app-originated turn) and append it to history as a visible message.
     private func appendAppChannelPhoto(data: Data, caption: String?, mimeType: String) async {
         let ext: String
@@ -2960,46 +2988,25 @@ class ConversationManager: ObservableObject {
                     try await sendText(finalResponse, to: replyTo)
                 }
 
-                // Media drains even on [SKIP] turns: a generate_image or
-                // send_document_to_chat call is an explicit delivery request, and
-                // leaving the queues populated would leak the files into whatever
-                // turn happens to run next.
-                let toolGeneratedImages = ToolExecutor.getPendingImages()
-                for (imageData, mimeType, prompt) in toolGeneratedImages {
-                    try Task.checkCancellation()
-                    guard activeRunId == runId else { return }
-                    
-                    do {
-                        let caption = "🎨 Generated: \(prompt.prefix(200))\(prompt.count > 200 ? "..." : "")"
-                        try await sendPhoto(imageData, caption: caption, mimeType: mimeType, to: replyTo)
-                        print("[ConversationManager] Sent generated image (\(imageData.count) bytes)")
-                    } catch {
-                        print("[ConversationManager] Failed to send generated image: \(error)")
+                // Media drains even on [SKIP] turns: a send_document_to_chat
+                // call is an explicit delivery request, and leaving the queue
+                // populated would leak the files into whatever turn happens to
+                // run next. Generated images are not queued: generate_image
+                // never sends; the agent shares one with send_document_to_chat.
+                let stillCurrent = try await Self.deliverQueuedTurnMedia(
+                    stillCurrent: { [weak self] in self?.activeRunId == runId },
+                    sendPhoto: { [weak self] data, caption, mimeType in
+                        try await self?.sendPhoto(data, caption: caption, mimeType: mimeType, to: replyTo)
+                    },
+                    sendDocument: { [weak self] data, filename, caption, mimeType in
+                        try await self?.sendDocument(data, filename: filename, caption: caption, mimeType: mimeType, to: replyTo)
                     }
-                }
-                
-                // Send any queued documents (or photos if the file is an image)
-                let toolPendingDocuments = ToolExecutor.getPendingDocuments()
-                for (documentData, filename, mimeType, caption) in toolPendingDocuments {
-                    try Task.checkCancellation()
-                    guard activeRunId == runId else { return }
-                    
-                    do {
-                        if mimeType.hasPrefix("image/") {
-                            try await sendPhoto(documentData, caption: caption, mimeType: mimeType, to: replyTo)
-                            print("[ConversationManager] Sent image as photo: \(filename) (\(documentData.count) bytes)")
-                        } else {
-                            try await sendDocument(documentData, filename: filename, caption: caption, mimeType: mimeType, to: replyTo)
-                            print("[ConversationManager] Sent document: \(filename) (\(documentData.count) bytes)")
-                        }
-                    } catch {
-                        print("[ConversationManager] Failed to send document \(filename): \(error)")
-                    }
-                }
+                )
+                guard stillCurrent else { return }
             } else {
                 // No reply channel configured — nowhere to deliver; drop queued
                 // media so it can't leak into a later turn.
-                let dropped = ToolExecutor.getPendingImages().count + ToolExecutor.getPendingDocuments().count
+                let dropped = ToolExecutor.getPendingDocuments().count
                 if dropped > 0 {
                     print("[ConversationManager] Dropped \(dropped) queued media item(s): no reply channel")
                 }

@@ -142,3 +142,19 @@ bullet; the 7 requests at index 7 (subagents off, O5) keep the legacy tools and
 bullet byte for byte. Bodies are re-serialized byte for byte and refused
 otherwise; a second application is refused. The candidate's `/websubagent off`
 surface is proven separately by the Web selftest against the legacy statics.
+
+## Explicit image send (r11, 2026-09-25)
+
+`image_explicit_send_migration.py` (rule `image-explicit-send-r1.json`) is chained
+after the r10 AGENTS.md bullet. generate_image no longer sends its image to the
+user after the turn; the model shares it with send_document_to_chat. In the 35
+requests that carry the (Gemini) generate_image schema, the description's sentence
+"The generated image will be sent to the user in the chat." is swapped, in place
+between its fixed neighbours, for "The image is saved and shown to you; it is not
+sent to the user automatically — use send_document_to_chat to share it." The other
+56 bodies carry no generate_image and are compared unchanged; lifecycle reverses
+the swap on the 16 candidate captures that carry it (the pinned SOURCE's
+`loop-exhausted-1` is absent from the candidate since r4) before the r10→r3 chain. Bodies are re-serialized
+byte for byte and refused otherwise; a second application is refused. The OpenAI
+and OpenRouter schema variants gain or swap the same sentence but appear in no
+frozen capture (the OpenAI one is pinned by `image_schema_contract_test.py`).

@@ -204,8 +204,9 @@ def main():
             from web_subagent_r2_wire_migration import migrate_wire_fixtures as migrate_web_subagent_r2
             from harness_identity_migration import migrate_wire_fixtures as migrate_harness_identity
             from agents_md_migration import migrate_wire_fixtures as migrate_agents_md
-            compare(migrate_agents_md(migrate_harness_identity(migrate_web_subagent_r2(migrate_chronology(migrate_reasoning_history_removal(migrate_wire_fixtures(fixtures)))))), actual)
-            print(f"Matched {len(fixtures)} pinned-release bodies with the reviewed read_file description addition, reasoning_history removal, chronology reply-time notes, the Web subagent R2 default-on/reply-policy change and runtime identity, targets and full header maps", flush=True)
+            from image_explicit_send_migration import migrate_wire_fixtures as migrate_image_explicit_send
+            compare(migrate_image_explicit_send(migrate_agents_md(migrate_harness_identity(migrate_web_subagent_r2(migrate_chronology(migrate_reasoning_history_removal(migrate_wire_fixtures(fixtures))))))), actual)
+            print(f"Matched {len(fixtures)} pinned-release bodies with the reviewed read_file description addition, reasoning_history removal, chronology reply-time notes, the Web subagent R2 default-on/reply-policy change, runtime identity, the AGENTS.md bullet and the explicit image-send sentence, targets and full header maps", flush=True)
         finally:
             for tree in reversed(trees):
                 command(["git", "worktree", "remove", "--force", str(tree)])

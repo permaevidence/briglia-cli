@@ -2976,9 +2976,6 @@ struct DeleteContactsResult: Codable {
 extension ToolExecutor {
     private static let pendingToolOutputsLock = NSLock()
 
-    /// Store for generated images to be sent after tool execution
-    private static var pendingImages: [(data: Data, mimeType: String, prompt: String)] = []
-    
     /// Store for documents to be sent after tool execution
     private static var pendingDocuments: [(data: Data, filename: String, mimeType: String, caption: String?)] = []
     
@@ -2988,15 +2985,6 @@ extension ToolExecutor {
     
     /// Store for downloaded filenames to add to Message history
     private static var pendingDownloadedFilenames: [String] = []
-    
-    /// Get and clear pending images
-    static func getPendingImages() -> [(data: Data, mimeType: String, prompt: String)] {
-        pendingToolOutputsLock.lock()
-        defer { pendingToolOutputsLock.unlock() }
-        let images = pendingImages
-        pendingImages = []
-        return images
-    }
     
     /// Get and clear pending documents
     static func getPendingDocuments() -> [(data: Data, filename: String, mimeType: String, caption: String?)] {
@@ -3029,16 +3017,9 @@ extension ToolExecutor {
     static func clearPendingToolOutputs() {
         pendingToolOutputsLock.lock()
         defer { pendingToolOutputsLock.unlock() }
-        pendingImages = []
         pendingDocuments = []
         pendingFilesForDescription = []
         pendingDownloadedFilenames = []
-    }
-
-    private static func queuePendingImage(data: Data, mimeType: String, prompt: String) {
-        pendingToolOutputsLock.lock()
-        pendingImages.append((data, mimeType, prompt))
-        pendingToolOutputsLock.unlock()
     }
 
     private static func queuePendingDocument(data: Data, filename: String, mimeType: String, caption: String?) {
@@ -3109,6 +3090,20 @@ extension ToolExecutor {
     nonisolated(unsafe) static var openRouterImageServiceOverrideForTesting: OpenRouterImageService?
     private var openRouterImageService: OpenRouterImageService {
         Self.openRouterImageServiceOverrideForTesting ?? .shared
+    }
+
+    /// Tool-result text for a generated image. The image is attached for the
+    /// model but NOT sent to the user; the main agent shares it with
+    /// send_document_to_chat, a subagent (no chat channel) returns the path.
+    static func generatedImageMessage(isEdit: Bool, savedPath: String?, canSendToChat: Bool) -> String {
+        let done = (isEdit ? "Image transformed" : "Image generated") + " successfully. You can now see and analyze the result."
+        guard let savedPath else {
+            return done + " It has NOT been shown to the user, and saving it to disk failed, so it cannot be sent."
+        }
+        if canSendToChat {
+            return done + " Saved to \(savedPath). It has NOT been shown to the user; to show it, call send_document_to_chat with file_path set to this path."
+        }
+        return done + " Saved to \(savedPath). It has NOT been shown to the user; include this path in your final result if the user should see it."
     }
 
     func executeGenerateImage(_ call: ToolCall) async -> ToolResultMessage {
@@ -3289,16 +3284,14 @@ extension ToolExecutor {
                 print("[ToolExecutor] Saved generated image: \(fileName) (\(imageData.count) bytes)")
             } catch {
                 print("[ToolExecutor] Failed to save generated image: \(error)")
-                // Continue anyway - we can still send to Telegram and inject multimodally
+                // Continue anyway - the image is still injected multimodally; the
+                // result says it was not saved, so no path is offered for sending.
             }
             
-            if allowsUserVisibleToolOutputs {
-                // Main-agent generated images are sent after the turn and tracked in
-                // conversation history. Subagents only return the file path/result.
-                ToolExecutor.queuePendingImage(data: imageData, mimeType: mimeType, prompt: args.prompt)
-                ToolExecutor.queueFileForDescription(filename: fileName, data: imageData, mimeType: mimeType)
-            }
-            
+            // Generated images are never sent to the user automatically: the
+            // model shows one with send_document_to_chat on the saved path.
+            // Nothing turn-scoped is queued here, so image generation holds no
+            // state that outlives the tool call (MIDTURN_EARLY_WAKE_PLAN_V2 D5).
             let isEdit = sourceImageData != nil
             
             // Create file attachment for multimodal injection (LLM can see the generated image)
@@ -3306,15 +3299,16 @@ extension ToolExecutor {
             print("[ToolExecutor] Created FileAttachment for generated image: \(fileName) (\(mimeType), \(imageData.count) bytes)")
             
             // Result text (image will be injected as multimodal content)
-            var result = """
-            {"success": true, "provider": "\(providerName)", "filename": "\(fileName)", "mimeType": "\(mimeType)", "sizeBytes": \(imageData.count), "resolution": "\(resolvedImageSize)", "message": "\(isEdit ? "Image transformed" : "Image generated") successfully. You can now see and analyze the result."}
-            """
-            
-            if !imageMetadata.isEmpty, let data = result.data(using: .utf8),
-               var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                object.merge(imageMetadata) { _, new in new }
-                result = jsonObjectString(object)
-            }
+            let savedPath = FileManager.default.fileExists(atPath: documentsURL.path) ? documentsURL.path : nil
+            var object: [String: Any] = [
+                "success": true, "provider": providerName, "filename": fileName, "mimeType": mimeType,
+                "sizeBytes": imageData.count, "resolution": resolvedImageSize,
+                "message": Self.generatedImageMessage(isEdit: isEdit, savedPath: savedPath,
+                                                      canSendToChat: allowsUserVisibleToolOutputs)
+            ]
+            if let savedPath { object["path"] = savedPath }
+            object.merge(imageMetadata) { _, new in new }
+            let result = jsonObjectString(object)
 
             await ToolServiceHealth.shared.recordSuccess(.imageGeneration)
             return ToolResultMessage(

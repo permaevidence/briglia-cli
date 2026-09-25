@@ -194,7 +194,7 @@ extension AvailableTools {
     static let openRouterGenerateImage = ToolDefinition(
         function: FunctionDefinition(
             name: "generate_image",
-            description: "Generate an image with Google's Gemini image models (Nano Banana) through OpenRouter, or edit, restyle or take inspiration from one stored source image. Use when the user asks you to create, generate, draw, make, edit, transform, restyle, or use an image as inspiration. The generated image will be sent to the user in the chat. Provide source_image when the user refers to a specific prior image; this tool does not infer the most recent image automatically.",
+            description: "Generate an image with Google's Gemini image models (Nano Banana) through OpenRouter, or edit, restyle or take inspiration from one stored source image. Use when the user asks you to create, generate, draw, make, edit, transform, restyle, or use an image as inspiration. The image is saved and shown to you; it is not sent to the user automatically — use send_document_to_chat to share it. Provide source_image when the user refers to a specific prior image; this tool does not infer the most recent image automatically.",
             parameters: FunctionParameters(
                 properties: [
                     "prompt": ParameterProperty(
