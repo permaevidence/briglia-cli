@@ -890,11 +890,16 @@ enum AvailableTools {
     // MARK: - Image Generation Tool
     
     static var generateImage: ToolDefinition {
-        switch ImageGenerationProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.imageGenerationProviderKey)) {
+        // MediaRouting: an OpenAI image key keeps today's schema; the
+        // OpenRouter lane without one gets the Gemini-via-OpenRouter schema
+        // (openRouterGenerateImage, OpenRouterImageService.swift).
+        switch MediaRouting.imageBackend {
         case .gemini:
             return geminiGenerateImage
         case .openAI:
             return openAIGenerateImage
+        case .openRouter:
+            return openRouterGenerateImage
         }
     }
 
@@ -1137,7 +1142,13 @@ enum AvailableTools {
         )
     }
 
-    static let transcribeMedia = ToolDefinition(
+    /// The OpenAI description unless voice runs through OpenRouter
+    /// (MediaRouting.transcription: no OpenAI key, OpenRouter lane).
+    static var transcribeMedia: ToolDefinition {
+        MediaRouting.transcription.viaOpenRouter ? openRouterTranscribeMedia : openAITranscribeMedia
+    }
+
+    private static let openAITranscribeMedia = ToolDefinition(
         function: FunctionDefinition(
             name: "transcribe_media",
             description: "Transcribe speech from an audio or video file on disk via OpenAI cloud transcription (requires the OpenAI key from setup). Video files and uncommon audio formats have their audio track extracted automatically via ffmpeg. Use format='text' for a plain transcript (default). Use format='srt' to get timestamped subtitles — the .srt file is written next to the input (or to output_path) and the result includes a preview; pair it with the video-edit skill to burn subtitles in or attach them as a soft track. Note: SRT uses whisper-1 (gpt-transcribe does not return timestamps); plain text uses gpt-transcribe.",

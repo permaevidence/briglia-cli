@@ -453,6 +453,10 @@
     return h('div', { class: 'saved' }, [svg(CHECK, { stroke: 'currentColor', width: '3' }), h('span', {}, [text, sub ? h('span', { class: 'sub', text: ' \u00b7 ' + sub }) : null])]);
   }
 
+  // Voice and images run through OpenRouter (OpenRouter lane in use, no OpenAI key).
+  function viaOR() { return !!(S.ai && S.ai.media_via === 'openrouter'); }
+  // The lane being set up or in use is OpenRouter (no OpenAI key needed there).
+  function orLane() { return !!(S.ai && S.ai.lane === 'openrouter'); }
   function KEYS() { return {
     serper: { title: T('Web search', 'Ricerca web'), lead: T('Serper lets Briglia search Google. The free plan includes 2,500 searches — plenty to start.', 'Serper permette a Briglia di cercare su Google. Il piano gratuito include 2.500 ricerche: più che sufficienti per iniziare.'),
       steps: [[T('Open ', 'Apri '), link('https://serper.dev/signup', 'serper.dev'), T(' and sign up (free, no card needed).', ' e registrati (gratis, senza carta).')], [T('In the dashboard, open ', 'Nella dashboard apri '), h('b', { text: 'API Key' }), T(' and copy it.', ' e copiala.')], [T('Paste it below. It’s checked automatically.', 'Incollala qui sotto. Viene controllata in automatico.')]],
@@ -463,6 +467,9 @@
     openai: S.ai && S.ai.openai_required ? { title: T('OpenAI key', 'Chiave OpenAI'),
       lead: T('Needed with ' + stepInfo('ai').title + ': Briglia reads web pages with OpenAI (much faster than other models); the research itself runs on your main model. The same key also lets Briglia understand voice messages and create images.', 'Serve con ' + stepInfo('ai').title + ': Briglia legge le pagine web con OpenAI (molto più veloce degli altri modelli); la ricerca vera e propria usa il tuo modello principale. La stessa chiave permette anche di capire i messaggi vocali e creare immagini.'),
       extra: T('OpenAI bills API use per request, so you add a few dollars of credit. Reading the pages of a search costs cents per question.', 'OpenAI fa pagare l’uso delle API a richiesta, quindi aggiungi qualche dollaro di credito. Leggere le pagine di una ricerca costa pochi centesimi.'),
+      steps: null, placeholder: 'sk-…' } : (viaOR() || orLane()) ? { title: T('Voice messages & images', 'Messaggi vocali e immagini'),
+      lead: T('Covered by your OpenRouter key: Briglia understands voice messages and creates images (with Google’s Gemini) with it — no other key needed.', 'Coperto dalla tua chiave OpenRouter: Briglia capisce i messaggi vocali e crea immagini (con Gemini di Google) con quella, senza altre chiavi.'),
+      extra: T('Optional: if you add an OpenAI API key, Briglia uses OpenAI for these instead (GPT Image for pictures). OpenAI bills API use per request.', 'Facoltativo: se aggiungi una chiave API di OpenAI, Briglia userà OpenAI per queste funzioni (GPT Image per le immagini). OpenAI fa pagare l’uso delle API a richiesta.'),
       steps: null, placeholder: 'sk-…' } : { title: T('Voice messages & images', 'Messaggi vocali e immagini'), lead: T('Optional. An OpenAI API key lets Briglia understand your voice messages and create images. Without it, everything else works.', 'Facoltativo. Una chiave API di OpenAI permette a Briglia di capire i tuoi messaggi vocali e di creare immagini. Senza, tutto il resto funziona.'),
       extra: T('This is separate from ChatGPT: OpenAI bills API use per request, so you add a few dollars of credit.', 'È separata da ChatGPT: OpenAI fa pagare l’uso delle API a richiesta, quindi aggiungi qualche dollaro di credito.'),
       steps: [[T('Open ', 'Apri '), link('https://platform.openai.com/api-keys', 'platform.openai.com/api-keys'), T(' and sign in.', ' e accedi.')], [T('Click ', 'Clicca '), h('b', { text: 'Create new secret key' }), T(' and copy it.', ' e copiala.')], [T('Add a little credit under ', 'Aggiungi un po’ di credito in '), h('b', { text: 'Settings → Billing' }), '.'], [T('Paste the key below.', 'Incolla la chiave qui sotto.')]],
@@ -522,13 +529,20 @@
       out.push(navButtons(id));
       return out;
     }
+    if (id === 'openai' && !masked && viaOR() && !st.editing) {
+      out.push(savedBox(T('Working through OpenRouter', 'Funziona tramite OpenRouter'), T('no OpenAI key needed', 'nessuna chiave OpenAI necessaria')));
+      if (k.extra) out.push(h('p', { class: 'small', text: k.extra }));
+      out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn secondary', type: 'button', id: 'openai-add', onclick: function () { st.editing = true; st.value = ''; render(); } }, [T('Add an OpenAI key (optional)', 'Aggiungi una chiave OpenAI (facoltativa)')])]));
+      out.push(navButtons(id));
+      return out;
+    }
     out.push(h('ol', { class: 'howto' }, k.steps.map(function (parts) { return h('li', {}, parts); })));
     if (k.extra) out.push(h('p', { class: 'small', text: k.extra }));
     if (id === 'email' && S.keys.agentmail && !S.email.on) out.push(h('p', { class: 'small', text: T('Your saved key ' + S.keys.agentmail + ' is kept — paste it again to turn email back on.', 'La chiave salvata ' + S.keys.agentmail + ' resta: incollala di nuovo per riattivare l’email.') }));
     out.push(field(id, { secret: true, placeholder: k.placeholder, label: T('Your key', 'La tua chiave'), checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
       return act('key', { kind: id === 'email' ? 'agentmail' : id, key: v }, id, current);
     } }));
-    if (st.editing && masked) out.push(h('button', { class: 'btn ghost', type: 'button', onclick: function () { st.editing = false; render(); } }, [T('Cancel', 'Annulla')]));
+    if (st.editing && (masked || (id === 'openai' && viaOR()))) out.push(h('button', { class: 'btn ghost', type: 'button', onclick: function () { st.editing = false; render(); } }, [T('Cancel', 'Annulla')]));
     out.push(navButtons(id));
     return out;
   }
@@ -556,7 +570,7 @@
       local: T('a model server running (LM Studio, Ollama, vLLM…) with a model loaded, or another provider’s address and API key', 'un server di modelli acceso (LM Studio, Ollama, vLLM…) con un modello caricato, oppure indirizzo e chiave API di un altro fornitore'),
     }[ln];
     var out = [first];
-    if (ln !== 'chatgpt') out.push(T('an OpenAI API key with a little credit — Briglia reads web pages with it', 'una chiave API di OpenAI con un po’ di credito: Briglia la usa per leggere le pagine web'));
+    if (ln === 'opencode' || ln === 'local') out.push(T('an OpenAI API key with a little credit — Briglia reads web pages with it', 'una chiave API di OpenAI con un po’ di credito: Briglia la usa per leggere le pagine web'));
     out.push(T('Telegram on your phone', 'Telegram sul telefono'));
     out.push(T('free accounts at serper.dev and jina.ai — we’ll show you exactly where to click', 'due account gratuiti su serper.dev e jina.ai: ti mostriamo esattamente dove cliccare'));
     return out;
@@ -581,7 +595,8 @@
       h('div', { class: 'lanes' }, LANES().map(function (l) {
         return laneCard(l, { selected: laneChoice === l.id, onclick: function () { laneChoice = l.id; laneTouched = true; render(); } });
       })),
-      laneChoice !== 'chatgpt' ? h('p', { class: 'small', text: T('With this choice you’ll also need an OpenAI API key: Briglia reads web pages with OpenAI.', 'Con questa scelta serve anche una chiave API di OpenAI: Briglia legge le pagine web con OpenAI.') }) : null,
+      (laneChoice === 'opencode' || laneChoice === 'local') ? h('p', { class: 'small', text: T('With this choice you’ll also need an OpenAI API key: Briglia reads web pages with OpenAI.', 'Con questa scelta serve anche una chiave API di OpenAI: Briglia legge le pagine web con OpenAI.') })
+        : laneChoice === 'openrouter' ? h('p', { class: 'small', text: T('Your OpenRouter key also covers reading web pages, voice messages and images: no OpenAI key needed.', 'La chiave OpenRouter copre anche la lettura delle pagine web, i messaggi vocali e le immagini: non serve una chiave OpenAI.') }) : null,
       h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', id: 'lane-continue', disabled: inflight > 0, onclick: function () {
         act('lane', { lane: laneChoice }).then(function (j) { if (j.ok) { lanePicked = true; render(); } });
       } }, [T('Continue', 'Continua')])]),
@@ -609,7 +624,7 @@
         act('lane', { lane: l.id }).then(function (j) { if (j.ok) openStep('ai', false); });
       } });
     })));
-    out.push(h('p', { class: 'small', text: T('Every choice except ChatGPT also needs an OpenAI API key, for reading web pages.', 'Ogni scelta tranne ChatGPT richiede anche una chiave API di OpenAI, per leggere le pagine web.') }));
+    out.push(h('p', { class: 'small', text: T('OpenCode Go and a local or other server also need an OpenAI API key, for reading web pages. ChatGPT and OpenRouter don’t.', 'OpenCode Go e un server locale o altro richiedono anche una chiave API di OpenAI, per leggere le pagine web. ChatGPT e OpenRouter no.') }));
     out.push(h('div', { class: 'actions' }, [h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', type: 'button', onclick: function () { openStep('ai', false); } }, [T('← Back', '← Indietro')])]));
     return out;
   }

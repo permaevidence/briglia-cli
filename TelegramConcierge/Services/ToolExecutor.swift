@@ -1048,33 +1048,36 @@ actor ToolExecutor {
 
         switch provider {
         case .openAI:
-            let apiKey = (KeychainHelper.load(key: KeychainHelper.openAITranscriptionApiKeyKey) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // An OpenAI key → OpenAI exactly as before; none, on the
+            // OpenRouter lane → OpenRouter (MediaRouting.transcription).
+            let route = MediaRouting.transcription
+            let endpoint = OpenAITranscriptionService.Endpoint(route)
+            let apiKey = route.key
             guard !apiKey.isEmpty else {
                 return fail("No OpenAI API key is configured for transcription. Run `briglia setup` (section 2) to add it.")
             }
             if let size = try? FileManager.default.attributesOfItem(atPath: workURL.path)[.size] as? Int,
                size > 25 * 1024 * 1024 {
-                return fail("Audio is \(size / (1024 * 1024)) MB — above OpenAI's 25 MB upload limit. Trim or split the media first (see the video-edit skill).")
+                return fail("Audio is \(size / (1024 * 1024)) MB — above \(endpoint.label)'s 25 MB upload limit. Trim or split the media first (see the video-edit skill).")
             }
 
             if format == "text" {
                 do {
-                    let text = try await OpenAITranscriptionService.shared.transcribeAudioFile(url: workURL, apiKey: apiKey, language: language)
+                    let text = try await OpenAITranscriptionService.shared.transcribeAudioFile(url: workURL, apiKey: apiKey, language: language, endpoint: endpoint)
                     return ToolResultMessage(toolCallId: call.id, content: jsonObjectString([
-                        "provider": "openai/gpt-transcribe",
+                        "provider": endpoint.textProviderLabel,
                         "source": inputURL.path,
                         "transcript": text
                     ]))
                 } catch {
-                    return fail("OpenAI transcription failed: \(error.localizedDescription)")
+                    return fail("\(endpoint.label) transcription failed: \(error.localizedDescription)")
                 }
             } else {
                 do {
-                    let srt = try await OpenAITranscriptionService.shared.transcribeAudioFileSRT(url: workURL, apiKey: apiKey, language: language)
-                    return writeSRTResult(call: call, srt: srt, args: args, inputURL: inputURL, provider: "openai/whisper-1")
+                    let srt = try await OpenAITranscriptionService.shared.transcribeAudioFileSRT(url: workURL, apiKey: apiKey, language: language, endpoint: endpoint)
+                    return writeSRTResult(call: call, srt: srt, args: args, inputURL: inputURL, provider: endpoint.srtProviderLabel)
                 } catch {
-                    return fail("OpenAI SRT transcription failed: \(error.localizedDescription)")
+                    return fail("\(endpoint.label) SRT transcription failed: \(error.localizedDescription)")
                 }
             }
 
@@ -3102,6 +3105,12 @@ extension ToolExecutor {
         }
     }
     
+    /// Selftest seam: a fake-transport service (never a live key or API).
+    nonisolated(unsafe) static var openRouterImageServiceOverrideForTesting: OpenRouterImageService?
+    private var openRouterImageService: OpenRouterImageService {
+        Self.openRouterImageServiceOverrideForTesting ?? .shared
+    }
+
     func executeGenerateImage(_ call: ToolCall) async -> ToolResultMessage {
         guard let argsData = call.function.arguments.data(using: .utf8),
               let args = try? JSONDecoder().decode(GenerateImageArguments.self, from: argsData) else {
@@ -3143,14 +3152,42 @@ extension ToolExecutor {
         let provider = ImageGenerationProvider.fromStoredValue(
             KeychainHelper.load(key: KeychainHelper.imageGenerationProviderKey)
         )
+        // Same decision as the schema (AvailableTools.generateImage): an
+        // OpenAI image key keeps today's path; the OpenRouter lane without
+        // one renders through OpenRouter (Gemini image models).
+        let backend = MediaRouting.imageBackend
         let requestedSize = args.size?.trimmingCharacters(in: .whitespacesAndNewlines)
         
         do {
             let imageResult: (data: Data, mimeType: String, spendUSD: Double?)
             let resolvedImageSize: String
             var imageMetadata: [String: Any] = [:]
+            var providerName = provider.toolName
 
-            switch provider {
+            switch backend {
+            case .openRouter:
+                let openRouterKey = (KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !openRouterKey.isEmpty else {
+                    return ToolResultMessage(toolCallId: call.id, content: "{\"error\": \"OpenRouter API key is not configured. Add it with briglia menu.\"}")
+                }
+                let orPrompt = sourceImageData == nil
+                    ? args.prompt
+                    : promptWithSourceImageRole(args.sourceImageRole, prompt: args.prompt)
+                let orResult = try await openRouterImageService.generateImage(
+                    apiKey: openRouterKey,
+                    prompt: orPrompt,
+                    sourceImageData: sourceImageData,
+                    sourceMimeType: sourceMimeType,
+                    engine: args.engine,
+                    aspectRatio: args.aspectRatio,
+                    size: requestedSize
+                )
+                imageResult = (orResult.data, orResult.mimeType, orResult.spendUSD)
+                imageMetadata = orResult.toolResultMetadata()
+                resolvedImageSize = orResult.size ?? "default"
+                providerName = "OpenRouter (Gemini)"
+
             case .gemini:
                 guard let geminiApiKey = KeychainHelper.load(key: KeychainHelper.geminiApiKeyKey),
                       !geminiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -3270,7 +3307,7 @@ extension ToolExecutor {
             
             // Result text (image will be injected as multimodal content)
             var result = """
-            {"success": true, "provider": "\(provider.toolName)", "filename": "\(fileName)", "mimeType": "\(mimeType)", "sizeBytes": \(imageData.count), "resolution": "\(resolvedImageSize)", "message": "\(isEdit ? "Image transformed" : "Image generated") successfully. You can now see and analyze the result."}
+            {"success": true, "provider": "\(providerName)", "filename": "\(fileName)", "mimeType": "\(mimeType)", "sizeBytes": \(imageData.count), "resolution": "\(resolvedImageSize)", "message": "\(isEdit ? "Image transformed" : "Image generated") successfully. You can now see and analyze the result."}
             """
             
             if !imageMetadata.isEmpty, let data = result.data(using: .utf8),
@@ -3287,6 +3324,8 @@ extension ToolExecutor {
                 spendUSD: spendUSD
             )
         } catch OpenAIImageError.invalidOptions(let message) {
+            return ToolResultMessage(toolCallId: call.id, content: jsonObjectString(["error": message]))
+        } catch OpenRouterImageService.ServiceError.invalidOptions(let message) {
             return ToolResultMessage(toolCallId: call.id, content: jsonObjectString(["error": message]))
         } catch {
             await ToolServiceHealth.shared.recordFailure(.imageGeneration, error: error.localizedDescription)
@@ -3896,8 +3935,11 @@ struct GenerateImageArguments: Codable {
     let outputCompression: Int?
     let background: String?
     let moderation: String?
+    /// OpenRouter (Gemini) schema only.
+    let aspectRatio: String?
     
     enum CodingKeys: String, CodingKey {
+        case aspectRatio = "aspect_ratio"
         case engine
         case prompt
         case sourceImage = "source_image"

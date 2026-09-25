@@ -738,16 +738,23 @@ actor OpenRouterService {
 
     /// nil when neither an OpenAI nor an OpenRouter key is available.
     func resolvedVisionBackend() -> VisionBackend? {
-        let stored = KeychainHelper.load(key: KeychainHelper.visionPreprocessorBackendKey)?
+        let snapshot = KeychainHelper.loadSnapshot()
+        let stored = snapshot[KeychainHelper.visionPreprocessorBackendKey]?
             .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         let openAIKey = Self.resolvedOpenAIKey()
-        let openRouterKey = (KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? "")
+        let openRouterKey = (snapshot[KeychainHelper.openRouterApiKeyKey] ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let useOpenAI: Bool
+        var useOpenAI: Bool
         switch stored {
         case "openai": useOpenAI = true
         case "openrouter": useOpenAI = false
         default: useOpenAI = !openAIKey.isEmpty
+        }
+        // A stored "openai" choice whose key is gone falls to OpenRouter on
+        // the OpenRouter lane (MediaRouting); with the key present nothing
+        // changes, and off that lane the old "no backend" result stands.
+        if useOpenAI, MediaRouting.ocrFollowsOpenRouter(stored: snapshot, openAIKey: openAIKey) {
+            useOpenAI = false
         }
         let effortRaw = KeychainHelper.load(key: KeychainHelper.visionPreprocessorReasoningEffortKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

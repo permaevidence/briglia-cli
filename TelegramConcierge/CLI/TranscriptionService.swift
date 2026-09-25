@@ -46,10 +46,59 @@ final class WhisperKitService {
 // MARK: - Cloud transcription (OpenAI) — identical to the Ada.app implementation
 
 actor OpenAITranscriptionService {
-    static let shared = OpenAITranscriptionService()
+    private static let defaultInstance = OpenAITranscriptionService()
+    /// Selftest seam: a fake-transport service (never a live key or API).
+    nonisolated(unsafe) static var overrideForTesting: OpenAITranscriptionService?
+    static var shared: OpenAITranscriptionService { overrideForTesting ?? defaultInstance }
+
+    /// Where a transcription goes. `.openAI` is the historical path
+    /// (api.openai.com, byte-identical). `.openRouter` serves the OpenRouter
+    /// lane when no OpenAI key is configured (`MediaRouting.transcription`):
+    /// the same multipart shape on openrouter.ai, verified live 2026-09-25
+    /// with `openai/gpt-transcribe` and the `prompt` vocabulary hint.
+    enum Endpoint: Equatable, Sendable {
+        case openAI
+        case openRouter
+
+        init(_ route: MediaRouting.TranscriptionRoute) {
+            self = route.viaOpenRouter ? .openRouter : .openAI
+        }
+
+        var url: String {
+            switch self {
+            case .openAI: return "https://api.openai.com/v1/audio/transcriptions"
+            case .openRouter: return "https://openrouter.ai/api/v1/audio/transcriptions"
+            }
+        }
+        var textModel: String { self == .openAI ? "gpt-transcribe" : "openai/gpt-transcribe" }
+        var label: String { self == .openAI ? "OpenAI" : "OpenRouter" }
+        /// What tools report as the provider/model that transcribed.
+        var textProviderLabel: String { self == .openAI ? "openai/gpt-transcribe" : "openrouter/openai/gpt-transcribe" }
+        var srtProviderLabel: String { self == .openAI ? "openai/whisper-1" : "openrouter/openai/whisper-1" }
+    }
+
+    private let transport: @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
+    init(transport: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }) {
+        self.transport = transport
+    }
 
     private struct TranscriptionResponse: Decodable {
         let text: String
+    }
+
+    /// OpenRouter's verbose_json (whisper-1): segments with start/end
+    /// seconds. OpenRouter serves no "srt" format ("Only json and
+    /// verbose_json are supported", verified 2026-09-25), so SRT is built
+    /// locally from these.
+    struct VerboseTranscription: Decodable {
+        struct Segment: Decodable {
+            let start: Double
+            let end: Double
+            let text: String
+        }
+        let text: String?
+        let segments: [Segment]?
     }
 
     private struct APIErrorEnvelope: Decodable {
@@ -71,19 +120,21 @@ actor OpenAITranscriptionService {
     /// the recognizer would otherwise misspell (see
     /// `TranscriptionVocabulary.chatHint`). Chat voice notes pass it;
     /// `transcribe_media` on arbitrary files does not.
-    func transcribeAudioFile(url: URL, apiKey: String, language: String? = nil, prompt: String? = nil) async throws -> String {
+    func transcribeAudioFile(url: URL, apiKey: String, language: String? = nil, prompt: String? = nil,
+                             endpoint: Endpoint = .openAI) async throws -> String {
         let data = try await performRequest(
             url: url,
             apiKey: apiKey,
-            model: "gpt-transcribe",
+            model: endpoint.textModel,
             responseFormat: nil,
             language: language,
-            prompt: prompt
+            prompt: prompt,
+            endpoint: endpoint
         )
 
         guard let decoded = try? JSONDecoder().decode(TranscriptionResponse.self, from: data) else {
             print("[OpenAITranscriptionService] Failed to decode transcription response")
-            throw TranscriptionServiceError(message: "OpenAI returned an unreadable transcription response")
+            throw TranscriptionServiceError(message: "\(endpoint.label) returned an unreadable transcription response")
         }
         let text = decoded.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
@@ -94,14 +145,35 @@ actor OpenAITranscriptionService {
 
     /// Transcribe to SRT subtitles. Uses whisper-1 because gpt-transcribe
     /// does not support timestamped response formats.
-    func transcribeAudioFileSRT(url: URL, apiKey: String, language: String? = nil, prompt: String? = nil) async throws -> String {
+    func transcribeAudioFileSRT(url: URL, apiKey: String, language: String? = nil, prompt: String? = nil,
+                                endpoint: Endpoint = .openAI) async throws -> String {
+        if endpoint == .openRouter {
+            let data = try await performRequest(
+                url: url,
+                apiKey: apiKey,
+                model: "openai/whisper-1",
+                responseFormat: "verbose_json",
+                language: language,
+                prompt: prompt,
+                endpoint: endpoint
+            )
+            guard let decoded = try? JSONDecoder().decode(VerboseTranscription.self, from: data) else {
+                throw TranscriptionServiceError(message: "OpenRouter returned an unreadable timestamped transcription")
+            }
+            let srt = Self.srt(from: decoded.segments ?? [])
+            guard !srt.isEmpty else {
+                throw TranscriptionServiceError(message: "the audio contained no recognizable speech (no timed segments)")
+            }
+            return srt
+        }
         let data = try await performRequest(
             url: url,
             apiKey: apiKey,
             model: "whisper-1",
             responseFormat: "srt",
             language: language,
-            prompt: prompt
+            prompt: prompt,
+            endpoint: endpoint
         )
 
         let srt = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -122,14 +194,15 @@ actor OpenAITranscriptionService {
         model: String,
         responseFormat: String?,
         language: String?,
-        prompt: String?
+        prompt: String?,
+        endpoint route: Endpoint
     ) async throws -> Data {
         let trimmedApiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedApiKey.isEmpty else {
-            throw TranscriptionServiceError(message: "no OpenAI API key is configured")
+            throw TranscriptionServiceError(message: "no \(route.label) API key is configured")
         }
 
-        guard let endpoint = URL(string: "https://api.openai.com/v1/audio/transcriptions") else {
+        guard let endpoint = URL(string: route.url) else {
             throw TranscriptionServiceError(message: "invalid endpoint URL")
         }
 
@@ -155,9 +228,9 @@ actor OpenAITranscriptionService {
                 fileData: fileData
             )
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await transport(request)
             guard let httpResponse = response as? HTTPURLResponse else {
-                throw TranscriptionServiceError(message: "invalid HTTP response from OpenAI")
+                throw TranscriptionServiceError(message: "invalid HTTP response from \(route.label)")
             }
 
             guard httpResponse.statusCode == 200 else {
@@ -184,6 +257,22 @@ actor OpenAITranscriptionService {
             await ToolServiceHealth.shared.recordFailure(.transcription, error: error.localizedDescription)
             throw TranscriptionServiceError(message: error.localizedDescription)
         }
+    }
+
+    /// SubRip text from timed segments (1-based cues, HH:MM:SS,mmm).
+    nonisolated static func srt(from segments: [VerboseTranscription.Segment]) -> String {
+        func stamp(_ seconds: Double) -> String {
+            let totalMs = max(0, Int((seconds * 1000).rounded()))
+            let h = totalMs / 3_600_000, m = (totalMs / 60_000) % 60, s = (totalMs / 1000) % 60, ms = totalMs % 1000
+            return String(format: "%02d:%02d:%02d,%03d", h, m, s, ms)
+        }
+        var cues: [String] = []
+        for segment in segments {
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            cues.append("\(cues.count + 1)\n\(stamp(segment.start)) --> \(stamp(max(segment.end, segment.start)))\n\(text)")
+        }
+        return cues.joined(separator: "\n\n")
     }
 
     /// The multipart form the transcriptions endpoint expects. Pure and

@@ -37,9 +37,12 @@ enum MenuItem: String, CaseIterable {
 }
 
 /// The four ways to power Briglia the menu offers. ChatGPT is the default
-/// and the easiest; the other three need an OpenAI API key too, because web
-/// research runs on OpenAI there (owner, 2026-09-24: only OpenAI models are
-/// fast enough for page extraction).
+/// and the easiest. OpenCode Go and the local/other-server lane need an
+/// OpenAI API key too, because web pages are read with OpenAI there (owner,
+/// 2026-09-24: only OpenAI models are fast enough for page extraction).
+/// OpenRouter needs no OpenAI key (owner, 2026-09-25): page reading,
+/// voice, images and OCR all go through the OpenRouter key
+/// (MediaRouting, WebSearchBackend's OpenRouter follow).
 enum MenuLane: String, CaseIterable {
     case chatgpt, opencode, openrouter, local
 
@@ -52,9 +55,10 @@ enum MenuLane: String, CaseIterable {
         }
     }
 
-    /// Web research needs the OpenAI key on this lane (it is optional only
-    /// with the subscription, which powers research itself).
-    var needsOpenAI: Bool { self != .chatgpt }
+    /// Web page reading needs the OpenAI key on this lane. Optional with the
+    /// subscription (it powers reading itself) and with OpenRouter (reading,
+    /// voice, images and OCR follow the OpenRouter key).
+    var needsOpenAI: Bool { self == .opencode || self == .local }
 
     func title(_ lang: String) -> String {
         switch self {
@@ -331,6 +335,17 @@ final class MenuWorkflow {
         return plannedLane?.needsOpenAI ?? false
     }
 
+    /// Voice, images and OCR run through OpenRouter: the OpenRouter lane is
+    /// in use and no OpenAI key is saved (MediaRouting's rule, as the page
+    /// sees it).
+    var mediaViaOpenRouter: Bool { snapshot.openAIMasked == nil && activeLane == .openrouter }
+
+    /// "openai" / "openrouter" / nil: what serves voice and images now.
+    var mediaVia: String? {
+        if snapshot.openAIMasked != nil { return "openai" }
+        return mediaViaOpenRouter ? "openrouter" : nil
+    }
+
     func isRequired(_ item: MenuItem) -> Bool {
         switch item {
         case .email: return false
@@ -385,7 +400,7 @@ final class MenuWorkflow {
         case .telegram: return s.telegramConfigured
         case .serper: return s.serperMasked != nil
         case .jina: return s.jinaMasked != nil
-        case .openai: return s.openAIMasked != nil
+        case .openai: return s.openAIMasked != nil || mediaViaOpenRouter
         case .email: return s.emailProvider == "agentmail" && s.agentMailMasked != nil
         case .computer: return (env.isLinux || s.fdaGranted) && s.keepAwakeOK
         case .tools: return toolchain?.complete == true
@@ -422,7 +437,9 @@ final class MenuWorkflow {
         case .telegram: return s.telegramConfigured ? L("Connected", "Collegato") : L("Not connected", "Non collegato")
         case .serper: return s.serperMasked.map { L("Key", "Chiave") + " \($0)" } ?? L("Not set", "Da impostare")
         case .jina: return s.jinaMasked.map { L("Key", "Chiave") + " \($0)" } ?? L("Not set", "Da impostare")
-        case .openai: return s.openAIMasked.map { L("Key", "Chiave") + " \($0)" } ?? L("Not set", "Non impostata")
+        case .openai:
+            if let masked = s.openAIMasked { return L("Key", "Chiave") + " \(masked)" }
+            return mediaViaOpenRouter ? L("Via OpenRouter", "Tramite OpenRouter") : L("Not set", "Non impostata")
         case .email:
             if isDone(.email) { return s.agentMailInbox.isEmpty ? L("On", "Attiva") : s.agentMailInbox }
             return L("Off", "Disattivata")
@@ -529,7 +546,7 @@ final class MenuWorkflow {
         }
         var out: [String: Any] = [
             "lane": lane.rawValue, "active": activeLane?.rawValue ?? NSNull(), "planned": plannedLane?.rawValue ?? NSNull(),
-            "ready": isDone(.ai), "openai_required": openAIRequired, "providers": providers,
+            "ready": isDone(.ai), "openai_required": openAIRequired, "media_via": mediaVia ?? NSNull(), "providers": providers,
             "opencode_models": OpenCodeGo.choices.map { ["id": $0.id, "label": $0.label, "recommended": $0.id == OpenCodeGo.defaultModel] as [String: Any] },
             "openrouter_default": Self.openRouterDefaultModel,
         ]
@@ -683,7 +700,10 @@ final class MenuWorkflow {
             let result = await env.apply(["openai": ["remove": true]], checkpoint)
             try checkpoint()
             await reload()
-            return result["ok"] as? Bool == true ? (true, L("Key removed. Voice messages and image creation are off.", "Chiave rimossa. Messaggi vocali e creazione di immagini sono disattivati.")) : (false, applyError(result))
+            guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
+            return mediaViaOpenRouter
+                ? (true, L("Key removed. Voice messages and images now go through OpenRouter.", "Chiave rimossa. Messaggi vocali e immagini ora passano da OpenRouter."))
+                : (true, L("Key removed. Voice messages and image creation are off.", "Chiave rimossa. Messaggi vocali e creazione di immagini sono disattivati."))
 
         case "email_off":
             try checkpoint()

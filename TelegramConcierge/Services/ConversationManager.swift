@@ -684,11 +684,12 @@ class ConversationManager: ObservableObject {
     func transcribeAppVoice(audioURL: URL) async -> Result<String, AppVoiceTranscriptionError> {
         let provider = currentVoiceTranscriptionProvider()
         statusMessage = provider == .openAI
-            ? "Transcribing audio with OpenAI..."
+            ? "Transcribing audio with \(MediaRouting.transcription.viaOpenRouter ? "OpenRouter" : "OpenAI")..."
             : "Transcribing audio locally..."
         switch provider {
         case .openAI:
-            let apiKey = openAITranscriptionAPIKey()
+            let transcriptionRoute = MediaRouting.transcription
+            let apiKey = transcriptionRoute.key
             guard !apiKey.isEmpty else {
                 statusMessage = "OpenAI API key missing"
                 return .failure(.notConfigured(
@@ -696,7 +697,7 @@ class ConversationManager: ObservableObject {
             }
             do {
                 let transcription = try await OpenAITranscriptionService.shared
-                    .transcribeAudioFile(url: audioURL, apiKey: apiKey, prompt: TranscriptionVocabulary.chatHint())
+                    .transcribeAudioFile(url: audioURL, apiKey: apiKey, prompt: TranscriptionVocabulary.chatHint(), endpoint: .init(transcriptionRoute))
                 guard !transcription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     return .failure(.failed("the recording sounded empty"))
                 }
@@ -1872,7 +1873,7 @@ class ConversationManager: ObservableObject {
         else if let voice = telegramMessage.voice {
             let transcriptionProvider = currentVoiceTranscriptionProvider()
             statusMessage = transcriptionProvider == .openAI
-                ? "Transcribing audio with OpenAI..."
+                ? "Transcribing audio with \(MediaRouting.transcription.viaOpenRouter ? "OpenRouter" : "OpenAI")..."
                 : "Transcribing audio locally..."
             
             // Every failure path below must TELL THE SENDER before returning.
@@ -1886,7 +1887,8 @@ class ConversationManager: ObservableObject {
                 var transcriptionFailureReason: String?
                 switch transcriptionProvider {
                 case .openAI:
-                    let apiKey = openAITranscriptionAPIKey()
+                    let transcriptionRoute = MediaRouting.transcription
+                    let apiKey = transcriptionRoute.key
                     guard !apiKey.isEmpty else {
                         self.error = "OpenAI API key not set. Run `briglia setup` (section 2) to add it."
                         statusMessage = "OpenAI API key missing"
@@ -1894,7 +1896,7 @@ class ConversationManager: ObservableObject {
                         return
                     }
                     do {
-                        transcription = try await OpenAITranscriptionService.shared.transcribeAudioFile(url: audioURL, apiKey: apiKey, prompt: TranscriptionVocabulary.chatHint())
+                        transcription = try await OpenAITranscriptionService.shared.transcribeAudioFile(url: audioURL, apiKey: apiKey, prompt: TranscriptionVocabulary.chatHint(), endpoint: .init(transcriptionRoute))
                     } catch {
                         transcription = nil
                         transcriptionFailureReason = error.localizedDescription
@@ -2117,7 +2119,7 @@ class ConversationManager: ObservableObject {
             case "voice":
                 let transcriptionProvider = currentVoiceTranscriptionProvider()
                 statusMessage = transcriptionProvider == .openAI
-                    ? "Transcribing audio with OpenAI..."
+                    ? "Transcribing audio with \(MediaRouting.transcription.viaOpenRouter ? "OpenRouter" : "OpenAI")..."
                     : "Transcribing audio locally..."
 
                 // Tell the sender on every failure path — same fix as the
@@ -2126,7 +2128,8 @@ class ConversationManager: ObservableObject {
                 var transcriptionFailureReason: String?
                 switch transcriptionProvider {
                 case .openAI:
-                    let apiKey = openAITranscriptionAPIKey()
+                    let transcriptionRoute = MediaRouting.transcription
+                    let apiKey = transcriptionRoute.key
                     guard !apiKey.isEmpty else {
                         self.error = "OpenAI API key not set. Run `briglia setup` (section 2) to add it."
                         statusMessage = "OpenAI API key missing"
@@ -2134,7 +2137,7 @@ class ConversationManager: ObservableObject {
                         return
                     }
                     do {
-                        transcription = try await OpenAITranscriptionService.shared.transcribeAudioFile(url: spoolURL, apiKey: apiKey, prompt: TranscriptionVocabulary.chatHint())
+                        transcription = try await OpenAITranscriptionService.shared.transcribeAudioFile(url: spoolURL, apiKey: apiKey, prompt: TranscriptionVocabulary.chatHint(), endpoint: .init(transcriptionRoute))
                     } catch {
                         transcription = nil
                         transcriptionFailureReason = error.localizedDescription
@@ -5666,7 +5669,9 @@ class ConversationManager: ObservableObject {
 
         var advisoryNotes: [String] = []
         if provider == .openAI {
-            if openAITranscriptionAPIKey().isEmpty {
+            if MediaRouting.transcription.viaOpenRouter {
+                advisoryNotes.append("ℹ️ No OpenAI key: voice messages are transcribed through your OpenRouter key (gpt-transcribe).")
+            } else if openAITranscriptionAPIKey().isEmpty {
                 advisoryNotes.append("⚠️ OpenAI API key missing. Run `briglia setup` (section 2) to add it.")
             }
         } else {

@@ -43,6 +43,7 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.telegramVariants()
         await t.keysAndEmail()
         await t.providerLanes()
+        await t.openRouterLaneWithoutOpenAI()
         t.localServerParsing()
         await t.liveHub()
         await t.staleSettings()

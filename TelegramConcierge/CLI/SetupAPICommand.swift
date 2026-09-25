@@ -275,6 +275,14 @@ enum SetupAPICore {
             "agentmail": keyStatus(KeychainHelper.agentMailApiKeyKey),
         ]
 
+        // Voice/images/OCR routing (MediaRouting): "openai" with an OpenAI
+        // key, "openrouter" on the OpenRouter lane without one, else absent.
+        let mediaSnapshot = KeychainHelper.loadSnapshot()
+        var media: [String: Any] = ["image_backend": MediaRouting.imageBackend(stored: mediaSnapshot).rawValue,
+                                    "openai_key_optional": MediaRouting.followsOpenRouter(stored: mediaSnapshot)]
+        if let via = MediaRouting.voiceAndImagesVia(stored: mediaSnapshot) { media["via"] = via }
+        payload["media"] = media
+
         payload["identity"] = [
             "user_name": KeychainHelper.load(key: KeychainHelper.userNameKey) ?? "",
             "assistant_name": KeychainHelper.load(key: KeychainHelper.assistantNameKey) ?? "Bree",

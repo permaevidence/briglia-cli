@@ -47,7 +47,7 @@ actor MaintenanceAlertCenter {
             case .webSearch: return "web search (serper.dev)"
             case .webFetch: return "web page fetching (jina.ai)"
             case .imageGeneration: return "image generation"
-            case .transcription: return "audio transcription (OpenAI)"
+            case .transcription: return MediaRouting.transcription.viaOpenRouter ? "audio transcription (OpenRouter)" : "audio transcription (OpenAI)"
             }
         }
 
@@ -72,7 +72,9 @@ actor MaintenanceAlertCenter {
             case .imageGeneration:
                 return "Image generation will keep failing until this is fixed — check the image provider's API key and billing in Settings."
             case .transcription:
-                return "Voice messages and the transcription tool will keep failing until this is fixed — check the OpenAI key/credits in Settings > Voice Transcription."
+                return MediaRouting.transcription.viaOpenRouter
+                    ? "Voice messages and the transcription tool will keep failing until this is fixed — check the OpenRouter key/credits (briglia menu)."
+                    : "Voice messages and the transcription tool will keep failing until this is fixed — check the OpenAI key/credits in Settings > Voice Transcription."
             }
         }
     }

@@ -65,7 +65,21 @@ struct Doctor: AsyncParsableCommand {
             note(pin)
         }
         let openAIKey = KeychainHelper.load(key: KeychainHelper.openAITranscriptionApiKeyKey) ?? ""
-        check("OpenAI key present", ok: !openAIKey.isEmpty, hint: "run `briglia setup`, section 2")
+        let mediaSnapshot = KeychainHelper.loadSnapshot()
+        let mediaFollowsOpenRouter = MediaRouting.followsOpenRouter(stored: mediaSnapshot)
+        if openAIKey.isEmpty && mediaFollowsOpenRouter {
+            note("OpenAI key: not set (optional with OpenRouter: voice, images and OCR go through the OpenRouter key)")
+        } else {
+            check("OpenAI key present", ok: !openAIKey.isEmpty, hint: "run `briglia setup`, section 2")
+        }
+        switch MediaRouting.voiceAndImagesVia(stored: mediaSnapshot) {
+        case "openrouter":
+            note("voice & images: via OpenRouter (\(OpenAITranscriptionService.Endpoint.openRouter.textModel); images \(OpenRouterImageService.bestModel), fast \(OpenRouterImageService.fastModel))")
+        case "openai":
+            note("voice & images: via OpenAI (image backend: \(MediaRouting.imageBackend(stored: mediaSnapshot).rawValue))")
+        default:
+            note("voice & images: not configured (add an OpenAI key, or use OpenRouter as the main provider)")
+        }
         let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""
         check("Serper key present", ok: !serperKey.isEmpty, hint: "run `briglia setup`, section 3")
         let jinaKey = KeychainHelper.load(key: KeychainHelper.jinaApiKeyKey) ?? ""
@@ -81,8 +95,11 @@ struct Doctor: AsyncParsableCommand {
             note("web page-reading backend (extraction, web_fetch; research runs on the main model): \(WebSearchBackend.active.rawValue) (\(backendSource))")
         }
         note("web subagent: \(AvailableTools.webSubagentEnabled ? "on" : "off"); Web preset available: \(serperKey.isEmpty ? "no (Serper key missing)" : (AvailableTools.webSubagentActive ? "yes" : "no (switch off)"))")
-        let ocrBackend = KeychainHelper.load(key: KeychainHelper.visionPreprocessorBackendKey)
+        var ocrBackend = KeychainHelper.load(key: KeychainHelper.visionPreprocessorBackendKey)
             ?? (openAIKey.isEmpty ? "openrouter (no OpenAI key)" : "openai")
+        if ocrBackend == "openai", MediaRouting.ocrFollowsOpenRouter(stored: mediaSnapshot, openAIKey: OpenRouterService.resolvedOpenAIKey()) {
+            ocrBackend = "openrouter (no OpenAI key; follows the OpenRouter provider)"
+        }
         note("OCR backend: \(ocrBackend)")
         note("data: \(StoragePaths.dataRoot.path)")
         let snapshotStatus = PruneArchiveStore.statusLine()

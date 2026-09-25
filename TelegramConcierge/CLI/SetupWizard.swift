@@ -388,7 +388,13 @@ struct SetupWizard {
             probe: { await Probes.chatCompletion(baseURL: "https://openrouter.ai/api/v1", apiKey: $0, model: model) }
         )
         let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: true)
-        if textOnly { printTextOnlyWarning() }
+        if textOnly {
+            print("""
+              ⚠ Text-only model: images and scanned PDFs will need the OCR
+                preprocessor, which runs on your OpenAI key or, without one,
+                on your OpenRouter key.
+            """)
+        }
         saveProfile(.openrouter, apiKey: key, baseURL: nil, model: model,
                     effort: "high", textOnly: textOnly)
         print("  ✔ OpenRouter: \(model)")
@@ -485,6 +491,25 @@ struct SetupWizard {
     // MARK: Step 2 — OpenAI
 
     private func stepOpenAI() async {
+        // OpenRouter lane (owner, 2026-09-25): page reading, voice, images
+        // and OCR all follow the OpenRouter key, so the OpenAI key is
+        // optional there. An existing OpenAI key keeps priority (MediaRouting).
+        let stored = KeychainHelper.loadSnapshot()
+        if WebSearchBackend.followsOpenRouter(stored: stored),
+           (stored[KeychainHelper.openAITranscriptionApiKeyKey] ?? "").isEmpty {
+            print("""
+            With OpenRouter as your main provider, your OpenRouter key also covers:
+              • web page reading for research (DeepSeek V4 Flash, fastest host)
+              • voice message transcription (gpt-transcribe via OpenRouter)
+              • image generation (Google Gemini image models via OpenRouter)
+              • OCR of scanned documents (GPT-6 Luna via OpenRouter)
+            An OpenAI API key is optional: if you add one, Briglia uses OpenAI for these instead.
+            """)
+            guard WizardIO.askYesNo("Add an OpenAI API key anyway?", default: false) else {
+                print("  ✔ Voice, images and OCR will go through OpenRouter")
+                return
+            }
+        }
         print("""
         One OpenAI API key powers four things:
           • web page reading for research (the research itself runs on your main model)

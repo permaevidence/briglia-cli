@@ -84,8 +84,15 @@ class Fake:
         return self.planned or self.active() or "chatgpt"
 
     def openai_required(self):
+        # OpenCode Go and local/other need the OpenAI key; ChatGPT and
+        # OpenRouter don't (owner, 2026-09-25).
         a = self.active()
-        return (a != "chatgpt") if a else (self.planned not in (None, "chatgpt"))
+        return (a in ("opencode", "local")) if a else (self.planned in ("opencode", "local"))
+
+    def media_via(self):
+        if self.keys["openai"]:
+            return "openai"
+        return "openrouter" if self.active() == "openrouter" else None
 
     def use(self, k):
         self.chatgpt["active"] = k == "chatgpt"
@@ -96,7 +103,7 @@ class Fake:
     def done(self, sid):
         return {"name": bool(self.name), "ai": self.active() is not None,
                 "telegram": self.telegram["configured"], "serper": bool(self.keys["serper"]), "jina": bool(self.keys["jina"]),
-                "openai": bool(self.keys["openai"]), "email": self.email["on"],
+                "openai": bool(self.keys["openai"]) or self.media_via() == "openrouter", "email": self.email["on"],
                 "computer": self.computer["fda"] and self.computer["keep_awake_ok"], "tools": self.tools["complete"]}[sid]
 
     def status(self):
@@ -112,7 +119,7 @@ class Fake:
         provs["chatgpt"] = {"configured": self.chatgpt["state"] == "signed_in", "active": self.active() == "chatgpt", "model": self.chatgpt["model"],
                             "model_label": [m["label"] for m in MODELS if m["id"] == self.chatgpt["model"]][0], "effort": self.chatgpt["effort"],
                             "efforts": ["low", "medium", "high", "xhigh"]}
-        ai = {"lane": self.lane(), "active": self.active(), "planned": self.planned, "ready": self.active() is not None, "openai_required": req,
+        ai = {"lane": self.lane(), "active": self.active(), "planned": self.planned, "ready": self.active() is not None, "openai_required": req, "media_via": self.media_via(),
               "providers": provs, "opencode_models": OC_MODELS, "openrouter_default": "deepseek/deepseek-v4.1-flash"}
         if self.local:
             ai["local"] = self.local
@@ -486,6 +493,39 @@ def main():
         page.click("#power-stop"); page.click("#power-yes")
         page.wait_for_selector("text=Stopping Briglia")
         check("live: Stop says Briglia is shutting down", lv.closing == "stop" and not errors, errors)
+        ctx.close()
+
+        # ---- OpenRouter lane: no OpenAI key needed (owner, 2026-09-25) ----
+        orf = Fake()
+        ctx, page, errors = session(orf)
+        page.wait_for_selector("text=Choose your language")
+        page.click(".langcard:has-text('English')")
+        page.wait_for_selector("text=How should Briglia think?")
+        page.click(".lanecard[data-lane=openrouter]")
+        check("or: picking OpenRouter says no OpenAI key is needed",
+              page.is_visible("text=no OpenAI key needed") and not page.is_visible("text=also need an OpenAI API key"))
+        page.click("#lane-continue")
+        page.wait_for_selector("text=Let’s set up Briglia")
+        check("or: the welcome list asks for no OpenAI key",
+              orf.planned == "openrouter" and page.is_visible("text=an OpenRouter account") and not page.is_visible("text=Briglia reads web pages with it"))
+        check("or: the voice & images step is optional, not an 'OpenAI key' step",
+              not page.is_visible("#steps li >> text=OpenAI key") and page.is_visible("#steps li >> text=Voice & images"))
+        page.click("text=Let’s start")
+        page.wait_for_selector("#f-name"); page.fill("#f-name", "Sofia"); page.click("button:has-text('Save')")
+        page.wait_for_selector("text=Connect OpenRouter")
+        page.fill("#f-ai", GOOD["openrouter"])
+        page.wait_for_selector("text=Connect Telegram", timeout=6000)
+        page.click("#steps button:has-text('Voice & images')")
+        page.wait_for_selector("text=Working through OpenRouter")
+        check("or: voice & images show as working through OpenRouter, no key asked",
+              orf.active() == "openrouter" and page.is_visible("#openai-add") and not page.is_visible("#f-openai"))
+        shot(page, "66-openrouter-media")
+        page.click("#openai-add")
+        page.wait_for_selector("#f-openai")
+        check("or: an OpenAI key can still be added, and the choice can be cancelled", page.is_visible("button:has-text('Cancel')"))
+        page.click("button:has-text('Cancel')")
+        page.wait_for_selector("text=Working through OpenRouter")
+        check("or: no page errors", not errors, errors)
         ctx.close()
 
         # ---- OpenCode lane, then switching and adding providers ----

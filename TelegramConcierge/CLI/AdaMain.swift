@@ -41,7 +41,7 @@ struct AdaCLI: AsyncParsableCommand {
                       MigrationRunCommand.self, MigrationSelftest.self,
                       Migrate.self, MigrateProbe.self, MigrateGate.self,
                       AppChatSocketSelftest.self,
-                      CommandMenuSelftest.self, TelegramMenuSelftest.self, ImageToolSelftest.self, BotSwitchSelftest.self, TelegramTransportSelftest.self, ParkedOutboundSelftest.self,
+                      CommandMenuSelftest.self, TelegramMenuSelftest.self, ImageToolSelftest.self, MediaRoutingSelftest.self, BotSwitchSelftest.self, TelegramTransportSelftest.self, ParkedOutboundSelftest.self,
                       EmailCalendarSelftest.self, AgentMailKeyCommand.self, AgentMailCommand.self,
                       WebLiveTest.self, QuickSetupSelftest.self, MenuSelftest.self],
         defaultSubcommand: Chat.self
