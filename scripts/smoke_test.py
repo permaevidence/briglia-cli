@@ -891,7 +891,7 @@ def main():
             # (this env has no OpenAI key in its isolated secrets store).
             send("/websearch", idle_timeout_s=30)
             check("websearch: backend listing rendered",
-                  output_contains("Web research backend", 30), output_text()[-800:])
+                  output_contains("Web page-reading backend", 30), output_text()[-800:])
             send("/websearch openai", idle_timeout_s=30)
             check("websearch: keyless switch refused",
                   output_contains("No key configured for OpenAI", 30), output_text()[-600:])
