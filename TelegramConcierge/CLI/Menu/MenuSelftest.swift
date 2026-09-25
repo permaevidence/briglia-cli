@@ -70,9 +70,14 @@ final class MenuFakeWorld: @unchecked Sendable {
     let good = ["serper": "srp-good-0123456789abcdef", "jina": "jina_good_0123456789abcdef",
                 "openai": "sk-good-0123456789abcdefghij", "agentmail": "am_good_0123456789abcdef",
                 "telegram": "123456789:AAgoodtoken0123456789",
-                "opencode": "oc-good-0123456789abcdef", "openrouter": "sk-or-good-0123456789abcdef"]
+                "opencode": "oc-good-0123456789abcdef", "openrouter": "sk-or-good-0123456789abcdef",
+                "custom": "sk-custom-good-0123456789abcdef"]
     var localModels: Result<[String], MenuLocalModelsError> = .success(["qwen3.8-27b", "gemma-4-12b"])
     var localModelAsks: [String] = []
+    /// The key each model listing was sent with (nil = none).
+    var localModelKeys: [String?] = []
+    /// When set, listings refuse (HTTP 401) unless sent this key.
+    var localNeedsKey: String?
     var applied: [[String: Any]] = []
     var probes: [String] = []
     var scan: MenuTelegramScan = .waiting
@@ -263,7 +268,11 @@ final class MenuSelftestContext {
         }
         env.loginBlock = { world.loginBlock }
         env.telegramScan = { _, _ in world.scanCount += 1; return world.scan }
-        env.localModels = { base in world.localModelAsks.append(base); return world.localModels }
+        env.localModels = { base, key in
+            world.localModelAsks.append(base); world.localModelKeys.append(key)
+            if let need = world.localNeedsKey, key != need { return .failure(.http(401)) }
+            return world.localModels
+        }
         env.providerKey = { profile in world.snap.providers[profile.rawValue]?.configured == true ? world.good[profile.rawValue] : nil }
         env.telegramChatProbe = { _, chatId in
             if let gate = world.holds["chat:" + chatId] { await gate.wait() }
@@ -630,6 +639,58 @@ final class MenuSelftestContext {
         check("a local model is saved with its address, no thinking level, and switched to",
               ok(r) && pr?["profile"] as? String == "local" && pr?["base_url"] as? String == "http://localhost:1234/v1" && pr?["effort"] == nil && ai(wf)["active"] as? String == "local")
         check("a local model offers no thinking level", (aiProvider(wf, "local")["efforts"] as? [String]) == [])
+
+        // Local lane with an API key: a server that needs one is saved as the
+        // custom endpoint; the key never reaches the page.
+        do {
+            let key = w.good["custom"]!
+            check("key: https anywhere, plain http only to this computer or a private network",
+                  MenuEnvironment.keySafe("https://api.example.com/v1") && MenuEnvironment.keySafe("http://localhost:8000/v1")
+                  && MenuEnvironment.keySafe("http://127.0.0.1:8000/v1") && MenuEnvironment.keySafe("http://192.168.1.20:8000/v1")
+                  && MenuEnvironment.keySafe("http://10.0.0.5/v1") && MenuEnvironment.keySafe("http://172.20.1.1/v1") && MenuEnvironment.keySafe("http://box.local/v1")
+                  && !MenuEnvironment.keySafe("http://api.example.com/v1") && !MenuEnvironment.keySafe("http://172.32.0.1/v1") && !MenuEnvironment.keySafe("http://8.8.8.8/v1"))
+            w.localModels = .success(["acme-large", "acme-small"])
+            w.localNeedsKey = key
+            let asks = w.localModelAsks.count
+            r = await act(wf, ["action": "local_models", "base_url": "http://api.example.com/v1", "api_key": key])
+            check("key: never sent over plain http to the internet", !ok(r) && msg(r).contains("https://") && w.localModelAsks.count == asks)
+            r = await act(wf, ["action": "local_models", "base_url": "https://api.example.com/v1"])
+            check("key: a server that wants a key says so", !ok(r) && msg(r).contains("needs an API key") && w.localModelKeys.last! == nil)
+            r = await act(wf, ["action": "local_models", "base_url": "https://api.example.com/v1", "api_key": "wrong-key"])
+            check("key: a refused key is explained", !ok(r) && msg(r).contains("refused this API key"))
+            r = await act(wf, ["action": "local_models", "base_url": "https://api.example.com/v1/", "api_key": key])
+            let listing = ai(wf)["local"] as? [String: Any]
+            check("key: models are listed with the key", ok(r) && w.localModelKeys.last! == key && (listing?["models"] as? [String]) == ["acme-large", "acme-small"])
+            let page = String(data: (try? JSONSerialization.data(withJSONObject: ai(wf))) ?? Data(), encoding: .utf8) ?? ""
+            check("key: the listing never shows the key", !page.isEmpty && !page.contains(key))
+            let probes = w.probes.count
+            r = await act(wf, ["action": "provider_model", "profile": "local", "model": "acme-large", "base_url": "https://api.example.com/v1"])
+            pr = lastProvider(w)
+            check("key: saved as the custom endpoint with its key, address and default thinking level, and switched to",
+                  ok(r) && pr?["profile"] as? String == "custom" && pr?["api_key"] as? String == key && pr?["base_url"] as? String == "https://api.example.com/v1"
+                  && pr?["effort"] as? String == "high" && pr?["activate"] as? Bool == true && w.probes.count == probes + 1 && w.probes.last == "custom")
+            let lp = aiProvider(wf, "local")
+            check("key: the Local lane shows the keyed server in use, masked key only",
+                  ai(wf)["active"] as? String == "local" && lp["keyed"] as? Bool == true && lp["model"] as? String == "acme-large"
+                  && lp["endpoint"] as? String == "https://api.example.com/v1" && (lp["key"] as? String).map { !$0.contains(key) && !$0.isEmpty } == true)
+            let dash = String(data: (try? JSONSerialization.data(withJSONObject: ai(wf))) ?? Data(), encoding: .utf8) ?? ""
+            check("key: the dashboard never shows the key", !dash.contains(key))
+            check("key: the dashboard names the lane", step(wf, "ai")["title"] as? String == "Local or other server")
+            r = await act(wf, ["action": "local_models", "base_url": "https://api.example.com/v1"])
+            check("key: re-listing the saved server reuses its saved key", ok(r) && w.localModelKeys.last! == key)
+            r = await act(wf, ["action": "provider_model", "profile": "local", "model": "acme-small", "base_url": "https://api.example.com/v1"])
+            pr = lastProvider(w)
+            check("key: changing its model keeps it the custom endpoint", ok(r) && pr?["profile"] as? String == "custom" && pr?["model"] as? String == "acme-small")
+            // A keyless server listed after it is the local server again.
+            w.localNeedsKey = nil
+            w.localModels = .success(["qwen3.8-27b"])
+            r = await act(wf, ["action": "local_models", "base_url": "http://localhost:1234/v1"])
+            check("key: a keyless listing sends no key", ok(r) && w.localModelKeys.last! == nil)
+            r = await act(wf, ["action": "provider_model", "profile": "local", "model": "qwen3.8-27b", "base_url": "http://localhost:1234/v1"])
+            pr = lastProvider(w)
+            check("key: a keyless server is saved as the local server, without a key",
+                  ok(r) && pr?["profile"] as? String == "local" && pr?["api_key"] == nil && ai(wf)["active"] as? String == "local" && aiProvider(wf, "local")["keyed"] as? Bool == false)
+        }
 
         // Superseded: a key still checking when the user picks another lane writes nothing.
         do {

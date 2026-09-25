@@ -538,14 +538,14 @@
     chatgpt: ['your ChatGPT subscription', 'il tuo abbonamento ChatGPT'],
     opencode: ['OpenCode Go', 'OpenCode Go'],
     openrouter: ['OpenRouter', 'OpenRouter'],
-    local: ['a model on your own computer', 'un modello sul tuo computer'],
+    local: ['your own server', 'il tuo server'],
   }; }
   function LANES() { return [
     { id: 'chatgpt', name: 'ChatGPT', badge: T('Easiest', 'Il più semplice'),
       text: T('Use your ChatGPT Plus or Pro subscription. Nothing extra to pay per message — just sign in.', 'Usa il tuo abbonamento ChatGPT Plus o Pro. Nessun costo extra a messaggio: basta accedere.') },
     { id: 'opencode', name: 'OpenCode Go', text: T('A low-cost monthly plan with many AI models: GLM, Kimi, Qwen, MiMo and more.', 'Un abbonamento mensile economico con tanti modelli AI: GLM, Kimi, Qwen, MiMo e altri.') },
     { id: 'openrouter', name: 'OpenRouter', text: T('Pay as you go, with hundreds of models from every AI company.', 'Paghi a consumo, con centinaia di modelli di tutte le aziende AI.') },
-    { id: 'local', name: T('Local model', 'Modello locale'), text: T('A model running on your own computer or network (LM Studio, Ollama). For advanced users.', 'Un modello sul tuo computer o nella tua rete (LM Studio, Ollama). Per utenti esperti.') },
+    { id: 'local', name: T('Local or other server', 'Server locale o altro'), text: T('A model on your own computer or network (LM Studio, Ollama), or any other OpenAI-compatible provider with its API key. For advanced users.', 'Un modello sul tuo computer o nella tua rete (LM Studio, Ollama), oppure un altro fornitore compatibile con OpenAI con la sua chiave API. Per utenti esperti.') },
   ]; }
   function laneName(id) { return (LANES().filter(function (l) { return l.id === id; })[0] || { name: id }).name; }
   function needList(ln) {
@@ -553,7 +553,7 @@
       chatgpt: T('a ChatGPT account with Plus or Pro', 'un account ChatGPT Plus o Pro'),
       opencode: T('an OpenCode Go subscription (opencode.ai)', 'un abbonamento OpenCode Go (opencode.ai)'),
       openrouter: T('an OpenRouter account with some credit (openrouter.ai)', 'un account OpenRouter con un po’ di credito (openrouter.ai)'),
-      local: T('a model server running (LM Studio, Ollama, vLLM…) with a model loaded', 'un server di modelli acceso (LM Studio, Ollama, vLLM…) con un modello caricato'),
+      local: T('a model server running (LM Studio, Ollama, vLLM…) with a model loaded, or another provider’s address and API key', 'un server di modelli acceso (LM Studio, Ollama, vLLM…) con un modello caricato, oppure indirizzo e chiave API di un altro fornitore'),
     }[ln];
     var out = [first];
     if (ln !== 'chatgpt') out.push(T('an OpenAI API key with a little credit — Briglia reads web pages with it', 'una chiave API di OpenAI con un po’ di credito: Briglia la usa per leggere le pagine web'));
@@ -695,6 +695,22 @@
     return out;
   }
 
+  // Optional API key for a server that needs one. It goes to the menu only
+  // with "Find models" (the menu remembers it for picking a model) and is
+  // never shown back; with a saved keyed server, leaving it empty keeps
+  // the saved key.
+  function localKeyField(p) {
+    var st = local['local-key'] = local['local-key'] || {};
+    var input = h('input', { type: st.show ? 'text' : 'password', id: 'f-local-key', autocomplete: 'off', spellcheck: 'false',
+      placeholder: p.keyed ? T('Leave empty to keep the saved key', 'Lascia vuoto per tenere la chiave salvata') : T('Only if the server needs one', 'Solo se il server la richiede'),
+      'aria-label': 'API key' });
+    input.value = st.value || '';
+    input.addEventListener('input', function () { st.value = input.value; });
+    return h('div', { class: 'input-wrap' }, [h('label', { for: 'f-local-key', text: T('API key (optional)', 'Chiave API (facoltativa)') }),
+      h('div', { class: 'input-row' }, [input, h('button', { class: 'btn secondary small', type: 'button', onclick: function () { st.value = input.value; st.show = !st.show; render(); } }, [st.show ? T('Hide', 'Nascondi') : T('Show', 'Mostra')])]),
+      h('p', { class: 'small', text: T('Local servers usually need none. Paste a key here for a provider that asks for one, then press Find models.', 'Di solito i server locali non ne hanno bisogno. Incolla qui la chiave di un fornitore che la richiede, poi premi Trova i modelli.') })]);
+  }
+
   function visionToggle(key) {
     var st = local[key] = local[key] || {};
     var box = h('input', { type: 'checkbox', id: 'to-' + key });
@@ -742,20 +758,21 @@
   function localView(st) {
     var p = S.ai.providers.local || {};
     var l = S.ai.local;
-    var out = stepHeader('ai', null, p.configured ? T('Local model', 'Modello locale') : T('Use a local model', 'Usa un modello locale'), T('Briglia can think with a model running on this computer or on your network — LM Studio, Ollama, vLLM and similar. It needs a powerful computer.', 'Briglia può ragionare con un modello in esecuzione su questo computer o nella tua rete: LM Studio, Ollama, vLLM e simili. Serve un computer potente.'));
+    var out = stepHeader('ai', null, p.configured ? T('Local or other server', 'Server locale o altro') : T('Use a local or other server', 'Usa un server locale o un altro'), T('Briglia can think with a model running on this computer or on your network — LM Studio, Ollama, vLLM and similar (it needs a powerful computer) — or with any other provider that works like OpenAI’s API.', 'Briglia può ragionare con un modello in esecuzione su questo computer o nella tua rete (LM Studio, Ollama, vLLM e simili: serve un computer potente), oppure con un altro fornitore che funziona come l’API di OpenAI.'));
     out.push(keepCurrent());
     out.push(notice('ai'));
     if (p.configured) {
-      out.push(savedBox(p.active ? T('Connected', 'Collegato') : T('Saved, not in use', 'Salvato, non in uso'), p.model + (p.endpoint ? ' · ' + p.endpoint : '')));
-      out.push(useButton('local', T('the local model', 'il modello locale')));
+      out.push(savedBox(p.active ? T('Connected', 'Collegato') : T('Saved, not in use', 'Salvato, non in uso'), p.model + (p.endpoint ? ' · ' + p.endpoint : '') + (p.keyed && p.key ? ' · ' + T('key ', 'chiave ') + p.key : '')));
+      out.push(useButton('local', T('this server', 'questo server')));
     }
     var as = local['local-url'] = local['local-url'] || {};
     if (as.value === undefined || as.value === null) as.value = p.endpoint || 'http://localhost:1234/v1';
     out.push(field('local-url', { label: T('Server address', 'Indirizzo del server'), placeholder: 'http://localhost:1234/v1', auto: false, button: T('Find models', 'Trova i modelli'),
       checkingText: T('Asking the server…', 'Chiedo al server…'), onSubmit: function (v, current) {
         // Listing saves nothing: keep the address in the field.
-        return act('local_models', { base_url: v }, 'ai', current).then(function (j) { return { ok: false, stale: true }; });
+        return act('local_models', { base_url: v, api_key: ((local['local-key'] || {}).value || '').trim() }, 'ai', current).then(function (j) { return { ok: false, stale: true }; });
       } }));
+    out.push(localKeyField(p));
     out.push(h('p', { class: 'small', text: 'LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1' }));
     if (l && l.state === 'ok') {
       out.push(h('p', { class: 'small', text: T('Pick the model Briglia should use:', 'Scegli il modello che Briglia deve usare:') }));

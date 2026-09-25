@@ -22,6 +22,8 @@ struct MenuSnapshot: Equatable {
         var textOnly = false
         var endpoint = ""
         var keyMasked: String?
+        /// Custom endpoint only: it speaks the Responses protocol.
+        var responses = false
     }
 
     var userName = ""
@@ -30,7 +32,9 @@ struct MenuSnapshot: Equatable {
     var otherProvider: String?
     /// The active provider profile (raw value), nil when none is set.
     var activeProfile: String?
-    /// The OpenCode Go, OpenRouter and local profiles, by raw value.
+    /// The OpenCode Go, OpenRouter, local and custom-endpoint profiles, by
+    /// raw value (the menu's Local lane shows local, or custom when the
+    /// server needs an API key).
     var providers: [String: Provider] = [:]
     var telegramConfigured = false
     var telegramChatId = ""
@@ -165,7 +169,7 @@ struct MenuEnvironment {
     }
     /// The model ids a local OpenAI-compatible server offers (GET /models),
     /// or why it couldn't be asked.
-    var localModels: (_ baseURL: String) async -> Result<[String], MenuLocalModelsError> = { await MenuEnvironment.listLocalModels(baseURL: $0) }
+    var localModels: (_ baseURL: String, _ apiKey: String?) async -> Result<[String], MenuLocalModelsError> = { await MenuEnvironment.listLocalModels(baseURL: $0, apiKey: $1) }
     /// The saved API key of a provider profile (never sent to the page;
     /// used to check a new model before switching to it).
     var providerKey: (ProviderProfiles.Profile) -> String? = { profile in
@@ -173,6 +177,7 @@ struct MenuEnvironment {
         switch profile {
         case .opencode: name = ProviderProfiles.opencodeApiKeyKey
         case .openrouter: name = KeychainHelper.openRouterApiKeyKey
+        case .custom: name = ProviderProfiles.customApiKeyKey
         default: return nil
         }
         guard let v = KeychainHelper.load(key: name)?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty else { return nil }
@@ -237,13 +242,14 @@ struct MenuEnvironment {
             s.otherProvider = active.displayName
         }
         s.activeProfile = active?.rawValue
-        for profile in [ProviderProfiles.Profile.opencode, .openrouter, .local] {
+        for profile in [ProviderProfiles.Profile.opencode, .openrouter, .local, .custom] {
             var p = MenuSnapshot.Provider()
             p.configured = ProviderProfiles.isConfigured(profile)
             p.model = ProviderProfiles.configuredModel(profile) ?? ""
             p.effort = ProviderProfiles.configuredEffort(profile) ?? ""
             p.textOnly = ProviderProfiles.textOnly(profile) ?? false
-            p.endpoint = profile == .local ? (ProviderProfiles.configuredEndpoint(.local) ?? "") : ""
+            p.endpoint = profile == .local || profile == .custom ? (ProviderProfiles.configuredEndpoint(profile) ?? "") : ""
+            p.responses = profile == .custom && ProviderProfiles.wireProtocol(.custom, model: nil) == .responses
             p.keyMasked = ProviderProfiles.maskedKey(profile)
             s.providers[profile.rawValue] = p
         }
@@ -286,12 +292,13 @@ struct MenuEnvironment {
         return s
     }
 
-    /// Asks a local server which models it serves. Keyless, short timeout:
-    /// the page offers the answer as a list to pick from.
-    static func listLocalModels(baseURL: String) async -> Result<[String], MenuLocalModelsError> {
+    /// Asks a server which models it serves, with its API key when it needs
+    /// one. Short timeout: the page offers the answer as a list to pick from.
+    static func listLocalModels(baseURL: String, apiKey: String?) async -> Result<[String], MenuLocalModelsError> {
         guard let base = MenuEnvironment.localBase(baseURL), let url = URL(string: base + "/models") else { return .failure(.badAddress) }
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
+        if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -323,6 +330,22 @@ struct MenuEnvironment {
         guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let host = url.host, !host.isEmpty,
               url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return nil }
         return text
+    }
+
+    /// Whether an API key may be sent to this address: always over https,
+    /// and over plain http only to this computer or a private network, so a
+    /// key never crosses the internet unencrypted.
+    static func keySafe(_ base: String) -> Bool {
+        guard let url = URL(string: base), let host = url.host?.lowercased() else { return false }
+        if url.scheme?.lowercased() == "https" { return true }
+        if host == "localhost" || host.hasSuffix(".local") || host == "::1" || host == "[::1]" { return true }
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4, host.split(separator: ".").count == 4 else { return false }
+        switch (parts[0], parts[1]) {
+        case (127, _), (10, _), (192, 168): return true
+        case (172, 16...31): return true
+        default: return false
+        }
     }
 
     /// Looks for the user's message to the bot, without consuming updates

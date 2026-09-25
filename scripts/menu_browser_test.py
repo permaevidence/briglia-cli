@@ -49,7 +49,7 @@ GOOD = {"serper": "srp-good-0123456789abcdef", "jina": "jina_good_0123456789abcd
         "opencode": "oc-good-0123456789abcdef", "openrouter": "sk-or-good-0123456789abcdef"}
 OC_MODELS = [{"id": "glm-5.3-flash", "label": "GLM 5.3 Flash", "recommended": True}, {"id": "kimi-k3", "label": "Kimi K3"},
              {"id": "qwen3.8-max", "label": "Qwen 3.8 Max"}]
-LANE_TITLES = {"chatgpt": "ChatGPT", "opencode": "OpenCode Go", "openrouter": "OpenRouter", "local": "Local model"}
+LANE_TITLES = {"chatgpt": "ChatGPT", "opencode": "OpenCode Go", "openrouter": "OpenRouter", "local": "Local or other server"}
 
 
 class Fake:
@@ -537,12 +537,23 @@ def main():
         page.click("#switch-provider")
         page.wait_for_selector(".lanecard[data-lane=local]")
         page.click(".lanecard[data-lane=local]")
-        page.wait_for_selector("text=Use a local model")
+        page.wait_for_selector("text=Use a local or other server")
         check("the local server address starts at LM Studio's default", page.input_value("#f-local-url") == "http://localhost:1234/v1")
+        check("the optional API key field hides what's typed", page.get_attribute("#f-local-key", "type") == "password" and page.input_value("#f-local-key") == "")
         page.click("button:has-text('Find models')")
         page.wait_for_selector(".choice[data-model='gemma-4-12b']")
+        lm = [c for c in o.calls if c.get("action") == "local_models"]
+        check("without a key, Find models sends an empty key", lm and lm[-1].get("api_key") == "")
+        page.fill("#f-local-key", "sk-fake-server-key-123")
+        page.click("button:has-text('Find models')")
+        page.wait_for_function("() => true")
+        page.wait_for_timeout(300)
+        lm = [c for c in o.calls if c.get("action") == "local_models"]
+        check("a typed key goes with Find models", lm[-1].get("api_key") == "sk-fake-server-key-123")
+        page.fill("#f-local-key", "")
+        page.wait_for_selector(".choice[data-model='gemma-4-12b']")
         page.click(".choice[data-model='gemma-4-12b']")
-        page.wait_for_selector("text=Briglia now thinks with gemma-4-12b on Local model.")
+        page.wait_for_selector("text=Briglia now thinks with gemma-4-12b on Local or other server.")
         check("a local model is one click from the server's list", o.active() == "local" and o.providers["local"]["endpoint"] == "http://localhost:1234/v1")
         shot(page, "65-local")
         page.click("#switch-provider")

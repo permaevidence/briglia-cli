@@ -61,7 +61,7 @@ enum MenuLane: String, CaseIterable {
         case .chatgpt: return "ChatGPT"
         case .opencode: return "OpenCode Go"
         case .openrouter: return "OpenRouter"
-        case .local: return lang == "it" ? "Modello locale" : "Local model"
+        case .local: return lang == "it" ? "Server locale o altro" : "Local or other server"
         }
     }
 }
@@ -169,7 +169,9 @@ final class MenuWorkflow {
     /// switched to.
     private(set) var plannedLane: MenuLane?
     /// A local server's model list (the page's "Find models").
-    struct LocalListing { var base: String; var state: String; var models: [String] = []; var message: String? }
+    /// A server's model listing. `apiKey` is the key it was listed with
+    /// (typed on the page or the saved one); it stays here, never on the page.
+    struct LocalListing { var base: String; var state: String; var models: [String] = []; var message: String?; var apiKey: String? = nil }
     private(set) var localListing: LocalListing?
 
     // Telegram pairing in progress (the token never leaves the server).
@@ -282,16 +284,40 @@ final class MenuWorkflow {
 
     /// Whether a lane is set up and usable as the main provider.
     func laneReady(_ lane: MenuLane) -> Bool {
-        lane == .chatgpt ? snapshot.chatgptReady : (snapshot.providers[lane.rawValue]?.configured ?? false)
+        lane == .chatgpt ? snapshot.chatgptReady : stored(lane).configured
     }
 
     /// The running provider as a lane. Nil when nothing is set up, or when
-    /// the active profile is one the menu shows but doesn't edit (a custom
-    /// endpoint or the OpenAI API, set up with briglia setup).
+    /// the active profile is one the menu shows but doesn't edit (the OpenAI
+    /// API, set up with briglia setup). A custom endpoint is the Local lane.
     var activeLane: MenuLane? {
         if snapshot.chatgptReady { return .chatgpt }
-        guard let raw = snapshot.activeProfile, let lane = MenuLane(rawValue: raw), lane != .chatgpt, laneReady(lane) else { return nil }
+        guard let raw = snapshot.activeProfile,
+              let lane = raw == ProviderProfiles.Profile.custom.rawValue ? .local : MenuLane(rawValue: raw),
+              lane != .chatgpt, laneReady(lane) else { return nil }
         return lane
+    }
+
+    /// The Local lane covers two saved profiles: the keyless local server
+    /// and, for a server that needs an API key, the custom endpoint. The
+    /// one in use wins; otherwise the local one, then the custom one.
+    var localLaneProfile: ProviderProfiles.Profile {
+        let local = snapshot.providers[ProviderProfiles.Profile.local.rawValue]?.configured ?? false
+        let custom = snapshot.providers[ProviderProfiles.Profile.custom.rawValue]?.configured ?? false
+        if snapshot.activeProfile == ProviderProfiles.Profile.custom.rawValue, custom { return .custom }
+        if snapshot.activeProfile == ProviderProfiles.Profile.local.rawValue, local { return .local }
+        if local { return .local }
+        return custom ? .custom : .local
+    }
+
+    /// The saved profile a lane shows and edits.
+    func profile(for lane: MenuLane) -> ProviderProfiles.Profile {
+        lane == .local ? localLaneProfile : lane.profile
+    }
+
+    /// A lane's saved setup, as the snapshot read it.
+    func stored(_ lane: MenuLane) -> MenuSnapshot.Provider {
+        snapshot.providers[profile(for: lane).rawValue] ?? MenuSnapshot.Provider()
     }
 
     /// The lane the AI screen shows.
@@ -491,13 +517,14 @@ final class MenuWorkflow {
             chat["efforts"] = effortChoices(.chatgpt, model: m) }
         providers["chatgpt"] = chat
         for lane in [MenuLane.opencode, .openrouter, .local] {
-            let p = snapshot.providers[lane.rawValue] ?? MenuSnapshot.Provider()
+            let p = stored(lane)
             var d: [String: Any] = ["configured": p.configured, "active": activeLane == lane, "model": p.model,
                                     "model_label": p.model.isEmpty ? "" : Self.modelLabel(lane, p.model),
                                     "effort": p.effort.isEmpty ? "high" : p.effort, "text_only": p.textOnly,
                                     "efforts": effortChoices(lane, model: p.model)]
             if let k = p.keyMasked { d["key"] = k }
             if !p.endpoint.isEmpty { d["endpoint"] = p.endpoint }
+            if lane == .local { d["keyed"] = profile(for: lane) == .custom }
             providers[lane.rawValue] = d
         }
         var out: [String: Any] = [
@@ -722,14 +749,15 @@ final class MenuWorkflow {
                 guard case .signedIn = snapshot.chatgpt else { return (false, L("Sign in to ChatGPT first.", "Prima accedi a ChatGPT.")) }
                 return try await selectAndProbe(basis: basis, checkpoint)
             }
-            guard let p = snapshot.providers[chosen.rawValue], p.configured else {
+            let p = stored(chosen)
+            guard p.configured else {
                 return (false, L("Set up \(chosen.title(lang)) first.", "Prima configura \(chosen.title(lang))."))
             }
-            return try await saveProvider(chosen, apiKey: nil, model: p.model, baseURL: nil, textOnly: p.textOnly,
+            return try await saveProvider(chosen, profile: profile(for: chosen), apiKey: nil, model: p.model, baseURL: nil, textOnly: p.textOnly,
                                           effort: p.effort.isEmpty ? nil : p.effort, basis: basis, checkpoint: checkpoint)
 
         case "local_models":
-            return await listLocalModels(str(body, "base_url"), generation: g)
+            return await listLocalModels(str(body, "base_url"), typedKey: str(body, "api_key"), generation: g)
 
         case "effort":
             return try await changeEffort(str(body, "effort"), basis: basis, checkpoint: checkpoint)
@@ -1174,7 +1202,7 @@ final class MenuWorkflow {
     private func saveProviderKey(profile: String, key: String, model requested: String, basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         guard let lane = MenuLane(rawValue: profile), lane == .opencode || lane == .openrouter else { return (false, L("Unknown provider.", "Fornitore sconosciuto.")) }
         guard !key.isEmpty, key.count <= 4096, !key.contains(where: { $0.isNewline }) else { return (false, L("Paste your key first.", "Incolla prima la chiave.")) }
-        let stored = snapshot.providers[lane.rawValue] ?? MenuSnapshot.Provider()
+        let stored = stored(lane)
         let model = !requested.isEmpty ? requested
             : !stored.model.isEmpty ? stored.model
             : (lane == .opencode ? OpenCodeGo.defaultModel : Self.openRouterDefaultModel)
@@ -1198,8 +1226,10 @@ final class MenuWorkflow {
         }
         if let raw = body["text_only"], !(raw is Bool) || !BashTools.isJSONBoolean(raw) { return (false, L("Unknown option.", "Opzione sconosciuta.")) }
         let textOnly = body["text_only"] as? Bool
-        let stored = snapshot.providers[lane.rawValue] ?? MenuSnapshot.Provider()
+        var stored = stored(lane)
         var baseURL: String?
+        var apiKey: String?
+        var saveAs = lane.profile
         let probe: [String: Any]
         switch lane {
         case .opencode:
@@ -1214,7 +1244,18 @@ final class MenuWorkflow {
                 return (false, L("That address doesn\u{2019}t look right. It looks like http://localhost:1234/v1.", "Questo indirizzo non sembra giusto. Somiglia a http://localhost:1234/v1."))
             }
             baseURL = base
-            probe = await env.probe(["kind": "local", "base_url": base, "model": model])
+            // A server that needs a key is saved as the custom endpoint, with
+            // the key it was listed with; a keyless one stays the local server.
+            if let listed = localListing, listed.base == base, let key = listed.apiKey {
+                apiKey = key
+                saveAs = .custom
+                stored = snapshot.providers[ProviderProfiles.Profile.custom.rawValue] ?? MenuSnapshot.Provider()
+                let responses = stored.configured && stored.responses && stored.endpoint == base
+                probe = await env.probe(["kind": responses ? "responses" : "custom", "base_url": base, "api_key": key, "model": model])
+            } else {
+                stored = snapshot.providers[ProviderProfiles.Profile.local.rawValue] ?? MenuSnapshot.Provider()
+                probe = await env.probe(["kind": "local", "base_url": base, "model": model])
+            }
         case .chatgpt:
             return (false, nil)
         }
@@ -1230,7 +1271,7 @@ final class MenuWorkflow {
         // OpenCode takes the vision state from its catalog; the others keep
         // theirs unless the page says otherwise (a new id defaults to vision).
         let vision: Bool? = lane == .opencode ? nil : (textOnly ?? (model == stored.model ? stored.textOnly : false))
-        return try await saveProvider(lane, apiKey: nil, model: model, baseURL: baseURL, textOnly: vision,
+        return try await saveProvider(lane, profile: saveAs, apiKey: apiKey, model: model, baseURL: baseURL, textOnly: vision,
                                       effort: stored.effort.isEmpty ? nil : stored.effort, basis: basis, checkpoint: checkpoint)
     }
 
@@ -1238,13 +1279,14 @@ final class MenuWorkflow {
     /// Briglia uses. Web research then runs on the OpenAI key (the owner's
     /// rule for every lane but ChatGPT), so the stored research backend is
     /// set to OpenAI whenever that key is there.
-    private func saveProvider(_ lane: MenuLane, apiKey: String?, model: String, baseURL: String?, textOnly: Bool?, effort: String?,
+    private func saveProvider(_ lane: MenuLane, profile: ProviderProfiles.Profile? = nil, apiKey: String?, model: String, baseURL: String?, textOnly: Bool?, effort: String?,
                               basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
-        var section: [String: Any] = ["profile": lane.profile.rawValue, "model": model, "activate": true]
+        let profile = profile ?? lane.profile
+        var section: [String: Any] = ["profile": profile.rawValue, "model": model, "activate": true]
         if let apiKey { section["api_key"] = apiKey }
         if let baseURL { section["base_url"] = baseURL }
         if let textOnly { section["text_only"] = textOnly }
-        if lane != .local { section["effort"] = effort ?? "high" }
+        if profile != .local { section["effort"] = effort ?? "high" }
         var payload: [String: Any] = ["provider": section]
         if snapshot.openAIMasked != nil { payload["web_search_backend"] = WebSearchBackend.openai.rawValue }
         try checkpoint()
@@ -1261,7 +1303,7 @@ final class MenuWorkflow {
     /// The reasoning level of the running provider.
     private func changeEffort(_ effort: String, basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         guard let active = activeLane else { return (false, L("Set up an AI provider first.", "Prima configura un fornitore AI.")) }
-        let model = active == .chatgpt ? (currentModel ?? "") : (snapshot.providers[active.rawValue]?.model ?? "")
+        let model = active == .chatgpt ? (currentModel ?? "") : stored(active).model
         guard effortChoices(active, model: model).contains(effort) else { return (false, L("Unknown thinking level.", "Livello di ragionamento sconosciuto.")) }
         try checkpoint()
         let request: [String: Any]
@@ -1269,8 +1311,8 @@ final class MenuWorkflow {
         if viaSubscription {
             request = ["action": "select", "model": model, "effort": effort]
         } else {
-            let p = snapshot.providers[active.rawValue] ?? MenuSnapshot.Provider()
-            request = ["provider": ["profile": active.profile.rawValue, "model": p.model, "effort": effort,
+            let p = stored(active)
+            request = ["provider": ["profile": profile(for: active).rawValue, "model": p.model, "effort": effort,
                                     "text_only": p.textOnly, "activate": true] as [String: Any]]
         }
         // Rebuilt from the snapshot above, so only written while the saved
@@ -1288,23 +1330,36 @@ final class MenuWorkflow {
 
     /// Asks a local server for its models. Read-only; the answer shows on
     /// the page only while no newer AI choice replaced this one.
-    private func listLocalModels(_ raw: String, generation g: Int) async -> (Bool, String?) {
+    private func listLocalModels(_ raw: String, typedKey: String, generation g: Int) async -> (Bool, String?) {
         guard let base = MenuEnvironment.localBase(raw) else {
             return (false, L("That address doesn\u{2019}t look right. It looks like http://localhost:1234/v1.", "Questo indirizzo non sembra giusto. Somiglia a http://localhost:1234/v1."))
         }
+        guard typedKey.count <= 4096, !typedKey.contains(where: { $0.isNewline }) else { return (false, L("That key doesn\u{2019}t look right.", "Questa chiave non sembra giusta.")) }
+        // A typed key wins; with none, the saved custom endpoint's key is
+        // reused for its own address, so changing its model needs no retyping.
+        let saved = snapshot.providers[ProviderProfiles.Profile.custom.rawValue]
+        let key: String? = !typedKey.isEmpty ? typedKey
+            : (saved?.configured == true && saved?.endpoint == base ? env.providerKey(.custom) : nil)
+        if key != nil, !MenuEnvironment.keySafe(base) {
+            return (false, L("To send an API key, the address must start with https:// (plain http only works for this computer or your home network).",
+                             "Per inviare una chiave API l\u{2019}indirizzo deve iniziare con https:// (http semplice funziona solo per questo computer o la rete di casa)."))
+        }
         let ticket = validity.ticket(generation: g, slot: "ai", claim: false)
         localListing = LocalListing(base: base, state: "checking")
-        let result = await env.localModels(base)
+        let result = await env.localModels(base, key)
         guard validity.isValid(ticket), localListing?.base == base else { return (true, nil) }
         switch result {
         case .success(let models):
-            localListing = LocalListing(base: base, state: "ok", models: models)
+            localListing = LocalListing(base: base, state: "ok", models: models, apiKey: key)
             return (true, nil)
         case .failure(let why):
             let message: String
             switch why {
             case .badAddress: message = L("That address doesn\u{2019}t look right.", "Questo indirizzo non sembra giusto.")
             case .unreachable: message = L("Nothing answered at \(base). Is the model server running (LM Studio: Developer → Start server; Ollama: ollama serve)?", "Nessuna risposta da \(base). Il server del modello è acceso (LM Studio: Developer → Start server; Ollama: ollama serve)?")
+            case .http(let code) where code == 401 || code == 403:
+                message = key == nil ? L("This server needs an API key. Paste it in the key field, then try again.", "Questo server richiede una chiave API. Incollala nel campo della chiave, poi riprova.")
+                    : L("The server refused this API key (HTTP \(code)). Check it and try again.", "Il server ha rifiutato questa chiave API (HTTP \(code)). Controllala e riprova.")
             case .http(let code): message = L("The server answered with an error (HTTP \(code)). Check the address — it usually ends in /v1.", "Il server ha risposto con un errore (HTTP \(code)). Controlla l\u{2019}indirizzo: di solito finisce con /v1.")
             case .noModels: message = L("The server is running but has no model loaded. Load one, then try again.", "Il server è acceso ma non ha nessun modello caricato. Caricane uno, poi riprova.")
             }
