@@ -351,7 +351,8 @@ struct WebSubagentSelftest: AsyncParsableCommand {
                                              imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
             check("3.7 model: inherit routes to the main profile A and is reported as inherited (same as omitting it)",
                   inherited.error == nil && serverB.requests.isEmpty && serverA.requests.count >= 1
-                  && serverA.requests.allSatisfy { body($0)["model"] as? String == "main-model" } && inherited.modelUsed == "main-model (inherited)", inherited.error ?? inherited.modelUsed ?? "")
+                  && serverA.requests.allSatisfy { body($0)["model"] as? String == "main-model" } && inherited.modelUsed == "main-model (inherited)"
+                  && resultJSON(inherited)["note"] == nil, inherited.error ?? inherited.modelUsed ?? "")
             // cheap-text lane on A (an explicit per-call choice, on the main profile).
             try SubagentModelLanes.setModel(.cheapText, model: "cheap-text-model")
             serverA.clear(); serverB.clear()
@@ -360,8 +361,10 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             let cheapRun = await runner.run(invocation: cheap, sessionId: first.sessionId, openRouterService: service, toolExecutor: executor,
                                             imagesDirectory: images, documentsDirectory: documents, parentTools: AvailableTools.all(includeWebSearch: true))
             try SubagentModelLanes.setModel(.cheapText, model: nil)
-            check("3.8 cheap-text routes to that lane on A", cheapRun.error == nil && serverB.requests.isEmpty
-                  && serverA.requests.allSatisfy { body($0)["model"] as? String == "cheap-text-model" } && cheapRun.modelUsed == "cheap-text-model", cheapRun.error ?? cheapRun.modelUsed ?? "")
+            check("3.8 cheap-text (a configured lane) is ignored: the researcher always runs the main model on A (owner decision 2026-09-25) and notes it",
+                  cheapRun.error == nil && serverB.requests.isEmpty && !serverA.requests.isEmpty
+                  && serverA.requests.allSatisfy { body($0)["model"] as? String == "main-model" } && cheapRun.modelUsed == "main-model (inherited)"
+                  && (resultJSON(cheapRun)["note"] as? String)?.contains("always runs the main model") == true, cheapRun.error ?? cheapRun.asJSON())
             // A web backend without a key no longer matters to the researcher's rounds.
             try KeychainHelper.delete(key: KeychainHelper.webSearchOpenCodeApiKeyKey)
             serverA.clear(); serverB.clear()
@@ -634,6 +637,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         serverA.divert = nil
         try await Self.runSubscriptionGroups(harness)
         try await Self.runMainModelGroups(harness)
+        try await Self.runRound1Groups(harness)
 
         print("Web subagent selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }

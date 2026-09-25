@@ -5145,16 +5145,22 @@ class ConversationManager: ObservableObject {
         guard replyAddress != nil else { return }
 
         guard !argument.isEmpty else {
-            let active = WebSearchBackend.active
+            let selection = WebSearchBackend.activeSelection
+            let active = selection.backend
+            // Derived follows (subscription, OpenRouter main provider) win
+            // while they hold; the stored choice serves the other providers.
+            let follows = active == .chatgpt || selection.followsMainOpenRouter
             var lines = ["Web page-reading backend — page extraction and web_fetch (research itself runs on your main model; switch with /websearch <name>):"]
             if active == .chatgpt {
                 lines.append("▸ chatgpt — \(WebSearchBackend.chatgpt.modelSummary)  [ACTIVE: follows /provider chatgpt]")
+            } else if selection.followsMainOpenRouter {
+                lines.append("▸ openrouter — \(WebSearchBackend.openRouterFollowSummary)  [ACTIVE: follows /provider openrouter]")
             }
-            let servingNote = active == .chatgpt ? "  [used on other providers]" : "  [ACTIVE]"
+            let servingNote = follows ? "  [used on other providers]" : "  [ACTIVE]"
             for backend in WebSearchBackend.selectable {
-                let marker = backend == active ? "▸" : " "
+                let marker = backend == active && !follows ? "▸" : " "
                 let key = WebSearchBackend.storedKey(for: backend).isEmpty ? "no key" : "key ✔"
-                let isServing = active == .chatgpt ? backend == WebSearchBackend.configured : backend == active
+                let isServing = follows ? backend == WebSearchBackend.configured : backend == active
                 let activeSuffix = isServing ? servingNote : ""
                 lines.append("\(marker) \(backend.rawValue) — \(backend.modelSummary) (\(key))\(activeSuffix)")
             }
@@ -5185,10 +5191,15 @@ class ConversationManager: ObservableObject {
             try? await sendText("✖ No key configured for \(backend.displayName) — \(hint).")
             return
         }
-        let followsSubscription = WebSearchBackend.active == .chatgpt
-        let followNote = followsSubscription
-            ? " While /provider is chatgpt, web page reading keeps using the subscription; this choice applies on other providers."
-            : ""
+        let followSelection = WebSearchBackend.activeSelection
+        let followNote: String
+        if followSelection.backend == .chatgpt {
+            followNote = " While /provider is chatgpt, web page reading keeps using the subscription; this choice applies on other providers."
+        } else if followSelection.followsMainOpenRouter {
+            followNote = " While /provider is openrouter, web page reading uses \(ORModel.openRouterExtractor) on OpenRouter's fastest host; this choice applies on other providers."
+        } else {
+            followNote = ""
+        }
         if WebSearchBackend.explicitlyStored == backend {
             try? await sendText("\(backend.displayName) is already the saved web page-reading backend.\(followNote)")
             return

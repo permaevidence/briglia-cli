@@ -4390,6 +4390,14 @@ extension ToolExecutor {
     /// only serves paths that bypass this gate, e.g. a watcher lane cleared
     /// while a batch was pending.) Returns an error JSON string, or nil when
     /// the hint is valid.
+    /// The built-in Web researcher ignores the hint (it always runs the
+    /// main model, owner decision 2026-09-25), so a hint on a Web call is
+    /// never an error; the run reports it as ignored in its result note.
+    static func agentModelHintError(_ hint: String?, subagentType: String) -> String? {
+        if SubagentTypes.find(name: subagentType)?.isWebResearcher == true { return nil }
+        return agentModelHintError(hint)
+    }
+
     static func agentModelHintError(_ hint: String?) -> String? {
         switch SubagentModelLanes.resolve(hint: hint) {
         case .inherit, .lane:
@@ -4467,7 +4475,7 @@ extension ToolExecutor {
         if let refusal = nestedAgentRefusal(args) {
             return ToolResultMessage(toolCallId: call.id, content: refusal)
         }
-        if let laneError = Self.agentModelHintError(args.model) {
+        if let laneError = Self.agentModelHintError(args.model, subagentType: args.subagent_type) {
             return ToolResultMessage(toolCallId: call.id, content: laneError)
         }
         let deliverable = Self.agentDeliverable(args.deliverable, subagentType: args.subagent_type)
@@ -4544,7 +4552,7 @@ extension ToolExecutor {
         if let refusal = nestedAgentRefusal(args) {
             return refusal
         }
-        if let laneError = Self.agentModelHintError(args.model) {
+        if let laneError = Self.agentModelHintError(args.model, subagentType: args.subagent_type) {
             return laneError
         }
         let deliverable = Self.agentDeliverable(args.deliverable, subagentType: args.subagent_type)

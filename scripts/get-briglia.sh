@@ -364,6 +364,7 @@ case "$MIGRATE_STATE" in
 esac
 
 ON_PATH=1
+PATH_WIRED=""
 case ":$PATH:" in
     *":$DEST_DIR:"*) ;;
     *)
@@ -389,6 +390,7 @@ case ":$PATH:" in
             done
             if [ -n "$WROTE" ]; then
                 echo "PATH configured in:$WROTE — new terminals will find \`briglia\`."
+                PATH_WIRED="$WROTE"
             else
                 echo "⚠ $DEST_DIR is not in your PATH — add this line to your shell profile:"
                 echo "    $PATH_LINE"
@@ -399,6 +401,7 @@ case ":$PATH:" in
         ;;
 esac
 echo
+# >>> next-step (scripts/installer_next_step_test.py runs this block alone)
 # Always end with a command that works VERBATIM in this very terminal:
 # a piped installer cannot export PATH into the parent shell, so `briglia`
 # alone would fail right now even when future terminals are fine.
@@ -419,6 +422,17 @@ if [ "$MIGRATE_STATE" = "4" ]; then
     echo
 elif [ "$ON_PATH" = "1" ]; then
     echo "✔ Briglia CLI is installed. Next step:  briglia${NEXT:+ $NEXT}"
+elif [ "$NEXT" = "menu" ] && [ -n "$PATH_WIRED" ]; then
+    # Desktop, PATH just wired into the shell profile: the plain command
+    # only works in a NEW window, which is what non-technical users need
+    # to hear; the full path still works right here.
+    if [ "$(uname -s)" = "Darwin" ]; then NEW_WINDOW_KEYS="⌘N"; else NEW_WINDOW_KEYS="Ctrl+Alt+T"; fi
+    echo "✔ Briglia CLI is installed. Next step:"
+    echo "  close this Terminal window, open a new one ($NEW_WINDOW_KEYS) and type:"
+    echo
+    echo "    briglia menu"
+    echo
+    echo "  (or run it right here with the full path:  $DEST_DIR/briglia menu)"
 else
     echo "✔ Briglia CLI is installed. Next step (copy-paste exactly):"
     echo
@@ -426,3 +440,4 @@ else
     echo
     echo "  (plain \`briglia\` works in new terminals from now on)"
 fi
+# <<< next-step

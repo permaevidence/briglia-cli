@@ -21,6 +21,13 @@ enum ORModel {
     /// web_fetch page compression: what this model drops from a page is
     /// invisible to the calling agent, so selection judgment matters here.
     static let webFetchCompression = "openai/gpt-6-luna"
+    /// Page extraction and web_fetch compression while OpenRouter is the
+    /// MAIN provider (owner decision 2026-09-25): DeepSeek V4 Flash, routed
+    /// by OpenRouter to its fastest host (`provider.sort: "throughput"`),
+    /// at low effort. Verified live 2026-09-25: id in /models, 30+ hosts,
+    /// strict-JSON extraction of a 39k-token page in ~2.5 s. Spend is the
+    /// served host's `usage.cost` (host prices differ several-fold).
+    static let openRouterExtractor = "deepseek/deepseek-v4-flash-0731"
     static let defaultMainModel  = KeychainHelper.defaultWebSearchModel
 }
 
@@ -109,11 +116,46 @@ enum WebSearchBackend: String {
     /// selection flipped (the old UserDefaults set/restore dance could).
     static var processOverride: WebSearchBackend?
 
-    static var active: WebSearchBackend {
-        if let processOverride { return processOverride }
-        if subscriptionFollowActive { return .chatgpt }
-        return configured
+    static var active: WebSearchBackend { activeSelection.backend }
+
+    /// The backend serving the mechanical stages plus whether it is the
+    /// OpenRouter follow (main provider = OpenRouter ⇒ extraction on
+    /// `ORModel.openRouterExtractor`, fastest host), read from ONE settings
+    /// snapshot so the two can never disagree.
+    static var activeSelection: (backend: WebSearchBackend, followsMainOpenRouter: Bool) {
+        if let processOverride { return (processOverride, false) }
+        let stored = KeychainHelper.loadSnapshot()
+        if followsSubscription(stored: stored) { return (.chatgpt, false) }
+        if followsOpenRouter(stored: stored) { return (.openrouter, true) }
+        return (configured, false)
     }
+
+    /// Pure rule: the main provider is OpenRouter with a key (selftest seam).
+    /// Derived, never stored — like the subscription follow, it wins over
+    /// the /websearch choice while it holds, and the choice returns after.
+    static func followsOpenRouter(stored: [String: String]) -> Bool {
+        LLMProvider.fromStoredValue(stored[KeychainHelper.llmProviderKey]) == .openRouter
+            && !(stored[KeychainHelper.openRouterApiKeyKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The model/effort/routing a mechanical stage actually sends. Unchanged
+    /// unless the OpenRouter follow holds; then DeepSeek V4 Flash at low
+    /// effort on the fastest host, the /orprovider pin deliberately ignored
+    /// (it governs the main model; its host may not serve this one), strict
+    /// response_format honoured by requiring hosts that support it.
+    static func stageRoute(followsMainOpenRouter: Bool, model: String, reasoning: ORChatReq.Reasoning?,
+                           provider: ORChatReq.Provider?, hasResponseFormat: Bool)
+        -> (model: String, reasoning: ORChatReq.Reasoning?, provider: ORChatReq.Provider?) {
+        guard followsMainOpenRouter else { return (model, reasoning, provider) }
+        var routing = ORChatReq.Provider(order: nil, only: nil, allow_fallbacks: true, sort: "throughput")
+        if hasResponseFormat { routing.require_parameters = true }
+        return (ORModel.openRouterExtractor, makeReasoning(openRouterExtractorEffort), routing)
+    }
+
+    /// Low: the extractor copies facts out of a page; DeepSeek V4 Flash at
+    /// low reasoned ~11 tokens on a small page and answered a 39k-token
+    /// strict-JSON extraction in ~2.5 s (medium: ~5.5 s, same answer).
+    static let openRouterExtractorEffort: ReasoningEffort = .low
 
     /// The stored/inferred backend, ignoring the subscription follow — what
     /// serves when the main provider is not the subscription.
@@ -218,6 +260,9 @@ enum WebSearchBackend: String {
         case .chatgpt:    return "ChatGPT subscription"
         }
     }
+
+    /// /websearch and doctor wording for the OpenRouter follow.
+    static var openRouterFollowSummary: String { "\(ORModel.openRouterExtractor) via openrouter.ai, fastest host" }
 
     /// What actually answers searches on this backend — shown by /websearch.
     var modelSummary: String {
@@ -343,6 +388,9 @@ struct ORChatReq: Encodable {
         let only: [String]?
         let allow_fallbacks: Bool?
         let sort: String?
+        /// Only endpoints that honour every sent parameter (strict
+        /// response_format included). Omitted (nil) everywhere else.
+        var require_parameters: Bool? = nil
     }
     let model: String
     let messages: [Msg]
@@ -1116,7 +1164,8 @@ actor WebOrchestrator {
             let detail: String
             switch response {
             case .text(let content, _, _, let promptTokens, let completionTokens, let spend, _):
-                addSpend(spend, executionID: executionID)
+                addSpend(ResearchSpend.settle(reported: spend, promptTokens: promptTokens,
+                    completionTokens: completionTokens, context: transcript.context), executionID: executionID)
                 let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
                 webLog("[WebOrchestrator] main response stage=\(stage) content_chars=\(text.count) tool_calls=0 tokens=\(promptTokens.map(String.init) ?? "?")/\(completionTokens.map(String.init) ?? "?")")
                 if !text.isEmpty {
@@ -1125,7 +1174,11 @@ actor WebOrchestrator {
                 }
                 detail = "empty text response"
             case .toolCalls(let assistant, let calls, let promptTokens, let completionTokens, let spend):
-                addSpend(spend, executionID: executionID)
+                // Paid OpenAI API rounds carry tokens only (the Responses
+                // adapter reports no dollars): priced here, locally to
+                // research, so they count toward tool spend and limits.
+                addSpend(ResearchSpend.settle(reported: spend, promptTokens: promptTokens,
+                    completionTokens: completionTokens, context: transcript.context), executionID: executionID)
                 let text = (assistant.content ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 webLog("[WebOrchestrator] main response stage=\(stage) content_chars=\(text.count) tool_calls=\(calls.count) tokens=\(promptTokens.map(String.init) ?? "?")/\(completionTokens.map(String.init) ?? "?")")
                 if forcedFinal {
@@ -1697,7 +1750,7 @@ actor WebOrchestrator {
             let providerOrder = providerToUse.order?.joined(separator: ",") ?? "nil"
             let providerOnly = providerToUse.only?.joined(separator: ",") ?? "nil"
             let providerFallbacks = providerToUse.allow_fallbacks.map(String.init) ?? "nil"
-            webLog("[WebOrchestrator] OpenRouter request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(reasoningLabel) \(formatLabel) max_tokens=\(maxTokens) provider_order=\(providerOrder) provider_only=\(providerOnly) provider_allow_fallbacks=\(providerFallbacks)")
+            webLog("[WebOrchestrator] OpenRouter request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(reasoningLabel) \(formatLabel) max_tokens=\(maxTokens) provider_order=\(providerOrder) provider_only=\(providerOnly) provider_allow_fallbacks=\(providerFallbacks) provider_sort=\(providerToUse.sort ?? "nil")\(providerToUse.require_parameters == true ? " require_parameters=true" : "")")
             return ORChatReq(
                 model: resolvedModel,
                 messages: messages,
@@ -1764,7 +1817,11 @@ actor WebOrchestrator {
         responseFormat: ORResponseFormat? = nil,
         executionID: UUID
     ) async throws -> String {
-        let backend = WebSearchBackend.active
+        let selection = WebSearchBackend.activeSelection
+        let backend = selection.backend
+        let route = WebSearchBackend.stageRoute(followsMainOpenRouter: selection.followsMainOpenRouter,
+            model: model, reasoning: reasoning, provider: provider, hasResponseFormat: responseFormat != nil)
+        let model = route.model, reasoning = route.reasoning, provider = route.provider
         if backend == .chatgpt {
             return try await callSubscriptionStage(
                 stage: stage, mode: mode, model: model, messages: messages,
@@ -2747,7 +2804,9 @@ actor WebOrchestrator {
         // The instance's OpenRouter key wins for that backend (it can carry
         // the BRIGLIA_TEST_OPENROUTER_KEY env override); everything else comes
         // from stored settings via the shared resolver.
-        if backend == .openrouter { return openRouterApiKey }
+        // An empty instance key (never configured in this process) falls back
+        // to the stored key: the OpenRouter follow can hold before a reload.
+        if backend == .openrouter, !openRouterApiKey.isEmpty { return openRouterApiKey }
         return WebSearchBackend.storedKey(for: backend)
     }
 

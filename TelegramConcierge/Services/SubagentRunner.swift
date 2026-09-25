@@ -541,8 +541,16 @@ actor SubagentRunner {
         // An unconfigured lane degrades to inherit with a log line: type
         // defaults must never hard-fail a run — only per-call hints do, and
         // those are validated loudly in ToolExecutor before the run starts.
+        // The built-in Web researcher ALWAYS runs the main model (owner
+        // decision 2026-09-25: the point of moving research onto the main
+        // model is never to research on a weaker one). A per-call lane hint
+        // is ignored for it — not validated, not applied — and the result
+        // carries a note saying so; its type has no frontmatter lane.
+        let ignoresModelLanes = subagentType.isWebResearcher
         let typeLevelOverride: (model: String, textOnly: Bool)?
-        if let lane = subagentType.preferredModel.lane {
+        if ignoresModelLanes {
+            typeLevelOverride = nil
+        } else if let lane = subagentType.preferredModel.lane {
             if let model = SubagentModelLanes.configuredModel(lane) {
                 typeLevelOverride = (model, lane.isTextOnly)
             } else {
@@ -559,6 +567,14 @@ actor SubagentRunner {
         // cleared while a batch was pending) degrades to the next precedence
         // level with a log line rather than dropping the run.
         let perCallLane: (model: String, textOnly: Bool)?
+        var ignoredModelHintNote: String? = nil
+        if ignoresModelLanes {
+            perCallLane = nil
+            if case .inherit = SubagentModelLanes.resolve(hint: invocation.modelOverride) {} else if let hint = invocation.modelOverride {
+                ignoredModelHintNote = Self.webModelHintIgnoredNote(hint)
+                print("[SubagentRunner] Web researcher: ignoring model hint '\(hint)'; it always runs the main model.")
+            }
+        } else {
         switch SubagentModelLanes.resolve(hint: invocation.modelOverride) {
         case .lane(let lane, let model):
             perCallLane = (model, lane.isTextOnly)
@@ -570,6 +586,7 @@ actor SubagentRunner {
         case .unknown(let hint):
             print("[SubagentRunner] Ignoring unknown model hint '\(hint)'; falling back to type default.")
             perCallLane = nil
+        }
         }
 
         // Provider routing preferences had a single source (the retired
@@ -673,6 +690,16 @@ actor SubagentRunner {
         var toolsCalledOrdered: [String] = []
         var seenToolNames = Set<String>()
         var totalSpendUSD: Double = 0
+        // Round spend. The Web researcher runs the main context, whose paid
+        // OpenAI API rounds report tokens but no dollars: priced locally to
+        // research (ResearchSpend) so they count toward tool spend and the
+        // limits. Every other subagent keeps the adapter's reported value.
+        let researchPricingContext: ProviderExecutionContext? = subagentType.isWebResearcher ? webExecution : nil
+        func runSpend(_ reported: Double?, _ promptTokens: Int?, _ completionTokens: Int?) -> Double {
+            guard let researchPricingContext else { return reported ?? 0 }
+            return ResearchSpend.settle(reported: reported, promptTokens: promptTokens,
+                completionTokens: completionTokens, context: researchPricingContext) ?? 0
+        }
         var turnsUsed = 0
         var runError: String? = nil
         var stoppedForContext = false
@@ -773,8 +800,8 @@ actor SubagentRunner {
                 markProgress()  // LLM responded — subagent is alive
 
                 switch response {
-                case .text(let content, _, _, let promptTk, _, let spend, let native):
-                    if let spend { totalSpendUSD += spend }
+                case .text(let content, _, _, let promptTk, let completionTk, let spend, let native):
+                    totalSpendUSD += runSpend(spend, promptTk, completionTk)
                     if let pt = promptTk { lastPromptTokens = pt }
                     // Web researcher: a final with no retrieval in this run gets
                     // ONE nudge (the answer is not kept; the model answers again
@@ -790,8 +817,8 @@ actor SubagentRunner {
                     finalReplay = native?.envelope
                     break loop
 
-                case .toolCalls(let received, let calls, let promptTk, _, let spend):
-                    if let spend { totalSpendUSD += spend }
+                case .toolCalls(let received, let calls, let promptTk, let completionTk, let spend):
+                    totalSpendUSD += runSpend(spend, promptTk, completionTk)
                     if let pt = promptTk { lastPromptTokens = pt }
                     // Record the round's receipt time once, before dispatch.
                     var assistantMessage = received
@@ -835,14 +862,14 @@ actor SubagentRunner {
                             markProgress()
 
                             switch retryResponse {
-                            case .text(let content, _, _, let retryPromptTk, _, let retrySpend, let native):
-                                if let retrySpend { totalSpendUSD += retrySpend }
+                            case .text(let content, _, _, let retryPromptTk, let retryCompletionTk, let retrySpend, let native):
+                                totalSpendUSD += runSpend(retrySpend, retryPromptTk, retryCompletionTk)
                                 if let pt = retryPromptTk { lastPromptTokens = pt }
                                 finalText = content
                                 finalReplay = native?.envelope
                                 break loop
-                            case .toolCalls(let retryAssistantMessage, let retryCalls, let retryPromptTk, _, let retrySpend):
-                                if let retrySpend { totalSpendUSD += retrySpend }
+                            case .toolCalls(let retryAssistantMessage, let retryCalls, let retryPromptTk, let retryCompletionTk, let retrySpend):
+                                totalSpendUSD += runSpend(retrySpend, retryPromptTk, retryCompletionTk)
                                 if let pt = retryPromptTk { lastPromptTokens = pt }
                                 forceInteractions.append(disabledToolInteraction(
                                     assistantMessage: retryAssistantMessage,
@@ -1089,17 +1116,17 @@ actor SubagentRunner {
                     markProgress()
 
                     switch forceResponse {
-                    case .text(let content, _, _, let promptTk, _, let spend, let native):
-                        if let spend { totalSpendUSD += spend }
+                    case .text(let content, _, _, let promptTk, let completionTk, let spend, let native):
+                        totalSpendUSD += runSpend(spend, promptTk, completionTk)
                         if let pt = promptTk { lastPromptTokens = pt }
                         finalText = content
                         finalReplay = native?.envelope
                         break
-                    case .toolCalls(let assistantMessage, let calls, let promptTk, _, let spend):
+                    case .toolCalls(let assistantMessage, let calls, let promptTk, let completionTk, let spend):
                         // Tools remain available for prompt-cache stability, so a model
                         // can still request them here. Never execute tools from a
                         // force-finish response; feed back no-op tool results and retry.
-                        if let spend { totalSpendUSD += spend }
+                        totalSpendUSD += runSpend(spend, promptTk, completionTk)
                         if let pt = promptTk { lastPromptTokens = pt }
                         forceInteractions.append(disabledToolInteraction(
                             assistantMessage: assistantMessage,
@@ -1207,6 +1234,9 @@ actor SubagentRunner {
             sessionPersisted: sessionPersisted,
             modelUsed: modelUsedLabel
         )
+        if let ignoredModelHintNote {
+            result.note = [result.note, ignoredModelHintNote].compactMap { $0 }.joined(separator: " ")
+        }
         if let webLedger {
             result.evidenceProvenance = provenance
             result.queriesUsed = webLedger.queriesUsed
@@ -1216,6 +1246,12 @@ actor SubagentRunner {
             result.reportPath = reportPath
         }
         return result
+    }
+
+    /// Result note for a Web run that received a model hint: the researcher
+    /// always runs the main model (owner decision 2026-09-25).
+    static func webModelHintIgnoredNote(_ hint: String) -> String {
+        "model '\(hint)' ignored: the Web researcher always runs the main model."
     }
 
     // MARK: - Context Compaction
