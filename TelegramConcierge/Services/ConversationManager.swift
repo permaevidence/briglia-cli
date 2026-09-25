@@ -3268,7 +3268,9 @@ class ConversationManager: ObservableObject {
     private func staleMenuReason(for action: TelegramCommandMenu.Action) -> String? {
         let active = ProviderProfiles.activeProfile()
         switch action {
-        case .provider, .modelTyped:
+        case .provider(let value):
+            return ProviderServers.staleProviderTap(value)
+        case .modelTyped:
             return nil
         case .model(let profile, _):
             guard active?.rawValue != profile else { return nil }
@@ -3276,7 +3278,7 @@ class ConversationManager: ObservableObject {
             let now = active?.displayName ?? "not set"
             return "this menu is outdated: it was for \(builtFor) and the active provider is now \(now). Send /model again."
         case .effort(let context, _):
-            guard let active, TelegramCommandMenu.effortContext(profile: active.rawValue, model: currentMainModel()) != context else {
+            guard let active, TelegramCommandMenu.effortContext(profile: ProviderProfiles.menuContextIdentity() ?? active.rawValue, model: currentMainModel()) != context else {
                 return active == nil ? "this menu is outdated: no active provider profile. Send /effort again." : nil
             }
             return "this menu is outdated: the provider or model changed since it was sent. Send /effort again."
@@ -4608,7 +4610,7 @@ class ConversationManager: ObservableObject {
                 : Self.validReasoningEfforts
             await sendCommandMenu(TelegramCommandMenu.effortMenu(
                 levels: levels,
-                context: TelegramCommandMenu.effortContext(profile: active.rawValue, model: currentMainModel()),
+                context: TelegramCommandMenu.effortContext(profile: ProviderProfiles.menuContextIdentity() ?? active.rawValue, model: currentMainModel()),
                 current: current,
                 currentDescription: current.isEmpty ? defaultDescription : current,
                 offAllowed: provider == .openAICompatible))
@@ -5068,25 +5070,26 @@ class ConversationManager: ObservableObject {
 
         guard !argument.isEmpty else {
             if replyAddress?.kind == .telegram, Self.commandCapture?.isOpen != true {
-                let active = ProviderProfiles.activeProfile()
-                let configured = ProviderProfiles.Profile.allCases
-                    .filter { ProviderProfiles.isConfigured($0) }
-                    .map { TelegramCommandMenu.ProviderChoice(id: $0.rawValue, displayName: $0.displayName, active: $0 == active) }
                 await sendCommandMenu(TelegramCommandMenu.providerMenu(
-                    statusLines: ProviderProfiles.statusLines(), configured: configured))
+                    statusLines: ProviderProfiles.statusLines(), configured: Self.providerChoices()))
                 return
             }
-            var lines = ["Providers (hop with /provider <name>):"]
+            var lines = ["Providers (hop with /provider <name>; a server by its name):"]
             lines.append(contentsOf: ProviderProfiles.statusLines())
             lines.append("Add or edit providers with `briglia setup` (step 1) in a terminal.")
             try? await sendText(lines.joined(separator: "\n"))
             return
         }
 
-        let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let profile = ProviderProfiles.Profile(rawValue: normalized) else {
-            let names = ProviderProfiles.Profile.allCases.map(\.rawValue).joined(separator: ", ")
-            try? await sendText("Unknown provider \"\(argument)\" — use one of: \(names).")
+        let target = ProviderServers.resolve(argument)
+        if case .server(let serverID)? = target {
+            await activateNamedServer(serverID)
+            return
+        }
+        guard case .profile(let profile)? = target else {
+            let names = ProviderProfiles.Profile.allCases.filter { $0 != .custom && $0 != .local }.map(\.rawValue)
+                + (ProviderServers.list() ?? []).map(\.name)
+            try? await sendText("Unknown provider \"\(argument)\" — use one of: \(names.joined(separator: ", ")).")
             return
         }
         if ProviderProfiles.activeProfile() == profile,
@@ -5132,6 +5135,56 @@ class ConversationManager: ObservableObject {
         case .none: note = ""
         }
         try? await sendText("✅ Active provider: \(profile.displayName) — model \(model). Takes effect from the next message.\(note)")
+    }
+
+    /// The /provider buttons: every configured built-in profile, then every
+    /// named server by its name (the local-server / custom-endpoint profiles
+    /// are listed as the servers they carry). A server button carries the
+    /// server's stable id, so a rename keeps it valid and a removal makes it
+    /// stale (refused in `staleMenuReason`).
+    static func providerChoices() -> [TelegramCommandMenu.ProviderChoice] {
+        let active = ProviderProfiles.activeProfile()
+        let store = KeychainHelper.loadSnapshot()
+        let activeServer = ProviderServers.activeServer(store)?.id
+        let builtIns = ProviderProfiles.Profile.allCases
+            .filter { $0 != .custom && $0 != .local && ProviderProfiles.isConfigured($0) }
+            .map { TelegramCommandMenu.ProviderChoice(id: $0.rawValue, displayName: $0.displayName, active: $0 == active) }
+        let servers = (ProviderServers.list(store) ?? []).map {
+            TelegramCommandMenu.ProviderChoice(id: $0.id, displayName: $0.name, active: $0.id == activeServer)
+        }
+        return builtIns + servers
+    }
+
+    /// `/provider <server>`: the same idle guard and follow-up as a profile
+    /// hop; the switch itself is one ProviderServers transaction.
+    private func activateNamedServer(_ id: String) async {
+        let store = KeychainHelper.loadSnapshot()
+        guard let server = ProviderServers.list(store)?.first(where: { $0.id == id }) else {
+            try? await sendText("✖ That server no longer exists. Send /provider to see the list.")
+            return
+        }
+        if ProviderServers.activeServer(store)?.id == id {
+            try? await sendText("\(server.name) is already the active provider.")
+            return
+        }
+        guard activeRunId == nil, activeProcessingTask == nil else {
+            try? await sendText("⏳ A turn is running — send /provider \(server.name) again when Briglia is idle (or /stop first).")
+            return
+        }
+        do {
+            try ProviderServers.use(id)
+        } catch {
+            try? await sendText("✖ \(ProviderServers.describe(error))")
+            return
+        }
+        modelRoutingGeneration += 1
+        NotificationCenter.default.post(
+            name: .adaLLMProviderDidChange,
+            object: nil,
+            userInfo: ["provider": LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)).rawValue]
+        )
+        let note = server.textOnly ? " Text-only model: images and scans go through the OCR preprocessor." : " Vision model: images flow natively."
+        try? await sendText("✅ Active provider: \(server.name) — model \(server.model). Takes effect from the next message.\(note)")
     }
 
     /// `/websearch` — show or switch the backend that READS web pages for

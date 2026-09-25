@@ -151,6 +151,12 @@ enum CredentialCatalog {
         Entry(key: ProviderProfiles.opencodeReasoningEffortKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.opencodeTextOnlyKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.customBaseURLKey, treatment: .notSecret),
+        // Named servers (2026-09-25): the list holds each server's API key,
+        // treated like the other provider keys (visible); the carrier
+        // bindings are server ids.
+        Entry(key: ProviderServers.listKey, treatment: .visible),
+        Entry(key: ProviderServers.customBindingKey, treatment: .notSecret),
+        Entry(key: ProviderServers.localBindingKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.customModelKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.customReasoningEffortKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.customTextOnlyKey, treatment: .notSecret),

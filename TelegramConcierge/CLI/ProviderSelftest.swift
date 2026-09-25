@@ -389,8 +389,8 @@ struct ProviderSelftest: AsyncParsableCommand {
               && listing.contains("…"))
         check("status lines mark the active profile",
               listing.contains("• opencode — ACTIVE"))
-        check("status lines flag unconfigured profiles",
-              listing.contains("• custom — not configured"))
+        check("status lines flag unconfigured profiles; servers replace the custom/local profile lines",
+              listing.contains("• openai — not configured") && !listing.contains("• custom") && !listing.contains("• local"))
 
         // 13. Web backend credential lookup must survive main-provider hops:
         // the opencode web backend's key comes from the saved OpenCode

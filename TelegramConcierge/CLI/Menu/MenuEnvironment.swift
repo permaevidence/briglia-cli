@@ -26,6 +26,20 @@ struct MenuSnapshot: Equatable {
         var responses = false
     }
 
+    /// One named server (ProviderServers) as the menu shows it. The key
+    /// itself never reaches the snapshot, only its masked form.
+    struct Server: Equatable {
+        var id = ""
+        var name = ""
+        var endpoint = ""
+        var model = ""
+        var effort = ""
+        var textOnly = false
+        var keyMasked: String?
+        var keyed = false
+        var responses = false
+    }
+
     var userName = ""
     var chatgpt: ChatGPT = .signedOut
     /// Display name of the active main provider when it is NOT ChatGPT.
@@ -36,6 +50,12 @@ struct MenuSnapshot: Equatable {
     /// raw value (the menu's Local lane shows local, or custom when the
     /// server needs an API key).
     var providers: [String: Provider] = [:]
+    /// Named servers (the local-server / custom-endpoint profiles carry
+    /// them), in saved order; `activeServer` is the one Briglia runs on.
+    var servers: [Server] = []
+    var activeServer: String?
+    /// The saved server list doesn't decode (every server action refuses).
+    var serversDamaged = false
     var telegramConfigured = false
     var telegramChatId = ""
     var serperMasked: String?
@@ -170,6 +190,11 @@ struct MenuEnvironment {
     /// The model ids a local OpenAI-compatible server offers (GET /models),
     /// or why it couldn't be asked.
     var localModels: (_ baseURL: String, _ apiKey: String?) async -> Result<[String], MenuLocalModelsError> = { await MenuEnvironment.listLocalModels(baseURL: $0, apiKey: $1) }
+    /// A named server's saved API key (never sent to the page; reused to
+    /// list its models or check a new model on the same address).
+    var serverKey: (String) -> String? = { id in
+        ProviderServers.list()?.first { $0.id == id }?.apiKey
+    }
     /// The saved API key of a provider profile (never sent to the page;
     /// used to check a new model before switching to it).
     var providerKey: (ProviderProfiles.Profile) -> String? = { profile in
@@ -242,16 +267,21 @@ struct MenuEnvironment {
             s.otherProvider = active.displayName
         }
         s.activeProfile = active?.rawValue
-        for profile in [ProviderProfiles.Profile.opencode, .openrouter, .local, .custom] {
+        for profile in [ProviderProfiles.Profile.opencode, .openrouter, .openai] {
             var p = MenuSnapshot.Provider()
             p.configured = ProviderProfiles.isConfigured(profile)
             p.model = ProviderProfiles.configuredModel(profile) ?? ""
             p.effort = ProviderProfiles.configuredEffort(profile) ?? ""
             p.textOnly = ProviderProfiles.textOnly(profile) ?? false
-            p.endpoint = profile == .local || profile == .custom ? (ProviderProfiles.configuredEndpoint(profile) ?? "") : ""
-            p.responses = profile == .custom && ProviderProfiles.wireProtocol(.custom, model: nil) == .responses
             p.keyMasked = ProviderProfiles.maskedKey(profile)
             s.providers[profile.rawValue] = p
+        }
+        let store = KeychainHelper.loadSnapshot()
+        if let servers = ProviderServers.list(store) {
+            s.servers = servers.map { MenuSnapshot.Server(server: $0) }
+            s.activeServer = ProviderServers.activeServer(store)?.id
+        } else {
+            s.serversDamaged = true
         }
         s.telegramConfigured = TelegramConfig.isConfigured
         s.telegramChatId = KeychainHelper.load(key: KeychainHelper.telegramChatIdKey) ?? ""
@@ -320,33 +350,11 @@ struct MenuEnvironment {
         return clean.isEmpty ? .failure(.noModels) : .success(Array(clean))
     }
 
-    /// A usable local base URL: http(s), a host, no credentials, query or
-    /// fragment; trailing slashes dropped. Nil when it isn't one.
-    static func localBase(_ raw: String) -> String? {
-        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, text.count <= 500, !text.contains(where: { $0.isNewline || $0 == " " }) else { return nil }
-        if !text.contains("://") { text = "http://" + text }
-        while text.hasSuffix("/") { text.removeLast() }
-        guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), let host = url.host, !host.isEmpty,
-              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return nil }
-        return text
-    }
+    /// A usable server base URL (ProviderServers' rule).
+    static func localBase(_ raw: String) -> String? { ProviderServers.normalizeBase(raw) }
 
-    /// Whether an API key may be sent to this address: always over https,
-    /// and over plain http only to this computer or a private network, so a
-    /// key never crosses the internet unencrypted.
-    static func keySafe(_ base: String) -> Bool {
-        guard let url = URL(string: base), let host = url.host?.lowercased() else { return false }
-        if url.scheme?.lowercased() == "https" { return true }
-        if host == "localhost" || host.hasSuffix(".local") || host == "::1" || host == "[::1]" { return true }
-        let parts = host.split(separator: ".").compactMap { Int($0) }
-        guard parts.count == 4, host.split(separator: ".").count == 4 else { return false }
-        switch (parts[0], parts[1]) {
-        case (127, _), (10, _), (192, 168): return true
-        case (172, 16...31): return true
-        default: return false
-        }
-    }
+    /// Whether an API key may be sent to this address (ProviderServers' rule).
+    static func keySafe(_ base: String) -> Bool { ProviderServers.keySafe(base) }
 
     /// Looks for the user's message to the bot, without consuming updates
     /// (no offset): the daemon still receives it later and answers — the
@@ -409,5 +417,12 @@ struct MenuEnvironment {
         }
         if let best { return .found(chatId: best.id, name: best.name) }
         return .waiting
+    }
+}
+
+extension MenuSnapshot.Server {
+    init(server: ProviderServers.Server) {
+        self.init(id: server.id, name: server.name, endpoint: server.baseURL, model: server.model, effort: server.effort ?? "",
+                  textOnly: server.textOnly, keyMasked: server.maskedKey, keyed: server.keyed, responses: server.responses)
     }
 }

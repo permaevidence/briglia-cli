@@ -448,6 +448,13 @@ enum ProviderProfiles {
     /// A fresh install (no stored llm_provider) is left unmigrated — the
     /// wizard creates its first profile explicitly.
     static func ensureMigrated() {
+        migrateActiveProfile()
+        // Named servers (2026-09-25): fold the local-server / custom-endpoint
+        // carriers into the server list (first run: one named server each).
+        ProviderServers.reconcileStored()
+    }
+
+    private static func migrateActiveProfile() {
         guard activeProfile() == nil else { return }
         // fromStoredValue silently defaults to .lmStudio — read raw so an
         // absent key (fresh install) is distinguishable from a real choice.
@@ -490,9 +497,11 @@ enum ProviderProfiles {
     // MARK: Listing
 
     /// Human-readable status lines for /provider and the wizard summary.
+    /// The local-server and custom-endpoint profiles are listed as the
+    /// named servers they carry (`ProviderServers.statusLines`).
     static func statusLines() -> [String] {
         let active = activeProfile()
-        return Profile.allCases.map { profile in
+        let builtIns = Profile.allCases.filter { $0 != .custom && $0 != .local }.map { profile -> String in
             var line = "• \(profile.rawValue)"
             if profile == active { line += " — ACTIVE" }
             guard isConfigured(profile) else { return line + " — not configured" }
@@ -509,5 +518,17 @@ enum ProviderProfiles {
             }
             return line + " — " + parts.joined(separator: ", ")
         }
+        return builtIns + ProviderServers.statusLines()
+    }
+
+    /// Identity of what runs now, for Telegram menu context binding: the
+    /// active profile, plus the server id when a named server runs (two
+    /// servers with the same model id are different destinations).
+    static func menuContextIdentity() -> String? {
+        guard let active = activeProfile() else { return nil }
+        guard active == .custom || active == .local, let server = ProviderServers.activeServerID(KeychainHelper.loadSnapshot()) else {
+            return active.rawValue
+        }
+        return "\(active.rawValue)#\(server)"
     }
 }

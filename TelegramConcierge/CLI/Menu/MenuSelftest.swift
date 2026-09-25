@@ -56,6 +56,7 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.routerRotation()
         await t.linuxStartup()
         await t.router()
+        await t.namedServers()
         print(t.failures == 0 ? "\nmenu selftest: all \(t.checks) checks passed"
                               : "\nmenu selftest: \(t.failures) of \(t.checks) FAILED")
         return t.failures
@@ -143,11 +144,53 @@ final class MenuFakeWorld: @unchecked Sendable {
                 if case .signedIn(_, let m, let e, let g) = snap.chatgpt { snap.chatgpt = .signedIn(active: false, model: m, effort: e, generation: g) }
             }
         }
+        if let pr = req["provider"] as? [String: Any], pr["remove"] as? Bool == true, let profile = pr["profile"] as? String {
+            snap.providers[profile] = MenuSnapshot.Provider()
+        }
+        if let sv = req["server"] as? [String: Any] {
+            serverRequests.append(sv)
+            let id = sv["id"] as? String ?? ""
+            switch sv["action"] as? String ?? "save" {
+            case "use":
+                guard let target = snap.servers.first(where: { $0.id == id }) else { return ["ok": false, "error": ["code": "not_found", "message": "That server doesn't exist"]] }
+                activateServer(target)
+            case "remove":
+                guard snap.activeServer != id else { return ["ok": false, "error": ["code": "server_active", "message": "in use"]] }
+                snap.servers.removeAll { $0.id == id }
+            default:
+                var server = snap.servers.first { $0.id == id } ?? MenuSnapshot.Server()
+                let isNew = server.id.isEmpty
+                if isNew { serverSeq += 1; server.id = "srv-fake\(serverSeq)" }
+                server.name = sv["name"] as? String ?? server.name
+                let base = sv["base_url"] as? String ?? server.endpoint
+                if let key = sv["api_key"] as? String {
+                    server.keyed = !key.isEmpty
+                    server.keyMasked = key.isEmpty ? nil : WizardIO.masked(key)
+                } else if base != server.endpoint {
+                    server.keyed = false; server.keyMasked = nil
+                }
+                server.endpoint = base
+                server.model = sv["model"] as? String ?? server.model
+                if let t = sv["text_only"] as? Bool { server.textOnly = t }
+                server.effort = server.keyed ? (sv["effort"] as? String ?? (server.effort.isEmpty ? "high" : server.effort)) : ""
+                if isNew { snap.servers.append(server) } else if let i = snap.servers.firstIndex(where: { $0.id == server.id }) { snap.servers[i] = server }
+                if sv["activate"] as? Bool == true || snap.activeServer == server.id { activateServer(server) }
+            }
+        }
         if let em = req["email_calendar"] as? [String: Any] {
             snap.emailProvider = em["provider"] as? String ?? "none"
             if let k = em["api_key"] as? String { snap.agentMailMasked = WizardIO.masked(k); snap.agentMailInbox = "bree@agentmail.to" }
         }
         return ["ok": true]
+    }
+
+    var serverRequests: [[String: Any]] = []
+    var serverSeq = 0
+    func activateServer(_ server: MenuSnapshot.Server) {
+        snap.activeServer = server.id
+        snap.activeProfile = server.keyed ? "custom" : "local"
+        snap.otherProvider = server.keyed ? "Custom endpoint" : "Local server"
+        if case .signedIn(_, let m, let e, let g) = snap.chatgpt { snap.chatgpt = .signedIn(active: false, model: m, effort: e, generation: g) }
     }
 
     func probe(_ req: [String: Any]) -> [String: Any] {
@@ -275,6 +318,7 @@ final class MenuSelftestContext {
             return world.localModels
         }
         env.providerKey = { profile in world.snap.providers[profile.rawValue]?.configured == true ? world.good[profile.rawValue] : nil }
+        env.serverKey = { id in world.snap.servers.first { $0.id == id }?.keyed == true ? world.good["custom"] : nil }
         env.telegramChatProbe = { _, chatId in
             if let gate = world.holds["chat:" + chatId] { await gate.wait() }
             var p = SetupAPICore.TelegramChatProbe()
@@ -617,32 +661,44 @@ final class MenuSelftestContext {
         check("switching back to OpenCode reuses its saved model, level and key",
               ok(r) && pr?["model"] as? String == "glm-5.3-flash" && pr?["effort"] as? String == "medium" && pr?["api_key"] == nil && ai(wf)["active"] as? String == "opencode")
         r = await act(wf, ["action": "provider_use", "profile": "local"])
-        check("a lane that isn't set up can't be switched to", !ok(r) && msg(r).contains("Set up"))
+        check("the server kind isn't switched to with provider_use (servers use server_use)", !ok(r))
         r = await act(wf, ["action": "provider_use", "profile": "chatgpt"])
         check("ChatGPT can't be switched to before signing in", !ok(r) && msg(r).contains("Sign in"))
         check("the dashboard names the running provider and model", step(wf, "ai")["title"] as? String == "OpenCode Go" && step(wf, "ai")["summary"] as? String == "GLM 5.3 Flash")
 
-        // Local model: find the server's models, pick one.
+        func lastServer(_ w: MenuFakeWorld) -> [String: Any]? { w.serverRequests.last }
+        func servers(_ wf: MenuWorkflow) -> [[String: Any]] { ai(wf)["servers"] as? [[String: Any]] ?? [] }
+
+        // A server on this computer: find its models, pick one, name it.
         await act(wf, ["action": "lane", "lane": "local"])
         r = await act(wf, ["action": "local_models", "base_url": "ftp://nas.local/models"])
         check("a non-HTTP server address is refused", !ok(r) && w.localModelAsks.isEmpty)
         r = await act(wf, ["action": "local_models", "base_url": "localhost:1234/v1/"])
         let listing = ai(wf)["local"] as? [String: Any]
-        check("the local server's models are listed (address normalized)",
+        check("the server's models are listed (address normalized)",
               ok(r) && w.localModelAsks.last == "http://localhost:1234/v1" && listing?["state"] as? String == "ok" && (listing?["models"] as? [String]) == ["qwen3.8-27b", "gemma-4-12b"])
         w.localModels = .failure(.unreachable)
         r = await act(wf, ["action": "local_models", "base_url": "http://localhost:11434/v1"])
         check("a server that doesn't answer is explained", !ok(r) && msg(r).contains("Nothing answered") && (ai(wf)["local"] as? [String: Any])?["state"] as? String == "error")
-        r = await act(wf, ["action": "provider_model", "profile": "local", "model": "qwen3.8-27b", "base_url": "http://localhost:11434/v1"])
-        check("a local model the server doesn't answer with is refused", !ok(r) && msg(r).contains("didn\u{2019}t answer"))
-        r = await act(wf, ["action": "provider_model", "profile": "local", "model": "qwen3.8-27b", "base_url": "http://localhost:1234/v1"])
-        pr = lastProvider(w)
-        check("a local model is saved with its address, no thinking level, and switched to",
-              ok(r) && pr?["profile"] as? String == "local" && pr?["base_url"] as? String == "http://localhost:1234/v1" && pr?["effort"] == nil && ai(wf)["active"] as? String == "local")
-        check("a local model offers no thinking level", (aiProvider(wf, "local")["efforts"] as? [String]) == [])
+        r = await act(wf, ["action": "server_save", "name": "Home GPU", "model": "qwen3.8-27b", "base_url": "http://localhost:11434/v1"])
+        check("a server can't be added without a model listing for its address", !ok(r) && msg(r).contains("Find models") && w.serverRequests.isEmpty)
+        w.localModels = .success(["qwen3.8-27b", "gemma-4-12b"])
+        await act(wf, ["action": "local_models", "base_url": "http://localhost:1234/v1"])
+        r = await act(wf, ["action": "server_save", "name": "", "model": "qwen3.8-27b", "base_url": "http://localhost:1234/v1"])
+        check("a server needs a name", !ok(r) && msg(r).contains("name") && w.serverRequests.isEmpty)
+        r = await act(wf, ["action": "server_save", "name": "local", "model": "qwen3.8-27b", "base_url": "http://localhost:1234/v1"])
+        check("a reserved name (a provider's own name) is refused", !ok(r) && msg(r).contains("reserved") && w.serverRequests.isEmpty)
+        r = await act(wf, ["action": "server_save", "name": "Home GPU", "model": "qwen3.8-27b", "base_url": "http://localhost:1234/v1"])
+        var sr = lastServer(w)
+        check("a keyless server is added with its name, address and model, no key, and switched to",
+              ok(r) && sr?["action"] as? String == "save" && sr?["name"] as? String == "Home GPU" && sr?["base_url"] as? String == "http://localhost:1234/v1"
+              && sr?["api_key"] as? String == "" && sr?["activate"] as? Bool == true && sr?["id"] == nil && ai(wf)["active"] as? String == "local" && w.probes.last == "local")
+        check("a keyless server offers no thinking level", (servers(wf).first?["efforts"] as? [String]) == [])
+        check("the dashboard names the running server", step(wf, "ai")["title"] as? String == "Home GPU" && step(wf, "ai")["summary"] as? String == "qwen3.8-27b")
+        r = await act(wf, ["action": "server_save", "name": "home gpu", "model": "qwen3.8-27b", "base_url": "http://localhost:1234/v1"])
+        check("a second server can't take a name that's already used (any case)", !ok(r) && msg(r).contains("already"))
 
-        // Local lane with an API key: a server that needs one is saved as the
-        // custom endpoint; the key never reaches the page.
+        // A server that needs an API key (an online provider).
         do {
             let key = w.good["custom"]!
             check("key: https anywhere, plain http only to this computer or a private network",
@@ -662,36 +718,56 @@ final class MenuSelftestContext {
             r = await act(wf, ["action": "local_models", "base_url": "https://api.example.com/v1/", "api_key": key])
             let listing = ai(wf)["local"] as? [String: Any]
             check("key: models are listed with the key", ok(r) && w.localModelKeys.last! == key && (listing?["models"] as? [String]) == ["acme-large", "acme-small"])
-            let page = String(data: (try? JSONSerialization.data(withJSONObject: ai(wf))) ?? Data(), encoding: .utf8) ?? ""
-            check("key: the listing never shows the key", !page.isEmpty && !page.contains(key))
+            check("key: the listing never shows the key", !json(ai(wf)).contains(key))
             let probes = w.probes.count
-            r = await act(wf, ["action": "provider_model", "profile": "local", "model": "acme-large", "base_url": "https://api.example.com/v1"])
-            pr = lastProvider(w)
-            check("key: saved as the custom endpoint with its key, address and default thinking level, and switched to",
-                  ok(r) && pr?["profile"] as? String == "custom" && pr?["api_key"] as? String == key && pr?["base_url"] as? String == "https://api.example.com/v1"
-                  && pr?["effort"] as? String == "high" && pr?["activate"] as? Bool == true && w.probes.count == probes + 1 && w.probes.last == "custom")
-            let lp = aiProvider(wf, "local")
-            check("key: the Local lane shows the keyed server in use, masked key only",
-                  ai(wf)["active"] as? String == "local" && lp["keyed"] as? Bool == true && lp["model"] as? String == "acme-large"
-                  && lp["endpoint"] as? String == "https://api.example.com/v1" && (lp["key"] as? String).map { !$0.contains(key) && !$0.isEmpty } == true)
-            let dash = String(data: (try? JSONSerialization.data(withJSONObject: ai(wf))) ?? Data(), encoding: .utf8) ?? ""
-            check("key: the dashboard never shows the key", !dash.contains(key))
-            check("key: the dashboard names the lane", step(wf, "ai")["title"] as? String == "Local or other server")
-            r = await act(wf, ["action": "local_models", "base_url": "https://api.example.com/v1"])
-            check("key: re-listing the saved server reuses its saved key", ok(r) && w.localModelKeys.last! == key)
-            r = await act(wf, ["action": "provider_model", "profile": "local", "model": "acme-small", "base_url": "https://api.example.com/v1"])
-            pr = lastProvider(w)
-            check("key: changing its model keeps it the custom endpoint", ok(r) && pr?["profile"] as? String == "custom" && pr?["model"] as? String == "acme-small")
-            // A keyless server listed after it is the local server again.
+            r = await act(wf, ["action": "server_save", "name": "Acme cloud", "model": "acme-large", "base_url": "https://api.example.com/v1"])
+            sr = lastServer(w)
+            check("key: a keyed server is added with its key and switched to (one check first)",
+                  ok(r) && sr?["api_key"] as? String == key && sr?["base_url"] as? String == "https://api.example.com/v1" && sr?["activate"] as? Bool == true
+                  && w.probes.count == probes + 1 && w.probes.last == "custom")
+            let acme = servers(wf).first { $0["name"] as? String == "Acme cloud" } ?? [:]
+            check("key: its card shows the masked key only, in use, with thinking levels",
+                  acme["active"] as? Bool == true && acme["keyed"] as? Bool == true && (acme["key"] as? String).map { !$0.contains(key) && !$0.isEmpty } == true
+                  && (acme["efforts"] as? [String]) == ["low", "medium", "high"] && servers(wf).count == 2)
+            check("key: the dashboard never shows the key", !json(wf.status()).contains(key))
+            let acmeID = acme["id"] as? String ?? ""
+            r = await act(wf, ["action": "local_models", "base_url": "https://api.example.com/v1", "server_id": acmeID])
+            check("key: re-listing a saved server reuses its own saved key", ok(r) && w.localModelKeys.last! == key)
+            r = await act(wf, ["action": "local_models", "base_url": "https://other.example.com/v1", "server_id": acmeID])
+            check("key: a saved key is never sent to a different address", !ok(r) && w.localModelKeys.last! == nil)
+            await act(wf, ["action": "local_models", "base_url": "https://api.example.com/v1", "server_id": acmeID])
+            r = await act(wf, ["action": "server_save", "id": acmeID, "name": "Acme cloud", "model": "acme-small", "base_url": "https://api.example.com/v1"])
+            sr = lastServer(w)
+            check("key: editing the running server's model keeps its key and applies at once",
+                  ok(r) && sr?["id"] as? String == acmeID && sr?["model"] as? String == "acme-small" && sr?["activate"] as? Bool == false && ai(wf)["active_server"] as? String == acmeID)
+            let probesBeforeRename = w.probes.count
+            r = await act(wf, ["action": "server_save", "id": acmeID, "name": "Acme", "model": "acme-small", "base_url": "https://api.example.com/v1"])
+            sr = lastServer(w)
+            check("key: a rename needs no new check and keeps the saved key (omitted)",
+                  ok(r) && w.probes.count == probesBeforeRename && sr?["api_key"] == nil && sr?["name"] as? String == "Acme")
+            r = await act(wf, ["action": "effort", "effort": "medium"])
+            sr = lastServer(w)
+            check("key: the running server's thinking level is saved on that server",
+                  ok(r) && sr?["id"] as? String == acmeID && sr?["effort"] as? String == "medium" && sr?["model"] as? String == "acme-small")
             w.localNeedsKey = nil
-            w.localModels = .success(["qwen3.8-27b"])
-            r = await act(wf, ["action": "local_models", "base_url": "http://localhost:1234/v1"])
-            check("key: a keyless listing sends no key", ok(r) && w.localModelKeys.last! == nil)
-            r = await act(wf, ["action": "provider_model", "profile": "local", "model": "qwen3.8-27b", "base_url": "http://localhost:1234/v1"])
-            pr = lastProvider(w)
-            check("key: a keyless server is saved as the local server, without a key",
-                  ok(r) && pr?["profile"] as? String == "local" && pr?["api_key"] == nil && ai(wf)["active"] as? String == "local" && aiProvider(wf, "local")["keyed"] as? Bool == false)
         }
+
+        // Use, Remove, and the refusals around them.
+        let home = servers(wf).first { $0["name"] as? String == "Home GPU" }?["id"] as? String ?? ""
+        let acmeID = servers(wf).first { $0["name"] as? String == "Acme" }?["id"] as? String ?? ""
+        r = await act(wf, ["action": "lane_remove", "lane": "server", "id": acmeID])
+        check("the server in use can't be removed", !ok(r) && msg(r).contains("using this one") && servers(wf).count == 2)
+        r = await act(wf, ["action": "server_use", "id": home])
+        check("Use switches to another saved server", ok(r) && ai(wf)["active_server"] as? String == home && lastServer(w)?["action"] as? String == "use")
+        r = await act(wf, ["action": "lane_remove", "lane": "server", "id": acmeID])
+        check("a server not in use is removed", ok(r) && servers(wf).count == 1 && lastServer(w)?["action"] as? String == "remove")
+        r = await act(wf, ["action": "server_use", "id": acmeID])
+        check("a removed server can't be used", !ok(r) && msg(r).contains("removed"))
+        r = await act(wf, ["action": "lane_remove", "lane": "opencode"])
+        check("a built-in lane not in use is removed", ok(r) && aiProvider(wf, "opencode")["configured"] as? Bool == false && lastProvider(w)?["remove"] as? Bool == true)
+        r = await act(wf, ["action": "provider_use", "profile": "openrouter"])
+        r = await act(wf, ["action": "lane_remove", "lane": "openrouter"])
+        check("the built-in lane in use can't be removed", !ok(r) && msg(r).contains("using this one") && aiProvider(wf, "openrouter")["configured"] as? Bool == true)
 
         // Superseded: a key still checking when the user picks another lane writes nothing.
         do {

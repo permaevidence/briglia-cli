@@ -261,3 +261,27 @@ label.check { display: inline-flex; align-items: center; gap: 8px; font-size: 14
 .seg button { display: inline-flex; flex-direction: column; align-items: center; line-height: 1.2; }
 .seg .etech { font-size: 11px; font-weight: 500; color: var(--muted); opacity: .85; margin-top: 2px; }
 .seg button.on .etech { color: var(--soft); }
+
+/* Your AI lanes (the home page) */
+h2.section { font-size: 19px; margin: 26px 0 4px; letter-spacing: -.005em; }
+.lanehome { margin: 4px 0 6px; }
+.lanehome > .small { margin: 0 0 12px; }
+.lanegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin: 0 0 12px; }
+.lanerow { border: 1.5px solid var(--line); border-radius: 16px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; background: var(--card); min-width: 0; }
+.lanerow.active { border-color: var(--ok); box-shadow: 0 0 0 3px rgba(21, 128, 61, .10); }
+.lanerow .top { display: flex; align-items: center; gap: 10px; }
+.lanerow .n { font-weight: 700; font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lanerow .m { color: var(--soft); font-size: 14px; overflow-wrap: anywhere; }
+.lanerow .sub { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.lanerow .warnline { color: var(--warn); font-size: 13px; font-weight: 600; }
+.lactions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.lactions .ask { font-weight: 600; font-size: 14px; color: var(--bad); }
+.btn.danger-text { color: var(--bad); }
+.addlane { width: 100%; max-width: 100%; font: inherit; font-weight: 700; color: var(--accent); background: transparent; border: 2px dashed var(--line); border-radius: 16px; padding: 14px 16px; cursor: pointer; transition: border-color .15s, background .15s; }
+.addlane:hover { border-color: var(--accent-2); background: var(--accent-soft); }
+.addlane:disabled { opacity: .5; cursor: default; }
+@media (max-width: 780px) { .lanegrid { grid-template-columns: 1fr; } .lactions .btn { flex: 0 1 auto; } }
+/* Long addresses and model ids wrap instead of widening the page. */
+.shell > main, .shell > aside { min-width: 0; }
+.saved > span { min-width: 0; overflow-wrap: anywhere; }
+.choice .n { overflow-wrap: anywhere; }

@@ -246,6 +246,23 @@ enum SetupAPICore {
         }
         var providers: [String: Any] = ["profiles": profiles]
         if let active = ProviderProfiles.activeProfile() { providers["active"] = active.rawValue }
+        // Named servers: the local-server / custom-endpoint profiles above
+        // are the carriers of whichever servers are bound to them.
+        let serverStore = KeychainHelper.loadSnapshot()
+        if let servers = ProviderServers.list(serverStore) {
+            let activeServer = ProviderServers.activeServer(serverStore)?.id
+            providers["servers"] = servers.map { server -> [String: Any] in
+                var entry: [String: Any] = ["id": server.id, "name": server.name, "endpoint": server.baseURL, "model": server.model,
+                                            "text_only": server.textOnly, "keyed": server.keyed, "active": server.id == activeServer]
+                if let masked = server.maskedKey { entry["masked_key"] = masked }
+                if let effort = server.effort { entry["effort"] = effort }
+                if server.responses { entry["protocol"] = "responses" }
+                return entry
+            }
+            if let activeServer { providers["active_server"] = activeServer }
+        } else {
+            providers["servers_damaged"] = true
+        }
         payload["providers"] = providers
 
         // Catalog served here so no GUI ever hardcodes the model list.
@@ -537,6 +554,10 @@ enum SetupAPICore {
                 try applyProvider(section, ownsLease: ownsLease, checkpoint: checkpoint)
                 applied.append("provider")
             }
+            if let section = request["server"] as? [String: Any] {
+                try applyServer(section, ownsLease: ownsLease, checkpoint: checkpoint)
+                applied.append("server")
+            }
             if let section = request["openai"] as? [String: Any] {
                 try applyOpenAI(section)
                 applied.append("openai")
@@ -624,7 +645,7 @@ enum SetupAPICore {
             }
             guard !applied.isEmpty else {
                 throw APIError(code: "empty_request",
-                               message: "no recognized sections — expected any of: provider, openai, "
+                               message: "no recognized sections — expected any of: provider, server, openai, "
                                + "serper, jina, identity, telegram, email_calendar, "
                                + "web_search_backend, toolchain, mark_complete")
             }
@@ -783,6 +804,75 @@ enum SetupAPICore {
                 throw APIError(code: "activation_failed",
                                message: ProviderProfiles.describeActivationError(error))
             }
+        }
+    }
+
+    /// Named servers (ProviderServers): `{action: save|use|remove, id?, name,
+    /// base_url, api_key?, model, text_only?, effort?, protocol?,
+    /// native_tool_media?, activate?}`. Omitted api_key keeps the saved key
+    /// when the address is unchanged; "" means the server needs no key. The
+    /// ACTIVE server can't be removed; editing it applies at once.
+    private static func applyServer(_ section: [String: Any], ownsLease: Bool = false, checkpoint: () throws -> Void = {}) throws {
+        let action = nonEmptyString(section["action"]) ?? "save"
+        let id = nonEmptyString(section["id"])
+        let snapshot = KeychainHelper.loadSnapshot()
+        let target = id.flatMap { id in ProviderServers.list(snapshot)?.first { $0.id == id } }
+        let affectsResponses = ProviderProfiles.usesResponses || target?.responses == true
+            || section["protocol"] as? String == ProviderWireProtocol.responses.rawValue
+        var lease: InstanceLease?
+        if affectsResponses && !ownsLease {
+            try StoragePaths.ensureRootsChecked()
+            switch InstanceLease.acquire(label: "Responses server configuration") {
+            case .success(let held): lease = held
+            case .failure: throw APIError(code: "agent_running", message: "Stop Briglia before changing a Responses server through Setup API.")
+            }
+        }
+        defer { lease?.release() }
+        func run(_ body: () throws -> Void) throws {
+            do { try body() } catch let failure as ProviderServers.Failure {
+                let code: String
+                switch failure {
+                case .damaged: code = "servers_damaged"
+                case .notFound: code = "not_found"
+                case .active: code = "server_active"
+                case .full: code = "servers_full"
+                case .invalid: code = "invalid_value"
+                }
+                throw APIError(code: code, message: failure.message)
+            } catch let error as APIError { throw error } catch { throw saveFailed(error) }
+        }
+        switch action {
+        case "use":
+            guard let id else { throw APIError(code: "missing_field", message: "server.id is required") }
+            try checkpoint()
+            try run { try ProviderServers.use(id) }
+        case "remove":
+            guard let id else { throw APIError(code: "missing_field", message: "server.id is required") }
+            try checkpoint()
+            try run { try ProviderServers.remove(id) }
+        case "save":
+            guard let name = section["name"] as? String else { throw APIError(code: "missing_field", message: "server.name is required") }
+            guard let base = nonEmptyString(section["base_url"]) else { throw APIError(code: "missing_field", message: "server.base_url is required") }
+            guard let model = nonEmptyString(section["model"]) else { throw APIError(code: "missing_field", message: "server.model is required") }
+            var textOnly = target?.textOnly ?? false
+            if let raw = section["text_only"] {
+                guard BashTools.isJSONBoolean(raw), let explicit = raw as? Bool else {
+                    throw APIError(code: "invalid_value", message: "server.text_only must be a boolean (true or false)")
+                }
+                textOnly = explicit
+            }
+            if let raw = section["api_key"], !(raw is String) { throw APIError(code: "invalid_value", message: "server.api_key must be a string") }
+            if let raw = section["activate"], !BashTools.isJSONBoolean(raw) { throw APIError(code: "invalid_value", message: "server.activate must be a boolean") }
+            if let raw = section["native_tool_media"], !BashTools.isJSONBoolean(raw) { throw APIError(code: "invalid_value", message: "server.native_tool_media must be a boolean") }
+            let input = ProviderServers.Input(id: id, name: name, baseURL: base, apiKey: section["api_key"] as? String, model: model,
+                                              effort: nonEmptyString(section["effort"]), textOnly: textOnly,
+                                              wireProtocol: nonEmptyString(section["protocol"]),
+                                              nativeToolMedia: section["native_tool_media"] as? Bool,
+                                              activate: section["activate"] as? Bool ?? false)
+            try checkpoint()
+            try run { try ProviderServers.save(input) }
+        default:
+            throw APIError(code: "invalid_value", message: "server.action must be save|use|remove")
         }
     }
 

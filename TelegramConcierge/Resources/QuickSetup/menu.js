@@ -18,6 +18,8 @@
   var lanePicked = false;       // first run: then how Briglia thinks
   var laneChoice = 'chatgpt';   // the highlighted card on that screen
   var laneTouched = false;
+  var edit = null;              // the lane being edited from the home page: {lane, id}
+  var confirmRemove = null;     // the lane card asking "Remove?"
 
   function lang() { return S && S.lang === 'it' ? 'it' : 'en'; }
   function T(en, it) { return lang() === 'it' ? it : en; }
@@ -107,7 +109,7 @@
   }
   // Pending auto-checks belong to the screen they were typed on.
   function cancelTimers() {
-    for (var k in local) if (Object.prototype.hasOwnProperty.call(local, k) && local[k].timer) { clearTimeout(local[k].timer); local[k].timer = null; }
+    for (var k in local) if (Object.prototype.hasOwnProperty.call(local, k) && local[k] && local[k].timer) { clearTimeout(local[k].timer); local[k].timer = null; }
   }
   function openStep(id, asGuided) {
     cancelTimers();
@@ -119,7 +121,7 @@
     window.scrollTo(0, 0);
   }
   function next(from) {
-    if (!guided) { view = { kind: 'dashboard' }; render(); return; }
+    if (!guided) { edit = null; view = { kind: 'dashboard' }; render(); return; }
     var i = ORDER.indexOf(from);
     for (var k = i + 1; k < ORDER.length; k++) { if (!isDone(ORDER[k])) { openStep(ORDER[k]); return; } }
     var missing = (S.steps || []).filter(function (s) { return s.required && !s.done; });
@@ -127,7 +129,7 @@
     else { openStep(missing[0].id); return; }
     render();
   }
-  function backToDashboard() { cancelTimers(); guided = false; view = { kind: 'dashboard' }; render(); }
+  function backToDashboard() { cancelTimers(); guided = false; edit = null; confirmRemove = null; view = { kind: 'dashboard' }; render(); }
 
   // ---------- chrome ----------
   function renderChrome() {
@@ -141,7 +143,7 @@
       if (s.required) { total++; if (s.done) done++; }
       var cls = [s.done ? 'done' : (s.required ? 'todo' : ''), s.required ? '' : 'optional', view.kind === 'step' && view.step === s.id ? 'current' : ''].join(' ');
       var dot = h('span', { class: 'dot' }, [s.done ? svg(CHECK, { width: '3' }) : String(idx + 1)]);
-      list.appendChild(h('li', { class: cls }, [h('button', { type: 'button', onclick: function () { openStep(s.id, false); } },
+      list.appendChild(h('li', { class: cls }, [h('button', { type: 'button', onclick: function () { if (s.id === 'ai') { edit = null; if (S.complete) { backToDashboard(); return; } } openStep(s.id, false); } },
         [dot, h('span', { text: s.title }), s.required ? null : h('span', { class: 'opt', text: T('optional', 'facoltativo') })])]));
     });
     var pct = total ? Math.round(done * 100 / total) : 0;
@@ -216,7 +218,7 @@
     if (view.kind === 'welcome') v = welcomeView();
     else if (view.kind === 'dashboard') v = dashboardView();
     else if (view.kind === 'finish') v = finishView();
-    else if (view.kind === 'providers') v = providersView();
+    else if (view.kind === 'addlane') v = addLaneView();
     else v = stepView(view.step);
     v.forEach(function (n) { if (n) card.appendChild(n); });
   }
@@ -263,7 +265,7 @@
 
   function dashboardView() {
     var missing = S.steps.filter(function (s) { return s.required && !s.done; });
-    var grid = h('div', { class: 'grid' }, S.steps.map(function (s) {
+    var grid = h('div', { class: 'grid' }, S.steps.filter(function (s) { return s.id !== 'ai'; }).map(function (s) {
       var badge = s.done ? h('span', { class: 'badge ok', text: T('✓ Done', '✓ Fatto') })
         : s.required ? h('span', { class: 'badge todo', text: T('Needed', 'Da fare') }) : h('span', { class: 'badge opt', text: T('Optional', 'Facoltativo') });
       return h('button', { class: 'tile', type: 'button', onclick: function () { openStep(s.id, false); } },
@@ -279,6 +281,8 @@
       h('p', { class: 'lead', text: missing.length ? (T('Still needed: ', 'Mancano ancora: ') + missing.map(function (s) { return s.title; }).join(', ') + '.') : T('Click anything to change it. Changes are saved right away.', 'Clicca su qualsiasi voce per modificarla. Le modifiche vengono salvate subito.') }),
       notice('dashboard'),
       missing.length ? null : paused,
+      lanesSection(),
+      h('h2', { class: 'section', text: T('Other settings', 'Altre impostazioni') }),
       grid,
       h('div', { class: 'actions' }, missing.length ? [
         h('button', { class: 'btn primary', type: 'button', onclick: function () { guided = true; openStep(missing[0].id, true); } }, [T('Continue setup', 'Continua la configurazione')]),
@@ -303,6 +307,8 @@
         ' · ' + T('changes apply right away, between messages.', 'le modifiche valgono subito, tra un messaggio e l’altro.')])]),
       missing.length ? h('div', { class: 'notice warn' }, [T('Still needed: ', 'Mancano ancora: ') + missing.map(function (s) { return s.title; }).join(', ') + '.']) : null,
       notice('dashboard'),
+      lanesSection(),
+      h('h2', { class: 'section', text: T('Other settings', 'Altre impostazioni') }),
       grid,
       h('div', { class: 'actions' }, [
         h('button', { class: 'btn ghost', type: 'button', onclick: function () { finish('quit'); } }, [T('Close this page', 'Chiudi questa pagina')]),
@@ -379,6 +385,7 @@
   }
 
   function stepHeader(id, eyebrow, title, lead) {
+    if (!eyebrow && id === 'ai' && !guided) eyebrow = T('AI lane', 'Fornitore AI');
     return [h('div', { class: 'eyebrow', text: eyebrow || (stepInfo(id).required ? T('Step ', 'Passo ') + (ORDER.indexOf(id) + 1) : T('Optional', 'Facoltativo')) }),
       h('h1', { text: title }), lead ? h('p', { class: 'lead', text: lead }) : null];
   }
@@ -391,7 +398,7 @@
       (guided && done) ? h('button', { class: 'btn primary', type: 'button', onclick: function () { next(id); } }, [T('Continue →', 'Continua →')]) : null,
       (guided && !done && optional) ? h('button', { class: 'btn secondary', type: 'button', onclick: function () { next(id); } }, [T('Skip for now', 'Salta per ora')]) : null,
       h('span', { class: 'spacer' }),
-      h('button', { class: 'btn ghost', type: 'button', onclick: backToDashboard }, [guided ? T('See all settings', 'Vedi tutte le impostazioni') : T('← Back', '← Indietro')]),
+      h('button', { class: 'btn ghost', type: 'button', onclick: backToDashboard }, [guided ? T('See all settings', 'Vedi tutte le impostazioni') : (id === 'ai' ? T('← Your AI lanes', '← I tuoi fornitori AI') : T('← Back', '← Indietro'))]),
     ]);
   }
 
@@ -559,7 +566,7 @@
       text: T('Use your ChatGPT Plus or Pro subscription. Nothing extra to pay per message — just sign in.', 'Usa il tuo abbonamento ChatGPT Plus o Pro. Nessun costo extra a messaggio: basta accedere.') },
     { id: 'opencode', name: 'OpenCode Go', text: T('A low-cost monthly plan with many AI models: GLM, Kimi, Qwen, MiMo and more.', 'Un abbonamento mensile economico con tanti modelli AI: GLM, Kimi, Qwen, MiMo e altri.') },
     { id: 'openrouter', name: 'OpenRouter', text: T('Pay as you go, with hundreds of models from every AI company.', 'Paghi a consumo, con centinaia di modelli di tutte le aziende AI.') },
-    { id: 'local', name: T('Local or other server', 'Server locale o altro'), text: T('A model on your own computer or network (LM Studio, Ollama), or any other OpenAI-compatible provider with its API key. For advanced users.', 'Un modello sul tuo computer o nella tua rete (LM Studio, Ollama), oppure un altro fornitore compatibile con OpenAI con la sua chiave API. Per utenti esperti.') },
+    { id: 'local', name: T('Server (local or online)', 'Server (locale o online)'), text: T('A model on your own computer or network (LM Studio, Ollama, vLLM), or any other OpenAI-compatible provider with its API key. Give each one a name; add as many as you like. For advanced users.', 'Un modello sul tuo computer o nella tua rete (LM Studio, Ollama, vLLM), oppure un altro fornitore compatibile con OpenAI con la sua chiave API. Dai un nome a ciascuno e aggiungine quanti vuoi. Per utenti esperti.') },
   ]; }
   function laneName(id) { return (LANES().filter(function (l) { return l.id === id; })[0] || { name: id }).name; }
   function needList(ln) {
@@ -602,39 +609,116 @@
       } }, [T('Continue', 'Continua')])]),
     ];
   }
-  // "Switch or add a provider": every lane, with what's saved and in use.
-  function providersView() {
-    var out = [
-      h('div', { class: 'eyebrow', text: T('AI provider', 'Fornitore AI') }),
-      h('h1', { text: T('Switch or add a provider', 'Cambia o aggiungi un fornitore') }),
-      h('p', { class: 'lead', text: T('Pick how Briglia thinks. Providers you’ve set up stay saved, so you can switch back any time.', 'Scegli come ragiona Briglia. I fornitori configurati restano salvati, così puoi tornare indietro quando vuoi.') }),
-      notice('providers'),
-    ];
-    if (S.ai.other) out.push(h('div', { class: 'notice info' }, [T('Right now Briglia uses ' + S.ai.other + ' (set up with briglia setup).', 'Adesso Briglia usa ' + S.ai.other + ' (configurato con briglia setup).')]));
-    out.push(h('div', { class: 'lanes' }, LANES().map(function (l) {
-      return laneCard(l, { status: true, onclick: function () {
-        var p = S.ai.providers[l.id] || {};
-        if (p.active) { act('lane', { lane: '' }).then(function () { openStep('ai', false); }); return; }
-        if (p.configured) {
-          act('provider_use', { profile: l.id }, 'providers').then(function (j) {
-            if (j.ok && !j.stale) { openStep('ai', false); local.ai.notice = { kind: 'ok', text: j.message || '' }; render(); }
-          });
-          return;
-        }
-        act('lane', { lane: l.id }).then(function (j) { if (j.ok) openStep('ai', false); });
-      } });
-    })));
-    out.push(h('p', { class: 'small', text: T('OpenCode Go and a local or other server also need an OpenAI API key, for reading web pages. ChatGPT and OpenRouter don’t.', 'OpenCode Go e un server locale o altro richiedono anche una chiave API di OpenAI, per leggere le pagine web. ChatGPT e OpenRouter no.') }));
-    out.push(h('div', { class: 'actions' }, [h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', type: 'button', onclick: function () { openStep('ai', false); } }, [T('← Back', '← Indietro')])]));
+  // ---------- Your AI lanes (the home page) ----------
+  // Every lane that's set up, one card each: what it thinks with, and
+  // Use / Edit / Remove. The one in use can't be removed.
+  function laneList() {
+    var a = S.ai || {}, prov = a.providers || {}, out = [];
+    var c = S.chatgpt || {};
+    if (c.state === 'signed_in' || c.state === 'login_required') {
+      var cp = prov.chatgpt || {};
+      out.push({ kind: 'chatgpt', key: 'chatgpt', name: 'ChatGPT', active: !!cp.active, model: c.model_label || '', effort: cp.active ? cp.effort : c.effort,
+        note: c.state === 'login_required' ? T('Sign-in expired: sign in again.', 'Accesso scaduto: accedi di nuovo.') : null });
+    }
+    ['opencode', 'openrouter'].forEach(function (id) {
+      var p = prov[id] || {};
+      if (p.configured) out.push({ kind: id, key: id, name: laneName(id), active: !!p.active, model: p.model_label || p.model, effort: p.effort });
+    });
+    if (prov.openai) out.push({ kind: 'openai', key: 'openai', name: T('OpenAI API', 'API di OpenAI'), active: !!prov.openai.active, model: prov.openai.model, effort: prov.openai.effort });
+    (a.servers || []).forEach(function (sv) {
+      out.push({ kind: 'server', key: 'srv:' + sv.id, id: sv.id, name: sv.name, active: !!sv.active, model: sv.model, effort: sv.keyed ? sv.effort : '', sub: sv.endpoint + (sv.key ? ' · ' + T('key ', 'chiave ') + sv.key : '') });
+    });
     return out;
   }
+  function effortText(e) { var l = EFFORT_LABELS()[e]; return e ? (l ? l + ' (' + e + ')' : e) : ''; }
+  function laneHomeCard(l) {
+    var kind = l.kind === 'server' ? 'server' : l.kind;
+    var confirming = confirmRemove === l.key;
+    var use = function () {
+      if (l.kind === 'server') act('server_use', { id: l.id }, 'dashboard');
+      else act('provider_use', { profile: l.kind }, 'dashboard');
+    };
+    var editIt = function () {
+      if (l.kind === 'openai') { local.dashboard = local.dashboard || {}; local.dashboard.notice = { kind: 'info', text: T('The OpenAI API was set up with briglia setup in the terminal: change it there.', 'L’API di OpenAI è stata configurata con briglia setup nel terminale: modificala da lì.') }; render(); return; }
+      edit = { lane: l.kind === 'server' ? 'local' : l.kind, id: l.id || null };
+      delete local.srv; delete local['srv-url']; delete local['local-key'];
+      openStep('ai', false);
+    };
+    var actions;
+    if (confirming) {
+      actions = [h('span', { class: 'ask', text: T('Remove ' + l.name + '?', 'Rimuovere ' + l.name + '?') }),
+        h('button', { class: 'btn danger small', type: 'button', 'data-confirm-remove': l.key, disabled: inflight > 0, onclick: function () {
+          confirmRemove = null; act('lane_remove', { lane: kind, id: l.id || '' }, 'dashboard');
+        } }, [T('Yes, remove', 'Sì, rimuovi')]),
+        h('button', { class: 'btn ghost small', type: 'button', onclick: function () { confirmRemove = null; render(); } }, [T('Cancel', 'Annulla')])];
+    } else {
+      actions = [
+        l.active ? null : h('button', { class: 'btn primary small', type: 'button', 'data-use': l.key, disabled: inflight > 0, onclick: use }, [T('Use', 'Usa')]),
+        h('button', { class: 'btn secondary small', type: 'button', 'data-edit': l.key, onclick: editIt }, [T('Edit', 'Modifica')]),
+        l.active ? null : h('button', { class: 'btn ghost small danger-text', type: 'button', 'data-remove': l.key, onclick: function () { confirmRemove = l.key; render(); } }, [T('Remove', 'Rimuovi')]),
+      ];
+    }
+    var line = [l.model, effortText(l.effort)].filter(function (x) { return !!x; }).join(' · ');
+    return h('div', { class: 'lanerow' + (l.active ? ' active' : ''), 'data-lane-card': l.key }, [
+      h('div', { class: 'top' }, [h('span', { class: 'n', text: l.name }), l.active ? h('span', { class: 'badge ok', text: T('In use', 'In uso') }) : null]),
+      line ? h('div', { class: 'm', text: line }) : null,
+      l.sub ? h('div', { class: 'sub', text: l.sub }) : null,
+      l.note ? h('div', { class: 'warnline', text: l.note }) : null,
+      h('div', { class: 'lactions' }, actions),
+    ]);
+  }
+  function lanesSection() {
+    var list = laneList();
+    var a = S.ai || {};
+    var full = (a.servers || []).length >= (a.max_servers || 20);
+    return h('div', { class: 'lanehome' }, [
+      h('h2', { class: 'section', text: T('Your AI lanes', 'I tuoi fornitori AI') }),
+      h('p', { class: 'small', text: list.length > 1 ? T('Briglia thinks with the one marked In use. Switch any time; the others stay saved.', 'Briglia ragiona con quello segnato In uso. Puoi cambiare quando vuoi; gli altri restano salvati.')
+        : T('Add more to switch between them any time.', 'Aggiungine altri per passare dall’uno all’altro quando vuoi.') }),
+      a.servers_damaged ? h('div', { class: 'notice bad' }, [T('The saved server list can’t be read (provider_servers in secrets.json is damaged). Run briglia doctor.', 'L’elenco dei server salvati non si legge (provider_servers in secrets.json è danneggiato). Esegui briglia doctor.')]) : null,
+      a.other ? h('div', { class: 'notice info' }, [T('Right now Briglia uses ' + a.other + ' (set up with briglia setup).', 'Adesso Briglia usa ' + a.other + ' (configurato con briglia setup).')]) : null,
+      list.length ? h('div', { class: 'lanegrid' }, list.map(laneHomeCard)) : h('p', { class: 'lead', text: T('No AI set up yet.', 'Nessuna AI configurata.') }),
+      h('button', { class: 'addlane', type: 'button', id: 'add-lane', disabled: inflight > 0, onclick: function () { cancelTimers(); confirmRemove = null; view = { kind: 'addlane' }; render(); window.scrollTo(0, 0); } },
+        ['+ ' + T('Add a lane', 'Aggiungi un fornitore')]),
+    ]);
+  }
+  // "+ Add a lane": the four kinds. ChatGPT, OpenCode Go and OpenRouter are
+  // one each (already added = edit it from its card); servers are a list.
+  function addLaneView() {
+    var a = S.ai || {}, prov = a.providers || {};
+    var c = S.chatgpt || {};
+    var added = { chatgpt: c.state === 'signed_in', opencode: !!(prov.opencode || {}).configured, openrouter: !!(prov.openrouter || {}).configured };
+    var servers = (a.servers || []).length, full = servers >= (a.max_servers || 20);
+    return [
+      h('div', { class: 'eyebrow', text: T('AI lanes', 'Fornitori AI') }),
+      h('h1', { text: T('Add a lane', 'Aggiungi un fornitore') }),
+      h('p', { class: 'lead', text: T('Pick what Briglia should think with. Everything you add stays saved, so you can switch any time.', 'Scegli con cosa deve ragionare Briglia. Tutto quello che aggiungi resta salvato, così puoi cambiare quando vuoi.') }),
+      notice('addlane'),
+      h('div', { class: 'lanes' }, LANES().map(function (l) {
+        var isServer = l.id === 'local';
+        var done = !isServer && added[l.id];
+        var badge = done ? h('span', { class: 'badge opt', text: T('Added', 'Aggiunto') })
+          : isServer && servers ? h('span', { class: 'badge opt', text: T(servers + ' saved', servers + ' salvati') })
+          : (l.badge ? h('span', { class: 'badge ok', text: l.badge }) : null);
+        return h('button', { class: 'lanecard', type: 'button', 'data-lane': l.id, disabled: inflight > 0 || done || (isServer && full), onclick: function () {
+          edit = { lane: l.id, id: null };
+          delete local.srv; delete local['srv-url']; delete local['local-key']; local.ai = {};
+          act('lane', { lane: l.id }).then(function (j) { if (j.ok) openStep('ai', false); });
+        } }, [h('div', { class: 'top' }, [h('span', { class: 'n', text: l.name }), badge]), h('div', { class: 's', text: done ? T('Already added: edit it from its card.', 'Già aggiunto: modificalo dalla sua scheda.') : l.text })]);
+      })),
+      h('p', { class: 'small', text: T('OpenCode Go and servers also need an OpenAI API key, for reading web pages. ChatGPT and OpenRouter don’t.', 'OpenCode Go e i server richiedono anche una chiave API di OpenAI, per leggere le pagine web. ChatGPT e OpenRouter no.') }),
+      h('div', { class: 'actions' }, [h('span', { class: 'spacer' }), h('button', { class: 'btn ghost', type: 'button', onclick: backToDashboard }, [T('← Your AI lanes', '← I tuoi fornitori AI')])]),
+    ];
+  }
+  // In the guided first run, "Choose a different AI" goes back to the picker.
   function switchRow() {
-    return h('div', { class: 'links switch' }, [h('button', { class: 'btn ghost small', type: 'button', id: 'switch-provider', onclick: function () { cancelTimers(); view = { kind: 'providers' }; local.providers = {}; render(); window.scrollTo(0, 0); } },
-      [T('Switch or add a provider', 'Cambia o aggiungi un fornitore')])]);
+    if (!guided) return null;
+    return h('div', { class: 'links switch' }, [h('button', { class: 'btn ghost small', type: 'button', id: 'switch-provider', onclick: function () { cancelTimers(); lanePicked = false; edit = null; act('lane', { lane: '' }).then(function () { view = { kind: 'welcome' }; render(); }); } },
+      [T('Choose a different AI', 'Scegli un’altra AI')])]);
   }
   function EFFORT_LABELS() { return { low: T('Light', 'Leggero'), medium: T('Balanced', 'Bilanciato'), high: T('Deep', 'Approfondito'), xhigh: T('Deepest', 'Massimo') }; }
   function effortRow(id) {
-    var p = S.ai.providers[id] || {};
+    var p = typeof id === 'string' ? (S.ai.providers[id] || {}) : (id || {});
     var list = (p.efforts || []).slice();
     if (!list.length) return null;
     // A level set elsewhere (/effort on Telegram) stays visible as selected.
@@ -654,9 +738,8 @@
   // Setting up a lane while another provider runs: say what runs now.
   function keepCurrent() {
     if (!S.ai.planned || !(S.ai.active || S.ai.other)) return null;
-    var now = S.ai.active ? laneName(S.ai.active) : S.ai.other;
-    return h('div', { class: 'notice info' }, [h('span', {}, [T('Briglia keeps using ' + now + ' until this is set up. ', 'Briglia continua a usare ' + now + ' finché questo non è configurato. '),
-      h('button', { class: 'btn ghost small', type: 'button', onclick: function () { act('lane', { lane: '' }); } }, [T('Keep ' + now, 'Tieni ' + now)])])]);
+    var now = S.ai.active === 'local' ? ((S.ai.servers || []).filter(function (x) { return x.active; })[0] || {}).name : (S.ai.active ? laneName(S.ai.active) : S.ai.other);
+    return h('div', { class: 'notice info' }, [h('span', {}, [T('Briglia keeps using ' + now + ' until this is set up.', 'Briglia continua a usare ' + now + ' finché questo non è configurato.')])]);
   }
   function useButton(id, name) {
     var p = S.ai.providers[id] || {};
@@ -664,10 +747,10 @@
     return h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', disabled: inflight > 0, onclick: function () { act('provider_use', { profile: id }, 'ai'); } }, [T('Use ' + name + ' for Briglia', 'Usa ' + name + ' per Briglia')])]);
   }
   function aiView(st) {
-    var ln = S.ai ? S.ai.lane : 'chatgpt';
+    var ln = edit ? edit.lane : (S.ai ? S.ai.lane : 'chatgpt');
     if (ln === 'opencode') return opencodeView(st);
     if (ln === 'openrouter') return openrouterView(st);
-    if (ln === 'local') return localView(st);
+    if (ln === 'local') return serverView(edit ? edit.id : (S.ai.active === 'local' ? S.ai.active_server : null));
     return chatgptView(st);
   }
   function afterSave(j) { if (j && j.ok && !j.stale && guided) next('ai'); return j; }
@@ -710,31 +793,6 @@
     return out;
   }
 
-  // Optional API key for a server that needs one. It goes to the menu only
-  // with "Find models" (the menu remembers it for picking a model) and is
-  // never shown back; with a saved keyed server, leaving it empty keeps
-  // the saved key.
-  function localKeyField(p) {
-    var st = local['local-key'] = local['local-key'] || {};
-    var input = h('input', { type: st.show ? 'text' : 'password', id: 'f-local-key', autocomplete: 'off', spellcheck: 'false',
-      placeholder: p.keyed ? T('Leave empty to keep the saved key', 'Lascia vuoto per tenere la chiave salvata') : T('Only if the server needs one', 'Solo se il server la richiede'),
-      'aria-label': 'API key' });
-    input.value = st.value || '';
-    input.addEventListener('input', function () { st.value = input.value; });
-    return h('div', { class: 'input-wrap' }, [h('label', { for: 'f-local-key', text: T('API key (optional)', 'Chiave API (facoltativa)') }),
-      h('div', { class: 'input-row' }, [input, h('button', { class: 'btn secondary small', type: 'button', onclick: function () { st.value = input.value; st.show = !st.show; render(); } }, [st.show ? T('Hide', 'Nascondi') : T('Show', 'Mostra')])]),
-      h('p', { class: 'small', text: T('Local servers usually need none. Paste a key here for a provider that asks for one, then press Find models.', 'Di solito i server locali non ne hanno bisogno. Incolla qui la chiave di un fornitore che la richiede, poi premi Trova i modelli.') })]);
-  }
-
-  function visionToggle(key) {
-    var st = local[key] = local[key] || {};
-    var box = h('input', { type: 'checkbox', id: 'to-' + key });
-    box.checked = !!st.textOnly;
-    box.addEventListener('change', function () { st.textOnly = box.checked; });
-    return h('details', { class: 'more', open: st.textOnly ? true : null }, [h('summary', { text: T('More options', 'Altre opzioni') }),
-      h('label', { class: 'check', for: 'to-' + key }, [box, ' ' + T('This model can’t see images (text-only)', 'Questo modello non vede le immagini (solo testo)')])]);
-  }
-
   function openrouterView(st) {
     var p = S.ai.providers.openrouter || {};
     var out = stepHeader('ai', null, p.configured ? 'OpenRouter' : T('Connect OpenRouter', 'Collega OpenRouter'), T('OpenRouter gives Briglia access to hundreds of models. You pay only for what you use.', 'OpenRouter dà a Briglia accesso a centinaia di modelli. Paghi solo quello che usi.'));
@@ -770,35 +828,103 @@
     return out;
   }
 
-  function localView(st) {
-    var p = S.ai.providers.local || {};
-    var l = S.ai.local;
-    var out = stepHeader('ai', null, p.configured ? T('Local or other server', 'Server locale o altro') : T('Use a local or other server', 'Usa un server locale o un altro'), T('Briglia can think with a model running on this computer or on your network — LM Studio, Ollama, vLLM and similar (it needs a powerful computer) — or with any other provider that works like OpenAI’s API.', 'Briglia può ragionare con un modello in esecuzione su questo computer o nella tua rete (LM Studio, Ollama, vLLM e simili: serve un computer potente), oppure con un altro fornitore che funziona come l’API di OpenAI.'));
-    out.push(keepCurrent());
-    out.push(notice('ai'));
-    if (p.configured) {
-      out.push(savedBox(p.active ? T('Connected', 'Collegato') : T('Saved, not in use', 'Salvato, non in uso'), p.model + (p.endpoint ? ' · ' + p.endpoint : '') + (p.keyed && p.key ? ' · ' + T('key ', 'chiave ') + p.key : '')));
-      out.push(useButton('local', T('this server', 'questo server')));
+  // Optional API key for a server that needs one. It goes to the menu only
+  // with "Find models" (the menu remembers it for picking a model) and is
+  // never shown back; editing a server with a saved key, leaving it empty
+  // keeps the saved key (for the same address only).
+  function localKeyField(sv) {
+    var st = local['local-key'] = local['local-key'] || {};
+    var input = h('input', { type: st.show ? 'text' : 'password', id: 'f-local-key', autocomplete: 'off', spellcheck: 'false',
+      placeholder: sv && sv.keyed ? T('Leave empty to keep the saved key', 'Lascia vuoto per tenere la chiave salvata') : T('Only if the server needs one', 'Solo se il server la richiede'),
+      'aria-label': 'API key' });
+    input.value = st.value || '';
+    input.addEventListener('input', function () { st.value = input.value; });
+    return h('div', { class: 'input-wrap' }, [h('label', { for: 'f-local-key', text: T('API key (optional)', 'Chiave API (facoltativa)') }),
+      h('div', { class: 'input-row' }, [input, h('button', { class: 'btn secondary small', type: 'button', onclick: function () { st.value = input.value; st.show = !st.show; render(); } }, [st.show ? T('Hide', 'Nascondi') : T('Show', 'Mostra')])]),
+      h('p', { class: 'small', text: T('Servers on your computer usually need none. Paste a key here for an online provider that asks for one, then press Find models.', 'Di solito i server sul tuo computer non ne hanno bisogno. Incolla qui la chiave di un fornitore online che la richiede, poi premi Trova i modelli.') })]);
+  }
+
+  function visionToggle(key) {
+    var st = local[key] = local[key] || {};
+    var box = h('input', { type: 'checkbox', id: 'to-' + key });
+    box.checked = !!st.textOnly;
+    box.addEventListener('change', function () { st.textOnly = box.checked; });
+    return h('details', { class: 'more', open: st.textOnly ? true : null }, [h('summary', { text: T('More options', 'Altre opzioni') }),
+      h('label', { class: 'check', for: 'to-' + key }, [box, ' ' + T('This model can’t see images (text-only)', 'Questo modello non vede le immagini (solo testo)')])]);
+  }
+
+  // One named server: add (id null) or edit. Name, address + "Find models",
+  // optional key, the model, vision; Save writes it all at once.
+  function serverView(id) {
+    var sv = id ? (S.ai.servers || []).filter(function (x) { return x.id === id; })[0] : null;
+    if (id && !sv) {
+      return [h('h1', { text: T('This server was removed', 'Questo server è stato rimosso') }), notice('ai'),
+        h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', onclick: backToDashboard }, [T('← Your AI lanes', '← I tuoi fornitori AI')])])];
     }
-    var as = local['local-url'] = local['local-url'] || {};
-    if (as.value === undefined || as.value === null) as.value = p.endpoint || 'http://localhost:1234/v1';
-    out.push(field('local-url', { label: T('Server address', 'Indirizzo del server'), placeholder: 'http://localhost:1234/v1', auto: false, button: T('Find models', 'Trova i modelli'),
+    var tag = id || 'new';
+    var f = local.srv && local.srv.tag === tag ? local.srv : (local.srv = { tag: tag, name: sv ? sv.name : '', model: sv ? sv.model : '', textOnly: sv ? !!sv.text_only : false });
+    var l = S.ai.local;
+    var mine = l && (l.server_id || null) === (id || null) ? l : null;
+    var listed = mine && mine.state === 'ok' ? mine : null;
+    var out = stepHeader('ai', sv ? T('Server', 'Server') : (guided ? null : T('New lane', 'Nuovo fornitore')), sv ? sv.name : T('Add a server', 'Aggiungi un server'),
+      sv ? null : T('A model running on this computer or your network — LM Studio, Ollama, vLLM and similar (it needs a powerful computer) — or any online provider that works like OpenAI’s API. Give it a name you’ll recognize.', 'Un modello in esecuzione su questo computer o nella tua rete (LM Studio, Ollama, vLLM e simili: serve un computer potente), oppure un fornitore online che funziona come l’API di OpenAI. Dagli un nome che riconosci.'));
+    if (!sv) out.push(keepCurrent());
+    out.push(notice('ai'));
+    if (sv) {
+      out.push(savedBox(sv.active ? T('In use', 'In uso') : T('Saved, not in use', 'Salvato, non in uso'), sv.model + ' · ' + sv.endpoint + (sv.key ? ' · ' + T('key ', 'chiave ') + sv.key : '')));
+      if (!sv.active) out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', disabled: inflight > 0, onclick: function () { act('server_use', { id: sv.id }, 'ai'); } }, [T('Use ' + sv.name + ' for Briglia', 'Usa ' + sv.name + ' per Briglia')])]));
+      if (sv.active) out.push(effortRow(sv));
+    }
+    // Name
+    var nameInput = h('input', { type: 'text', id: 'f-srv-name', autocomplete: 'off', spellcheck: 'false', maxlength: '40',
+      placeholder: T('e.g. Home GPU, Work server', 'es. GPU di casa, Server di lavoro'), 'aria-label': T('Name', 'Nome') });
+    nameInput.value = f.name || '';
+    nameInput.addEventListener('input', function () { f.name = nameInput.value; var b = $('srv-save'); if (b) b.disabled = !canSave(); });
+    out.push(h('div', { class: 'input-wrap' }, [h('label', { for: 'f-srv-name', text: T('Name', 'Nome') }), h('div', { class: 'input-row' }, [nameInput])]));
+    // Address + Find models
+    var as = local['srv-url'] = local['srv-url'] || {};
+    if (as.value === undefined || as.value === null) as.value = sv ? sv.endpoint : 'http://localhost:1234/v1';
+    out.push(field('srv-url', { label: T('Server address', 'Indirizzo del server'), placeholder: 'http://localhost:1234/v1', auto: false, button: T('Find models', 'Trova i modelli'),
       checkingText: T('Asking the server…', 'Chiedo al server…'), onSubmit: function (v, current) {
         // Listing saves nothing: keep the address in the field.
-        return act('local_models', { base_url: v, api_key: ((local['local-key'] || {}).value || '').trim() }, 'ai', current).then(function (j) { return { ok: false, stale: true }; });
+        return act('local_models', { base_url: v, api_key: ((local['local-key'] || {}).value || '').trim(), server_id: id || '' }, 'ai', current).then(function () { return { ok: false, stale: true }; });
       } }));
-    out.push(localKeyField(p));
+    out.push(localKeyField(sv));
     out.push(h('p', { class: 'small', text: 'LM Studio: http://localhost:1234/v1 · Ollama: http://localhost:11434/v1' }));
-    if (l && l.state === 'ok') {
-      out.push(h('p', { class: 'small', text: T('Pick the model Briglia should use:', 'Scegli il modello che Briglia deve usare:') }));
-      out.push(h('div', { class: 'choices' }, l.models.map(function (m) {
-        var inUse = p.configured && m === p.model && l.base === p.endpoint;
-        return h('button', { class: 'choice' + (inUse ? ' sel' : ''), type: 'button', disabled: inflight > 0, 'data-model': m,
-          onclick: function () { if (!inUse) act('provider_model', { profile: 'local', model: m, base_url: l.base, text_only: !!(local['local-url'] || {}).textOnly }, 'ai').then(afterSave); } },
-          [h('div', { class: 'n', text: m }), h('div', { class: 's', text: inUse ? T('In use', 'In uso') : '' })]);
+    // Model
+    var models = listed ? listed.models : (sv ? [sv.model] : []);
+    if (listed && models.indexOf(f.model) < 0) f.model = '';
+    if (models.length) {
+      out.push(h('p', { class: 'small', text: listed ? T('Pick the model Briglia should use:', 'Scegli il modello che Briglia deve usare:') : T('Model (press Find models to pick another):', 'Modello (premi Trova i modelli per sceglierne un altro):') }));
+      out.push(h('div', { class: 'choices' }, models.map(function (m) {
+        return h('button', { class: 'choice' + (m === f.model ? ' sel' : ''), type: 'button', disabled: inflight > 0, 'data-model': m,
+          onclick: function () { f.model = m; render(); } },
+          [h('div', { class: 'n', text: m }), h('div', { class: 's', text: m === f.model ? T('Selected', 'Selezionato') : '' })]);
       })));
-      out.push(visionToggle('local-url'));
+    } else {
+      out.push(h('p', { class: 'small', text: T('Type the address, then press Find models to see what the server offers.', 'Scrivi l’indirizzo, poi premi Trova i modelli per vedere cosa offre il server.') }));
     }
+    // Vision
+    var box = h('input', { type: 'checkbox', id: 'to-srv' });
+    box.checked = !!f.textOnly;
+    box.addEventListener('change', function () { f.textOnly = box.checked; });
+    out.push(h('details', { class: 'more', open: f.textOnly ? true : null }, [h('summary', { text: T('More options', 'Altre opzioni') }),
+      h('label', { class: 'check', for: 'to-srv' }, [box, ' ' + T('This model can’t see images (text-only)', 'Questo modello non vede le immagini (solo testo)')])]));
+    function canSave() { return inflight === 0 && !!(f.name || '').trim() && !!f.model && (!!listed || !!sv); }
+    out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', id: 'srv-save', disabled: !canSave(), onclick: function () {
+      var body = { id: id || '', name: (f.name || '').trim(), base_url: listed ? listed.base : sv.endpoint, model: f.model, text_only: !!f.textOnly };
+      act('server_save', body, 'ai').then(function (j) {
+        if (!j.ok || j.stale) return;
+        delete local['local-key'];
+        if (!id) {
+          delete local.srv; delete local['srv-url'];
+          if (guided) { next('ai'); return; }
+          edit = null; view = { kind: 'dashboard' };
+          local.dashboard = { notice: j.message ? { kind: 'ok', text: j.message } : null };
+          render();
+        }
+      });
+    } }, [sv ? T('Save changes', 'Salva le modifiche') : T('Add this server', 'Aggiungi questo server')])]));
     out.push(switchRow());
     out.push(navButtons('ai'));
     return out;

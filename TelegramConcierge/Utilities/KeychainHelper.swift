@@ -168,7 +168,16 @@ enum KeychainHelper {
         }
     }
 
-    private static func mutate(_ change: (inout [String: String]) -> Void) throws {
+    /// Read-modify-write under the same in-process lock and cross-process
+    /// flock as every other write: `change` sees the store as it is on disk
+    /// right now and its edits commit as ONE atomic file write — or, when it
+    /// throws, nothing is written. `change` must not call back into
+    /// KeychainHelper (the in-process lock is not recursive).
+    static func transaction(_ change: (inout [String: String]) throws -> Void) throws {
+        try mutate(change)
+    }
+
+    private static func mutate(_ change: (inout [String: String]) throws -> Void) throws {
         lock.lock()
         defer { lock.unlock() }
         // Writes materialize the config root; reads never do (StoragePaths:
@@ -194,7 +203,7 @@ enum KeychainHelper {
         // must fail the mutation and keep its bytes, or this write would
         // replace every stored secret with empty-plus-delta and report ok.
         var store = try readDiskStrict().store
-        change(&store)
+        try change(&store)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(store)

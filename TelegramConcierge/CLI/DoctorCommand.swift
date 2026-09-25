@@ -61,6 +61,15 @@ struct Doctor: AsyncParsableCommand {
                 activeProfile: ProviderProfiles.activeProfile()) {
             note(advisory)
         }
+        let serverStore = KeychainHelper.loadSnapshot()
+        if let servers = ProviderServers.list(serverStore) {
+            if !servers.isEmpty {
+                let active = ProviderServers.activeServer(serverStore)
+                note("named servers: \(servers.count) (\(servers.map(\.name).joined(separator: ", ")))\(active.map { "; in use: \($0.name)" } ?? "")")
+            }
+        } else {
+            check("named server list readable", ok: false, hint: "\(ProviderServers.listKey) in secrets.json doesn't decode — fix or remove that entry")
+        }
         if provider == .openRouter, let pin = OpenRouterProviderPin.statusLine() {
             note(pin)
         }

@@ -49,7 +49,7 @@ GOOD = {"serper": "srp-good-0123456789abcdef", "jina": "jina_good_0123456789abcd
         "opencode": "oc-good-0123456789abcdef", "openrouter": "sk-or-good-0123456789abcdef"}
 OC_MODELS = [{"id": "glm-5.3-flash", "label": "GLM 5.3 Flash", "recommended": True}, {"id": "kimi-k3", "label": "Kimi K3"},
              {"id": "qwen3.8-max", "label": "Qwen 3.8 Max"}]
-LANE_TITLES = {"chatgpt": "ChatGPT", "opencode": "OpenCode Go", "openrouter": "OpenRouter", "local": "Local or other server"}
+LANE_TITLES = {"chatgpt": "ChatGPT", "opencode": "OpenCode Go", "openrouter": "OpenRouter", "local": "Server (local or online)"}
 
 
 class Fake:
@@ -66,7 +66,9 @@ class Fake:
         self.closing = None
         self.planned = None
         self.providers = {k: {"configured": False, "active": False, "model": "", "model_label": "", "effort": "high", "text_only": False,
-                              "efforts": ["low", "medium", "high"] if k != "local" else []} for k in ("opencode", "openrouter", "local")}
+                              "efforts": ["low", "medium", "high"]} for k in ("opencode", "openrouter")}
+        self.servers = []          # named servers: {id, name, endpoint, model, keyed, key, text_only, effort}
+        self.active_server = None
         self.local = None
         self.lang = "en"
         self.calls = []
@@ -78,6 +80,8 @@ class Fake:
         for k, p in self.providers.items():
             if p["active"] and p["configured"]:
                 return k
+        if self.active_server:
+            return "local"
         return None
 
     def lane(self):
@@ -94,10 +98,11 @@ class Fake:
             return "openai"
         return "openrouter" if self.active() == "openrouter" else None
 
-    def use(self, k):
+    def use(self, k, server=None):
         self.chatgpt["active"] = k == "chatgpt"
         for kk, p in self.providers.items():
             p["active"] = kk == k
+        self.active_server = server if k == "local" else None
         self.planned = None
 
     def done(self, sid):
@@ -110,6 +115,8 @@ class Fake:
         req = self.openai_required()
         def title(i, t):
             if i == "ai":
+                if self.active() == "local":
+                    return [x for x in self.servers if x["id"] == self.active_server][0]["name"]
                 return LANE_TITLES[self.active() or self.lane()]
             if i == "openai" and req:
                 return "OpenAI key"
@@ -120,9 +127,12 @@ class Fake:
                             "model_label": [m["label"] for m in MODELS if m["id"] == self.chatgpt["model"]][0], "effort": self.chatgpt["effort"],
                             "efforts": ["low", "medium", "high", "xhigh"]}
         ai = {"lane": self.lane(), "active": self.active(), "planned": self.planned, "ready": self.active() is not None, "openai_required": req, "media_via": self.media_via(),
-              "providers": provs, "opencode_models": OC_MODELS, "openrouter_default": "deepseek/deepseek-v4.1-flash"}
+              "providers": provs, "opencode_models": OC_MODELS, "openrouter_default": "deepseek/deepseek-v4.1-flash",
+              "servers": [dict(x, model_label=x["model"], active=(x["id"] == self.active_server),
+                               efforts=(["low", "medium", "high"] if x["keyed"] and x["id"] == self.active_server else [])) for x in self.servers],
+              "active_server": self.active_server, "max_servers": 20, "servers_damaged": False}
         if self.local:
-            ai["local"] = self.local
+            ai["local"] = {k: v for k, v in self.local.items() if k != "key"}
         c = dict(self.chatgpt)
         c["models"] = MODELS
         c["model_label"] = [m["label"] for m in MODELS if m["id"] == c["model"]][0]
@@ -173,23 +183,62 @@ class Fake:
         elif a == "provider_model":
             k = body["profile"]
             p = self.providers[k]
-            if k == "local":
-                p.update({"configured": True, "endpoint": body["base_url"]})
             p.update({"model": body["model"], "model_label": {m["id"]: m["label"] for m in OC_MODELS}.get(body["model"], body["model"]),
                       "text_only": bool(body.get("text_only"))})
             self.use(k)
             msg = "Briglia now thinks with %s on %s." % (p["model_label"], LANE_TITLES[k])
         elif a == "provider_use":
             self.use(body["profile"]); msg = "Briglia now thinks with %s." % LANE_TITLES[body["profile"]]
+        elif a == "server_save":
+            sid = body.get("id") or ""
+            if not body.get("name", "").strip():
+                ok, msg = False, "Give the server a name."
+            elif any(x["name"].lower() == body["name"].lower() and x["id"] != sid for x in self.servers):
+                ok, msg = False, "You already have a server called “%s”." % body["name"]
+            else:
+                lk = (self.local or {}).get("key")
+                if sid:
+                    x = [x for x in self.servers if x["id"] == sid][0]
+                else:
+                    x = {"id": "srv-%04d" % (len(self.servers) + 1), "keyed": False, "effort": ""}
+                    self.servers.append(x)
+                if self.local and self.local.get("base") == body["base_url"]:
+                    x["keyed"] = bool(lk); x["key"] = (lk[:5] + "…" + lk[-4:]) if lk else None
+                x.update({"name": body["name"], "endpoint": body["base_url"], "model": body["model"], "text_only": bool(body.get("text_only"))})
+                if x["keyed"] and not x["effort"]:
+                    x["effort"] = "high"
+                self.local = None
+                if not sid:
+                    self.use("local", x["id"]); msg = "Added %s. Briglia now thinks with %s on it." % (x["name"], x["model"])
+                else:
+                    msg = "Saved."
+        elif a == "server_use":
+            x = [x for x in self.servers if x["id"] == body["id"]][0]
+            self.use("local", x["id"]); msg = "Briglia now thinks with %s on %s." % (x["model"], x["name"])
+        elif a == "lane_remove":
+            lane = body["lane"]
+            if lane == "server":
+                if body["id"] == self.active_server:
+                    ok, msg = False, "Briglia is using this one right now. Switch to another first, then remove it."
+                else:
+                    name = [x for x in self.servers if x["id"] == body["id"]][0]["name"]
+                    self.servers = [x for x in self.servers if x["id"] != body["id"]]; msg = "%s removed." % name
+            elif self.active() == lane:
+                ok, msg = False, "Briglia is using this one right now. Switch to another first, then remove it."
+            else:
+                self.providers[lane].update({"configured": False, "model": "", "model_label": ""}); msg = "%s removed." % LANE_TITLES[lane]
         elif a == "effort":
             a2 = self.active()
             if a2 == "chatgpt":
                 self.chatgpt["effort"] = body["effort"]
+            elif a2 == "local":
+                [x for x in self.servers if x["id"] == self.active_server][0]["effort"] = body["effort"]
             else:
                 self.providers[a2]["effort"] = body["effort"]
             msg = "Saved. It applies from the next message."
         elif a == "local_models":
-            self.local = {"base": body["base_url"], "state": "ok", "models": ["qwen3.8-27b", "gemma-4-12b"]}
+            self.local = {"base": body["base_url"], "state": "ok", "models": ["qwen3.8-27b", "gemma-4-12b"], "server_id": body.get("server_id") or None,
+                          "keyed": bool(body.get("api_key")), "key": body.get("api_key") or None}
         elif a == "chatgpt_model":
             self.chatgpt["model"] = body["model"]; msg = "Briglia now thinks with " + [m["label"] for m in MODELS if m["id"] == body["model"]][0] + "."
         elif a == "telegram_token":
@@ -373,11 +422,15 @@ def main():
         g.keys.update({"serper": "srp-g…cdef", "jina": "jina_…cdef"}); g.computer["fda"] = True; g.tools.update({"complete": True, "missing": []})
         ctx, page, errors = session(g)
         page.wait_for_selector("text=Everything’s ready")
-        check("a finished setup opens on the dashboard", page.is_visible(".grid"))
+        check("a finished setup opens on the lanes home: the AI lanes first, other settings below",
+              page.is_visible("text=Your AI lanes") and page.is_visible(".lanerow[data-lane-card=chatgpt] >> text=In use")
+              and page.is_visible("#add-lane") and page.is_visible("text=Other settings") and page.is_visible(".grid") and not page.is_visible(".tile:has-text('ChatGPT')"))
+        check("the lane in use offers Edit but neither Use nor Remove",
+              page.is_visible("[data-edit=chatgpt]") and not page.is_visible("[data-use=chatgpt]") and not page.is_visible("[data-remove=chatgpt]"))
         check("the corner shows Briglia stopped, with Start and no Stop",
               page.is_visible("#power >> text=Stopped") and page.is_visible("#power-start") and not page.is_visible("#power-stop"))
         shot(page, "20-dashboard")
-        page.click(".tile:has-text('ChatGPT')")
+        page.click("[data-edit=chatgpt]")
         page.wait_for_selector(".choices")
         page.click(".choice:has-text('GPT-6 Luna')")
         page.wait_for_selector("text=Briglia now thinks with GPT-6 Luna.")
@@ -390,7 +443,7 @@ def main():
         page.click(".seg button[data-effort=xhigh]")
         page.wait_for_selector(".seg button.on[data-effort=xhigh]")
         check("the thinking level is one click", g.chatgpt["effort"] == "xhigh")
-        page.click("text=← Back")
+        page.click("text=← Your AI lanes")
         page.wait_for_selector(".grid")
         check("the dashboard says Briglia is stopped and has one Start (in the corner), no bottom Start/Stop",
               page.is_visible("text=Briglia is stopped") and page.locator("button:has-text('Start')").count() == 1 and page.locator("button:has-text('Stop')").count() == 0)
@@ -559,11 +612,16 @@ def main():
         page.wait_for_selector(".seg button.on[data-effort=medium]")
         check("model and thinking level change with one click each", o.providers["opencode"]["model"] == "kimi-k3" and o.providers["opencode"]["effort"] == "medium")
         shot(page, "62-opencode-settings")
-        page.click("#switch-provider")
-        page.wait_for_selector("text=Switch or add a provider")
-        check("the switcher shows every lane with what's in use",
-              page.locator(".lanecard").count() == 4 and page.is_visible(".lanecard[data-lane=opencode] >> text=In use"))
-        shot(page, "63-switcher")
+        page.click("text=← Your AI lanes")
+        page.wait_for_selector("#add-lane")
+        check("the lanes home lists OpenCode Go in use, with its model",
+              page.is_visible(".lanerow[data-lane-card=opencode] >> text=In use") and page.is_visible(".lanerow[data-lane-card=opencode] >> text=Kimi K3"))
+        page.click("#add-lane")
+        page.wait_for_selector("h1:has-text('Add a lane')")
+        check("Add a lane offers the four kinds; a built-in already added can't be added twice",
+              page.locator(".lanecard").count() == 4 and page.is_disabled(".lanecard[data-lane=opencode]") and page.is_visible(".lanecard[data-lane=opencode] >> text=Added")
+              and page.is_enabled(".lanecard[data-lane=local]"))
+        shot(page, "63-add-lane")
         page.click(".lanecard[data-lane=openrouter]")
         page.wait_for_selector("h1:has-text('Connect OpenRouter')")
         check("adding OpenRouter keeps OpenCode running until it's set up", page.is_visible("text=Briglia keeps using OpenCode Go"))
@@ -574,36 +632,102 @@ def main():
         page.click("button:has-text('Use this model')")
         page.wait_for_selector("text=Briglia now thinks with moonshotai/kimi-k3 on OpenRouter.")
         shot(page, "64-openrouter")
-        page.click("#switch-provider")
-        page.wait_for_selector(".lanecard[data-lane=local]")
+        # A server on this computer, named.
+        page.click("text=← Your AI lanes")
+        page.click("#add-lane")
         page.click(".lanecard[data-lane=local]")
-        page.wait_for_selector("text=Use a local or other server")
-        check("the local server address starts at LM Studio's default", page.input_value("#f-local-url") == "http://localhost:1234/v1")
+        page.wait_for_selector("h1:has-text('Add a server')")
+        check("the new server's address starts at LM Studio's default", page.input_value("#f-srv-url") == "http://localhost:1234/v1")
         check("the optional API key field hides what's typed", page.get_attribute("#f-local-key", "type") == "password" and page.input_value("#f-local-key") == "")
+        check("Add is disabled until a model is picked and the server is named", page.is_disabled("#srv-save"))
         page.click("button:has-text('Find models')")
         page.wait_for_selector(".choice[data-model='gemma-4-12b']")
         lm = [c for c in o.calls if c.get("action") == "local_models"]
-        check("without a key, Find models sends an empty key", lm and lm[-1].get("api_key") == "")
+        check("without a key, Find models sends an empty key and no server id (new server)", lm and lm[-1].get("api_key") == "" and lm[-1].get("server_id") == "")
+        page.click(".choice[data-model='gemma-4-12b']")
+        page.fill("#f-srv-name", "Home GPU")
+        shot(page, "65-server-new")
+        page.click("#srv-save")
+        page.wait_for_selector("text=Added Home GPU.")
+        sv = [c for c in o.calls if c.get("action") == "server_save"][-1]
+        check("the server is saved with its name, address and model, and runs",
+              sv.get("name") == "Home GPU" and sv.get("base_url") == "http://localhost:1234/v1" and sv.get("model") == "gemma-4-12b" and sv.get("id") == ""
+              and o.active() == "local" and page.is_visible(".lanerow[data-lane-card^='srv:'] >> text=Home GPU"))
+        # A second server, online, with a key.
+        page.click("#add-lane")
+        page.click(".lanecard[data-lane=local]")
+        page.wait_for_selector("h1:has-text('Add a server')")
+        page.fill("#f-srv-url", "https://api.example.com/v1")
         page.fill("#f-local-key", "sk-fake-server-key-123")
         page.click("button:has-text('Find models')")
-        page.wait_for_function("() => true")
-        page.wait_for_timeout(300)
+        page.wait_for_selector(".choice[data-model='qwen3.8-27b']")
         lm = [c for c in o.calls if c.get("action") == "local_models"]
         check("a typed key goes with Find models", lm[-1].get("api_key") == "sk-fake-server-key-123")
-        page.fill("#f-local-key", "")
-        page.wait_for_selector(".choice[data-model='gemma-4-12b']")
-        page.click(".choice[data-model='gemma-4-12b']")
-        page.wait_for_selector("text=Briglia now thinks with gemma-4-12b on Local or other server.")
-        check("a local model is one click from the server's list", o.active() == "local" and o.providers["local"]["endpoint"] == "http://localhost:1234/v1")
-        shot(page, "65-local")
-        page.click("#switch-provider")
-        page.wait_for_selector(".lanecard[data-lane=opencode]")
-        page.click(".lanecard[data-lane=opencode]")
-        page.wait_for_selector("text=Briglia now thinks with OpenCode Go.")
-        check("switching back to a saved provider is one click", o.active() == "opencode")
+        page.click(".choice[data-model='qwen3.8-27b']")
+        page.fill("#f-srv-name", "Acme cloud")
+        page.click("#srv-save")
+        page.wait_for_selector("text=Added Acme cloud.")
+        check("the page never shows the typed key back", "sk-fake-server-key-123" not in page.content())
+        check("each server is its own card; the one in use is marked",
+              page.locator(".lanerow[data-lane-card^='srv:']").count() == 2 and page.is_visible(".lanerow.active >> text=Acme cloud"))
+        shot(page, "66-lanes-home")
+        # Edit a server that isn't in use: rename it.
+        home = [x for x in o.servers if x["name"] == "Home GPU"][0]
+        page.click("[data-edit='srv:%s']" % home["id"])
+        page.wait_for_selector("h1:has-text('Home GPU')")
+        check("editing a server shows its saved model selected and its name", page.is_visible(".choice.sel[data-model='gemma-4-12b']") and page.input_value("#f-srv-name") == "Home GPU")
+        page.fill("#f-srv-name", "Home box")
+        shot(page, "67-server-edit")
+        page.click("#srv-save")
+        page.wait_for_selector(".notice.ok >> text=Saved.")
+        sv = [c for c in o.calls if c.get("action") == "server_save"][-1]
+        check("a rename is saved on that server, keeping its address and model",
+              sv.get("id") == home["id"] and sv.get("name") == "Home box" and sv.get("model") == "gemma-4-12b" and home["name"] == "Home box")
+        page.click("text=← Your AI lanes")
+        # Remove: refused for the one in use (no button), asks once for another.
+        acme = [x for x in o.servers if x["name"] == "Acme cloud"][0]
+        check("the server in use has no Remove button", not page.is_visible("[data-remove='srv:%s']" % acme["id"]))
+        page.click("[data-remove='srv:%s']" % home["id"])
+        check("Remove asks once before acting", page.is_visible("text=Remove Home box?") and len(o.servers) == 2)
+        page.click("[data-confirm-remove='srv:%s']" % home["id"])
+        page.wait_for_selector("text=Home box removed.")
+        check("a confirmed Remove deletes the server", [x["name"] for x in o.servers] == ["Acme cloud"])
+        # Use: back to a saved built-in lane in one click.
+        page.click("[data-use=opencode]")
+        page.wait_for_selector(".lanerow[data-lane-card=opencode] >> text=In use")
+        check("Use switches back to a saved lane in one click", o.active() == "opencode")
         overflow = page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")
-        check("no page errors or overflow while switching providers", not errors and not overflow, errors)
+        check("no page errors or overflow while managing lanes", not errors and not overflow, errors)
         ctx.close()
+
+        # ---- lanes home at phone width, in both languages ----
+        for lang, name in (("en", "81-phone-lanes-en"), ("it", "82-phone-lanes-it")):
+            pf = Fake()
+            pf.lang = lang
+            pf.name = "Sofia"; pf.chatgpt.update({"state": "signed_in", "active": False}); pf.telegram.update({"configured": True, "chat_id": "5551234567", "bot": "sofia_test_bot"})
+            pf.keys.update({"serper": "srp-g…cdef", "jina": "jina_…cdef", "openai": "sk-go…cdef"}); pf.computer["fda"] = True; pf.tools.update({"complete": True, "missing": []})
+            pf.providers["openrouter"].update({"configured": True, "model": "deepseek/deepseek-v4.1-flash", "model_label": "deepseek/deepseek-v4.1-flash", "key": "sk-or…cdef"})
+            pf.servers = [{"id": "srv-0001", "name": "Home GPU", "endpoint": "http://localhost:1234/v1", "model": "qwen3.8-27b", "keyed": False, "key": None, "text_only": False, "effort": ""},
+                          {"id": "srv-0002", "name": "Acme cloud", "endpoint": "https://api.example.com/v1", "model": "acme-large", "keyed": True, "key": "sk-ac…9xyz", "text_only": False, "effort": "high"}]
+            pf.use("local", "srv-0002")
+            ctx, page, errors = session(pf, width=390, height=844)
+            page.wait_for_selector("#add-lane")
+            overflow = page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")
+            check("phone (%s): the lanes home fits without sideways scrolling" % lang, not overflow and page.locator(".lanerow").count() == 4)
+            if lang == "it":
+                check("phone (it): the lanes home is in Italian", page.is_visible("text=I tuoi fornitori AI") and page.is_visible("text=Aggiungi un fornitore") and page.is_visible(".lanerow.active >> text=In uso"))
+            shot(page, name)
+            if lang == "en":
+                page.click("#add-lane")
+                page.wait_for_selector("h1:has-text('Add a lane')")
+                shot(page, "83-phone-add-lane")
+                page.click("text=← Your AI lanes")
+                page.click("[data-edit='srv:srv-0002']")
+                page.wait_for_selector("h1:has-text('Acme cloud')")
+                check("phone: the server edit form fits", not page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1"))
+                shot(page, "84-phone-server-edit")
+            check("phone (%s): no page errors" % lang, not errors, errors)
+            ctx.close()
 
         # ---- Linux start failure (Codex R3): shown on the page with Retry,
         # never "running in the background" before the service is healthy.

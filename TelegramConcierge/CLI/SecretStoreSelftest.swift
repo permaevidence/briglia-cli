@@ -233,6 +233,7 @@ struct SecretStoreSelftest: ParsableCommand {
                 let sources = [
                     "TelegramConcierge/Utilities/KeychainHelper.swift",
                     "TelegramConcierge/Services/ProviderProfiles.swift",
+                    "TelegramConcierge/Services/ProviderServers.swift",
                 ]
                 var scanned = 0
                 var unclassified: [String] = []
