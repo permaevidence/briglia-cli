@@ -325,7 +325,7 @@ final class MenuWorkflow {
     /// A fresh setup: no provider runs yet, so the first lane saved becomes
     /// the one in use. Otherwise adding or editing a lane never switches:
     /// the "Briglia is using" selector does.
-    var nothingActive: Bool { snapshot.activeProfile == nil && !snapshot.chatgptReady }
+    var nothingActive: Bool { snapshot.noLaneActive }
 
     /// Why `lane` can't become the one in use now, nil when it can. OpenCode
     /// Go and servers read web pages with the OpenAI key (owner rule), so
@@ -1200,9 +1200,14 @@ final class MenuWorkflow {
             // The store waits for its cross-process lock before writing;
             // the ticket is checked again under that lock, so a newer action
             // taken meanwhile leaves the saved credential untouched.
+            // Whether to switch is decided from the settings as saved NOW,
+            // read under the barrier: a lane chosen elsewhere (Telegram
+            // /provider, another menu page) while the human part ran is
+            // newer than this page's snapshot and must stay in use.
+            let current = await self.env.snapshot()
+            let wasInUse = current.activeProfile == ProviderProfiles.Profile.chatgpt.rawValue
+            let fresh = current.noLaneActive
             generation = try await write(checkpoint)
-            let wasInUse = self.snapshot.activeProfile == ProviderProfiles.Profile.chatgpt.rawValue
-            let fresh = self.nothingActive
             await self.reload()
             // Adding ChatGPT while another lane runs only saves the sign-in;
             // the selector switches. A fresh setup, or signing in again to
@@ -1513,7 +1518,12 @@ final class MenuWorkflow {
             effectiveKey = listing.apiKey
         } else if let existing, existing.endpoint == base {
             keyForSave = nil
-            effectiveKey = existing.keyed ? env.serverKey(existing.id) : nil
+            // The saved key only ever goes to the address it was saved with:
+            // address and key are read together from the stored record, and
+            // a record moved or removed elsewhere since the page loaded
+            // sends nothing.
+            guard case .key(let saved) = env.serverCredential(existing.id, base) else { return await serverMoved() }
+            effectiveKey = saved
         } else if existing == nil {
             return (false, L("Press Find models first, then pick a model.", "Premi prima Trova i modelli, poi scegli un modello."))
         } else {
@@ -1524,13 +1534,25 @@ final class MenuWorkflow {
             return (false, L("To send an API key, the address must start with https:// (plain http only works for this computer or your home network).",
                              "Per inviare una chiave API l\u{2019}indirizzo deve iniziare con https:// (http semplice funziona solo per questo computer o la rete di casa)."))
         }
+        // The protocol saved is exactly the one checked: a keyed server
+        // keeps its saved protocol (Responses or Chat Completions); on a new
+        // address a Responses server is tried with Responses first and, if
+        // that host doesn't answer it, with Chat Completions — and whichever
+        // answered is written explicitly with the record.
+        var verifiedProtocol: ProviderWireProtocol?
         // A fresh listing may carry a new key: check again then too.
         if existing == nil || existing?.endpoint != base || existing?.model != model || listing != nil {
-            let responses = effectiveKey != nil && existing?.responses == true && existing?.endpoint == base
-            let probe = await env.probe(effectiveKey != nil
-                ? ["kind": responses ? "responses" : "custom", "base_url": base, "api_key": effectiveKey!, "model": model]
-                : ["kind": "local", "base_url": base, "model": model])
-            try checkpoint()
+            let savedResponses = effectiveKey != nil && existing?.responses == true
+            let attempts: [ProviderWireProtocol?] = effectiveKey == nil ? [nil]
+                : savedResponses ? (existing?.endpoint == base ? [.responses] : [.responses, .chatCompletions])
+                : [.chatCompletions]
+            var probe: [String: Any] = [:]
+            for attempt in attempts {
+                probe = await env.probe(attempt.map { ["kind": $0 == .responses ? "responses" : "custom", "base_url": base, "api_key": effectiveKey!, "model": model] }
+                    ?? ["kind": "local", "base_url": base, "model": model])
+                try checkpoint()
+                if probe["ok"] as? Bool == true { verifiedProtocol = attempt; break }
+            }
             guard probe["ok"] as? Bool == true else {
                 let reason = Self.probeReason(probe)
                 return (false, L("The server at \(base) didn\u{2019}t answer with \(model): \(reason). Check that the model is loaded, then try again.",
@@ -1542,6 +1564,7 @@ final class MenuWorkflow {
                                       "activate": activateNew]
         if let existing { section["id"] = existing.id }
         if let keyForSave { section["api_key"] = keyForSave }
+        if let verifiedProtocol { section["protocol"] = verifiedProtocol.rawValue }
         var payload: [String: Any] = ["server": section]
         if existing == nil, snapshot.openAIMasked != nil { payload["web_search_backend"] = WebSearchBackend.openai.rawValue }
         try checkpoint()
@@ -1559,6 +1582,15 @@ final class MenuWorkflow {
         return (true, activeServer?.id == existing?.id
             ? L("Saved. It applies from the next message.", "Salvato. Vale dal prossimo messaggio.")
             : L("Saved.", "Salvato."))
+    }
+
+    /// A saved server changed address or was removed elsewhere since the
+    /// page loaded: nothing was sent; the page refreshes and says why.
+    private func serverMoved() async -> (Bool, String?) {
+        await reload()
+        localListing = nil
+        return (false, L("That server was changed or removed elsewhere, so nothing was sent. The page now shows its current settings.",
+                         "Quel server è stato modificato o rimosso altrove, quindi non è stato inviato nulla. Ora la pagina mostra le impostazioni attuali."))
     }
 
     private func nameMessage(_ why: String, _ name: String) -> String {
@@ -1674,8 +1706,13 @@ final class MenuWorkflow {
         // reused for its own address only, so changing its model needs no
         // retyping and a saved key never goes to a different host.
         let saved = serverId.isEmpty ? nil : server(serverId)
-        let key: String? = !typedKey.isEmpty ? typedKey
-            : (saved?.keyed == true && saved?.endpoint == base ? env.serverKey(serverId) : nil)
+        var key: String? = typedKey.isEmpty ? nil : typedKey
+        if key == nil, let saved, saved.keyed, saved.endpoint == base {
+            // Address and key from one fresh read of the stored record; a
+            // server moved or removed elsewhere sends nothing.
+            guard case .key(let stored) = env.serverCredential(saved.id, base) else { return await serverMoved() }
+            key = stored
+        }
         if key != nil, !MenuEnvironment.keySafe(base) {
             return (false, L("To send an API key, the address must start with https:// (plain http only works for this computer or your home network).",
                              "Per inviare una chiave API l\u{2019}indirizzo deve iniziare con https:// (http semplice funziona solo per questo computer o la rete di casa)."))

@@ -80,6 +80,23 @@ struct MenuSnapshot: Equatable {
         if case .signedIn(let active, _, _, _) = chatgpt { return active }
         return false
     }
+    /// No lane is in use yet (a fresh setup).
+    var noLaneActive: Bool { activeProfile == nil && !chatgptReady }
+}
+
+/// A saved server's key as it may be used for one outbound request.
+enum MenuServerCredential: Equatable {
+    /// The stored record is at the expected address; its key (nil = none).
+    case key(String?)
+    /// The record moved to another address or was removed since the page
+    /// loaded: send nothing.
+    case moved
+
+    static func resolve(_ record: ProviderServers.Server?, expectedBase: String) -> MenuServerCredential {
+        guard let record, let stored = ProviderServers.normalizeBase(record.baseURL),
+              let expected = ProviderServers.normalizeBase(expectedBase), stored == expected else { return .moved }
+        return .key(record.keyed ? record.apiKey : nil)
+    }
 }
 
 /// Why a local server's model list couldn't be read.
@@ -190,10 +207,14 @@ struct MenuEnvironment {
     /// The model ids a local OpenAI-compatible server offers (GET /models),
     /// or why it couldn't be asked.
     var localModels: (_ baseURL: String, _ apiKey: String?) async -> Result<[String], MenuLocalModelsError> = { await MenuEnvironment.listLocalModels(baseURL: $0, apiKey: $1) }
-    /// A named server's saved API key (never sent to the page; reused to
-    /// list its models or check a new model on the same address).
-    var serverKey: (String) -> String? = { id in
-        ProviderServers.list()?.first { $0.id == id }?.apiKey
+    /// A named server's saved API key, bound to the address it was saved
+    /// with (never sent to the page; reused to list its models or check a
+    /// new model on the same address). Address and key come from ONE fresh
+    /// read of the stored record: when that record's address is no longer
+    /// `expectedBase` (edited elsewhere) or it was removed, the answer is
+    /// `.moved` and nothing may be sent.
+    var serverCredential: (_ id: String, _ expectedBase: String) -> MenuServerCredential = { id, expectedBase in
+        MenuServerCredential.resolve(ProviderServers.list()?.first { $0.id == id }, expectedBase: expectedBase)
     }
     /// The saved API key of a provider profile (never sent to the page;
     /// used to check a new model before switching to it).

@@ -57,6 +57,7 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.linuxStartup()
         await t.router()
         await t.namedServers()
+        await t.round5()
         print(t.failures == 0 ? "\nmenu selftest: all \(t.checks) checks passed"
                               : "\nmenu selftest: \(t.failures) of \(t.checks) FAILED")
         return t.failures
@@ -172,6 +173,8 @@ final class MenuFakeWorld: @unchecked Sendable {
                 server.endpoint = base
                 server.model = sv["model"] as? String ?? server.model
                 if let t = sv["text_only"] as? Bool { server.textOnly = t }
+                if let p = sv["protocol"] as? String { server.responses = p == "responses" }
+                if !server.keyed { server.responses = false }
                 server.effort = server.keyed ? (sv["effort"] as? String ?? (server.effort.isEmpty ? "high" : server.effort)) : ""
                 if isNew { snap.servers.append(server) } else if let i = snap.servers.firstIndex(where: { $0.id == server.id }) { snap.servers[i] = server }
                 if sv["activate"] as? Bool == true || snap.activeServer == server.id { activateServer(server) }
@@ -318,7 +321,10 @@ final class MenuSelftestContext {
             return world.localModels
         }
         env.providerKey = { profile in world.snap.providers[profile.rawValue]?.configured == true ? world.good[profile.rawValue] : nil }
-        env.serverKey = { id in world.snap.servers.first { $0.id == id }?.keyed == true ? world.good["custom"] : nil }
+        env.serverCredential = { id, base in
+            guard let s = world.snap.servers.first(where: { $0.id == id }), s.endpoint == base else { return .moved }
+            return .key(s.keyed ? world.good["custom"] : nil)
+        }
         env.telegramChatProbe = { _, chatId in
             if let gate = world.holds["chat:" + chatId] { await gate.wait() }
             var p = SetupAPICore.TelegramChatProbe()
