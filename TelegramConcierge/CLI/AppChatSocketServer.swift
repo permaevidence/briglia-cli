@@ -570,6 +570,10 @@ final class AppChatSocketServer {
                 // Mid-turn early wake §3.8: same durability ack, plus the
                 // flag that the message will reach the running turn.
                 ack(["queued_mid_turn": true])
+            case .heldForRecovery(let notice):
+                // Durably held (history unreadable): same ack, plus the
+                // explanation for the app to show.
+                ack(["held_until_history_loads": true, "notice": notice])
             case .refused(let reason):
                 nack(reason)
             }
@@ -601,6 +605,8 @@ final class AppChatSocketServer {
                         ack(["transcription": transcription])
                     case .queuedMidTurn:
                         ack(["transcription": transcription, "queued_mid_turn": true])
+                    case .heldForRecovery(let notice):
+                        ack(["transcription": transcription, "held_until_history_loads": true, "notice": notice])
                     case .refused(let reason):
                         nack(reason)
                     }

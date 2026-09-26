@@ -167,6 +167,8 @@ class ConversationManager: ObservableObject {
     /// only by a successful (re)load — restart after repair, or the file
     /// moved aside — or by an explicit /deleteuserdata reset.
     private var historyLoadFailure: String?
+    /// One Telegram notice per unreadable-history episode (round 4).
+    private var historyHoldNoticeSent = false
     private var promptEstimateCorrections: [String: Double] = [:]
     private var pendingCompactionCalibration: (scope: String, estimated: Int, generation: Int)?
     private var latestEstimateScope = ""
@@ -522,6 +524,10 @@ class ConversationManager: ObservableObject {
         /// gains `"queued_mid_turn": true`, the terminal prints a local dim
         /// status line. Same durability promise as `.accepted`.
         case queuedMidTurn
+        /// Durably held (in the mid-turn queue file) because conversation
+        /// history could not be read: no turn starts until history loads.
+        /// Same durability promise as `.accepted`; the string explains why.
+        case heldForRecovery(String)
         case refused(String)
     }
 
@@ -627,6 +633,18 @@ class ConversationManager: ObservableObject {
             documentFileSizes: documents.map(\.fileSize),
             originChannel: Self.appChannelAddress
         )
+
+        // Unreadable history (1a round 4): no turn may start and nothing may
+        // replace the recovery state it is protecting. Hold the message in
+        // the durable mid-turn queue file (recovered, in order, once history
+        // loads again) or refuse if even that write fails.
+        if historyLoadFailure != nil {
+            guard holdInboundWhileHistoryUnreadable(userMessage) else {
+                discardCopies()
+                return .refused("could not persist your message (disk problem?) — it was NOT accepted, try again")
+            }
+            return .heldForRecovery(Self.historyHoldNotice)
+        }
 
         // Durable enqueue, then accept. Unlike the Telegram path (which keeps
         // an unpersisted message in memory and blocks the poll-offset ack so
@@ -2356,6 +2374,26 @@ class ConversationManager: ObservableObject {
     /// follow-up turn launched when this one ends), so history order always
     /// matches what the model saw.
     private func dispatchUserTurn(_ userMessage: Message, telegramMessageId: Int? = nil) async {
+        // Unreadable history (1a round 4): hold, never run. The message goes
+        // to the durable mid-turn queue file — the update is then confirmed
+        // like any queued message, so polling (and /status, /restart,
+        // /deleteuserdata) keeps working. If even that write fails, the
+        // update stays unconfirmed and the existing durability stall
+        // re-delivers it after a restart. No history append, no marker.
+        if historyLoadFailure != nil {
+            guard holdInboundWhileHistoryUnreadable(userMessage) else {
+                inboundDurabilityFailure = true
+                return
+            }
+            if !historyHoldNoticeSent {
+                historyHoldNoticeSent = true
+                try? await sendText(Self.historyHoldNotice)
+            } else if userMessage.kind == .userText, let telegramMessageId, let chatId = pairedChatId {
+                let service = telegramService
+                Task { try? await service.setMessageReaction(chatId: chatId, messageId: telegramMessageId, emoji: "👀") }
+            }
+            return
+        }
         if activeRunId != nil || activeProcessingTask != nil {
             pendingMidTurnMessages.append(userMessage)
             let persisted = persistPendingMidTurnQueue()
@@ -2387,6 +2425,28 @@ class ConversationManager: ObservableObject {
 
         statusMessage = "Generating response..."
         startActiveProcessing(for: userMessage)
+    }
+
+    /// Shown to the user (once per episode on Telegram; on every app/terminal
+    /// submission) when a message is held because history can't be read.
+    static let historyHoldNotice = "⚠️ I can't read my conversation history, so I'm not starting any work. Your message is saved and will be answered once the history loads again: repair the conversation file (or move it aside), then /restart. /status shows the details."
+
+    /// Hold an inbound message while history is unreadable: append to the
+    /// mid-turn queue and mirror it to disk (the queue file is kept, and only
+    /// recovered, once history loads — `recoverPersistedMidTurnMessages`).
+    /// No wake is fired (there is no run), nothing touches history or the
+    /// active-turn marker. Returns false (and rolls back) if the mirror
+    /// write fails.
+    private func holdInboundWhileHistoryUnreadable(_ message: Message) -> Bool {
+        pendingMidTurnMessages.append(message)
+        guard persistPendingMidTurnQueue() else {
+            pendingMidTurnMessages.removeAll { $0.id == message.id }
+            _ = persistPendingMidTurnQueue()
+            return false
+        }
+        print("[ConversationManager] Held inbound message (history unreadable) — \(pendingMidTurnMessages.count) waiting for history to load")
+        statusMessage = "Message held — conversation history can't be read"
+        return true
     }
 
     /// Drain queued mid-turn user messages into the last tool result of the
@@ -2961,6 +3021,15 @@ class ConversationManager: ObservableObject {
     private func resumeInterruptedActiveTurnIfNeeded() {
         guard historyLoadFailure == nil else { return }  // marker kept until history loads
         guard let data = try? Data(contentsOf: activeTurnMarkerFileURL) else { return }
+        // A turn started by an earlier startup pass (e.g. queue recovery of
+        // messages held while history was unreadable) has already replaced
+        // the file with its OWN marker — keep it, so that turn stays
+        // crash-resumable (1a round 4).
+        if activeRunId != nil || activeProcessingTask != nil,
+           let own = try? JSONDecoder().decode(ActiveTurnMarker.self, from: data),
+           own.triggerMessageId == activeTurnTriggerMessage?.id {
+            return
+        }
         clearActiveTurnMarker()
         guard activeRunId == nil, activeProcessingTask == nil, !recoveryBlocked else { return }
         guard let marker = try? JSONDecoder().decode(ActiveTurnMarker.self, from: data),
@@ -2979,6 +3048,14 @@ class ConversationManager: ObservableObject {
     private func startActiveProcessing(for userMessage: Message) {
         guard activeRunId == nil, activeProcessingTask == nil else {
             print("[ConversationManager] Ignoring startActiveProcessing because a run is already active")
+            return
+        }
+        // Central admission rule (1a round 4): no model/tool work and no new
+        // active-turn marker while history is unreadable — the preserved
+        // marker is the only record of an interrupted request. Every caller
+        // also holds its input before reaching here; this is the backstop.
+        guard historyLoadFailure == nil else {
+            print("[ConversationManager] Not starting a turn: conversation history could not be read")
             return
         }
 
@@ -3037,7 +3114,7 @@ class ConversationManager: ObservableObject {
             // All queued messages enter history; the last one is the trigger
             // (the new turn's context window includes them all).
             if isPolling, activeRunId == nil, activeProcessingTask == nil,
-               !pendingMidTurnMessages.isEmpty {
+               historyLoadFailure == nil, !pendingMidTurnMessages.isEmpty {
                 let queued = pendingMidTurnMessages
                 pendingMidTurnMessages.removeAll()
                 // Id-dedup: a batch requeued after an aborted annotation
@@ -9624,6 +9701,9 @@ class ConversationManager: ObservableObject {
         // Don't run reminder workflows while a run is active — the reminders stay
         // due and fire on a later poll tick once the agent is idle.
         guard activeRunId == nil, activeProcessingTask == nil else { return }
+        // Nor while history is unreadable: reminders stay due, watcher
+        // checks don't run and outbox records stay pending (1a round 4).
+        guard historyLoadFailure == nil else { return }
 
         // Append ALL due reminders to history, then trigger ONE agent turn via the
         // standard active-processing pipeline (same as user messages and email
@@ -10311,7 +10391,7 @@ class ConversationManager: ObservableObject {
     /// which to delete. The monitor enforces a 6h cooldown — no nag loops if the agent
     /// [SKIP]s because every clone is still active work.
     private func checkScratchDiskPressure() async {
-        guard activeRunId == nil, activeProcessingTask == nil else { return }
+        guard activeRunId == nil, activeProcessingTask == nil, historyLoadFailure == nil else { return }
 
         let measurement = ScratchDiskMonitor.measure()
         guard ScratchDiskMonitor.shouldPromptNow(measurement: measurement) else { return }
@@ -10332,7 +10412,9 @@ class ConversationManager: ObservableObject {
     /// Drain completed background bash processes and inject each one as a synthetic user
     /// message, triggering a new agent turn so the agent can react (e.g. Telegram the user).
     private func checkBackgroundBashCompletions() async {
-        guard activeRunId == nil, activeProcessingTask == nil else { return }
+        // Notices stay queued (and their crash records owed) while history
+        // is unreadable (1a round 4).
+        guard activeRunId == nil, activeProcessingTask == nil, historyLoadFailure == nil else { return }
         // Non-destructive delivery (mid-turn early wake §3.10.3): read the
         // queued notices, append each under its stable message id (skipped
         // when already in history), save, and only after a successful save
@@ -10393,7 +10475,8 @@ class ConversationManager: ObservableObject {
     /// triggering a new agent turn so the parent can react (e.g. notify the user, continue
     /// work that depended on the subagent's findings). Mirrors the bash completion flow.
     private func checkBackgroundSubagentCompletions() async {
-        guard activeRunId == nil, activeProcessingTask == nil else { return }
+        // Completions stay queued in the registry while history is unreadable.
+        guard activeRunId == nil, activeProcessingTask == nil, historyLoadFailure == nil else { return }
         let completions = await SubagentBackgroundRegistry.shared.drainCompletions()
         guard !completions.isEmpty else { return }
 
@@ -10485,7 +10568,8 @@ class ConversationManager: ObservableObject {
     /// Reuses the `.bashComplete` message kind — these are ephemeral notifications that
     /// do not need history compression.
     private func checkBashWatchMatches() async {
-        guard activeRunId == nil, activeProcessingTask == nil else { return }
+        // Matches stay in the registry while history is unreadable.
+        guard activeRunId == nil, activeProcessingTask == nil, historyLoadFailure == nil else { return }
         let matches = await BackgroundProcessRegistry.shared.drainWatchMatches()
         guard !matches.isEmpty else { return }
         // Append one coalesced message per handle, then ONE turn for all of them.
@@ -10587,6 +10671,12 @@ class ConversationManager: ObservableObject {
     /// behind an advanced checkpoint (Codex round 6, 2026-08-22).
     @discardableResult
     private func processNewUnreadEmails(_ emails: [GoogleWorkspaceService.UnreadEmail]) async -> Bool {
+        // Unreadable history (1a round 4): not durable — the poller keeps its
+        // checkpoint and re-delivers these once history loads.
+        if historyLoadFailure != nil {
+            print("[ConversationManager] Holding \(emails.count) email notice(s): conversation history can't be read")
+            return false
+        }
         switch Self.emailDeliveryRoute(
             isRestoringMind: isRestoringMind,
             providerActive: EmailCalendarProvider.current != .none,
@@ -10709,7 +10799,7 @@ class ConversationManager: ObservableObject {
     /// active. No-ops unless the agent is fully idle. All queued triggers enter
     /// history; the last one starts the turn (its context includes them all).
     private func drainPendingAmbientTriggers() {
-        guard activeRunId == nil, activeProcessingTask == nil else { return }
+        guard activeRunId == nil, activeProcessingTask == nil, historyLoadFailure == nil else { return }
         guard let trigger = pendingAmbientTriggers.last else { return }
         let queued = pendingAmbientTriggers
         pendingAmbientTriggers.removeAll()
@@ -10785,6 +10875,7 @@ class ConversationManager: ObservableObject {
     private func noteHistoryLoaded() {
         let wasFailing = historyLoadFailure != nil
         historyLoadFailure = nil
+        historyHoldNoticeSent = false
         if wasFailing { print("[ConversationManager] Conversation history readable again") }
         Task { await MaintenanceAlertCenter.shared.reportSuccess(.conversationHistory) }
     }
@@ -12788,6 +12879,18 @@ extension ConversationManager {
         startActiveProcessing(for: message)
     }
     func _testDispatchUser(_ message: Message) async { await dispatchUserTurn(message) }
+    func _testProcessEmails(_ emails: [GoogleWorkspaceService.UnreadEmail]) async -> Bool {
+        await processNewUnreadEmails(emails)
+    }
+    func _testQueueAmbient(_ message: Message) {
+        pendingAmbientTriggers.append(message)
+        _ = persistPendingAmbientTriggers()
+    }
+    func _testDrainAmbient() { drainPendingAmbientTriggers() }
+    var _testPendingAmbientURL: URL { pendingAmbientFileURL }
+    func _testCheckDueReminders() async { await checkDueReminders() }
+    func _testStartTurnOnly(for message: Message) { startActiveProcessing(for: message) }
+    var _testHoldNoticeSent: Bool { historyHoldNoticeSent }
     func _testAwaitIdle(timeout: TimeInterval = 60) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
