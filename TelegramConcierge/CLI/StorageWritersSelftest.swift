@@ -123,7 +123,10 @@ enum StorageWritersSelftest {
         let imagesDir = dataRoot.appendingPathComponent("images").path
         let toolAttachmentsDir = dataRoot.appendingPathComponent("tool_attachments").path
         do {
-            try plant(conversationFile, "{\"planted\": true}", 0o644)
+            // A DECODABLE history with different bytes: an undecodable file
+            // is preserved for repair and never overwritten (mid-turn wake
+            // storage rule), so it cannot exercise the rewrite path.
+            try plant(conversationFile, "[ ]", 0o644)
             _ = chmod(imagesDir, 0o755)
             let result: (mode: Int, text: String, images: Int, attachments: Int) = await MainActor.run {
                 let manager = ConversationManager()
