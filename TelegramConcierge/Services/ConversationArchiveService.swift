@@ -34,6 +34,9 @@ actor MaintenanceAlertCenter {
         case transcription
         /// conversation.json exists but cannot be read (mid-turn wake §3.10.2).
         case conversationHistory
+        /// pending_midturn.json (acknowledged, not yet answered messages)
+        /// exists but cannot be read (mid-turn wake 1a round 6).
+        case heldMessageQueue
 
         var displayName: String {
             switch self {
@@ -51,6 +54,7 @@ actor MaintenanceAlertCenter {
             case .imageGeneration: return "image generation"
             case .transcription: return MediaRouting.transcription.viaOpenRouter ? "audio transcription (OpenRouter)" : "audio transcription (OpenAI)"
             case .conversationHistory: return "conversation history loading"
+            case .heldMessageQueue: return "held-message file loading"
             }
         }
 
@@ -80,6 +84,8 @@ actor MaintenanceAlertCenter {
                     : "Voice messages and the transcription tool will keep failing until this is fixed — check the OpenAI key/credits in Settings > Voice Transcription."
             case .conversationHistory:
                 return "The file is kept exactly as it is and nothing will overwrite it, so new messages are not saved and background results stay pending. Repair conversation.json (or move it aside), then /restart; /deleteuserdata resets it instead."
+            case .heldMessageQueue:
+                return "It holds messages you sent that I haven't answered yet. It is kept exactly as it is and nothing will overwrite it, so no new work starts and new messages are not accepted. Repair pending_midturn.json (or move it aside), then /restart; /deleteuserdata discards it instead."
             }
         }
     }
