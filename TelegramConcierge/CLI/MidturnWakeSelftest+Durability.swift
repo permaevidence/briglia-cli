@@ -308,7 +308,7 @@ extension MidturnHarness {
 
     // MARK: CX3 — /stop and queued subagent completions
 
-    private static func subagentCompletion(_ id: String) -> SubagentBackgroundRegistry.Completion {
+    static func subagentCompletion(_ id: String) -> SubagentBackgroundRegistry.Completion {
         .init(handle: .init(id: id, subagentType: "general-purpose", description: "finished before stop", startedAt: Date()),
               result: subagentResult(), completedAt: Date())
     }

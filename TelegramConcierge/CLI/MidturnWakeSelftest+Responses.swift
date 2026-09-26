@@ -36,6 +36,9 @@ extension MidturnHarness {
             ConversationManager.responsesSalvageFaultForTesting = nil
             try? ProviderProfiles.saveProfile(.custom, apiKey: apiKey, baseURL: "http://127.0.0.1:\(server.port)/v1",
                                               model: "glm-5.3", effort: nil, textOnly: false, wireProtocol: .chatCompletions)
+            // Re-activate so the runtime protocol slot returns to chat
+            // completions too; later sections expect chat-mode replies.
+            try? ProviderProfiles.activate(.custom)
             try? configureProvider()
         }
         check("RX0 the manager runs over Responses", ProviderProfiles.usesResponses)
