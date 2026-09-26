@@ -213,8 +213,17 @@ class ConversationManager: ObservableObject {
     /// suppressed batches the next one is admitted.
     private var consecutiveSuppressions = 0
     static let maxConsecutiveSuppressions = 3
-    /// Ids of every message covered by the last successful history save —
-    /// "durably in history" (§3.10.2; mere presence in `messages` is not).
+    /// The history exactly as last committed to disk: as loaded, or as
+    /// covered by the last successful save / checked rewrite (§3.10.2).
+    /// Every durability decision (record settlement, queue-file removal,
+    /// stop-entry retirement) consults THIS view, never `messages`, which
+    /// can hold appends whose save failed — and whose content, under an
+    /// existing id, may differ from what is on disk.
+    private var committedMessages: [Message] = [] {
+        didSet { lastSavedMessageIDs = Set(committedMessages.map(\.id)) }
+    }
+    /// Ids of `committedMessages` — "durably in history" (mere presence in
+    /// `messages` is not).
     private var lastSavedMessageIDs: Set<UUID> = []
     /// Completion notices appended but not yet acknowledged: message id →
     /// job. Acknowledged (registry + crash record) only after a save that
@@ -1161,8 +1170,8 @@ class ConversationManager: ObservableObject {
         loadConversation()
         // Mid-turn early wake (§3.9.3, §3.10.4): the stop intent is loaded
         // FIRST — nothing is classified or delivered before it. The loaded
-        // history is durable by definition.
-        lastSavedMessageIDs = Set(messages.map(\.id))
+        // history is durable by definition (loadConversation sets the
+        // committed view from the decoded file).
         loadStopIntent()
         recoverInterruptedTurnSalvageIfNeeded()
         // Snapshot evidence bookkeeping (§3.12.3): the legacy list exists
@@ -2596,7 +2605,12 @@ class ConversationManager: ObservableObject {
         }
     }
 
-    private func persistResponsesSalvage(_ interactions: [ToolInteraction]) throws {
+    /// Selftest seam: throw to simulate a failed Responses salvage write —
+    /// stage "placeholder" (before the batch runs) or "completed" (after).
+    nonisolated(unsafe) static var responsesSalvageFaultForTesting: ((String) throws -> Void)?
+
+    private func persistResponsesSalvage(_ interactions: [ToolInteraction], stage: String) throws {
+        try Self.responsesSalvageFaultForTesting?(stage)
         if let runID = activeRunId, var checkpoint = activeTurnCheckpoints[runID], checkpoint.isEnvelope {
             checkpoint.retainedInteractions = interactions
             try writeTurnCheckpoint(checkpoint)
@@ -2713,10 +2727,13 @@ class ConversationManager: ObservableObject {
         }
         let historyIds = Set(messages.map { $0.id })
         let fresh = recovered.filter { !historyIds.contains($0.id) }
-        guard !fresh.isEmpty else {
+        // Remove the file only when every entry is COMMITTED, not merely
+        // present in memory (a failed save keeps the file as the durable copy).
+        guard recovered.contains(where: { !lastSavedMessageIDs.contains($0.id) }) else {
             try? FileManager.default.removeItem(at: pendingAmbientFileURL)
             return
         }
+        guard !fresh.isEmpty else { return }
         pendingAmbientTriggers.append(contentsOf: fresh)
         print("[ConversationManager] Recovered \(fresh.count) ambient trigger(s) from a previous process — will start an ambient turn when idle")
         // The file stays until the drain's saveConversation succeeds; the
@@ -2739,15 +2756,20 @@ class ConversationManager: ObservableObject {
             try? FileManager.default.removeItem(at: pendingMidTurnFileURL)
             return
         }
-        let known = Set(messages.map(\.id))
-        let fresh = recovered.filter { !known.contains($0.id) }
-        guard !fresh.isEmpty else {
+        // The file may go only when every queued message is COMMITTED
+        // (Codex 1a R1): a message the startup stop pass appended in memory
+        // before a failed save is not yet durable — the queue file is then
+        // its only durable copy.
+        let inMemory = Set(messages.map(\.id))
+        let fresh = recovered.filter { !inMemory.contains($0.id) }
+        let uncommitted = recovered.filter { !lastSavedMessageIDs.contains($0.id) }
+        guard !uncommitted.isEmpty else {
             try? FileManager.default.removeItem(at: pendingMidTurnFileURL)
             return
         }
-        print("[ConversationManager] Recovered \(fresh.count) queued mid-turn message(s) from before restart")
+        print("[ConversationManager] Recovered \(uncommitted.count) queued mid-turn message(s) from before restart")
         messages.append(contentsOf: fresh)
-        let held = appendHeldPreStopNotes(for: fresh)
+        let held = appendHeldPreStopNotes(for: uncommitted)
         if saveConversation() {
             try? FileManager.default.removeItem(at: pendingMidTurnFileURL)
         } else {
@@ -2756,7 +2778,7 @@ class ConversationManager: ObservableObject {
         // Held pre-stop messages are never answered (§3.9.3); an unreadable
         // stop marker means nothing recovered starts work (fail closed).
         guard !stopIntent.isUnknown else { return }
-        if activeRunId == nil, activeProcessingTask == nil, let trigger = fresh.last(where: { !held.contains($0.id) }) {
+        if activeRunId == nil, activeProcessingTask == nil, let trigger = uncommitted.last(where: { !held.contains($0.id) }) {
             statusMessage = "Generating response..."
             startActiveProcessing(for: trigger)
         }
@@ -6093,16 +6115,37 @@ class ConversationManager: ObservableObject {
         }
     }
     
-    private func stopActiveExecution(notify address: ChannelAddress? = nil) async {
-        let wasRunning = activeRunId != nil
+    /// Selftest seam: runs between the registry cutoffs and the final
+    /// run-identity check of /stop (simulates main-actor work interleaving
+    /// at those awaits, e.g. an idle drain starting a turn).
+    nonisolated(unsafe) static var stopCutoffInterleaveForTesting: (@MainActor () async -> Void)?
 
+    private func stopActiveExecution(notify address: ChannelAddress? = nil) async {
         // 1. Cut off and persist FIRST (mid-turn early wake §3.9.1): the
         //    stop marker names every unsettled agent-started item, the
         //    stopped turn's trigger and every queued pre-stop user message,
         //    before anything is cancelled. Repeated /stop appends an entry.
         //    A failed write never refuses the stop.
-        let items = await BackgroundProcessRegistry.shared.stopCutoff(turnRunId: activeRunId)
-        let runningSubagents = await SubagentBackgroundRegistry.shared.runningHandles()
+        //
+        //    The registry cutoffs are awaits; main-actor work can interleave
+        //    at them (an idle drain may start a turn, the running turn may
+        //    end). So the cutoff repeats until the run it closed admission
+        //    for is still the active run afterwards — the marker's trigger
+        //    and the cancelled task then describe the SAME run (Codex 1a R3).
+        //    Subagents: one actor step returns running runs AND finished
+        //    runs whose completion is still queued.
+        var closedRun = activeRunId
+        var items = await BackgroundProcessRegistry.shared.stopCutoff(turnRunId: closedRun)
+        var stoppedSubagents = await SubagentBackgroundRegistry.shared.stopCutoffHandleIds()
+        if let interleave = Self.stopCutoffInterleaveForTesting { await interleave() }
+        var passes = 0
+        while activeRunId != closedRun && passes < 8 {
+            passes += 1
+            closedRun = activeRunId
+            items = await BackgroundProcessRegistry.shared.stopCutoff(turnRunId: closedRun)
+            stoppedSubagents.formUnion(await SubagentBackgroundRegistry.shared.stopCutoffHandleIds())
+        }
+        let wasRunning = activeRunId != nil
         // From here to the turn cancellation below there is NO suspension
         // point: the running turn cannot drain a held message into its next
         // request between the snapshot and the cancel.
@@ -6138,7 +6181,7 @@ class ConversationManager: ObservableObject {
         // Stopped items never start work until settled — across turns (a
         // new user message never clears this) and restarts (the marker).
         stoppedJobIds.formUnion(affected)
-        stoppedSubagentHandles.formUnion(runningSubagents.map(\.id))
+        stoppedSubagentHandles.formUnion(stoppedSubagents)
 
         // 3–4. Cancel: the turn, every background subagent, EVERY
         //    main-owned bash job from any turn including long-lived ones
@@ -6153,7 +6196,9 @@ class ConversationManager: ObservableObject {
         // (In-flight archiving / user-context extraction are deliberately NOT
         // cancelled here; they run on detached tasks that continue to
         // completion so we don't lose summaries or fact extraction.)
-        let killedBackgroundSubagents = await SubagentBackgroundRegistry.shared.cancelAll()
+        let cancelledSubagents = await SubagentBackgroundRegistry.shared.cancelAllReturningIds()
+        stoppedSubagentHandles.formUnion(cancelledSubagents)
+        let killedBackgroundSubagents = cancelledSubagents.count
         let stoppedBash = await BackgroundProcessRegistry.shared.stopAllMainOwned()
 
         await toolExecutor.cancelAllRunningProcesses()
@@ -6296,36 +6341,54 @@ class ConversationManager: ObservableObject {
         var unverifiable: [UUID: String] = [:]
         var disposition: [UUID: DetachedJobRecord.Disposition] = [:]
         var lastWaking: Message? = nil
-        var appended = false
+        var needsSave = false
+        // Evidence is read from the COMMITTED view only (Codex 1a R1): a
+        // notice appended by an earlier pass whose save failed is in
+        // `messages` but proves nothing until a save carrying it succeeds.
+        let committed = committedMessages
         for record in foreign {
-            if messages.contains(where: { $0.id == record.completionMessageId }) {
+            if lastSavedMessageIDs.contains(record.completionMessageId) {
                 delivered.insert(record.jobId); continue
             }
-            let outcome = SettlementEvidence.locate(record, history: messages)
+            let stopped = stopIntent.isUnknown || record.stopId != nil || stoppedJobIds.contains(record.jobId)
+            if let pending = messages.first(where: { $0.id == record.completionMessageId }) {
+                // Appended by an earlier pass whose save failed: retry the
+                // save (never a second copy); delivered only once it lands.
+                needsSave = true
+                delivered.insert(record.jobId)
+                if !stopped { lastWaking = pending }
+                continue
+            }
+            let outcome = SettlementEvidence.locate(record, history: committed)
             switch outcome {
             case .bound(.receiptObserved):
                 notOwed.insert(record.jobId); continue
             case .unverifiable(let reason):
                 unverifiable[record.jobId] = reason; continue
             case .bound, .absent:
-                break
+                // An evidence route removed while it was unverifiable (the
+                // removal gate recorded it): the obligation stays retained.
+                if let reason = record.routeRemovedWhileUnverifiable {
+                    unverifiable[record.jobId] = reason; continue
+                }
             }
             if case .absent = outcome { disposition[record.jobId] = .orphanedMoved }
             if record.completionBody == nil { disposition[record.jobId] = .lost }
-            let stopped = stopIntent.isUnknown || record.stopId != nil || stoppedJobIds.contains(record.jobId)
             var body = record.completionBody.map { $0 + "\n\n[Recovered after a restart — this job finished before Briglia stopped.]" }
                 ?? BashCompletionNotice.lostNote(for: record)
             if stopped { body += BashCompletionNotice.stoppedNote }
             let message = Message(id: record.completionMessageId, role: .user, content: body, kind: .bashComplete)
             messages.append(message)
-            appended = true
+            needsSave = true
             delivered.insert(record.jobId)
             if !stopped { lastWaking = message }
         }
-        if appended {
+        if needsSave {
             guard saveConversation() else {
-                // Nothing is marked; the same ids are reused next time.
-                print("[ConversationManager] Job reconciliation save failed — records kept for the next start")
+                // Nothing is marked; the appended notices stay in memory
+                // under their pre-minted ids (never a second copy) and the
+                // next pass — this process or the next — retries the save.
+                print("[ConversationManager] Job reconciliation save failed — records kept for the next pass")
                 return
             }
         }
@@ -6357,57 +6420,90 @@ class ConversationManager: ObservableObject {
     // MARK: - Crash-record gate before history removal (§3.10.3 step 5)
 
     /// Before messages leave `messages` (prune strips their rounds, archive
-    /// removes them): a message carrying a crash record's typed binding, or
-    /// a job's delivered completion notice, must be durable and its record
-    /// settled accordingly (certified / delivered) with a checked write.
-    /// Conservative 1a rule: if that write fails the removal is REFUSED —
-    /// never proceed and rely on a snapshot as the only proof. Messages with
-    /// no bindings and no notices pass without touching the record file.
+    /// removes them): every owed crash record whose settlement evidence is
+    /// reachable through the COMMITTED history — inline bindings, and
+    /// snapshot-backed evidence (active-turn compaction chains, pending
+    /// recovery and interrupted outcomes, prune-archive references) reached
+    /// from the roots that still exist — is settled with a checked write
+    /// FIRST (Codex 1a R2): a receipt → nothing owed; moved/real → the
+    /// certificate is upgraded; a delivered notice leaving history →
+    /// delivered. Once the owning root is gone a restart could no longer
+    /// discover that evidence, so the record itself must carry it.
+    /// A route that is UNVERIFIABLE while its root is removed is recorded
+    /// on the record (retained obligation, never delivered as absent).
+    /// Conservative 1a rule: if the write fails the removal is REFUSED.
+    /// Messages when no record is owed pass without touching the file.
     private func settleJobEvidenceBeforeRemoval(of removed: [Message]) throws {
-        var bound: [UUID: OutcomeBinding.Kind] = [:]
+        var inlineBound = false
         for message in removed {
             for round in message.toolInteractions {
-                for result in round.results {
-                    guard let binding = result.outcomeBinding, binding.kind.carriesJob, let job = binding.jobId else { continue }
-                    if Self.certificateRank(binding.kind) > Self.certificateRank(bound[job]) { bound[job] = binding.kind }
+                for result in round.results where result.outcomeBinding?.kind.carriesJob == true && result.outcomeBinding?.jobId != nil {
+                    inlineBound = true
                 }
             }
         }
         let removedIDs = Set(removed.map(\.id))
-        guard FileManager.default.fileExists(atPath: DetachedJobStore.fileURL.path) || !bound.isEmpty else { return }
+        guard FileManager.default.fileExists(atPath: DetachedJobStore.fileURL.path) || inlineBound else { return }
         let records: [DetachedJobRecord]
         do { records = try DetachedJobStore.load() }
         catch {
-            guard bound.isEmpty else {
+            // Unreadable records: nothing can be settled, so nothing whose
+            // removal could hide evidence may leave (inline bindings, or any
+            // snapshot route from a removed root).
+            let carriesRoute = removed.contains { !$0.pruneArchiveReferences.isEmpty || $0.activeTurnCompaction != nil }
+            guard !inlineBound && !carriesRoute else {
                 throw PruneArchiveStore.Failure("Crash records unreadable (\(error.localizedDescription)); results of background jobs stay in history until they can be settled")
             }
             return
         }
-        let needsWork = records.contains { record in
-            guard record.completion == .owed else { return false }
-            if removedIDs.contains(record.completionMessageId) { return true }
-            if let kind = bound[record.jobId], Self.certificateRank(kind) > Self.certificateRank(record.certifiedKind) { return true }
-            return false
-        }
-        guard needsWork else { return }
+        let owed = records.filter { $0.completion == .owed }
+        guard !owed.isEmpty else { return }
         // The carriers must be durable before a certificate may name them.
         if !removedIDs.isSubset(of: lastSavedMessageIDs) {
             guard saveConversation() else {
                 throw PruneArchiveStore.Failure("Could not save history before settling background-job records; nothing was removed")
             }
         }
+        let committed = committedMessages
+        let remaining = committed.filter { !removedIDs.contains($0.id) }
+        var certify: [UUID: OutcomeBinding.Kind] = [:]
+        var deliveredJobs: Set<UUID> = []
+        var routeLost: [UUID: String] = [:]
+        for record in owed {
+            if removedIDs.contains(record.completionMessageId), lastSavedMessageIDs.contains(record.completionMessageId) {
+                deliveredJobs.insert(record.jobId)
+            }
+            // Resolved while the removed roots still exist.
+            switch SettlementEvidence.locate(record, history: committed) {
+            case .bound(let kind):
+                if Self.certificateRank(kind) > Self.certificateRank(record.certifiedKind) { certify[record.jobId] = kind }
+            case .unverifiable(let reason):
+                if record.routeRemovedWhileUnverifiable == nil,
+                   SettlementEvidence.locate(record, history: remaining) != .unverifiable(reason) {
+                    routeLost[record.jobId] = reason
+                }
+            case .absent:
+                break
+            }
+        }
+        guard !certify.isEmpty || !deliveredJobs.isEmpty || !routeLost.isEmpty else { return }
         do {
             try DetachedJobStore.mutate("settle-before-removal") { records in
                 for i in records.indices where records[i].completion == .owed {
-                    if removedIDs.contains(records[i].completionMessageId) {
+                    let job = records[i].jobId
+                    if deliveredJobs.contains(job) {
                         records[i].completion = .delivered
                         records[i].deliveredAt = Date()
                     }
-                    if let kind = bound[records[i].jobId],
-                       Self.certificateRank(kind) > Self.certificateRank(records[i].certifiedKind) {
+                    if let kind = certify[job], Self.certificateRank(kind) > Self.certificateRank(records[i].certifiedKind) {
                         records[i].certifiedKind = kind
                         records[i].certifiedAt = Date()
                         if kind == .receiptObserved { records[i].completion = .notOwed }
+                    }
+                    if let reason = routeLost[job], records[i].completion == .owed {
+                        records[i].routeRemovedWhileUnverifiable = reason
+                        records[i].unverifiableReason = reason
+                        records[i].unverifiableSince = records[i].unverifiableSince ?? Date()
                     }
                 }
                 records.removeAll { $0.isSettled }
@@ -6415,7 +6511,7 @@ class ConversationManager: ObservableObject {
         } catch {
             throw PruneArchiveStore.Failure("Could not settle background-job records (\(error.localizedDescription)); nothing was removed")
         }
-        let observed = Set(bound.filter { $0.value == .receiptObserved }.keys)
+        let observed = Set(certify.filter { $0.value == .receiptObserved }.keys)
         if !observed.isEmpty { Task { await BackgroundProcessRegistry.shared.acknowledgeDelivered(jobUUIDs: observed) } }
     }
 
@@ -6682,6 +6778,7 @@ class ConversationManager: ObservableObject {
                     let candidate = messages.filter { !archivedIDs.contains($0.id) }
                     try PrivateStorage.writeAtomically(try encoder.encode(candidate), to: conversationFileURL)
                     messages = candidate
+                    committedMessages = candidate
                     lastPromptTokens = nil
                     lastCompletionTokens = nil
                     cleanupOrphanedToolAttachmentSnapshots()
@@ -7096,7 +7193,7 @@ class ConversationManager: ObservableObject {
                         return placeholder
                     })
                     let pending = toolInteractions + [uncertain]
-                    try persistResponsesSalvage(pending)
+                    try persistResponsesSalvage(pending, stage: "placeholder")
                     toolInteractions = pending
                 }
                 var toolResults: [ToolResultMessage] = []
@@ -7213,7 +7310,7 @@ class ConversationManager: ObservableObject {
                 if responsesExecution != nil {
                     var completed = toolInteractions
                     completed[completed.count - 1] = interaction
-                    try persistResponsesSalvage(completed)
+                    try persistResponsesSalvage(completed, stage: "completed")
                     toolInteractions = completed
                 } else { toolInteractions.append(interaction) }
 
@@ -8159,6 +8256,7 @@ class ConversationManager: ObservableObject {
         do { try PrivateStorage.writeAtomically(try encoder.encode(candidateLive), to: conversationFileURL) }
         catch { throw PruneArchiveStore.Failure("Could not commit pruned conversation: \(error.localizedDescription). Live details and the snapshot remain; the disk file may contain the complete old or new state. No cleanup ran.") }
         messages = candidateLive
+        committedMessages = candidateLive
         var trackerPreimage = source
         applyPrunePlan(plan, to: &trackerPreimage, clearTrackers: true)
         cleanupOrphanedToolAttachmentSnapshots(additionalLiveInteractions: currentRounds)
@@ -10609,12 +10707,16 @@ class ConversationManager: ObservableObject {
             if clearWhenMissing {
                 messages = []
             }
+            committedMessages = []
             return
         }
 
         do {
             let data = try Data(contentsOf: conversationFileURL)
             messages = try JSONDecoder().decode([Message].self, from: data)
+            // What is on disk, before any load-time cleanup below (a failed
+            // cleanup save leaves the disk content as the committed view).
+            committedMessages = messages
             var dirty = false
             // Cleanup old compact tool logs from previous runs to keep context lean.
             if pruneOldToolLogMessages() > 0 { dirty = true }
@@ -10687,7 +10789,7 @@ class ConversationManager: ObservableObject {
     /// typed bindings reached durable history (a certificate is only a cache
     /// of that search; a failed write changes nothing unsafe).
     private func noteDurableSave() {
-        lastSavedMessageIDs = Set(messages.map(\.id))
+        committedMessages = messages
         let durableAcks = pendingCompletionAcks.filter { lastSavedMessageIDs.contains($0.key) }
         if !durableAcks.isEmpty {
             for id in durableAcks.keys { pendingCompletionAcks.removeValue(forKey: id) }
@@ -10721,7 +10823,7 @@ class ConversationManager: ObservableObject {
               let records = try? DetachedJobStore.load(), records.contains(where: { $0.completion == .owed }) else { return }
         var upgrades: [UUID: OutcomeBinding.Kind] = [:]
         for record in records where record.completion == .owed {
-            if case .bound(let kind) = SettlementEvidence.locate(record, history: messages),
+            if case .bound(let kind) = SettlementEvidence.locate(record, history: committedMessages),
                Self.certificateRank(kind) > Self.certificateRank(record.certifiedKind) {
                 upgrades[record.jobId] = kind
             }
@@ -12635,6 +12737,8 @@ extension ConversationManager {
         await checkBashWatchMatches()
     }
     func _testSave() -> Bool { saveConversation() }
+    func _testReconcileJobsOnly() { reconcileJobRecords() }
+    func _testSubagentDrainOnly() async { await checkBackgroundSubagentCompletions() }
     func _testReplaceMessages(_ history: [Message]) { messages = history }
     func _testStartupPasses() {
         restorePendingInboundBuffers()

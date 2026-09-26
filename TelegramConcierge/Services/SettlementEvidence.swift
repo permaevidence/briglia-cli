@@ -244,9 +244,14 @@ enum SettlementEvidence {
         }
         let legacy = legacyIds(snapshots: snapshots)
         let expired = expiredIds(snapshots: snapshots)
-        var visited = Set<UUID>()
+        // Visitation is keyed by snapshot AND effective ownership (Codex 1a
+        // R2, CX2a): reaching a snapshot first through a non-owning path must
+        // not suppress a later owning visit, which may accept its carried
+        // entries. An owning visit subsumes a non-owning one.
+        var visited: [UUID: Bool] = [:]
         func traverse(_ ref: PruneArchiveReference, owning: Bool) {
-            guard visited.insert(ref.id).inserted else { return }
+            if let seenOwning = visited[ref.id], seenOwning || !owning { return }
+            visited[ref.id] = owning
             let snapshotPath = snapshots.appendingPathComponent(ref.basename).path
             let exists = FileManager.default.fileExists(atPath: snapshotPath)
             if !exists {

@@ -4565,6 +4565,12 @@ extension ToolExecutor {
         let childExecutor = await makeChildExecutor()
 
         if runInBg {
+            // A /stop'd turn never launches background work after its
+            // cutoff (mid-turn early wake §3.9.1): its completion could
+            // otherwise arrive unstopped and start a new turn.
+            if Task.isCancelled {
+                return ToolResultMessage(toolCallId: call.id, content: "{\"error\": \"The turn was stopped; the background agent was not started.\"}")
+            }
             let handle = await SubagentBackgroundRegistry.shared.spawn(
                 invocation: invocation,
                 sessionId: args.session_id,
@@ -4645,6 +4651,9 @@ extension ToolExecutor {
         let childExecutor = await makeChildExecutor()
 
         if runInBg {
+            if Task.isCancelled {
+                return "{\"error\": \"The turn was stopped; the background agent was not started.\"}"
+            }
             let handle = await SubagentBackgroundRegistry.shared.spawn(
                 invocation: invocation,
                 sessionId: args.session_id,

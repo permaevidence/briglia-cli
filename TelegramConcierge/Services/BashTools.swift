@@ -277,6 +277,9 @@ enum BashTools {
                                   owner: String) async -> UUID? {
         guard owner == BackgroundProcessRegistry.mainOwner, let wake = WakeContext.current else { return nil }
         guard let facts = await BackgroundProcessRegistry.shared.jobFacts(handleId: handle, owner: owner) else { return nil }
+        // Already made durable by this process (a later wait on the same
+        // job needs no new write — and must not fail on a transient read).
+        if DetachedJobStore.createdThisProcess(facts.jobUUID) { return facts.jobUUID }
         do {
             if try DetachedJobStore.load().contains(where: { $0.jobId == facts.jobUUID }) { return facts.jobUUID }
             try DetachedJobStore.create(DetachedJobRecord(
@@ -298,6 +301,27 @@ enum BashTools {
             DetachedJobStore.recordSettlement(jobId: facts.jobUUID, body: body, at: Date())
         }
         return facts.jobUUID
+    }
+
+    /// A main-agent job whose wait ended while it still runs, but whose crash
+    /// record cannot be made durable (Codex 1a R4): stop it (process tree),
+    /// wait boundedly for the exit to settle, and return its terminal
+    /// snapshot with the reason — the model sees the final result, nothing
+    /// is promised, nothing runs untracked.
+    static func stopUnrecordable(handle: String, owner: String,
+                                 render: ([String: Any]) async -> OpResult) async -> OpResult {
+        await BackgroundProcessRegistry.shared.stopJob(handleId: handle, cause: .turnCancelled)
+        let deadline = Date().addingTimeInterval(12)
+        while Date() < deadline {
+            if let s = await BackgroundProcessRegistry.shared.snapshot(handleId: handle, owner: owner),
+               s.status != .running, s.exitCode != nil { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        BashJobsStats.log("detach.record_failed_stopped")
+        return await render([
+            "stopped_untracked": true,
+            "message": "The wait ended while the command was still running, but its background record could not be saved (storage problem: \(lastRecordFailure ?? "unknown")). It was stopped so it cannot run untracked; retry it, or run it with a longer wait."
+        ])
     }
 
     /// The moved-result message (§3.4, §3.13): identical for a user-message
@@ -731,10 +755,16 @@ enum BashTools {
             }
             BashJobsStats.log("managed.initial_wait_expired")
             BashJobsStats.logWait(ms: Int(waited * 1000))
-            // The job continues past its launching call: crash record
-            // (best effort — the wait already ended, so a failure only means
-            // no restart protection for this job).
+            // The job continues past its launching call only with a durable
+            // crash record (Codex 1a R4 — same policy as an explicit
+            // background launch): if the record cannot be written the job is
+            // stopped and the failure reported, never left running untracked.
             let expiredRecord = isMain ? await recordDetachedJob(handle: handle.id, launch: .waitExpired, owner: owner) : nil
+            if isMain, WakeContext.current != nil, expiredRecord == nil {
+                return await stopUnrecordable(handle: handle.id, owner: owner) { extra in
+                    await render(extra: extra.merging(["waited_seconds": waited]) { a, _ in a })
+                }
+            }
             let continueMessage = isMain
                 ? "Still running after the initial wait — the command CONTINUES. You will be notified automatically when it exits; manage it with bash_manage(handle: '\(handle.id)')."
                 : "Still running after the initial wait — the command CONTINUES (private to this run, no automatic exit notification). Collect its result with bash_manage(mode 'wait'/'output', handle: '\(handle.id)') before returning your final result; jobs still running when you finish are terminated."
@@ -875,7 +905,14 @@ enum BashTools {
             let expiredMessage = owner == BackgroundProcessRegistry.mainOwner
                 ? "Still running — this handle now refuses further waits this turn. End your turn; the result will be delivered automatically."
                 : "Still running — this handle now refuses further waits this turn. Poll mode='output' later or kill the job; there is no automatic exit notification in this context."
+            // Same rule as the launch expiry (Codex 1a R4): no durable
+            // record → the job is stopped and the failure reported.
             let expiredRecord = isMain ? await recordDetachedJob(handle: handle, launch: .waitExpired, owner: owner) : nil
+            if isMain, WakeContext.current != nil, expiredRecord == nil {
+                return await stopUnrecordable(handle: handle, owner: owner) { extra in
+                    await snapshotOrError(extra: extra.merging(["waited_seconds": waited, "effective_wait_seconds": Int(waitSecs)]) { a, _ in a })
+                }
+            }
             return await snapshotOrError(extra: [
                 "waited_seconds": waited,
                 "effective_wait_seconds": Int(waitSecs),

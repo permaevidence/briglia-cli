@@ -94,6 +94,16 @@ actor SubagentBackgroundRegistry {
         return out
     }
 
+    /// /stop cutoff (mid-turn early wake §3.9.1, Codex 1a R3): every
+    /// background run the stop affects, in ONE actor step — running handles,
+    /// run tasks not yet committed, AND finished runs whose completion is
+    /// still queued (markCompleted already removed those from `running`).
+    /// A run is always in at least one of these sets until its completion
+    /// is drained, so no completion can slip between two snapshots.
+    func stopCutoffHandleIds() -> Set<String> {
+        Set(running.keys).union(tasks.keys).union(pendingCompletions.map(\.handle.id))
+    }
+
     /// Snapshot of currently-running handles, used for diagnostics / system-prompt hints.
     func runningHandles() -> [Handle] {
         running.values.sorted { $0.startedAt < $1.startedAt }
@@ -145,8 +155,13 @@ actor SubagentBackgroundRegistry {
     /// command stops the main turn AND any parallel background work the
     /// user no longer wants to pay for.
     @discardableResult
-    func cancelAll() -> Int {
-        let count = tasks.count
+    func cancelAll() -> Int { cancelAllReturningIds().count }
+
+    /// `cancelAll`, returning the ids of the runs it cancelled (union'd into
+    /// the /stop disposition: a run spawned after the cutoff snapshot but
+    /// before this call is stopped work too).
+    func cancelAllReturningIds() -> Set<String> {
+        let ids = Set(tasks.keys).union(running.keys)
         for (_, task) in tasks {
             task.cancel()
         }
@@ -157,7 +172,7 @@ actor SubagentBackgroundRegistry {
                 await executor.cancelAllRunningProcesses()
             }
         }
-        return count
+        return ids
     }
 
     /// `/deleteuserdata` support: cancel everything and WAIT until every
@@ -197,6 +212,10 @@ actor SubagentBackgroundRegistry {
     func _testUnregister(id: String) { tasks.removeValue(forKey: id) }
     func _testEnqueueCompletion(_ completion: Completion) { pendingCompletions.append(completion) }
     func _testPendingCompletionsCount() -> Int { pendingCompletions.count }
+    /// Selftest-only: a running handle without a runner task (races /stop).
+    func _testRegisterRunning(_ handle: Handle) { running[handle.id] = handle }
+    /// Selftest-only: the production completion path for such a handle.
+    func _testMarkCompleted(id: String, result: SubagentRunner.RunResult) { markCompleted(id: id, result: result) }
 
     // MARK: - Internal
 

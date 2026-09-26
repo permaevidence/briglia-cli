@@ -67,6 +67,11 @@ struct DetachedJobRecord: Codable, Equatable {
     /// A retained obligation (§3.12.5): evidence could not be verified.
     var unverifiableReason: String?
     var unverifiableSince: Date?
+    /// Set (checked write) by the prune/archive gate when history holding
+    /// an UNVERIFIABLE evidence route for this job is removed: a receipt
+    /// could have hidden there, so the obligation stays retained and
+    /// reported — never delivered as if the evidence were absent.
+    var routeRemovedWhileUnverifiable: String?
     /// Search hint only (§3.10.1): the call that observed the receipt.
     var settlementObservedBy: String?
     let completionMessageId: UUID
@@ -169,7 +174,18 @@ enum DetachedJobStore {
             records.removeAll { $0.jobId == record.jobId }
             records.append(record)
         }
+        lock.lock(); createdIds.insert(record.jobId); lock.unlock()
     }
+
+    /// Jobs whose record THIS process created (a durable write succeeded).
+    /// A later wait on the same job reuses it without another read.
+    private nonisolated(unsafe) static var createdIds = Set<UUID>()
+    static func createdThisProcess(_ jobId: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return createdIds.contains(jobId)
+    }
+    /// Selftests simulate a new process within one binary.
+    static func forgetCreatedForTesting() { lock.lock(); createdIds.removeAll(); lock.unlock() }
 
     static func update(_ jobId: UUID, _ label: String, _ body: (inout DetachedJobRecord) -> Void) throws {
         try mutate(label) { records in
