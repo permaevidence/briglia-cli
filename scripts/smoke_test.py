@@ -2396,7 +2396,7 @@ def main():
         # Phase 11b: hidden force-detach test setting (mid-turn early wake
         # §3.13), end-to-end over the real binary with the env var the owner
         # uses on a field-trial install: a default quick command that runs
-        # longer than 8 s is moved to the background with
+        # longer than the 3 s grace is moved to the background with
         # wake_reason test_forced (no user message involved), the startup log
         # warns, and the job's completion later arrives as its own turn.
         with tg_lock:
@@ -2404,7 +2404,7 @@ def main():
             tg_state["offsets"].clear()
             llm_state["bodies"].clear()
             llm_state["tool_call_marker"] = "use-the-forced-tool"
-            llm_state["tool_command"] = "sleep 11; echo forced-detach-done"
+            llm_state["tool_command"] = "sleep 8; echo forced-detach-done"
             # Phase 11 left call_mt1 in history: a distinct id lets the mock
             # issue this phase's tool call.
             llm_state["tool_call_id"] = "call_fd1"

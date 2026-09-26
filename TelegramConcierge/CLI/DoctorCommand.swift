@@ -65,7 +65,7 @@ struct Doctor: AsyncParsableCommand {
         // stay in force-detach mode silently, and crash-record obligations
         // that could not be verified after a restart are listed.
         check("force-detach test setting is off", ok: !ForceDetach.isEnabled,
-              hint: "\(ForceDetach.environmentKey) is set: every long bash wait moves to the background after 8 s — unset it outside field trials")
+              hint: "\(ForceDetach.environmentKey) is set: every long bash wait moves to the background after \(Int(TurnWakeCenter.defaultGraceSeconds)) s — unset it outside field trials")
         do {
             let records = try DetachedJobStore.load()
             for record in records where record.unverifiableReason != nil {

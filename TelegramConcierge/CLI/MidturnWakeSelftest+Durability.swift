@@ -18,6 +18,49 @@ extension MidturnHarness {
         try await removalGateRows()
         try await subagentStopRows()
         try await expiryRecordRows()
+        try await productionGraceRows()
+    }
+
+    // MARK: GW — the production grace window (owner decision: 3 s)
+
+    /// GW1: the shipped defaults (no test override): 3 s grace, and the
+    /// forced-detach setting follows the same value. GW2: the real window,
+    /// non-sliding — a second message 1.5 s later does not extend it.
+    private func productionGraceRows() async throws {
+        let savedGrace = TurnWakeCenter.graceSecondsForTesting
+        let savedForced = MidturnWakeSignal.forcedDelaySecondsForTesting
+        TurnWakeCenter.graceSecondsForTesting = nil
+        MidturnWakeSignal.forcedDelaySecondsForTesting = nil
+        defer {
+            TurnWakeCenter.graceSecondsForTesting = savedGrace
+            MidturnWakeSignal.forcedDelaySecondsForTesting = savedForced
+        }
+        check("GW1 shipped grace is 3 s and force-detach uses the same value",
+              TurnWakeCenter.graceSeconds == 3 && MidturnWakeSignal.forcedDelaySeconds == 3,
+              "grace \(TurnWakeCenter.graceSeconds), forced \(MidturnWakeSignal.forcedDelaySeconds)")
+        let manager = await freshManager()
+        server.script([
+            Self.chatTools([(id: "gw2", name: "bash", args: ["command": "sleep 12", "wait_seconds": 60])]),
+            Self.chatText("answered"),
+        ])
+        manager._testStartTurn(for: user("long job"))
+        guard await waitForRunningJob() != nil else { check("GW2 job started", false); return }
+        let t0 = Date()
+        await manager._testDispatchUser(user("first message"))
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        await manager._testDispatchUser(user("second message 1.5 s later"))
+        _ = await waitUntil(timeout: 20) { self.server.completeRequests.count >= 2 }
+        let elapsed = Date().timeIntervalSince(t0)
+        _ = await manager._testAwaitIdle(timeout: 10)
+        let payload = parse(results(manager).first { $0.toolCallId == "gw2" }?.content ?? "")
+        // Lower bound is the window itself; the upper bound allows load but
+        // stays below 4.5 s, the value a window sliding to the second
+        // message would produce.
+        check("GW2 real 3 s window, non-sliding: moved ≈3 s after the FIRST message",
+              payload["moved_to_background"] as? Bool == true && elapsed >= 2.9 && elapsed < 4.4,
+              String(format: "%.2fs, %@", elapsed, "\(payload["wake_reason"] ?? "nil")"))
+        _ = await manager._testAwaitIdle(timeout: 10)
+        _ = await BackgroundProcessRegistry.shared.purgeAllForWipe()
     }
 
     private var historyURL: URL { StoragePaths.dataRoot.appendingPathComponent("conversation.json") }

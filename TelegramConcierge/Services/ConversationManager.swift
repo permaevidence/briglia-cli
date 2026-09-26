@@ -1180,7 +1180,7 @@ class ConversationManager: ObservableObject {
         catch { print("[ConversationManager] Settlement evidence not initialized yet: \(error.localizedDescription)") }
         SettlementEvidence.sweepOrphanSidecars()
         if ForceDetach.isEnabled {
-            print("[MidturnWake] ⚠️ \(ForceDetach.environmentKey) is set: every long bash wait moves to the background 8 s after it starts (test setting)")
+            print("[MidturnWake] ⚠️ \(ForceDetach.environmentKey) is set: every long bash wait moves to the background \(Int(TurnWakeCenter.defaultGraceSeconds)) s after it starts (test setting)")
         }
         // The job pass ends canonical recovery, against the history it just
         // saved (deferred while recovery is unresolved).

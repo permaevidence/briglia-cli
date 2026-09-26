@@ -45,7 +45,7 @@ struct WakeContext: Sendable {
 /// Hidden field-trial switch (§3.13): `BRIGLIA_MIDTURN_FORCE_DETACH=1`, read
 /// once at process start. Off = a constant `false`: no code path differs and
 /// no request byte changes. On = every eligible depth-0 bash wait gets a
-/// per-call synthetic wake 8 s after the call STARTED, without any fake user
+/// per-call synthetic wake `TurnWakeCenter.defaultGraceSeconds` (3 s) after the call STARTED, without any fake user
 /// message, generation, annotation or suppression. Deliberately an env var:
 /// neither the agent nor a copied config can switch it on, and it never
 /// travels in a Mind export. Absent from help, menus, /commands and setup.
@@ -66,9 +66,12 @@ enum ForceDetach {
 actor TurnWakeCenter {
     static let shared = TurnWakeCenter()
 
-    /// Grace window: 8 s, wait-then-check (owner decision O4). Test seam.
+    /// Grace window: 3 s, non-sliding wait-then-check (owner decision O4;
+    /// shortened from 8 s by the owner, 2026-09-26). The forced-detach
+    /// test setting uses the same value. Test seam below.
+    static let defaultGraceSeconds: Double = 3
     nonisolated(unsafe) static var graceSecondsForTesting: Double?
-    static var graceSeconds: Double { graceSecondsForTesting ?? 8 }
+    static var graceSeconds: Double { graceSecondsForTesting ?? defaultGraceSeconds }
 
     private var armedRunId: UUID?
     /// Fired but not yet consumed generations with their enqueue instants,
@@ -212,12 +215,12 @@ actor TurnWakeCenter {
 
 /// The wake signal one blocked depth-0 wait listens to: the armed turn's
 /// grace window, or — with the hidden test setting on — a per-call synthetic
-/// wake 8 s after the call started. Whichever resolves first wins; the
+/// wake after the same grace (3 s) from the call start. Whichever resolves first wins; the
 /// registry actor then decides wake vs finish exactly once.
 enum MidturnWakeSignal {
     /// Forced-detach delay after the call started (test seam).
     nonisolated(unsafe) static var forcedDelaySecondsForTesting: Double?
-    static var forcedDelaySeconds: Double { forcedDelaySecondsForTesting ?? 8 }
+    static var forcedDelaySeconds: Double { forcedDelaySecondsForTesting ?? TurnWakeCenter.defaultGraceSeconds }
 
     static func next(_ context: WakeContext) async -> MidturnWakeReason? {
         await withTaskGroup(of: MidturnWakeReason?.self) { group in
