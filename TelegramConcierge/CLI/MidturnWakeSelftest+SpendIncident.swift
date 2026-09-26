@@ -177,6 +177,7 @@ extension MidturnHarness {
         for step in ["journal-rename", "journal-new-ledger", "journal-commit"] {
             try await acceptanceCrashAt(step)
         }
+        try await rollForwardKeepsNewerLedger()
         try await chargeArrivesDuringAcceptance()
         try await moreDoesNotUnpause()
         try await nothingOpenNothingWritten()
@@ -213,6 +214,32 @@ extension MidturnHarness {
                 && journalState() == "committed" && generation == 2 && ledgerEntries().map(\.chargeId) == [pending]
                 && preservedFiles().count == 1 && accepted && after.isComplete && abs(after.today - 0.4) < 1e-9,
               "journal \(midJournal ?? "nil")→\(journalState() ?? "nil"), gen \(String(describing: generation)), entries \(ledgerEntries().count), preserved \(preservedFiles().count), accepted \(accepted), reply \(reply.prefix(100))")
+    }
+
+    /// I9b: the new generation already holds a charge that exists nowhere
+    /// else (it was only in memory; the process then died before the journal
+    /// committed): the roll-forward commits without rewriting that ledger.
+    private func rollForwardKeepsNewerLedger() async throws {
+        let manager = await freshManager()
+        try Data("{nope".utf8).write(to: ToolChargeLedger.ledgerURL)
+        let memoryOnly = UUID()
+        try DetachedJobStore.create(chargeRecord(jobId: memoryOnly))
+        struct Injected: Error {}
+        DetachedJobStore.faultForTesting = { if $0 == "charge-pending" { throw Injected() } }
+        ToolChargeLedger.faultForTesting = { if $0 == "ledger-write" { throw Injected() } }
+        _ = ToolChargeLedger.capture(jobId: memoryOnly, amountUSD: 0.7, kind: "subagent")   // held in memory
+        DetachedJobStore.faultForTesting = nil
+        _ = ToolChargeLedger.snapshot()
+        ToolChargeLedger.faultForTesting = { if $0 == "journal-commit" { throw Injected() } }
+        _ = await accept(manager)
+        let inNewGeneration = ledgerEntries().contains { $0.chargeId == memoryOnly }
+        ToolChargeLedger.faultForTesting = nil
+        ToolChargeLedger.forgetHeldForTesting()   // crash: memory lost
+        _ = ToolChargeLedger.snapshot()
+        check("I9b roll-forward after a crash keeps the newer generation (a charge only it holds survives); journal commits",
+              inNewGeneration && ledgerEntries().contains { $0.chargeId == memoryOnly } && journalState() == "committed"
+                && abs(ToolChargeLedger.snapshot().today - 0.7) < 1e-9,
+              "in new gen \(inNewGeneration), entries \(ledgerEntries().count), journal \(journalState() ?? "nil")")
     }
 
     /// I10: a charge captured between the acceptance start and the journal

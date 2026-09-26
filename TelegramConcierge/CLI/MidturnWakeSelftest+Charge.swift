@@ -27,6 +27,7 @@ extension MidturnHarness {
         try await chargeLedgerWriteFails()
         try await chargeRecordWriteFailsHeldInMemory()
         try await chargeRecordOnlyFails()
+        try await chargeHeldBlocksRetirement()
         await chargeUnionAndConflictRows()
         try await chargeCrossesCapDuringTurn()
         try await chargeUnverifiablePausesTurn()
@@ -184,6 +185,31 @@ extension MidturnHarness {
               inLedger && openIncidents().isEmpty && abs(ToolChargeLedger.snapshot().today - 0.06) < 1e-9
                 && !records().contains { $0.jobId == jobId },
               "inLedger \(inLedger), incidents \(openIncidents().map(\.id)), total \(ToolChargeLedger.snapshot().today)")
+    }
+
+    /// C3d: a charge held only in memory keeps its record from retiring even
+    /// for a job kind with no provider marker (the guard for future kinds;
+    /// subagent records are also kept by the unknown-spend rule).
+    private func chargeHeldBlocksRetirement() async throws {
+        _ = await freshManager()
+        let job = UUID()
+        var record = chargeRecord(jobId: job, completion: .delivered)
+        record.providerCalled = nil
+        record.kind = "image"
+        try DetachedJobStore.create(record)
+        struct Injected: Error {}
+        DetachedJobStore.faultForTesting = { if $0 == "charge-pending" { throw Injected() } }
+        ToolChargeLedger.faultForTesting = { if $0 == "ledger-write" { throw Injected() } }
+        let durable = ToolChargeLedger.capture(jobId: job, amountUSD: 0.08, kind: "image")
+        DetachedJobStore.faultForTesting = nil
+        ToolChargeLedger.faultForTesting = nil
+        try DetachedJobStore.retireSettled()
+        let kept = records().contains { $0.jobId == job }
+        ToolChargeLedger.settlePending()
+        ToolChargeLedger.settlePending()
+        check("C3d a memory-held charge blocks retirement; the idle retry records it, then the record retires",
+              !durable && kept && ledgerEntries().contains { $0.chargeId == job } && !records().contains { $0.jobId == job },
+              "durable \(durable), kept \(kept), ledger \(ledgerEntries().count), records \(records().count)")
     }
 
     /// C4/C5: union by chargeId and the single conservative conflict rule.
