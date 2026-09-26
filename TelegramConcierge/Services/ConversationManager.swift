@@ -169,6 +169,12 @@ class ConversationManager: ObservableObject {
     private var historyLoadFailure: String?
     /// One Telegram notice per unreadable-history episode (round 4).
     private var historyHoldNoticeSent = false
+    /// Set while history is unreadable and the held-message queue file
+    /// (pending_midturn.json) EXISTS but cannot be read or decoded: its
+    /// contents are acknowledged messages, so it is never overwritten —
+    /// new intake is refused (left unconfirmed / not accepted) until it
+    /// reads again.
+    private var heldQueueFileProblem: String?
     private var promptEstimateCorrections: [String: Double] = [:]
     private var pendingCompactionCalibration: (scope: String, estimated: Int, generation: Int)?
     private var latestEstimateScope = ""
@@ -2438,9 +2444,21 @@ class ConversationManager: ObservableObject {
     /// active-turn marker. Returns false (and rolls back) if the mirror
     /// write fails.
     private func holdInboundWhileHistoryUnreadable(_ message: Message) -> Bool {
+        // The queue file may hold messages acknowledged by an earlier
+        // process: merge it first, and never replace a file that cannot be
+        // read (the caller then refuses / leaves the update unconfirmed).
+        guard hydrateHeldQueueFromDisk() else {
+            print("[ConversationManager] Refusing to hold a new message: the held-message queue file can't be read (\(heldQueueFileProblem ?? "unknown")) — it is kept as is")
+            return false
+        }
+        if pendingMidTurnMessages.contains(where: { $0.id == message.id }) { return true }
+        let before = pendingMidTurnMessages
         pendingMidTurnMessages.append(message)
         guard persistPendingMidTurnQueue() else {
-            pendingMidTurnMessages.removeAll { $0.id == message.id }
+            // Atomic write: the file still holds `before` unless the
+            // failure came after the rename — rewrite it to be sure. Every
+            // earlier entry stays in memory and on disk.
+            pendingMidTurnMessages = before
             _ = persistPendingMidTurnQueue()
             return false
         }
@@ -2743,6 +2761,77 @@ class ConversationManager: ObservableObject {
         )
     }
 
+    private enum QueueFileState {
+        case absent
+        case readable([Message])
+        case unreadable(String)
+    }
+
+    /// Read pending_midturn.json without side effects. `absent` only when
+    /// the path provably does not exist (ENOENT); any other stat, read or
+    /// decode failure is `unreadable`.
+    private func readHeldQueueFile() -> QueueFileState {
+        let path = pendingMidTurnFileURL.path
+        var st = stat()
+        if lstat(path, &st) != 0 {
+            return errno == ENOENT ? .absent : .unreadable(String(cString: strerror(errno)))
+        }
+        guard let data = try? Data(contentsOf: pendingMidTurnFileURL) else { return .unreadable("could not be read") }
+        guard let decoded = try? JSONDecoder().decode([Message].self, from: data) else { return .unreadable("could not be decoded") }
+        return .readable(decoded)
+    }
+
+    /// While history is unreadable the durable queue file is the held
+    /// state: load it into memory (file order first, then anything only in
+    /// memory, id-deduplicated) WITHOUT admitting it to history. Returns
+    /// false — and records the problem — when the file exists but cannot
+    /// be read; the file is then left untouched.
+    @discardableResult
+    private func hydrateHeldQueueFromDisk() -> Bool {
+        switch readHeldQueueFile() {
+        case .absent:
+            heldQueueFileProblem = nil
+            return true
+        case .unreadable(let reason):
+            heldQueueFileProblem = reason
+            return false
+        case .readable(let onDisk):
+            heldQueueFileProblem = nil
+            var seen = Set<UUID>()
+            var merged: [Message] = []
+            for message in onDisk + pendingMidTurnMessages where seen.insert(message.id).inserted {
+                merged.append(message)
+            }
+            if merged.map(\.id) != pendingMidTurnMessages.map(\.id) { pendingMidTurnMessages = merged }
+            return true
+        }
+    }
+
+    private enum TurnMarkerState {
+        case absent
+        case readable(ActiveTurnMarker)
+        case unreadable
+    }
+
+    private func readActiveTurnMarkerState() -> TurnMarkerState {
+        let path = activeTurnMarkerFileURL.path
+        var st = stat()
+        if lstat(path, &st) != 0 { return errno == ENOENT ? .absent : .unreadable }
+        guard let data = try? Data(contentsOf: activeTurnMarkerFileURL),
+              let marker = try? JSONDecoder().decode(ActiveTurnMarker.self, from: data) else { return .unreadable }
+        return .readable(marker)
+    }
+
+    /// Every known /stop entry (in memory and as loaded at startup).
+    private var allStopEntries: [StopEntry] {
+        var seen = Set(stopEntries.map(\.stopId))
+        return stopEntries + stopIntent.entries.filter { seen.insert($0.stopId).inserted }
+    }
+
+    /// Selftest seam: while set, the non-empty queue write fails before
+    /// touching the file (as a failed atomic write does).
+    nonisolated(unsafe) static var heldQueueWriteFaultForTesting = false
+
     /// Write the mid-turn queue to disk (or remove the file when empty).
     /// Called on every queue mutation — enqueue, drain, follow-up drain,
     /// clear — so the file always mirrors memory. Returns false when the
@@ -2750,11 +2839,15 @@ class ConversationManager: ObservableObject {
     /// the Telegram acknowledgment).
     @discardableResult
     private func persistPendingMidTurnQueue() -> Bool {
+        // Backstop: a held-message file that could not be read holds
+        // acknowledged messages and is never replaced.
+        if historyLoadFailure != nil, heldQueueFileProblem != nil { return false }
         if pendingMidTurnMessages.isEmpty {
             try? FileManager.default.removeItem(at: pendingMidTurnFileURL)
             return true
         }
         do {
+            if Self.heldQueueWriteFaultForTesting { throw CocoaError(.fileWriteUnknown) }
             let data = try JSONEncoder().encode(pendingMidTurnMessages)
             try PrivateStorage.writeAtomically(data, to: pendingMidTurnFileURL)
             return true
@@ -2821,7 +2914,17 @@ class ConversationManager: ObservableObject {
     /// wedge every future startup); the id-dedup makes a re-consumed file
     /// harmless.
     private func recoverPersistedMidTurnMessages() {
-        guard historyLoadFailure == nil else { return }  // queue file kept until history loads
+        // While history is unreadable the queue file is kept and NOT
+        // admitted to history — but it is loaded into memory, so a new
+        // hold appends to it (never replaces it), and /stop and /status
+        // see every held message, including ones acknowledged before a
+        // restart.
+        if historyLoadFailure != nil {
+            if !hydrateHeldQueueFromDisk() {
+                showMaintenanceNotice("The file of messages held while history is unreadable can't be read (\(heldQueueFileProblem ?? "unknown")). It is kept as is; new messages are not accepted until it reads again.")
+            }
+            return
+        }
         guard let data = try? Data(contentsOf: pendingMidTurnFileURL) else { return }
         guard let recovered = try? JSONDecoder().decode([Message].self, from: data) else {
             try? FileManager.default.removeItem(at: pendingMidTurnFileURL)
@@ -3036,7 +3139,8 @@ class ConversationManager: ObservableObject {
               let trigger = messages.last(where: { $0.id == marker.triggerMessageId }) else { return }
         // A turn stopped by /stop is never resumed; with an unreadable stop
         // marker nothing is resumed (§3.9.3).
-        guard !stopIntent.isUnknown, !stopIntent.stoppedTriggerIds.contains(marker.triggerMessageId) else {
+        guard !stopIntent.isUnknown,
+              !allStopEntries.contains(where: { $0.coversInterruptedTurn(triggerId: marker.triggerMessageId, startedAt: marker.startedAt) }) else {
             print("[ConversationManager] Not resuming the interrupted turn: it was stopped by /stop (or the stop marker is unreadable)")
             return
         }
@@ -5795,6 +5899,9 @@ class ConversationManager: ObservableObject {
         if let historyLoadFailure {
             lines.append("  ⚠️ conversation history could not be read (\(historyLoadFailure)) — preserved, not overwritten; background results stay owed until it loads")
             lines.append("  ⏸ no new work starts until it loads\(pendingMidTurnMessages.isEmpty ? "" : " — \(pendingMidTurnMessages.count) message\(pendingMidTurnMessages.count == 1 ? "" : "s") held") — repair or move the file aside, then /restart")
+            if let heldQueueFileProblem {
+                lines.append("  ⚠️ the held-message file can't be read (\(heldQueueFileProblem)) — kept as is; new messages are not accepted until it reads")
+            }
         }
         if let records = try? DetachedJobStore.load() {
             for record in records where record.unverifiableReason != nil {
@@ -6246,14 +6353,32 @@ class ConversationManager: ObservableObject {
         if let records = try? DetachedJobStore.load() {
             affected.formUnion(records.filter { $0.completion == .owed }.map(\.jobId))
         }
+        // While history is unreadable the held state includes the durable
+        // queue of earlier processes (synchronous read, no suspension).
+        var heldQueueUnreadable = false
+        if historyLoadFailure != nil, !hydrateHeldQueueFromDisk() { heldQueueUnreadable = true }
         let held = pendingMidTurnMessages.filter { $0.kind == .userText }.map(\.id)
-        let trigger = wasRunning ? activeTurnTriggerMessage?.id : nil
+        var trigger = wasRunning ? activeTurnTriggerMessage?.id : nil
+        // No run: an interrupted turn preserved for resume (e.g. while
+        // history is unreadable) is stopped too. Its marker is read, not
+        // the history; an unreadable marker gets a conservative stop.
+        var stoppedPendingTurn = false
+        var turnMarkerUnreadable = false
+        if !wasRunning {
+            switch readActiveTurnMarkerState() {
+            case .absent: break
+            case .readable(let marker): trigger = marker.triggerMessageId; stoppedPendingTurn = true
+            case .unreadable: turnMarkerUnreadable = true; stoppedPendingTurn = true
+            }
+        }
         var markerFailure: String? = nil
-        if !affected.isEmpty || !held.isEmpty || trigger != nil {
+        if !affected.isEmpty || !held.isEmpty || trigger != nil || heldQueueUnreadable || turnMarkerUnreadable {
             let entry = StopEntry(stopId: UUID(), at: Date(), stoppedTurnTriggerId: trigger,
                                   heldQueueMessageIds: held, heldNoteMessageId: UUID(),
                                   affectedJobIds: affected.sorted { $0.uuidString < $1.uuidString },
-                                  affectedWatchMatchIds: items.watchMatchIds)
+                                  affectedWatchMatchIds: items.watchMatchIds,
+                                  stoppedUnreadableTurnMarker: turnMarkerUnreadable ? true : nil,
+                                  heldUnreadableQueue: heldQueueUnreadable ? true : nil)
             stopEntries.append(entry)
             do { try StopMarkerStore.append(entry) } catch {
                 markerFailure = error.localizedDescription
@@ -6308,7 +6433,9 @@ class ConversationManager: ObservableObject {
         }
 
         // 6. Reply: "stopped" only for confirmed exits.
-        var text = wasRunning ? "⛔ I stopped the current work." : (stoppedBash.isEmpty ? "I'm not doing anything at the moment." : "⛔ Stopped.")
+        var text = wasRunning ? "⛔ I stopped the current work."
+            : stoppedPendingTurn ? "⛔ I stopped the interrupted request; it won't resume."
+            : (stoppedBash.isEmpty ? "I'm not doing anything at the moment." : "⛔ Stopped.")
         if killedBackgroundSubagents > 0 {
             text += " Also stopped \(killedBackgroundSubagents) background assistant\(killedBackgroundSubagents == 1 ? "" : "s")."
         }
@@ -6327,6 +6454,9 @@ class ConversationManager: ObservableObject {
             text += held.count == 1
                 ? " I kept the message you sent before /stop for your next request."
                 : " I kept the \(held.count) messages you sent before /stop for your next request."
+        }
+        if heldQueueUnreadable {
+            text += " I couldn't read the saved held messages; they'll be kept without being answered."
         }
         if markerFailure != nil {
             text += " (I couldn't save the stop to disk — if Briglia restarts in the next moments it may resume the stopped request.)"
@@ -6372,15 +6502,17 @@ class ConversationManager: ObservableObject {
     /// affected jobs are stamped. Settled entries retire.
     private func applyPersistedStopMarker() {
         guard case .known(let entries) = stopIntent else { return }
-        let heldIds = Set(entries.flatMap(\.heldQueueMessageIds))
-        if !heldIds.isEmpty, let data = try? Data(contentsOf: pendingMidTurnFileURL),
+        let holdsAny = entries.contains { !$0.heldQueueMessageIds.isEmpty || $0.heldUnreadableQueue == true }
+        // Held messages reach history only once it loads (they stay in the
+        // queue file meanwhile — no write may replace unreadable history).
+        if holdsAny, historyLoadFailure == nil, let data = try? Data(contentsOf: pendingMidTurnFileURL),
            let queued = try? JSONDecoder().decode([Message].self, from: data) {
-            let held = queued.filter { heldIds.contains($0.id) }
+            let held = queued.filter { m in entries.contains { $0.holds(m) } }
             if !held.isEmpty {
                 for message in held where !messages.contains(where: { $0.id == message.id }) { messages.append(message) }
                 appendHeldPreStopNotes(for: held)
                 if saveConversation() {
-                    let remainder = queued.filter { !heldIds.contains($0.id) }
+                    let remainder = queued.filter { m in !entries.contains { $0.holds(m) } }
                     if remainder.isEmpty { try? FileManager.default.removeItem(at: pendingMidTurnFileURL) }
                     else if let encoded = try? JSONEncoder().encode(remainder) {
                         try? PrivateStorage.writeAtomically(encoded, to: pendingMidTurnFileURL)
@@ -6388,9 +6520,8 @@ class ConversationManager: ObservableObject {
                 }
             }
         }
-        if let data = try? Data(contentsOf: activeTurnMarkerFileURL),
-           let marker = try? JSONDecoder().decode(ActiveTurnMarker.self, from: data),
-           stopIntent.stoppedTriggerIds.contains(marker.triggerMessageId) {
+        if case .readable(let marker) = readActiveTurnMarkerState(),
+           entries.contains(where: { $0.coversInterruptedTurn(triggerId: marker.triggerMessageId, startedAt: marker.startedAt) }) {
             clearActiveTurnMarker()
         }
         let affected = stopIntent.stoppedJobIds
@@ -6635,10 +6766,10 @@ class ConversationManager: ObservableObject {
     /// never modified. Returns the held ids found in `batch`.
     @discardableResult
     private func appendHeldPreStopNotes(for batch: [Message]) -> Set<UUID> {
-        let heldIds = Set(stopEntries.flatMap(\.heldQueueMessageIds)).union(stopIntent.heldMessageIds)
-        let held = Set(batch.map(\.id)).intersection(heldIds)
+        let entries = allStopEntries
+        let held = Set(batch.filter { m in entries.contains { $0.holds(m) } }.map(\.id))
         guard !held.isEmpty else { return [] }
-        for entry in stopEntries where !Set(entry.heldQueueMessageIds).isDisjoint(with: held) {
+        for entry in entries where batch.contains(where: { held.contains($0.id) && entry.holds($0) }) {
             guard !messages.contains(where: { $0.id == entry.heldNoteMessageId }) else { continue }
             messages.append(Message(id: entry.heldNoteMessageId, role: .user,
                                     content: "[Harness note] The message(s) above were sent before /stop; Briglia stopped without acting on them.",
@@ -6666,13 +6797,37 @@ class ConversationManager: ObservableObject {
         do { records = try DetachedJobStore.load() } catch { return }  // keep entries: cannot prove settlement
         let openRecords = Set(records.filter { !$0.isSettled }.map(\.jobId))
         let queued = Set(pendingMidTurnMessages.map(\.id))
-        let markerTrigger = (try? Data(contentsOf: activeTurnMarkerFileURL))
-            .flatMap { try? JSONDecoder().decode(ActiveTurnMarker.self, from: $0) }?.triggerMessageId
+        let markerState = readActiveTurnMarkerState()
+        var markerTrigger: UUID? = nil
+        if case .readable(let marker) = markerState { markerTrigger = marker.triggerMessageId }
+        let queueFile = readHeldQueueFile()
         var remaining: [StopEntry] = []
         for entry in stopEntries {
-            let heldSettled = entry.heldQueueMessageIds.allSatisfy { lastSavedMessageIDs.contains($0) && !queued.contains($0) }
+            var heldSettled = entry.heldQueueMessageIds.allSatisfy { lastSavedMessageIDs.contains($0) && !queued.contains($0) }
                 && (entry.heldQueueMessageIds.isEmpty || lastSavedMessageIDs.contains(entry.heldNoteMessageId))
-            let turnSettled = entry.stoppedTurnTriggerId.map { $0 != markerTrigger && $0 != activeTurnTriggerMessage?.id } ?? true
+            if entry.heldUnreadableQueue == true {
+                // Settled once the queue file reads and no message it holds
+                // is still queued, and its note (if appended) is durable.
+                switch queueFile {
+                case .unreadable: heldSettled = false
+                case .absent, .readable:
+                    var onDisk: [Message] = []
+                    if case .readable(let list) = queueFile { onDisk = list }
+                    let stillQueued = (onDisk + pendingMidTurnMessages).contains { entry.holds($0) }
+                    let noteDurable = !messages.contains(where: { $0.id == entry.heldNoteMessageId })
+                        || lastSavedMessageIDs.contains(entry.heldNoteMessageId)
+                    heldSettled = heldSettled && !stillQueued && noteDurable
+                }
+            }
+            var turnSettled = entry.stoppedTurnTriggerId.map { $0 != markerTrigger && $0 != activeTurnTriggerMessage?.id } ?? true
+            if entry.stoppedUnreadableTurnMarker == true {
+                switch markerState {
+                case .absent: break
+                case .unreadable: turnSettled = false
+                case .readable(let marker):
+                    if entry.coversInterruptedTurn(triggerId: marker.triggerMessageId, startedAt: marker.startedAt) { turnSettled = false }
+                }
+            }
             let jobsSettled = entry.affectedJobIds.allSatisfy { !openRecords.contains($0) && !unsettledLiveJobs.contains($0) }
             if !(heldSettled && turnSettled && jobsSettled) { remaining.append(entry) }
         }
@@ -10877,6 +11032,7 @@ class ConversationManager: ObservableObject {
         let wasFailing = historyLoadFailure != nil
         historyLoadFailure = nil
         historyHoldNoticeSent = false
+        heldQueueFileProblem = nil
         if wasFailing { print("[ConversationManager] Conversation history readable again") }
         Task { await MaintenanceAlertCenter.shared.reportSuccess(.conversationHistory) }
     }
@@ -11358,6 +11514,7 @@ class ConversationManager: ObservableObject {
             historyLoadFailure = nil
             Task { await MaintenanceAlertCenter.shared.reportSuccess(.conversationHistory) }
         }
+        heldQueueFileProblem = nil
         clearConversation()
         if !saveConversation() { failures.append("conversation file: write failed") }
         removeAndRecreate(imagesDirectory, label: "images directory")
@@ -12892,6 +13049,10 @@ extension ConversationManager {
     func _testCheckDueReminders() async { await checkDueReminders() }
     func _testStartTurnOnly(for message: Message) { startActiveProcessing(for: message) }
     var _testHoldNoticeSent: Bool { historyHoldNoticeSent }
+    var _testInboundDurabilityFailure: Bool { inboundDurabilityFailure }
+    func _testClearInboundDurabilityFailure() { inboundDurabilityFailure = false }
+    var _testHeldQueueProblem: String? { heldQueueFileProblem }
+    func _testBackgroundStatus() async -> String? { await backgroundStatusSection() }
     func _testAwaitIdle(timeout: TimeInterval = 60) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {

@@ -303,6 +303,26 @@ struct StopEntry: Codable, Equatable {
     /// notice is still queued, owner jobs of pending watch matches.
     var affectedJobIds: [UUID]
     var affectedWatchMatchIds: [UUID]
+    /// Conservative dispositions for recovery state that could not be read
+    /// when /stop ran (absent from older markers and omitted when nil, so
+    /// existing marker bytes are unchanged):
+    /// - an active-turn marker existed but could not be read: no
+    ///   interrupted turn that started at or before `at` is ever resumed;
+    /// - the held-message queue file existed but could not be read: every
+    ///   queued user message timestamped at or before `at` is held.
+    var stoppedUnreadableTurnMarker: Bool? = nil
+    var heldUnreadableQueue: Bool? = nil
+
+    /// Whether this stop covers an interrupted turn described by a marker.
+    func coversInterruptedTurn(triggerId: UUID, startedAt: Date) -> Bool {
+        stoppedTurnTriggerId == triggerId || (stoppedUnreadableTurnMarker == true && startedAt <= at)
+    }
+
+    /// Whether this stop holds a queued user message.
+    func holds(_ message: Message) -> Bool {
+        heldQueueMessageIds.contains(message.id)
+            || (heldUnreadableQueue == true && message.kind == .userText && message.timestamp <= at)
+    }
 }
 
 /// What startup knows about earlier /stops before anything is recovered.
@@ -326,6 +346,10 @@ enum StopIntent: Equatable {
         return []
     }
     var isUnknown: Bool { if case .unknown = self { return true }; return false }
+    var entries: [StopEntry] {
+        if case .known(let entries) = self { return entries }
+        return []
+    }
 }
 
 enum StopMarkerStore {
