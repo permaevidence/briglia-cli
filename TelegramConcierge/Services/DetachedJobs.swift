@@ -15,11 +15,15 @@ import Darwin
 
 // MARK: - Crash records
 
-/// One record per registered main-agent bash job that outlived its launching
-/// call: wake-detached (§3.4), forced by the test setting (§3.13), an
-/// initial wait that expired, or an explicit background launch
-/// (wait_seconds=0). Written BEFORE the call returns its moved/handle result;
-/// if that write fails the job is not detached (a woken wait keeps waiting).
+/// One record per registered main-agent job that outlived its launching
+/// call. Bash (1a): wake-detached (§3.4), forced by the test setting
+/// (§3.13), an initial wait that expired, or an explicit background launch
+/// (wait_seconds=0). Subagents (1b, §3.5): a foreground general/custom/Web
+/// run detached by a user message (or the test setting), or an explicit
+/// background launch. Written BEFORE the call returns its moved/handle
+/// result; if that write fails the job is not detached (a woken wait keeps
+/// waiting, a woken subagent stays foreground, an explicit background
+/// launch is refused).
 struct DetachedJobRecord: Codable, Equatable {
     enum Launch: String, Codable {
         case background        // wait_seconds=0
@@ -90,7 +94,55 @@ struct DetachedJobRecord: Codable, Equatable {
     /// appended after it (or anywhere, when it is gone).
     var historyAnchorMessageId: UUID?
 
-    var isSettled: Bool { completion == .notOwed || completion == .delivered }
+    // Subagent jobs (release 1b, plan §3.5, §3.10.1). Additive and omitted
+    // when nil, so bash records keep their bytes. For a subagent `handle` is
+    // the display id (`subagent_N`) and `command` its description.
+    /// The persistent session the run works in, once known.
+    var sessionId: String? = nil
+    var subagentType: String? = nil
+    /// A provider may have been called for this job: a job that ends without
+    /// a captured charge is an unknown-amount spend incident (§3.6.3).
+    var providerCalled: Bool? = nil
+    /// The job's charge (§3.6.3): captured here FIRST (pending), then written
+    /// to the charge ledger, then flipped to recorded. A record is never
+    /// retired while its charge is pending — it may be the only durable
+    /// evidence of that spend.
+    var charge: JobCharge? = nil
+    /// The spend incident registered for a job that ended without a captured
+    /// charge (§3.6.3): set only after the incident is durable, so such a
+    /// record never retires before its unknown amount is accounted for.
+    var unknownSpendIncidentId: String? = nil
+
+    static let bashKind = "bash"
+    static let subagentKind = "subagent"
+    var isSubagent: Bool { kind == Self.subagentKind }
+
+    /// The charge is durable in the ledger (or there is none) and no copy is
+    /// held only in memory (that record may be its only trace after a crash).
+    var chargeSettled: Bool {
+        if ToolChargeLedger.isHeldInMemory(jobId) { return false }
+        if let charge { return charge.state == .recorded }
+        // No captured charge: settled only when no provider was called for
+        // this job, its real result carried the spend (certified `real`), or
+        // its unknown amount is a registered incident.
+        return providerCalled != true || certifiedKind == .real || unknownSpendIncidentId != nil
+    }
+    /// A record of a previous process whose job ended without a captured
+    /// charge: its unknown amount must become a durable incident first.
+    var needsUnknownSpendIncident: Bool {
+        providerCalled == true && charge == nil && certifiedKind != .real && unknownSpendIncidentId == nil
+    }
+    var completionSettled: Bool { completion == .notOwed || completion == .delivered }
+    var isSettled: Bool { completionSettled && chargeSettled }
+}
+
+/// One job's charge (plan §3.6.3). `chargeId` is the job id.
+struct JobCharge: Codable, Equatable {
+    enum State: String, Codable { case pending, recorded }
+    let chargeId: UUID
+    let amountUSD: Double
+    let providerReturnedAt: Date
+    var state: State
 }
 
 enum DetachedJobStore {
@@ -282,6 +334,29 @@ enum BashCompletionNotice {
         body += "\n\n[END OF BACKGROUND TASK - Check external state before repeating it. If the user asked you to notify them when this finished, tell them it was lost in a restart.]"
         return body
     }
+}
+
+/// Subagent job notices (release 1b). The live completion body is
+/// `ConversationManager.backgroundSubagentCompletionBody`; this is the note
+/// for a run whose registry state died with a previous process.
+enum SubagentCompletionNotice {
+    static func lostNote(for record: DetachedJobRecord) -> String {
+        var body = """
+        [SUBAGENT LOST]
+        handle: \(record.handle)
+        subagent_type: \(record.subagentType ?? "unknown")
+        description: \(record.command)
+        session_id: \(record.sessionId ?? "(unknown)")
+        status: lost in a restart — Briglia stopped before this background subagent's report was recorded; its session reflects its last completed run
+        """
+        if record.providerCalled == true, record.charge == nil {
+            body += "\nspend: unknown — it may have been billed"
+        }
+        body += "\n\n[END OF BACKGROUND TASK - Check its session or the files it was working on before repeating it. If the user asked you to notify them when this finished, tell them it was lost in a restart.]"
+        return body
+    }
+
+    static let stoppedNote = BashCompletionNotice.stoppedNote
 }
 
 // MARK: - /stop marker (§3.9)

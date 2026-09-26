@@ -290,6 +290,10 @@ enum SettlementEvidence {
             for ref in refs { traverse(ref, owning: true) }
         }
         if best == .receiptObserved { return .bound(.receiptObserved) }
+        // A subagent job has no receipts: a durable real result for its own
+        // job id is terminal (release 1b) — nothing stronger could hide in an
+        // unverifiable source.
+        if best == .real && record.isSubagent { return .bound(.real) }
         if let problem { return .unverifiable(problem) }
         if let best { return .bound(best) }
         return .absent

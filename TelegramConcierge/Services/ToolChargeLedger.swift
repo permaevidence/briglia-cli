@@ -1,0 +1,846 @@
+import Foundation
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
+
+// Tool-charge accounting for work that outlives its launching call (mid-turn
+// early wake plan v7 §3.6.3, release 1b; Codex V7 acceptance gate 4).
+//
+// Background and wake-detached subagents record their whole run total here,
+// once, keyed by the job id (`chargeId`), BEFORE their completion is queued.
+// The completion drain never charges, so a completion retried after a failed
+// history save can never be charged twice. Images join the same ledger later
+// (kind "image"); nothing in this file is subagent-specific.
+//
+// Durability chain per charge (each step checked, each retryable):
+//   1. the job's crash record carries the charge as `pending`;
+//   2. the charge is written to `tool-charges.json`;
+//   3. the record flips to `recorded` (and may then retire).
+// Totals are the UNION by chargeId of the ledger, pending record charges and
+// charges held only in memory (both stores failed) — one copy per chargeId,
+// with one conservative rule for conflicting copies.
+//
+// Completeness is a list of typed incidents with stable ids. A configured
+// daily/monthly cap plus an open, unaccepted incident affecting the current
+// day or month pauses paid work until repair or `/spend accept-unknown`,
+// which accepts exactly the incidents open at that moment (their unknown
+// amounts count as $0) and keeps every known charge.
+//
+// Files (data root, 0600, atomic writes, parent fsync, errors checked, never
+// in a Mind export):
+//   tool-charges.json              the ledger (never overwritten while unreadable)
+//   spend-incidents.json           incident identities and acceptances
+//   spend-acceptance-journal.json  the unreadable-ledger replacement journal
+//   tool-charges.unreadable-<episode>.json  a preserved unreadable ledger
+
+/// One ledger entry. `chargeId` is the job id.
+struct ToolChargeEntry: Codable, Equatable {
+    let chargeId: UUID
+    let amountUSD: Double
+    let providerReturnedAt: Date
+    let kind: String
+
+    func sameCharge(as other: ToolChargeEntry) -> Bool {
+        chargeId == other.chargeId && abs(amountUSD - other.amountUSD) < 1e-12
+            && abs(providerReturnedAt.timeIntervalSince(other.providerReturnedAt)) < 0.001
+    }
+}
+
+/// A typed unknown-spend incident with a stable identity (§3.6.3).
+struct SpendIncident: Codable, Equatable {
+    enum Kind: String, Codable {
+        /// A job ended (lost in a restart) after a provider may have been
+        /// called, with no captured charge. Id `unknown-amount:<jobId>`.
+        case unknownAmount
+        /// A charge held only in memory (both stores failed) was lost at a
+        /// restart. Id `memory-only:<chargeId>`.
+        case memoryOnly
+        /// `tool-charges.json` exists but cannot be read or decoded. One
+        /// EPISODE per failure period, id `ledger-unreadable:<episode uuid>`:
+        /// minted when the failure is first seen, WITHOUT reading the bytes,
+        /// and closed when the file reads again or is replaced by an accepted
+        /// generation — a later failure (even with identical bytes) is a new
+        /// episode that no earlier acceptance covers.
+        case ledgerUnreadable
+        /// The crash records (which may hold pending charges) cannot be read.
+        /// Same episode rule, id `records-unreadable:<episode uuid>`.
+        case recordsUnreadable
+    }
+    enum State: String, Codable { case open, accepted, closed }
+    let id: String
+    let kind: Kind
+    /// Day keys (`yyyy-MM-dd`) the unknown amount belongs to. Empty for the
+    /// unreadable-file kinds: while open they affect whatever day and month
+    /// is current (their prior totals are unknown).
+    var periods: [String]
+    let openedAt: Date
+    var state: State
+    var acceptedAt: Date? = nil
+    var closedAt: Date? = nil
+    var detail: String? = nil
+
+    var affectsCurrentPeriods: Bool { kind == .ledgerUnreadable || kind == .recordsUnreadable }
+    func affects(dayKey: String, monthKey: String) -> Bool {
+        affectsCurrentPeriods || periods.contains(dayKey) || periods.contains { $0.hasPrefix(monthKey + "-") }
+    }
+}
+
+enum ToolChargeLedger {
+    struct Failure: Error, LocalizedError {
+        let detail: String
+        init(_ detail: String) { self.detail = detail }
+        var errorDescription: String? { detail }
+    }
+
+    // MARK: Files
+
+    nonisolated(unsafe) static var directoryForTesting: URL?
+    /// Fault injection (tests only): called before every write/rename with an
+    /// operation label; throwing simulates a storage failure.
+    nonisolated(unsafe) static var faultForTesting: ((String) throws -> Void)?
+
+    static var directory: URL { directoryForTesting ?? StoragePaths.dataRoot }
+    static var ledgerURL: URL { directory.appendingPathComponent("tool-charges.json") }
+    static var incidentsURL: URL { directory.appendingPathComponent("spend-incidents.json") }
+    static var journalURL: URL { directory.appendingPathComponent("spend-acceptance-journal.json") }
+    static func preservedURL(episode: String) -> URL {
+        directory.appendingPathComponent("tool-charges.unreadable-\(episode).json")
+    }
+
+    /// Serializes EVERY ledger operation — charge capture and settlement,
+    /// acceptance and roll-forward, incident updates (Codex V7 gate 4: one
+    /// serialized transaction domain). Lock order: this lock, then the
+    /// crash-record lock, never the reverse.
+    private static let lock = NSRecursiveLock()
+
+    private struct LedgerFile: Codable {
+        var version = 1
+        var generation: Int
+        var entries: [ToolChargeEntry]
+        /// Second copies of a chargeId that disagreed with the entry
+        /// (kept; the snapshot counts the conservative maximum).
+        var conflicts: [ToolChargeEntry] = []
+    }
+    private struct IncidentFile: Codable {
+        var version = 1
+        var incidents: [SpendIncident]
+    }
+    private struct Journal: Codable {
+        enum State: String, Codable { case begun, committed }
+        var version = 1
+        var state: State
+        /// The ledger-unreadable episode this transaction accepts.
+        let episodeIncidentId: String
+        let preservedName: String
+        let newGeneration: Int
+        let acceptedIncidentIds: [String]
+        let at: Date
+    }
+
+    enum LedgerState {
+        case absent
+        case readable(generation: Int, entries: [ToolChargeEntry], conflicts: [ToolChargeEntry])
+        case unreadable(String)
+    }
+
+    // MARK: Memory-held charges (both stores failed)
+
+    private static let heldLock = NSLock()
+    private nonisolated(unsafe) static var held: [UUID: JobCharge] = [:]
+    /// A job whose charge is held only in memory: its crash record must not
+    /// retire (it may be the only trace of that spend after a restart).
+    static func isHeldInMemory(_ jobId: UUID) -> Bool {
+        heldLock.lock(); defer { heldLock.unlock() }
+        return held[jobId] != nil
+    }
+    static func heldCharges() -> [JobCharge] {
+        heldLock.lock(); defer { heldLock.unlock() }
+        return Array(held.values)
+    }
+    private static func hold(_ charge: JobCharge) {
+        heldLock.lock(); held[charge.chargeId] = charge; heldLock.unlock()
+    }
+    private static func release(_ id: UUID) {
+        heldLock.lock(); held.removeValue(forKey: id); heldLock.unlock()
+    }
+    /// Selftests simulate a restart (memory is lost).
+    static func forgetHeldForTesting() { heldLock.lock(); held.removeAll(); heldLock.unlock() }
+
+    /// Surfaced as a maintenance notice by the manager.
+    nonisolated(unsafe) static var lastFailure: String?
+
+    // MARK: Capture (§3.6.3 "pending charge details")
+
+    /// Record a finished job's charge: record (pending) → ledger → record
+    /// (recorded). Zero amounts are written straight as `recorded` (no ledger
+    /// entry). Returns true when the charge is durable somewhere (record or
+    /// ledger); false when it is held only in memory.
+    @discardableResult
+    static func capture(jobId: UUID, amountUSD rawAmount: Double, at date: Date = Date(), kind: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let amount = rawAmount.isFinite && rawAmount > 0 ? rawAmount : 0
+        let charge = JobCharge(chargeId: jobId, amountUSD: amount, providerReturnedAt: date,
+                               state: amount > 0 ? .pending : .recorded)
+        let entry = ToolChargeEntry(chargeId: jobId, amountUSD: amount, providerReturnedAt: date, kind: kind)
+        var found = false
+        var recordWritten = false
+        do {
+            try DetachedJobStore.mutate("charge-pending") { records in
+                guard let i = records.firstIndex(where: { $0.jobId == jobId }) else { return }
+                found = true
+                records[i].charge = charge
+            }
+            recordWritten = found
+        } catch {
+            lastFailure = "could not save a charge to the job record: \(error.localizedDescription)"
+        }
+        guard recordWritten else {
+            // Step 1 failed: try the ledger directly. The record must learn
+            // the charge before it may retire, so a copy is held in memory
+            // (recorded when the ledger took it, pending otherwise) and the
+            // idle retry writes it into the record. Both stores failing
+            // leaves the charge only in memory: counted in this process, an
+            // unknown-amount incident after a crash.
+            var inLedger = amount == 0
+            if amount > 0 { inLedger = (try? recordInLedger(entry)) != nil }
+            var heldCopy = charge
+            if inLedger { heldCopy.state = .recorded }
+            hold(heldCopy)
+            DebugTelemetry.log(.info, summary: "tool charge held in memory", detail: "job \(jobId) $\(amount), in ledger: \(inLedger)", isError: true)
+            return inLedger
+        }
+        guard amount > 0 else { return true }
+        do {
+            try recordInLedger(entry)
+            try DetachedJobStore.mutate("charge-recorded") { records in
+                guard let i = records.firstIndex(where: { $0.jobId == jobId }) else { return }
+                records[i].charge?.state = .recorded
+            }
+        } catch {
+            // Pending in the record: counted by the union, retried later.
+            lastFailure = "charge pending (\(error.localizedDescription))"
+        }
+        return true
+    }
+
+    /// Retry every pending/held charge (idle poll; Mind import Stage A).
+    /// Returns the reasons of whatever is still not recorded.
+    @discardableResult
+    static func settlePending() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        var problems: [String] = []
+        // Memory-held first: get them into their records.
+        for charge in heldCharges() {
+            var found = false
+            do {
+                try DetachedJobStore.mutate("charge-pending") { records in
+                    guard let i = records.firstIndex(where: { $0.jobId == charge.chargeId }) else { return }
+                    found = true
+                    if records[i].charge == nil || records[i].charge?.state == .pending { records[i].charge = charge }
+                }
+            } catch {
+                problems.append("charge of job \(charge.chargeId) held in memory: \(error.localizedDescription)")
+                continue
+            }
+            if found { release(charge.chargeId) }
+            else { problems.append("charge of job \(charge.chargeId) held in memory: its record is gone") }
+        }
+        let records: [DetachedJobRecord]
+        do { records = try DetachedJobStore.load() } catch {
+            problems.append("job records unreadable: \(error.localizedDescription)")
+            return problems
+        }
+        let pending = records.compactMap { record -> (UUID, JobCharge)? in
+            guard let charge = record.charge, charge.state == .pending else { return nil }
+            return (record.jobId, charge)
+        }
+        guard !pending.isEmpty else { return problems }
+        var recorded: Set<UUID> = []
+        for (jobId, charge) in pending {
+            do {
+                try recordInLedger(ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
+                                                   providerReturnedAt: charge.providerReturnedAt,
+                                                   kind: records.first { $0.jobId == jobId }?.kind ?? "subagent"))
+                recorded.insert(jobId)
+            } catch {
+                problems.append("charge of job \(jobId) still pending: \(error.localizedDescription)")
+            }
+        }
+        if !recorded.isEmpty {
+            do {
+                try DetachedJobStore.mutate("charge-recorded") { records in
+                    for i in records.indices where recorded.contains(records[i].jobId) { records[i].charge?.state = .recorded }
+                    records.removeAll { $0.isSettled }
+                }
+            } catch {
+                problems.append("could not mark recorded charges: \(error.localizedDescription)")
+            }
+        }
+        return problems
+    }
+
+    /// Mind import Stage A prerequisite (§3.6.4): every pending/held charge
+    /// recorded, or the reason the import must abort before anything changes.
+    static func settleAllBeforeReplacingHistory() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        let problems = settlePending() + registerUnknownSpendForPreviousProcesses(includeOwed: true)
+        if !heldCharges().isEmpty { return problems.first ?? "a charge is held only in memory" }
+        do {
+            let records = try DetachedJobStore.load()
+            if records.contains(where: { $0.charge?.state == .pending }) {
+                return problems.first ?? "a charge is still pending"
+            }
+            if records.contains(where: { $0.instanceId != DetachedJobStore.instanceId && $0.needsUnknownSpendIncident }) {
+                return problems.first ?? "an unknown spend amount could not be recorded"
+            }
+        } catch {
+            return "job records unreadable: \(error.localizedDescription)"
+        }
+        return nil
+    }
+
+    /// Register the unknown amount of a job of a PREVIOUS process that ended
+    /// without a captured charge (§3.6.3): an unknown-amount incident when it
+    /// never reported (lost in a restart), a memory-only incident when it
+    /// finished but its charge existed only in memory. The record is marked
+    /// only after the incident is durable (so it retires only then).
+    static func registerUnknownSpend(_ record: DetachedJobRecord) throws {
+        lock.lock(); defer { lock.unlock() }
+        // The ledger may already hold this job's charge (the record write
+        // failed but the ledger took it): then the amount is known — the
+        // record learns it instead of opening an incident.
+        if case .readable(_, let entries, _) = loadLedger(), let entry = entries.first(where: { $0.chargeId == record.jobId }) {
+            try DetachedJobStore.update(record.jobId, "charge-recovered") {
+                $0.charge = JobCharge(chargeId: entry.chargeId, amountUSD: entry.amountUSD,
+                                      providerReturnedAt: entry.providerReturnedAt, state: .recorded)
+            }
+            return
+        }
+        let id: String
+        if record.completionBody != nil || record.settledAt != nil {
+            try openMemoryOnly(chargeId: record.jobId, day: record.settledAt ?? record.startedAt,
+                               detail: "\(record.handle) finished but its charge was only in memory at a restart")
+            id = "memory-only:\(record.jobId.uuidString.lowercased())"
+        } else {
+            try openUnknownAmount(jobId: record.jobId, day: record.startedAt,
+                                  detail: "\(record.handle) was lost in a restart after a provider may have been called")
+            id = "unknown-amount:\(record.jobId.uuidString.lowercased())"
+        }
+        try DetachedJobStore.update(record.jobId, "unknown-spend") { $0.unknownSpendIncidentId = id }
+    }
+
+    /// Every previous-process record still missing its unknown-spend
+    /// incident; returns the failures (the records then stay). Owed records
+    /// are left to the startup job pass (a durable `real` result may still
+    /// settle them) unless `includeOwed` (Mind import discards them).
+    @discardableResult
+    static func registerUnknownSpendForPreviousProcesses(includeOwed: Bool = false) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        guard let records = try? DetachedJobStore.load() else { return [] }
+        var problems: [String] = []
+        for record in records where record.instanceId != DetachedJobStore.instanceId && record.needsUnknownSpendIncident
+            && (includeOwed || record.completion != .owed) {
+            do { try registerUnknownSpend(record) }
+            catch { problems.append("\(record.handle): \(error.localizedDescription)") }
+        }
+        return problems
+    }
+
+    // MARK: Ledger file
+
+    static func loadLedger() -> LedgerState {
+        let url = ledgerURL
+        var st = stat()
+        if lstat(url.path, &st) != 0 {
+            return errno == ENOENT ? .absent : .unreadable("cannot stat: \(String(cString: strerror(errno)))")
+        }
+        let data: Data
+        do { data = try Data(contentsOf: url) } catch { return .unreadable("cannot read: \(error.localizedDescription)") }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .secondsSince1970
+        guard let file = try? decoder.decode(LedgerFile.self, from: data), file.version == 1 else {
+            return .unreadable("undecodable")
+        }
+        return .readable(generation: file.generation, entries: file.entries, conflicts: file.conflicts)
+    }
+
+    private static func writeLedger(_ file: LedgerFile, label: String) throws {
+        try faultForTesting?(label)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .secondsSince1970
+        try PrivateStorage.ensureDirectory(directory)
+        try PrivateStorage.writeAtomically(try encoder.encode(file), to: ledgerURL)
+    }
+
+    /// Idempotent: an identical copy is a no-op; a different copy is a
+    /// conflict (kept, alerted, never rewrites the entry). Throws when the
+    /// ledger cannot be read (never overwritten) or written.
+    static func recordInLedger(_ entry: ToolChargeEntry) throws {
+        lock.lock(); defer { lock.unlock() }
+        try rollForwardIfNeeded()
+        var file: LedgerFile
+        switch loadLedger() {
+        case .unreadable(let reason):
+            throw Failure("tool-charges.json unreadable (\(reason)) — not overwritten")
+        case .absent:
+            // An absent ledger while an acceptance journal exists is never a
+            // pristine empty ledger (§3.6.3).
+            if FileManager.default.fileExists(atPath: journalURL.path) {
+                throw Failure("tool-charges.json missing while an acceptance journal exists — not recreated")
+            }
+            file = LedgerFile(generation: 1, entries: [])
+        case .readable(let generation, let entries, let conflicts):
+            file = LedgerFile(generation: generation, entries: entries, conflicts: conflicts)
+        }
+        if let existing = file.entries.first(where: { $0.chargeId == entry.chargeId }) {
+            // Same copy (dates compared at millisecond precision: the record
+            // and the ledger round-trip them through different encodings).
+            if existing.sameCharge(as: entry) { return }
+            guard !file.conflicts.contains(where: { $0.sameCharge(as: entry) }) else { return }
+            file.conflicts.append(entry)
+            DebugTelemetry.log(.info, summary: "tool charge conflict", detail: "\(entry.chargeId): \(existing.amountUSD) vs \(entry.amountUSD)", isError: true)
+        } else {
+            file.entries.append(entry)
+        }
+        pruneOld(&file)
+        try writeLedger(file, label: "ledger-write")
+    }
+
+    private static func pruneOld(_ file: inout LedgerFile) {
+        let now = Date()
+        file.entries.removeAll { now.timeIntervalSince($0.providerReturnedAt) > 400 * 86_400 }
+        file.conflicts.removeAll { now.timeIntervalSince($0.providerReturnedAt) > 90 * 86_400 }
+    }
+
+    // MARK: Incident registry
+
+    enum IncidentState {
+        case readable([SpendIncident])
+        case unreadable(String)
+    }
+
+    static func loadIncidents() -> IncidentState {
+        let url = incidentsURL
+        var st = stat()
+        if lstat(url.path, &st) != 0 {
+            return errno == ENOENT ? .readable([]) : .unreadable("cannot stat: \(String(cString: strerror(errno)))")
+        }
+        guard let data = try? Data(contentsOf: url) else { return .unreadable("cannot read") }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .secondsSince1970
+        guard let file = try? decoder.decode(IncidentFile.self, from: data), file.version == 1 else {
+            return .unreadable("undecodable")
+        }
+        return .readable(file.incidents)
+    }
+
+    private static func mutateIncidents(_ label: String, _ body: (inout [SpendIncident]) -> Void) throws {
+        guard case .readable(var incidents) = loadIncidents() else {
+            throw Failure("spend-incidents.json unreadable — not overwritten")
+        }
+        let before = incidents
+        body(&incidents)
+        guard incidents != before else { return }
+        // Closed/accepted incidents are kept 90 days for audit.
+        let now = Date()
+        incidents.removeAll { $0.state != .open && now.timeIntervalSince($0.closedAt ?? $0.acceptedAt ?? $0.openedAt) > 90 * 86_400 }
+        try faultForTesting?(label)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .secondsSince1970
+        try PrivateStorage.ensureDirectory(directory)
+        try PrivateStorage.writeAtomically(try encoder.encode(IncidentFile(incidents: incidents)), to: incidentsURL)
+    }
+
+    /// Open (idempotently) the unknown-amount incident of a job lost after a
+    /// provider may have been called. Checked: the caller keeps the job's
+    /// record until this succeeds.
+    static func openUnknownAmount(jobId: UUID, day: Date, detail: String) throws {
+        try openIncident(id: "unknown-amount:\(jobId.uuidString.lowercased())", kind: .unknownAmount,
+                         periods: [dayKey(day)], detail: detail)
+    }
+
+    /// A charge that existed only in memory was lost at a restart.
+    static func openMemoryOnly(chargeId: UUID, day: Date, detail: String) throws {
+        try openIncident(id: "memory-only:\(chargeId.uuidString.lowercased())", kind: .memoryOnly,
+                         periods: [dayKey(day)], detail: detail)
+    }
+
+    private static func openIncident(id: String, kind: SpendIncident.Kind, periods: [String], detail: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        try mutateIncidents("incident-open") { incidents in
+            guard !incidents.contains(where: { $0.id == id }) else { return }
+            incidents.append(SpendIncident(id: id, kind: kind, periods: periods, openedAt: Date(), state: .open, detail: detail))
+        }
+    }
+
+    /// The open episode of an unreadable-file kind, minted without reading
+    /// the failing file (Codex V7 gate 4). Returns nil (no stable identity)
+    /// when the incident registry itself cannot be updated.
+    private static func episode(_ kind: SpendIncident.Kind, detail: String) -> String? {
+        if case .readable(let incidents) = loadIncidents(),
+           let open = incidents.first(where: { $0.kind == kind && $0.state == .open }) { return open.id }
+        let prefix = kind == .ledgerUnreadable ? "ledger-unreadable" : "records-unreadable"
+        let id = "\(prefix):\(UUID().uuidString.lowercased())"
+        do {
+            try mutateIncidents("incident-open") { incidents in
+                incidents.append(SpendIncident(id: id, kind: kind, periods: [], openedAt: Date(), state: .open, detail: detail))
+            }
+        } catch {
+            return nil
+        }
+        DebugTelemetry.log(.info, summary: "spend incident opened", detail: "\(id): \(detail)", isError: true)
+        return id
+    }
+
+    /// The file reads again: its open episode (if unaccepted) closes, so a
+    /// later failure is a NEW episode.
+    private static func closeEpisodes(_ kind: SpendIncident.Kind) {
+        guard case .readable(let incidents) = loadIncidents(),
+              incidents.contains(where: { $0.kind == kind && $0.state == .open }) else { return }
+        try? mutateIncidents("incident-close") { incidents in
+            for i in incidents.indices where incidents[i].kind == kind && incidents[i].state == .open {
+                incidents[i].state = .closed
+                incidents[i].closedAt = Date()
+            }
+        }
+    }
+
+    // MARK: Snapshot (§3.6.3 "authoritative snapshot = union by chargeId")
+
+    struct Snapshot {
+        var today: Double = 0
+        var month: Double = 0
+        /// Open, unaccepted incidents affecting the current day or month.
+        var incidents: [SpendIncident] = []
+        /// Problems with no stable incident identity (the incident registry
+        /// itself cannot be updated): still incomplete, but cannot be accepted.
+        var unidentified: [String] = []
+        var isComplete: Bool { incidents.isEmpty && unidentified.isEmpty }
+        /// Charges counted from job records/memory (not yet in the ledger).
+        var pendingCount = 0
+    }
+
+    static func snapshot(referenceDate: Date = Date()) -> Snapshot {
+        lock.lock(); defer { lock.unlock() }
+        var snap = Snapshot()
+        var acceptanceInFlight = false
+        do { try rollForwardIfNeeded() } catch {
+            acceptanceInFlight = true
+            snap.unidentified.append("acceptance roll-forward: \(error.localizedDescription)")
+        }
+        var copies: [UUID: [(amount: Double, at: Date)]] = [:]
+        switch loadLedger() {
+        case .absent:
+            if FileManager.default.fileExists(atPath: journalURL.path) {
+                if let id = episode(.ledgerUnreadable, detail: "tool-charges.json missing after an accepted replacement") {
+                    _ = id
+                } else { snap.unidentified.append("tool-charges.json missing (incident registry unwritable)") }
+            } else {
+                closeEpisodes(.ledgerUnreadable)
+            }
+        case .readable(_, let entries, let conflicts):
+            // While an acceptance is still being completed its episode stays
+            // open (the roll-forward records it as accepted, not closed).
+            if !acceptanceInFlight { closeEpisodes(.ledgerUnreadable) }
+            for e in entries + conflicts { copies[e.chargeId, default: []].append((e.amountUSD, e.providerReturnedAt)) }
+        case .unreadable(let reason):
+            if episode(.ledgerUnreadable, detail: "tool-charges.json \(reason)") == nil {
+                snap.unidentified.append("tool-charges.json \(reason) (incident registry unwritable)")
+            }
+        }
+        do {
+            let records = try DetachedJobStore.load()
+            closeEpisodes(.recordsUnreadable)
+            for record in records {
+                guard let charge = record.charge, charge.state == .pending else { continue }
+                copies[charge.chargeId, default: []].append((charge.amountUSD, charge.providerReturnedAt))
+                snap.pendingCount += 1
+            }
+        } catch {
+            if episode(.recordsUnreadable, detail: error.localizedDescription) == nil {
+                snap.unidentified.append("job records unreadable (incident registry unwritable)")
+            }
+        }
+        for charge in heldCharges() {
+            copies[charge.chargeId, default: []].append((charge.amountUSD, charge.providerReturnedAt))
+            snap.pendingCount += 1
+        }
+        let today = dayKey(referenceDate)
+        let month = monthKey(referenceDate)
+        // One rule for conflicting copies (§3.6.3): the largest amount,
+        // counted in EVERY day/month any copy's timestamp falls in.
+        for (_, list) in copies {
+            let amount = list.map(\.amount).filter { $0.isFinite && $0 > 0 }.max() ?? 0
+            guard amount > 0 else { continue }
+            let days = Set(list.map { dayKey($0.at) })
+            if days.contains(today) { snap.today += amount }
+            if days.contains(where: { $0.hasPrefix(month + "-") }) { snap.month += amount }
+        }
+        switch loadIncidents() {
+        case .readable(let incidents):
+            snap.incidents = incidents.filter { $0.state == .open && $0.affects(dayKey: today, monthKey: month) }
+        case .unreadable(let reason):
+            snap.unidentified.append("spend-incidents.json \(reason)")
+        }
+        return snap
+    }
+
+    // MARK: /spend accept-unknown (§3.6.3, v7; Codex gate 4)
+
+    struct Acceptance {
+        let accepted: [SpendIncident]
+        let failure: String?
+    }
+
+    /// Accept exactly the incidents open NOW (their unknown amounts count as
+    /// $0). Known charges are kept: readable-ledger incidents are accepted in
+    /// the registry; an unreadable ledger goes through the journaled
+    /// replacement (the old file is preserved under its episode's name, the
+    /// new generation starts with every pending captured charge). Later
+    /// incidents are never covered.
+    static func acceptOpenIncidents(referenceDate: Date = Date(), channel: String) -> Acceptance {
+        lock.lock(); defer { lock.unlock() }
+        let snap = snapshot(referenceDate: referenceDate)
+        if !snap.unidentified.isEmpty {
+            return Acceptance(accepted: [], failure: "some spend problems have no stable identity yet (\(snap.unidentified.joined(separator: "; "))) — repair them first (see `briglia doctor`)")
+        }
+        let open = snap.incidents
+        guard !open.isEmpty else { return Acceptance(accepted: [], failure: nil) }
+        let ids = open.map(\.id)
+        // Unreadable ledger: the journaled replacement transaction first.
+        if let ledgerIncident = open.first(where: { $0.kind == .ledgerUnreadable }) {
+            if case .unreadable = loadLedger() {
+                do { try beginReplacement(episode: ledgerIncident.id, acceptedIds: ids) }
+                catch {
+                    // Once the journal is `begun` the acceptance is durable
+                    // and completes at the next roll-forward.
+                    let started = ((try? loadJournal()) ?? nil).map { $0.state == .begun && $0.episodeIncidentId == ledgerIncident.id } ?? false
+                    return Acceptance(accepted: [], failure: started
+                        ? "the acceptance was saved but replacing the unreadable ledger could not finish (\(error.localizedDescription)); it completes automatically at the next check"
+                        : "could not replace the unreadable ledger: \(error.localizedDescription)")
+                }
+            }
+        }
+        do {
+            try mutateIncidents("incident-accept") { incidents in
+                for i in incidents.indices where ids.contains(incidents[i].id) && incidents[i].state == .open {
+                    incidents[i].state = .accepted
+                    incidents[i].acceptedAt = Date()
+                    if incidents[i].affectsCurrentPeriods { incidents[i].closedAt = Date() }
+                }
+            }
+        } catch {
+            return Acceptance(accepted: [], failure: "could not save the acceptance: \(error.localizedDescription)")
+        }
+        DebugTelemetry.log(.info, summary: "spend accept-unknown", detail: "channel \(channel): \(ids.joined(separator: ", "))")
+        return Acceptance(accepted: open, failure: nil)
+    }
+
+    private static func loadJournal() throws -> Journal? {
+        guard FileManager.default.fileExists(atPath: journalURL.path) else { return nil }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .secondsSince1970
+        guard let data = try? Data(contentsOf: journalURL),
+              let journal = try? decoder.decode(Journal.self, from: data), journal.version == 1 else {
+            throw Failure("spend-acceptance-journal.json unreadable")
+        }
+        return journal
+    }
+
+    private static func writeJournal(_ journal: Journal, label: String) throws {
+        try faultForTesting?(label)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .secondsSince1970
+        try PrivateStorage.writeAtomically(try encoder.encode(journal), to: journalURL)
+    }
+
+    /// Step 1 (journal `begun`), then the roll-forward performs steps 2–4.
+    private static func beginReplacement(episode: String, acceptedIds: [String]) throws {
+        if let existing = try loadJournal(), existing.state == .begun {
+            throw Failure("an earlier acceptance is still being completed")
+        }
+        let previous = (try? loadJournal())??.newGeneration ?? 1
+        let episodeTag = episode.split(separator: ":").last.map(String.init) ?? UUID().uuidString.lowercased()
+        let journal = Journal(state: .begun, episodeIncidentId: episode,
+                              preservedName: preservedURL(episode: episodeTag).lastPathComponent,
+                              newGeneration: previous + 1, acceptedIncidentIds: acceptedIds, at: Date())
+        try writeJournal(journal, label: "journal-begin")
+        try rollForwardIfNeeded()
+    }
+
+    /// Complete an interrupted acceptance (every start, before every
+    /// snapshot, before every ledger write). Never reads an absent ledger as
+    /// empty while the journal is `begun`, never overwrites a newer ledger,
+    /// never overwrites a preserved file.
+    static func rollForwardIfNeeded() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard let journal = try loadJournal(), journal.state == .begun else { return }
+        let preserved = directory.appendingPathComponent(journal.preservedName)
+        let ledgerExists = FileManager.default.fileExists(atPath: ledgerURL.path)
+        if ledgerExists {
+            switch loadLedger() {
+            case .readable(let generation, _, _) where generation >= journal.newGeneration:
+                break  // step 3 already done
+            default:
+                // Step 2: preserve the unreadable (or older) ledger. Refuse to
+                // overwrite an existing preserved file.
+                guard !FileManager.default.fileExists(atPath: preserved.path) else {
+                    throw Failure("both the ledger and its preserved copy exist — left untouched")
+                }
+                try faultForTesting?("journal-rename")
+                guard rename(ledgerURL.path, preserved.path) == 0 else {
+                    throw Failure("could not preserve the unreadable ledger: \(String(cString: strerror(errno)))")
+                }
+                try PrivateStorage.fsyncDirectory(directory.path)
+            }
+        }
+        if !FileManager.default.fileExists(atPath: ledgerURL.path) {
+            // Step 3: the new generation starts with every pending captured
+            // charge (known charges carry over; the union still dedups).
+            var entries: [ToolChargeEntry] = []
+            let records = try DetachedJobStore.load()
+            for record in records {
+                if let charge = record.charge, charge.state == .pending, charge.amountUSD > 0 {
+                    entries.append(ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
+                                                   providerReturnedAt: charge.providerReturnedAt, kind: record.kind))
+                }
+            }
+            for charge in heldCharges() where charge.amountUSD > 0 && !entries.contains(where: { $0.chargeId == charge.chargeId }) {
+                entries.append(ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
+                                               providerReturnedAt: charge.providerReturnedAt, kind: "subagent"))
+            }
+            try writeLedger(LedgerFile(generation: journal.newGeneration, entries: entries), label: "journal-new-ledger")
+        }
+        // Step 4: committed (the journal is kept as the durable record).
+        var committed = journal
+        committed.state = .committed
+        try writeJournal(committed, label: "journal-commit")
+        try? mutateIncidents("incident-accept") { incidents in
+            for i in incidents.indices where journal.acceptedIncidentIds.contains(incidents[i].id) && incidents[i].state != .accepted {
+                incidents[i].state = .accepted
+                incidents[i].acceptedAt = journal.at
+                if incidents[i].affectsCurrentPeriods { incidents[i].closedAt = Date() }
+            }
+        }
+    }
+
+    // MARK: Periods (same buckets as the model-spend ledger)
+
+    static func dayKey(_ date: Date) -> String {
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 1970, c.month ?? 1, c.day ?? 1)
+    }
+    static func monthKey(_ date: Date) -> String {
+        let c = Calendar.current.dateComponents([.year, .month], from: date)
+        return String(format: "%04d-%02d", c.year ?? 1970, c.month ?? 1)
+    }
+
+    /// Human text for one incident.
+    static func describe(_ incident: SpendIncident) -> String {
+        let when = incident.periods.isEmpty ? "current totals" : incident.periods.joined(separator: ", ")
+        switch incident.kind {
+        case .unknownAmount: return "unknown amount for background job \(incident.id.dropFirst("unknown-amount:".count).prefix(8)) (\(when))"
+        case .memoryOnly: return "charge lost in a restart for job \(incident.id.dropFirst("memory-only:".count).prefix(8)) (\(when))"
+        case .ledgerUnreadable: return "tool-charges.json unreadable — earlier totals unknown (episode \(incident.id.dropFirst("ledger-unreadable:".count).prefix(8)))"
+        case .recordsUnreadable: return "background-job records unreadable — pending charges unknown (episode \(incident.id.dropFirst("records-unreadable:".count).prefix(8)))"
+        }
+    }
+
+    /// Selftests: forget process state and files (called on a scratch root).
+    static func resetForTesting() {
+        forgetHeldForTesting()
+        lastFailure = nil
+        faultForTesting = nil
+        for url in [ledgerURL, incidentsURL, journalURL] { try? FileManager.default.removeItem(at: url) }
+        if let items = try? FileManager.default.contentsOfDirectory(atPath: directory.path) {
+            for name in items where name.hasPrefix("tool-charges.unreadable-") {
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+            }
+        }
+    }
+}
+
+// MARK: - Spend gate (§3.6.3 "daily/monthly enforcement reads a fresh snapshot")
+
+/// Daily/monthly limit status from the AUTHORITATIVE snapshot: the model-spend
+/// ledger plus the tool-charge union (so a charge recorded by a detached job
+/// during a turn is visible to the next enforcement point), with its
+/// completeness. Usable from any isolation domain.
+enum SpendGate {
+    struct Status {
+        let todaySpentUSD: Double
+        let monthSpentUSD: Double
+        let dailyBaseLimitUSD: Double?
+        let monthlyBaseLimitUSD: Double?
+        let dailyExtraUSD: Double
+        let monthlyExtraUSD: Double
+        let accounting: ToolChargeLedger.Snapshot
+
+        var effectiveDailyLimitUSD: Double? { dailyBaseLimitUSD.map { $0 + dailyExtraUSD } }
+        var effectiveMonthlyLimitUSD: Double? { monthlyBaseLimitUSD.map { $0 + monthlyExtraUSD } }
+        var dailyExceeded: Bool { effectiveDailyLimitUSD.map { todaySpentUSD >= $0 } ?? false }
+        var monthlyExceeded: Bool { effectiveMonthlyLimitUSD.map { monthSpentUSD >= $0 } ?? false }
+        var capConfigured: Bool { dailyBaseLimitUSD != nil || monthlyBaseLimitUSD != nil }
+        /// A configured cap cannot be verified while accounting is
+        /// incomplete: treated like a reached cap for new paid work.
+        var unverifiable: Bool { capConfigured && !accounting.isComplete }
+    }
+
+    static let minimumLimitUSD = 0.001
+
+    static func configuredLimit(_ key: String) -> Double? {
+        guard let raw = KeychainHelper.load(key: key)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty, let parsed = Double(raw), parsed.isFinite, parsed >= minimumLimitUSD else { return nil }
+        return parsed
+    }
+
+    static func status(referenceDate: Date = Date()) -> Status {
+        let model = KeychainHelper.openRouterSpendSnapshot(referenceDate: referenceDate)
+        let extra = KeychainHelper.openRouterSpendLimitIncreaseSnapshot(referenceDate: referenceDate)
+        let tools = ToolChargeLedger.snapshot(referenceDate: referenceDate)
+        return Status(todaySpentUSD: model.today + tools.today, monthSpentUSD: model.month + tools.month,
+                      dailyBaseLimitUSD: configuredLimit(KeychainHelper.openRouterToolSpendLimitDailyUSDKey),
+                      monthlyBaseLimitUSD: configuredLimit(KeychainHelper.openRouterToolSpendLimitMonthlyUSDKey),
+                      dailyExtraUSD: extra.daily, monthlyExtraUSD: extra.monthly, accounting: tools)
+    }
+
+    /// Why new paid work must pause, or nil.
+    static func pauseReason(referenceDate: Date = Date()) -> String? {
+        let status = status(referenceDate: referenceDate)
+        if let exceeded = exceededMessage(todaySpentUSD: status.todaySpentUSD, monthSpentUSD: status.monthSpentUSD,
+                                          dailyLimitUSD: status.effectiveDailyLimitUSD,
+                                          monthlyLimitUSD: status.effectiveMonthlyLimitUSD) {
+            return exceeded
+        }
+        return status.unverifiable ? unverifiableMessage(status.accounting) : nil
+    }
+
+    static func unverifiableMessage(_ snapshot: ToolChargeLedger.Snapshot) -> String {
+        let list = (snapshot.incidents.map(ToolChargeLedger.describe) + snapshot.unidentified).joined(separator: "; ")
+        return "I paused paid work because I can't verify today's spend: \(list). Fix the file (see `briglia doctor`), or send `/spend accept-unknown` to accept that these specific amounts are unknown and continue. (`/more1`, `/more5` and `/more10` raise a limit but can't make an unknown total known.)"
+    }
+
+    static func exceededMessage(todaySpentUSD: Double, monthSpentUSD: Double,
+                                dailyLimitUSD: Double?, monthlyLimitUSD: Double?) -> String? {
+        let dailyExceeded = dailyLimitUSD.map { todaySpentUSD >= $0 } ?? false
+        let monthlyExceeded = monthlyLimitUSD.map { monthSpentUSD >= $0 } ?? false
+        guard dailyExceeded || monthlyExceeded else { return nil }
+
+        if dailyExceeded, monthlyExceeded, let dailyLimitUSD, let monthlyLimitUSD {
+            return "I paused tool usage because both spend limits were reached (today: $\(formatUSD(todaySpentUSD)) / $\(formatUSD(dailyLimitUSD)); this month: $\(formatUSD(monthSpentUSD)) / $\(formatUSD(monthlyLimitUSD))). Reply `/more1`, `/more5`, or `/more10` to temporarily raise the reached limit and keep going, or change the limits for good with `/spend daily <usd|off>` and `/spend monthly <usd|off>`."
+        }
+        if dailyExceeded, let dailyLimitUSD {
+            return "I paused tool usage because the daily spend limit was reached (today: $\(formatUSD(todaySpentUSD)) / $\(formatUSD(dailyLimitUSD))). Reply `/more1`, `/more5`, or `/more10` to temporarily raise the reached limit and keep going, or change it for good with `/spend daily <usd|off>` / `/spend monthly <usd|off>`."
+        }
+        if monthlyExceeded, let monthlyLimitUSD {
+            return "I paused tool usage because the monthly spend limit was reached (this month: $\(formatUSD(monthSpentUSD)) / $\(formatUSD(monthlyLimitUSD))). Reply `/more1`, `/more5`, or `/more10` to temporarily raise the reached limit and keep going, or change it for good with `/spend daily <usd|off>` / `/spend monthly <usd|off>`."
+        }
+        return nil
+    }
+
+    static func formatUSD(_ value: Double) -> String {
+        var formatted = String(format: "%.6f", value)
+        while formatted.contains(".") && formatted.last == "0" { formatted.removeLast() }
+        if formatted.last == "." { formatted.removeLast() }
+        return formatted
+    }
+}

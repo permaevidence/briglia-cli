@@ -65,7 +65,7 @@ struct Doctor: AsyncParsableCommand {
         // stay in force-detach mode silently, and crash-record obligations
         // that could not be verified after a restart are listed.
         check("force-detach test setting is off", ok: !ForceDetach.isEnabled,
-              hint: "\(ForceDetach.environmentKey) is set: every long bash wait moves to the background after \(Int(TurnWakeCenter.defaultGraceSeconds)) s — unset it outside field trials")
+              hint: "\(ForceDetach.environmentKey) is set: every long bash wait and eligible subagent call (not Browse) moves to the background after \(Int(TurnWakeCenter.defaultGraceSeconds)) s — unset it outside field trials")
         do {
             let records = try DetachedJobStore.load()
             for record in records where record.unverifiableReason != nil {
@@ -74,6 +74,21 @@ struct Doctor: AsyncParsableCommand {
         } catch {
             check("background-job crash records readable", ok: false,
                   hint: "\(DetachedJobStore.fileURL.path): \(error.localizedDescription) — it is never overwritten; move it aside to reset")
+        }
+        // Tool-charge accounting (§3.6.3): read-only here — the daemon owns
+        // every write (episodes, acceptance, roll-forward).
+        if case .unreadable(let reason) = ToolChargeLedger.loadLedger() {
+            check("tool-charge ledger readable", ok: false,
+                  hint: "\(ToolChargeLedger.ledgerURL.path): \(reason) — never overwritten; spend totals are incomplete. Repair or restore the file, or send /spend accept-unknown (the file is preserved)")
+        }
+        switch ToolChargeLedger.loadIncidents() {
+        case .unreadable(let reason):
+            check("spend incident registry readable", ok: false,
+                  hint: "\(ToolChargeLedger.incidentsURL.path): \(reason) — never overwritten; paid work stays paused under a configured daily/monthly cap until it reads")
+        case .readable(let incidents):
+            for incident in incidents where incident.state == .open {
+                note("spend totals incomplete: \(ToolChargeLedger.describe(incident))")
+            }
         }
         let serverStore = KeychainHelper.loadSnapshot()
         if let servers = ProviderServers.list(serverStore) {

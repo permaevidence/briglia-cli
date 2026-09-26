@@ -39,6 +39,10 @@ actor SubagentRunner {
         /// Web preset only (WEB_SUBAGENT_PLAN §4.3), validated by ToolExecutor;
         /// rendered into the task message, never into the cached prefix.
         var deliverable: WebDeliverable? = nil
+        /// Called once the run's session is known (created or resumed), so
+        /// a registry-owned run can name it in a moved result before the run
+        /// ends (mid-turn early wake §3.5). Never affects the run itself.
+        var onSessionResolved: (@Sendable (String) -> Void)? = nil
     }
 
     struct RunResult {
@@ -477,6 +481,7 @@ actor SubagentRunner {
             priorToolInteractions = session.toolInteractions
             if let webDeliverable { webLedger = WebEvidenceLedger(deliverable: webDeliverable) }
         }
+        invocation.onSessionResolved?(resolvedSessionId)
         let syntheticUser = messagesForLLM.last ?? Message(role: .user, content: taskPrompt, timestamp: HarnessClock.now())
         // The child executor's web tools consult and extend the ledger; the
         // runner persists it and applies compaction evictions (§4.2).

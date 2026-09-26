@@ -4562,7 +4562,25 @@ extension ToolExecutor {
             deliverable: deliverable.deliverable
         )
 
+        // A session still worked on by a wake-detached run cannot be resumed
+        // until its report arrives (§3.5: fail fast, never mutate it under
+        // the running run).
+        if let sid = args.session_id, !sid.isEmpty,
+           let holder = await SubagentBackgroundRegistry.shared.detachedRunHolding(sessionId: sid) {
+            return ToolResultMessage(toolCallId: call.id, content: jsonObjectString([
+                "error": "session busy: background subagent \(holder.id) is still running in session \(sid) — wait for its [SUBAGENT COMPLETE] report or cancel it with subagent_manage cancel \(holder.id)."
+            ]))
+        }
+        // Paid launch gate (§3.6.3): a reached cap or unverifiable spend
+        // (configured cap + open incident) refuses new main-agent launches.
+        if depth == 0, outputMode == .mainAgent, let pause = SpendGate.pauseReason() {
+            return ToolResultMessage(toolCallId: call.id, content: jsonObjectString(["error": pause]))
+        }
+
         let childExecutor = await makeChildExecutor()
+        // Main-agent calls inside a depth-0 call scope get crash records and
+        // may detach (mid-turn early wake 1b); everything else runs as before.
+        let wake = (depth == 0 && outputMode == .mainAgent) ? WakeContext.current : nil
 
         if runInBg {
             // A /stop'd turn never launches background work after its
@@ -4571,15 +4589,44 @@ extension ToolExecutor {
             if Task.isCancelled {
                 return ToolResultMessage(toolCallId: call.id, content: "{\"error\": \"The turn was stopped; the background agent was not started.\"}")
             }
-            let handle = await SubagentBackgroundRegistry.shared.spawn(
-                invocation: invocation,
-                sessionId: args.session_id,
-                parentTools: parentTools,
-                openRouterService: openRouter,
-                toolExecutor: childExecutor,
-                imagesDirectory: imagesDir,
-                documentsDirectory: documentsDir
-            )
+            // Crash record BEFORE the handle result is returned (§3.10.1):
+            // a background launch whose record cannot be written is refused
+            // honestly instead of running untracked.
+            var recorded: (jobId: UUID, messageId: UUID, handle: String)? = nil
+            if let wake {
+                let handleId = await SubagentBackgroundRegistry.shared.reserveHandleId()
+                let jobId = UUID(), messageId = UUID()
+                Self.beforeSubagentRecordForTesting?()
+                do {
+                    try DetachedJobStore.create(Self.subagentRecord(
+                        jobId: jobId, messageId: messageId, handle: handleId, args: args,
+                        invocation: invocation, wake: wake, launch: .background))
+                    recorded = (jobId, messageId, handleId)
+                } catch {
+                    return ToolResultMessage(toolCallId: call.id, content: jsonObjectString([
+                        "error": "could not record the background agent (storage problem: \(error.localizedDescription)) — it was not started; retry, or run it in the foreground"
+                    ]))
+                }
+            }
+            let handle: SubagentBackgroundRegistry.Handle
+            do {
+                handle = try await SubagentBackgroundRegistry.shared.spawnRecorded(
+                    invocation: invocation,
+                    sessionId: args.session_id,
+                    parentTools: parentTools,
+                    openRouterService: openRouter,
+                    toolExecutor: childExecutor,
+                    imagesDirectory: imagesDir,
+                    documentsDirectory: documentsDir,
+                    reservedId: recorded?.handle,
+                    jobId: recorded?.jobId,
+                    completionMessageId: recorded?.messageId,
+                    turnRunId: wake?.turnRunId
+                )
+            } catch {
+                if let recorded { Self.dropUnlaunchedRecord(recorded.jobId) }
+                return ToolResultMessage(toolCallId: call.id, content: "{\"error\": \"The turn was stopped; the background agent was not started.\"}")
+            }
             var payload: [String: Any] = [
                 "background": true,
                 "handle": handle.id,
@@ -4591,7 +4638,20 @@ extension ToolExecutor {
             let content = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes]))
                 .flatMap { String(data: $0, encoding: .utf8) }
                 ?? "{\"error\": \"Failed to encode background handle response\"}"
-            return ToolResultMessage(toolCallId: call.id, content: content)
+            var message = ToolResultMessage(toolCallId: call.id, content: content)
+            // The launch returned while the run keeps going: bound `moved`
+            // for its job (its completion is owed), like a bash launch.
+            if let recorded { message.outcomeBinding = OutcomeBinding(kind: .moved, jobId: recorded.jobId, fingerprint: wake?.fingerprint) }
+            return message
+        }
+
+        // Detachable foreground run (§3.5): general-purpose, custom and Web.
+        // Browse — and any agent whose tools can operate the browser — stays
+        // blocking in this release (the browser lease/reset is not accepted).
+        if let wake, Self.subagentDetachEligible(args.subagent_type) {
+            return await runDetachableForeground(call: call, args: args, invocation: invocation,
+                                                 wake: wake, parentTools: parentTools, openRouter: openRouter,
+                                                 childExecutor: childExecutor, imagesDir: imagesDir, documentsDir: documentsDir)
         }
 
         let runner = SubagentRunner()
@@ -4609,6 +4669,175 @@ extension ToolExecutor {
             content: result.asJSON(),
             spendUSD: result.spendUSD > 0 ? result.spendUSD : nil
         )
+    }
+
+    /// Whether a main-agent foreground run of this type may move to the
+    /// background on a mid-turn wake (1b). Browse never does, and neither
+    /// does any agent whose routed MCP surface reaches the managed browser
+    /// (the browser ownership lease and verified reset ship with phase 2).
+    static func subagentDetachEligible(_ typeName: String) -> Bool {
+        if let override = detachEligibilityOverrideForTesting?(typeName) { return override }
+        guard let type = SubagentTypes.find(name: typeName) else { return false }
+        return subagentDetachEligible(type: type)
+    }
+
+    /// Selftest seam: runs just before a subagent crash record is written
+    /// (a /stop can be made to land in the detach/launch commit window).
+    nonisolated(unsafe) static var beforeSubagentRecordForTesting: (() -> Void)?
+
+    /// Selftest seam: force a type's eligibility (nil = production rule).
+    nonisolated(unsafe) static var detachEligibilityOverrideForTesting: ((String) -> Bool?)?
+
+    static func subagentDetachEligible(type: SubagentType) -> Bool {
+        if type.builtInRole == .browser { return false }
+        if type.isWebResearcher || type.forbidMCP { return true }
+        let patterns = MCPAgentRouting.effectivePatterns(forAgent: type.name, fallbackPatterns: type.mcpToolPatterns)
+        let browserTools = ["mcp__playwright__browser_navigate", "mcp__playwright__browser_click",
+                            "mcp__playwright__browser_snapshot"]
+        // Conservative: a pattern that could reach the managed browser even
+        // when Playwright is not installed right now (so the live surface
+        // cannot resolve it) still makes the agent ineligible.
+        let textual: (String) -> Bool = { pattern in
+            let p = pattern.lowercased()
+            return p.contains("playwright") || p == "*" || p == "mcp__*" || p == "mcp__*__*"
+        }
+        return !patterns.contains { pattern in
+            textual(pattern) || browserTools.contains { MCPAgentRouting.matches(pattern: pattern, name: $0) }
+        }
+    }
+
+    /// The crash record of a main-agent subagent job (§3.10.1).
+    static func subagentRecord(jobId: UUID, messageId: UUID, handle: String, args: SubagentInvocationArguments,
+                               invocation: SubagentRunner.Invocation, wake: WakeContext,
+                               launch: DetachedJobRecord.Launch, sessionId: String? = nil,
+                               startedAt: Date = Date()) -> DetachedJobRecord {
+        var record = DetachedJobRecord(
+            jobId: jobId, instanceId: DetachedJobStore.instanceId, turnRunId: wake.turnRunId,
+            toolCallId: wake.callId, callFingerprint: wake.fingerprint, handle: handle,
+            command: invocation.description, description: invocation.description, workdir: nil,
+            startedAt: startedAt, launch: launch, completionMessageId: messageId,
+            historyAnchorMessageId: wake.historyAnchorMessageId)
+        record.kind = DetachedJobRecord.subagentKind
+        record.subagentType = invocation.subagentType
+        record.sessionId = sessionId ?? args.session_id
+        // A provider is called as soon as the run starts: a record that ends
+        // without a captured charge is an unknown-amount incident.
+        record.providerCalled = true
+        return record
+    }
+
+    /// A record written for a launch that never happened (refused by /stop
+    /// admission, or a detach that did not commit): best effort removal. If
+    /// it fails, the record stays owed and a restart settles it (a `real`
+    /// binding, or one lost-job note).
+    static func dropUnlaunchedRecord(_ jobId: UUID) {
+        do {
+            try DetachedJobStore.mutate("drop-unlaunched") { records in records.removeAll { $0.jobId == jobId } }
+        } catch {
+            print("[ToolExecutor] could not drop an unlaunched job record \(jobId): \(error.localizedDescription)")
+        }
+    }
+
+    /// Run a detachable foreground subagent (§3.5). One registry state
+    /// machine decides finish vs wake; a woken run detaches only once its
+    /// crash record is durable (otherwise it stays foreground, as for bash).
+    private func runDetachableForeground(
+        call: ToolCall, args: SubagentInvocationArguments, invocation: SubagentRunner.Invocation,
+        wake: WakeContext, parentTools: [ToolDefinition], openRouter: OpenRouterService,
+        childExecutor: ToolExecutor, imagesDir: URL, documentsDir: URL
+    ) async -> ToolResultMessage {
+        let registry = SubagentBackgroundRegistry.shared
+        let startedAt = Date()
+        let handle: SubagentBackgroundRegistry.Handle
+        do {
+            handle = try await registry.launchForeground(
+                invocation: invocation, sessionId: args.session_id, parentTools: parentTools,
+                openRouterService: openRouter, toolExecutor: childExecutor,
+                imagesDirectory: imagesDir, documentsDirectory: documentsDir, turnRunId: wake.turnRunId)
+        } catch {
+            return ToolResultMessage(toolCallId: call.id, content: "{\"error\": \"The turn was stopped; the agent was not started.\"}")
+        }
+        func real(_ result: SubagentRunner.RunResult, bound jobId: UUID?) -> ToolResultMessage {
+            var message = ToolResultMessage(toolCallId: call.id, content: result.asJSON(),
+                                            spendUSD: result.spendUSD > 0 ? result.spendUSD : nil)
+            // A record was written for this run: its real outcome is this
+            // result (settles the record; no completion is owed).
+            if let jobId { message.outcomeBinding = OutcomeBinding(kind: .real, jobId: jobId, fingerprint: wake.fingerprint) }
+            return message
+        }
+        var listen: WakeContext? = wake
+        while true {
+            switch await registry.awaitForeground(id: handle.id, wake: listen) {
+            case .completed(let result):
+                return real(result, bound: nil)
+            case .woken(let reason):
+                let jobId = UUID(), messageId = UUID()
+                let session = await registry.sessionOfRun(id: handle.id)
+                Self.beforeSubagentRecordForTesting?()
+                do {
+                    try DetachedJobStore.create(Self.subagentRecord(
+                        jobId: jobId, messageId: messageId, handle: handle.id, args: args,
+                        invocation: invocation, wake: wake,
+                        launch: reason == .testForced ? .forcedDetach : .wakeDetached,
+                        sessionId: session, startedAt: startedAt))
+                } catch {
+                    // §3.5: the wake is declined for this call; the run stays
+                    // foreground and the call keeps waiting for its result.
+                    BashTools.lastRecordFailure = error.localizedDescription
+                    DebugTelemetry.log(.info, summary: "could not record background agent \(handle.id)",
+                                       detail: error.localizedDescription, isError: true)
+                    await registry.abortDetach(id: handle.id)
+                    listen = nil
+                    continue
+                }
+                switch await registry.commitDetach(id: handle.id, jobId: jobId, completionMessageId: messageId) {
+                case .completed(let result):
+                    // Finished while the record was written: an ordinary
+                    // foreground result (its spend travels on it). The record
+                    // was never needed; drop it (a failed drop leaves it owed
+                    // and the `real` binding settles it after a restart).
+                    Self.dropUnlaunchedRecord(jobId)
+                    return real(result, bound: jobId)
+                case .refused:
+                    Self.dropUnlaunchedRecord(jobId)
+                    listen = nil
+                    continue
+                case .detached(let detached):
+                    if reason == .testForced {
+                        DebugTelemetry.log(.info, summary: "midturnForcedDetach Agent \(detached.id)",
+                                           detail: "elapsed \(Int(Date().timeIntervalSince(startedAt)))s")
+                    }
+                    var message = ToolResultMessage(toolCallId: call.id, content: Self.movedAgentResult(
+                        handle: detached, args: args, reason: reason, elapsed: Date().timeIntervalSince(startedAt)))
+                    message.outcomeBinding = OutcomeBinding(kind: .moved, jobId: jobId, fingerprint: wake.fingerprint)
+                    return message
+                }
+            }
+        }
+    }
+
+    /// The moved result of a detached subagent (§3.5; honest about D8: the
+    /// report arrives only once the agent is idle after this turn).
+    static func movedAgentResult(handle: SubagentBackgroundRegistry.Handle, args: SubagentInvocationArguments,
+                                 reason: MidturnWakeReason, elapsed: TimeInterval) -> String {
+        let clause = reason == .testForced
+            ? "because background-detach test mode is on"
+            : "because a user message arrived"
+        var payload: [String: Any] = [
+            "status": "moved_to_background",
+            "handle": handle.id,
+            "subagent_type": handle.subagentType,
+            "description": handle.description,
+            "elapsed_seconds": Int(elapsed.rounded()),
+            "wake_reason": reason.rawValue,
+            "note": "Still running in the background \(clause). Its [SUBAGENT COMPLETE] report is delivered automatically once you are idle after this turn — you cannot wait for it inside this turn. It may still be changing files; don't edit the files it is working on or resume its session until the report arrives. subagent_manage cancel \(handle.id) stops it."
+        ]
+        if let sid = handle.sessionId {
+            payload["session_id"] = sid
+            payload["is_new_session"] = args.session_id == nil
+        }
+        return (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{\"status\": \"moved_to_background\"}"
     }
 
     func executeAgent(_ call: ToolCall) async -> String {

@@ -260,6 +260,10 @@ class ConversationManager: ObservableObject {
     /// job. Acknowledged (registry + crash record) only after a save that
     /// carried the message succeeded (§3.10.3).
     private var pendingCompletionAcks: [UUID: UUID] = [:]
+    /// Subagent completions appended to `messages` awaiting a durable save
+    /// (release 1b): message id → the run's job id (nil for an unrecorded
+    /// run). Acknowledged in the registry by message id after the save.
+    private var pendingSubagentAcks: [UUID: UUID?] = [:]
     /// Items a /stop affected (§3.9.2): their completions and watch matches
     /// are appended to history WITHOUT starting a turn, until settled —
     /// never cleared by a new user turn.
@@ -1100,6 +1104,14 @@ class ConversationManager: ObservableObject {
         let monthlyBaseLimitUSD: Double?
         let dailyExtraUSD: Double
         let monthlyExtraUSD: Double
+        /// Tool-charge accounting completeness (mid-turn early wake §3.6.3).
+        var accounting = ToolChargeLedger.Snapshot()
+
+        /// A configured daily/monthly cap cannot be verified while accounting
+        /// is incomplete: new paid work pauses as if the cap were reached.
+        var unverifiable: Bool {
+            (dailyBaseLimitUSD != nil || monthlyBaseLimitUSD != nil) && !accounting.isComplete
+        }
 
         var effectiveDailyLimitUSD: Double? {
             dailyBaseLimitUSD.map { $0 + dailyExtraUSD }
@@ -1238,7 +1250,7 @@ class ConversationManager: ObservableObject {
         catch { print("[ConversationManager] Settlement evidence not initialized yet: \(error.localizedDescription)") }
         SettlementEvidence.sweepOrphanSidecars()
         if ForceDetach.isEnabled {
-            print("[MidturnWake] ⚠️ \(ForceDetach.environmentKey) is set: every long bash wait moves to the background \(Int(TurnWakeCenter.defaultGraceSeconds)) s after it starts (test setting)")
+            print("[MidturnWake] ⚠️ \(ForceDetach.environmentKey) is set: every long bash wait and eligible subagent call (not Browse) moves to the background \(Int(TurnWakeCenter.defaultGraceSeconds)) s after it starts (test setting)")
         }
         // The job pass ends canonical recovery, against the history it just
         // saved (deferred while recovery is unresolved).
@@ -1591,6 +1603,11 @@ class ConversationManager: ObservableObject {
 
                     // Check for completed background bash processes
                     await checkBackgroundBashCompletions()
+
+                    // Retry pending tool charges and register the unknown
+                    // spend of jobs lost in a restart (§3.6.3), before the
+                    // completions they belong to are delivered.
+                    settleToolCharges()
 
                     // Check for completed background subagents
                     await checkBackgroundSubagentCompletions()
@@ -2682,15 +2699,26 @@ class ConversationManager: ObservableObject {
     /// rendered and the annotation bytes are unchanged).
     private func wakeNoteStatus(movedThisRound: Set<UUID>) async -> HarnessBackgroundStatus? {
         let running = await BackgroundProcessRegistry.shared.runningMainOwnedJobs()
-        guard !running.isEmpty else { return nil }
-        let items = running.prefix(HarnessBackgroundStatus.maxItems).map { job -> HarnessBackgroundStatus.Item in
+        let subagents = await SubagentBackgroundRegistry.shared.runningHandles()
+        guard !running.isEmpty || !subagents.isEmpty else { return nil }
+        var items = running.map { job -> HarnessBackgroundStatus.Item in
             let command = job.command.count > 80 ? String(job.command.prefix(80)) + "…" : job.command
             var detail = Self.formatShortDuration(job.runningForSeconds)
             if let workdir = job.workdir, !workdir.isEmpty { detail += ", in \(Self.abbreviatedPath(workdir))" }
             detail += movedThisRound.contains(job.jobUUID) ? ", moved to the background" : ", running in the background"
             return .init(label: "bash \(job.handle) \(Self.jsonQuoted(command))", detail: detail)
         }
-        let status = HarnessBackgroundStatus(items: Array(items))
+        // Background and wake-detached subagents (1b). Descriptions are
+        // model-authored: JSON-quoted here, neutralized by the renderer.
+        for handle in subagents {
+            let description = handle.description.count > 80 ? String(handle.description.prefix(80)) + "…" : handle.description
+            let kind = SubagentTypes.find(name: handle.subagentType)?.isWebResearcher == true
+                ? "Web research \(handle.id)" : "subagent \(handle.id) (\(handle.subagentType))"
+            var detail = Self.formatShortDuration(Int(Date().timeIntervalSince(handle.startedAt)))
+            detail += handle.jobId.map { movedThisRound.contains($0) } == true ? ", moved to the background" : ", running in the background"
+            items.append(.init(label: "\(kind) \(Self.jsonQuoted(description))", detail: detail))
+        }
+        let status = HarnessBackgroundStatus(items: Array(items.prefix(HarnessBackgroundStatus.maxItems)))
         return status.isValid ? status : nil
     }
 
@@ -2968,10 +2996,12 @@ class ConversationManager: ObservableObject {
     /// conversation is loaded and before the first poll tick. Messages whose
     /// id already exists in history are skipped — that covers a crash in the
     /// window between a drain's saveConversation and the queue-file clear.
-    /// The queue file is deleted only after the conversation save succeeds
-    /// (an undecodable file is deleted immediately — a poison entry must not
-    /// wedge every future startup); the id-dedup makes a re-consumed file
-    /// harmless.
+    /// The queue file is deleted only after the conversation save succeeds;
+    /// the id-dedup makes a re-consumed file harmless. A file that exists
+    /// but cannot be read or decoded is NEVER deleted or overwritten (it may
+    /// hold acknowledged messages): it is kept byte for byte, reported, and
+    /// no new work starts until it reads or the owner moves it aside
+    /// (mid-turn early wake 1a, round 6).
     private func recoverPersistedMidTurnMessages() {
         // While history is unreadable the queue file is kept and NOT
         // admitted to history — but it is loaded into memory, so a new
@@ -5969,8 +5999,11 @@ class ConversationManager: ObservableObject {
         if !jobs.isEmpty { lines.append("  (/stop stops all of these, including long-running ones)") }
         let subagents = await SubagentBackgroundRegistry.shared.runningHandles()
         for handle in subagents.prefix(5) {
-            lines.append("  • subagent \(handle.id) (\(handle.subagentType)) — \(Self.formatShortDuration(Int(Date().timeIntervalSince(handle.startedAt))))")
+            // Wake-detached runs (1b) say so: they were moved out of a turn.
+            let moved = handle.detached ? ", moved to the background" : ""
+            lines.append("  • subagent \(handle.id) (\(handle.subagentType)) — \(Self.formatShortDuration(Int(Date().timeIntervalSince(handle.startedAt))))\(moved)")
         }
+        if subagents.count > 5 { lines.append("  • … and \(subagents.count - 5) more subagents") }
         if let historyLoadFailure {
             lines.append("  ⚠️ conversation history could not be read (\(historyLoadFailure)) — preserved, not overwritten; background results stay owed until it loads")
             lines.append("  ⏸ no new work starts until it loads\(pendingMidTurnMessages.isEmpty ? "" : " — \(pendingMidTurnMessages.count) message\(pendingMidTurnMessages.count == 1 ? "" : "s") held") — repair or move the file aside, then /restart")
@@ -5985,6 +6018,7 @@ class ConversationManager: ObservableObject {
                 lines.append("  ⚠️ result of \(record.handle) could not be verified after a restart (\(record.unverifiableReason ?? "")) — kept for inspection")
             }
         }
+        for line in spendIncidentLines(currentSpendLimitStatus(referenceDate: Date())) { lines.append("  " + line) }
         guard !lines.isEmpty else { return nil }
         return "Running in the background:\n" + lines.joined(separator: "\n")
     }
@@ -6321,6 +6355,10 @@ class ConversationManager: ObservableObject {
             try? await sendText(spendSnapshotText())
             return
         }
+        if argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "accept-unknown" {
+            await acceptUnknownSpend()
+            return
+        }
         switch SpendLimitCommand.parse(argument) {
         case .failure(let why):
             try? await sendText("✖ \(why.description)\n\(SpendLimitCommand.usage)")
@@ -6345,11 +6383,32 @@ class ConversationManager: ObservableObject {
         }
     }
 
+    /// `/spend accept-unknown` (hidden owner command, §3.6.3 v7; Codex V7
+    /// gate 4): accept EXACTLY the spend incidents open now — their unknown
+    /// amounts count as $0; every known charge is kept; later incidents are
+    /// not covered. Never automatic, never reachable by the agent. Logged.
+    private func acceptUnknownSpend() async {
+        let channel = lastUserChannelAddress?.kind.rawValue ?? "unknown"
+        let result = ToolChargeLedger.acceptOpenIncidents(referenceDate: Date(), channel: channel)
+        let text: String
+        if let failure = result.failure {
+            text = "✖ \(failure)"
+            showMaintenanceNotice("/spend accept-unknown failed: \(failure)")
+        } else if result.accepted.isEmpty {
+            text = "Nothing to accept — no unknown spend is open."
+        } else {
+            let lines = result.accepted.map { "• " + ToolChargeLedger.describe($0) }
+            text = (["✅ Accepted as $0 (known charges kept):"] + lines + [spendSnapshotText()]).joined(separator: "\n")
+            print("[ConversationManager] /spend accept-unknown: \(result.accepted.map(\.id).joined(separator: ", "))")
+        }
+        try? await sendText(text)
+    }
+
     private func spendSnapshotText() -> String {
         let nativeNotice = ProviderProfiles.usesResponses
             ? ["Responses model costs are not included in these totals or caps. Set a budget in your API provider account; these limits do not cap total Responses spending."] : []
-        let snapshot = KeychainHelper.openRouterSpendSnapshot(referenceDate: Date())
         let status = currentSpendLimitStatus(referenceDate: Date())
+        let snapshot = (today: status.todaySpentUSD, month: status.monthSpentUSD)
         let turnCap = configuredToolSpendLimitPerTurnUSD()
         func limitText(_ base: Double?, extra: Double) -> String {
             guard let base else { return "off" }
@@ -6360,8 +6419,20 @@ class ConversationManager: ObservableObject {
             "Today: $\(formatUSD(snapshot.today)) — daily limit: \(limitText(status.dailyBaseLimitUSD, extra: status.dailyExtraUSD))",
             "This month: $\(formatUSD(snapshot.month)) — monthly limit: \(limitText(status.monthlyBaseLimitUSD, extra: status.monthlyExtraUSD))",
             "Per-turn cap: \(turnCap.map { "$" + formatUSD($0) } ?? "off")",
+        ] + spendIncidentLines(status) + [
             SpendLimitCommand.usage,
         ]).joined(separator: "\n")
+    }
+
+    /// Open spend incidents (§3.6.3) for /spend and /status.
+    private func spendIncidentLines(_ status: SpendLimitStatus) -> [String] {
+        let problems = status.accounting.incidents.map(ToolChargeLedger.describe) + status.accounting.unidentified
+        guard !problems.isEmpty else { return [] }
+        var lines = ["⚠️ Spend totals incomplete: " + problems.joined(separator: "; ")]
+        if status.unverifiable {
+            lines.append("Paid work is paused until the file is repaired (see `briglia doctor`) or you send `/spend accept-unknown`.")
+        }
+        return lines
     }
 
     private func setPrivacyMode(enabled: Bool) async {
@@ -6413,20 +6484,27 @@ class ConversationManager: ObservableObject {
         //    runs whose completion is still queued.
         var closedRun = activeRunId
         var items = await BackgroundProcessRegistry.shared.stopCutoff(turnRunId: closedRun)
-        var stoppedSubagents = await SubagentBackgroundRegistry.shared.stopCutoffHandleIds()
+        // Subagents (1b): the same cutoff closes launch admission for the
+        // stopped turn (a racing detach commit or background launch is
+        // refused) and names recorded runs by their durable job ids.
+        var subagentCut = await SubagentBackgroundRegistry.shared.stopCutoff(turnRunId: closedRun)
+        var stoppedSubagents = subagentCut.handles
+        var stoppedSubagentJobs = subagentCut.jobIds
         if let interleave = Self.stopCutoffInterleaveForTesting { await interleave() }
         var passes = 0
         while activeRunId != closedRun && passes < 8 {
             passes += 1
             closedRun = activeRunId
             items = await BackgroundProcessRegistry.shared.stopCutoff(turnRunId: closedRun)
-            stoppedSubagents.formUnion(await SubagentBackgroundRegistry.shared.stopCutoffHandleIds())
+            subagentCut = await SubagentBackgroundRegistry.shared.stopCutoff(turnRunId: closedRun)
+            stoppedSubagents.formUnion(subagentCut.handles)
+            stoppedSubagentJobs.formUnion(subagentCut.jobIds)
         }
         let wasRunning = activeRunId != nil
         // From here to the turn cancellation below there is NO suspension
         // point: the running turn cannot drain a held message into its next
         // request between the snapshot and the cancel.
-        var affected = items.jobUUIDs
+        var affected = items.jobUUIDs.union(stoppedSubagentJobs)
         if let records = try? DetachedJobStore.load() {
             affected.formUnion(records.filter { $0.completion == .owed }.map(\.jobId))
         }
@@ -6554,13 +6632,38 @@ class ConversationManager: ObservableObject {
     /// every in-memory disposition. The legacy list is recreated from the
     /// snapshots now present.
     private func resetEarlyWakeStateForReplacedHistory() throws {
+        // Charge evidence is never discarded with the replaced history
+        // (§3.6.4 Stage B, belt and braces: Stage A already settled every
+        // pending charge): a record still carrying an unrecorded charge (or
+        // an unregistered unknown amount) stays, with nothing owed, until
+        // the idle retry records it.
+        if FileManager.default.fileExists(atPath: DetachedJobStore.fileURL.path),
+           let records = try? DetachedJobStore.load(),
+           records.contains(where: { !$0.chargeSettled }) {
+            try DetachedJobStore.mutate("reset-keep-charges") { records in
+                records.removeAll { $0.chargeSettled }
+                for i in records.indices {
+                    records[i].completion = .notOwed
+                    records[i].stopId = nil
+                }
+            }
+            if FileManager.default.fileExists(atPath: StopMarkerStore.fileURL.path) {
+                try FileManager.default.removeItem(at: StopMarkerStore.fileURL)
+                try PrivateStorage.fsyncDirectory(StopMarkerStore.fileURL.deletingLastPathComponent().path)
+            }
+            try SettlementEvidence.resetForReplacedHistory()
+            stoppedJobIds.removeAll(); stopEntries.removeAll(); stoppedSubagentHandles.removeAll()
+            stopIntent = .none; pendingCompletionAcks.removeAll(); pendingSubagentAcks.removeAll(); recoveredWakeTrigger = nil
+            midTurnGeneration.removeAll()
+            return
+        }
         for url in [DetachedJobStore.fileURL, StopMarkerStore.fileURL] where FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
             try PrivateStorage.fsyncDirectory(url.deletingLastPathComponent().path)
         }
         try SettlementEvidence.resetForReplacedHistory()
         stoppedJobIds.removeAll(); stopEntries.removeAll(); stoppedSubagentHandles.removeAll()
-        stopIntent = .none; pendingCompletionAcks.removeAll(); recoveredWakeTrigger = nil
+        stopIntent = .none; pendingCompletionAcks.removeAll(); pendingSubagentAcks.removeAll(); recoveredWakeTrigger = nil
         midTurnGeneration.removeAll()
     }
 
@@ -6651,7 +6754,15 @@ class ConversationManager: ObservableObject {
             return
         }
         let foreign = records.filter { $0.instanceId != DetachedJobStore.instanceId && $0.completion == .owed }
-        guard !foreign.isEmpty else { return }
+        guard !foreign.isEmpty else {
+            // Delivered jobs of the previous process may still lack their
+            // unknown-spend incident (charge only in memory at the restart).
+            if records.contains(where: { $0.instanceId != DetachedJobStore.instanceId && $0.needsUnknownSpendIncident }) {
+                ToolChargeLedger.registerUnknownSpendForPreviousProcesses()
+                try? DetachedJobStore.retireSettled()
+            }
+            return
+        }
         guard !recoveryBlocked, !activeTurnCheckpoints.values.contains(where: { $0.pendingRecovery }),
               !FileManager.default.fileExists(atPath: turnSalvageFileURL.path) else {
             print("[ConversationManager] Job reconciliation deferred until turn recovery resolves")
@@ -6659,6 +6770,7 @@ class ConversationManager: ObservableObject {
         }
         var delivered: Set<UUID> = []
         var notOwed: Set<UUID> = []
+        var realSettled: Set<UUID> = []
         var unverifiable: [UUID: String] = [:]
         var disposition: [UUID: DetachedJobRecord.Disposition] = [:]
         var lastWaking: Message? = nil
@@ -6684,6 +6796,10 @@ class ConversationManager: ObservableObject {
             switch outcome {
             case .bound(.receiptObserved):
                 notOwed.insert(record.jobId); continue
+            case .bound(.real):
+                // A subagent that finished while its detach was committed:
+                // the durable real result is its outcome (nothing owed).
+                realSettled.insert(record.jobId); continue
             case .unverifiable(let reason):
                 unverifiable[record.jobId] = reason; continue
             case .bound, .absent:
@@ -6696,9 +6812,10 @@ class ConversationManager: ObservableObject {
             if case .absent = outcome { disposition[record.jobId] = .orphanedMoved }
             if record.completionBody == nil { disposition[record.jobId] = .lost }
             var body = record.completionBody.map { $0 + "\n\n[Recovered after a restart — this job finished before Briglia stopped.]" }
-                ?? BashCompletionNotice.lostNote(for: record)
+                ?? (record.isSubagent ? SubagentCompletionNotice.lostNote(for: record) : BashCompletionNotice.lostNote(for: record))
             if stopped { body += BashCompletionNotice.stoppedNote }
-            let message = Message(id: record.completionMessageId, role: .user, content: body, kind: .bashComplete)
+            let message = Message(id: record.completionMessageId, role: .user, content: body,
+                                  kind: record.isSubagent ? .subagentComplete : .bashComplete)
             messages.append(message)
             needsSave = true
             delivered.insert(record.jobId)
@@ -6725,12 +6842,21 @@ class ConversationManager: ObservableObject {
                     if let d = disposition[job] { records[i].disposition = d }
                     if delivered.contains(job) { records[i].completion = .delivered; records[i].deliveredAt = Date() }
                     if notOwed.contains(job) { records[i].completion = .notOwed; records[i].certifiedKind = .receiptObserved }
+                    if realSettled.contains(job) { records[i].completion = .notOwed; records[i].certifiedKind = .real }
                 }
                 records.removeAll { $0.isSettled }
             }
         } catch {
             print("[ConversationManager] Could not update reconciled records: \(error.localizedDescription) (ids in history keep them idempotent)")
         }
+        // Jobs of the previous process that ended without a captured charge
+        // (lost subagents, charges that were only in memory): their unknown
+        // amounts become durable spend incidents before the records retire.
+        let spendProblems = ToolChargeLedger.registerUnknownSpendForPreviousProcesses()
+        if !spendProblems.isEmpty {
+            print("[ConversationManager] Unknown-spend incidents not yet recorded (records kept): \(spendProblems.joined(separator: "; "))")
+        }
+        try? DetachedJobStore.retireSettled()
         if !unverifiable.isEmpty {
             showMaintenanceNotice("\(unverifiable.count) background job result\(unverifiable.count == 1 ? "" : "s") could not be verified after a restart; kept for inspection (see /status).")
         }
@@ -6776,9 +6902,9 @@ class ConversationManager: ObservableObject {
             // write failed, the notice's pre-minted id in history is the ONLY
             // deduplication proof, and which notices are record-backed cannot
             // be told while the records are unreadable — so every possible
-            // carrier (.bashComplete) stays.
+            // carrier (.bashComplete, and since 1b .subagentComplete) stays.
             let carriesRoute = removed.contains { !$0.pruneArchiveReferences.isEmpty || $0.activeTurnCompaction != nil }
-            let carriesNotice = removed.contains { $0.kind == .bashComplete }
+            let carriesNotice = removed.contains { $0.kind == .bashComplete || $0.kind == .subagentComplete }
             guard !inlineBound && !carriesRoute && !carriesNotice else {
                 throw PruneArchiveStore.Failure("Crash records unreadable (\(error.localizedDescription)); results of background jobs stay in history until they can be settled")
             }
@@ -6826,7 +6952,7 @@ class ConversationManager: ObservableObject {
                     if let kind = certify[job], Self.certificateRank(kind) > Self.certificateRank(records[i].certifiedKind) {
                         records[i].certifiedKind = kind
                         records[i].certifiedAt = Date()
-                        if kind == .receiptObserved { records[i].completion = .notOwed }
+                        if kind == .receiptObserved || kind == .real { records[i].completion = .notOwed }
                     }
                     if let reason = routeLost[job], records[i].completion == .owed {
                         records[i].routeRemovedWhileUnverifiable = reason
@@ -6885,7 +7011,7 @@ class ConversationManager: ObservableObject {
         guard !stopEntries.isEmpty, historyLoadFailure == nil else { return }
         let records: [DetachedJobRecord]
         do { records = try DetachedJobStore.load() } catch { return }  // keep entries: cannot prove settlement
-        let openRecords = Set(records.filter { !$0.isSettled }.map(\.jobId))
+        let openRecords = Set(records.filter { !$0.completionSettled }.map(\.jobId))
         let queued = Set(pendingMidTurnMessages.map(\.id))
         let markerState = readActiveTurnMarkerState()
         let queueFile = readHeldQueueFile()
@@ -6971,6 +7097,9 @@ class ConversationManager: ObservableObject {
                 New monthly limit: $\(formatUSD(updatedStatus.effectiveMonthlyLimitUSD ?? 0)) (spent: $\(formatUSD(updatedStatus.monthSpentUSD)))
                 """
             }
+        } else if status.unverifiable {
+            // A raised limit cannot make an unknown total known (§3.6.3).
+            message = "No limit is reached, but today's spend can't be verified, so paid work stays paused: \((status.accounting.incidents.map(ToolChargeLedger.describe) + status.accounting.unidentified).joined(separator: "; ")). `/more1`, `/more5` and `/more10` can't fix that — repair the file (see `briglia doctor`) or send `/spend accept-unknown`."
         } else {
             message = "No daily or monthly spend limit is currently reached. `/more1`, `/more5`, and `/more10` only work after a daily or monthly cap has been hit."
         }
@@ -7252,7 +7381,7 @@ class ConversationManager: ObservableObject {
             monthSpentUSD: monthSpentUSD,
             dailyLimitUSD: toolSpendLimitDailyUSD,
             monthlyLimitUSD: toolSpendLimitMonthlyUSD
-        ) {
+        ) ?? (spendLimitStatus.unverifiable ? SpendGate.unverifiableMessage(spendLimitStatus.accounting) : nil) {
             print("[ConversationManager] Daily/monthly spend limit already reached before tool loop: \(exceededMessage)")
             let changed = await computeLedgerDiff()
             return ToolAwareResponse(
@@ -7468,13 +7597,8 @@ class ConversationManager: ObservableObject {
                     break toolLoop
                 }
 
-                if let exceededMessage = spendLimitExceededMessage(
-                    todaySpentUSD: todaySpentUSD,
-                    monthSpentUSD: monthSpentUSD,
-                    dailyLimitUSD: toolSpendLimitDailyUSD,
-                    monthlyLimitUSD: toolSpendLimitMonthlyUSD
-                ) {
-                    print("[ConversationManager] Daily/monthly spend limit reached during tool loop: \(exceededMessage)")
+                if let exceededMessage = freshSpendPauseMessage() {
+                    print("[ConversationManager] Daily/monthly spend limit reached during tool loop: \(exceededMessage) (turn-local today $\(formatUSD(todaySpentUSD)), month $\(formatUSD(monthSpentUSD)))")
                     let totalMeasuredSpend = toolInteractionTokens(toolInteractions)
                     let changed = await computeLedgerDiff()
                     return ToolAwareResponse(
@@ -7724,12 +7848,7 @@ class ConversationManager: ObservableObject {
                     break toolLoop
                 }
 
-                if let exceededMessage = spendLimitExceededMessage(
-                    todaySpentUSD: todaySpentUSD,
-                    monthSpentUSD: monthSpentUSD,
-                    dailyLimitUSD: toolSpendLimitDailyUSD,
-                    monthlyLimitUSD: toolSpendLimitMonthlyUSD
-                ) {
+                if let exceededMessage = freshSpendPauseMessage() {
                     print("[ConversationManager] Daily/monthly spend limit reached after tool execution: \(exceededMessage)")
                     let totalMeasuredSpend = toolInteractionTokens(toolInteractions)
                     let changed = await computeLedgerDiff()
@@ -7972,17 +8091,34 @@ class ConversationManager: ObservableObject {
         return parsed
     }
 
+    /// The AUTHORITATIVE snapshot (mid-turn early wake §3.6.3): model spend
+    /// plus the tool-charge union (charges recorded by background/detached
+    /// jobs, including during this turn), with its completeness.
     private func currentSpendLimitStatus(referenceDate: Date = Date()) -> SpendLimitStatus {
-        let spendSnapshot = KeychainHelper.openRouterSpendSnapshot(referenceDate: referenceDate)
-        let extraSnapshot = KeychainHelper.openRouterSpendLimitIncreaseSnapshot(referenceDate: referenceDate)
+        let gate = SpendGate.status(referenceDate: referenceDate)
         return SpendLimitStatus(
-            todaySpentUSD: spendSnapshot.today,
-            monthSpentUSD: spendSnapshot.month,
+            todaySpentUSD: gate.todaySpentUSD,
+            monthSpentUSD: gate.monthSpentUSD,
             dailyBaseLimitUSD: configuredDailyToolSpendLimitUSD(),
             monthlyBaseLimitUSD: configuredMonthlyToolSpendLimitUSD(),
-            dailyExtraUSD: extraSnapshot.daily,
-            monthlyExtraUSD: extraSnapshot.monthly
+            dailyExtraUSD: gate.dailyExtraUSD,
+            monthlyExtraUSD: gate.monthlyExtraUSD,
+            accounting: gate.accounting
         )
+    }
+
+    /// Daily/monthly enforcement point (§3.6.3): a FRESH authoritative
+    /// snapshot, not turn-start locals (a detached job may have recorded a
+    /// charge meanwhile). A reached cap, or a configured cap that cannot be
+    /// verified (incomplete accounting), pauses paid work.
+    private func freshSpendPauseMessage() -> String? {
+        let fresh = currentSpendLimitStatus(referenceDate: Date())
+        if let exceeded = spendLimitExceededMessage(todaySpentUSD: fresh.todaySpentUSD, monthSpentUSD: fresh.monthSpentUSD,
+                                                    dailyLimitUSD: fresh.effectiveDailyLimitUSD,
+                                                    monthlyLimitUSD: fresh.effectiveMonthlyLimitUSD) {
+            return exceeded
+        }
+        return fresh.unverifiable ? SpendGate.unverifiableMessage(fresh.accounting) : nil
     }
 
     private func spendLimitExceededMessage(
@@ -10722,18 +10858,31 @@ class ConversationManager: ObservableObject {
 
     // MARK: - Background subagent completion handling
 
-    /// Drain completed background subagents and inject each as a synthetic user message,
-    /// triggering a new agent turn so the parent can react (e.g. notify the user, continue
-    /// work that depended on the subagent's findings). Mirrors the bash completion flow.
+    /// Deliver completed background (and wake-detached) subagents as
+    /// synthetic user messages, triggering a new agent turn so the parent can
+    /// react. Non-destructive and checked like the bash drain (mid-turn early
+    /// wake §3.10.3, release 1b): each completion is appended under its
+    /// pre-minted message id (skipped when already in history), history is
+    /// saved, and only after a successful save are the completions withdrawn
+    /// from the registry and their crash records marked delivered. A failed
+    /// save leaves them queued; the next idle poll retries the save — never
+    /// a second copy, never a second charge (recorded runs were charged into
+    /// the charge ledger when they finished; the drain never charges them).
     private func checkBackgroundSubagentCompletions() async {
         // Completions stay queued in the registry while history is unreadable.
         guard activeRunId == nil, activeProcessingTask == nil, workHeldReason == nil else { return }
-        let completions = await SubagentBackgroundRegistry.shared.drainCompletions()
+        let completions = await SubagentBackgroundRegistry.shared.pendingCompletionsForDelivery()
         guard !completions.isEmpty else { return }
+        guard activeRunId == nil, activeProcessingTask == nil else { return }
 
         // Same pattern as bash completions: append all, one turn, off the poll loop.
         var lastMessage: Message? = nil
         for completion in completions {
+            if pendingSubagentAcks[completion.messageId] != nil { continue }
+            if messages.contains(where: { $0.id == completion.messageId }) {
+                pendingSubagentAcks[completion.messageId] = .some(completion.handle.jobId)
+                continue
+            }
             let duration = completion.completedAt.timeIntervalSince(completion.handle.startedAt)
             let durationStr = String(format: "%.1fs", duration)
 
@@ -10746,29 +10895,42 @@ class ConversationManager: ObservableObject {
                 isError: !subagentErr.isEmpty
             )
 
-            // Persist background subagent spend to the authoritative daily/monthly
-            // counters in Keychain so it counts toward the user-configured spend
-            // limits. The generateResponseWithTools call that follows will re-seed
-            // its local spend status from Keychain at the top of the loop.
-            if completion.result.spendUSD.isFinite, completion.result.spendUSD > 0 {
+            // Unrecorded runs only (no crash record, e.g. outside a depth-0
+            // call scope): the legacy counters, charged once — on the first
+            // append; a retried save finds the message and skips this.
+            if !completion.chargeCaptured, completion.result.spendUSD.isFinite, completion.result.spendUSD > 0 {
                 KeychainHelper.recordOpenRouterSpend(completion.result.spendUSD)
                 print("[ConversationManager] Background subagent \(completion.handle.id) spend: +$\(formatUSD(completion.result.spendUSD))")
             }
 
             var body = Self.backgroundSubagentCompletionBody(completion, durationStr: durationStr)
             // A run cancelled by /stop is recorded without waking (§3.9.2).
-            let stopped = stoppedSubagentHandles.remove(completion.handle.id) != nil
-            if stopped { body += "\n\n[Stopped by /stop — the user asked to stop this work. Do not restart it unless they ask again.]" }
+            let stoppedByJob = completion.handle.jobId.map { stoppedJobIds.contains($0) } ?? false
+            let stopped = stoppedSubagentHandles.remove(completion.handle.id) != nil || stoppedByJob
+            if stopped { body += SubagentCompletionNotice.stoppedNote }
 
-            let userMessage = Message(role: .user, content: body, kind: .subagentComplete)
+            let userMessage = Message(id: completion.messageId, role: .user, content: body, kind: .subagentComplete)
             messages.append(userMessage)
+            pendingSubagentAcks[completion.messageId] = .some(completion.handle.jobId)
             if !stopped { lastMessage = userMessage }
         }
-        saveConversation()
+        if !pendingSubagentAcks.isEmpty { saveConversation() }
+        retireSettledStopEntries()
 
         guard let trigger = lastMessage else { return }
         statusMessage = "Processing subagent completion..."
         startActiveProcessing(for: trigger)
+    }
+
+    /// Idle retry of the charge chain (record → ledger → record) and of
+    /// unknown-spend registration; one maintenance notice per new failure.
+    private func settleToolCharges() {
+        ToolChargeLedger.settlePending()
+        ToolChargeLedger.registerUnknownSpendForPreviousProcesses()
+        if let failure = ToolChargeLedger.lastFailure {
+            ToolChargeLedger.lastFailure = nil
+            showMaintenanceNotice("Spend accounting: \(failure). The charge is kept and retried; totals still count it.")
+        }
     }
 
     /// The parent-facing `[SUBAGENT COMPLETE]` message of a background run —
@@ -11219,6 +11381,26 @@ class ConversationManager: ObservableObject {
                 print("[ConversationManager] Could not mark delivered crash records: \(error.localizedDescription)")
             }
         }
+        let durableSubagentAcks = pendingSubagentAcks.filter { lastSavedMessageIDs.contains($0.key) }
+        if !durableSubagentAcks.isEmpty {
+            for id in durableSubagentAcks.keys { pendingSubagentAcks.removeValue(forKey: id) }
+            let messageIds = Set(durableSubagentAcks.keys)
+            Task { await SubagentBackgroundRegistry.shared.acknowledgeDelivered(messageIds: messageIds) }
+            let jobs = Set(durableSubagentAcks.values.compactMap { $0 })
+            if !jobs.isEmpty {
+                do {
+                    try DetachedJobStore.mutate("delivered") { records in
+                        for i in records.indices where jobs.contains(records[i].jobId) && records[i].completion == .owed {
+                            records[i].completion = .delivered
+                            records[i].deliveredAt = Date()
+                        }
+                        records.removeAll { $0.isSettled }
+                    }
+                } catch {
+                    print("[ConversationManager] Could not mark delivered subagent records: \(error.localizedDescription)")
+                }
+            }
+        }
         certifyDurableBindings()
     }
 
@@ -11249,7 +11431,10 @@ class ConversationManager: ObservableObject {
                     guard let kind = upgrades[records[i].jobId] else { continue }
                     records[i].certifiedKind = kind
                     records[i].certifiedAt = Date()
-                    if kind == .receiptObserved { records[i].completion = .notOwed }
+                    // A durable receipt (bash) or real result (a subagent
+                    // that finished while its detach was being committed)
+                    // settles the job: nothing is owed.
+                    if kind == .receiptObserved || kind == .real { records[i].completion = .notOwed }
                 }
                 records.removeAll { $0.isSettled }
             }
@@ -11527,6 +11712,14 @@ class ConversationManager: ObservableObject {
             return ["ABORTED: \(triageRunsInFlight.count) watcher triage run(s) still in flight — nothing was deleted; try again in a minute"]
         }
 
+        // 0c-ter. Pending tool charges (mid-turn early wake §3.6.4): the wipe
+        //     keeps spend totals, so every charge held in a crash record (or
+        //     only in memory) is recorded in the charge ledger BEFORE the
+        //     records are deleted — or the wipe aborts with nothing deleted.
+        if let why = ToolChargeLedger.settleAllBeforeReplacingHistory() {
+            return ["ABORTED: pending spend couldn't be saved (\(why)) — nothing was deleted; fix it with `briglia doctor` and try again"]
+        }
+
         // 0d. Quiesce the AgentMail poller BEFORE the last abort point and
         //     BEFORE the buffer clears below: cancelling is not quiescence
         //     here either — the actor is reentrant, so a tick suspended in a
@@ -11714,7 +11907,7 @@ class ConversationManager: ObservableObject {
             if let f = UserDataWipe.remove(url.path, label: label) { failures.append(f) }
         }
         stoppedJobIds.removeAll(); stopEntries.removeAll(); stoppedSubagentHandles.removeAll()
-        stopIntent = .none; pendingCompletionAcks.removeAll(); recoveredWakeTrigger = nil
+        stopIntent = .none; pendingCompletionAcks.removeAll(); pendingSubagentAcks.removeAll(); recoveredWakeTrigger = nil
         midTurnGeneration.removeAll()
         for (dir, label) in [
             (appFolder.appendingPathComponent("archive", isDirectory: true), "archive directory"),
@@ -11844,6 +12037,12 @@ class ConversationManager: ObservableObject {
         // quiescence available.
         guard await awaitTriageRunsQuiesced(timeoutSeconds: timeoutSeconds) else {
             return "\(triageRunsInFlight.count) watcher triage run(s) still in flight"
+        }
+        // Stage A prerequisite (§3.6.4): every pending charge recorded before
+        // the point of no return — spend is not part of a Mind, and Stage B
+        // discards the replaced conversation's crash records.
+        if let why = ToolChargeLedger.settleAllBeforeReplacingHistory() {
+            return "pending spend couldn't be saved (\(why)); fix it with `briglia doctor` and retry"
         }
         return nil
     }
@@ -13187,6 +13386,8 @@ extension ConversationManager {
         resumeInterruptedActiveTurnIfNeeded()
     }
     func _testSettleBeforeRemoval(_ removed: [Message]) throws { try settleJobEvidenceBeforeRemoval(of: removed) }
+    func _testResetEarlyWakeState() throws { try resetEarlyWakeStateForReplacedHistory() }
+    func _testSettleToolCharges() { settleToolCharges() }
     var _testActiveTurnMarkerURL: URL { activeTurnMarkerFileURL }
     var _testPendingMidTurnURL: URL { pendingMidTurnFileURL }
     var _testSalvageURL: URL { turnSalvageFileURL }
