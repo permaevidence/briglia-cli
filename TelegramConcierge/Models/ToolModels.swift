@@ -328,12 +328,27 @@ struct HarnessAnnotation: Codable, Equatable {
     let kind: Kind
     let deliveryNonce: String        // exactly 32 lowercase hex characters
     let messages: [DirectUserMessageAnnotation]
+    /// Harness-authored list of work still running when this batch was
+    /// drained (mid-turn early wake, plan §3.11). Additive optional field:
+    /// absent in legacy JSON and omitted when nil, so a delivery made while
+    /// nothing runs encodes byte-identically to before. Rendered by the
+    /// trusted renderer as a separate harness status block AFTER the
+    /// direct-user block — never inside user-authority text, never treated
+    /// as user content by validation.
+    var backgroundStatus: HarnessBackgroundStatus? = nil
 
     private init(version: Int, kind: Kind, deliveryNonce: String, messages: [DirectUserMessageAnnotation]) {
         self.version = version
         self.kind = kind
         self.deliveryNonce = deliveryNonce
         self.messages = messages
+    }
+
+    /// Copy carrying the given harness status (nil or empty clears it).
+    func withBackgroundStatus(_ status: HarnessBackgroundStatus?) -> HarnessAnnotation {
+        var copy = self
+        copy.backgroundStatus = (status?.items.isEmpty ?? true) ? nil : status
+        return copy
     }
 
     /// Validating factory — the only way trusted live code obtains an
@@ -388,6 +403,106 @@ struct HarnessAnnotation: Codable, Equatable {
         let messages = try container.decode([DirectUserMessageAnnotation].self, forKey: .messages)
         try Self.validate(version: version, deliveryNonce: deliveryNonce, messages: messages)
         self.init(version: version, kind: kind, deliveryNonce: deliveryNonce, messages: messages)
+        // Lossy: a malformed or out-of-bounds status drops only the status,
+        // never the user delivery it rides on.
+        if let status = (try? container.decodeIfPresent(HarnessBackgroundStatus.self, forKey: .backgroundStatus)) ?? nil,
+           status.isValid {
+            self.backgroundStatus = status
+        }
+    }
+}
+
+/// Harness status block carried by a mid-turn delivery (plan §3.11): what is
+/// still running at the moment the user's message reaches the model. Every
+/// string is harness-assembled from registry state (commands are untrusted
+/// text and are escaped at render time). Bounded so a corrupted file cannot
+/// create an unbounded request.
+struct HarnessBackgroundStatus: Codable, Equatable {
+    struct Item: Codable, Equatable {
+        /// e.g. `bash bash_3 "swift build"` — already JSON-quoted command.
+        let label: String
+        /// e.g. `45s, in ~/proj, moved to background`.
+        let detail: String
+    }
+    let items: [Item]
+
+    static let maxItems = 20
+    static let maxFieldChars = 400
+
+    var isValid: Bool {
+        !items.isEmpty && items.count <= Self.maxItems
+            && items.allSatisfy { $0.label.count <= Self.maxFieldChars && $0.detail.count <= Self.maxFieldChars }
+    }
+}
+
+/// Typed settlement evidence on a harness-created tool result (mid-turn
+/// early wake, plan §3.12.1). Set only by trusted harness code at the moment
+/// the result object is created — never derived from content, a call id or a
+/// fingerprint. Only a DURABLE `real`/`moved`/`receiptObserved` binding for a
+/// crash record's own `jobId` settles that job; the other kinds (and an
+/// absent binding) prove nothing. Persisted, additive and never on the wire:
+/// the provider request builders do not read it.
+struct OutcomeBinding: Codable, Equatable {
+    enum Kind: String, Codable {
+        /// The job's real outcome was this call's result.
+        case real
+        /// The call returned while the job keeps running (its completion
+        /// is still owed): wake-detached, wait expired, or an explicit
+        /// background launch.
+        case moved
+        /// This result carried the bash completion receipt of the job —
+        /// the model saw its final output, no completion notice is owed.
+        case receiptObserved
+        /// The Responses crash placeholder persisted before execution.
+        case interruptedIntent
+        /// Suppressed by stale-batch suppression (never ran).
+        case notExecuted
+        /// Synthesised for a blocked or cancelled call.
+        case cancelled
+
+        /// Kinds that name (and can settle) one execution.
+        var carriesJob: Bool { self == .real || self == .moved || self == .receiptObserved }
+    }
+    let kind: Kind
+    /// The unique execution id (crash record `jobId`); present exactly for
+    /// the job-carrying kinds.
+    let jobId: UUID?
+    /// Launch-call fingerprint (hex SHA-256 of tool name + canonical
+    /// arguments). A consistency check only, never proof — and absent on a
+    /// receipt observed by a different call (a `bash_manage wait` is not the
+    /// launch call).
+    let fingerprint: String?
+
+    init(kind: Kind, jobId: UUID? = nil, fingerprint: String? = nil) {
+        self.kind = kind
+        self.jobId = kind.carriesJob ? jobId : nil
+        self.fingerprint = kind.carriesJob ? fingerprint : nil
+    }
+
+    struct Invalid: Error {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try c.decode(Kind.self, forKey: .kind)
+        let jobId = try c.decodeIfPresent(UUID.self, forKey: .jobId)
+        let fingerprint = try c.decodeIfPresent(String.self, forKey: .fingerprint)
+        // A job-carrying kind without its job (or a non-carrying kind that
+        // names one) is malformed: unbound, never a guess.
+        guard kind.carriesJob == (jobId != nil) else { throw Invalid() }
+        if let fingerprint, fingerprint.count != 64 || !fingerprint.allSatisfy(\.isHexDigit) { throw Invalid() }
+        self.kind = kind; self.jobId = jobId; self.fingerprint = fingerprint
+    }
+
+    /// Hex SHA-256 of `name` + NUL + canonical (sorted-key) arguments JSON;
+    /// raw arguments when they are not a JSON object.
+    static func fingerprint(toolName: String, arguments: String) -> String {
+        var canonical = arguments
+        if let data = arguments.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data),
+           let sorted = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) {
+            canonical = String(decoding: sorted, as: UTF8.self)
+        }
+        return SHA256Hex.digest(Data((toolName + "\u{0}" + canonical).utf8))
     }
 }
 
@@ -441,6 +556,14 @@ struct ToolResultMessage: Codable {
     /// gets no note rather than an invented one.
     var completedAt: Date? = nil
 
+    /// Typed settlement evidence (mid-turn early wake, plan §3.12.1). Set
+    /// only by trusted harness code when the result is created. Additive
+    /// optional field: absent in legacy JSON, omitted when nil (every result
+    /// outside the new flows encodes byte-identically), and never read by
+    /// the provider request builders. A malformed value decodes as nil
+    /// (unbound), never a load failure.
+    var outcomeBinding: OutcomeBinding? = nil
+
     enum CodingKeys: String, CodingKey {
         case role
         case toolCallId = "tool_call_id"
@@ -448,6 +571,7 @@ struct ToolResultMessage: Codable {
         case fileAttachmentReferences
         case harnessAnnotations
         case completedAt
+        case outcomeBinding
     }
 
     func encode(to encoder: Encoder) throws {
@@ -460,6 +584,7 @@ struct ToolResultMessage: Codable {
             try container.encode(harnessAnnotations, forKey: .harnessAnnotations)
         }
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
+        try container.encodeIfPresent(outcomeBinding, forKey: .outcomeBinding)
     }
 
     init(
@@ -502,6 +627,14 @@ struct ToolResultMessage: Codable {
         // Lossy at the field boundary: a malformed recorded time is dropped
         // (the result then renders without a note), never a load failure.
         self.completedAt = (try? container.decodeIfPresent(Date.self, forKey: .completedAt)) ?? nil
+        // Lossy like completedAt: a malformed binding leaves the result
+        // unbound (it then proves nothing), never fails the history load.
+        if container.contains(.outcomeBinding) {
+            self.outcomeBinding = (try? container.decodeIfPresent(OutcomeBinding.self, forKey: .outcomeBinding)) ?? nil
+            if self.outcomeBinding == nil {
+                print("[ToolResultMessage] discarded a malformed persisted outcome binding (result treated as unbound)")
+            }
+        }
         // Fail-closed and lossy at the annotation-field boundary: an absent
         // field is [], a malformed element is discarded, a defensively
         // oversized payload is dropped whole — the conversation stays loadable

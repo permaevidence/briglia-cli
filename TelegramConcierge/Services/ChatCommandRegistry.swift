@@ -25,7 +25,7 @@ enum ChatCommandRegistry {
     static let categories = ["Control", "Models", "System", "Account"]
 
     static let commands: [ChatCommand] = [
-        ChatCommand(name: "stop", description: "Stop the current work immediately",
+        ChatCommand(name: "stop", description: "Stop all current work, including long-running commands",
                     usage: nil, inMenu: true, category: "Control"),
         ChatCommand(name: "status", description: "Show what Briglia is doing right now",
                     usage: nil, inMenu: true, category: "Control"),

@@ -95,6 +95,21 @@ actor ToolExecutor {
         midTurnMessageSender = sender
     }
 
+    /// Mid-turn early wake scope of the current main-agent turn (§3.1): its
+    /// run id and the last history message when it started. Captured by
+    /// `executeParallel` at batch start and bound per call as a task-local;
+    /// nil outside a turn and on every child executor.
+    private var wakeTurn: (runId: UUID, anchor: UUID?)?
+
+    func setWakeTurn(runId: UUID?, anchor: UUID?) {
+        wakeTurn = runId.map { ($0, anchor) }
+    }
+
+    /// Teardown of one run: never clears a newer run's scope.
+    func clearWakeTurn(ifRunId runId: UUID) {
+        if wakeTurn?.runId == runId { wakeTurn = nil }
+    }
+
     /// Nesting depth of this executor (WEB_SUBAGENT_PLAN §4.6, R1b): 0 for
     /// the main agent, 1 for a subagent started by the main agent, 2 for the
     /// Web researcher a depth-1 subagent delegated to. `makeChildExecutor()`
@@ -603,11 +618,22 @@ actor ToolExecutor {
     func executeParallel(_ calls: [ToolCall]) async throws -> [ToolResultMessage] {
         try Task.checkCancellation()
         preflightBashWaits(calls)
+        // Only depth-0 main-executor calls can be woken by a mid-turn user
+        // message (§3.1): the scope is captured once, now, for this batch.
+        let wakeScope = (depth == 0 && outputMode == .mainAgent) ? wakeTurn : nil
         return try await withThrowingTaskGroup(of: ToolResultMessage.self) { group in
             for call in calls {
                 group.addTask {
                     try Task.checkCancellation()
-                    return try await self.execute(call)
+                    guard let wakeScope else { return try await self.execute(call) }
+                    let context = WakeContext(
+                        turnRunId: wakeScope.runId, callId: call.id, toolName: call.function.name,
+                        fingerprint: OutcomeBinding.fingerprint(toolName: call.function.name,
+                                                                arguments: call.function.arguments),
+                        callStartedAt: .now, historyAnchorMessageId: wakeScope.anchor)
+                    return try await WakeContext.$current.withValue(context) {
+                        try await self.execute(call)
+                    }
                 }
             }
             

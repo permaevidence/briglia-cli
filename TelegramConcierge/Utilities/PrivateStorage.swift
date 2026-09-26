@@ -55,6 +55,10 @@ enum PrivateStorage {
     /// the reminder scripts themselves).
     static let harnessStateDirectories: Set<String> = [
         "archive", "prune-archives", "subagent_sessions", "fire-outbox", "trigger-events", "logs",
+        // Snapshot settlement sidecars and the legacy/expired lists (mid-turn
+        // early wake §3.12.3). Top-level detached-jobs.json and
+        // stop-marker.json are harness state as top-level files.
+        "prune-archive-settlements",
     ]
     /// Subpaths (relative to the data root) that are harness state even
     /// though their parent is user-authored.

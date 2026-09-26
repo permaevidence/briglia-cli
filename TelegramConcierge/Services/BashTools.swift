@@ -257,6 +257,60 @@ enum BashTools {
         /// The job handle this result concerns (managed/wait paths only),
         /// for ledger bookkeeping. Never rendered separately.
         var jobHandle: String? = nil
+        /// Set when this call returned while its job keeps running AND the
+        /// job's crash record is durable (mid-turn early wake §3.10.1): the
+        /// executor binds the result as `moved` for this job id.
+        var movedJobUUID: UUID? = nil
+    }
+
+    // MARK: - Mid-turn early wake (§3.4, §3.10.1)
+
+    /// Surfaced once by the manager as a maintenance notice (§3.4: a woken
+    /// wait whose crash record cannot be written keeps waiting).
+    nonisolated(unsafe) static var lastRecordFailure: String?
+
+    /// Write the crash record of a main-owned job that is about to outlive
+    /// its launching call. Returns the job's internal id once the record is
+    /// durable; nil when there is no depth-0 wake scope (tests, subagents)
+    /// or the write failed (the caller then does not detach).
+    static func recordDetachedJob(handle: String, launch: DetachedJobRecord.Launch,
+                                  owner: String) async -> UUID? {
+        guard owner == BackgroundProcessRegistry.mainOwner, let wake = WakeContext.current else { return nil }
+        guard let facts = await BackgroundProcessRegistry.shared.jobFacts(handleId: handle, owner: owner) else { return nil }
+        do {
+            if try DetachedJobStore.load().contains(where: { $0.jobId == facts.jobUUID }) { return facts.jobUUID }
+            try DetachedJobStore.create(DetachedJobRecord(
+                jobId: facts.jobUUID, instanceId: DetachedJobStore.instanceId,
+                turnRunId: wake.turnRunId, toolCallId: wake.callId, callFingerprint: wake.fingerprint,
+                handle: facts.handle, command: facts.command, description: facts.description,
+                workdir: facts.workdir, startedAt: facts.startedAt, launch: launch,
+                completionMessageId: facts.completionMessageId,
+                historyAnchorMessageId: wake.historyAnchorMessageId))
+        } catch {
+            lastRecordFailure = error.localizedDescription
+            DebugTelemetry.log(.info, summary: "could not record background job \(handle)",
+                               detail: error.localizedDescription, isError: true)
+            return nil
+        }
+        // Settled between the facts read and the create: persist its notice
+        // now (the settlement hook found no record to update).
+        if let body = await BackgroundProcessRegistry.shared.pendingCompletionBody(jobUUID: facts.jobUUID) {
+            DetachedJobStore.recordSettlement(jobId: facts.jobUUID, body: body, at: Date())
+        }
+        return facts.jobUUID
+    }
+
+    /// The moved-result message (§3.4, §3.13): identical for a user-message
+    /// wake and a forced test detach except for the reason clause.
+    static func movedMessage(handle: String, reason: MidturnWakeReason, killAfterSeconds: Int?) -> String {
+        let clause = reason == .testForced
+            ? "because background-detach test mode is on"
+            : "because a user message arrived"
+        var text = "Moved to the background \(clause) — the command CONTINUES. Its result is delivered automatically when it exits, once you are idle after this turn (you cannot wait for it inside this turn); manage it with bash_manage(handle: '\(handle)')."
+        if let killAfterSeconds {
+            text += " It is still killed at its \(killAfterSeconds)-second execution deadline."
+        }
+        return text
     }
 
     /// True when a JSON-decoded value is a genuine boolean. `is Bool` alone
@@ -456,6 +510,8 @@ enum BashTools {
         var e = extra
         e.removeValue(forKey: "wait_timed_out")
         e.removeValue(forKey: "message")
+        e.removeValue(forKey: "wake_reason")
+        e.removeValue(forKey: "moved_to_background")
         return (e, false)
     }
 
@@ -537,7 +593,8 @@ enum BashTools {
         do {
             handle = try await BackgroundProcessRegistry.shared.start(
                 command: command, workdir: workdir, description: description,
-                perCommandEnv: perCommandEnv, owner: owner)
+                perCommandEnv: perCommandEnv, owner: owner,
+                turnRunId: isMain ? WakeContext.current?.turnRunId : nil)
         } catch {
             return OpResult(content: jsonError("failed to spawn background process: \(error.localizedDescription)"))
         }
@@ -557,7 +614,8 @@ enum BashTools {
         // completion notice once the turn durably saves. The cancelled
         // branch opts out: a /stop'd turn may never save.
         func render(extra: [String: Any], receipt: BashCompletionReceipt? = nil,
-                    waitExpired: Bool = false, mintIfSettled: Bool = true) async -> OpResult {
+                    waitExpired: Bool = false, mintIfSettled: Bool = true,
+                    moved: UUID? = nil) async -> OpResult {
             guard let (snapshot, minted) = await BackgroundProcessRegistry.shared
                 .snapshotWithReceipt(handleId: handle.id, owner: owner) else {
                 return OpResult(content: jsonError("job vanished during start: \(handle.id)"))
@@ -579,28 +637,73 @@ enum BashTools {
             }
             if snapshot.status == .timedOut { payload["execution_timed_out"] = true }
             for (k, v) in extra { payload[k] = v }
+            // A settled snapshot is a real result: no moved binding.
             return OpResult(content: jsonString(payload),
                             receipt: receipt ?? (mintIfSettled ? minted : nil),
-                            waitExpired: waitExpired, jobHandle: handle.id)
+                            waitExpired: waitExpired, jobHandle: handle.id,
+                            movedJobUUID: snapshot.exitCode == nil ? moved : nil)
         }
 
         if effectiveWait <= 0 {
+            // Crash record BEFORE the handle result is returned (§3.10.1):
+            // an explicit background launch whose record cannot be written
+            // is stopped and reported honestly instead of running untracked.
+            var recorded: UUID? = nil
+            if isMain, WakeContext.current != nil {
+                recorded = await recordDetachedJob(handle: handle.id, launch: .background, owner: owner)
+                if recorded == nil {
+                    await BackgroundProcessRegistry.shared.stopJob(handleId: handle.id, cause: .turnCancelled)
+                    return OpResult(content: jsonError("could not record the background job (storage problem: \(lastRecordFailure ?? "unknown")) — it was stopped so it cannot run untracked; retry, or run it with a wait"))
+                }
+            }
             let startMessage = isMain
                 ? "Process started. Use bash_manage (mode 'output'/'input'/'watch'/'wait'/'kill') with this handle. You will be notified automatically when it exits."
                 : "Process started (private to this run). Use bash_manage (mode 'output'/'wait'/'input'/'kill') with this handle — there is NO automatic exit notification, and jobs still running when you finish are terminated, so collect what you need before returning your final result."
             return await render(extra: [
                 "waited_seconds": 0,
                 "message": startMessage
-            ])
+            ], moved: recorded)
         }
 
         let t0 = ContinuousClock.now
-        let outcome = await BackgroundProcessRegistry.shared.awaitSettlement(
+        var outcome = await BackgroundProcessRegistry.shared.awaitSettlement(
             handleId: handle.id, timeoutNanos: UInt64(effectiveWait * 1_000_000_000),
-            owner: owner)
+            owner: owner, wake: isMain ? WakeContext.current : nil)
+        // Mid-turn early wake (§3.4): a woken wait detaches only once the
+        // job's crash record is durable. If it cannot be written, the call
+        // keeps waiting as before (the rest of its window, no wake).
+        var movedJob: UUID? = nil
+        var wakeReason: MidturnWakeReason? = nil
+        if case .woken(let reason) = outcome {
+            movedJob = await recordDetachedJob(handle: handle.id,
+                                               launch: reason == .testForced ? .forcedDetach : .wakeDetached,
+                                               owner: owner)
+            if movedJob != nil {
+                wakeReason = reason
+                if reason == .testForced {
+                    DebugTelemetry.log(.info, summary: "midturnForcedDetach bash \(handle.id)",
+                                       detail: "elapsed \(Int(BashWaitLedger.seconds(t0.duration(to: .now))))s")
+                }
+            } else {
+                let remaining = max(0, effectiveWait - BashWaitLedger.seconds(t0.duration(to: .now)))
+                outcome = await BackgroundProcessRegistry.shared.awaitSettlement(
+                    handleId: handle.id, timeoutNanos: UInt64(remaining * 1_000_000_000), owner: owner)
+            }
+        }
         let waited = (BashWaitLedger.seconds(t0.duration(to: .now)) * 10).rounded() / 10
 
         switch outcome {
+        case .woken:
+            guard let wakeReason else { return await render(extra: ["waited_seconds": waited]) }
+            BashJobsStats.log("managed.woken")
+            // No ledger strike (waitExpired false): the job did not time out.
+            let defaultDeadline = killAfterSeconds.map { min(max($0, 1), maxKillAfterSeconds) }
+            return await render(extra: [
+                "waited_seconds": waited,
+                "moved_to_background": true,
+                "wake_reason": wakeReason.rawValue,
+                "message": movedMessage(handle: handle.id, reason: wakeReason, killAfterSeconds: defaultDeadline)
+            ], moved: movedJob)
         case .settled(_, let receipt):
             BashJobsStats.log("managed.settled_in_initial_wait")
             BashJobsStats.logWait(ms: Int(waited * 1000))
@@ -628,6 +731,10 @@ enum BashTools {
             }
             BashJobsStats.log("managed.initial_wait_expired")
             BashJobsStats.logWait(ms: Int(waited * 1000))
+            // The job continues past its launching call: crash record
+            // (best effort — the wait already ended, so a failure only means
+            // no restart protection for this job).
+            let expiredRecord = isMain ? await recordDetachedJob(handle: handle.id, launch: .waitExpired, owner: owner) : nil
             let continueMessage = isMain
                 ? "Still running after the initial wait — the command CONTINUES. You will be notified automatically when it exits; manage it with bash_manage(handle: '\(handle.id)')."
                 : "Still running after the initial wait — the command CONTINUES (private to this run, no automatic exit notification). Collect its result with bash_manage(mode 'wait'/'output', handle: '\(handle.id)') before returning your final result; jobs still running when you finish are terminated."
@@ -635,7 +742,7 @@ enum BashTools {
                 "waited_seconds": waited,
                 "wait_timed_out": true,
                 "message": continueMessage
-            ], waitExpired: true)
+            ], waitExpired: true, moved: expiredRecord)
         case .cancelled:
             BashJobsStats.log("wait.cancelled")
             // Attached semantics (§10.1): during the initial bash wait the
@@ -683,7 +790,8 @@ enum BashTools {
         // branch opts out (`mintIfSettled: false`): a /stop'd turn may never
         // save, and its result may never reach the model.
         func snapshotOrError(extra: [String: Any], receipt: BashCompletionReceipt? = nil,
-                             waitExpired: Bool = false, mintIfSettled: Bool = true) async -> OpResult {
+                             waitExpired: Bool = false, mintIfSettled: Bool = true,
+                             moved: UUID? = nil) async -> OpResult {
             guard let (snapshot, minted) = await BackgroundProcessRegistry.shared
                 .snapshotWithReceipt(handleId: handle, owner: owner) else {
                 return OpResult(content: jsonError(await unknownHandleMessage(handle, owner: owner)))
@@ -699,7 +807,8 @@ enum BashTools {
             for (k, v) in extra { payload[k] = v }
             return OpResult(content: jsonString(payload),
                             receipt: receipt ?? (mintIfSettled ? minted : nil),
-                            waitExpired: waitExpired, jobHandle: handle)
+                            waitExpired: waitExpired, jobHandle: handle,
+                            movedJobUUID: snapshot.exitCode == nil ? moved : nil)
         }
 
         BashJobsStats.log("manage_wait.calls")
@@ -709,11 +818,43 @@ enum BashTools {
         }
         let waitSecs = min(max(effectiveWaitSeconds ?? 1, 1), Double(maxWaitSeconds))
         let t0 = ContinuousClock.now
-        let outcome = await BackgroundProcessRegistry.shared.awaitSettlement(
-            handleId: handle, timeoutNanos: UInt64(waitSecs * 1_000_000_000), owner: owner)
+        let isMain = owner == BackgroundProcessRegistry.mainOwner
+        var outcome = await BackgroundProcessRegistry.shared.awaitSettlement(
+            handleId: handle, timeoutNanos: UInt64(waitSecs * 1_000_000_000), owner: owner,
+            wake: isMain ? WakeContext.current : nil)
+        // Same rule as the launch wait (§3.4): detach only with a durable
+        // crash record, otherwise keep waiting out the admitted window.
+        var movedJob: UUID? = nil
+        var wakeReason: MidturnWakeReason? = nil
+        if case .woken(let reason) = outcome {
+            movedJob = await recordDetachedJob(handle: handle,
+                                               launch: reason == .testForced ? .forcedDetach : .wakeDetached,
+                                               owner: owner)
+            if movedJob != nil {
+                wakeReason = reason
+                if reason == .testForced {
+                    DebugTelemetry.log(.info, summary: "midturnForcedDetach bash_manage wait \(handle)",
+                                       detail: "elapsed \(Int(BashWaitLedger.seconds(t0.duration(to: .now))))s")
+                }
+            } else {
+                let remaining = max(0, waitSecs - BashWaitLedger.seconds(t0.duration(to: .now)))
+                outcome = await BackgroundProcessRegistry.shared.awaitSettlement(
+                    handleId: handle, timeoutNanos: UInt64(remaining * 1_000_000_000), owner: owner)
+            }
+        }
         let waited = (BashWaitLedger.seconds(t0.duration(to: .now)) * 10).rounded() / 10
 
         switch outcome {
+        case .woken:
+            guard let wakeReason else { return await snapshotOrError(extra: ["waited_seconds": waited]) }
+            BashJobsStats.log("manage_wait.woken")
+            return await snapshotOrError(extra: [
+                "waited_seconds": waited,
+                "effective_wait_seconds": Int(waitSecs),
+                "moved_to_background": true,
+                "wake_reason": wakeReason.rawValue,
+                "message": movedMessage(handle: handle, reason: wakeReason, killAfterSeconds: nil)
+            ], moved: movedJob)
         case .unknownHandle:
             return OpResult(content: jsonError(await unknownHandleMessage(handle, owner: owner)))
         case .refusedDuplicate:
@@ -734,12 +875,13 @@ enum BashTools {
             let expiredMessage = owner == BackgroundProcessRegistry.mainOwner
                 ? "Still running — this handle now refuses further waits this turn. End your turn; the result will be delivered automatically."
                 : "Still running — this handle now refuses further waits this turn. Poll mode='output' later or kill the job; there is no automatic exit notification in this context."
+            let expiredRecord = isMain ? await recordDetachedJob(handle: handle, launch: .waitExpired, owner: owner) : nil
             return await snapshotOrError(extra: [
                 "waited_seconds": waited,
                 "effective_wait_seconds": Int(waitSecs),
                 "wait_timed_out": true,
                 "message": expiredMessage
-            ], waitExpired: true)
+            ], waitExpired: true, moved: expiredRecord)
         case .cancelled:
             BashJobsStats.log("wait.cancelled")
             return await snapshotOrError(extra: ["waited_seconds": waited, "wait_cancelled": true],
@@ -962,6 +1104,12 @@ actor BackgroundProcessRegistry {
         case refusedDuplicate
         /// No such background handle.
         case unknownHandle
+        /// A user message arrived during the wait and its grace window
+        /// passed (or the hidden force-detach test setting fired): the wait
+        /// ends early, the job KEEPS RUNNING in the background and its
+        /// completion is delivered later (mid-turn early wake §3.4). Only a
+        /// depth-0 main-agent wait inside a bound `WakeContext` can get this.
+        case woken(MidturnWakeReason)
     }
 
     struct Snapshot {
@@ -1021,6 +1169,12 @@ actor BackgroundProcessRegistry {
         let unsubscribeReason: String?
         let matchesSoFar: Int        // count including this match
         let limit: Int
+        /// Stable identity of this queued match (mid-turn early wake §3.9:
+        /// a /stop records the pending matches it holds).
+        let matchId = UUID()
+        /// Internal identity of the job the watched handle belongs to — a
+        /// match of a job stopped by /stop is appended without waking.
+        var ownerJobUUID: UUID? = nil
     }
 
     enum WatchError: Error, CustomStringConvertible {
@@ -1101,6 +1255,14 @@ actor BackgroundProcessRegistry {
         var waiter: (id: UUID, continuation: CheckedContinuation<WaitOutcome, Never>)?
         /// Cancels the pending wait-timeout when another outcome wins.
         var waiterTimeoutTask: Task<Void, Never>?
+        /// Listens for the mid-turn wake of the waiting call; cancelled when
+        /// another outcome wins. Whichever of finish/timeout/cancel/wake
+        /// reaches the actor first removes the waiter and resumes it once.
+        var waiterWakeTask: Task<Void, Never>?
+        /// Stable id of the job's completion message, minted with the job so
+        /// every delivery attempt (and a crash record) reuses it — appends
+        /// are id-deduplicated (mid-turn early wake §3.10).
+        let completionMessageId = UUID()
         /// kill_after_seconds enforcement; cancelled at settlement.
         var executionDeadlineTask: Task<Void, Never>?
 
@@ -1222,7 +1384,7 @@ actor BackgroundProcessRegistry {
     /// Pending completion notices keyed by the owning job's UUID — the key
     /// is what Phase 2's acknowledgement receipts will match against.
     /// `drainCompletions()` still returns bare Completions.
-    private var pendingCompletions: [(jobUUID: UUID, completion: Completion)] = []
+    private var pendingCompletions: [(jobUUID: UUID, messageId: UUID, completion: Completion)] = []
     private var watches: [String: [Watch]] = [:]
     private var nextWatchId: Int = 1
     private var pendingMatchEvents: [WatchMatch] = []
@@ -1409,7 +1571,14 @@ actor BackgroundProcessRegistry {
         }
     }
 
-    func start(command: String, workdir: String?, description: String?, perCommandEnv: [String: String] = [:], owner: String = BackgroundProcessRegistry.mainOwner) throws -> Handle {
+    func start(command: String, workdir: String?, description: String?, perCommandEnv: [String: String] = [:], owner: String = BackgroundProcessRegistry.mainOwner,
+               turnRunId: UUID? = nil) throws -> Handle {
+        // /stop closed admission for this run (mid-turn early wake §3.9.1):
+        // decided on the actor, atomically with the stop's snapshot, so a
+        // racing launch is either stopped with the rest or refused.
+        if let turnRunId, closedTurnRunIds.contains(turnRunId) {
+            throw SpawnFailure.runFailed("not started: the user stopped this turn with /stop")
+        }
         pruneSettledEntries()
         let id = "bash_\(nextCounter)"
         nextCounter += 1
@@ -1853,7 +2022,7 @@ actor BackgroundProcessRegistry {
             : "…[earlier output truncated]\n" + String(e.stderr.suffix(tailBytes))
         let redactor = BashTools.SecretRedactor()
 
-        pendingCompletions.append((jobUUID: e.jobUUID, completion: Completion(
+        pendingCompletions.append((jobUUID: e.jobUUID, messageId: e.completionMessageId, completion: Completion(
             handleId: e.id,
             command: redactor.redact(e.command),
             description: e.description.map { redactor.redact($0) },
@@ -1866,12 +2035,21 @@ actor BackgroundProcessRegistry {
             durationSeconds: duration
         )))
 
+        // Persist the settled notice into the job's crash record (if it has
+        // one), so a restart before delivery still delivers the real result
+        // (mid-turn early wake §3.10). Off-actor, best effort.
+        if let settled = pendingCompletions.last, settled.jobUUID == e.jobUUID {
+            let body = BashCompletionNotice.body(for: settled.completion)
+            let jobUUID = e.jobUUID
+            Task.detached { DetachedJobStore.recordSettlement(jobId: jobUUID, body: body, at: Date()) }
+        }
+
         // Tear down any still-active watches for this handle, emitting one
         // synthetic terminal match per watch so the agent knows they were
         // auto-unsubscribed because the process exited.
         if let activeWatches = watches[id], !activeWatches.isEmpty {
             for w in activeWatches {
-                pendingMatchEvents.append(WatchMatch(
+                appendMatchEvent(WatchMatch(
                     watchId: w.id,
                     handle: id,
                     pattern: redactor.redact(w.patternSource),
@@ -1901,6 +2079,8 @@ actor BackgroundProcessRegistry {
         e.waiter = nil
         e.waiterTimeoutTask?.cancel()
         e.waiterTimeoutTask = nil
+        e.waiterWakeTask?.cancel()
+        e.waiterWakeTask = nil
         w.continuation.resume(returning: .settled(
             exitCode: e.exitCode.map(Int32.init),
             receipt: pendingReceipt(handleId: e.id)
@@ -1996,7 +2176,7 @@ actor BackgroundProcessRegistry {
                 case .matched:
                     watchRef.matchesSoFar += 1
                     let reachedLimit = watchRef.matchesSoFar >= watchRef.limit
-                    pendingMatchEvents.append(WatchMatch(
+                    appendMatchEvent(WatchMatch(
                         watchId: watchRef.id,
                         handle: handleId,
                         pattern: redactor.redact(watchRef.patternSource),
@@ -2016,7 +2196,7 @@ actor BackgroundProcessRegistry {
                     break
                 case .timedOut:
                     print("[BackgroundProcessRegistry] watch \(watchRef.id) on \(handleId): regex timeout (>10ms) — auto-unsubscribing (ReDoS protection). pattern: \(watchRef.patternSource)")
-                    pendingMatchEvents.append(WatchMatch(
+                    appendMatchEvent(WatchMatch(
                         watchId: watchRef.id,
                         handle: handleId,
                         pattern: redactor.redact(watchRef.patternSource),
@@ -2102,6 +2282,143 @@ actor BackgroundProcessRegistry {
         return outcome
     }
 
+    private func appendMatchEvent(_ match: WatchMatch) {
+        var match = match
+        match.ownerJobUUID = entries[match.handle]?.jobUUID
+        pendingMatchEvents.append(match)
+    }
+
+    // MARK: Mid-turn early wake support (§3.9, §3.10)
+
+    /// A completion awaiting durable delivery, with the stable ids that make
+    /// every append id-deduplicated.
+    struct PendingDelivery {
+        let jobUUID: UUID
+        let messageId: UUID
+        let completion: Completion
+    }
+
+    /// Non-destructive read of the queued completion notices (§3.10.3): the
+    /// caller appends each (id-deduplicated), saves, and only after a
+    /// successful save acknowledges them with `acknowledgeDelivered`. A
+    /// failed save therefore leaves every notice queued for the next idle
+    /// poll instead of losing it. Also the retention heartbeat.
+    func pendingCompletionsForDelivery() -> [PendingDelivery] {
+        pruneSettledEntries()
+        return pendingCompletions.map {
+            PendingDelivery(jobUUID: $0.jobUUID, messageId: $0.messageId, completion: $0.completion)
+        }
+    }
+
+    /// The rendered notice of a settled job whose completion is still queued.
+    func pendingCompletionBody(jobUUID: UUID) -> String? {
+        pendingCompletions.first(where: { $0.jobUUID == jobUUID }).map { BashCompletionNotice.body(for: $0.completion) }
+    }
+
+    /// Withdraw delivered notices by job identity — called only after the
+    /// history save that carries their messages succeeded.
+    func acknowledgeDelivered(jobUUIDs: Set<UUID>) {
+        guard !jobUUIDs.isEmpty else { return }
+        pendingCompletions.removeAll { jobUUIDs.contains($0.jobUUID) }
+        pruneSettledEntries()
+    }
+
+    /// Identity and display facts for one main-owned job, for its crash
+    /// record (§3.10.1).
+    struct JobFacts {
+        let jobUUID: UUID
+        let handle: String
+        let command: String
+        let description: String?
+        let workdir: String?
+        let startedAt: Date
+        let completionMessageId: UUID
+        let settled: Bool
+    }
+
+    func jobFacts(handleId: String, owner: String = BackgroundProcessRegistry.mainOwner) -> JobFacts? {
+        guard let e = entries[handleId], e.kind == .background, e.owner == owner else { return nil }
+        let redactor = BashTools.SecretRedactor()
+        return JobFacts(jobUUID: e.jobUUID, handle: e.id, command: redactor.redact(e.command),
+                        description: e.description.map { redactor.redact($0) }, workdir: e.workdir,
+                        startedAt: e.startedAt, completionMessageId: e.completionMessageId,
+                        settled: e.lifecycleSettled)
+    }
+
+    /// Runs whose launches are refused (a /stop cut them off). Bounded.
+    private var closedTurnRunIds: [UUID] = []
+
+    /// /stop cutoff (§3.9.1): close launch admission for the stopped run and
+    /// snapshot every unsettled main-owned item in the same actor step.
+    func stopCutoff(turnRunId: UUID?) -> (jobUUIDs: Set<UUID>, watchMatchIds: [UUID]) {
+        if let turnRunId, !closedTurnRunIds.contains(turnRunId) {
+            closedTurnRunIds.append(turnRunId)
+            if closedTurnRunIds.count > 64 { closedTurnRunIds.removeFirst() }
+        }
+        return unsettledMainOwnedItems()
+    }
+
+    /// Every main-owned item a /stop affects (§3.9.1): running jobs, jobs
+    /// whose completion is still queued, and owner jobs of pending watch
+    /// matches — plus the ids of those pending matches.
+    func unsettledMainOwnedItems() -> (jobUUIDs: Set<UUID>, watchMatchIds: [UUID]) {
+        var jobs = Set(entries.values.filter {
+            $0.kind == .background && $0.owner == Self.mainOwner && $0.status == .running
+        }.map(\.jobUUID))
+        jobs.formUnion(pendingCompletions.map(\.jobUUID))
+        for match in pendingMatchEvents { if let owner = match.ownerJobUUID { jobs.insert(owner) } }
+        return (jobs, pendingMatchEvents.map(\.matchId))
+    }
+
+    struct StoppedJob {
+        let jobUUID: UUID
+        let handle: String
+        let command: String
+        let runningForSeconds: Int
+    }
+
+    /// /stop (owner decision B/B1): terminate EVERY running main-owned
+    /// background job, including long-lived ones started turns ago with
+    /// wait_seconds=0, and tear down their watches (the exit path emits the
+    /// terminal watch events, which the manager appends without waking).
+    /// Cause and killed status are stamped BEFORE signalling.
+    func stopAllMainOwned() async -> [StoppedJob] {
+        let running = entries.values.filter {
+            $0.kind == .background && $0.owner == Self.mainOwner && $0.status == .running
+        }
+        let redactor = BashTools.SecretRedactor()
+        var stopped: [StoppedJob] = []
+        for e in running {
+            e.status = .killed
+            e.terminationCause = .userKill
+            try? e.stdin.close()
+            stopped.append(StoppedJob(jobUUID: e.jobUUID, handle: e.id, command: redactor.redact(e.command),
+                                      runningForSeconds: Int(Date().timeIntervalSince(e.startedAt))))
+        }
+        for e in running { await ProcessTree.terminate(e.process, graceNanos: 300_000_000) }
+        return stopped
+    }
+
+    /// Main-owned running jobs, for /status and the wake note.
+    struct RunningJob {
+        let jobUUID: UUID
+        let handle: String
+        let command: String
+        let description: String?
+        let workdir: String?
+        let runningForSeconds: Int
+    }
+
+    func runningMainOwnedJobs() -> [RunningJob] {
+        let redactor = BashTools.SecretRedactor()
+        return entries.values
+            .filter { $0.kind == .background && $0.owner == Self.mainOwner && $0.status == .running }
+            .sorted { $0.startedAt < $1.startedAt }
+            .map { RunningJob(jobUUID: $0.jobUUID, handle: $0.id, command: redactor.redact($0.command),
+                              description: $0.description.map { redactor.redact($0) }, workdir: $0.workdir,
+                              runningForSeconds: Int(Date().timeIntervalSince($0.startedAt))) }
+    }
+
     /// Called by the ConversationManager poll loop. Returns and clears pending completions.
     func drainCompletions() -> [Completion] {
         // Called every poll cycle — the periodic heartbeat that lets the
@@ -2134,7 +2451,8 @@ actor BackgroundProcessRegistry {
     /// per handle; a duplicate is refused immediately. An already-settled
     /// handle returns at once, carrying the acknowledgement receipt if its
     /// completion notice is still pending.
-    func awaitSettlement(handleId: String, timeoutNanos: UInt64, owner: String = BackgroundProcessRegistry.mainOwner) async -> WaitOutcome {
+    func awaitSettlement(handleId: String, timeoutNanos: UInt64, owner: String = BackgroundProcessRegistry.mainOwner,
+                         wake: WakeContext? = nil) async -> WaitOutcome {
         // Fast-path guards only. `await withTaskCancellationHandler` is a
         // suspension point, so another caller CAN interleave between these
         // checks and the registration closure — every guard is re-checked
@@ -2182,9 +2500,39 @@ actor BackgroundProcessRegistry {
                     if Task.isCancelled { return }
                     await BackgroundProcessRegistry.shared.waiterTimeoutFired(handleId: handleId, waiterId: waiterId)
                 }
+                // Mid-turn early wake (§3.4): only a main-owned wait inside a
+                // depth-0 call scope listens. The wake resolves through the
+                // same actor-serialized waiter slot as every other outcome.
+                if let wake, owner == Self.mainOwner {
+                    e.waiterWakeTask = Task {
+                        guard let reason = await MidturnWakeSignal.next(wake) else { return }
+                        if Task.isCancelled { return }
+                        await BackgroundProcessRegistry.shared.wakeFired(handleId: handleId, waiterId: waiterId, reason: reason)
+                    }
+                }
             }
         } onCancel: {
             Task { await BackgroundProcessRegistry.shared.cancelWaiter(handleId: handleId, waiterId: waiterId) }
+        }
+    }
+
+    /// Wake branch (mid-turn early wake §3.4). Rechecks settlement inside the
+    /// actor exactly like the timeout branch: at the settlement boundary the
+    /// only valid outcomes are a terminal result (with receipt) or a woken
+    /// running job — never "woken" after settlement was recorded.
+    private func wakeFired(handleId: String, waiterId: UUID, reason: MidturnWakeReason) {
+        guard let e = entries[handleId], let w = e.waiter, w.id == waiterId else { return }
+        e.waiter = nil
+        e.waiterTimeoutTask?.cancel()
+        e.waiterTimeoutTask = nil
+        e.waiterWakeTask = nil
+        if e.lifecycleSettled {
+            w.continuation.resume(returning: .settled(
+                exitCode: e.exitCode.map(Int32.init),
+                receipt: pendingReceipt(handleId: handleId)))
+        } else {
+            BashJobsStats.log("wait.woken")
+            w.continuation.resume(returning: .woken(reason))
         }
     }
 
@@ -2196,6 +2544,8 @@ actor BackgroundProcessRegistry {
         guard let e = entries[handleId], let w = e.waiter, w.id == waiterId else { return }
         e.waiter = nil
         e.waiterTimeoutTask = nil
+        e.waiterWakeTask?.cancel()
+        e.waiterWakeTask = nil
         if e.lifecycleSettled {
             w.continuation.resume(returning: .settled(
                 exitCode: e.exitCode.map(Int32.init),
@@ -2212,6 +2562,8 @@ actor BackgroundProcessRegistry {
         e.waiter = nil
         e.waiterTimeoutTask?.cancel()
         e.waiterTimeoutTask = nil
+        e.waiterWakeTask?.cancel()
+        e.waiterWakeTask = nil
         w.continuation.resume(returning: .cancelled)
     }
 

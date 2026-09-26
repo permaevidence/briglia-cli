@@ -133,6 +133,19 @@ enum HarnessAnnotationRenderer {
         return blocks.joined(separator: "\n\n")
     }
 
+    /// The wake note's harness status block (mid-turn early wake §3.11):
+    /// labelled as harness status, rendered AFTER and OUTSIDE the
+    /// direct-user block, never inside user-authority text. Labels and
+    /// details are untrusted-derived (commands, paths) and are escaped.
+    ///
+    ///     [Harness status — not from the user. Still running: • <label> (<detail>) • …]
+    static func renderBackgroundStatus(_ status: HarnessBackgroundStatus) -> String {
+        let items = status.items.map { item in
+            "• " + MarkerNeutralizer.escape(item.label) + " (" + MarkerNeutralizer.escape(item.detail) + ")"
+        }
+        return "[Harness status — not from the user. Still running: " + items.joined(separator: " ") + "]"
+    }
+
     /// Verify the rendered block carries the annotation intact. Rendering is
     /// deterministic so this can only fail through the test seam or memory
     /// corruption — but a violated invariant must abort the request rather
@@ -186,8 +199,9 @@ enum ProviderToolResultRenderer {
         // form — the form the legacy prompt declares authoritative — so
         // history and prompt can never contradict each other.
         guard MidTurnDelivery.typedAnnotationsEnabled else {
-            let legacyBlocks = result.harnessAnnotations.map {
-                HarnessAnnotationRenderer.renderLegacyFlattened($0)
+            let legacyBlocks = result.harnessAnnotations.flatMap { annotation -> [String] in
+                [HarnessAnnotationRenderer.renderLegacyFlattened(annotation)]
+                    + (annotation.backgroundStatus.map { [HarnessAnnotationRenderer.renderBackgroundStatus($0)] } ?? [])
             }
             return ([safeToolText] + legacyBlocks)
                 .filter { !$0.isEmpty }
@@ -198,6 +212,11 @@ enum ProviderToolResultRenderer {
             let block = HarnessAnnotationRenderer.render(annotation)
             try HarnessAnnotationRenderer.verifyRenderInvariant(block, annotation: annotation)
             rendered.append(block)
+            // Separate trusted status block after the direct-user block
+            // (absent when nothing was running: bytes unchanged).
+            if let status = annotation.backgroundStatus {
+                rendered.append(HarnessAnnotationRenderer.renderBackgroundStatus(status))
+            }
         }
         return ([safeToolText] + rendered)
             .filter { !$0.isEmpty }
@@ -339,14 +358,17 @@ enum MidTurnDrainSupport {
             guard recordBasenames == expectedBasenames else { return nil }
             canonicalMessages.append(canonical)
         }
-        return try? HarnessAnnotation.makeDirectUserBatch(
+        // The harness status block (mid-turn early wake §3.11) is not user
+        // content: it survives canonicalization unchanged (it was validated
+        // and bounded at decode, and is escaped at render).
+        return (try? HarnessAnnotation.makeDirectUserBatch(
             deliveryNonce: annotation.deliveryNonce,
             messages: annotationRecords(
                 for: canonicalMessages,
                 imagesDirectory: imagesDirectory,
                 documentsDirectory: documentsDirectory
             )
-        )
+        ))?.withBackgroundStatus(annotation.backgroundStatus)
     }
 
     struct SanitizeOutcome {

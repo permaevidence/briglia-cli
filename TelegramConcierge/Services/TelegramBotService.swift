@@ -438,6 +438,29 @@ actor TelegramBotService {
             chatId: chatId, messageId: messageId, text: finalText))
     }
 
+    private struct TelegramSetReactionRequest: Encodable {
+        struct Reaction: Encodable {
+            let type = "emoji"
+            let emoji: String
+        }
+        let chatId: Int
+        let messageId: Int
+        let reaction: [Reaction]
+        enum CodingKeys: String, CodingKey {
+            case chatId = "chat_id", messageId = "message_id", reaction
+        }
+    }
+
+    /// Silent receipt signal for a message queued while a turn runs
+    /// (mid-turn early wake §3.8): a 👀 reaction, no text. One attempt with
+    /// a 5 s timeout; the caller ignores errors and never parks it.
+    func setMessageReaction(chatId: Int, messageId: Int, emoji: String) async throws {
+        try await postJSON(method: "setMessageReaction",
+                           body: TelegramSetReactionRequest(chatId: chatId, messageId: messageId,
+                                                             reaction: [.init(emoji: emoji)]),
+                           timeout: 5)
+    }
+
     private struct TelegramOkEnvelope: Decodable {
         let ok: Bool
         let description: String?
@@ -445,14 +468,14 @@ actor TelegramBotService {
 
     /// POST a JSON body to a Bot API method whose result we don't need —
     /// only the ok flag is checked (the result type differs per method).
-    private func postJSON<Body: Encodable>(method: String, body: Body) async throws {
+    private func postJSON<Body: Encodable>(method: String, body: Body, timeout: TimeInterval = 15) async throws {
         guard !botToken.isEmpty else {
             throw TelegramError.notConfigured
         }
         let url = URL(string: "\(baseURL)\(botToken)/\(method)")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 15
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await transportData(for: request)

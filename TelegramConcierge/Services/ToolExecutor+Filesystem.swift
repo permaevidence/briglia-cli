@@ -297,8 +297,30 @@ extension ToolExecutor {
         if result.waitExpired, let jobHandle = result.jobHandle, waitSecondsArg != nil {
             recordBashWaitTimeout(handle: jobHandle)
         }
-        return ToolResultMessage(toolCallId: call.id, content: result.content,
-                                 bashReceipt: result.receipt)
+        var message = ToolResultMessage(toolCallId: call.id, content: result.content,
+                                        bashReceipt: result.receipt)
+        message.outcomeBinding = Self.bashOutcomeBinding(result, launchCall: true)
+        return message
+    }
+
+    /// Typed settlement evidence for a bash-family result (mid-turn early
+    /// wake §3.12.1), set only here, from harness state — never from text:
+    /// `moved` when the call returned while its recorded job keeps running;
+    /// `receiptObserved` when the result carries the completion receipt of
+    /// a recorded job. Jobs without a crash record stay unbound (their
+    /// receipts keep the in-memory contract). The launch fingerprint rides
+    /// only on the launching call's own binding (Codex V7 gate 1: a
+    /// `bash_manage wait` is a different call from the launch).
+    static func bashOutcomeBinding(_ result: BashTools.OpResult, launchCall: Bool) -> OutcomeBinding? {
+        let wake = WakeContext.current
+        if let receipt = result.receipt,
+           (try? DetachedJobStore.load())?.contains(where: { $0.jobId == receipt.jobUUID }) == true {
+            return OutcomeBinding(kind: .receiptObserved, jobId: receipt.jobUUID)
+        }
+        if let moved = result.movedJobUUID {
+            return OutcomeBinding(kind: .moved, jobId: moved, fingerprint: launchCall ? wake?.fingerprint : nil)
+        }
+        return nil
     }
 
     // MARK: - bash_manage (unified output/wait/input/watch/kill/list)
@@ -352,8 +374,10 @@ extension ToolExecutor {
             // A settled snapshot carries an acknowledgement receipt (§8) —
             // forward it so the completion notice observed here is withdrawn
             // after the turn durably saves, instead of arriving as a duplicate.
-            return ToolResultMessage(toolCallId: call.id, content: result.content,
-                                     bashReceipt: result.receipt)
+            var message = ToolResultMessage(toolCallId: call.id, content: result.content,
+                                            bashReceipt: result.receipt)
+            message.outcomeBinding = Self.bashOutcomeBinding(result, launchCall: false)
+            return message
 
         case "wait":
             let requested: Int
@@ -385,8 +409,10 @@ extension ToolExecutor {
                     since: since, sinceStderr: sinceStderr, owner: bashOwner)
             }
             if result.waitExpired { recordBashWaitTimeout(handle: handle) }
-            return ToolResultMessage(toolCallId: call.id, content: result.content,
-                                     bashReceipt: result.receipt)
+            var message = ToolResultMessage(toolCallId: call.id, content: result.content,
+                                            bashReceipt: result.receipt)
+            message.outcomeBinding = Self.bashOutcomeBinding(result, launchCall: false)
+            return message
 
         case "input":
             guard let text = args.stringAllowingEmpty("text") else {

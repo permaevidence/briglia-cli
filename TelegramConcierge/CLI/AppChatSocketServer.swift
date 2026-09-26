@@ -566,6 +566,10 @@ final class AppChatSocketServer {
             switch await manager.sendFromApp(text: text, attachments: urls) {
             case .accepted:
                 ack()
+            case .queuedMidTurn:
+                // Mid-turn early wake §3.8: same durability ack, plus the
+                // flag that the message will reach the running turn.
+                ack(["queued_mid_turn": true])
             case .refused(let reason):
                 nack(reason)
             }
@@ -595,6 +599,8 @@ final class AppChatSocketServer {
                     switch await manager.sendFromApp(text: transcription, attachments: []) {
                     case .accepted:
                         ack(["transcription": transcription])
+                    case .queuedMidTurn:
+                        ack(["transcription": transcription, "queued_mid_turn": true])
                     case .refused(let reason):
                         nack(reason)
                     }

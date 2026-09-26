@@ -61,6 +61,20 @@ struct Doctor: AsyncParsableCommand {
                 activeProfile: ProviderProfiles.activeProfile()) {
             note(advisory)
         }
+        // Mid-turn early wake (§3.13, §3.12.5): a test install must never
+        // stay in force-detach mode silently, and crash-record obligations
+        // that could not be verified after a restart are listed.
+        check("force-detach test setting is off", ok: !ForceDetach.isEnabled,
+              hint: "\(ForceDetach.environmentKey) is set: every long bash wait moves to the background after 8 s — unset it outside field trials")
+        do {
+            let records = try DetachedJobStore.load()
+            for record in records where record.unverifiableReason != nil {
+                note("background job \(record.handle) (\(record.command.prefix(40))): result could not be verified after a restart (\(record.unverifiableReason ?? "")) — kept for inspection")
+            }
+        } catch {
+            check("background-job crash records readable", ok: false,
+                  hint: "\(DetachedJobStore.fileURL.path): \(error.localizedDescription) — it is never overwritten; move it aside to reset")
+        }
         let serverStore = KeychainHelper.loadSnapshot()
         if let servers = ProviderServers.list(serverStore) {
             if !servers.isEmpty {

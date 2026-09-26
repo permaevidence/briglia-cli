@@ -191,8 +191,46 @@ class ConversationManager: ObservableObject {
     /// the turn's trigger message is ambient. These start their own follow-up
     /// turn once the agent goes idle.
     private var pendingAmbientTriggers: [Message] = []
-    /// One queue ack per turn so a burst of mid-turn messages doesn't spam.
-    private var didNotifyMidTurnQueue = false
+
+    // MARK: Mid-turn early wake state (plan v7, release 1a)
+    //
+    // Generations are IN MEMORY ONLY (§3.1): the queue file holds plain
+    // `Message`s that land in conversation.json unchanged, so nothing new is
+    // persisted and history bytes stay the same.
+
+    /// Monotonic generation of every `.userText` enqueued mid-turn, keyed by
+    /// message id; ambient kinds never get one. Messages recovered from the
+    /// queue file at startup go straight into history (they never need one:
+    /// no batch of theirs can be stale).
+    private var midTurnGeneration: [UUID: UInt64] = [:]
+    private var nextMidTurnGeneration: UInt64 = 0
+    /// Highest generation whose message had entered history when the
+    /// current request body was frozen, and the value for the request that
+    /// was actually TRANSMITTED (set only after a successful response).
+    private var appendedMidTurnGeneration: UInt64 = 0
+    private var seenGenerationAtRequest: UInt64 = 0
+    /// Stale-batch suppression flood cap (§3.2): after 3 consecutive
+    /// suppressed batches the next one is admitted.
+    private var consecutiveSuppressions = 0
+    static let maxConsecutiveSuppressions = 3
+    /// Ids of every message covered by the last successful history save —
+    /// "durably in history" (§3.10.2; mere presence in `messages` is not).
+    private var lastSavedMessageIDs: Set<UUID> = []
+    /// Completion notices appended but not yet acknowledged: message id →
+    /// job. Acknowledged (registry + crash record) only after a save that
+    /// carried the message succeeded (§3.10.3).
+    private var pendingCompletionAcks: [UUID: UUID] = [:]
+    /// Items a /stop affected (§3.9.2): their completions and watch matches
+    /// are appended to history WITHOUT starting a turn, until settled —
+    /// never cleared by a new user turn.
+    private var stoppedJobIds: Set<UUID> = []
+    /// Startup knowledge of earlier /stops, loaded FIRST in init (§3.9.3).
+    private var stopIntent: StopIntent = .none
+    /// A waking item appended by startup job reconciliation; its turn starts
+    /// once polling begins.
+    private var recoveredWakeTrigger: Message?
+    /// One maintenance notice per process when a detach record fails.
+    private var detachRecordFailureShown = false
     private var pairedChatId: Int?
     /// The Telegram update_id whose processUpdate call is currently on the
     /// stack. Lets /upgrade — which exec-restarts and never returns — confirm
@@ -461,6 +499,10 @@ class ConversationManager: ObservableObject {
     /// so the app can safely clear its composer.
     enum AppSubmitOutcome {
         case accepted
+        /// Accepted AND queued for the running turn (§3.8): the socket ack
+        /// gains `"queued_mid_turn": true`, the terminal prints a local dim
+        /// status line. Same durability promise as `.accepted`.
+        case queuedMidTurn
         case refused(String)
     }
 
@@ -585,8 +627,9 @@ class ConversationManager: ObservableObject {
                 summary: "queued app msg during active turn",
                 detail: String(userMessage.content.prefix(200))
             )
+            noteMidTurnEnqueued(userMessage)
             statusMessage = "Message queued for in-flight turn"
-            return .accepted
+            return .queuedMidTurn
         }
 
         messages.append(userMessage)
@@ -1116,7 +1159,23 @@ class ConversationManager: ObservableObject {
     init() {
         isPrivacyModeEnabled = UserDefaults.standard.bool(forKey: privacyModeDefaultsKey)
         loadConversation()
+        // Mid-turn early wake (§3.9.3, §3.10.4): the stop intent is loaded
+        // FIRST — nothing is classified or delivered before it. The loaded
+        // history is durable by definition.
+        lastSavedMessageIDs = Set(messages.map(\.id))
+        loadStopIntent()
         recoverInterruptedTurnSalvageIfNeeded()
+        // Snapshot evidence bookkeeping (§3.12.3): the legacy list exists
+        // before any new job or snapshot; orphan sidecars are swept.
+        do { try SettlementEvidence.ensureLegacyListInitialized() }
+        catch { print("[ConversationManager] Settlement evidence not initialized yet: \(error.localizedDescription)") }
+        SettlementEvidence.sweepOrphanSidecars()
+        if ForceDetach.isEnabled {
+            print("[MidturnWake] ⚠️ \(ForceDetach.environmentKey) is set: every long bash wait moves to the background 8 s after it starts (test setting)")
+        }
+        // The job pass ends canonical recovery, against the history it just
+        // saved (deferred while recovery is unresolved).
+        reconcileJobRecords()
         loadContextUsageSnapshot()
         loadLastUserChannelAddress()
         loadPendingContinuation()
@@ -1390,8 +1449,21 @@ class ConversationManager: ObservableObject {
         // the queue recovery just started a turn — the unanswered message is
         // part of that turn's context).
         restorePendingInboundBuffers()
+        // Startup stop pass (§3.9.3) BEFORE queue recovery and turn resume:
+        // messages held by an earlier /stop reach history without being
+        // answered, and a stopped turn is never resumed.
+        applyPersistedStopMarker()
         recoverPersistedMidTurnMessages()
         recoverPersistedAmbientTriggers()
+        // Recovered crash-record notices that wake (§3.10.4) start their turn
+        // here; a resume below then finds the run active and only clears
+        // its marker (the unanswered trigger is in this turn's context).
+        reconcileJobRecords()
+        if let trigger = recoveredWakeTrigger, activeRunId == nil, activeProcessingTask == nil, !stopIntent.isUnknown {
+            recoveredWakeTrigger = nil
+            statusMessage = "Processing background task completion..."
+            startActiveProcessing(for: trigger)
+        }
         resumeInterruptedActiveTurnIfNeeded()
         
         // Warm up Whisper only when local transcription is active.
@@ -2083,7 +2155,7 @@ class ConversationManager: ObservableObject {
         pendingReplyContext = nil
         pendingAttachmentNotes.removeAll()
         
-        await dispatchUserTurn(userMessage)
+        await dispatchUserTurn(userMessage, telegramMessageId: telegramMessage.messageId)
     }
 
     // MARK: - WhatsApp inbound
@@ -2264,10 +2336,11 @@ class ConversationManager: ObservableObject {
     /// are actually shown to the model (next tool-round boundary, or the
     /// follow-up turn launched when this one ends), so history order always
     /// matches what the model saw.
-    private func dispatchUserTurn(_ userMessage: Message) async {
+    private func dispatchUserTurn(_ userMessage: Message, telegramMessageId: Int? = nil) async {
         if activeRunId != nil || activeProcessingTask != nil {
             pendingMidTurnMessages.append(userMessage)
-            if !persistPendingMidTurnQueue() {
+            let persisted = persistPendingMidTurnQueue()
+            if !persisted {
                 inboundDurabilityFailure = true
             }
             DebugTelemetry.log(
@@ -2275,15 +2348,14 @@ class ConversationManager: ObservableObject {
                 summary: "queued msg during active turn",
                 detail: String(userMessage.content.prefix(200))
             )
-            // Only real user messages get the "got it" acknowledgement; ambient
-            // kinds queue silently (defensive — they normally use
-            // pendingAmbientTriggers, not this path).
-            if !didNotifyMidTurnQueue && userMessage.kind == .userText {
-                didNotifyMidTurnQueue = true
-                try? await sendText(
-                    "📨 Got it — I'm still working on the previous request and will take this into account. Send /stop if you'd rather interrupt me.",
-                    to: userMessage.originChannel ?? replyAddress
-                )
+            // Mid-turn early wake (§3.1, §3.8): mint the generation and fire
+            // the wake after the append and persist. No text acknowledgement
+            // (owner decision): a silent 👀 reaction on Telegram, one attempt,
+            // errors ignored, never parked.
+            noteMidTurnEnqueued(userMessage)
+            if userMessage.kind == .userText, let telegramMessageId, let chatId = pairedChatId {
+                let service = telegramService
+                Task { try? await service.setMessageReaction(chatId: chatId, messageId: telegramMessageId, emoji: "👀") }
             }
             statusMessage = "Message queued for in-flight turn"
             return
@@ -2304,14 +2376,22 @@ class ConversationManager: ObservableObject {
     /// they land just before the turn's final assistant message, matching what
     /// the model actually saw. Attachments can't ride inline mid-turn, so the
     /// envelope lists their absolute paths for read_file.
-    private func deliverMidTurnMessages(into results: inout [ToolResultMessage]) {
-        guard !pendingMidTurnMessages.isEmpty, !results.isEmpty else { return }
-
+    /// Returns the highest wake generation whose message reached durable
+    /// history in this drain (the caller consumes the wake up to it), or nil
+    /// when nothing was delivered.
+    @discardableResult
+    private func deliverMidTurnMessages(into results: inout [ToolResultMessage],
+                                        backgroundStatus: HarnessBackgroundStatus? = nil) -> UInt64? {
+        guard !pendingMidTurnMessages.isEmpty, !results.isEmpty else { return nil }
+        let queued = pendingMidTurnMessages
+        let delivered: Bool
         if MidTurnDelivery.typedAnnotationsEnabled {
-            deliverMidTurnMessagesTyped(into: &results)
+            delivered = deliverMidTurnMessagesTyped(into: &results, backgroundStatus: backgroundStatus)
         } else {
-            deliverMidTurnMessagesLegacy(into: &results)
+            delivered = deliverMidTurnMessagesLegacy(into: &results, backgroundStatus: backgroundStatus)
         }
+        guard delivered else { return nil }
+        return noteAppendedToHistory(queued)
     }
 
     /// Typed mid-turn delivery: peek the queue, build a
@@ -2322,17 +2402,22 @@ class ConversationManager: ObservableObject {
     /// annotation is emitted and the messages stay queued for a later
     /// boundary. The marker itself is rendered exclusively at the provider
     /// serialization boundary — never appended to `content`.
-    private func deliverMidTurnMessagesTyped(into results: inout [ToolResultMessage]) {
+    @discardableResult
+    private func deliverMidTurnMessagesTyped(into results: inout [ToolResultMessage],
+                                             backgroundStatus: HarnessBackgroundStatus? = nil) -> Bool {
         let drained = pendingMidTurnMessages  // peek — do not clear yet
 
-        guard let annotation = MidTurnDrainSupport.buildBatchAnnotation(
+        guard let built = MidTurnDrainSupport.buildBatchAnnotation(
             for: drained,
             imagesDirectory: imagesDirectory,
             documentsDirectory: documentsDirectory
         ) else {
             statusMessage = "Mid-turn delivery deferred (will retry at the next boundary)"
-            return  // fail closed: queue and its durable mirror stay untouched
+            return false  // fail closed: queue and its durable mirror stay untouched
         }
+        // The wake note (§3.11): harness status of work still running,
+        // rendered after and outside the direct-user block.
+        let annotation = built.withBackgroundStatus(backgroundStatus)
 
         pendingMidTurnMessages.removeAll()
         defer { persistPendingMidTurnQueue() }  // after saveConversation below
@@ -2355,17 +2440,20 @@ class ConversationManager: ObservableObject {
         guard saveConversation() else {
             pendingMidTurnMessages = drained + pendingMidTurnMessages
             statusMessage = "Mid-turn history could not be saved; delivery remains pending"
-            return
+            return false
         }
 
         results[results.count - 1].harnessAnnotations.append(annotation)
         inFlightMidTurnBatch = InFlightMidTurnBatch(nonce: annotation.deliveryNonce, messages: drained)
+        return true
     }
 
     /// Legacy flattened delivery — reachable only through the rollback flag
     /// (BRIGLIA_MIDTURN_TYPED_ANNOTATIONS=0 / ada.midturnLegacyDelivery). Restores
     /// the weaker static-marker behavior documented in the plan's Phase D.
-    private func deliverMidTurnMessagesLegacy(into results: inout [ToolResultMessage]) {
+    @discardableResult
+    private func deliverMidTurnMessagesLegacy(into results: inout [ToolResultMessage],
+                                              backgroundStatus: HarnessBackgroundStatus? = nil) -> Bool {
         let drained = pendingMidTurnMessages
         pendingMidTurnMessages.removeAll()
         defer { persistPendingMidTurnQueue() }  // after saveConversation below
@@ -2399,7 +2487,87 @@ class ConversationManager: ObservableObject {
         }
         saveConversation()
 
+        if let backgroundStatus, backgroundStatus.isValid {
+            blocks.append(HarnessAnnotationRenderer.renderBackgroundStatus(backgroundStatus))
+        }
         results[results.count - 1].content += "\n\n" + blocks.joined(separator: "\n\n")
+        return true
+    }
+
+    // MARK: - Mid-turn early wake (plan v7, release 1a)
+
+    /// Append → persist → mint → fire (§3.1): called by both enqueue sites
+    /// after the queue mirror was written. Only `.userText` mints a
+    /// generation and fires; ambient kinds never do.
+    private func noteMidTurnEnqueued(_ message: Message) {
+        guard message.kind == .userText, let runId = activeRunId else { return }
+        nextMidTurnGeneration += 1
+        let generation = nextMidTurnGeneration
+        midTurnGeneration[message.id] = generation
+        let at = ContinuousClock.now
+        Task { await TurnWakeCenter.shared.fire(runId: runId, generation: generation, at: at) }
+    }
+
+    /// Record that queued messages entered history (every later request
+    /// renders them). Returns the highest generation among them.
+    @discardableResult
+    private func noteAppendedToHistory(_ batch: [Message]) -> UInt64? {
+        let generations = batch.compactMap { midTurnGeneration[$0.id] }
+        guard let highest = generations.max() else { return nil }
+        appendedMidTurnGeneration = max(appendedMidTurnGeneration, highest)
+        for message in batch { midTurnGeneration.removeValue(forKey: message.id) }
+        return highest
+    }
+
+    /// Stale-batch test (§3.2): a queued `.userText` whose generation is
+    /// higher than the highest generation rendered into the transmitted
+    /// request that produced this batch. Messages without a generation
+    /// (recovered from disk, seeded by tests) never suppress.
+    private func batchIsStale() -> Bool {
+        pendingMidTurnMessages.contains {
+            $0.kind == .userText && (midTurnGeneration[$0.id] ?? 0) > seenGenerationAtRequest
+        }
+    }
+
+    static let notExecutedResultContent = #"{"status":"not_executed","reason":"a user message arrived before this batch started — read it below and re-issue this call if it is still wanted"}"#
+
+    /// The synthetic result of one call of a suppressed batch.
+    static func notExecutedResult(for call: ToolCall) -> ToolResultMessage {
+        var result = ToolResultMessage(toolCallId: call.id, content: notExecutedResultContent)
+        result.outcomeBinding = OutcomeBinding(kind: .notExecuted)
+        return result
+    }
+
+    /// Harness status for the wake note (§3.11): main-owned bash jobs still
+    /// running when the batch is drained. nil when nothing runs (nothing is
+    /// rendered and the annotation bytes are unchanged).
+    private func wakeNoteStatus(movedThisRound: Set<UUID>) async -> HarnessBackgroundStatus? {
+        let running = await BackgroundProcessRegistry.shared.runningMainOwnedJobs()
+        guard !running.isEmpty else { return nil }
+        let items = running.prefix(HarnessBackgroundStatus.maxItems).map { job -> HarnessBackgroundStatus.Item in
+            let command = job.command.count > 80 ? String(job.command.prefix(80)) + "…" : job.command
+            var detail = Self.formatShortDuration(job.runningForSeconds)
+            if let workdir = job.workdir, !workdir.isEmpty { detail += ", in \(Self.abbreviatedPath(workdir))" }
+            detail += movedThisRound.contains(job.jobUUID) ? ", moved to the background" : ", running in the background"
+            return .init(label: "bash \(job.handle) \(Self.jsonQuoted(command))", detail: detail)
+        }
+        let status = HarnessBackgroundStatus(items: Array(items))
+        return status.isValid ? status : nil
+    }
+
+    static func jsonQuoted(_ text: String) -> String {
+        (try? String(data: JSONEncoder().encode(text), encoding: .utf8) ?? nil) ?? "\"\""
+    }
+
+    static func abbreviatedPath(_ path: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+    }
+
+    static func formatShortDuration(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60)m\(seconds % 60)s" }
+        return "\(seconds / 3600)h\((seconds % 3600) / 60)m"
     }
 
     /// A provider request was fully constructed and successfully transmitted.
@@ -2579,12 +2747,16 @@ class ConversationManager: ObservableObject {
         }
         print("[ConversationManager] Recovered \(fresh.count) queued mid-turn message(s) from before restart")
         messages.append(contentsOf: fresh)
+        let held = appendHeldPreStopNotes(for: fresh)
         if saveConversation() {
             try? FileManager.default.removeItem(at: pendingMidTurnFileURL)
         } else {
             print("[ConversationManager] Conversation save failed during mid-turn recovery — keeping the queue file for the next startup")
         }
-        if activeRunId == nil, activeProcessingTask == nil, let trigger = fresh.last {
+        // Held pre-stop messages are never answered (§3.9.3); an unreadable
+        // stop marker means nothing recovered starts work (fail closed).
+        guard !stopIntent.isUnknown else { return }
+        if activeRunId == nil, activeProcessingTask == nil, let trigger = fresh.last(where: { !held.contains($0.id) }) {
             statusMessage = "Generating response..."
             startActiveProcessing(for: trigger)
         }
@@ -2759,6 +2931,12 @@ class ConversationManager: ObservableObject {
         guard activeRunId == nil, activeProcessingTask == nil, !recoveryBlocked else { return }
         guard let marker = try? JSONDecoder().decode(ActiveTurnMarker.self, from: data),
               let trigger = messages.last(where: { $0.id == marker.triggerMessageId }) else { return }
+        // A turn stopped by /stop is never resumed; with an unreadable stop
+        // marker nothing is resumed (§3.9.3).
+        guard !stopIntent.isUnknown, !stopIntent.stoppedTriggerIds.contains(marker.triggerMessageId) else {
+            print("[ConversationManager] Not resuming the interrupted turn: it was stopped by /stop (or the stop marker is unreadable)")
+            return
+        }
         print("[ConversationManager] Resuming turn interrupted by shutdown (trigger message \(marker.triggerMessageId.uuidString.prefix(8)))")
         statusMessage = "Generating response..."
         startActiveProcessing(for: trigger)
@@ -2805,6 +2983,13 @@ class ConversationManager: ObservableObject {
                 currentTurnLogIsActive = false
                 turnActivity = nil
             }
+            // Mid-turn early wake: this run can no longer be woken; a newer
+            // run's arm/scope is never touched (run-id scoped).
+            let executor = toolExecutor
+            Task {
+                await TurnWakeCenter.shared.disarm(runId: runId)
+                await executor.clearWakeTurn(ifRunId: runId)
+            }
             // Stranded-batch recovery must run before the follow-up drain:
             // a drained mid-turn batch whose annotation never reached a
             // transmitted request re-enters the queue here, so the follow-up
@@ -2818,7 +3003,7 @@ class ConversationManager: ObservableObject {
             // All queued messages enter history; the last one is the trigger
             // (the new turn's context window includes them all).
             if isPolling, activeRunId == nil, activeProcessingTask == nil,
-               let trigger = pendingMidTurnMessages.last {
+               !pendingMidTurnMessages.isEmpty {
                 let queued = pendingMidTurnMessages
                 pendingMidTurnMessages.removeAll()
                 // Id-dedup: a batch requeued after an aborted annotation
@@ -2826,11 +3011,22 @@ class ConversationManager: ObservableObject {
                 messages.append(contentsOf: queued.filter { queuedMessage in
                     !messages.contains(where: { $0.id == queuedMessage.id })
                 })
+                // Messages sent BEFORE a /stop (O-S1) are kept in history
+                // unchanged, followed by one id-deduplicated harness note,
+                // and do not start a turn (§3.9.3). Only messages that
+                // arrived after the cutoff start the follow-up.
+                let held = appendHeldPreStopNotes(for: queued)
+                noteAppendedToHistory(queued)
                 saveConversation()
                 persistPendingMidTurnQueue()
-                print("[ConversationManager] Starting follow-up turn for \(queued.count) queued mid-turn message(s)")
-                statusMessage = "Generating response..."
-                startActiveProcessing(for: trigger)
+                retireSettledStopEntries()
+                if let trigger = queued.last(where: { !held.contains($0.id) }) {
+                    print("[ConversationManager] Starting follow-up turn for \(queued.count) queued mid-turn message(s)")
+                    statusMessage = "Generating response..."
+                    startActiveProcessing(for: trigger)
+                } else {
+                    print("[ConversationManager] Kept \(queued.count) message(s) sent before /stop for the next request (no turn started)")
+                }
             }
             // Deferred ambient triggers wait behind user messages; the drain
             // no-ops if the follow-up turn above just started.
@@ -2842,8 +3038,15 @@ class ConversationManager: ObservableObject {
         // Reset the per-turn tool log so /status shows only this turn.
         currentTurnToolLog = []
         currentTurnLogIsActive = true
-        didNotifyMidTurnQueue = false
         turnActivity = TurnActivity(kind: .thinking, startedAt: Date())
+
+        // Mid-turn early wake (§3.1): arm this run and give the main
+        // executor its wake scope (run id + history anchor for crash-record
+        // evidence searches). Disarmed in the teardown below.
+        consecutiveSuppressions = 0
+        seenGenerationAtRequest = appendedMidTurnGeneration
+        await TurnWakeCenter.shared.arm(runId: runId)
+        await toolExecutor.setWakeTurn(runId: runId, anchor: messages.last?.id)
 
         let turnStartedAt = Date()
         DebugTelemetry.log(
@@ -3045,6 +3248,16 @@ class ConversationManager: ObservableObject {
                 if !messages.contains(where: { $0.id == assistantMessage.id }) { messages.append(assistantMessage) }
                 salvageSaved = saveConversation()
                 print("[ConversationManager] Saved \(partialInteractions.count) partial tool interaction(s) from cancelled turn")
+                // Cancel-salvage receipt fix, narrowed (§3.12, V4-R1): only
+                // receipts whose result is in the outcome ACTUALLY saved, and
+                // only after that save returned true — never `salvageSaved`
+                // alone (it starts true) and never a pendingRecovery outcome
+                // (it carries no results). Removes the duplicate
+                // [BACKGROUND BASH COMPLETE] after a cancelled turn.
+                if salvageSaved, partialCheckpoint?.pendingRecovery != true {
+                    let receipts = assistantMessage.toolInteractions.flatMap { $0.results.compactMap(\.bashReceipt) }
+                    if !receipts.isEmpty { await BackgroundProcessRegistry.shared.acknowledgeCompletions(receipts) }
+                }
             }
             if salvageSaved && partialCheckpoint != nil && partialCheckpoint?.pendingRecovery != true {
                 clearTurnSalvageFile(ifStillOwnedBy: runId)
@@ -3092,6 +3305,11 @@ class ConversationManager: ObservableObject {
             if let checkpoint = partialCheckpoint, checkpoint.isEnvelope { errMessage = checkpoint.outcome(text: errText) }
             if !messages.contains(where: { $0.id == errMessage.id }) { messages.append(errMessage) }
             let salvageSaved = saveConversation()
+            // Same narrowed receipt rule on the error salvage (§3.12).
+            if salvageSaved, partialCheckpoint?.pendingRecovery != true {
+                let receipts = errMessage.toolInteractions.flatMap { $0.results.compactMap(\.bashReceipt) }
+                if !receipts.isEmpty { await BackgroundProcessRegistry.shared.acknowledgeCompletions(receipts) }
+            }
             if salvageSaved && partialCheckpoint != nil && partialCheckpoint?.pendingRecovery != true {
                 clearTurnSalvageFile(ifStillOwnedBy: runId)
             }
@@ -5413,11 +5631,15 @@ class ConversationManager: ObservableObject {
            let pin = OpenRouterProviderPin.statusLine() {
             contextLine += "\n" + pin
         }
+        // Mid-turn early wake (§3.11): background work and retained
+        // obligations; the hidden test setting announces itself first.
+        if let background = await backgroundStatusSection() { contextLine += "\n" + background }
+        let testWarning = ForceDetach.active ? "⚠️ test setting: force-detach is ON\n" : ""
 
         if log.isEmpty {
             let msg = activeRunId != nil
-                ? "⏳ Working on it — no tool calls yet.\n\(contextLine)"
-                : "💤 Idle. No tool activity to report.\n\(contextLine)"
+                ? "\(testWarning)⏳ Working on it — no tool calls yet.\n\(contextLine)"
+                : "\(testWarning)💤 Idle. No tool activity to report.\n\(contextLine)"
             try? await sendText(msg)
             return
         }
@@ -5431,7 +5653,7 @@ class ConversationManager: ObservableObject {
             ? "⚙️ Current turn — \(log.count) tool call\(log.count == 1 ? "" : "s") so far\(failedSuffix):"
             : "\(failedCount > 0 ? "⚠️" : "✅") Last turn — \(log.count) tool call\(log.count == 1 ? "" : "s")\(failedSuffix):"
 
-        var lines: [String] = [header]
+        var lines: [String] = testWarning.isEmpty ? [header] : [String(testWarning.dropLast()), header]
         for entry in log {
             let emoji = Self.progressEmoji(forToolName: entry.name)
             let time = formatter.string(from: entry.startedAt)
@@ -5441,6 +5663,31 @@ class ConversationManager: ObservableObject {
         lines.append(contextLine)
 
         try? await sendText(lines.joined(separator: "\n"))
+    }
+
+    /// "Running in the background" for /status (§3.11): main-owned bash
+    /// jobs (all stopped by /stop — owner decision B1), background
+    /// subagents, and crash-record obligations that could not be verified.
+    private func backgroundStatusSection() async -> String? {
+        var lines: [String] = []
+        let jobs = await BackgroundProcessRegistry.shared.runningMainOwnedJobs()
+        for job in jobs.prefix(10) {
+            let command = job.command.count > 50 ? String(job.command.prefix(50)) + "…" : job.command
+            lines.append("  • bash \(job.handle) \"\(command)\" — \(Self.formatShortDuration(job.runningForSeconds))")
+        }
+        if jobs.count > 10 { lines.append("  • … and \(jobs.count - 10) more") }
+        if !jobs.isEmpty { lines.append("  (/stop stops all of these, including long-running ones)") }
+        let subagents = await SubagentBackgroundRegistry.shared.runningHandles()
+        for handle in subagents.prefix(5) {
+            lines.append("  • subagent \(handle.id) (\(handle.subagentType)) — \(Self.formatShortDuration(Int(Date().timeIntervalSince(handle.startedAt))))")
+        }
+        if let records = try? DetachedJobStore.load() {
+            for record in records where record.unverifiableReason != nil {
+                lines.append("  ⚠️ result of \(record.handle) could not be verified after a restart (\(record.unverifiableReason ?? "")) — kept for inspection")
+            }
+        }
+        guard !lines.isEmpty else { return nil }
+        return "Running in the background:\n" + lines.joined(separator: "\n")
     }
 
     private func formatContextGaugeLine() -> String {
@@ -5849,29 +6096,396 @@ class ConversationManager: ObservableObject {
     private func stopActiveExecution(notify address: ChannelAddress? = nil) async {
         let wasRunning = activeRunId != nil
 
+        // 1. Cut off and persist FIRST (mid-turn early wake §3.9.1): the
+        //    stop marker names every unsettled agent-started item, the
+        //    stopped turn's trigger and every queued pre-stop user message,
+        //    before anything is cancelled. Repeated /stop appends an entry.
+        //    A failed write never refuses the stop.
+        let items = await BackgroundProcessRegistry.shared.stopCutoff(turnRunId: activeRunId)
+        let runningSubagents = await SubagentBackgroundRegistry.shared.runningHandles()
+        // From here to the turn cancellation below there is NO suspension
+        // point: the running turn cannot drain a held message into its next
+        // request between the snapshot and the cancel.
+        var affected = items.jobUUIDs
+        if let records = try? DetachedJobStore.load() {
+            affected.formUnion(records.filter { $0.completion == .owed }.map(\.jobId))
+        }
+        let held = pendingMidTurnMessages.filter { $0.kind == .userText }.map(\.id)
+        let trigger = wasRunning ? activeTurnTriggerMessage?.id : nil
+        var markerFailure: String? = nil
+        if !affected.isEmpty || !held.isEmpty || trigger != nil {
+            let entry = StopEntry(stopId: UUID(), at: Date(), stoppedTurnTriggerId: trigger,
+                                  heldQueueMessageIds: held, heldNoteMessageId: UUID(),
+                                  affectedJobIds: affected.sorted { $0.uuidString < $1.uuidString },
+                                  affectedWatchMatchIds: items.watchMatchIds)
+            stopEntries.append(entry)
+            do { try StopMarkerStore.append(entry) } catch {
+                markerFailure = error.localizedDescription
+                showMaintenanceNotice("Could not save the /stop marker: \(error.localizedDescription)")
+            }
+            // 2. Per-item disposition in each crash record (an optimisation:
+            //    the marker's sets are authoritative even if this fails).
+            do {
+                try DetachedJobStore.mutate("stop") { records in
+                    for i in records.indices where affected.contains(records[i].jobId) && records[i].stopId == nil {
+                        records[i].stopId = entry.stopId
+                    }
+                }
+            } catch {
+                print("[ConversationManager] /stop could not stamp crash records: \(error.localizedDescription)")
+            }
+        }
+        // Stopped items never start work until settled — across turns (a
+        // new user message never clears this) and restarts (the marker).
+        stoppedJobIds.formUnion(affected)
+        stoppedSubagentHandles.formUnion(runningSubagents.map(\.id))
+
+        // 3–4. Cancel: the turn, every background subagent, EVERY
+        //    main-owned bash job from any turn including long-lived ones
+        //    (owner decision B1) and their watches, and registered processes.
         activeProcessingTask?.cancel()
         let hasCheckpointOwner = activeRunId.flatMap { activeTurnCheckpoints[$0]?.isEnvelope } == true
         if !hasCheckpointOwner { activeProcessingTask = nil; activeRunId = nil }
         currentTurnLogIsActive = false
         turnActivity = nil
+        await TurnWakeCenter.shared.disarm()
 
-        // Kill every background subagent too — /stop is a blanket halt for all
-        // active cost-accruing work the user invoked. (In-flight archiving /
-        // user-context extraction are deliberately NOT cancelled here; they
-        // run on detached tasks that continue to completion so we don't lose
-        // summaries or fact extraction mid-flight.)
+        // (In-flight archiving / user-context extraction are deliberately NOT
+        // cancelled here; they run on detached tasks that continue to
+        // completion so we don't lose summaries or fact extraction.)
         let killedBackgroundSubagents = await SubagentBackgroundRegistry.shared.cancelAll()
+        let stoppedBash = await BackgroundProcessRegistry.shared.stopAllMainOwned()
 
         await toolExecutor.cancelAllRunningProcesses()
         ToolExecutor.clearPendingToolOutputs()
 
-        var text = wasRunning ? "⛔ I stopped the current work." : "I'm not doing anything at the moment."
+        // 5. Confirm up to 3 s (actual exits, not just signals sent).
+        var unconfirmed = Set(stoppedBash.map(\.jobUUID))
+        let confirmDeadline = Date().addingTimeInterval(3)
+        while !unconfirmed.isEmpty && Date() < confirmDeadline {
+            for job in unconfirmed where await BackgroundProcessRegistry.shared.settlementInfo(uuid: job).settled {
+                unconfirmed.remove(job)
+            }
+            if !unconfirmed.isEmpty { try? await Task.sleep(nanoseconds: 50_000_000) }
+        }
+
+        // 6. Reply: "stopped" only for confirmed exits.
+        var text = wasRunning ? "⛔ I stopped the current work." : (stoppedBash.isEmpty ? "I'm not doing anything at the moment." : "⛔ Stopped.")
         if killedBackgroundSubagents > 0 {
             text += " Also stopped \(killedBackgroundSubagents) background assistant\(killedBackgroundSubagents == 1 ? "" : "s")."
+        }
+        let confirmed = stoppedBash.filter { !unconfirmed.contains($0.jobUUID) }
+        if !confirmed.isEmpty {
+            let list = confirmed.prefix(5).map { job in
+                let command = job.command.count > 40 ? String(job.command.prefix(40)) + "…" : job.command
+                return "\(job.handle) (\(command), running \(Self.formatShortDuration(job.runningForSeconds)))"
+            }
+            text += " Stopped \(confirmed.count) background command\(confirmed.count == 1 ? "" : "s"), including long-running ones: \(list.joined(separator: ", "))\(confirmed.count > 5 ? ", …" : "")."
+        }
+        if !unconfirmed.isEmpty {
+            text += " Cancellation requested for \(unconfirmed.count) more command\(unconfirmed.count == 1 ? "" : "s"); still shutting down."
+        }
+        if !held.isEmpty {
+            text += held.count == 1
+                ? " I kept the message you sent before /stop for your next request."
+                : " I kept the \(held.count) messages you sent before /stop for your next request."
+        }
+        if markerFailure != nil {
+            text += " (I couldn't save the stop to disk — if Briglia restarts in the next moments it may resume the stopped request.)"
         }
         try? await sendText(text, to: address)
 
         statusMessage = wasRunning ? "Cancelled" : "Listening... (Last check: \(formattedTime()))"
+    }
+
+    /// Mind import / wipe: drop crash records, the stop marker and the
+    /// snapshot settlement evidence of the replaced history (checked), and
+    /// every in-memory disposition. The legacy list is recreated from the
+    /// snapshots now present.
+    private func resetEarlyWakeStateForReplacedHistory() throws {
+        for url in [DetachedJobStore.fileURL, StopMarkerStore.fileURL] where FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+            try PrivateStorage.fsyncDirectory(url.deletingLastPathComponent().path)
+        }
+        try SettlementEvidence.resetForReplacedHistory()
+        stoppedJobIds.removeAll(); stopEntries.removeAll(); stoppedSubagentHandles.removeAll()
+        stopIntent = .none; pendingCompletionAcks.removeAll(); recoveredWakeTrigger = nil
+        midTurnGeneration.removeAll()
+    }
+
+    // MARK: - Startup: stop intent and job reconciliation (§3.9.3, §3.10.4)
+
+    private func loadStopIntent() {
+        stopIntent = StopMarkerStore.load()
+        switch stopIntent {
+        case .none: break
+        case .known(let entries):
+            stopEntries = entries
+            stoppedJobIds.formUnion(stopIntent.stoppedJobIds)
+        case .unknown(let reason):
+            showMaintenanceNotice("The /stop record could not be read (\(reason)). Nothing recovered will start work until you check it — send a new message to continue.")
+        }
+    }
+
+    /// Startup stop pass (in startPolling, before queue recovery and turn
+    /// resume): held messages still in the queue file reach history followed
+    /// by their note (both id-deduplicated) and leave the queue file only
+    /// after a checked save; a stopped turn's marker is cleared; records of
+    /// affected jobs are stamped. Settled entries retire.
+    private func applyPersistedStopMarker() {
+        guard case .known(let entries) = stopIntent else { return }
+        let heldIds = Set(entries.flatMap(\.heldQueueMessageIds))
+        if !heldIds.isEmpty, let data = try? Data(contentsOf: pendingMidTurnFileURL),
+           let queued = try? JSONDecoder().decode([Message].self, from: data) {
+            let held = queued.filter { heldIds.contains($0.id) }
+            if !held.isEmpty {
+                for message in held where !messages.contains(where: { $0.id == message.id }) { messages.append(message) }
+                appendHeldPreStopNotes(for: held)
+                if saveConversation() {
+                    let remainder = queued.filter { !heldIds.contains($0.id) }
+                    if remainder.isEmpty { try? FileManager.default.removeItem(at: pendingMidTurnFileURL) }
+                    else if let encoded = try? JSONEncoder().encode(remainder) {
+                        try? PrivateStorage.writeAtomically(encoded, to: pendingMidTurnFileURL)
+                    }
+                }
+            }
+        }
+        if let data = try? Data(contentsOf: activeTurnMarkerFileURL),
+           let marker = try? JSONDecoder().decode(ActiveTurnMarker.self, from: data),
+           stopIntent.stoppedTriggerIds.contains(marker.triggerMessageId) {
+            clearActiveTurnMarker()
+        }
+        let affected = stopIntent.stoppedJobIds
+        try? DetachedJobStore.mutate("stop-stamp") { records in
+            for i in records.indices where affected.contains(records[i].jobId) && records[i].stopId == nil {
+                records[i].stopId = entries.first(where: { $0.affectedJobIds.contains(records[i].jobId) })?.stopId
+            }
+        }
+        retireSettledStopEntries(unsettledLiveJobs: [])
+    }
+
+    /// Job pass (§3.10.4): records of a previous process (their registry
+    /// state is gone). Deferred while canonical recovery is unresolved or
+    /// recovery evidence (salvage file, unpublished checkpoint) could still
+    /// carry a result — the publication gate. Per record, using durable
+    /// history only (as loaded, plus what canonical recovery saved):
+    /// - its notice already in history (same id) → delivered;
+    /// - a durable receiptObserved binding → nothing owed (receipt rule);
+    /// - moved/absent → the notice is owed: the persisted real result when
+    ///   the job settled before the restart, else one lost-job note;
+    /// - unverifiable → obligation retained, reported, retried next start.
+    /// Notes of stopped jobs (marker or record) or under an unreadable
+    /// marker are appended without waking. One checked save for the pass.
+    private func reconcileJobRecords() {
+        guard FileManager.default.fileExists(atPath: DetachedJobStore.fileURL.path) else { return }
+        let records: [DetachedJobRecord]
+        do { records = try DetachedJobStore.load() }
+        catch {
+            showMaintenanceNotice("Background-job crash records could not be read (\(error.localizedDescription)); they are kept for inspection.")
+            return
+        }
+        let foreign = records.filter { $0.instanceId != DetachedJobStore.instanceId && $0.completion == .owed }
+        guard !foreign.isEmpty else { return }
+        guard !recoveryBlocked, !activeTurnCheckpoints.values.contains(where: { $0.pendingRecovery }),
+              !FileManager.default.fileExists(atPath: turnSalvageFileURL.path) else {
+            print("[ConversationManager] Job reconciliation deferred until turn recovery resolves")
+            return
+        }
+        var delivered: Set<UUID> = []
+        var notOwed: Set<UUID> = []
+        var unverifiable: [UUID: String] = [:]
+        var disposition: [UUID: DetachedJobRecord.Disposition] = [:]
+        var lastWaking: Message? = nil
+        var appended = false
+        for record in foreign {
+            if messages.contains(where: { $0.id == record.completionMessageId }) {
+                delivered.insert(record.jobId); continue
+            }
+            let outcome = SettlementEvidence.locate(record, history: messages)
+            switch outcome {
+            case .bound(.receiptObserved):
+                notOwed.insert(record.jobId); continue
+            case .unverifiable(let reason):
+                unverifiable[record.jobId] = reason; continue
+            case .bound, .absent:
+                break
+            }
+            if case .absent = outcome { disposition[record.jobId] = .orphanedMoved }
+            if record.completionBody == nil { disposition[record.jobId] = .lost }
+            let stopped = stopIntent.isUnknown || record.stopId != nil || stoppedJobIds.contains(record.jobId)
+            var body = record.completionBody.map { $0 + "\n\n[Recovered after a restart — this job finished before Briglia stopped.]" }
+                ?? BashCompletionNotice.lostNote(for: record)
+            if stopped { body += BashCompletionNotice.stoppedNote }
+            let message = Message(id: record.completionMessageId, role: .user, content: body, kind: .bashComplete)
+            messages.append(message)
+            appended = true
+            delivered.insert(record.jobId)
+            if !stopped { lastWaking = message }
+        }
+        if appended {
+            guard saveConversation() else {
+                // Nothing is marked; the same ids are reused next time.
+                print("[ConversationManager] Job reconciliation save failed — records kept for the next start")
+                return
+            }
+        }
+        do {
+            try DetachedJobStore.mutate("reconcile") { records in
+                for i in records.indices {
+                    let job = records[i].jobId
+                    if let reason = unverifiable[job] {
+                        records[i].unverifiableReason = reason
+                        records[i].unverifiableSince = records[i].unverifiableSince ?? Date()
+                        continue
+                    }
+                    if let d = disposition[job] { records[i].disposition = d }
+                    if delivered.contains(job) { records[i].completion = .delivered; records[i].deliveredAt = Date() }
+                    if notOwed.contains(job) { records[i].completion = .notOwed; records[i].certifiedKind = .receiptObserved }
+                }
+                records.removeAll { $0.isSettled }
+            }
+        } catch {
+            print("[ConversationManager] Could not update reconciled records: \(error.localizedDescription) (ids in history keep them idempotent)")
+        }
+        if !unverifiable.isEmpty {
+            showMaintenanceNotice("\(unverifiable.count) background job result\(unverifiable.count == 1 ? "" : "s") could not be verified after a restart; kept for inspection (see /status).")
+        }
+        if let lastWaking { recoveredWakeTrigger = lastWaking }
+        retireSettledStopEntries()
+    }
+
+    // MARK: - Crash-record gate before history removal (§3.10.3 step 5)
+
+    /// Before messages leave `messages` (prune strips their rounds, archive
+    /// removes them): a message carrying a crash record's typed binding, or
+    /// a job's delivered completion notice, must be durable and its record
+    /// settled accordingly (certified / delivered) with a checked write.
+    /// Conservative 1a rule: if that write fails the removal is REFUSED —
+    /// never proceed and rely on a snapshot as the only proof. Messages with
+    /// no bindings and no notices pass without touching the record file.
+    private func settleJobEvidenceBeforeRemoval(of removed: [Message]) throws {
+        var bound: [UUID: OutcomeBinding.Kind] = [:]
+        for message in removed {
+            for round in message.toolInteractions {
+                for result in round.results {
+                    guard let binding = result.outcomeBinding, binding.kind.carriesJob, let job = binding.jobId else { continue }
+                    if Self.certificateRank(binding.kind) > Self.certificateRank(bound[job]) { bound[job] = binding.kind }
+                }
+            }
+        }
+        let removedIDs = Set(removed.map(\.id))
+        guard FileManager.default.fileExists(atPath: DetachedJobStore.fileURL.path) || !bound.isEmpty else { return }
+        let records: [DetachedJobRecord]
+        do { records = try DetachedJobStore.load() }
+        catch {
+            guard bound.isEmpty else {
+                throw PruneArchiveStore.Failure("Crash records unreadable (\(error.localizedDescription)); results of background jobs stay in history until they can be settled")
+            }
+            return
+        }
+        let needsWork = records.contains { record in
+            guard record.completion == .owed else { return false }
+            if removedIDs.contains(record.completionMessageId) { return true }
+            if let kind = bound[record.jobId], Self.certificateRank(kind) > Self.certificateRank(record.certifiedKind) { return true }
+            return false
+        }
+        guard needsWork else { return }
+        // The carriers must be durable before a certificate may name them.
+        if !removedIDs.isSubset(of: lastSavedMessageIDs) {
+            guard saveConversation() else {
+                throw PruneArchiveStore.Failure("Could not save history before settling background-job records; nothing was removed")
+            }
+        }
+        do {
+            try DetachedJobStore.mutate("settle-before-removal") { records in
+                for i in records.indices where records[i].completion == .owed {
+                    if removedIDs.contains(records[i].completionMessageId) {
+                        records[i].completion = .delivered
+                        records[i].deliveredAt = Date()
+                    }
+                    if let kind = bound[records[i].jobId],
+                       Self.certificateRank(kind) > Self.certificateRank(records[i].certifiedKind) {
+                        records[i].certifiedKind = kind
+                        records[i].certifiedAt = Date()
+                        if kind == .receiptObserved { records[i].completion = .notOwed }
+                    }
+                }
+                records.removeAll { $0.isSettled }
+            }
+        } catch {
+            throw PruneArchiveStore.Failure("Could not settle background-job records (\(error.localizedDescription)); nothing was removed")
+        }
+        let observed = Set(bound.filter { $0.value == .receiptObserved }.keys)
+        if !observed.isEmpty { Task { await BackgroundProcessRegistry.shared.acknowledgeDelivered(jobUUIDs: observed) } }
+    }
+
+    // MARK: - /stop dispositions (mid-turn early wake §3.9)
+
+    /// Unsettled /stop entries of this process (and those loaded at start).
+    private var stopEntries: [StopEntry] = []
+    /// Background subagents running when /stop ran: their (cancelled)
+    /// completions are appended without waking.
+    private var stoppedSubagentHandles: Set<String> = []
+
+    /// Append the "sent before /stop" note after held messages (one per
+    /// stop entry, id-deduplicated with its pre-minted id). User text is
+    /// never modified. Returns the held ids found in `batch`.
+    @discardableResult
+    private func appendHeldPreStopNotes(for batch: [Message]) -> Set<UUID> {
+        let heldIds = Set(stopEntries.flatMap(\.heldQueueMessageIds)).union(stopIntent.heldMessageIds)
+        let held = Set(batch.map(\.id)).intersection(heldIds)
+        guard !held.isEmpty else { return [] }
+        for entry in stopEntries where !Set(entry.heldQueueMessageIds).isDisjoint(with: held) {
+            guard !messages.contains(where: { $0.id == entry.heldNoteMessageId }) else { continue }
+            messages.append(Message(id: entry.heldNoteMessageId, role: .user,
+                                    content: "[Harness note] The message(s) above were sent before /stop; Briglia stopped without acting on them.",
+                                    kind: .bashComplete))
+        }
+        return held
+    }
+
+    /// Retire every stop entry whose items are all durably settled
+    /// (§3.9.3): held messages durable and out of the queue, their note
+    /// durable, the stopped turn not resumable, and every affected job
+    /// settled (record retired/settled, nothing queued or running).
+    private func retireSettledStopEntries() {
+        guard !stopEntries.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let unsettled = await BackgroundProcessRegistry.shared.unsettledMainOwnedItems().jobUUIDs
+            await MainActor.run { self.retireSettledStopEntries(unsettledLiveJobs: unsettled) }
+        }
+    }
+
+    private func retireSettledStopEntries(unsettledLiveJobs: Set<UUID>) {
+        guard !stopEntries.isEmpty else { return }
+        let records: [DetachedJobRecord]
+        do { records = try DetachedJobStore.load() } catch { return }  // keep entries: cannot prove settlement
+        let openRecords = Set(records.filter { !$0.isSettled }.map(\.jobId))
+        let queued = Set(pendingMidTurnMessages.map(\.id))
+        let markerTrigger = (try? Data(contentsOf: activeTurnMarkerFileURL))
+            .flatMap { try? JSONDecoder().decode(ActiveTurnMarker.self, from: $0) }?.triggerMessageId
+        var remaining: [StopEntry] = []
+        for entry in stopEntries {
+            let heldSettled = entry.heldQueueMessageIds.allSatisfy { lastSavedMessageIDs.contains($0) && !queued.contains($0) }
+                && (entry.heldQueueMessageIds.isEmpty || lastSavedMessageIDs.contains(entry.heldNoteMessageId))
+            let turnSettled = entry.stoppedTurnTriggerId.map { $0 != markerTrigger && $0 != activeTurnTriggerMessage?.id } ?? true
+            let jobsSettled = entry.affectedJobIds.allSatisfy { !openRecords.contains($0) && !unsettledLiveJobs.contains($0) }
+            if !(heldSettled && turnSettled && jobsSettled) { remaining.append(entry) }
+        }
+        guard remaining.count != stopEntries.count else { return }
+        do {
+            try StopMarkerStore.replace(remaining)
+            let retired = stopEntries.filter { e in !remaining.contains(where: { $0.stopId == e.stopId }) }
+            stopEntries = remaining
+            let stillAffected = Set(remaining.flatMap(\.affectedJobIds))
+            for job in retired.flatMap(\.affectedJobIds) where !stillAffected.contains(job) {
+                stoppedJobIds.remove(job)
+            }
+            if case .known = stopIntent { stopIntent = remaining.isEmpty ? .none : .known(entries: remaining) }
+        } catch {
+            print("[ConversationManager] Could not retire settled /stop entries: \(error.localizedDescription)")
+        }
     }
 
     private func increaseSpendLimitIfNeeded(by amountUSD: Double) async {
@@ -5991,7 +6605,14 @@ class ConversationManager: ObservableObject {
         // of the un-archived content, and the next turn after the cooldown retries.
         // MaintenanceAlertCenter tells the user when this enters/leaves a degraded
         // state, so persistent failures surface instead of spinning silently.
+        var archiveGateRefusal: String? = nil
         if contextResult.needsArchiving && !contextResult.messagesToArchive.isEmpty {
+            do { try settleJobEvidenceBeforeRemoval(of: contextResult.messagesToArchive) }
+            catch { archiveGateRefusal = error.localizedDescription }
+        }
+        if let archiveGateRefusal {
+            print("[ConversationManager] Archive postponed — crash-record evidence not settled: \(archiveGateRefusal)")
+        } else if contextResult.needsArchiving && !contextResult.messagesToArchive.isEmpty {
             if Date() < archiveRetryBackoffUntil {
                 print("[ConversationManager] Archive needed but in failure cooldown until \(archiveRetryBackoffUntil) — keeping raw messages in context")
             } else {
@@ -6265,6 +6886,10 @@ class ConversationManager: ObservableObject {
                 throw PruneArchiveStore.Failure("The configured context budget cannot fit the remaining instructions and message text (estimated \(estimate.fixedTextTokens) tokens). Reduce fixed context or increase the configured budget; no tools ran.")
             }
             let response: LLMResponse
+            // Highest wake generation already in history when this request
+            // body is frozen (§3.1): becomes the transmitted value only once
+            // the request succeeds.
+            let requestGeneration = appendedMidTurnGeneration
             do {
                 response = try await openRouterService.generateResponse(
                     messages: projected,
@@ -6285,6 +6910,7 @@ class ConversationManager: ObservableObject {
                 // actually carried the in-flight annotation (nonce-checked).
                 if responsesExecution != nil { clearResponsesMidTurnBatch(response) }
                 else { clearInFlightMidTurnBatchIfCarried(by: toolInteractions.isEmpty ? nil : toolInteractions) }
+                seenGenerationAtRequest = requestGeneration
             } catch let renderError as HarnessAnnotationRenderError {
                 // Request construction aborted BEFORE network transmission
                 // (MIDTURN_NONCE_PLAN §8 step 13): fail closed — requeue the
@@ -6424,13 +7050,30 @@ class ConversationManager: ObservableObject {
                 if !blockedResults.isEmpty {
                     print("[ConversationManager] Round \(round): blocked \(blockedResults.count) tool call(s) due to turn policy or tool availability")
                 }
-                
+
+                // Stale-batch suppression (mid-turn early wake §3.2): the
+                // model chose these calls before it could see a queued user
+                // message. None runs; each call gets a synthetic not_executed
+                // result, the queue drains into the last one, and the model
+                // decides again. A message suppresses at most one batch (it
+                // is delivered here); after 3 consecutive suppressions the
+                // next batch is admitted (flood cap).
+                let suppressBatch = batchIsStale() && consecutiveSuppressions < Self.maxConsecutiveSuppressions
+                consecutiveSuppressions = suppressBatch ? consecutiveSuppressions + 1 : 0
+                if suppressBatch {
+                    let now = Date()
+                    for call in calls {
+                        currentTurnToolLog.append((id: call.id, name: call.function.name, label: Self.toolLogLabel(name: call.function.name, arguments: call.function.arguments) + " (deferred)", startedAt: now, failed: false))
+                    }
+                    print("[ConversationManager] Round \(round): suppressed \(calls.count) stale tool call(s) — a user message arrived before the batch started")
+                }
+
                 // Record each tool use into the per-turn log so the user can
                 // retrieve the chronology on demand via /status. We intentionally
                 // do NOT push a Telegram progress message here — a single turn
                 // can fire dozens of tools and spamming the user is worse than
                 // letting them ask for status when they're curious.
-                if !executableCalls.isEmpty {
+                if !executableCalls.isEmpty && !suppressBatch {
                     let now = Date()
                     for call in executableCalls {
                         currentTurnToolLog.append((id: call.id, name: call.function.name, label: Self.toolLogLabel(name: call.function.name, arguments: call.function.arguments), startedAt: now, failed: false))
@@ -6446,21 +7089,33 @@ class ConversationManager: ObservableObject {
                 // Then reorder results to match the assistant's tool call order for deterministic follow-up prompts.
                 if responsesExecution != nil {
                     let uncertain = ToolInteraction(assistantMessage: assistantMessage, results: calls.map {
-                        ToolResultMessage(toolCallId: $0.id, content: "[Interrupted tool intent: outcome unknown. This call was not automatically rerun; inspect external state before repeating it.]")
+                        // Typed placeholder (§3.12.1): it names no job, so it
+                        // can never settle one — the real outcome stays owed.
+                        var placeholder = ToolResultMessage(toolCallId: $0.id, content: "[Interrupted tool intent: outcome unknown. This call was not automatically rerun; inspect external state before repeating it.]")
+                        placeholder.outcomeBinding = OutcomeBinding(kind: .interruptedIntent)
+                        return placeholder
                     })
                     let pending = toolInteractions + [uncertain]
                     try persistResponsesSalvage(pending)
                     toolInteractions = pending
                 }
                 var toolResults: [ToolResultMessage] = []
-                if !executableCalls.isEmpty {
-                    let executedResults = try await toolExecutor.executeParallel(executableCalls)
-                    toolResults.append(contentsOf: executedResults)
-                }
-                if !blockedResults.isEmpty {
-                    toolResults.append(contentsOf: blockedResults)
+                if suppressBatch {
+                    toolResults = calls.map(Self.notExecutedResult(for:))
+                } else {
+                    if !executableCalls.isEmpty {
+                        let executedResults = try await toolExecutor.executeParallel(executableCalls)
+                        toolResults.append(contentsOf: executedResults)
+                    }
+                    if !blockedResults.isEmpty {
+                        toolResults.append(contentsOf: blockedResults)
+                    }
                 }
                 try Task.checkCancellation()
+                if let failure = BashTools.lastRecordFailure, !detachRecordFailureShown {
+                    detachRecordFailureShown = true
+                    showMaintenanceNotice("A background job could not be recorded for crash recovery (\(failure)); affected commands kept waiting instead of moving to the background.")
+                }
                 
                 var orderedToolResults: [ToolResultMessage] = []
                 var remainingToolResults = toolResults
@@ -6541,7 +7196,14 @@ class ConversationManager: ObservableObject {
                 // Tail-appending to the last tool result keeps the prompt
                 // prefix stable (same mechanism as the timestamp note above),
                 // so the cache is preserved and the model can steer mid-turn.
-                deliverMidTurnMessages(into: &orderedToolResults)
+                // The wake note (§3.11) lists what is still running.
+                let wakeStatus: HarnessBackgroundStatus? = pendingMidTurnMessages.isEmpty ? nil
+                    : await wakeNoteStatus(movedThisRound: Set(orderedToolResults.compactMap {
+                        $0.outcomeBinding?.kind == .moved ? $0.outcomeBinding?.jobId : nil }))
+                if let consumed = deliverMidTurnMessages(into: &orderedToolResults, backgroundStatus: wakeStatus),
+                   let runID = activeRunId {
+                    await TurnWakeCenter.shared.consume(runId: runID, upTo: consumed)
+                }
 
                 // Add this interaction to the chain
                 let interaction = ToolInteraction(
@@ -7439,6 +8101,10 @@ class ConversationManager: ObservableObject {
             throw PruneArchiveStore.Failure("Pruning source changed before snapshot; retry at an idle boundary")
         }
         let owner = activeRunId
+        // Crash-record gate (mid-turn early wake §3.10.3 step 5): typed
+        // settlement evidence and delivered notices may leave `messages` only
+        // once their records are settled on disk; otherwise nothing is pruned.
+        try settleJobEvidenceBeforeRemoval(of: Array(Set(plan.affectedIndices + compressedIndices)).map { source[$0] })
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let preimageBytes = try encoder.encode(livePreimage)
         let reference: PruneArchiveReference?
@@ -8530,7 +9196,11 @@ class ConversationManager: ObservableObject {
         let escapedError = errorMessage
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
-        return ToolResultMessage(toolCallId: call.id, content: #"{"error":"\#(escapedError)"}"#)
+        var result = ToolResultMessage(toolCallId: call.id, content: #"{"error":"\#(escapedError)"}"#)
+        // Typed as synthesised-for-a-blocked-call (§3.12.1): names no job,
+        // settles nothing.
+        result.outcomeBinding = OutcomeBinding(kind: .cancelled)
+        return result
     }
 
     private func partitionToolCallsForExecution(
@@ -9534,24 +10204,26 @@ class ConversationManager: ObservableObject {
     /// message, triggering a new agent turn so the agent can react (e.g. Telegram the user).
     private func checkBackgroundBashCompletions() async {
         guard activeRunId == nil, activeProcessingTask == nil else { return }
-        let completions = await BackgroundProcessRegistry.shared.drainCompletions()
-        guard !completions.isEmpty else { return }
-        BashJobsStats.log("completions.injected", by: completions.count)
+        // Non-destructive delivery (mid-turn early wake §3.10.3): read the
+        // queued notices, append each under its stable message id (skipped
+        // when already in history), save, and only after a successful save
+        // acknowledge them (registry + crash record). A failed save leaves
+        // them queued; the next idle poll retries the save, never a second
+        // copy and never a second turn for the same notice.
+        let pending = await BackgroundProcessRegistry.shared.pendingCompletionsForDelivery()
+        guard !pending.isEmpty else { return }
+        guard activeRunId == nil, activeProcessingTask == nil else { return }
 
-        // Append every completion to history, then trigger ONE agent turn via
-        // startActiveProcessing (the turn sees them all). Running turns inline
-        // here used to block the poll loop and swallow failures.
-        var lastMessage: Message? = nil
-        for completion in completions {
-            let statusLabel: String
-            switch completion.status {
-            case .exited:  statusLabel = completion.exitCode == 0 ? "exited cleanly" : "exited with code \(completion.exitCode)"
-            case .killed:  statusLabel = "killed"
-            case .crashed: statusLabel = "crashed with signal"
-            case .running: statusLabel = "unexpectedly still running"
-            case .timedOut: statusLabel = "killed at its execution deadline (kill_after_seconds)"
+        var lastWaking: Message? = nil
+        var appended = 0
+        for item in pending {
+            if pendingCompletionAcks[item.messageId] != nil { continue }
+            if messages.contains(where: { $0.id == item.messageId }) {
+                pendingCompletionAcks[item.messageId] = item.jobUUID
+                continue
             }
-
+            let completion = item.completion
+            let statusLabel = BashCompletionNotice.statusLabel(completion)
             let bashIsError: Bool = {
                 switch completion.status {
                 case .exited: return completion.exitCode != 0
@@ -9567,44 +10239,21 @@ class ConversationManager: ObservableObject {
                 durationMs: completion.durationSeconds * 1000,
                 isError: bashIsError
             )
-
-            let durationStr: String = {
-                let secs = completion.durationSeconds
-                if secs < 60 { return "\(secs)s" }
-                if secs < 3600 { return "\(secs / 60)m \(secs % 60)s" }
-                return "\(secs / 3600)h \((secs % 3600) / 60)m"
-            }()
-
-            var body = """
-            [BACKGROUND BASH COMPLETE]
-
-            handle: \(completion.handleId)
-            command: \(completion.command)
-            status: \(statusLabel)
-            duration: \(durationStr)
-            """
-            if let desc = completion.description, !desc.isEmpty {
-                body += "\ndescription: \(desc)"
-            }
-            body += "\n\n--- stdout (tail) ---\n\(completion.stdoutTail)"
-            if !completion.stderrTail.isEmpty {
-                body += "\n\n--- stderr (tail) ---\n\(completion.stderrTail)"
-            }
-            if let p = completion.stdoutFullPath {
-                body += "\n\nComplete stdout saved to: \(p) (read with read_file or grep)"
-            }
-            if let p = completion.stderrFullPath {
-                body += "\nComplete stderr saved to: \(p)"
-            }
-            body += "\n\n[END OF BACKGROUND TASK - If the user asked you to notify them when this finished, do so now.]"
-
-            let userMessage = Message(role: .user, content: body, kind: .bashComplete)
+            // A job stopped by /stop is appended without waking (§3.9.2);
+            // its harness-authored body says so.
+            let stopped = stoppedJobIds.contains(item.jobUUID)
+            let body = BashCompletionNotice.body(for: completion) + (stopped ? BashCompletionNotice.stoppedNote : "")
+            let userMessage = Message(id: item.messageId, role: .user, content: body, kind: .bashComplete)
             messages.append(userMessage)
-            lastMessage = userMessage
+            pendingCompletionAcks[item.messageId] = item.jobUUID
+            appended += 1
+            if !stopped { lastWaking = userMessage }
         }
-        saveConversation()
+        if appended > 0 { BashJobsStats.log("completions.injected", by: appended) }
+        if !pendingCompletionAcks.isEmpty { saveConversation() }
+        retireSettledStopEntries()
 
-        guard let trigger = lastMessage else { return }
+        guard let trigger = lastWaking else { return }
         statusMessage = "Processing background task completion..."
         startActiveProcessing(for: trigger)
     }
@@ -9643,11 +10292,14 @@ class ConversationManager: ObservableObject {
                 print("[ConversationManager] Background subagent \(completion.handle.id) spend: +$\(formatUSD(completion.result.spendUSD))")
             }
 
-            let body = Self.backgroundSubagentCompletionBody(completion, durationStr: durationStr)
+            var body = Self.backgroundSubagentCompletionBody(completion, durationStr: durationStr)
+            // A run cancelled by /stop is recorded without waking (§3.9.2).
+            let stopped = stoppedSubagentHandles.remove(completion.handle.id) != nil
+            if stopped { body += "\n\n[Stopped by /stop — the user asked to stop this work. Do not restart it unless they ask again.]" }
 
             let userMessage = Message(role: .user, content: body, kind: .subagentComplete)
             messages.append(userMessage)
-            lastMessage = userMessage
+            if !stopped { lastMessage = userMessage }
         }
         saveConversation()
 
@@ -9773,12 +10425,16 @@ class ConversationManager: ObservableObject {
                 body += "\nThe watch is still active (\(remaining) of \(last.limit) remaining). Use bash_manage(mode='output') for full context or bash_manage(mode='kill') to terminate."
             }
 
+            // Matches of a job stopped by /stop are appended without waking.
+            let stopped = group.contains { $0.ownerJobUUID.map { stoppedJobIds.contains($0) } ?? false }
+            if stopped { body += "\n[Stopped by /stop — this watch belongs to a stopped command.]" }
             let userMessage = Message(role: .user, content: body, kind: .bashComplete)
             messages.append(userMessage)
-            lastMessage = userMessage
+            if !stopped { lastMessage = userMessage }
             print("[ConversationManager] bash_manage watch match batch for \(handle) queued (\(totalCount) match\(totalCount == 1 ? "" : "es"))")
         }
         saveConversation()
+        retireSettledStopEntries()
 
         guard let trigger = lastMessage else { return }
         statusMessage = "Processing watch match..."
@@ -10017,10 +10673,86 @@ class ConversationManager: ObservableObject {
             // Atomic so a Mind export copying this file mid-save can never
             // capture a torn JSON.
             try PrivateStorage.writeAtomically(data, to: conversationFileURL)
+            noteDurableSave()
             return true
         } catch {
             print("Failed to save conversation: \(error)")
             return false
+        }
+    }
+
+    /// After every successful history save (mid-turn early wake §3.10.2):
+    /// everything in `messages` is now durable. Acknowledge completion
+    /// notices whose messages were carried, and certify crash records whose
+    /// typed bindings reached durable history (a certificate is only a cache
+    /// of that search; a failed write changes nothing unsafe).
+    private func noteDurableSave() {
+        lastSavedMessageIDs = Set(messages.map(\.id))
+        let durableAcks = pendingCompletionAcks.filter { lastSavedMessageIDs.contains($0.key) }
+        if !durableAcks.isEmpty {
+            for id in durableAcks.keys { pendingCompletionAcks.removeValue(forKey: id) }
+            let jobs = Set(durableAcks.values)
+            Task { await BackgroundProcessRegistry.shared.acknowledgeDelivered(jobUUIDs: jobs) }
+            do {
+                try DetachedJobStore.mutate("delivered") { records in
+                    for i in records.indices where jobs.contains(records[i].jobId) && records[i].completion == .owed {
+                        records[i].completion = .delivered
+                        records[i].deliveredAt = Date()
+                    }
+                    records.removeAll { $0.isSettled }
+                }
+            } catch {
+                // Startup reconciliation finds the notice in history by its
+                // id and settles the record then.
+                print("[ConversationManager] Could not mark delivered crash records: \(error.localizedDescription)")
+            }
+        }
+        certifyDurableBindings()
+    }
+
+    /// Runtime certification (§3.12 commit protocol step 2) with monotonic
+    /// upgrades (Codex V7 gate 1): a durable `receiptObserved` settles the
+    /// job — its notice is withdrawn from the registry and nothing is owed —
+    /// even when an earlier `moved` was already certified. Only bound
+    /// outcomes are acted on here; `absent`/`unverifiable` belong to the
+    /// startup pass (a live job's notice is still in the registry).
+    private func certifyDurableBindings() {
+        guard FileManager.default.fileExists(atPath: DetachedJobStore.fileURL.path),
+              let records = try? DetachedJobStore.load(), records.contains(where: { $0.completion == .owed }) else { return }
+        var upgrades: [UUID: OutcomeBinding.Kind] = [:]
+        for record in records where record.completion == .owed {
+            if case .bound(let kind) = SettlementEvidence.locate(record, history: messages),
+               Self.certificateRank(kind) > Self.certificateRank(record.certifiedKind) {
+                upgrades[record.jobId] = kind
+            }
+        }
+        guard !upgrades.isEmpty else { return }
+        let observed = Set(upgrades.filter { $0.value == .receiptObserved }.keys)
+        if !observed.isEmpty {
+            Task { await BackgroundProcessRegistry.shared.acknowledgeDelivered(jobUUIDs: observed) }
+        }
+        do {
+            try DetachedJobStore.mutate("certify") { records in
+                for i in records.indices {
+                    guard let kind = upgrades[records[i].jobId] else { continue }
+                    records[i].certifiedKind = kind
+                    records[i].certifiedAt = Date()
+                    if kind == .receiptObserved { records[i].completion = .notOwed }
+                }
+                records.removeAll { $0.isSettled }
+            }
+        } catch {
+            // Nothing unsafe: every later decision searches durable evidence.
+            print("[ConversationManager] Certificate write failed (evidence stays in history): \(error.localizedDescription)")
+        }
+    }
+
+    static func certificateRank(_ kind: OutcomeBinding.Kind?) -> Int {
+        switch kind {
+        case .receiptObserved?: return 3
+        case .real?: return 2
+        case .moved?: return 1
+        default: return 0
         }
     }
 
@@ -10455,6 +11187,16 @@ class ConversationManager: ObservableObject {
         do { try ResponsesUsageStore().clearForWipe() }
         catch { failures.append("Could not clear Responses cache statistics") }
         failures.append(contentsOf: SessionAffinity.deleteForUserDataWipe())
+        // Mid-turn early wake state (crash records, /stop marker, snapshot
+        // settlement evidence) — harness state about the wiped history.
+        for (url, label) in [(DetachedJobStore.fileURL, "background-job crash records"),
+                             (StopMarkerStore.fileURL, "stop marker"),
+                             (SettlementEvidence.directory(), "snapshot settlement evidence")] {
+            if let f = UserDataWipe.remove(url.path, label: label) { failures.append(f) }
+        }
+        stoppedJobIds.removeAll(); stopEntries.removeAll(); stoppedSubagentHandles.removeAll()
+        stopIntent = .none; pendingCompletionAcks.removeAll(); recoveredWakeTrigger = nil
+        midTurnGeneration.removeAll()
         for (dir, label) in [
             (appFolder.appendingPathComponent("archive", isDirectory: true), "archive directory"),
             (appFolder.appendingPathComponent("subagent_sessions", isDirectory: true), "subagent sessions directory"),
@@ -10738,6 +11480,11 @@ class ConversationManager: ObservableObject {
         do {
             try discardTurnRecoveryForReplacement()
             try await MindExportService.shared.applyStagedMind(staged)
+            // Stage B (mid-turn early wake §3.12.3): every crash record and
+            // /stop entry of the replaced conversation is discarded, and the
+            // imported snapshots join the legacy list (no live record can
+            // predate them).
+            try resetEarlyWakeStateForReplacedHistory()
         } catch {
             return .failedApply(error.localizedDescription)
         }
@@ -11839,4 +12586,74 @@ extension ConversationManager {
             showMaintenanceNotice("Turn checkpoint preserved: \(error.localizedDescription)")
         }
     }
+}
+
+
+// MARK: - Mid-turn early wake selftest seams
+//
+// Explicit, test-only entry points for `__midturn-wake-selftest` (which runs
+// in private scratch roots). They call the production paths; none replaces
+// an implementation, a branch or a durability rule.
+extension ConversationManager {
+    func _testPrepareScriptedProvider(apiKey: String) async {
+        frozenCalendarContext = ""
+        frozenEmailContext = ""
+        frozenContextDay = Calendar.current.startOfDay(for: Date())
+        await openRouterService.configure(apiKey: apiKey)
+        await toolExecutor.configureOpenRouter(openRouterService, imagesDirectory: imagesDirectory,
+                                               documentsDirectory: documentsDirectory)
+    }
+    func _testSeedHistory(_ history: [Message]) {
+        messages = history
+        _ = saveConversation()
+    }
+    func _testSetPolling(_ on: Bool) { isPolling = on }
+    func _testStartTurn(for message: Message) {
+        messages.append(message)
+        _ = saveConversation()
+        startActiveProcessing(for: message)
+    }
+    func _testDispatchUser(_ message: Message) async { await dispatchUserTurn(message) }
+    func _testAwaitIdle(timeout: TimeInterval = 60) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if activeProcessingTask == nil && activeRunId == nil { return true }
+            if let task = activeProcessingTask { _ = await Task { await task.value }.value }
+            else { try? await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        return activeProcessingTask == nil && activeRunId == nil
+    }
+    var _testMessages: [Message] { messages }
+    var _testQueue: [Message] { pendingMidTurnMessages }
+    var _testIsActive: Bool { activeRunId != nil || activeProcessingTask != nil }
+    var _testLastError: String? { error }
+    var _testStoppedJobIds: Set<UUID> { stoppedJobIds }
+    var _testRecoveredWakeTrigger: Message? { recoveredWakeTrigger }
+    func _testStop() async { await stopActiveExecution(notify: nil) }
+    func _testIdleDrains() async {
+        await checkBackgroundBashCompletions()
+        await checkBashWatchMatches()
+    }
+    func _testSave() -> Bool { saveConversation() }
+    func _testReplaceMessages(_ history: [Message]) { messages = history }
+    func _testStartupPasses() {
+        restorePendingInboundBuffers()
+        applyPersistedStopMarker()
+        recoverPersistedMidTurnMessages()
+        reconcileJobRecords()
+        if let trigger = recoveredWakeTrigger, activeRunId == nil, activeProcessingTask == nil, !stopIntent.isUnknown {
+            recoveredWakeTrigger = nil
+            startActiveProcessing(for: trigger)
+        }
+        resumeInterruptedActiveTurnIfNeeded()
+    }
+    func _testSettleBeforeRemoval(_ removed: [Message]) throws { try settleJobEvidenceBeforeRemoval(of: removed) }
+    var _testActiveTurnMarkerURL: URL { activeTurnMarkerFileURL }
+    var _testPendingMidTurnURL: URL { pendingMidTurnFileURL }
+    var _testSalvageURL: URL { turnSalvageFileURL }
+    var _testRecoveryBlocked: Bool { recoveryBlocked }
+    func _testWriteActiveTurnMarker(for message: Message) { _ = writeActiveTurnMarker(for: message) }
+    func _testPersistQueue(_ queue: [Message]) { pendingMidTurnMessages = queue; _ = persistPendingMidTurnQueue() }
+    var _testSeenGeneration: UInt64 { seenGenerationAtRequest }
+    var _testToolLog: [(label: String, failed: Bool)] { currentTurnToolLog.map { ($0.label, $0.failed) } }
 }

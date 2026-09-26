@@ -283,6 +283,15 @@ enum PruneArchiveStore {
         try line("\nBRIGLIA SNAPSHOT END " + id.uuidString)
         try faultForTesting?("fsync")
         guard fsync(fd) == 0 else { throw error("fsync snapshot", staging.path) }
+        // Typed settlement sidecar (mid-turn early wake §3.12.3), written and
+        // fsynced BEFORE the snapshot is published, so a published snapshot
+        // always has one. Its failure fails the snapshot write (the caller's
+        // existing failure paths apply; nothing is pruned).
+        try SettlementEvidence.writeSidecar(
+            SettlementEvidence.sidecar(snapshotId: id, created: now, trigger: trigger,
+                                       durable: messages, carried: newRounds,
+                                       priorActiveSummary: priorActiveSummary),
+            snapshots: directory)
         try faultForTesting?("publish")
         // link publishes without replacing an existing name; staging and final
         // are on the same filesystem. Readers only see complete immutable files.
@@ -358,13 +367,53 @@ enum PruneArchiveStore {
         lock.lock(); defer { lock.unlock() }
         let all = try entries(directory: directory)
         var excess = max(0, all.count - limit)
-        for entry in all where excess > 0 && !protecting.contains(entry.reference.id) && pinned[entry.reference.id] == nil {
+        guard excess > 0 else { return }
+        // Proof pins (mid-turn early wake §3.12.4, Codex V7 gate 2): never
+        // unlink a snapshot on the discovery path to settlement evidence of
+        // an open crash record. The limit may be exceeded temporarily; it is
+        // restored as records settle.
+        let proofPinned = SettlementEvidence.pinnedSnapshotIds(snapshots: directory, entries: all)
+        let doomed = all.filter { entry in
+            guard excess > 0, !protecting.contains(entry.reference.id), pinned[entry.reference.id] == nil,
+                  !proofPinned.contains(entry.reference.id) else { return false }
+            excess -= 1
+            return true
+        }
+        guard !doomed.isEmpty else { return }
+        // Recorded as expired BEFORE unlinking: a later evidence search that
+        // reaches a removed snapshot knows it held no open proof.
+        try SettlementEvidence.noteExpired(doomed.map(\.reference.id), snapshots: directory)
+        for entry in doomed {
             try faultForTesting?("retention")
             let path = directory.appendingPathComponent(entry.reference.basename).path
             guard unlink(path) == 0 else { throw error("remove expired snapshot", path) }
-            excess -= 1
+            SettlementEvidence.removeSidecar(entry.reference.id, snapshots: directory)
         }
-        if all.count > limit { try PrivateStorage.fsyncDirectory(directory.path) }
+        try PrivateStorage.fsyncDirectory(directory.path)
+    }
+
+    /// Header/END completeness of one published snapshot (the same checks as
+    /// `entries(validateComplete:)` minus UTF-8 scanning): what a settlement
+    /// sidecar may vouch for (§3.12.3).
+    static func isCompleteSnapshot(_ reference: PruneArchiveReference, directory: URL = root) -> Bool {
+        let path = directory.appendingPathComponent(reference.basename).path
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return false }
+        var bytes = [UInt8](repeating: 0, count: 4096)
+        let count = read(fd, &bytes, bytes.count)
+        guard count > 0, let end = bytes.prefix(count).firstIndex(of: 10) else { return false }
+        let prefix = "BRIGLIA SNAPSHOT 1 "
+        let line = String(decoding: bytes.prefix(end), as: UTF8.self)
+        guard line.hasPrefix(prefix), let header = try? JSONDecoder().decode(Header.self, from: Data(line.dropFirst(prefix.count).utf8)),
+              header.version == 1, header.id == reference.id else { return false }
+        let ending = Data(("\nBRIGLIA SNAPSHOT END " + header.id.uuidString + "\n").utf8)
+        guard st.st_size >= ending.count, lseek(fd, -off_t(ending.count), SEEK_END) >= 0 else { return false }
+        var tail = [UInt8](repeating: 0, count: ending.count)
+        guard read(fd, &tail, tail.count) == tail.count else { return false }
+        return Data(tail) == ending
     }
 
     static func statusLine(directory: URL = root) -> String {

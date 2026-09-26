@@ -412,10 +412,17 @@ final class TerminalSession {
     /// vanishing — the terminal's equivalent of the app socket's nack.
     private func submit(text: String, attachments: [URL]) {
         Task {
-            if case .refused(let reason) = await manager.sendFromApp(
-                text: text, attachments: attachments, policy: .terminal) {
+            switch await manager.sendFromApp(text: text, attachments: attachments, policy: .terminal) {
+            case .refused(let reason):
                 print("\n  ✖ not accepted: \(reason)")
                 prompt()
+            case .queuedMidTurn:
+                // Local receipt signal (mid-turn early wake §3.8): dim, no
+                // message enters history.
+                print("\n  \u{1B}[2m· queued for the running turn — read within a few seconds\u{1B}[0m")
+                prompt()
+            case .accepted:
+                break
             }
         }
     }
