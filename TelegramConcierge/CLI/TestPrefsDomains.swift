@@ -20,7 +20,7 @@ enum TestPrefsDomains {
     /// Every prefix a selftest may use for a throwaway domain. The smoke
     /// suite counts files matching these before and after a run.
     static let testPrefixes = ["ada-mig-probe-", "ada-mig-st-", "ada-setup-api-selftest-",
-                               "briglia-s4-"]
+                               "briglia-s4-", "briglia-mw-"]
 
     static func isTestDomain(_ name: String) -> Bool {
         testPrefixes.contains { name.hasPrefix($0) }

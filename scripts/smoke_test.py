@@ -147,7 +147,7 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         pass
 
 
-TEST_PREFS_PREFIXES = ("ada-mig-probe-", "ada-mig-st-", "ada-setup-api-selftest-", "briglia-s4-")
+TEST_PREFS_PREFIXES = ("ada-mig-probe-", "ada-mig-st-", "ada-setup-api-selftest-", "briglia-s4-", "briglia-mw-")
 
 
 def _test_prefs_domains_since(t0):
@@ -379,6 +379,16 @@ def main():
                             text=True, timeout=120, cwd=REPO_ROOT)
     check("midturn-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
+
+    # 3c5-ter. Mid-turn early wake (release 1a): wake center, suppression,
+    # bash detach, forced test setting, /stop dispositions and marker, crash
+    # records and restart reconciliation, typed settlement evidence, snapshot
+    # sidecars and proof-pinned retention, 2,400-resolution registry race.
+    # Re-executes itself in a private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__midturn-wake-selftest"], capture_output=True,
+                          text=True, timeout=900)
+    check("midturn-wake-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
 
     result = run_selftest([ADA, "__prune-archive-selftest"], capture_output=True, text=True, timeout=120)
     check("prune archive selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
@@ -1400,11 +1410,12 @@ def main():
                 # request containing the tool marker gets a real bash tool
                 # call; the follow-up request (recognizable by the echoed
                 # tool_call id) gets the normal text reply.
-                if tool_marker and tool_marker in body and "call_mt1" not in body:
+                tool_call_id = llm_state.get("tool_call_id", "call_mt1")
+                if tool_marker and tool_marker in body and tool_call_id not in body:
                     message = {"role": "assistant", "content": None,
-                               "tool_calls": [{"id": "call_mt1", "type": "function",
+                               "tool_calls": [{"id": tool_call_id, "type": "function",
                                                "function": {"name": "bash",
-                                                            "arguments": json.dumps({"command": "sleep 6"})}}]}
+                                                            "arguments": json.dumps({"command": llm_state.get("tool_command", "sleep 6")})}}]}
                     finish = "tool_calls"
                 else:
                     message = {"role": "assistant", "content": MOCK_REPLY}
@@ -2308,6 +2319,70 @@ def main():
               f"{phase11_state} body2_found={body2 is not None} "
               f"annotation_ok={annotation_ok} ordering_ok={ordering_ok} rc={rc11}\n"
               + tg_timeline() + "\n" + out11[-2500:])
+        # Mid-turn early wake §3.8 (owner decision): a message queued while
+        # a turn runs gets a silent 👀 reaction and NO text acknowledgement.
+        with tg_lock:
+            posts11 = list(tg_state["posts"])
+        reactions = [b for m, b in posts11 if m == "setMessageReaction"]
+        acks = [b for m, b in posts11 if m == "sendMessage" and isinstance(b, dict)
+                and "Got it" in str(b.get("text", ""))]
+        check("midturn receipt signal: silent 👀 reaction on the queued message, no text ack",
+              any(isinstance(b, dict) and b.get("message_id") == 951
+                  and (b.get("reaction") or [{}])[0].get("emoji") == "👀" for b in reactions)
+              and not acks,
+              f"reactions={reactions} acks={acks}")
+        # Phase 11b: hidden force-detach test setting (mid-turn early wake
+        # §3.13), end-to-end over the real binary with the env var the owner
+        # uses on a field-trial install: a default quick command that runs
+        # longer than 8 s is moved to the background with
+        # wake_reason test_forced (no user message involved), the startup log
+        # warns, and the job's completion later arrives as its own turn.
+        with tg_lock:
+            tg_state["updates"].clear()
+            tg_state["offsets"].clear()
+            llm_state["bodies"].clear()
+            llm_state["tool_call_marker"] = "use-the-forced-tool"
+            llm_state["tool_command"] = "sleep 11; echo forced-detach-done"
+            # Phase 11 left call_mt1 in history: a distinct id lets the mock
+            # issue this phase's tool call.
+            llm_state["tool_call_id"] = "call_fd1"
+
+        def phase11b(pwait, push, pout, proc):
+            push([tg_update(955, "please use-the-forced-tool now")])
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                if any("call_fd1" in b and "test_forced" in b for b in llm_bodies()):
+                    break
+                time.sleep(0.2)
+            deadline = time.time() + 40
+            while time.time() < deadline:
+                if any("[BACKGROUND BASH COMPLETE]" in b and "forced-detach-done" in b for b in llm_bodies()):
+                    break
+                time.sleep(0.2)
+            # Let the completion turn finish and save before this process
+            # exits (otherwise the next phase resumes it at startup).
+            pwait("Briglia ▸", 60, count=2)
+
+        tg_mark("phase11b-start")
+        out11b, rc11b = run_poller_phase({"BRIGLIA_MIDTURN_FORCE_DETACH": "1"}, phase11b, timeout_s=150)
+        with tg_lock:
+            llm_state["tool_call_marker"] = ""
+            llm_state.pop("tool_command", None)
+            llm_state.pop("tool_call_id", None)
+        forced_body = next((b for b in llm_bodies() if "call_fd1" in b and "test_forced" in b), "")
+        # No fake user message: the request after the forced detach carries
+        # no more direct-user blocks than the request that issued the call
+        # (earlier phases left genuine ones in history).
+        first_body = next((b for b in llm_bodies() if "use-the-forced-tool" in b and "call_fd1" not in b), "")
+        no_fake_user = forced_body.count("[Direct user message") == first_body.count("[Direct user message")
+        completion_seen = any("[BACKGROUND BASH COMPLETE]" in b and "forced-detach-done" in b for b in llm_bodies())
+        check("force-detach test setting: long default command moved with wake_reason test_forced, "
+              "startup warns, completion delivered later as its own turn",
+              bool(forced_body) and "because background-detach test mode is on" in forced_body
+              and bool(first_body) and no_fake_user
+              and "BRIGLIA_MIDTURN_FORCE_DETACH is set" in out11b and completion_seen and rc11b == 0,
+              f"forced_body={bool(forced_body)} completion={completion_seen} rc={rc11b}\n" + out11b[-2500:])
+
         # Phase 12: Telegram inline-keyboard menus (owner request 2026-09-07),
         # end-to-end over the real binary and the mock Bot API. /effort with
         # no argument answers with buttons; a tap (callback_query) runs the
