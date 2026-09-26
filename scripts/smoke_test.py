@@ -2349,6 +2349,16 @@ def main():
                 time.sleep(0.2)
             pwait("Briglia ▸", 60)  # turn completes with the mock reply
             phase11_state["queue_empty_at_end"] = not os.path.exists(midturn_path)
+            # With the 3 s grace the 6 s command is moved to the background
+            # by the mid-turn message; its completion arrives as its own
+            # turn. Let that turn finish and save before this process exits
+            # (otherwise the next phase's startup publishes it).
+            deadline = time.time() + 40
+            while time.time() < deadline:
+                if any("[BACKGROUND BASH COMPLETE]" in b and "call_mt1" in b for b in llm_bodies()):
+                    break
+                time.sleep(0.2)
+            pwait("Briglia ▸", 60, count=2)
 
         tg_mark("phase11-start")
         out11, rc11 = run_poller_phase({}, phase11, timeout_s=150)
