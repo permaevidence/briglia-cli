@@ -157,6 +157,16 @@ class ConversationManager: ObservableObject {
     private var activeTurnCheckpoints: [UUID: TurnCheckpoint] = [:]
     private var checkpointWriteFailure: String?
     private var recoveryBlocked = false
+    /// Set when conversation.json EXISTS but could not be read or decoded.
+    /// A failed load is not an empty history (§3.10.2): while this is set,
+    /// nothing may treat the committed view as evidence of absence — job
+    /// reconciliation, stop-entry retirement, queue recovery and turn resume
+    /// are deferred, removal gates refuse, and no write may replace the
+    /// unreadable file (it is preserved for repair). Independent of
+    /// `recoveryBlocked`: checkpoint recovery can never clear it. Cleared
+    /// only by a successful (re)load — restart after repair, or the file
+    /// moved aside — or by an explicit /deleteuserdata reset.
+    private var historyLoadFailure: String?
     private var promptEstimateCorrections: [String: Double] = [:]
     private var pendingCompactionCalibration: (scope: String, estimated: Int, generation: Int)?
     private var latestEstimateScope = ""
@@ -2719,6 +2729,7 @@ class ConversationManager: ObservableObject {
     /// the queue-file clear. An undecodable file is deleted (poison entry
     /// must not wedge startup).
     private func recoverPersistedAmbientTriggers() {
+        guard historyLoadFailure == nil else { return }  // queue file kept until history loads
         guard let data = try? Data(contentsOf: pendingAmbientFileURL) else { return }
         guard let recovered = try? JSONDecoder().decode([Message].self, from: data) else {
             try? FileManager.default.removeItem(at: pendingAmbientFileURL)
@@ -2750,6 +2761,7 @@ class ConversationManager: ObservableObject {
     /// wedge every future startup); the id-dedup makes a re-consumed file
     /// harmless.
     private func recoverPersistedMidTurnMessages() {
+        guard historyLoadFailure == nil else { return }  // queue file kept until history loads
         guard let data = try? Data(contentsOf: pendingMidTurnFileURL) else { return }
         guard let recovered = try? JSONDecoder().decode([Message].self, from: data) else {
             try? FileManager.default.removeItem(at: pendingMidTurnFileURL)
@@ -2947,6 +2959,7 @@ class ConversationManager: ObservableObject {
     /// unanswered message is part of its context and a second turn would
     /// answer twice, so the marker is just cleared.
     private func resumeInterruptedActiveTurnIfNeeded() {
+        guard historyLoadFailure == nil else { return }  // marker kept until history loads
         guard let data = try? Data(contentsOf: activeTurnMarkerFileURL) else { return }
         clearActiveTurnMarker()
         guard activeRunId == nil, activeProcessingTask == nil, !recoveryBlocked else { return }
@@ -5702,6 +5715,9 @@ class ConversationManager: ObservableObject {
         for handle in subagents.prefix(5) {
             lines.append("  • subagent \(handle.id) (\(handle.subagentType)) — \(Self.formatShortDuration(Int(Date().timeIntervalSince(handle.startedAt))))")
         }
+        if let historyLoadFailure {
+            lines.append("  ⚠️ conversation history could not be read (\(historyLoadFailure)) — preserved, not overwritten; background results stay owed until it loads")
+        }
         if let records = try? DetachedJobStore.load() {
             for record in records where record.unverifiableReason != nil {
                 lines.append("  ⚠️ result of \(record.handle) could not be verified after a restart (\(record.unverifiableReason ?? "")) — kept for inspection")
@@ -6322,6 +6338,13 @@ class ConversationManager: ObservableObject {
     /// marker are appended without waking. One checked save for the pass.
     private func reconcileJobRecords() {
         guard FileManager.default.fileExists(atPath: DetachedJobStore.fileURL.path) else { return }
+        // An unreadable history proves nothing absent (Codex 1a round 2):
+        // no publication, no retirement — records stay owed until a
+        // successful reread.
+        guard historyLoadFailure == nil else {
+            print("[ConversationManager] Job reconciliation deferred: conversation history unreadable")
+            return
+        }
         let records: [DetachedJobRecord]
         do { records = try DetachedJobStore.load() }
         catch {
@@ -6433,6 +6456,7 @@ class ConversationManager: ObservableObject {
     /// Conservative 1a rule: if the write fails the removal is REFUSED.
     /// Messages when no record is owed pass without touching the file.
     private func settleJobEvidenceBeforeRemoval(of removed: [Message]) throws {
+        if let historyLoadFailure { throw HistoryUnreadable(reason: historyLoadFailure) }
         var inlineBound = false
         for message in removed {
             for round in message.toolInteractions {
@@ -6448,9 +6472,15 @@ class ConversationManager: ObservableObject {
         catch {
             // Unreadable records: nothing can be settled, so nothing whose
             // removal could hide evidence may leave (inline bindings, or any
-            // snapshot route from a removed root).
+            // snapshot route from a removed root). A completion notice is
+            // evidence too (Codex 1a round 2): if its record's delivered-state
+            // write failed, the notice's pre-minted id in history is the ONLY
+            // deduplication proof, and which notices are record-backed cannot
+            // be told while the records are unreadable — so every possible
+            // carrier (.bashComplete) stays.
             let carriesRoute = removed.contains { !$0.pruneArchiveReferences.isEmpty || $0.activeTurnCompaction != nil }
-            guard !inlineBound && !carriesRoute else {
+            let carriesNotice = removed.contains { $0.kind == .bashComplete }
+            guard !inlineBound && !carriesRoute && !carriesNotice else {
                 throw PruneArchiveStore.Failure("Crash records unreadable (\(error.localizedDescription)); results of background jobs stay in history until they can be settled")
             }
             return
@@ -6553,7 +6583,7 @@ class ConversationManager: ObservableObject {
     }
 
     private func retireSettledStopEntries(unsettledLiveJobs: Set<UUID>) {
-        guard !stopEntries.isEmpty else { return }
+        guard !stopEntries.isEmpty, historyLoadFailure == nil else { return }
         let records: [DetachedJobRecord]
         do { records = try DetachedJobStore.load() } catch { return }  // keep entries: cannot prove settlement
         let openRecords = Set(records.filter { !$0.isSettled }.map(\.jobId))
@@ -6775,7 +6805,7 @@ class ConversationManager: ObservableObject {
                         throw PruneArchiveStore.Failure("Archived batch changed before removal; live messages retained")
                     }
                     let candidate = messages.filter { !archivedIDs.contains($0.id) }
-                    try PrivateStorage.writeAtomically(try encoder.encode(candidate), to: conversationFileURL)
+                    try writeHistoryFile(try encoder.encode(candidate))
                     messages = candidate
                     committedMessages = candidate
                     lastPromptTokens = nil
@@ -8254,7 +8284,7 @@ class ConversationManager: ObservableObject {
         }
         // Failure (including post-rename fsync) leaves a complete old-or-new file.
         // Keep the full live preimage and the snapshot; do not run cleanup.
-        do { try PrivateStorage.writeAtomically(try encoder.encode(candidateLive), to: conversationFileURL) }
+        do { try writeHistoryFile(try encoder.encode(candidateLive)) }
         catch { throw PruneArchiveStore.Failure("Could not commit pruned conversation: \(error.localizedDescription). Live details and the snapshot remain; the disk file may contain the complete old or new state. No cleanup ran.") }
         messages = candidateLive
         committedMessages = candidateLive
@@ -10709,6 +10739,7 @@ class ConversationManager: ObservableObject {
                 messages = []
             }
             committedMessages = []
+            noteHistoryLoaded()
             return
         }
 
@@ -10718,6 +10749,7 @@ class ConversationManager: ObservableObject {
             // What is on disk, before any load-time cleanup below (a failed
             // cleanup save leaves the disk content as the committed view).
             committedMessages = messages
+            noteHistoryLoaded()
             var dirty = false
             // Cleanup old compact tool logs from previous runs to keep context lean.
             if pruneOldToolLogMessages() > 0 { dirty = true }
@@ -10744,7 +10776,40 @@ class ConversationManager: ObservableObject {
             if dirty { saveConversation() }
         } catch {
             print("Failed to load conversation: \(error)")
+            noteHistoryUnreadable(error)
         }
+    }
+
+    /// A successful load (or a known-absent file) ends any unreadable-history
+    /// episode; the all-clear is sent only if the user was alerted.
+    private func noteHistoryLoaded() {
+        let wasFailing = historyLoadFailure != nil
+        historyLoadFailure = nil
+        if wasFailing { print("[ConversationManager] Conversation history readable again") }
+        Task { await MaintenanceAlertCenter.shared.reportSuccess(.conversationHistory) }
+    }
+
+    /// Fail closed (§3.10.2): the file is kept byte-for-byte for repair and
+    /// the committed view is marked invalid rather than empty.
+    private func noteHistoryUnreadable(_ error: Error) {
+        let reason = error.localizedDescription
+        historyLoadFailure = reason
+        showMaintenanceNotice("Conversation history could not be read (\(reason)); it is preserved and nothing will overwrite it.")
+        Task { await MaintenanceAlertCenter.shared.reportFailure(.conversationHistory, error: reason, deterministic: false) }
+    }
+
+    struct HistoryUnreadable: LocalizedError {
+        let reason: String
+        var errorDescription: String? {
+            "Conversation history could not be read (\(reason)); it is preserved for repair and will not be overwritten"
+        }
+    }
+
+    /// The only way history bytes reach disk: refused while the existing
+    /// file could not be loaded, so an unreadable history is never replaced.
+    private func writeHistoryFile(_ data: Data) throws {
+        if let historyLoadFailure { throw HistoryUnreadable(reason: historyLoadFailure) }
+        try PrivateStorage.writeAtomically(data, to: conversationFileURL)
     }
 
     /// Requalify pre-v0.1.28 reasoning provenance (bare model ids) for
@@ -10775,7 +10840,7 @@ class ConversationManager: ObservableObject {
             let data = try JSONEncoder().encode(messages)
             // Atomic so a Mind export copying this file mid-save can never
             // capture a torn JSON.
-            try PrivateStorage.writeAtomically(data, to: conversationFileURL)
+            try writeHistoryFile(data)
             noteDurableSave()
             return true
         } catch {
@@ -11195,6 +11260,12 @@ class ConversationManager: ObservableObject {
         //    and re-remove the media directories with CHECKED deletion —
         //    clearConversation's own removals are try? and could silently
         //    leave files behind.
+        // An explicit wipe is the reset path for an unreadable history: the
+        // user asked for it to be replaced.
+        if historyLoadFailure != nil {
+            historyLoadFailure = nil
+            Task { await MaintenanceAlertCenter.shared.reportSuccess(.conversationHistory) }
+        }
         clearConversation()
         if !saveConversation() { failures.append("conversation file: write failed") }
         removeAndRecreate(imagesDirectory, label: "images directory")
@@ -12757,6 +12828,8 @@ extension ConversationManager {
     var _testPendingMidTurnURL: URL { pendingMidTurnFileURL }
     var _testSalvageURL: URL { turnSalvageFileURL }
     var _testRecoveryBlocked: Bool { recoveryBlocked }
+    var _testHistoryLoadFailure: String? { historyLoadFailure }
+    func _testExpectCompletionAck(messageId: UUID, jobId: UUID) { pendingCompletionAcks[messageId] = jobId }
     func _testWriteActiveTurnMarker(for message: Message) { _ = writeActiveTurnMarker(for: message) }
     func _testPersistQueue(_ queue: [Message]) { pendingMidTurnMessages = queue; _ = persistPendingMidTurnQueue() }
     var _testSeenGeneration: UInt64 { seenGenerationAtRequest }
