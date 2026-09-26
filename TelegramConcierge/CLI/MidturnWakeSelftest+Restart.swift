@@ -10,6 +10,7 @@ extension MidturnHarness {
         _ = await BackgroundProcessRegistry.shared.purgeAllForWipe()
         await TurnWakeCenter.shared.disarm()
         DetachedJobStore.instanceId = UUID()
+        DetachedJobStore.forgetCreatedForTesting()
         let manager = ConversationManager()
         await manager._testPrepareScriptedProvider(apiKey: apiKey)
         return manager

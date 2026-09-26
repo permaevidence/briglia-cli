@@ -130,6 +130,8 @@ final class MidturnHarness {
         if section("gate1") { try await gateOneSection() }
         if section("gate2") { try await gateTwoSection() }
         if section("race") { await raceSection() }
+        if section("durability") { try await durabilitySection() }
+        if section("responses") { try await responsesSection() }
     }
 
     // MARK: Provider and scripting
@@ -185,6 +187,8 @@ final class MidturnHarness {
         BashTools.lastRecordFailure = nil
         BashTools.quickDefaultSeconds = 120
         DetachedJobStore.instanceId = UUID()
+        DetachedJobStore.forgetCreatedForTesting()
+        ConversationManager.stopCutoffInterleaveForTesting = nil
         let root = StoragePaths.dataRoot
         for name in ["conversation.json", "detached-jobs.json", "stop-marker.json", "pending_midturn.json",
                      "active_turn.json", "turn_salvage.json", "context_usage.json", "prune-archives",

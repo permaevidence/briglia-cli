@@ -69,6 +69,13 @@ extension MidturnHarness {
 
     /// L2: a call shorter than the grace returns its real result.
     private func loopShortCallReturnsReal() async throws {
+        // A wider grace for this row only: under compile/CI load a 0.3 s
+        // command could still be exiting at a 0.6 s grace (the wake then
+        // legitimately wins the race). The row tests "shorter than the
+        // grace", so give that margin explicitly.
+        let savedGrace = TurnWakeCenter.graceSecondsForTesting
+        TurnWakeCenter.graceSecondsForTesting = 3.0
+        defer { TurnWakeCenter.graceSecondsForTesting = savedGrace }
         let manager = await freshManager()
         server.script([
             Self.chatTools([(id: "call-l2", name: "bash", args: ["command": "sleep 0.3; echo quick-done"])]),
