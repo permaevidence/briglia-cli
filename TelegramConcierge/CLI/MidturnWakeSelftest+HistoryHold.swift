@@ -6,12 +6,12 @@ import Foundation
 /// earlier interrupted request in history order — when history loads again.
 extension MidturnHarness {
 
-    private var holdHistoryURL: URL { StoragePaths.dataRoot.appendingPathComponent("conversation.json") }
-    private static let unreadable = Data("unreadable history; preserve for repair".utf8)
+    var holdHistoryURL: URL { StoragePaths.dataRoot.appendingPathComponent("conversation.json") }
+    static let unreadable = Data("unreadable history; preserve for repair".utf8)
 
     /// A saved interrupted request with its marker, then history made
     /// undecodable and a new manager constructed over it.
-    private func unreadableWithInterruptedTurn() async throws
+    func unreadableWithInterruptedTurn() async throws
         -> (manager: ConversationManager, prior: Message, marker: Data, good: Data) {
         let manager = await freshManager()
         let prior = user("previous interrupted request")
@@ -24,13 +24,13 @@ extension MidturnHarness {
         return (recovered, prior, marker, good)
     }
 
-    private func queuedIds(_ manager: ConversationManager) -> [UUID] {
+    func queuedIds(_ manager: ConversationManager) -> [UUID] {
         guard let data = try? Data(contentsOf: manager._testPendingMidTurnURL),
               let queue = try? JSONDecoder().decode([Message].self, from: data) else { return [] }
         return queue.map(\.id)
     }
 
-    private func markerBytes(_ manager: ConversationManager) -> Data? {
+    func markerBytes(_ manager: ConversationManager) -> Data? {
         try? Data(contentsOf: manager._testActiveTurnMarkerURL)
     }
 

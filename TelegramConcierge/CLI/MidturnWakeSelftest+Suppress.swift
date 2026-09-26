@@ -163,12 +163,17 @@ extension MidturnHarness {
         do {
             let manager = await freshManager()
             ForceDetach.overrideForTesting = true
-            defer { ForceDetach.overrideForTesting = nil }
+            // A delay far above the 0.2 s command, so process start-up under
+            // heavy machine load can't reach it (the row proves "shorter
+            // than the delay returns real", not a tight bound).
+            let savedDelay = MidturnWakeSignal.forcedDelaySecondsForTesting
+            MidturnWakeSignal.forcedDelaySecondsForTesting = 5
+            defer { ForceDetach.overrideForTesting = nil; MidturnWakeSignal.forcedDelaySecondsForTesting = savedDelay }
             server.script([Self.chatTools([(id: "call-t2", name: "bash", args: ["command": "sleep 0.2; echo fast"])]), Self.chatText("ok")])
             manager._testStartTurn(for: user("fast forced"))
             _ = await manager._testAwaitIdle(timeout: 20)
             let payload = parse(results(manager).first { $0.toolCallId == "call-t2" }?.content ?? "")
-            check("F2 forced: a call shorter than the delay returns real", payload["wake_reason"] == nil && payload["status"] as? String == "exited")
+            check("F2 forced: a call shorter than the delay returns real", payload["wake_reason"] == nil && payload["status"] as? String == "exited", "\(payload)")
         }
         // F3: depth > 0 is never forced (subagent executor).
         do {
