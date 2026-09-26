@@ -51,6 +51,14 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ADA = sys.argv[1] if len(sys.argv) > 1 else ".build/debug/briglia"
+# Preference-domain isolation (macOS): `UserDefaults.standard` follows the
+# EXECUTABLE NAME, and cfprefsd serves a binary named `briglia` the real
+# install's domain whatever HOME/XDG/CFFIXED_USER_HOME say. Every binary the
+# smoke suite runs is therefore a differently named hard link (or copy) —
+# never `briglia` — and its throwaway domain is purged at the end. Release
+# tarballs keep their `briglia` entry (the upgrade swaps into whatever path
+# the running binary has).
+SMOKE_EXE = "briglia-smoke"
 # Repo root for selftests that scan the source tree (midturn invariant scan).
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -176,7 +184,61 @@ def _test_prefs_domains_since(t0):
     return out
 
 
+def _smoke_executable(source):
+    """A hard link (copy as fallback) named SMOKE_EXE beside `source`, so the
+    resource bundle next to it still resolves."""
+    target = os.path.join(os.path.dirname(os.path.abspath(source)), SMOKE_EXE)
+    try:
+        os.unlink(target)
+    except FileNotFoundError:
+        pass
+    try:
+        os.link(os.path.abspath(source), target)
+    except OSError:
+        shutil.copy2(source, target)
+    return target
+
+
+def _real_prefs_snapshot():
+    """macOS: the live install's `briglia` domain, for the before/after
+    guard. None elsewhere (corelibs keeps preferences under the isolated
+    HOME/XDG roots)."""
+    if sys.platform != "darwin":
+        return None
+    r = subprocess.run(["defaults", "export", "briglia", "-"], capture_output=True, timeout=30)
+    if r.returncode != 0:
+        return {}
+    import plistlib
+    try:
+        return plistlib.loads(r.stdout)
+    except Exception:
+        return {}
+
+
+def _purge_smoke_prefs_domain():
+    if sys.platform != "darwin":
+        return
+    subprocess.run(["defaults", "delete", SMOKE_EXE], capture_output=True, timeout=30)
+    shell = os.path.expanduser(f"~/Library/Preferences/{SMOKE_EXE}.plist")
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        try:
+            if os.path.getsize(shell) <= 64:
+                os.unlink(shell)
+        except OSError:
+            pass
+        if not os.path.exists(shell):
+            # cfprefsd can rewrite the empty shell a few seconds later.
+            time.sleep(7)
+            if not os.path.exists(shell):
+                return
+        time.sleep(1)
+
+
 def main():
+    global ADA
+    real_prefs_before = _real_prefs_snapshot()
+    ADA = _smoke_executable(ADA)
     print(f"Briglia binary: {ADA}")
     smoke_started_at = time.time()
 
@@ -770,8 +832,8 @@ def main():
     check("bundle-check: passes next to build bundle", result.returncode == 0,
           result.stdout + result.stderr)
     with tempfile.TemporaryDirectory() as bindir:
-        shutil.copy2(ADA, os.path.join(bindir, "briglia"))
-        result = subprocess.run([os.path.join(bindir, "briglia"), "bundle-check"],
+        shutil.copy2(ADA, os.path.join(bindir, SMOKE_EXE))
+        result = subprocess.run([os.path.join(bindir, SMOKE_EXE), "bundle-check"],
                                 capture_output=True, text=True, timeout=60, cwd="/")
         check("bundle-check: missing bundle fails readably",
               result.returncode == 1 and "resource bundle missing" in result.stdout,
@@ -994,7 +1056,7 @@ def main():
             # A user-writable "install": the exact layout install.sh produces.
             install_dir = os.path.join(home, "bin")
             os.makedirs(install_dir)
-            shutil.copy2(ADA, os.path.join(install_dir, "briglia"))
+            shutil.copy2(ADA, os.path.join(install_dir, SMOKE_EXE))
             shutil.copytree(bundle_src, os.path.join(install_dir, bundle_name))
 
             # Release tarball with the same binary, served by a mock CDN as 9.9.9.
@@ -1095,7 +1157,7 @@ def main():
             os.chmod(os.path.join(config_dir, "secrets.json"), 0o600)
 
             proc = subprocess.Popen(
-                [os.path.join(install_dir, "briglia")],
+                [os.path.join(install_dir, SMOKE_EXE)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, env=env,
             )
@@ -1173,7 +1235,7 @@ def main():
                 proc.stdin.write(b"/upgrade\n")
                 proc.stdin.flush()
                 rejected = wait_for("failed verification", 120)
-                with open(os.path.join(install_dir, "briglia"), "rb") as f:
+                with open(os.path.join(install_dir, SMOKE_EXE), "rb") as f:
                     intact = f.read(64) != b"#!/bin/sh\nexit 1\n"[:64]
                 check("upgrade: corrupt build rejected, install untouched",
                       rejected and intact, out()[-1200:])
@@ -1193,12 +1255,12 @@ def main():
                 def sha256_of(path):
                     with open(path, "rb") as f:
                         return hashlib.sha256(f.read()).hexdigest()
-                pre_hash = sha256_of(os.path.join(install_dir, "briglia"))
+                pre_hash = sha256_of(os.path.join(install_dir, SMOKE_EXE))
                 sign_mock("7.7.7", BASE_SEQ + 4, tar_bytes, tar_sha)
                 env2 = dict(env)
                 env2["BRIGLIA_UPGRADE_FAULT"] = "bundle-move"
                 proc2 = subprocess.Popen(
-                    [os.path.join(install_dir, "briglia")],
+                    [os.path.join(install_dir, SMOKE_EXE)],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, env=env2,
                 )
@@ -1234,7 +1296,7 @@ def main():
                     proc2.stdin.write(b"/upgrade\n")
                     proc2.stdin.flush()
                     rolled_back = wait2("previous version restored", 120)
-                    post_hash = sha256_of(os.path.join(install_dir, "briglia"))
+                    post_hash = sha256_of(os.path.join(install_dir, SMOKE_EXE))
                     bundle_ok = os.path.isdir(os.path.join(install_dir, bundle_name))
                     leftovers = [n for n in os.listdir(install_dir)
                                  if n.startswith(".briglia-upgrade-")]
@@ -1787,7 +1849,7 @@ def main():
         p5_build_dir = os.path.dirname(os.path.abspath(ADA))
         p5_install = os.path.join(home, "bin")
         os.makedirs(p5_install, exist_ok=True)
-        shutil.copy2(ADA, os.path.join(p5_install, "briglia"))
+        shutil.copy2(ADA, os.path.join(p5_install, SMOKE_EXE))
         shutil.copytree(os.path.join(p5_build_dir, p5_bundle),
                         os.path.join(p5_install, p5_bundle))
         p5_tar = os.path.join(home, "p5.tar.gz")
@@ -1881,7 +1943,7 @@ def main():
                 {"BRIGLIA_ENVELOPE_URL": f"http://127.0.0.1:{p5_cdn_port}/manifest.sig.json",
                  "BRIGLIA_RELEASE_URL_PREFIX": f"http://127.0.0.1:{p5_cdn_port}/dl/v{{version}}/",
                  "BRIGLIA_RELEASE_TEST_KEY": f"{p5_key_id}:{p5_pub_hex}"}, phase5,
-                binary=os.path.join(p5_install, "briglia"))
+                binary=os.path.join(p5_install, SMOKE_EXE))
         finally:
             p5_cdn.shutdown()
         tail_pos = out5.find("[Telegram] tail message survives")
@@ -2890,6 +2952,26 @@ def main():
         check("selftests leave no throwaway preference domains behind",
               not leaked, f"written during this run: {', '.join(sorted(leaked))} "
               f"(prefixes {', '.join(TEST_PREFS_PREFIXES)})")
+
+    # Live-settings guard (macOS): the real install's preference domain must
+    # carry nothing this run wrote. The live daemon may legitimately update
+    # its own keys meanwhile, so a change fails only when its new value
+    # carries a smoke fixture (the mock Telegram chat, a smoke scratch path).
+    _purge_smoke_prefs_domain()
+    if real_prefs_before is not None:
+        after = _real_prefs_snapshot() or {}
+        changed = sorted(k for k in set(real_prefs_before) | set(after)
+                         if real_prefs_before.get(k) != after.get(k))
+        sentinels = ("ada-smoke", "briglia-smoke", tempfile.gettempdir())
+        def carries_fixture(value):
+            text = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+            return (re.search(r'chatId"\s*:\s*"?12345\b', text) is not None
+                    or any(s in text for s in sentinels))
+        tainted = [k for k in changed if k in after and carries_fixture(after[k])]
+        if changed and not tainted:
+            print(f"  note: real preference keys changed during the run by the live install: {', '.join(changed)}")
+        check("real Briglia preference domain carries nothing from this run", not tainted,
+              f"keys written with smoke fixtures: {', '.join(tainted)}")
 
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
