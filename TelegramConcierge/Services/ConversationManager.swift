@@ -2609,8 +2609,7 @@ class ConversationManager: ObservableObject {
     /// stage "placeholder" (before the batch runs) or "completed" (after).
     nonisolated(unsafe) static var responsesSalvageFaultForTesting: ((String) throws -> Void)?
 
-    private func persistResponsesSalvage(_ interactions: [ToolInteraction], stage: String) throws {
-        try Self.responsesSalvageFaultForTesting?(stage)
+    private func persistResponsesSalvage(_ interactions: [ToolInteraction]) throws {
         if let runID = activeRunId, var checkpoint = activeTurnCheckpoints[runID], checkpoint.isEnvelope {
             checkpoint.retainedInteractions = interactions
             try writeTurnCheckpoint(checkpoint)
@@ -7193,7 +7192,8 @@ class ConversationManager: ObservableObject {
                         return placeholder
                     })
                     let pending = toolInteractions + [uncertain]
-                    try persistResponsesSalvage(pending, stage: "placeholder")
+                    try Self.responsesSalvageFaultForTesting?("placeholder")
+                    try persistResponsesSalvage(pending)
                     toolInteractions = pending
                 }
                 var toolResults: [ToolResultMessage] = []
@@ -7310,7 +7310,8 @@ class ConversationManager: ObservableObject {
                 if responsesExecution != nil {
                     var completed = toolInteractions
                     completed[completed.count - 1] = interaction
-                    try persistResponsesSalvage(completed, stage: "completed")
+                    try Self.responsesSalvageFaultForTesting?("completed")
+                    try persistResponsesSalvage(completed)
                     toolInteractions = completed
                 } else { toolInteractions.append(interaction) }
 
