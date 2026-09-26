@@ -137,6 +137,9 @@ final class MidturnHarness {
         if section("storage") { try await heldQueueReproSection() }
         if section("storage") { try await heldQueueDurabilitySection() }
         if section("storage") { try await heldQueueStopSection() }
+        if section("storage") { try await heldQueueRound5ReproSection() }
+        if section("storage") { try await heldQueueIndependenceSection() }
+        if section("storage") { try await stopMarkerSettlementSection() }
     }
 
     // MARK: Provider and scripting
