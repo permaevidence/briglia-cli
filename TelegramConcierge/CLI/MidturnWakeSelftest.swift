@@ -132,6 +132,7 @@ final class MidturnHarness {
         if section("race") { await raceSection() }
         if section("durability") { try await durabilitySection() }
         if section("responses") { try await responsesSection() }
+        if section("storage") { try await storageSection() }
     }
 
     // MARK: Provider and scripting
