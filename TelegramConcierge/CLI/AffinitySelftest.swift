@@ -763,6 +763,21 @@ final class CaptureServer: @unchecked Sendable {
         set { lock.lock(); _requestObserver = newValue; lock.unlock() }
     }
     var remainingResponses: Int { lock.lock(); defer { lock.unlock() }; return responseQueue.count }
+    // Opt-in content router (mid-turn wake 1b subagent rows): a request the
+    // router answers gets that body after its delay; every other request
+    // uses the scripted queue. Off (nil) by default: other suites unchanged.
+    private var _router: (@Sendable (CapturedHTTPRequest) -> (body: String, delay: TimeInterval)?)?
+    var router: (@Sendable (CapturedHTTPRequest) -> (body: String, delay: TimeInterval)?)? {
+        get { lock.lock(); defer { lock.unlock() }; return _router }
+        set { lock.lock(); _router = newValue; lock.unlock() }
+    }
+    // Opt-in: serve each connection on its own thread, so a delayed routed
+    // reply (a slow subagent) never holds back another client's request.
+    private var _concurrent = false
+    var concurrent: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _concurrent }
+        set { lock.lock(); _concurrent = newValue; lock.unlock() }
+    }
 
     var requests: [[String: String]] { completeRequests.map(\.headers) }
     var completeRequests: [CapturedHTTPRequest] { lock.lock(); defer { lock.unlock() }; return recorded }
@@ -815,7 +830,11 @@ final class CaptureServer: @unchecked Sendable {
             if !go { return }
             let client = accept(listenFd, nil, nil)
             if client < 0 { if errno == EINTR { continue }; return }
-            handle(client)
+            if concurrent {
+                Thread { [self] in self.handle(client) }.start()
+            } else {
+                handle(client)
+            }
         }
     }
 
@@ -826,14 +845,16 @@ final class CaptureServer: @unchecked Sendable {
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         var parser = CaptureRequestParser()
         var chunk = [UInt8](repeating: 0, count: 65536)
+        var routed: (body: String, delay: TimeInterval)? = nil
         do {
             while true {
                 let n = chunk.withUnsafeMutableBytes { read(fd, $0.baseAddress!, $0.count) }
                 if n < 0 && errno == EINTR { continue }
                 guard n > 0 else { throw CaptureRequestParser.Invalid("EOF or timeout before complete request") }
                 if let request = try parser.append(Data(chunk[0..<n])) {
-                    lock.lock(); recorded.append(request); let observer = _requestObserver; lock.unlock()
+                    lock.lock(); recorded.append(request); let observer = _requestObserver; let route = _router; lock.unlock()
                     observer?(request)
+                    routed = route?(request)
                     break
                 }
             }
@@ -841,12 +862,13 @@ final class CaptureServer: @unchecked Sendable {
             lock.lock(); captureErrors.append(String(describing: error)); lock.unlock()
             return
         }
+        if let routed, routed.delay > 0 { Thread.sleep(forTimeInterval: routed.delay) }
         let fallbackStatus = statusOverride ?? 200
         let content = contentOverride ?? "OK"
         let encodedContent = String(data: try! JSONEncoder().encode(content), encoding: .utf8)!
         lock.lock()
-        let scripted = responseQueue.isEmpty ? nil : responseQueue.removeFirst()
-        let status = statusQueue.isEmpty ? fallbackStatus : statusQueue.removeFirst()
+        let scripted = routed?.body ?? (responseQueue.isEmpty ? nil : responseQueue.removeFirst())
+        let status = routed != nil ? 200 : (statusQueue.isEmpty ? fallbackStatus : statusQueue.removeFirst())
         lock.unlock()
         let body = scripted ?? (status == 200
             ? "{\"id\":\"cap\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\(encodedContent)},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}"

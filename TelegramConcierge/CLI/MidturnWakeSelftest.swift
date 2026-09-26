@@ -140,6 +140,15 @@ final class MidturnHarness {
         if section("storage") { try await heldQueueRound5ReproSection() }
         if section("storage") { try await heldQueueIndependenceSection() }
         if section("storage") { try await stopMarkerSettlementSection() }
+        // Release 1b: subagent detachment, charges, spend incidents.
+        if section("subagent") { try await subagentSection() }
+        if section("subagent") { try await subagentStopSection() }
+        if section("subagent") { try await subagentRestartSection() }
+        if section("subagent") { try await subagentResponsesSection() }
+        if section("charge") { try await chargeSection() }
+        if section("charge") { try await chargeBarrierSection() }
+        if section("incident") { try await spendIncidentSection() }
+        if section("incident") { try await spendAcceptanceSection() }
     }
 
     // MARK: Provider and scripting
@@ -197,10 +206,16 @@ final class MidturnHarness {
         DetachedJobStore.instanceId = UUID()
         DetachedJobStore.forgetCreatedForTesting()
         ConversationManager.stopCutoffInterleaveForTesting = nil
+        ToolExecutor.detachEligibilityOverrideForTesting = nil
+        ToolExecutor.beforeSubagentRecordForTesting = nil
+        await SubagentBackgroundRegistry.shared._testReset()
+        ToolChargeLedger.resetForTesting()
+        server.router = nil
+        server.concurrent = false
         let root = StoragePaths.dataRoot
         for name in ["conversation.json", "detached-jobs.json", "stop-marker.json", "pending_midturn.json",
                      "active_turn.json", "turn_salvage.json", "context_usage.json", "prune-archives",
-                     "prune-archive-settlements"] {
+                     "prune-archive-settlements", "subagent_sessions"] {
             try? FileManager.default.removeItem(at: root.appendingPathComponent(name))
         }
         server.clear()
