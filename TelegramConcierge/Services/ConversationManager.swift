@@ -5794,6 +5794,7 @@ class ConversationManager: ObservableObject {
         }
         if let historyLoadFailure {
             lines.append("  ⚠️ conversation history could not be read (\(historyLoadFailure)) — preserved, not overwritten; background results stay owed until it loads")
+            lines.append("  ⏸ no new work starts until it loads\(pendingMidTurnMessages.isEmpty ? "" : " — \(pendingMidTurnMessages.count) message\(pendingMidTurnMessages.count == 1 ? "" : "s") held") — repair or move the file aside, then /restart")
         }
         if let records = try? DetachedJobStore.load() {
             for record in records where record.unverifiableReason != nil {
