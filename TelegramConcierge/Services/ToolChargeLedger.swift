@@ -20,8 +20,9 @@ import Darwin
 //   3. the record flips to `recorded` (and may then retire).
 // Totals are the UNION by chargeId of the ledger, record charges (pending or
 // recorded — a recorded copy survives when the ledger cannot be read) and
-// charges held only in memory (both stores failed) — one copy per chargeId,
-// with one conservative rule for conflicting copies.
+// charges held only in memory (both stores failed; every distinct copy of a
+// chargeId is kept) — one total per chargeId, with one conservative rule for
+// conflicting copies.
 //
 // Completeness is a list of typed incidents with stable ids. A configured
 // daily/monthly cap plus an open, unaccepted incident affecting the current
@@ -162,22 +163,42 @@ enum ToolChargeLedger {
     // MARK: Memory-held charges (both stores failed)
 
     private static let heldLock = NSLock()
-    private nonisolated(unsafe) static var held: [UUID: JobCharge] = [:]
+    /// Every DISTINCT copy (amount and date) held for a chargeId. A later
+    /// copy never replaces an earlier one: known charges never shrink, and
+    /// the snapshot counts the largest amount in every period any copy
+    /// names, so keeping only the largest would still lose the periods of
+    /// the smaller ones. Identical copies are deduplicated.
+    private nonisolated(unsafe) static var held: [UUID: [JobCharge]] = [:]
     /// A job whose charge is held only in memory: its crash record must not
     /// retire (it may be the only trace of that spend after a restart).
     static func isHeldInMemory(_ jobId: UUID) -> Bool {
         heldLock.lock(); defer { heldLock.unlock() }
-        return held[jobId] != nil
+        return !(held[jobId] ?? []).isEmpty
     }
+    /// Every held copy, all chargeIds (several copies per id possible).
     static func heldCharges() -> [JobCharge] {
         heldLock.lock(); defer { heldLock.unlock() }
-        return Array(held.values)
+        return held.keys.sorted { $0.uuidString < $1.uuidString }.flatMap { held[$0] ?? [] }
     }
+    /// Add a copy. An identical copy (same amount and date) is merged,
+    /// keeping `recorded` over `pending`; a differing copy is appended.
     private static func hold(_ charge: JobCharge) {
-        heldLock.lock(); held[charge.chargeId] = charge; heldLock.unlock()
+        heldLock.lock(); defer { heldLock.unlock() }
+        var copies = held[charge.chargeId] ?? []
+        if let i = copies.firstIndex(where: { $0.sameValues(as: charge) }) {
+            if charge.state == .recorded { copies[i].state = .recorded }
+        } else {
+            copies.append(charge)
+        }
+        held[charge.chargeId] = copies
     }
-    private static func release(_ id: UUID) {
-        heldLock.lock(); held.removeValue(forKey: id); heldLock.unlock()
+    /// Release exactly this copy, once a durable store holds it. Other
+    /// copies of the same chargeId stay held.
+    private static func release(_ charge: JobCharge) {
+        heldLock.lock(); defer { heldLock.unlock() }
+        guard var copies = held[charge.chargeId] else { return }
+        copies.removeAll { $0.sameValues(as: charge) }
+        held[charge.chargeId] = copies.isEmpty ? nil : copies
     }
     /// Selftests simulate a restart (memory is lost).
     static func forgetHeldForTesting() { heldLock.lock(); held.removeAll(); heldLock.unlock() }
@@ -251,7 +272,8 @@ enum ToolChargeLedger {
     static func settlePending() -> [String] {
         lock.lock(); defer { lock.unlock() }
         var problems: [String] = []
-        // Memory-held first. A held copy is released only once a durable
+        // Memory-held first, copy by copy (a chargeId may hold several
+        // differing copies). A held copy is released only once a durable
         // store holds THAT copy: its record (when the record has none, or
         // the same values), or else the readable ledger (as its entry or a
         // conflict copy). A record carrying a different copy keeps its own;
@@ -280,13 +302,13 @@ enum ToolChargeLedger {
             }
             switch outcome {
             case .adopted:
-                release(charge.chargeId)
+                release(charge)
             case .differs(let kind):
-                guard charge.amountUSD > 0 else { release(charge.chargeId); continue }
+                guard charge.amountUSD > 0 else { release(charge); continue }
                 do {
                     try recordInLedger(ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
                                                        providerReturnedAt: charge.providerReturnedAt, kind: kind))
-                    release(charge.chargeId)
+                    release(charge)
                 } catch {
                     problems.append("charge of job \(charge.chargeId) held in memory (a second, different copy): \(error.localizedDescription)")
                 }
