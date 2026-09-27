@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#endif
 
 /// Round-5 rows: the durable held queue survives restarts while history is
 /// still unreadable (hydrated into memory, merged, never replaced when it
@@ -152,7 +155,11 @@ extension MidturnHarness {
         }
         // HQ3: a queue file that exists but can't be read (permissions) is
         // likewise kept and intake refused; once readable again, holds merge.
-        do {
+        // Root reads a mode-000 file, so this row needs an unprivileged user
+        // (the Linux CI container runs as root; the decode variant HQ2 covers it there).
+        if geteuid() == 0 {
+            print("  (HQ3 skipped: running as root, file permissions do not deny reads)")
+        } else {
             let (manager, _, _, _) = try await unreadableWithInterruptedTurn()
             let a = user("HQ3 held before the file became unreadable")
             await manager._testDispatchUser(a)
@@ -245,8 +252,10 @@ extension MidturnHarness {
         }
         // HS2: the active-turn marker can't be read at /stop → conservative
         // disposition recorded; when it reads again after repair, the
-        // interrupted turn is not resumed.
-        do {
+        // interrupted turn is not resumed. Permission-based: needs a non-root user.
+        if geteuid() == 0 {
+            print("  (HS2 skipped: running as root, file permissions do not deny reads)")
+        } else {
             let (manager, _, _, good) = try await unreadableWithInterruptedTurn()
             setMode(0o000, manager._testActiveTurnMarkerURL)
             await manager._testStop()
@@ -267,7 +276,10 @@ extension MidturnHarness {
         }
         // HS3: the held-queue file can't be read at /stop → every queued
         // message up to the stop is held; after repair nothing runs.
-        do {
+        // Permission-based: needs a non-root user.
+        if geteuid() == 0 {
+            print("  (HS3 skipped: running as root, file permissions do not deny reads)")
+        } else {
             let (manager, _, _, good) = try await unreadableWithInterruptedTurn()
             let a = user("HS3 held, file later unreadable")
             await manager._testDispatchUser(a)

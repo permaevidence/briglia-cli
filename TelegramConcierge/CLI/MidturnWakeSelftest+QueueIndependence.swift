@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#endif
 
 /// Round-6 rows. (1) The held-message queue file's validity is independent
 /// of conversation-history validity: an unreadable file (decode or
@@ -71,8 +74,12 @@ extension MidturnHarness {
             let partial = await restart()
             partial._testStartupPasses()
             _ = await partial._testAwaitIdle()
-            check("C5D stop survives an unreadable named marker", StopMarkerStore.load().stoppedTriggerIds.contains(prior.id),
-                  "stop entries: \(StopMarkerStore.load().entries.count)")
+            // Permission-based: as root the marker stays readable (Linux CI container),
+            // so only the resume check below applies there.
+            if geteuid() != 0 {
+                check("C5D stop survives an unreadable named marker", StopMarkerStore.load().stoppedTriggerIds.contains(prior.id),
+                      "stop entries: \(StopMarkerStore.load().entries.count)")
+            }
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: partial._testActiveTurnMarkerURL.path)
             server.clear()
             server.script([Self.chatText("must not resume stopped request")])
