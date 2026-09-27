@@ -118,6 +118,7 @@ final class MidturnHarness {
         server = try CaptureServer()
         defer { server.stop() }
         try configureProvider()
+        if section("repro1b3") { try await repro1b3Section() }
         if section("repro1b2") { try await repro1b2Section() }
         if section("repro1b") { try await repro1bSection() }
         if section("wake") { await wakeCenterSection() }
@@ -163,6 +164,9 @@ final class MidturnHarness {
         // cancelled before it commits starts nothing.
         if section("charge") { try await knownCopySection() }
         if section("subagent") { try await launchCancellationSection() }
+        // 1b round 4: every distinct memory-held copy of a charge is kept
+        // and released copy by copy.
+        if section("charge") { try await heldCopySection() }
     }
 
     // MARK: Provider and scripting
