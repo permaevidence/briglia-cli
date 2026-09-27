@@ -306,6 +306,14 @@ enum ToolChargeLedger {
             if records.contains(where: { $0.charge?.state == .pending }) {
                 return problems.first ?? "a charge is still pending"
             }
+            // A recorded charge the readable ledger does not hold (it is
+            // unreadable, absent or mid-replacement) survives only in its job
+            // record: deleting or replacing the records would lose a KNOWN
+            // charge. Repair the ledger or accept the unknown first (the
+            // accepted generation carries the charge over).
+            if records.contains(where: { ($0.charge?.amountUSD ?? 0) > 0 && !$0.chargeSettled }) {
+                return problems.first ?? "the charge ledger can't be read and a known charge exists only in a job record (repair tool-charges.json or send /spend accept-unknown)"
+            }
             if records.contains(where: { $0.instanceId != DetachedJobStore.instanceId && $0.needsUnknownSpendIncident }) {
                 return problems.first ?? "an unknown spend amount could not be recorded"
             }
