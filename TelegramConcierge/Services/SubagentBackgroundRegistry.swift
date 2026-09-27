@@ -115,6 +115,16 @@ actor SubagentBackgroundRegistry {
     struct AdmissionRefused: Error, LocalizedError {
         var errorDescription: String? { "not started: the user stopped this turn with /stop" }
     }
+    /// The calling task was cancelled before the launch committed (the run
+    /// never started). `recordWritten`: the crash record was written in the
+    /// same step and must be dropped by the caller.
+    struct CallerCancelled: Error, LocalizedError {
+        let recordWritten: Bool
+        var errorDescription: String? { "not started: the call was cancelled before the launch" }
+    }
+    /// Tests only: runs on the actor at the start of `spawnRecorded`, in the
+    /// calling task (a cancel here must win).
+    nonisolated(unsafe) static var atSpawnAdmissionForTesting: (() -> Void)?
 
     /// Spawns a detached Task that runs the invocation to completion and stores its result.
     /// Returns the Handle immediately. With `jobId` (main-agent launch whose
@@ -131,9 +141,24 @@ actor SubagentBackgroundRegistry {
         reservedId: String?,
         jobId: UUID?,
         completionMessageId: UUID?,
-        turnRunId: UUID?
+        turnRunId: UUID?,
+        refuseIfCallerCancelled: Bool = false,
+        writeRecord: (@Sendable () throws -> Void)? = nil
     ) throws -> Handle {
+        Self.atSpawnAdmissionForTesting?()
         if let turnRunId, closedTurnRunIds.contains(turnRunId) { throw AdmissionRefused() }
+        // Caller-cancellation admission (release 1b): an actor method runs in
+        // the CALLING task, so `Task.isCancelled` here is the call's own flag,
+        // serialized with the launch. Checked before the crash record is
+        // written and again after it, with no suspension between the last
+        // check and the run's creation below: a cancel observed by either
+        // check wins (no run); a cancel after the second one is a cancel of
+        // an already-launched background job (ordinary background semantics).
+        if refuseIfCallerCancelled && Task.isCancelled { throw CallerCancelled(recordWritten: false) }
+        if let writeRecord {
+            try writeRecord()
+            if refuseIfCallerCancelled && Task.isCancelled { throw CallerCancelled(recordWritten: true) }
+        }
         let id = reservedId ?? reserveHandleId()
         let handle = Handle(
             id: id,

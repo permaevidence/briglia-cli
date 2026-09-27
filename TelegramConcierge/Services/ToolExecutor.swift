@@ -4591,22 +4591,24 @@ extension ToolExecutor {
             }
             // Crash record BEFORE the handle result is returned (§3.10.1):
             // a background launch whose record cannot be written is refused
-            // honestly instead of running untracked.
+            // honestly instead of running untracked. The record is written
+            // inside the registry's launch step, between its two
+            // caller-cancellation checks: a call cancelled before the launch
+            // commits starts no run and leaves no record.
             var recorded: (jobId: UUID, messageId: UUID, handle: String)? = nil
+            var writeRecord: (@Sendable () throws -> Void)? = nil
             if let wake {
                 let handleId = await SubagentBackgroundRegistry.shared.reserveHandleId()
                 let jobId = UUID(), messageId = UUID()
                 Self.beforeSubagentRecordForTesting?()
-                do {
-                    try DetachedJobStore.create(Self.subagentRecord(
-                        jobId: jobId, messageId: messageId, handle: handleId, args: args,
-                        invocation: invocation, wake: wake, launch: .background))
-                    recorded = (jobId, messageId, handleId)
-                } catch {
-                    return ToolResultMessage(toolCallId: call.id, content: jsonObjectString([
-                        "error": "could not record the background agent (storage problem: \(error.localizedDescription)) — it was not started; retry, or run it in the foreground"
-                    ]))
+                let record = Self.subagentRecord(
+                    jobId: jobId, messageId: messageId, handle: handleId, args: args,
+                    invocation: invocation, wake: wake, launch: .background)
+                writeRecord = {
+                    try DetachedJobStore.create(record)
+                    Self.afterSubagentRecordWriteForTesting?()
                 }
+                recorded = (jobId, messageId, handleId)
             }
             let handle: SubagentBackgroundRegistry.Handle
             do {
@@ -4621,12 +4623,24 @@ extension ToolExecutor {
                     reservedId: recorded?.handle,
                     jobId: recorded?.jobId,
                     completionMessageId: recorded?.messageId,
-                    turnRunId: wake?.turnRunId
+                    turnRunId: wake?.turnRunId,
+                    refuseIfCallerCancelled: true,
+                    writeRecord: writeRecord
                 )
-            } catch {
-                if let recorded { Self.dropUnlaunchedRecord(recorded.jobId) }
+            } catch let cancelled as SubagentBackgroundRegistry.CallerCancelled {
+                // No run was started. A record written in the launch step is
+                // dropped (a failed drop leaves it owed; a restart then
+                // settles it conservatively with one lost note).
+                if cancelled.recordWritten, let recorded { Self.dropUnlaunchedRecord(recorded.jobId) }
+                return ToolResultMessage(toolCallId: call.id, content: "{\"error\": \"The call was cancelled before the background agent started; it was not started.\"}")
+            } catch is SubagentBackgroundRegistry.AdmissionRefused {
                 return ToolResultMessage(toolCallId: call.id, content: "{\"error\": \"The turn was stopped; the background agent was not started.\"}")
+            } catch {
+                return ToolResultMessage(toolCallId: call.id, content: jsonObjectString([
+                    "error": "could not record the background agent (storage problem: \(error.localizedDescription)) — it was not started; retry, or run it in the foreground"
+                ]))
             }
+            Self.afterBackgroundLaunchForTesting?()
             var payload: [String: Any] = [
                 "background": true,
                 "handle": handle.id,
@@ -4684,6 +4698,11 @@ extension ToolExecutor {
     /// Selftest seam: runs just before a subagent crash record is written
     /// (a /stop can be made to land in the detach/launch commit window).
     nonisolated(unsafe) static var beforeSubagentRecordForTesting: (() -> Void)?
+    /// Tests only: runs right after an explicit background launch's crash
+    /// record is written, inside the registry's launch step (calling task).
+    nonisolated(unsafe) static var afterSubagentRecordWriteForTesting: (() -> Void)?
+    /// Tests only: runs right after an explicit background launch committed.
+    nonisolated(unsafe) static var afterBackgroundLaunchForTesting: (() -> Void)?
 
     /// Selftest seam: force a type's eligibility (nil = production rule).
     nonisolated(unsafe) static var detachEligibilityOverrideForTesting: ((String) -> Bool?)?

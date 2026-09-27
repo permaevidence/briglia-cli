@@ -203,8 +203,14 @@ enum ToolChargeLedger {
         do {
             try DetachedJobStore.mutate("charge-pending") { records in
                 guard let i = records.firstIndex(where: { $0.jobId == jobId }) else { return }
+                // A record already carrying a DIFFERENT copy of this charge
+                // keeps it (known charges never shrink): the new copy takes
+                // the ledger/memory path below, where the ledger keeps both
+                // (entry + conflict) and the snapshot counts the maximum in
+                // every period either copy names.
+                if let existing = records[i].charge, !existing.sameValues(as: charge) { return }
                 found = true
-                records[i].charge = charge
+                if records[i].charge?.state != .recorded { records[i].charge = charge }
             }
             recordWritten = found
         } catch {
@@ -245,22 +251,53 @@ enum ToolChargeLedger {
     static func settlePending() -> [String] {
         lock.lock(); defer { lock.unlock() }
         var problems: [String] = []
-        // Memory-held first: get them into their records.
+        // Memory-held first. A held copy is released only once a durable
+        // store holds THAT copy: its record (when the record has none, or
+        // the same values), or else the readable ledger (as its entry or a
+        // conflict copy). A record carrying a different copy keeps its own;
+        // neither copy is ever dropped for the other.
         for charge in heldCharges() {
-            var found = false
+            enum Outcome { case missing, adopted, differs(kind: String) }
+            var outcome = Outcome.missing
             do {
                 try DetachedJobStore.mutate("charge-pending") { records in
                     guard let i = records.firstIndex(where: { $0.jobId == charge.chargeId }) else { return }
-                    found = true
-                    if records[i].charge == nil || records[i].charge?.state == .pending { records[i].charge = charge }
+                    guard let existing = records[i].charge else {
+                        records[i].charge = charge
+                        outcome = .adopted
+                        return
+                    }
+                    if existing.sameValues(as: charge) {
+                        if existing.state == .pending && charge.state == .recorded { records[i].charge = charge }
+                        outcome = .adopted
+                    } else {
+                        outcome = .differs(kind: records[i].kind)
+                    }
                 }
             } catch {
                 problems.append("charge of job \(charge.chargeId) held in memory: \(error.localizedDescription)")
                 continue
             }
-            if found { release(charge.chargeId) }
-            else { problems.append("charge of job \(charge.chargeId) held in memory: its record is gone") }
+            switch outcome {
+            case .adopted:
+                release(charge.chargeId)
+            case .differs(let kind):
+                guard charge.amountUSD > 0 else { release(charge.chargeId); continue }
+                do {
+                    try recordInLedger(ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
+                                                       providerReturnedAt: charge.providerReturnedAt, kind: kind))
+                    release(charge.chargeId)
+                } catch {
+                    problems.append("charge of job \(charge.chargeId) held in memory (a second, different copy): \(error.localizedDescription)")
+                }
+            case .missing:
+                problems.append("charge of job \(charge.chargeId) held in memory: its record is gone")
+            }
         }
+        // Recorded record copies the readable ledger does not hold with the
+        // same values (a conflicting copy) are merged into it first, so a
+        // record retires only once the ledger keeps its exact amount/date.
+        problems += mergeRecordedCopies()
         let records: [DetachedJobRecord]
         do { records = try DetachedJobStore.load() } catch {
             problems.append("job records unreadable: \(error.localizedDescription)")
@@ -390,12 +427,40 @@ enum ToolChargeLedger {
         return .readable(generation: file.generation, entries: file.entries, conflicts: file.conflicts)
     }
 
-    /// The readable ledger holds this charge (entry or conflict copy).
-    /// False while the ledger is unreadable or absent: a job record carrying
-    /// the charge must then stay, since it may be the only known copy.
-    static func ledgerHolds(chargeId: UUID) -> Bool {
+    /// The readable ledger holds THIS copy of the charge — same id, amount
+    /// and date — as its entry or a conflict copy. Holding the id alone is
+    /// not enough: a record copy that disagrees with the ledger's is known
+    /// charge evidence (the snapshot counts the maximum in every period any
+    /// copy names) and must stay until the ledger keeps it too. False while
+    /// the ledger is unreadable or absent: the record may be the only copy.
+    static func ledgerHolds(_ charge: JobCharge) -> Bool {
         guard case .readable(_, let entries, let conflicts) = loadLedger() else { return false }
-        return entries.contains { $0.chargeId == chargeId } || conflicts.contains { $0.chargeId == chargeId }
+        let copy = ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
+                                   providerReturnedAt: charge.providerReturnedAt, kind: "")
+        return (entries + conflicts).contains { $0.sameCharge(as: copy) }
+    }
+
+    /// Merge every positive `recorded` record copy the readable ledger does
+    /// not hold with the same values into it (a conflict copy when the
+    /// ledger's entry differs; idempotent). Retirement of such a record
+    /// becomes possible only after this durable merge. Nothing is written
+    /// while the ledger is unreadable or absent. Returns the failures.
+    @discardableResult
+    static func mergeRecordedCopies() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        guard case .readable = loadLedger(), let records = try? DetachedJobStore.load() else { return [] }
+        var problems: [String] = []
+        for record in records {
+            guard let charge = record.charge, charge.state == .recorded, charge.amountUSD > 0,
+                  !ledgerHolds(charge) else { continue }
+            do {
+                try recordInLedger(ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
+                                                   providerReturnedAt: charge.providerReturnedAt, kind: record.kind))
+            } catch {
+                problems.append("charge of job \(record.jobId) differs from the ledger's copy and could not be merged: \(error.localizedDescription)")
+            }
+        }
+        return problems
     }
 
     private static func writeLedger(_ file: LedgerFile, label: String) throws {
@@ -748,19 +813,28 @@ enum ToolChargeLedger {
             // recorded record charges, and memory-held ones (the union still
             // dedups by chargeId). Accepting the unknown never drops a known
             // charge.
+            // A second copy of a chargeId that differs (amount or date) is
+            // kept as a conflict copy, never dropped for the first one.
             var entries: [ToolChargeEntry] = []
+            var conflicts: [ToolChargeEntry] = []
+            func seed(_ entry: ToolChargeEntry) {
+                guard entry.amountUSD > 0 else { return }
+                guard let first = entries.first(where: { $0.chargeId == entry.chargeId }) else { entries.append(entry); return }
+                if first.sameCharge(as: entry) || conflicts.contains(where: { $0.sameCharge(as: entry) }) { return }
+                conflicts.append(entry)
+            }
             let records = try DetachedJobStore.load()
             for record in records {
-                if let charge = record.charge, charge.amountUSD > 0, !entries.contains(where: { $0.chargeId == charge.chargeId }) {
-                    entries.append(ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
-                                                   providerReturnedAt: charge.providerReturnedAt, kind: record.kind))
+                if let charge = record.charge {
+                    seed(ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
+                                         providerReturnedAt: charge.providerReturnedAt, kind: record.kind))
                 }
             }
-            for charge in heldCharges() where charge.amountUSD > 0 && !entries.contains(where: { $0.chargeId == charge.chargeId }) {
-                entries.append(ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
-                                               providerReturnedAt: charge.providerReturnedAt, kind: "subagent"))
+            for charge in heldCharges() {
+                seed(ToolChargeEntry(chargeId: charge.chargeId, amountUSD: charge.amountUSD,
+                                     providerReturnedAt: charge.providerReturnedAt, kind: "subagent"))
             }
-            try writeLedger(LedgerFile(generation: journal.newGeneration, entries: entries), label: "journal-new-ledger")
+            try writeLedger(LedgerFile(generation: journal.newGeneration, entries: entries, conflicts: conflicts), label: "journal-new-ledger")
         }
         // Step 4: the acceptances captured in the journal become durable
         // (checked). A failure or crash here leaves the journal `begun`, so

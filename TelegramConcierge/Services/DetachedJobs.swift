@@ -123,11 +123,12 @@ struct DetachedJobRecord: Codable, Equatable {
         if ToolChargeLedger.isHeldInMemory(jobId) { return false }
         if let charge {
             // A `recorded` copy is still a known charge: it may retire only
-            // while the READABLE ledger holds that charge. While the ledger
+            // while the READABLE ledger holds this exact copy (same amount
+            // and date — a disagreeing ledger copy does not cover it). While the ledger
             // is unreadable, absent or being replaced by an accepted
             // generation, this record may be the only surviving copy.
             guard charge.state == .recorded else { return false }
-            return charge.amountUSD <= 0 || ToolChargeLedger.ledgerHolds(chargeId: charge.chargeId)
+            return charge.amountUSD <= 0 || ToolChargeLedger.ledgerHolds(charge)
         }
         // No captured charge: settled only when no provider was called for
         // this job, its real result carried the spend (certified `real`), or
@@ -150,6 +151,13 @@ struct JobCharge: Codable, Equatable {
     let amountUSD: Double
     let providerReturnedAt: Date
     var state: State
+
+    /// Same amount and date (dates at millisecond precision: records and
+    /// the ledger encode them differently). The state is not compared.
+    func sameValues(as other: JobCharge) -> Bool {
+        chargeId == other.chargeId && abs(amountUSD - other.amountUSD) < 1e-12
+            && abs(providerReturnedAt.timeIntervalSince(other.providerReturnedAt)) < 0.001
+    }
 }
 
 enum DetachedJobStore {
@@ -269,6 +277,10 @@ enum DetachedJobStore {
     /// Retire settled records (§3.10.1): completion not owed or delivered,
     /// and — for a stopped job — the stop disposition settles with it.
     static func retireSettled() throws {
+        // Conflicting recorded copies are merged into the readable ledger
+        // first (ledger lock, then this lock); a record whose exact copy the
+        // ledger still lacks stays.
+        ToolChargeLedger.mergeRecordedCopies()
         try mutate("retire") { records in
             records.removeAll { $0.isSettled }
         }
