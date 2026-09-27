@@ -64,7 +64,9 @@ extension MidturnHarness {
         }
         // A stop names the marker while readable. It becomes unreadable on
         // the next restart, then is restored: the stop must remain authoritative.
-        do {
+        if geteuid() == 0 {
+            print("  (C5C-C5E skipped: running as root, file permissions do not deny reads)")
+        } else {
             let (manager, prior, _, good) = try await unreadableWithInterruptedTurn()
             await manager._testStop()
             check("C5C control stop names preserved trigger", StopMarkerStore.load().stoppedTriggerIds.contains(prior.id))
@@ -91,7 +93,9 @@ extension MidturnHarness {
         }
         // Control: the conservative disposition created WHEN the marker is
         // unreadable is retained across another unreadable restart.
-        do {
+        if geteuid() == 0 {
+            print("  (C5F-C5G skipped: running as root, file permissions do not deny reads)")
+        } else {
             let (manager, _, _, good) = try await unreadableWithInterruptedTurn()
             try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: manager._testActiveTurnMarkerURL.path)
             await manager._testStop()
@@ -177,7 +181,9 @@ extension MidturnHarness {
                     && repaired._testHeldQueueProblem == nil, "requests \(server.completeRequests.count)")
         }
         // QI2: permission-unreadable queue file, history readable.
-        do {
+        if geteuid() == 0 {
+            print("  (QI2 skipped: running as root, file permissions do not deny reads)")
+        } else {
             let (_, held, goodQueue) = try await healthyWithHeldQueue("QI2")
             chmod(0o000, queueFileURL)
             server.clear()
@@ -204,7 +210,9 @@ extension MidturnHarness {
         // QI3: the reported sequence with a permission failure instead of a
         // decode failure — held while history unreadable, queue made
         // unreadable, restart, repair only history, restart.
-        do {
+        if geteuid() == 0 {
+            print("  (QI3 skipped: running as root, file permissions do not deny reads)")
+        } else {
             let (manager, prior, _, good) = try await unreadableWithInterruptedTurn()
             let held = user("QI3 held acknowledged request")
             await manager._testDispatchUser(held)
@@ -325,7 +333,9 @@ extension MidturnHarness {
         }
         // SM2: readable history throughout; /stop names the marker; the
         // marker is permission-unreadable at the next startup.
-        do {
+        if geteuid() == 0 {
+            print("  (SM2 skipped: running as root, file permissions do not deny reads)")
+        } else {
             let prior = user("SM2 interrupted request")
             let manager = await freshManager(history: [prior])
             manager._testWriteActiveTurnMarker(for: prior)

@@ -84,6 +84,8 @@ extension MidturnHarness {
     /// incident id; acceptance preserves the file under its episode name and
     /// starts a new generation holding every pending captured charge.
     private func incidentUnreadableLedgerByPermission() async throws {
+        // Root reads a mode-000 file (Linux CI container); the decode variants cover this path there.
+        guard geteuid() != 0 else { print("  (I5 skipped: running as root, file permissions do not deny reads)"); return }
         let manager = await freshManager()
         clearModelSpend()
         try setDailyCap("10")

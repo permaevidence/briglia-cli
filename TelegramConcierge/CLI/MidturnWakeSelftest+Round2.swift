@@ -72,24 +72,27 @@ extension MidturnHarness {
         check("KC1d after a restart the charge is still $0.70, and the record retires now that the readable ledger holds it",
               abs(ToolChargeLedger.snapshot().today - 0.7) < 1e-9 && !records().contains { $0.jobId == job })
 
-        // KC2: permission-unreadable ledger (0000) — same guarantees.
-        _ = await freshManager()
-        let perm = UUID()
-        try DetachedJobStore.create(chargeRecord(jobId: perm, completion: .delivered))
-        ToolChargeLedger.capture(jobId: perm, amountUSD: 0.4, kind: "subagent")
-        chmod(ToolChargeLedger.ledgerURL.path, 0o000)
-        let permSnap = ToolChargeLedger.snapshot()
-        try DetachedJobStore.retireSettled()
-        check("KC2a permission-unreadable ledger: recorded copy counts ($0.40), record kept",
-              abs(permSnap.today - 0.4) < 1e-9 && records().contains { $0.jobId == perm }, "today=\(permSnap.today)")
-        let permAccept = ToolChargeLedger.acceptOpenIncidents(channel: "test")
-        chmod(ToolChargeLedger.ledgerURL.path, 0o600)
-        let preserved = ((try? FileManager.default.contentsOfDirectory(atPath: ToolChargeLedger.directory.path)) ?? [])
-            .filter { $0.hasPrefix("tool-charges.unreadable-") }
-        for name in preserved { chmod(ToolChargeLedger.directory.appendingPathComponent(name).path, 0o600) }
-        check("KC2b acceptance keeps the known $0.40 in the new generation",
-              permAccept.failure == nil && abs(ToolChargeLedger.snapshot().today - 0.4) < 1e-9
-                && ledgerEntries().contains { $0.chargeId == perm }, "failure=\(permAccept.failure ?? "nil")")
+        // Permission-based: root reads a mode-000 file (Linux CI container), so KC2 needs a non-root user.
+        if geteuid() != 0 {
+            // KC2: permission-unreadable ledger (0000) — same guarantees.
+            _ = await freshManager()
+            let perm = UUID()
+            try DetachedJobStore.create(chargeRecord(jobId: perm, completion: .delivered))
+            ToolChargeLedger.capture(jobId: perm, amountUSD: 0.4, kind: "subagent")
+            chmod(ToolChargeLedger.ledgerURL.path, 0o000)
+            let permSnap = ToolChargeLedger.snapshot()
+            try DetachedJobStore.retireSettled()
+            check("KC2a permission-unreadable ledger: recorded copy counts ($0.40), record kept",
+                  abs(permSnap.today - 0.4) < 1e-9 && records().contains { $0.jobId == perm }, "today=\(permSnap.today)")
+            let permAccept = ToolChargeLedger.acceptOpenIncidents(channel: "test")
+            chmod(ToolChargeLedger.ledgerURL.path, 0o600)
+            let preserved = ((try? FileManager.default.contentsOfDirectory(atPath: ToolChargeLedger.directory.path)) ?? [])
+                .filter { $0.hasPrefix("tool-charges.unreadable-") }
+            for name in preserved { chmod(ToolChargeLedger.directory.appendingPathComponent(name).path, 0o600) }
+            check("KC2b acceptance keeps the known $0.40 in the new generation",
+                  permAccept.failure == nil && abs(ToolChargeLedger.snapshot().today - 0.4) < 1e-9
+                    && ledgerEntries().contains { $0.chargeId == perm }, "failure=\(permAccept.failure ?? "nil")")
+        }
 
         // KC3: the conflict rule still applies across a recorded record copy
         // and a readable ledger copy (largest amount, counted once).
@@ -431,21 +434,24 @@ extension MidturnHarness {
               incidentState(owedId) == .accepted && incidentState(outsideId) == .open && replay.incidents.map(\.id) == [outsideId],
               "owed=\(String(describing: incidentState(owedId))), outside=\(String(describing: incidentState(outsideId)))")
 
-        // JR4: the incident registry unreadable at finalization → the
-        // snapshot is incomplete and nothing is lost; repair → completes.
-        let unreadable = try await openJobAndLedgerIncidents()
-        ToolChargeLedger.faultForTesting = { if $0 == "incident-accept" { throw Injected() } }
-        _ = ToolChargeLedger.acceptOpenIncidents(channel: "test")
-        ToolChargeLedger.faultForTesting = nil
-        let saved = try Data(contentsOf: ToolChargeLedger.incidentsURL)
-        chmod(ToolChargeLedger.incidentsURL.path, 0o000)
-        let blocked = ToolChargeLedger.snapshot()
-        let blockedJournal = journalStateR2()
-        chmod(ToolChargeLedger.incidentsURL.path, 0o600)
-        let bytesKept = (try? Data(contentsOf: ToolChargeLedger.incidentsURL)) == saved
-        let repaired = ToolChargeLedger.snapshot()
-        check("JR4 registry unreadable while finalizing: incomplete, journal still begun, registry untouched; repaired → accepted",
-              !blocked.isComplete && blockedJournal == "begun" && bytesKept && repaired.isComplete && incidentState(unreadable.job) == .accepted
-                && journalStateR2() == "committed", "blocked=\(blocked.unidentified)")
+        // Permission-based: needs a non-root user (see KC2).
+        if geteuid() != 0 {
+            // JR4: the incident registry unreadable at finalization → the
+            // snapshot is incomplete and nothing is lost; repair → completes.
+            let unreadable = try await openJobAndLedgerIncidents()
+            ToolChargeLedger.faultForTesting = { if $0 == "incident-accept" { throw Injected() } }
+            _ = ToolChargeLedger.acceptOpenIncidents(channel: "test")
+            ToolChargeLedger.faultForTesting = nil
+            let saved = try Data(contentsOf: ToolChargeLedger.incidentsURL)
+            chmod(ToolChargeLedger.incidentsURL.path, 0o000)
+            let blocked = ToolChargeLedger.snapshot()
+            let blockedJournal = journalStateR2()
+            chmod(ToolChargeLedger.incidentsURL.path, 0o600)
+            let bytesKept = (try? Data(contentsOf: ToolChargeLedger.incidentsURL)) == saved
+            let repaired = ToolChargeLedger.snapshot()
+            check("JR4 registry unreadable while finalizing: incomplete, journal still begun, registry untouched; repaired → accepted",
+                  !blocked.isComplete && blockedJournal == "begun" && bytesKept && repaired.isComplete && incidentState(unreadable.job) == .accepted
+                    && journalStateR2() == "committed", "blocked=\(blocked.unidentified)")
+        }
     }
 }
