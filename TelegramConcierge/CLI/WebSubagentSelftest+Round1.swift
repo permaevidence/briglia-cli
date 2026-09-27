@@ -172,10 +172,11 @@ extension WebSubagentSelftest {
                                                            provider: nil, hasResponseFormat: false)
         let unchanged = WebSearchBackend.stageRoute(followsMainOpenRouter: false, model: ORModel.webExcerpts, reasoning: makeReasoning(.medium),
                                                     provider: nil, hasResponseFormat: true)
-        check("19.10 follow rule + stage route: OpenRouter main with a key follows (not without a key, not on other providers); the route is deepseek/deepseek-v4-flash-0731, effort low, sort=throughput, fallbacks on, no host list, require_parameters only with a strict format; off → untouched",
+        check("19.10 follow rule + stage route: OpenRouter main with a key follows (not without a key, not on other providers); the route is deepseek/deepseek-v4-flash-0731, effort low, sort=throughput, fallbacks on, host list reka/makora/digitalocean, require_parameters only with a strict format; off → untouched",
               WebSearchBackend.followsOpenRouter(stored: stored) && !WebSearchBackend.followsOpenRouter(stored: noKey) && !WebSearchBackend.followsOpenRouter(stored: custom)
               && followed.model == "deepseek/deepseek-v4-flash-0731" && followed.reasoning?.effort == "low"
-              && followed.provider?.sort == "throughput" && followed.provider?.allow_fallbacks == true && followed.provider?.only == nil
+              && followed.provider?.sort == "throughput" && followed.provider?.allow_fallbacks == true && followed.provider?.only == ["reka", "makora", "digitalocean"]
+              && followedNoFormat.provider?.only == ["reka", "makora", "digitalocean"]
               && followed.provider?.order == nil && followed.provider?.require_parameters == true
               && followedNoFormat.provider?.require_parameters == nil && followedNoFormat.model == "deepseek/deepseek-v4-flash-0731"
               && unchanged.model == ORModel.webExcerpts && unchanged.reasoning?.effort == "medium" && unchanged.provider == nil)
@@ -217,19 +218,19 @@ extension WebSubagentSelftest {
         func effortOf(_ r: WebFixtureServer.Request) -> String? { (body(r)["reasoning"] as? [String: Any])?["effort"] as? String }
         let excerptStages = stagesD.filter { text($0).contains("Cite verbatim and in full") }
         let fetchStages = stagesD.filter { text($0).contains("You extract information from a web page") }
-        check("19.11 OpenRouter main: web_extract's excerpt stage and web_fetch compression go to OpenRouter (D) with the OpenRouter key, deepseek/deepseek-v4-flash-0731, reasoning low, provider sort=throughput; nothing on the /websearch backend",
+        check("19.11 OpenRouter main: web_extract's excerpt stage and web_fetch compression go to OpenRouter (D) with the OpenRouter key, deepseek/deepseek-v4-flash-0731, reasoning low, provider sort=throughput over the pinned extraction hosts; nothing on the /websearch backend",
               !excerptStages.isEmpty && !fetchStages.isEmpty && pageStages(serverB).isEmpty && pageStages(serverC).isEmpty
               && stagesD.allSatisfy { $0.path == "/api/v1/chat/completions" && $0.headers["authorization"] == "Bearer synthetic-or-key"
                   && body($0)["model"] as? String == "deepseek/deepseek-v4-flash-0731" && effortOf($0) == "low"
-                  && provider($0)["sort"] as? String == "throughput" && provider($0)["only"] == nil }
+                  && provider($0)["sort"] as? String == "throughput" && provider($0)["only"] as? [String] == ["reka", "makora", "digitalocean"] }
               && excerptStages.allSatisfy { provider($0)["require_parameters"] as? Bool == true && body($0)["response_format"] != nil }
               && extracted?.docs.isEmpty == false && fetched?.contains("COMPRESSED: deepseek page") == true,
               "\(stagesD.count) stages: \(stagesD.map { "\(body($0)["model"] as? String ?? "nil")/\(effortOf($0) ?? "nil")/\(provider($0))" })")
         check("19.12 extraction spend is the served host's reported cost (0.0003 per stage call on OpenRouter), not a Luna estimate",
               extractCalls > 0 && near(extracted?.spendUSD, 0.0003 * Double(extractCalls)), "\(extracted?.spendUSD ?? -1) over \(extractCalls) calls")
         let pinnedStages = stageFilter(pinnedExtract)
-        check("19.13 an /orprovider pin governs the main model only: the extractor keeps sort=throughput and never sends the pinned host list",
-              !pinnedStages.isEmpty && pinnedStages.allSatisfy { provider($0)["only"] == nil && provider($0)["sort"] as? String == "throughput" && provider($0)["allow_fallbacks"] as? Bool == true },
+        check("19.13 an /orprovider pin governs the main model only: the extractor keeps sort=throughput over its own host list and never sends the /orprovider host",
+              !pinnedStages.isEmpty && pinnedStages.allSatisfy { provider($0)["only"] as? [String] == ["reka", "makora", "digitalocean"] && provider($0)["sort"] as? String == "throughput" && provider($0)["allow_fallbacks"] as? Bool == true },
               "\(pinnedStages.map { provider($0) })")
         // Legacy loop on an OpenRouter main: agent rounds on the main model, fetch_and_extract on DeepSeek.
         serverD.clear()

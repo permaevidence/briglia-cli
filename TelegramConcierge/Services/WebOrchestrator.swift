@@ -23,7 +23,8 @@ enum ORModel {
     static let webFetchCompression = "openai/gpt-6-luna"
     /// Page extraction and web_fetch compression while OpenRouter is the
     /// MAIN provider (owner decision 2026-09-25): DeepSeek V4 Flash, routed
-    /// by OpenRouter to its fastest host (`provider.sort: "throughput"`),
+    /// by OpenRouter to the fastest of the pinned hosts
+    /// (`WebSearchBackend.openRouterExtractorHosts`, `provider.sort: "throughput"`),
     /// at low effort. Verified live 2026-09-25: id in /models, 30+ hosts,
     /// strict-JSON extraction of a 39k-token page in ~2.5 s. Spend is the
     /// served host's `usage.cost` (host prices differ several-fold).
@@ -140,17 +141,26 @@ enum WebSearchBackend: String {
 
     /// The model/effort/routing a mechanical stage actually sends. Unchanged
     /// unless the OpenRouter follow holds; then DeepSeek V4 Flash at low
-    /// effort on the fastest host, the /orprovider pin deliberately ignored
+    /// effort on the fastest pinned extraction host, the /orprovider pin deliberately ignored
     /// (it governs the main model; its host may not serve this one), strict
     /// response_format honoured by requiring hosts that support it.
     static func stageRoute(followsMainOpenRouter: Bool, model: String, reasoning: ORChatReq.Reasoning?,
                            provider: ORChatReq.Provider?, hasResponseFormat: Bool)
         -> (model: String, reasoning: ORChatReq.Reasoning?, provider: ORChatReq.Provider?) {
         guard followsMainOpenRouter else { return (model, reasoning, provider) }
-        var routing = ORChatReq.Provider(order: nil, only: nil, allow_fallbacks: true, sort: "throughput")
+        var routing = ORChatReq.Provider(order: nil, only: openRouterExtractorHosts, allow_fallbacks: true, sort: "throughput")
         if hasResponseFormat { routing.require_parameters = true }
         return (ORModel.openRouterExtractor, makeReasoning(openRouterExtractorEffort), routing)
     }
+
+    /// Hosts the extractor may use; OpenRouter picks the fastest of them.
+    /// Owner decision 2026-09-27 after live strict-JSON extraction probes
+    /// (14 per host, a 126 KB and an 18 KB page): Reka, Makora and
+    /// DigitalOcean passed 14/14. Cohere, which the unrestricted sort chose
+    /// almost always, hung ~90 s then returned an empty body; Morph, Nebius,
+    /// Together (429s), Phala and Parasail failed some; Wafer and the fp4
+    /// hosts were slow on large pages; eight hosts refused strict JSON.
+    static let openRouterExtractorHosts = ["reka", "makora", "digitalocean"]
 
     /// Low: the extractor copies facts out of a page; DeepSeek V4 Flash at
     /// low reasoned ~11 tokens on a small page and answered a 39k-token
