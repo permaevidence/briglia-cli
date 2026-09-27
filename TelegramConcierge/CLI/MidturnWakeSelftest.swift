@@ -118,6 +118,7 @@ final class MidturnHarness {
         server = try CaptureServer()
         defer { server.stop() }
         try configureProvider()
+        if section("repro1b2") { try await repro1b2Section() }
         if section("repro1b") { try await repro1bSection() }
         if section("wake") { await wakeCenterSection() }
         if section("binding") { bindingModelSection() }
@@ -157,6 +158,11 @@ final class MidturnHarness {
         if section("charge") { try await knownChargeSurvivalSection() }
         if section("incident") { try await incidentSpanSection() }
         if section("incident") { try await acceptanceFinalizationSection() }
+        // 1b round 3: every known copy of a charge survives retirement,
+        // acceptance, retry and import; an explicit background launch
+        // cancelled before it commits starts nothing.
+        if section("charge") { try await knownCopySection() }
+        if section("subagent") { try await launchCancellationSection() }
     }
 
     // MARK: Provider and scripting
@@ -216,6 +222,9 @@ final class MidturnHarness {
         ConversationManager.stopCutoffInterleaveForTesting = nil
         ToolExecutor.detachEligibilityOverrideForTesting = nil
         ToolExecutor.beforeSubagentRecordForTesting = nil
+        ToolExecutor.afterSubagentRecordWriteForTesting = nil
+        ToolExecutor.afterBackgroundLaunchForTesting = nil
+        SubagentBackgroundRegistry.atSpawnAdmissionForTesting = nil
         SubagentBackgroundRegistry.atCommitDetachForTesting = nil
         await SubagentBackgroundRegistry.shared._testReset()
         ToolChargeLedger.resetForTesting()
