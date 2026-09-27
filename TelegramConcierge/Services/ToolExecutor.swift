@@ -4730,11 +4730,14 @@ extension ToolExecutor {
     /// admission, or a detach that did not commit): best effort removal. If
     /// it fails, the record stays owed and a restart settles it (a `real`
     /// binding, or one lost-job note).
-    static func dropUnlaunchedRecord(_ jobId: UUID) {
+    @discardableResult
+    static func dropUnlaunchedRecord(_ jobId: UUID) -> Bool {
         do {
             try DetachedJobStore.mutate("drop-unlaunched") { records in records.removeAll { $0.jobId == jobId } }
+            return true
         } catch {
             print("[ToolExecutor] could not drop an unlaunched job record \(jobId): \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -4766,14 +4769,26 @@ extension ToolExecutor {
             return message
         }
         var listen: WakeContext? = wake
+        // A record written for a handoff that did not commit and could not be
+        // dropped: the eventual real result binds to it (settles it).
+        var strandedRecord: UUID?
         while true {
             switch await registry.awaitForeground(id: handle.id, wake: listen) {
             case .completed(let result):
-                return real(result, bound: nil)
+                return real(result, bound: strandedRecord)
             case .woken(let reason):
                 let jobId = UUID(), messageId = UUID()
                 let session = await registry.sessionOfRun(id: handle.id)
                 Self.beforeSubagentRecordForTesting?()
+                if Task.isCancelled {
+                    // Cancelled before any record exists: no handoff. The
+                    // next await (already cancelled) cancels the run and
+                    // returns its result; commitDetach below is the
+                    // authoritative check for a cancel arriving later.
+                    await registry.abortDetach(id: handle.id)
+                    listen = nil
+                    continue
+                }
                 do {
                     try DetachedJobStore.create(Self.subagentRecord(
                         jobId: jobId, messageId: messageId, handle: handle.id, args: args,
@@ -4798,8 +4813,8 @@ extension ToolExecutor {
                     // and the `real` binding settles it after a restart).
                     Self.dropUnlaunchedRecord(jobId)
                     return real(result, bound: jobId)
-                case .refused:
-                    Self.dropUnlaunchedRecord(jobId)
+                case .refused, .cancelled:
+                    if !Self.dropUnlaunchedRecord(jobId) { strandedRecord = jobId }
                     listen = nil
                     continue
                 case .detached(let detached):

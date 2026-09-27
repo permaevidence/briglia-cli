@@ -69,7 +69,16 @@ actor SubagentBackgroundRegistry {
         /// /stop closed admission for the run's turn meanwhile: it stays
         /// foreground (and is being cancelled with the turn).
         case refused
+        /// The awaiting call was cancelled before the handoff committed
+        /// (turn cancellation that is not /stop, e.g. polling stopped): the
+        /// run is cancelled with its call and stays foreground, so the call
+        /// awaits and returns its (cancelled) result — never a moved result.
+        case cancelled
     }
+
+    /// Selftests: runs on the actor inside `commitDetach`, right before the
+    /// cancellation decision (to cancel the calling task AT commit).
+    nonisolated(unsafe) static var atCommitDetachForTesting: (() -> Void)?
 
     private enum ForegroundMode { case foreground, detaching }
     private struct ForegroundEntry {
@@ -311,6 +320,17 @@ actor SubagentBackgroundRegistry {
         if let result = entry.result {
             foreground.removeValue(forKey: id)
             return .completed(result)
+        }
+        Self.atCommitDetachForTesting?()
+        // Cancellation ownership until the handoff commits: this actor method
+        // runs in the CALLING task, so `Task.isCancelled` is that call's flag,
+        // read in the same actor step that would commit. A cancellation set
+        // before this point wins (whenever its handler is delivered); one set
+        // after it is a post-commit cancel of an already-moved job.
+        if Task.isCancelled {
+            foreground[id]?.mode = .foreground
+            cancelForegroundRun(id: id)
+            return .cancelled
         }
         if let turn = entry.turnRunId, closedTurnRunIds.contains(turn) {
             foreground[id]?.mode = .foreground

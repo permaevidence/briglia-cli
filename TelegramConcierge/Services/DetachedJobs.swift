@@ -121,7 +121,14 @@ struct DetachedJobRecord: Codable, Equatable {
     /// held only in memory (that record may be its only trace after a crash).
     var chargeSettled: Bool {
         if ToolChargeLedger.isHeldInMemory(jobId) { return false }
-        if let charge { return charge.state == .recorded }
+        if let charge {
+            // A `recorded` copy is still a known charge: it may retire only
+            // while the READABLE ledger holds that charge. While the ledger
+            // is unreadable, absent or being replaced by an accepted
+            // generation, this record may be the only surviving copy.
+            guard charge.state == .recorded else { return false }
+            return charge.amountUSD <= 0 || ToolChargeLedger.ledgerHolds(chargeId: charge.chargeId)
+        }
         // No captured charge: settled only when no provider was called for
         // this job, its real result carried the spend (certified `real`), or
         // its unknown amount is a registered incident.
