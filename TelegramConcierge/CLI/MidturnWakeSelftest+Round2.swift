@@ -121,6 +121,30 @@ extension MidturnHarness {
         try manager2._testResetEarlyWakeState()
         check("KC4b control: with the readable ledger holding the charge, history replacement discards the record",
               !records().contains { $0.jobId == gone } && abs(ToolChargeLedger.snapshot().today - 0.25) < 1e-9)
+        try await knownChargeImportWipeRows()
+    }
+
+    /// KC5: Mind import Stage A and /deleteuserdata never delete the only
+    /// copy of a known charge: with the ledger unreadable they abort; after
+    /// the acceptance carries the charge into the new generation they
+    /// proceed and the charge stays counted.
+    private func knownChargeImportWipeRows() async throws {
+        let manager = await freshManager(history: [user("keep me")])
+        let job = UUID()
+        try DetachedJobStore.create(chargeRecord(jobId: job, completion: .delivered))
+        ToolChargeLedger.capture(jobId: job, amountUSD: 0.35, kind: "subagent")
+        try Data("{corrupt".utf8).write(to: ToolChargeLedger.ledgerURL)
+        let importRefused = await manager.quiesceBackgroundWorkForMindRestore(timeoutSeconds: 2)
+        check("KC5a Mind import Stage A with an unreadable ledger and a recorded charge only in its record: aborts, record kept",
+              importRefused != nil && records().contains { $0.jobId == job }, "refused=\(importRefused ?? "nil")")
+        let wipe = await manager.deleteAllMemory()
+        check("KC5b /deleteuserdata in the same state aborts before deleting anything (record and history kept)",
+              wipe.first?.contains("ABORTED") == true && records().contains { $0.jobId == job }
+                && manager._testMessages.contains { $0.content == "keep me" }, "\(wipe.prefix(2))")
+        _ = ToolChargeLedger.acceptOpenIncidents(channel: "test")
+        let proceeds = await manager.quiesceBackgroundWorkForMindRestore(timeoutSeconds: 2)
+        check("KC5c control: once the accepted generation holds the charge, Stage A proceeds and $0.35 stays counted",
+              proceeds == nil && abs(ToolChargeLedger.snapshot().today - 0.35) < 1e-9, "refused=\(proceeds ?? "nil")")
     }
 
     // MARK: CC — cancellation owns the detach handoff (Codex 1b R2)
