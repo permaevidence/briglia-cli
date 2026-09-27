@@ -325,12 +325,16 @@ extension MidturnHarness {
         let manager = await freshManager()
         let pending = UUID(), settled = UUID()
         try DetachedJobStore.create(chargeRecord(jobId: pending, charge: JobCharge(chargeId: pending, amountUSD: 0.3, providerReturnedAt: Date(), state: .pending)))
-        try DetachedJobStore.create(chargeRecord(jobId: settled, charge: JobCharge(chargeId: settled, amountUSD: 0.1, providerReturnedAt: Date(), state: .recorded)))
+        let settledAt = Date()
+        // Genuinely settled: the readable ledger holds the recorded charge
+        // (a recorded copy the ledger lacks is still known evidence).
+        try ToolChargeLedger.recordInLedger(ToolChargeEntry(chargeId: settled, amountUSD: 0.1, providerReturnedAt: settledAt, kind: "subagent"))
+        try DetachedJobStore.create(chargeRecord(jobId: settled, charge: JobCharge(chargeId: settled, amountUSD: 0.1, providerReturnedAt: settledAt, state: .recorded)))
         try manager._testResetEarlyWakeState()
         let left = records()
         check("B2 history replacement keeps a record whose charge is pending (nothing owed), discards the rest",
               left.count == 1 && left.first?.jobId == pending && left.first?.completion == .notOwed
-                && abs(ToolChargeLedger.snapshot().today - 0.3) < 1e-9)
+                && abs(ToolChargeLedger.snapshot().today - 0.4) < 1e-9)
     }
 
     /// B3: /deleteuserdata keeps spend totals, so it settles pending charges

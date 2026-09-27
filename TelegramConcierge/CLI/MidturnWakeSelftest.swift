@@ -118,6 +118,7 @@ final class MidturnHarness {
         server = try CaptureServer()
         defer { server.stop() }
         try configureProvider()
+        if section("repro1b") { try await repro1bSection() }
         if section("wake") { await wakeCenterSection() }
         if section("binding") { bindingModelSection() }
         if section("registry") { await registryWakeSection() }
@@ -149,6 +150,13 @@ final class MidturnHarness {
         if section("charge") { try await chargeBarrierSection() }
         if section("incident") { try await spendIncidentSection() }
         if section("incident") { try await spendAcceptanceSection() }
+        // 1b round 2: known charges survive acceptance, cancellation owns the
+        // detach handoff, lost-run incidents span periods, acceptance
+        // finalization is part of the journaled transaction.
+        if section("subagent") { try await detachCancellationSection() }
+        if section("charge") { try await knownChargeSurvivalSection() }
+        if section("incident") { try await incidentSpanSection() }
+        if section("incident") { try await acceptanceFinalizationSection() }
     }
 
     // MARK: Provider and scripting
@@ -208,6 +216,7 @@ final class MidturnHarness {
         ConversationManager.stopCutoffInterleaveForTesting = nil
         ToolExecutor.detachEligibilityOverrideForTesting = nil
         ToolExecutor.beforeSubagentRecordForTesting = nil
+        SubagentBackgroundRegistry.atCommitDetachForTesting = nil
         await SubagentBackgroundRegistry.shared._testReset()
         ToolChargeLedger.resetForTesting()
         server.router = nil
