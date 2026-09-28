@@ -22,7 +22,7 @@ sources = {str(p.relative_to(ROOT)): p.read_text() for p in (ROOT / 'TelegramCon
 fixture = ROOT / 'scripts/fixtures/active-compaction'
 sources['TelegramConcierge/CLI/ActiveCompactionOwnerSelftest.swift'] = (fixture / 'Driver.swift').read_text()
 key = 'TelegramConcierge/Services/ConversationManager.swift'
-s = sources[key] + (fixture / 'ManagerSeam.swift').read_text()
+s = sources[key] + (fixture / 'ManagerSeam.swift').read_text() + (fixture / 'SummaryBoundsSeam.swift').read_text()
 anchor = '        let activity = beginMaintenance(.pruning)\n        defer { endMaintenance(activity) }\n        let budget = ActiveTurnBudget'
 assert s.count(anchor) == 1
 sources[key] = s.replace(anchor, '        if CompactionTestInputs.disableCompaction { throw PruneArchiveStore.Failure("negative control: old exhaustion") }\n' + anchor)
@@ -70,7 +70,7 @@ print('Active compaction evidence:', root, flush=True)
 build = Path('/tmp/briglia-active-owner-scratch')
 wire.command(['swift', 'build', '--scratch-path', str(build)], cwd=tree)
 binary = Path(subprocess.check_output(['swift', 'build', '--scratch-path', str(build), '--show-bin-path'], cwd=tree, text=True).strip()) / 'briglia'
-wire.command([str(binary), '__active-compaction-owner-selftest'], cwd=tree, timeout=240)
+wire.command([str(binary), '__active-compaction-owner-selftest'], cwd=tree, timeout=480)
 for control in ['--disable-compaction', '--omit-carried', '--conservative-start-gate', '--omit-prune-notes', '--unprojected-final', '--old-ceiling-gate', '--protect-newest-turn']:
     result = subprocess.run([str(binary), '__active-compaction-owner-selftest', control], cwd=tree, capture_output=True, text=True, timeout=240)
     (root / (control[2:] + '.log')).write_text(result.stdout + result.stderr)

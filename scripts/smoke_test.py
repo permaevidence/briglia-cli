@@ -455,6 +455,12 @@ def main():
     result = run_selftest([ADA, "__prune-archive-selftest"], capture_output=True, text=True, timeout=120)
     check("prune archive selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # Compaction-summary bounds: 65,536-byte limit on both enforcement sites,
+    # cut-off replies rejected at decode (both transports), specific failure
+    # reasons, summary allowance, older-binary tolerance. Pure, no storage.
+    result = run_selftest([ADA, "__summary-bounds-selftest"], capture_output=True, text=True, timeout=120)
+    check("summary bounds selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # Subagent compaction: dialogue with the main agent preserved under a
     # capped budget, chronological work eviction across both stores, one
     # folded summary; drives the real runner against a scripted local

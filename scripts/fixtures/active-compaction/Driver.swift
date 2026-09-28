@@ -20,11 +20,18 @@ enum CompactionTestInputs {
     static var ordinaryCalls = 0
     static var requireVioletCorrection = false
     static var missingCanonical = false
+    /// Scripted maintenance replies (raw bodies), consumed before the defaults.
+    static var summaryScript: [String] = []
+    static var pruneScript: [String] = []
+    static var summaryRequests = 0
+    static var pruneRequests = 0
     static func noteCompaction() { lock.lock(); compactions += 1; lock.unlock() }
     static func dynamicReply(_ request: CapturedHTTPRequest) -> String? {
         lock.lock(); defer { lock.unlock() }
-        guard let wire = dynamicWire else { return nil }
         let text = String(decoding: request.body, as: UTF8.self)
+        if text.contains("ACTIVE TURN COMPACTION") { summaryRequests += 1; if !summaryScript.isEmpty { return summaryScript.removeFirst() } }
+        if text.contains("[PRUNE SUMMARY REQUEST") { pruneRequests += 1; if !pruneScript.isEmpty { return pruneScript.removeFirst() } }
+        guard let wire = dynamicWire else { return nil }
         let tokens = request.body.count / 3
         if text.contains("ACTIVE TURN COMPACTION") {
             return try! body(protocol: wire, text: "Goal: preserve exact evidence. User correction says use violet. File source.txt verified; phases remain. Running handle bash_7 pending.", tokens: tokens)
@@ -69,6 +76,26 @@ enum CompactionTestInputs {
     }
     static func check(_ condition: Bool, _ text: String) throws {
         guard condition else { throw Failure(text) }; count += 1; print("PASS " + text)
+    }
+    /// A maintenance reply: `cut` = the provider stopped at the output limit
+    /// (Chat Completions finish_reason "length"; Responses status incomplete
+    /// with max_output_tokens); `nullContent` = Chat Completions content null.
+    static func summaryBody(protocol wire: ProviderWireProtocol, text: String, cut: Bool = false,
+                            nullContent: Bool = false, cost: Double? = nil) throws -> String {
+        var root: [String: Any]
+        if wire == .responses {
+            root = ["id": "resp_" + UUID().uuidString, "status": cut ? "incomplete" : "completed",
+                    "output": [["type": "message", "role": "assistant", "status": cut ? "incomplete" : "completed", "id": "msg_" + UUID().uuidString,
+                                "content": [["type": "output_text", "text": text, "annotations": []]]]],
+                    "usage": ["input_tokens": 1000, "output_tokens": 100]]
+            if cut { root["incomplete_details"] = ["reason": "max_output_tokens"] }
+        } else {
+            var usage: [String: Any] = ["prompt_tokens": 1000, "completion_tokens": 100]
+            if let cost { usage["cost"] = cost }
+            root = ["choices": [["message": ["role": "assistant", "content": nullContent ? NSNull() : text as Any],
+                                 "finish_reason": cut ? "length" : "stop"]], "usage": usage]
+        }
+        return String(decoding: try JSONSerialization.data(withJSONObject: root), as: UTF8.self)
     }
     static func body(protocol wire: ProviderWireProtocol, text: String, toolID: String? = nil, path: String = "", tokens: Int = 1000) throws -> String {
         let args = String(decoding: try JSONSerialization.data(withJSONObject: ["path": path, "limit": 200]), as: UTF8.self)
@@ -214,6 +241,7 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
             try await manager.activeTestForcedFinal(server: server, wire: wire, file: file)
             try await manager.activeTestIrreducibleContext(server: server, wire: wire, file: file)
             try await manager.activeTestPreviousTurnFirst(server: server, wire: wire, file: file)
+            try await manager.activeTestSummaryBounds(server: server, wire: wire, file: file)
 
         }
         print("Active compaction owner: \(CompactionTestInputs.count) passed; evidence root: \(root.path)")
