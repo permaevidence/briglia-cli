@@ -31,8 +31,12 @@ retried.
     briglia doctor                       # shows the path and size
 
 The reader starts with an `Integrity:` line. `LOSS DETECTED` means some
-records never reached the file (sequence gaps, a truncated line, or records
-the writer itself reported as unwritten); see "Write failures" below.
+records never reached the file (sequence gaps, a truncated or invalid-UTF-8
+line, or records the writer itself reported as unwritten); see "Write
+failures" below. Each line is decoded on its own, so one damaged line (for
+example a write cut inside an accented letter) is counted and skipped
+without hiding the other records. A log that exists but cannot be read is
+reported as `READ ERROR`, never as empty.
 
 **Settings (environment):**
 

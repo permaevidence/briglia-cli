@@ -117,8 +117,8 @@ extension StageMarkersSelftest {
     }
 
     static func lines(_ path: String) -> [String] {
-        ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "")
-            .split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return [] }
+        return StageMarkersReader.splitLines(data).lines
     }
 
     // MARK: - SM12: custom log path (Codex R1)

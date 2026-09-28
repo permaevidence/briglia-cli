@@ -25,18 +25,16 @@ struct StageMarkersCommand: ParsableCommand {
     func run() throws {
         let url = StageMarkers.logURL
         print("Stage markers: \(url.path)")
-        let rotated = URL(fileURLWithPath: url.path + ".1")
-        var lines: [String] = []
-        for file in [rotated, url] {
-            if let text = try? String(contentsOf: file, encoding: .utf8) {
-                lines += text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-            }
-        }
-        guard !lines.isEmpty else {
-            print("(no records yet)")
+        let read = StageMarkersReader.readLog(url)
+        for problem in read.readErrors { print("READ ERROR: \(problem)") }
+        let lines = read.lines
+        guard !lines.isEmpty || read.invalidEncoding > 0 else {
+            print(read.readErrors.isEmpty ? "(no records yet)" : "(no readable records)")
             return
         }
-        print(StageMarkersReader.integrity(lines).summary)
+        var check = StageMarkersReader.integrity(lines)
+        check.invalidEncoding = read.invalidEncoding
+        print(check.summary)
         if unclosed {
             let open = StageMarkersReader.unclosed(lines)
             print(open.isEmpty ? "(no unclosed stages)" : open.joined(separator: "\n"))
@@ -47,6 +45,50 @@ struct StageMarkersCommand: ParsableCommand {
 }
 
 enum StageMarkersReader {
+    /// The log (rotated `.1` first, then current) as newline-delimited
+    /// lines. Decoding is PER LINE: a line whose bytes are not valid UTF-8
+    /// (a write cut inside a multi-byte character) is counted in
+    /// `invalidEncoding` and left out, never hiding the valid lines around
+    /// it (Codex round 2). A file that exists but cannot be read is reported
+    /// in `readErrors`, never treated as empty. Absent files are normal.
+    struct LogRead {
+        var lines: [String] = []
+        var invalidEncoding = 0
+        var readErrors: [String] = []
+    }
+
+    static func readLog(_ url: URL) -> LogRead {
+        var result = LogRead()
+        for file in [URL(fileURLWithPath: url.path + ".1"), url] {
+            guard FileManager.default.fileExists(atPath: file.path) else { continue }
+            let data: Data
+            do {
+                data = try Data(contentsOf: file)
+            } catch {
+                result.readErrors.append("\(file.path): \(error.localizedDescription)")
+                continue
+            }
+            let (lines, invalid) = splitLines(data)
+            result.lines += lines
+            result.invalidEncoding += invalid
+        }
+        return result
+    }
+
+    /// Splits bytes at newlines and decodes each line strictly.
+    static func splitLines(_ data: Data) -> (lines: [String], invalid: Int) {
+        var lines: [String] = []
+        var invalid = 0
+        for chunk in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            if let line = String(data: Data(chunk), encoding: .utf8) {
+                lines.append(line)
+            } else {
+                invalid += 1
+            }
+        }
+        return (lines, invalid)
+    }
+
     /// Enter records with no matching exit (same pid + id). Stall reports
     /// for the same stage are kept too, so the output answers "where did it
     /// stop, and was that reported".
@@ -80,12 +122,17 @@ enum StageMarkersReader {
         /// Losses the writer itself reported in later records.
         var reportedUnwritten = 0
         var reportedDropped = 0
+        /// Lines that are not even valid UTF-8 (set by the caller from
+        /// `readLog`); they are damaged records too.
+        var invalidEncoding = 0
 
-        var isClean: Bool { malformed == 0 && missing == 0 && reportedUnwritten == 0 && reportedDropped == 0 }
+        var isClean: Bool {
+            malformed == 0 && missing == 0 && reportedUnwritten == 0 && reportedDropped == 0 && invalidEncoding == 0
+        }
 
         var summary: String {
             if isClean { return "Integrity: \(records) records, no gaps, no malformed lines" }
-            return "Integrity: \(records) records; LOSS DETECTED: \(missing) missing (sequence gaps), \(malformed) malformed line(s), \(reportedUnwritten) reported unwritten (write errors), \(reportedDropped) reported dropped (queue full). Unwritten records may be on stderr as [StageMarkers-unwritten]."
+            return "Integrity: \(records) records; LOSS DETECTED: \(missing) missing (sequence gaps), \(malformed + invalidEncoding) damaged line(s) (\(invalidEncoding) invalid UTF-8), \(reportedUnwritten) reported unwritten (write errors), \(reportedDropped) reported dropped (queue full). Unwritten records may be on stderr as [StageMarkers-unwritten]."
         }
     }
 
@@ -127,11 +174,14 @@ enum StageMarkersReader {
             ISO8601DateFormatter().string(from: $0)
         } ?? "?"
         var loss = ""
-        if let text = try? String(contentsOfFile: path, encoding: .utf8) {
-            let check = integrity(text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init))
-            if !check.isClean {
-                loss = "; LOSS DETECTED (\(check.missing) missing, \(check.malformed) malformed, \(check.reportedUnwritten) unwritten, \(check.reportedDropped) dropped)"
-            }
+        let read = readLog(StageMarkers.logURL)
+        var check = integrity(read.lines)
+        check.invalidEncoding = read.invalidEncoding
+        if !check.isClean {
+            loss = "; LOSS DETECTED (\(check.missing) missing, \(check.malformed + check.invalidEncoding) damaged incl. \(check.invalidEncoding) invalid UTF-8, \(check.reportedUnwritten) unwritten, \(check.reportedDropped) dropped)"
+        }
+        if !read.readErrors.isEmpty {
+            loss += "; READ ERROR: \(read.readErrors.joined(separator: "; "))"
         }
         return "tool stage markers: \(path) (\(size / 1024) KB, last write \(modified))\(loss); `briglia __stage-markers --unclosed` shows stages that never finished"
     }

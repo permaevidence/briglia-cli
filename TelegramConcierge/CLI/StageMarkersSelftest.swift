@@ -67,6 +67,7 @@ struct StageMarkersSelftest: AsyncParsableCommand {
         try Self.customPathRows(check, root: tempRoot)
         try Self.writeFailureRows(check, root: tempRoot)
         try Self.stallReportRows(check, root: tempRoot)
+        try Self.damagedEncodingRows(check, root: tempRoot)
         print("Stage markers selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }
     }
@@ -76,8 +77,8 @@ struct StageMarkersSelftest: AsyncParsableCommand {
     // MARK: - Helpers
 
     static func records(_ url: URL) -> [[String: Any]] {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        return text.split(separator: "\n").compactMap { line in
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        return StageMarkersReader.splitLines(data).lines.compactMap { line in
             guard let data = line.data(using: .utf8) else { return nil }
             return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         }
@@ -467,6 +468,8 @@ struct StageMarkersSelftest: AsyncParsableCommand {
             // Normal exit while the writer thread is stuck in open().
         case "bench":
             try await benchChild()
+        case "utf8cut", "doctorline":
+            try round3Child(mode, ctx: ctx)
         case "recover", "flood":
             try round2Child(mode, ctx: ctx)
         default:
