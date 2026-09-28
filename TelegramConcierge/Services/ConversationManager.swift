@@ -8998,11 +8998,49 @@ class ConversationManager: ObservableObject {
             guard let spend, spend.isFinite, spend > 0 else { return }
             KeychainHelper.recordOpenRouterSpend(spend)
         }
+        // Empty, cut-off and no-text replies share one budget across the plain
+        // request and the tool-refusal retries: the original attempt plus one
+        // retry, then the programmatic fallback. Every rejected reply is charged.
+        var rejection: CompactionSummaryPolicy.Rejection?
+        var rejectedAttempts = 0
+        func acceptPruneText(_ content: String, _ finish: String?, _ label: String) -> String? {
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if CompactionSummaryPolicy.isCutOff(finish) {
+                rejection = .truncated("finish_reason: \(finish!)")
+            } else if trimmed.isEmpty {
+                rejection = .empty
+            } else {
+                return String(trimmed.prefix(14000))
+            }
+            rejectedAttempts += 1
+            print("[ConversationManager] Prune summary \(label) rejected (\(rejectedAttempts)/\(CompactionSummaryPolicy.attempts)): \(rejection!.reason)")
+            return nil
+        }
+        /// A decode-layer rejection (no-text or incomplete reply): charged and
+        /// counted. Returns false for a request failure, which is not a reply.
+        func rejectThrownReply(_ error: Error, _ label: String) -> Bool {
+            guard let reason = CompactionSummaryPolicy.rejection(for: error) else { return false }
+            recordPruneSummarySpend(CompactionSummaryPolicy.spend(for: error))
+            rejection = reason
+            rejectedAttempts += 1
+            print("[ConversationManager] Prune summary \(label) rejected (\(rejectedAttempts)/\(CompactionSummaryPolicy.attempts)): \(reason.reason)")
+            return true
+        }
+        func rejectedFallback() -> String? {
+            let reason = rejection?.reason ?? "no usable reply"
+            print("[ConversationManager] Prune summary rejected after \(CompactionSummaryPolicy.attempts) attempts (\(reason)); falling back to compact log summary")
+            DebugTelemetry.log(
+                .info,
+                summary: "prune summary fallback: reply rejected",
+                detail: "Prune summary rejected after \(CompactionSummaryPolicy.attempts) attempts: \(reason)",
+                durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000),
+                isError: true
+            )
+            return fallbackPrunedContextSummary(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
+        }
         do {
-            // An empty or provider-cut-off reply gets exactly one plain retry of
-            // the same request before the programmatic fallback below.
-            var rejection: CompactionSummaryPolicy.Rejection?
-            for attempt in 1...CompactionSummaryPolicy.attempts {
+            while rejectedAttempts < CompactionSummaryPolicy.attempts {
+                let attempt = rejectedAttempts + 1
                 let response: LLMResponse
                 do {
                     response = try await openRouterService.generateResponse(
@@ -9022,30 +9060,21 @@ class ConversationManager: ObservableObject {
                         execution: summaryExecution, lane: .main
                     )
                 } catch {
-                    guard let reason = CompactionSummaryPolicy.rejection(for: error) else { throw error }
-                    recordPruneSummarySpend(CompactionSummaryPolicy.spend(for: error))
-                    rejection = reason
-                    print("[ConversationManager] Prune summary attempt \(attempt)/\(CompactionSummaryPolicy.attempts) rejected: \(reason.reason)")
+                    guard rejectThrownReply(error, "attempt \(attempt)") else { throw error }
                     continue
                 }
                 recordPruneSummarySpend(spendUSD(from: response))
                 switch response {
                 case .text(let content, _, _, _, _, _, _, let finish):
-                    let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if CompactionSummaryPolicy.isCutOff(finish) {
-                        rejection = .truncated("finish_reason: \(finish!)")
-                    } else if trimmed.isEmpty {
-                        rejection = .empty
-                    } else {
+                    if let summary = acceptPruneText(content, finish, "attempt \(attempt)") {
                         DebugTelemetry.log(
                             .info,
                             summary: "prune summary completed",
-                            detail: "chars: \(trimmed.count), attempt: \(attempt)",
+                            detail: "chars: \(summary.count), attempt: \(attempt)",
                             durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000)
                         )
-                        return String(trimmed.prefix(14000))
+                        return summary
                     }
-                    print("[ConversationManager] Prune summary attempt \(attempt)/\(CompactionSummaryPolicy.attempts) rejected: \(rejection!.reason)")
                     continue
                 case .toolCalls(let assistantMessage, let calls, _, _, _):
                     var retryInteractions = (currentTurnInteractions ?? []) + [
@@ -9057,6 +9086,8 @@ class ConversationManager: ObservableObject {
                     ]
 
                     for attempt in 1...4 {
+                        // The shared reply budget is spent: no further request.
+                        guard rejectedAttempts < CompactionSummaryPolicy.attempts else { break }
                         let retryTail = """
                         [PRUNE SUMMARY RETRY \(attempt)/4 - system maintenance]
                         The tool call(s) you requested were not executed because this is an internal pruning summary pass.
@@ -9085,19 +9116,15 @@ class ConversationManager: ObservableObject {
                             recordPruneSummarySpend(spendUSD(from: retryResponse))
                             switch retryResponse {
                             case .text(let content, _, _, _, _, _, _, let finish):
-                                // A cut-off reply is never a summary: try the next attempt.
-                                if CompactionSummaryPolicy.isCutOff(finish) {
-                                    print("[ConversationManager] Prune summary retry \(attempt) cut off by the provider (finish_reason: \(finish!))")
-                                    continue
-                                }
-                                let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                                // Empty or cut-off text is a rejected reply, never a summary.
+                                guard let summary = acceptPruneText(content, finish, "retry \(attempt) after tool refusal") else { continue }
                                 DebugTelemetry.log(
                                     .info,
                                     summary: "prune summary completed after tool refusal",
-                                    detail: "attempt: \(attempt), chars: \(trimmed.count)",
+                                    detail: "attempt: \(attempt), chars: \(summary.count)",
                                     durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000)
                                 )
-                                return trimmed.isEmpty ? nil : String(trimmed.prefix(14000))
+                                return summary
                             case .toolCalls(let retryAssistant, let retryCalls, _, _, _):
                                 retryInteractions.append(
                                     disabledMaintenanceToolInteraction(
@@ -9108,10 +9135,13 @@ class ConversationManager: ObservableObject {
                                 )
                             }
                         } catch {
-                            print("[ConversationManager] Prune summary retry \(attempt) failed after refusing tool calls: \(error)")
+                            if !rejectThrownReply(error, "retry \(attempt) after tool refusal") {
+                                print("[ConversationManager] Prune summary retry \(attempt) failed after refusing tool calls: \(error)")
+                            }
                         }
                     }
 
+                    if rejectedAttempts >= CompactionSummaryPolicy.attempts { return rejectedFallback() }
                     print("[ConversationManager] Prune summary request kept returning tool calls after retries; falling back to compact log summary")
                     DebugTelemetry.log(
                         .info,
@@ -9123,16 +9153,7 @@ class ConversationManager: ObservableObject {
                     return fallbackPrunedContextSummary(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
                 }
             }
-            let reason = rejection?.reason ?? "no usable reply"
-            print("[ConversationManager] Prune summary rejected after \(CompactionSummaryPolicy.attempts) attempts (\(reason)); falling back to compact log summary")
-            DebugTelemetry.log(
-                .info,
-                summary: "prune summary fallback: reply rejected",
-                detail: "Prune summary rejected after \(CompactionSummaryPolicy.attempts) attempts: \(reason)",
-                durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000),
-                isError: true
-            )
-            return fallbackPrunedContextSummary(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
+            return rejectedFallback()
         } catch {
             print("[ConversationManager] Failed to generate prune summary: \(error)")
             DebugTelemetry.log(
