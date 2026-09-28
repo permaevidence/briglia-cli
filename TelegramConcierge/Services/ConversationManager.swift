@@ -2783,13 +2783,20 @@ class ConversationManager: ObservableObject {
     /// stage "placeholder" (before the batch runs) or "completed" (after).
     nonisolated(unsafe) static var responsesSalvageFaultForTesting: ((String) throws -> Void)?
 
-    private func persistResponsesSalvage(_ interactions: [ToolInteraction], runId: UUID?) throws {
-        // Owner-scoped (round delivery v3, Codex acceptance check 2): a run
-        // stopped while a newer run owns the recovery file must not replace
-        // that file with its own rounds. The stopped run keeps its rounds in
-        // memory and saves them through its interrupted-outcome path.
-        if let runId, let owner = activeRunId, owner != runId { throw CancellationError() }
-        if let runID = runId ?? activeRunId, var checkpoint = activeTurnCheckpoints[runID], checkpoint.isEnvelope {
+    /// Owner check before a Responses salvage write (round delivery v3,
+    /// Codex acceptance check 2): a run stopped while a newer run owns the
+    /// recovery file must not replace that file with its own rounds. The
+    /// stopped run keeps its rounds in memory and saves them through its
+    /// interrupted-outcome path.
+    private func requireSalvageOwnership(_ runId: UUID?) throws {
+        if let runId, let owner = activeRunId, owner != runId {
+            salvageWritesRefusedForOwnership += 1
+            throw CancellationError()
+        }
+    }
+
+    private func persistResponsesSalvage(_ interactions: [ToolInteraction]) throws {
+        if let runID = activeRunId, var checkpoint = activeTurnCheckpoints[runID], checkpoint.isEnvelope {
             checkpoint.retainedInteractions = interactions
             try writeTurnCheckpoint(checkpoint)
         } else {
@@ -7729,7 +7736,8 @@ class ConversationManager: ObservableObject {
                     })
                     let pending = toolInteractions + [uncertain]
                     try Self.responsesSalvageFaultForTesting?("placeholder")
-                    try persistResponsesSalvage(pending, runId: salvageRunId)
+                    try requireSalvageOwnership(salvageRunId)
+                    try persistResponsesSalvage(pending)
                     toolInteractions = pending
                 }
                 var toolResults: [ToolResultMessage] = []
@@ -7862,7 +7870,8 @@ class ConversationManager: ObservableObject {
                     var completed = toolInteractions
                     completed[completed.count - 1] = interaction
                     try Self.responsesSalvageFaultForTesting?("completed")
-                    try persistResponsesSalvage(completed, runId: salvageRunId)
+                    try requireSalvageOwnership(salvageRunId)
+                    try persistResponsesSalvage(completed)
                     toolInteractions = completed
                 } else { toolInteractions.append(interaction) }
 

@@ -25,10 +25,10 @@ enum RoundDelivery {
     static let frameHeader = "[Background results — added by Briglia at this tool-round boundary. Not output of the tool above and not from the user: background work you started finished while you were working.]"
     static let frameFooter = "[End of background results]"
 
-    /// Hidden kill switch: `BRIGLIA_MIDTURN_BACKGROUND_RESULTS=0` (or the
-    /// defaults key set to false) restores idle-only delivery exactly.
+    /// Hidden kill switch: `BRIGLIA_MIDTURN_BACKGROUND_RESULTS=0` restores
+    /// idle-only delivery exactly. Environment only: no preference key, so
+    /// no new owner-preference read enters the frozen lifecycle harness.
     static let environmentKey = "BRIGLIA_MIDTURN_BACKGROUND_RESULTS"
-    static let defaultsKey = "midturn_background_results"
     nonisolated(unsafe) static var overrideForTesting: Bool?
 
     static var isEnabled: Bool {
@@ -36,9 +36,6 @@ enum RoundDelivery {
         if let value = ProcessInfo.processInfo.environment[environmentKey] {
             let v = value.trimmingCharacters(in: .whitespaces).lowercased()
             if v == "0" || v == "false" || v == "off" || v == "no" { return false }
-        }
-        if UserDefaults.standard.object(forKey: defaultsKey) != nil {
-            return UserDefaults.standard.bool(forKey: defaultsKey)
         }
         return true
     }
