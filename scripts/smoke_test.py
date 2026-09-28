@@ -452,6 +452,17 @@ def main():
     check("midturn-wake-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-quater. Mid-turn round delivery: a background bash job or
+    # background/moved subagent that finishes during a turn is appended to
+    # that round's last tool result (ordinary tool output), acknowledged only
+    # after saved history carries it (inline or through a snapshot sidecar),
+    # /stop and run ownership, crash recovery, real active-turn compaction.
+    # Re-executes itself in a private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__midturn-roundresult-selftest"], capture_output=True,
+                          text=True, timeout=900)
+    check("midturn-roundresult-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     result = run_selftest([ADA, "__prune-archive-selftest"], capture_output=True, text=True, timeout=120)
     check("prune archive selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
