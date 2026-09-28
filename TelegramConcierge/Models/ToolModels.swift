@@ -564,6 +564,18 @@ struct ToolResultMessage: Codable {
     /// (unbound), never a load failure.
     var outcomeBinding: OutcomeBinding? = nil
 
+    /// Recovery bookkeeping for mid-turn round delivery (plan
+    /// MIDTURN_ROUND_DELIVERY v3 §2.6, owner decision D-A): the completion
+    /// message ids of the background results whose bodies Briglia appended
+    /// to this result's `content` at a tool-round boundary. Set only by
+    /// trusted harness code at that moment; never derived from content (a
+    /// later `cat` can copy a `completion_id:` line). Persisted, additive,
+    /// omitted when empty (every ordinary result encodes byte-identically),
+    /// never rendered and never read by the provider request builders,
+    /// summarizers or archives. A malformed value decodes as empty (no
+    /// evidence), never a load failure.
+    var deliveredCompletions: [UUID] = []
+
     enum CodingKeys: String, CodingKey {
         case role
         case toolCallId = "tool_call_id"
@@ -572,6 +584,7 @@ struct ToolResultMessage: Codable {
         case harnessAnnotations
         case completedAt
         case outcomeBinding
+        case deliveredCompletions
     }
 
     func encode(to encoder: Encoder) throws {
@@ -585,6 +598,9 @@ struct ToolResultMessage: Codable {
         }
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
         try container.encodeIfPresent(outcomeBinding, forKey: .outcomeBinding)
+        if !deliveredCompletions.isEmpty {
+            try container.encode(deliveredCompletions, forKey: .deliveredCompletions)
+        }
     }
 
     init(
@@ -633,6 +649,14 @@ struct ToolResultMessage: Codable {
             self.outcomeBinding = (try? container.decodeIfPresent(OutcomeBinding.self, forKey: .outcomeBinding)) ?? nil
             if self.outcomeBinding == nil {
                 print("[ToolResultMessage] discarded a malformed persisted outcome binding (result treated as unbound)")
+            }
+        }
+        // Lossy like outcomeBinding: a malformed list proves nothing (no
+        // delivery evidence), never a load failure.
+        if container.contains(.deliveredCompletions) {
+            self.deliveredCompletions = (try? container.decode([UUID].self, forKey: .deliveredCompletions)) ?? []
+            if self.deliveredCompletions.isEmpty {
+                print("[ToolResultMessage] discarded malformed or empty persisted delivery bookkeeping (result carries no delivery evidence)")
             }
         }
         // Fail-closed and lossy at the annotation-field boundary: an absent

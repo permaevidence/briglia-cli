@@ -264,6 +264,22 @@ class ConversationManager: ObservableObject {
     /// (release 1b): message id → the run's job id (nil for an unrecorded
     /// run). Acknowledged in the registry by message id after the save.
     private var pendingSubagentAcks: [UUID: UUID?] = [:]
+    /// Background results appended to a tool round mid-turn (round delivery
+    /// v3 §2.4–§2.5), keyed by completion message id, owned by the run that
+    /// appended them. Acknowledged only after a saved history carries them;
+    /// the idle drains skip every id listed here.
+    private var roundDeliveryReservations: [UUID: RoundDeliveryReservation] = [:]
+    /// Crash records of acknowledged round deliveries whose `.delivered`
+    /// write failed: retried after later saves (startup reconciliation finds
+    /// the typed evidence anyway).
+    private var roundDeliveryRecordRetries: Set<UUID> = []
+    /// Runs whose latest plain salvage write failed (checked, not only
+    /// logged): their in-progress rounds exist only in memory until the
+    /// turn's outcome is saved.
+    private var turnSalvageWriteFailedRuns: Set<UUID> = []
+    /// Plain/envelope salvage writes refused because a newer run owned the
+    /// recovery file (diagnostics and selftests).
+    private var salvageWritesRefusedForOwnership = 0
     /// Items a /stop affected (§3.9.2): their completions and watch matches
     /// are appended to history WITHOUT starting a turn, until settled —
     /// never cleared by a new user turn.
@@ -2767,8 +2783,13 @@ class ConversationManager: ObservableObject {
     /// stage "placeholder" (before the batch runs) or "completed" (after).
     nonisolated(unsafe) static var responsesSalvageFaultForTesting: ((String) throws -> Void)?
 
-    private func persistResponsesSalvage(_ interactions: [ToolInteraction]) throws {
-        if let runID = activeRunId, var checkpoint = activeTurnCheckpoints[runID], checkpoint.isEnvelope {
+    private func persistResponsesSalvage(_ interactions: [ToolInteraction], runId: UUID?) throws {
+        // Owner-scoped (round delivery v3, Codex acceptance check 2): a run
+        // stopped while a newer run owns the recovery file must not replace
+        // that file with its own rounds. The stopped run keeps its rounds in
+        // memory and saves them through its interrupted-outcome path.
+        if let runId, let owner = activeRunId, owner != runId { throw CancellationError() }
+        if let runID = runId ?? activeRunId, var checkpoint = activeTurnCheckpoints[runID], checkpoint.isEnvelope {
             checkpoint.retainedInteractions = interactions
             try writeTurnCheckpoint(checkpoint)
         } else {
@@ -3296,6 +3317,11 @@ class ConversationManager: ObservableObject {
             // defer unwinding after a newer turn started must not delete
             // that turn's marker.
             clearActiveTurnMarker(ownedBy: userMessage.id)
+            // Round delivery (v3 §2.5): this run's appended background
+            // results that no saved history carries are released to idle
+            // delivery; those still carried by unsaved history stay reserved
+            // until a later save. Run-scoped: never a newer run's items.
+            releaseRoundDeliveryReservations(ofRun: runId)
             if activeRunId == runId {
                 activeRunId = nil
                 activeProcessingTask = nil
@@ -6654,7 +6680,7 @@ class ConversationManager: ObservableObject {
             try SettlementEvidence.resetForReplacedHistory()
             stoppedJobIds.removeAll(); stopEntries.removeAll(); stoppedSubagentHandles.removeAll()
             stopIntent = .none; pendingCompletionAcks.removeAll(); pendingSubagentAcks.removeAll(); recoveredWakeTrigger = nil
-            midTurnGeneration.removeAll()
+            midTurnGeneration.removeAll(); roundDeliveryReservations.removeAll(); roundDeliveryRecordRetries.removeAll()
             return
         }
         for url in [DetachedJobStore.fileURL, StopMarkerStore.fileURL] where FileManager.default.fileExists(atPath: url.path) {
@@ -6664,7 +6690,7 @@ class ConversationManager: ObservableObject {
         try SettlementEvidence.resetForReplacedHistory()
         stoppedJobIds.removeAll(); stopEntries.removeAll(); stoppedSubagentHandles.removeAll()
         stopIntent = .none; pendingCompletionAcks.removeAll(); pendingSubagentAcks.removeAll(); recoveredWakeTrigger = nil
-        midTurnGeneration.removeAll()
+        midTurnGeneration.removeAll(); roundDeliveryReservations.removeAll(); roundDeliveryRecordRetries.removeAll()
     }
 
     // MARK: - Startup: stop intent and job reconciliation (§3.9.3, §3.10.4)
@@ -6793,6 +6819,11 @@ class ConversationManager: ObservableObject {
                 continue
             }
             let outcome = SettlementEvidence.locate(record, history: committed)
+            // Round delivery (v3 §2.7): a saved tool result (inline, or in a
+            // reachable snapshot's sidecar) that typed-carries this
+            // completion means the model already received it mid-turn —
+            // delivered, nothing appended, no wake.
+            let delivery = SettlementEvidence.locateDelivery(record, history: committed)
             switch outcome {
             case .bound(.receiptObserved):
                 notOwed.insert(record.jobId); continue
@@ -6800,9 +6831,18 @@ class ConversationManager: ObservableObject {
                 // A subagent that finished while its detach was committed:
                 // the durable real result is its outcome (nothing owed).
                 realSettled.insert(record.jobId); continue
+            default: break
+            }
+            if delivery == .delivered { delivered.insert(record.jobId); continue }
+            switch outcome {
             case .unverifiable(let reason):
                 unverifiable[record.jobId] = reason; continue
             case .bound, .absent:
+                // Delivery data that could not be verified (e.g. a malformed
+                // sidecar delivery list) retains the obligation too.
+                if case .unverifiable(let reason) = delivery {
+                    unverifiable[record.jobId] = reason; continue
+                }
                 // An evidence route removed while it was unverifiable (the
                 // removal gate recorded it): the obligation stays retained.
                 if let reason = record.routeRemovedWhileUnverifiable {
@@ -6888,6 +6928,9 @@ class ConversationManager: ObservableObject {
                 for result in round.results where result.outcomeBinding?.kind.carriesJob == true && result.outcomeBinding?.jobId != nil {
                     inlineBound = true
                 }
+                // A round carrying mid-turn delivery evidence (round delivery
+                // v3 §2.7) is gated like a bound result.
+                for result in round.results where !result.deliveredCompletions.isEmpty { inlineBound = true }
             }
         }
         let removedIDs = Set(removed.map(\.id))
@@ -6926,6 +6969,18 @@ class ConversationManager: ObservableObject {
         for record in owed {
             if removedIDs.contains(record.completionMessageId), lastSavedMessageIDs.contains(record.completionMessageId) {
                 deliveredJobs.insert(record.jobId)
+            }
+            // Delivered mid-turn as tool output (typed evidence reachable
+            // while the removed roots still exist): settle it now, before
+            // its carrier leaves history.
+            switch SettlementEvidence.locateDelivery(record, history: committed) {
+            case .delivered: deliveredJobs.insert(record.jobId)
+            case .unverifiable(let reason):
+                if record.routeRemovedWhileUnverifiable == nil,
+                   SettlementEvidence.locateDelivery(record, history: remaining) != .unverifiable(reason) {
+                    routeLost[record.jobId] = reason
+                }
+            case .absent: break
             }
             // Resolved while the removed roots still exist.
             switch SettlementEvidence.locate(record, history: committed) {
@@ -7364,7 +7419,7 @@ class ConversationManager: ObservableObject {
                 if let salvageRunId {
                     activeTurnCheckpoints[salvageRunId]?.retainedInteractions = newValue
                     if responsesExecution == nil || activeTurnCheckpoints[salvageRunId]?.isEnvelope == true {
-                        persistTurnSalvage(newValue)
+                        persistTurnSalvage(newValue, runId: salvageRunId)
                     }
                 } else {
                     localToolInteractions = newValue
@@ -7674,7 +7729,7 @@ class ConversationManager: ObservableObject {
                     })
                     let pending = toolInteractions + [uncertain]
                     try Self.responsesSalvageFaultForTesting?("placeholder")
-                    try persistResponsesSalvage(pending)
+                    try persistResponsesSalvage(pending, runId: salvageRunId)
                     toolInteractions = pending
                 }
                 var toolResults: [ToolResultMessage] = []
@@ -7770,6 +7825,21 @@ class ConversationManager: ObservableObject {
                     orderedToolResults[i].completedAt = batchCompletedAt
                 }
 
+                // Background results that finished while this round ran are
+                // ordinary tool output of this round (round delivery v3 §2.4):
+                // appended after every parser above has read the foreground
+                // content, before the round is stored, estimated, pruned or
+                // compacted, and before the user drain (a mid-turn user block
+                // still renders last). Only when a normal request follows.
+                if let runID = salvageRunId, !suppressBatch {
+                    let capReached = toolSpendLimitPerTurnUSD.map { cumulativeToolSpendUSD >= $0 } ?? false
+                    let nextRequestFollows = !capReached && round < maxToolRoundsSafetyLimit
+                        && freshSpendPauseMessage() == nil
+                    await deliverBackgroundResultsIntoRound(runId: runID, into: &orderedToolResults,
+                                                            currentRounds: toolInteractions,
+                                                            nextRequestFollows: nextRequestFollows)
+                }
+
                 // Deliver any user messages that arrived while this round ran.
                 // Tail-appending to the last tool result keeps the prompt
                 // prefix stable (same mechanism as the timestamp note above),
@@ -7792,7 +7862,7 @@ class ConversationManager: ObservableObject {
                     var completed = toolInteractions
                     completed[completed.count - 1] = interaction
                     try Self.responsesSalvageFaultForTesting?("completed")
-                    try persistResponsesSalvage(completed)
+                    try persistResponsesSalvage(completed, runId: salvageRunId)
                     toolInteractions = completed
                 } else { toolInteractions.append(interaction) }
 
@@ -8816,13 +8886,14 @@ class ConversationManager: ObservableObject {
                 // next tool touching that project must re-inject them.
                 for interaction in (clearTrackers ? targetMessages[index].toolInteractions : []) {
                     for result in interaction.results {
-                        for path in ProjectInstructionsTracker.markerPaths(in: result.content) {
+                        let foreground = RoundDelivery.foregroundContent(of: result)
+                        for path in ProjectInstructionsTracker.markerPaths(in: foreground) {
                             toolExecutor.projectInstructions.clearLoaded(instructionFilePath: path)
                         }
-                        for root in ProjectInstructionsTracker.verificationMarkerRoots(in: result.content) {
+                        for root in ProjectInstructionsTracker.verificationMarkerRoots(in: foreground) {
                             toolExecutor.projectInstructions.clearVerification(root: root)
                         }
-                        for root in GitCheckpointTracker.markerRoots(in: result.content) {
+                        for root in GitCheckpointTracker.markerRoots(in: foreground) {
                             toolExecutor.gitCheckpoints.clearCheckpoint(root: root)
                         }
                     }
@@ -10015,7 +10086,10 @@ class ConversationManager: ObservableObject {
             ? ""
             : " (+\(result.fileAttachments.count) file\(result.fileAttachments.count == 1 ? "" : "s"))"
         
-        if let dict = parseJSONDictionary(from: result.content) {
+        // Only the foreground tool's part: appended background results are
+        // not this tool's outcome (round delivery v3 §2.3).
+        let foreground = RoundDelivery.foregroundContent(of: result)
+        if let dict = parseJSONDictionary(from: foreground) {
             if let error = dict["error"] as? String, !error.isEmpty {
                 return "error - \(compact(error, maxLength: 90))\(fileSuffix)"
             }
@@ -10047,7 +10121,7 @@ class ConversationManager: ObservableObject {
             return "ok\(fileSuffix)"
         }
         
-        let fallback = compact(result.content, maxLength: 90)
+        let fallback = compact(foreground, maxLength: 90)
         return (fallback.isEmpty ? "ok" : fallback) + fileSuffix
     }
     
@@ -10880,6 +10954,9 @@ class ConversationManager: ObservableObject {
         var lastWaking: Message? = nil
         var appended = 0
         for item in pending {
+            // Appended to a tool round mid-turn and not yet acknowledged
+            // (round delivery v3 §2.5): never a second copy.
+            if roundDeliveryReservations[item.messageId] != nil { continue }
             if pendingCompletionAcks[item.messageId] != nil { continue }
             if messages.contains(where: { $0.id == item.messageId }) {
                 pendingCompletionAcks[item.messageId] = item.jobUUID
@@ -10943,6 +11020,7 @@ class ConversationManager: ObservableObject {
         // Same pattern as bash completions: append all, one turn, off the poll loop.
         var lastMessage: Message? = nil
         for completion in completions {
+            if roundDeliveryReservations[completion.messageId] != nil { continue }
             if pendingSubagentAcks[completion.messageId] != nil { continue }
             if messages.contains(where: { $0.id == completion.messageId }) {
                 pendingSubagentAcks[completion.messageId] = .some(completion.handle.jobId)
@@ -11380,6 +11458,7 @@ class ConversationManager: ObservableObject {
     /// file could not be loaded, so an unreadable history is never replaced.
     private func writeHistoryFile(_ data: Data) throws {
         if let historyLoadFailure { throw HistoryUnreadable(reason: historyLoadFailure) }
+        try Self.historyWriteFaultForTesting?()
         try PrivateStorage.writeAtomically(data, to: conversationFileURL)
     }
 
@@ -11427,6 +11506,7 @@ class ConversationManager: ObservableObject {
     /// of that search; a failed write changes nothing unsafe).
     private func noteDurableSave() {
         committedMessages = messages
+        resolveRoundDeliveries()
         let durableAcks = pendingCompletionAcks.filter { lastSavedMessageIDs.contains($0.key) }
         if !durableAcks.isEmpty {
             for id in durableAcks.keys { pendingCompletionAcks.removeValue(forKey: id) }
@@ -11522,24 +11602,51 @@ class ConversationManager: ObservableObject {
     /// mutation, so a hard crash or force-quit mid-turn cannot lose completed
     /// tool rounds. Cleared once the turn's outcome (success, error, or
     /// cancellation) has been written to conversation.json.
-    private func persistTurnSalvage(_ interactions: [ToolInteraction]) {
-        if let runID = activeRunId, var checkpoint = activeTurnCheckpoints[runID], checkpoint.isEnvelope {
+    ///
+    /// Checked and owner-scoped (round delivery v3 §2.5, Codex acceptance
+    /// check 2): returns whether this run's rounds reached the recovery file.
+    /// A run whose ownership passed to a newer run (a /stop, then a new
+    /// message) never overwrites or clears that run's file; a failed write
+    /// is recorded per run instead of only logged. No delivery is ever
+    /// acknowledged on the strength of this file: only saved history counts
+    /// (a newer run may clear the file before the stopped run's outcome is
+    /// saved).
+    @discardableResult
+    private func persistTurnSalvage(_ interactions: [ToolInteraction], runId: UUID) -> Bool {
+        guard activeRunId == nil || activeRunId == runId else {
+            salvageWritesRefusedForOwnership += 1
+            print("[ConversationManager] Turn salvage not written: a newer turn owns the recovery file")
+            return false
+        }
+        if var checkpoint = activeTurnCheckpoints[runId], checkpoint.isEnvelope {
             checkpoint.retainedInteractions = interactions
-            do { try writeTurnCheckpoint(checkpoint) }
-            catch { checkpointWriteFailure = "Checkpoint write failed: \(error.localizedDescription)" }
-            return
+            do { try writeTurnCheckpoint(checkpoint); return true }
+            catch { checkpointWriteFailure = "Checkpoint write failed: \(error.localizedDescription)"; return false }
         }
         guard !interactions.isEmpty else {
             clearTurnSalvageFile()
-            return
+            return true
         }
         do {
+            try Self.plainSalvageFaultForTesting?()
             let data = try JSONEncoder().encode(interactions)
             try PrivateStorage.writeAtomically(data, to: turnSalvageFileURL)
+            turnSalvageWriteFailedRuns.remove(runId)
+            return true
         } catch {
+            turnSalvageWriteFailedRuns.insert(runId)
             print("[ConversationManager] Failed to persist turn salvage: \(error)")
+            return false
         }
     }
+
+    /// Selftest seam: throw to simulate a failed plain salvage write.
+    nonisolated(unsafe) static var plainSalvageFaultForTesting: (() throws -> Void)?
+    /// Selftest seam: throw to simulate a failed history write (before the
+    /// file is touched, as a failed atomic write leaves it).
+    nonisolated(unsafe) static var historyWriteFaultForTesting: (() throws -> Void)?
+    /// Selftest seam: throw to simulate a failed turn-checkpoint write.
+    nonisolated(unsafe) static var checkpointWriteFaultForTesting: (() throws -> Void)?
 
     private func clearTurnSalvageFile() {
         do {
@@ -11973,7 +12080,7 @@ class ConversationManager: ObservableObject {
         }
         stoppedJobIds.removeAll(); stopEntries.removeAll(); stoppedSubagentHandles.removeAll()
         stopIntent = .none; pendingCompletionAcks.removeAll(); pendingSubagentAcks.removeAll(); recoveredWakeTrigger = nil
-        midTurnGeneration.removeAll()
+        midTurnGeneration.removeAll(); roundDeliveryReservations.removeAll(); roundDeliveryRecordRetries.removeAll()
         for (dir, label) in [
             (appFolder.appendingPathComponent("archive", isDirectory: true), "archive directory"),
             (appFolder.appendingPathComponent("subagent_sessions", isDirectory: true), "subagent sessions directory"),
@@ -13015,6 +13122,7 @@ extension ConversationManager {
             throw PruneArchiveStore.Failure("Checkpoint owner changed")
         }
         do {
+            try Self.checkpointWriteFaultForTesting?()
             let data = try JSONEncoder().encode(checkpoint)
             guard data.count <= TurnCheckpointStore.maxBytes else { throw PruneArchiveStore.Failure("Turn checkpoint exceeds storage policy; snapshot and recovery are required") }
             try PrivateStorage.writeAtomically(data, to: turnSalvageFileURL)
@@ -13165,13 +13273,14 @@ extension ConversationManager {
         lastPromptTokens = nil; lastCompletionTokens = nil
         for round in prefix {
             for result in round.results {
-                for path in ProjectInstructionsTracker.markerPaths(in: result.content) {
+                let foreground = RoundDelivery.foregroundContent(of: result)
+                for path in ProjectInstructionsTracker.markerPaths(in: foreground) {
                     toolExecutor.projectInstructions.clearLoaded(instructionFilePath: path)
                 }
-                for root in ProjectInstructionsTracker.verificationMarkerRoots(in: result.content) {
+                for root in ProjectInstructionsTracker.verificationMarkerRoots(in: foreground) {
                     toolExecutor.projectInstructions.clearVerification(root: root)
                 }
-                for root in GitCheckpointTracker.markerRoots(in: result.content) {
+                for root in GitCheckpointTracker.markerRoots(in: foreground) {
                     toolExecutor.gitCheckpoints.clearCheckpoint(root: root)
                 }
             }
@@ -13394,6 +13503,226 @@ extension ConversationManager {
     }
 }
 
+
+// MARK: - Mid-turn round delivery of background results (plan v3)
+//
+// While a turn runs, a finished background bash job or background/moved
+// subagent is appended as ordinary tool output to the round that just ran
+// (see `RoundDelivery`). Acknowledgement waits for a saved history that
+// carries it; idle delivery is unchanged and skips reserved ids.
+extension ConversationManager {
+
+    /// Selftest seam: awaited at the drain's suspension points with the
+    /// stage name ("bash-read", "subagent-read", "after-reads").
+    nonisolated(unsafe) static var roundDeliveryInterleaveForTesting: ((String) async -> Void)?
+    /// Selftest seam: awaited before the registry withdrawal of acknowledged
+    /// round deliveries (holds the in-flight window open).
+    nonisolated(unsafe) static var roundWithdrawalHoldForTesting: (() async -> Void)?
+
+    private func roundDeliveryAllowed(runId: UUID) -> Bool {
+        activeRunId == runId && !Task.isCancelled && workHeldReason == nil && !isRestoringMind
+            && !recoveryBlocked && checkpointWriteFailure == nil && !stopIntent.isUnknown
+    }
+
+    /// Append every eligible finished background result to the last result
+    /// of this round (v3 §2.4). Nothing is acknowledged here.
+    func deliverBackgroundResultsIntoRound(runId: UUID, into results: inout [ToolResultMessage],
+                                           currentRounds: [ToolInteraction], nextRequestFollows: Bool) async {
+        guard RoundDelivery.isEnabled, nextRequestFollows, !results.isEmpty, roundDeliveryAllowed(runId: runId) else { return }
+        if let hook = Self.roundDeliveryInterleaveForTesting { await hook("bash-read") }
+        let bash = await BackgroundProcessRegistry.shared.pendingCompletionsForDelivery()
+        if let hook = Self.roundDeliveryInterleaveForTesting { await hook("subagent-read") }
+        let subagents = await SubagentBackgroundRegistry.shared.pendingCompletionsForDelivery()
+        if let hook = Self.roundDeliveryInterleaveForTesting { await hook("after-reads") }
+        // A /stop, a newer turn or a hold may have interleaved at the awaits.
+        guard !bash.isEmpty || !subagents.isEmpty, roundDeliveryAllowed(runId: runId) else { return }
+
+        // Bash jobs the model already observed this turn (a settled
+        // `bash_manage wait/output` receipt, retained, compacted or in this
+        // very round): their notice is not owed, never appended.
+        var observed = Set((currentRounds.flatMap(\.results) + results).compactMap(\.bashReceipt?.jobUUID))
+        observed.formUnion(activeTurnCheckpoints[runId]?.completionReceipts.map(\.jobUUID) ?? [])
+        for result in currentRounds.flatMap(\.results) + results
+        where result.outcomeBinding?.kind == .receiptObserved {
+            if let job = result.outcomeBinding?.jobId { observed.insert(job) }
+        }
+        // Stopped jobs never arrive mid-turn (§2.8), in this or any turn.
+        var stopped = stoppedJobIds
+        for entry in allStopEntries { stopped.formUnion(entry.affectedJobIds) }
+        let inHistory = Set(messages.map(\.id))
+        let anchor = committedMessages.last?.id
+
+        var items: [RoundDelivery.Item] = []
+        var reservations: [RoundDeliveryReservation] = []
+        for item in bash {
+            let id = item.messageId
+            guard roundDeliveryReservations[id] == nil, pendingCompletionAcks[id] == nil, !inHistory.contains(id),
+                  !stopped.contains(item.jobUUID), !observed.contains(item.jobUUID) else { continue }
+            items.append(.init(messageId: id, body: BashCompletionNotice.body(for: item.completion)))
+            reservations.append(RoundDeliveryReservation(messageId: id, runId: runId, kind: .bash(jobUUID: item.jobUUID),
+                                                          unrecordedSpendUSD: 0, anchor: anchor))
+            DebugTelemetry.log(.bashComplete, summary: "bash \(item.completion.handleId) \(BashCompletionNotice.statusLabel(item.completion)) (mid-turn)",
+                               detail: "command: \(item.completion.command)", durationMs: item.completion.durationSeconds * 1000)
+        }
+        for completion in subagents {
+            let id = completion.messageId
+            let job = completion.handle.jobId
+            guard roundDeliveryReservations[id] == nil, pendingSubagentAcks[id] == nil, !inHistory.contains(id),
+                  !stoppedSubagentHandles.contains(completion.handle.id), !(job.map { stopped.contains($0) } ?? false) else { continue }
+            let duration = completion.completedAt.timeIntervalSince(completion.handle.startedAt)
+            items.append(.init(messageId: id, body: Self.backgroundSubagentCompletionBody(completion, durationStr: String(format: "%.1fs", duration))))
+            let unrecorded = (!completion.chargeCaptured && completion.result.spendUSD.isFinite && completion.result.spendUSD > 0)
+                ? completion.result.spendUSD : 0
+            reservations.append(RoundDeliveryReservation(messageId: id, runId: runId,
+                                                          kind: .subagent(jobId: job, handleId: completion.handle.id),
+                                                          unrecordedSpendUSD: unrecorded, anchor: anchor))
+            DebugTelemetry.log(.subagentComplete, summary: "subagent \(completion.handle.id) (\(completion.handle.subagentType)) done (mid-turn)",
+                               detail: "description: \(completion.handle.description)", durationMs: Int(duration * 1000))
+        }
+        guard !items.isEmpty else { return }
+        let last = results.count - 1
+        results[last].content = RoundDelivery.append(items, to: results[last].content)
+        results[last].deliveredCompletions.append(contentsOf: items.map(\.messageId))
+        for reservation in reservations { roundDeliveryReservations[reservation.messageId] = reservation }
+        BashJobsStats.log("completions.midturn", by: items.count)
+        print("[ConversationManager] Appended \(items.count) background result(s) to the tool round (mid-turn delivery)")
+        if let hook = Self.roundDeliveryInterleaveForTesting { await hook("after-append") }
+    }
+
+    /// After every successful history save: acknowledge each reserved item
+    /// that the SAVED history now carries (typed evidence, inline or via a
+    /// reachable snapshot sidecar). Also retries failed record writes.
+    func resolveRoundDeliveries() {
+        if !roundDeliveryRecordRetries.isEmpty { markRoundDeliveryRecords(roundDeliveryRecordRetries) }
+        let pending = roundDeliveryReservations.values.filter { $0.state == .reserved }
+        guard !pending.isEmpty else { return }
+        let found = roundDeliveryCarried(Set(pending.map(\.messageId)), in: committedMessages, anchors: pending.map(\.anchor)).found
+        guard !found.isEmpty else { return }
+        acknowledgeRoundDeliveries(found)
+    }
+
+    /// Ids among `wanted` that `history` carries. Roots start after the
+    /// earliest reservation anchor still present (all messages otherwise).
+    private func roundDeliveryCarried(_ wanted: Set<UUID>, in history: [Message], anchors: [UUID?]) -> (found: Set<UUID>, problem: String?) {
+        var start = 0
+        let indices = anchors.map { anchor in anchor.flatMap { id in history.firstIndex { $0.id == id } } }
+        if !indices.contains(where: { $0 == nil }), let first = indices.compactMap({ $0 }).min() { start = first + 1 }
+        return SettlementEvidence.deliveredIds(wanted, roots: Array(history[min(start, history.count)...]))
+    }
+
+    private func acknowledgeRoundDeliveries(_ ids: Set<UUID>) {
+        var bashJobs = Set<UUID>()
+        var subagentMessages = Set<UUID>()
+        var recordJobs = Set<UUID>()
+        var acknowledged = Set<UUID>()
+        for id in ids {
+            guard var reservation = roundDeliveryReservations[id], reservation.state == .reserved else { continue }
+            reservation.state = .acknowledging
+            switch reservation.kind {
+            case .bash(let job): bashJobs.insert(job); recordJobs.insert(job)
+            case .subagent(let job, _):
+                subagentMessages.insert(id)
+                if let job { recordJobs.insert(job) }
+            }
+            // Unrecorded run: charged exactly once, here (D6: day/month
+            // totals; the per-turn cap is unaffected).
+            if !reservation.charged, reservation.unrecordedSpendUSD > 0 {
+                KeychainHelper.recordOpenRouterSpend(reservation.unrecordedSpendUSD)
+                reservation.charged = true
+                print("[ConversationManager] Background subagent spend (delivered mid-turn): +$\(formatUSD(reservation.unrecordedSpendUSD))")
+            }
+            roundDeliveryReservations[id] = reservation
+            acknowledged.insert(id)
+        }
+        guard !acknowledged.isEmpty else { return }
+        if !recordJobs.isEmpty { markRoundDeliveryRecords(recordJobs) }
+        // The reservation stays (state .acknowledging) until the registry
+        // withdrawal has completed, so an idle drain can never append a
+        // second copy in between.
+        Task { [weak self] in
+            if let hold = Self.roundWithdrawalHoldForTesting { await hold() }
+            await BackgroundProcessRegistry.shared.acknowledgeDelivered(jobUUIDs: bashJobs)
+            await SubagentBackgroundRegistry.shared.acknowledgeDelivered(messageIds: subagentMessages)
+            await MainActor.run {
+                guard let self else { return }
+                for id in acknowledged where self.roundDeliveryReservations[id]?.state == .acknowledging {
+                    self.roundDeliveryReservations.removeValue(forKey: id)
+                }
+                self.retireSettledStopEntries()
+            }
+        }
+    }
+
+    /// Checked `.delivered` write for the crash records of acknowledged
+    /// items; a failure keeps them for a retry after the next save (and
+    /// startup reconciliation finds the typed evidence regardless).
+    private func markRoundDeliveryRecords(_ jobs: Set<UUID>) {
+        guard !jobs.isEmpty, FileManager.default.fileExists(atPath: DetachedJobStore.fileURL.path) else {
+            roundDeliveryRecordRetries.subtract(jobs); return
+        }
+        do {
+            try DetachedJobStore.mutate("delivered-midturn") { records in
+                for i in records.indices where jobs.contains(records[i].jobId) && records[i].completion == .owed {
+                    records[i].completion = .delivered
+                    records[i].deliveredAt = Date()
+                }
+                records.removeAll { $0.isSettled }
+            }
+            roundDeliveryRecordRetries.subtract(jobs)
+        } catch {
+            roundDeliveryRecordRetries.formUnion(jobs)
+            print("[ConversationManager] Could not mark mid-turn deliveries in crash records (retried after the next save): \(error.localizedDescription)")
+        }
+    }
+
+    /// Run teardown (v3 §2.5): each reserved item of `runId` is resolved
+    /// against saved history; one still carried by unsaved history or an
+    /// in-memory checkpoint stays reserved (a later save resolves it, a
+    /// restart finds the recovery evidence); every other one is released,
+    /// so idle delivery delivers it (at-least-once). Never touches a newer
+    /// run's reservations.
+    func releaseRoundDeliveryReservations(ofRun runId: UUID) {
+        turnSalvageWriteFailedRuns.remove(runId)
+        guard roundDeliveryReservations.values.contains(where: { $0.runId == runId && $0.state == .reserved }) else { return }
+        resolveRoundDeliveries()
+        let mine = roundDeliveryReservations.values.filter { $0.runId == runId && $0.state == .reserved }
+        guard !mine.isEmpty else { return }
+        var roots = messages
+        var checkpoints = Array(activeTurnCheckpoints.values)
+        // The recovery file (a pendingRecovery checkpoint or plain rounds)
+        // is published by startup/next-turn recovery: still a carrier.
+        if let data = try? TurnCheckpointStore.read(turnSalvageFileURL) {
+            if let checkpoint = try? JSONDecoder().decode(TurnCheckpoint.self, from: data) { checkpoints.append(checkpoint) }
+            else if let rounds = try? JSONDecoder().decode([ToolInteraction].self, from: data) {
+                roots.append(Message(role: .assistant, content: "", toolInteractions: rounds))
+            }
+        }
+        for checkpoint in checkpoints {
+            var carrier = Message(role: .assistant, content: "", toolInteractions: checkpoint.retainedInteractions)
+            carrier.activeTurnCompaction = checkpoint.activeTurnCompaction
+            if let ref = checkpoint.overflowReference { carrier.pruneArchiveReferences = [ref] }
+            roots.append(carrier)
+        }
+        let carried = roundDeliveryCarried(Set(mine.map(\.messageId)), in: roots, anchors: mine.map(\.anchor)).found
+        for reservation in mine where !carried.contains(reservation.messageId) {
+            roundDeliveryReservations.removeValue(forKey: reservation.messageId)
+            print("[ConversationManager] Mid-turn background result \(reservation.messageId) not saved with its round; left for idle delivery")
+        }
+    }
+
+    // Selftest seams (round delivery).
+    var _testRoundReservations: [UUID: RoundDeliveryReservation] { roundDeliveryReservations }
+    var _testRoundRecordRetries: Set<UUID> { roundDeliveryRecordRetries }
+    var _testSalvageWriteFailedRuns: Set<UUID> { turnSalvageWriteFailedRuns }
+    var _testActiveRunId: UUID? { activeRunId }
+    var _testSalvageRefusals: Int { salvageWritesRefusedForOwnership }
+    func _testSetRecoveryBlocked(_ on: Bool) { recoveryBlocked = on }
+    func _testSetHeldQueueProblem(_ reason: String?) { heldQueueFileProblem = reason }
+    func _testCompactLogLabel(_ result: ToolResultMessage) -> String { summarizeToolOutcome(result) }
+    func _testSetCheckpointReceipts(_ receipts: [BashCompletionReceipt]) {
+        if let run = activeRunId { activeTurnCheckpoints[run]?.completionReceipts = receipts }
+    }
+}
 
 // MARK: - Mid-turn early wake selftest seams
 //
