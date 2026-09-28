@@ -49,7 +49,10 @@ final class GitCheckpointTracker: @unchecked Sendable {
 
         var blocks: [String] = []
         for path in touched {
-            guard let root = Self.repoRoot(forTouchedPath: path) else { continue }
+            let rootToken = StageMarkers.enter("git.repo_root", detail: StageMarkers.basename(path))
+            let foundRoot = Self.repoRoot(forTouchedPath: path)
+            StageMarkers.exit(rootToken, .ok, detail: foundRoot == nil ? "no repo" : "repo")
+            guard let root = foundRoot else { continue }
             let rootPath = root.path
 
             lock.lock()
@@ -57,8 +60,14 @@ final class GitCheckpointTracker: @unchecked Sendable {
             lock.unlock()
             guard inserted else { continue }
 
-            guard let snapshot = Self.createSnapshot(repoRoot: rootPath) else { continue }
-            Self.appendToLedger(repo: rootPath, sha: snapshot.sha, clean: snapshot.clean)
+            let snapToken = StageMarkers.enter("git.snapshot", detail: StageMarkers.basename(rootPath))
+            let createdSnapshot = Self.createSnapshot(repoRoot: rootPath)
+            StageMarkers.exit(snapToken, createdSnapshot == nil ? .error : .ok,
+                              detail: createdSnapshot.map { $0.clean ? "clean" : "dirty" } ?? "skipped")
+            guard let snapshot = createdSnapshot else { continue }
+            StageMarkers.measure("git.ledger_append") {
+                Self.appendToLedger(repo: rootPath, sha: snapshot.sha, clean: snapshot.clean)
+            }
 
             let shortSha = String(snapshot.sha.prefix(12))
             let stateNote = snapshot.clean
@@ -179,9 +188,17 @@ final class GitCheckpointTracker: @unchecked Sendable {
     /// stall the executor: on expiry the process is terminated and the
     /// checkpoint is silently skipped. stdin is nulled so git can never sit
     /// waiting for input.
-    static func runGit(_ args: [String], in workdir: String, timeoutSeconds: Double = 15) -> String? {
+    static func runGit(_ args: [String], in workdir: String, timeoutSeconds: Double = 15,
+                       executable: String = "/usr/bin/git") -> String? {
+        // Diagnostics: the subcommand name only (never paths or messages).
+        let label = args.first ?? "?"
+        let runToken = StageMarkers.enter("git.run", detail: label)
+        var runOutcome: StageMarkers.Outcome = .error
+        var runDetail = "launch failed"
+        defer { StageMarkers.exit(runToken, runOutcome, detail: runDetail) }
+        let markerCall = StageMarkers.call
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = args
         process.currentDirectoryURL = URL(fileURLWithPath: workdir)
         let out = Pipe()
@@ -191,31 +208,50 @@ final class GitCheckpointTracker: @unchecked Sendable {
 
         let finished = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in finished.signal() }
+        let launchToken = StageMarkers.enter("git.launch", detail: label)
         do {
             try process.run()
         } catch {
+            StageMarkers.exit(launchToken, .error)
             return nil
         }
+        StageMarkers.exit(launchToken, .ok)
 
         // Drain stdout on a background queue so a full pipe buffer can't
         // deadlock the child while we wait.
         let outputBox = NSMutableData()
         let readQueue = DispatchQueue(label: "com.permaevidence.briglia.git-checkpoint.read")
         readQueue.async {
+            // Runs on a dispatch thread: the task-local call is passed in.
+            let readerToken = StageMarkers.enter("git.reader_read_to_eof", detail: label, call: markerCall)
             outputBox.append(out.fileHandleForReading.readDataToEndOfFile())
+            StageMarkers.exit(readerToken, .ok)
         }
 
+        let waitToken = StageMarkers.enter("git.wait_exit", detail: label)
         if finished.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+            StageMarkers.exit(waitToken, .error, detail: "timeout")
+            let killToken = StageMarkers.enter("git.terminate_after_timeout", detail: label)
             process.terminate()
             if finished.wait(timeout: .now() + 2) == .timedOut {
                 kill(process.processIdentifier, SIGKILL)
                 _ = finished.wait(timeout: .now() + 2)
             }
+            StageMarkers.exit(killToken, .ok)
+            runDetail = "timeout"
             return nil
         }
+        StageMarkers.exit(waitToken, .ok)
         // Barrier: ensure the reader finished before touching the data.
+        let drainToken = StageMarkers.enter("git.drain_stdout_barrier", detail: label)
         readQueue.sync {}
-        guard process.terminationStatus == 0 else { return nil }
+        StageMarkers.exit(drainToken, .ok)
+        guard process.terminationStatus == 0 else {
+            runDetail = "exit \(process.terminationStatus)"
+            return nil
+        }
+        runOutcome = .ok
+        runDetail = label
         return String(data: outputBox as Data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

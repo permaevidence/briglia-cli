@@ -461,6 +461,12 @@ def main():
     result = run_selftest([ADA, "__summary-bounds-selftest"], capture_output=True, text=True, timeout=120)
     check("summary bounds selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # Tool stage markers (write_file stall diagnostics): real write_file path
+    # records, SIGKILL durability, the stall reporter (report only), rotation,
+    # a hung log volume, and the Git reader barrier made visible.
+    result = run_selftest([ADA, "__stage-markers-selftest"], capture_output=True, text=True, timeout=180)
+    check("stage markers selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # Subagent compaction: dialogue with the main agent preserved under a
     # capped budget, chronological work eviction across both stores, one
     # folded summary; drives the real runner against a scripted local

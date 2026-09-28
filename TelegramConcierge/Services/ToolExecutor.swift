@@ -401,35 +401,72 @@ actor ToolExecutor {
     // MARK: - Execution
     
     /// Execute a single tool call and return the result
-    func execute(_ call: ToolCall) async throws -> ToolResultMessage {
+    func execute(_ call: ToolCall, acquireToken: StageMarkers.Token? = nil) async throws -> ToolResultMessage {
+        // Stage markers (diagnostics only; never change behaviour): the
+        // executor actor was acquired, then every stage of the call.
+        let markerContext = StageMarkers.CallContext(callId: call.id, tool: call.function.name, depth: depth)
+        if let acquireToken { StageMarkers.exit(acquireToken, .ok) }
+        return try await StageMarkers.$call.withValue(markerContext) {
+            let toolToken = StageMarkers.enter("tool.execute")
+            do {
+                let result = try await executeMarked(call)
+                StageMarkers.exit(toolToken, result.content.contains("\"error\"") ? .error : .ok)
+                return result
+            } catch {
+                StageMarkers.exit(toolToken, error is CancellationError || Task.isCancelled ? .cancelled : .error)
+                throw error
+            }
+        }
+    }
+
+    private func executeMarked(_ call: ToolCall) async throws -> ToolResultMessage {
         try Task.checkCancellation()
         return try await withTelemetry(call) {
             // Git safety net: the first edit in a repo snapshots the working
             // tree BEFORE the edit lands (git stash create — a dangling
             // commit; no index/history side effects).
+            let checkpointToken = StageMarkers.enter("git.checkpoint")
             let checkpoint = self.gitCheckpoints.checkpointIfNeeded(
                 toolName: call.function.name,
                 argumentsJSON: call.function.arguments
             )
-            var result = try await self.executeBody(call)
+            StageMarkers.exit(checkpointToken, .ok, detail: checkpoint == nil ? "none" : "created")
+            // enter/exit rather than an async wrapper: a nonisolated async
+            // helper would add an actor hop, and markers must not change
+            // scheduling.
+            let bodyToken = StageMarkers.enter("tool.body")
+            var result: ToolResultMessage
+            do {
+                result = try await self.executeBody(call)
+                StageMarkers.exit(bodyToken, .ok)
+            } catch {
+                StageMarkers.exit(bodyToken, error is CancellationError || Task.isCancelled ? .cancelled : .error)
+                throw error
+            }
             // First touch of a project in this context auto-loads its
             // AGENTS.md/CLAUDE.md into the tool result (rides along like LSP
             // diagnostics; deduped per instruction file until pruned). The
             // first successful code edit in a project additionally injects
             // its detected build/test checks. Both computed from the original
             // result content, before anything is appended.
-            let instructions = self.projectInstructions.payload(
-                toolName: call.function.name,
-                argumentsJSON: call.function.arguments
-            )
-            let verification = self.projectInstructions.verificationPayload(
-                toolName: call.function.name,
-                argumentsJSON: call.function.arguments,
-                resultContent: result.content
-            )
+            let instructions = StageMarkers.measure("project_instructions.load") {
+                self.projectInstructions.payload(
+                    toolName: call.function.name,
+                    argumentsJSON: call.function.arguments
+                )
+            }
+            let verification = StageMarkers.measure("project_instructions.verification") {
+                self.projectInstructions.verificationPayload(
+                    toolName: call.function.name,
+                    argumentsJSON: call.function.arguments,
+                    resultContent: result.content
+                )
+            }
+            let buildToken = StageMarkers.enter("result.build")
             if let checkpoint { result.content += checkpoint }
             if let instructions { result.content += instructions }
             if let verification { result.content += verification }
+            StageMarkers.exit(buildToken, .ok)
             return result
         }
     }
@@ -625,22 +662,32 @@ actor ToolExecutor {
             for call in calls {
                 group.addTask {
                     try Task.checkCancellation()
-                    guard let wakeScope else { return try await self.execute(call) }
+                    // Diagnostics: time spent waiting to enter the executor actor.
+                    let acquire = StageMarkers.enter(
+                        "executor.actor_acquire",
+                        call: StageMarkers.CallContext(callId: call.id, tool: call.function.name, depth: self.depth))
+                    guard let wakeScope else { return try await self.execute(call, acquireToken: acquire) }
                     let context = WakeContext(
                         turnRunId: wakeScope.runId, callId: call.id, toolName: call.function.name,
                         fingerprint: OutcomeBinding.fingerprint(toolName: call.function.name,
                                                                 arguments: call.function.arguments),
                         callStartedAt: .now, historyAnchorMessageId: wakeScope.anchor)
                     return try await WakeContext.$current.withValue(context) {
-                        try await self.execute(call)
+                        try await self.execute(call, acquireToken: acquire)
                     }
                 }
             }
+            StageMarkers.event("round.dispatched", detail: "\(calls.count) tool(s): " + calls.map { $0.function.name }.joined(separator: ","))
             
             var results: [ToolResultMessage] = []
             for try await result in group {
+                StageMarkers.event("round.tool_finished",
+                                   call: StageMarkers.CallContext(callId: result.toolCallId,
+                                                                  tool: calls.first { $0.id == result.toolCallId }?.function.name ?? "?",
+                                                                  depth: depth))
                 results.append(result)
             }
+            StageMarkers.event("round.all_tools_finished", detail: "\(results.count) result(s)")
             return results
         }
     }

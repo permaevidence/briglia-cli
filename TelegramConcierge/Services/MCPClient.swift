@@ -155,11 +155,14 @@ actor MCPClient {
             _ = handle.availableData
         }
 
+        let spawnToken = StageMarkers.enter("mcp.spawn", detail: serverName, call: nil)
         do {
             try proc.run()
         } catch {
+            StageMarkers.exit(spawnToken, .error)
             throw MCPClientError.spawnFailed(error.localizedDescription)
         }
+        StageMarkers.exit(spawnToken, .ok, detail: "\(serverName) pid \(proc.processIdentifier)")
 
         self.process = proc
         self.stdinHandle = stdin.fileHandleForWriting
@@ -182,7 +185,15 @@ actor MCPClient {
         ]
         // Short timeout: initialize is awaited during turn-start bootstrap, so a
         // server that launches but never answers must not hang the agent.
-        _ = try await sendRequest(method: "initialize", params: params, timeout: timeout)
+        StageMarkers.event("mcp.initialize_sent", detail: serverName, call: nil)
+        let initToken = StageMarkers.enter("mcp.initialize", detail: serverName, call: nil)
+        do {
+            _ = try await sendRequest(method: "initialize", params: params, timeout: timeout)
+        } catch {
+            StageMarkers.exit(initToken, error is CancellationError ? .cancelled : .error, detail: serverName)
+            throw error
+        }
+        StageMarkers.exit(initToken, .ok, detail: "\(serverName) answered")
         try sendNotification(method: "notifications/initialized", params: [String: Any]())
         isInitialized = true
 
@@ -326,7 +337,15 @@ actor MCPClient {
     // MARK: - Tools
 
     func refreshTools(timeout: TimeInterval = 30) async throws {
-        let result = try await sendRequest(method: "tools/list", params: [String: Any](), timeout: timeout)
+        let listToken = StageMarkers.enter("mcp.tools_list", detail: serverName, call: nil)
+        let result: [String: Any]
+        do {
+            result = try await sendRequest(method: "tools/list", params: [String: Any](), timeout: timeout)
+        } catch {
+            StageMarkers.exit(listToken, error is CancellationError ? .cancelled : .error, detail: serverName)
+            throw error
+        }
+        StageMarkers.exit(listToken, .ok, detail: "\(serverName) answered")
         let raw: [Any]
         if let arr = result["tools"] as? [Any] {
             raw = arr

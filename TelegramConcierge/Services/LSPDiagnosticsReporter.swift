@@ -31,11 +31,17 @@ enum LSPDiagnosticsReporter {
         updatedText: String,
         waitFor timeout: TimeInterval? = nil
     ) async {
+        let lspToken = StageMarkers.enter("lsp.diagnostics", detail: StageMarkers.basename(path))
         let outcome = await LSPRegistry.shared.diagnostics(
             forPath: path,
             updatedText: updatedText,
             waitFor: timeout
         )
+        if case .skipped = outcome {
+            StageMarkers.exit(lspToken, .ok, detail: "skipped")
+        } else {
+            StageMarkers.exit(lspToken, .ok)
+        }
         switch outcome {
         case .skipped(let reason):
             result["diagnostics_skipped"] = reason

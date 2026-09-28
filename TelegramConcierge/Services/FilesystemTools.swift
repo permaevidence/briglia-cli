@@ -268,6 +268,10 @@ actor FilesystemTools {
     /// FileTime is asserted before write. Overwrites preserve the pre-image's line endings
     /// (CRLF), UTF-8 BOM, and POSIX mode, and write through symlinks instead of replacing them.
     func writeFile(path rawPath: String, content: String, description: String? = nil) async -> OpResult {
+        // Diagnostics: entered the FilesystemTools actor; the stage stays
+        // open for the whole body (early refusals included).
+        let insideToken = StageMarkers.enter("fs.inside_actor", detail: "write_file")
+        defer { StageMarkers.exit(insideToken, .ok) }
         let path = Self.normalizePath(rawPath)
         guard Self.isAbsolute(path) else {
             return OpResult(content: jsonError("path must be absolute: \(rawPath)"))
@@ -280,7 +284,9 @@ actor FilesystemTools {
         }
 
         let fm = FileManager.default
+        let existsToken = StageMarkers.enter("fs.exists_check", detail: StageMarkers.basename(path))
         let fileExists = fm.fileExists(atPath: path)
+        StageMarkers.exit(existsToken, .ok, detail: fileExists ? "exists" : "new")
         // Capture the pre-image before overwriting: content for the unified diff,
         // line ending + BOM so a rewrite doesn't silently change the file's on-disk
         // representation. The POSIX mode and a symlink at the path are handled by
@@ -290,12 +296,15 @@ actor FilesystemTools {
         // file is the user's and keeps its exact previous mode.
         let previousFile: TextFileSnapshot?
         if fileExists {
+            let freshToken = StageMarkers.enter("fs.read_ledger_assert_fresh")
             do {
                 try await FileTimeTracker.shared.assertFresh(path: path)
+                StageMarkers.exit(freshToken, .ok)
             } catch {
+                StageMarkers.exit(freshToken, .error)
                 return OpResult(content: jsonError(error.localizedDescription))
             }
-            previousFile = try? Self.readTextFileSnapshot(path: path)
+            previousFile = StageMarkers.measure("fs.read_preimage") { try? Self.readTextFileSnapshot(path: path) }
         } else {
             previousFile = nil
         }
@@ -312,19 +321,27 @@ actor FilesystemTools {
         }
 
         do {
-            try PrivateStorage.fileToolEnsureParentDirectory(ofRequestedPath: path, outsideRoots: .resolveAndPreserveMode)
+            try StageMarkers.measure("fs.ensure_parent_dir") {
+                try PrivateStorage.fileToolEnsureParentDirectory(ofRequestedPath: path, outsideRoots: .resolveAndPreserveMode)
+            }
             var finalData = Data()
             if preservedBOM {
                 finalData.append(contentsOf: [0xEF, 0xBB, 0xBF])
             }
             finalData.append(Data(finalText.utf8))
-            try MCPAgentRouting.withLockIfRoutingFile(path) {
-                try PrivateStorage.fileToolWrite(finalData, toRequestedPath: path, outsideRoots: .resolveAndPreserveMode)
+            try StageMarkers.measure("fs.write", detail: "\(finalData.count) bytes") {
+                try MCPAgentRouting.withLockIfRoutingFile(path) {
+                    try PrivateStorage.fileToolWrite(finalData, toRequestedPath: path, outsideRoots: .resolveAndPreserveMode)
+                }
             }
             // Refresh FileTime snapshot so subsequent edits still pass the staleness check.
+            let recordToken = StageMarkers.enter("fs.read_ledger_record")
             await FileTimeTracker.shared.recordRead(path: path)
+            StageMarkers.exit(recordToken, .ok)
             let origin: FilesLedger.Origin = fileExists ? .edited : .generated
+            let ledgerToken = StageMarkers.enter("fs.files_ledger_record")
             await FilesLedger.shared.record(path: path, origin: origin, description: description)
+            StageMarkers.exit(ledgerToken, .ok)
             var result: [String: Any] = [
                 "success": true,
                 "path": path,
@@ -337,11 +354,11 @@ actor FilesystemTools {
             if preservedBOM {
                 result["bom"] = "existing UTF-8 BOM preserved"
             }
-            if let diff = DiffUtil.unifiedDiff(old: previousFile?.content ?? "", new: finalText, path: path) {
+            if let diff = StageMarkers.measure("fs.diff", { DiffUtil.unifiedDiff(old: previousFile?.content ?? "", new: finalText, path: path) }) {
                 result["diff"] = diff
             }
             await LSPDiagnosticsReporter.attach(to: &result, path: path, updatedText: finalText)
-            return OpResult(content: jsonString(result))
+            return StageMarkers.measure("fs.result_json") { OpResult(content: jsonString(result)) }
         } catch {
             return OpResult(content: jsonError("failed to write \(path): \(error.localizedDescription)"))
         }
@@ -384,6 +401,8 @@ actor FilesystemTools {
     /// If any edit fails validation, the file is untouched.
     /// Falls back through 3 match strategies per edit: literal → line-trimmed → whitespace-normalized.
     func editFile(path rawPath: String, edits: [EditPair], replaceAll: Bool = false) async -> OpResult {
+        let insideToken = StageMarkers.enter("fs.inside_actor", detail: "edit_file")
+        defer { StageMarkers.exit(insideToken, .ok) }
         let path = Self.normalizePath(rawPath)
         guard Self.isAbsolute(path) else {
             return OpResult(content: jsonError("path must be absolute: \(rawPath)"))
@@ -411,15 +430,18 @@ actor FilesystemTools {
                 }
             }
         }
+        let freshToken = StageMarkers.enter("fs.read_ledger_assert_fresh")
         do {
             try await FileTimeTracker.shared.assertFresh(path: path)
+            StageMarkers.exit(freshToken, .ok)
         } catch {
+            StageMarkers.exit(freshToken, .error)
             return OpResult(content: jsonError(error.localizedDescription))
         }
 
         let originalFile: TextFileSnapshot
         do {
-            originalFile = try Self.readTextFileSnapshot(path: path)
+            originalFile = try StageMarkers.measure("fs.read_preimage") { try Self.readTextFileSnapshot(path: path) }
         } catch {
             return OpResult(content: jsonError("file \(path) is not valid UTF-8 text"))
         }
@@ -502,18 +524,24 @@ actor FilesystemTools {
             // Symlink and mode handling live in the write itself, matching
             // write_file: policy inside Briglia's roots, exact previous mode
             // and resolved link elsewhere.
-            try MCPAgentRouting.withLockIfRoutingFile(path) {
-                try PrivateStorage.fileToolWrite(finalData, toRequestedPath: path, outsideRoots: .resolveAndPreserveMode)
+            try StageMarkers.measure("fs.write", detail: "\(finalData.count) bytes") {
+                try MCPAgentRouting.withLockIfRoutingFile(path) {
+                    try PrivateStorage.fileToolWrite(finalData, toRequestedPath: path, outsideRoots: .resolveAndPreserveMode)
+                }
             }
+            let recordToken = StageMarkers.enter("fs.read_ledger_record")
             await FileTimeTracker.shared.recordRead(path: path)
+            StageMarkers.exit(recordToken, .ok)
+            let ledgerToken = StageMarkers.enter("fs.files_ledger_record")
             await FilesLedger.shared.record(path: path, origin: .edited, description: nil)
+            StageMarkers.exit(ledgerToken, .ok)
             var result: [String: Any] = [
                 "success": true,
                 "path": path,
                 "edits_applied": matchedEdits.count,
                 "bytes_written": finalData.count
             ]
-            if let diff = DiffUtil.unifiedDiff(old: originalFile.content, new: finalText, path: path) {
+            if let diff = StageMarkers.measure("fs.diff", { DiffUtil.unifiedDiff(old: originalFile.content, new: finalText, path: path) }) {
                 result["diff"] = diff
             }
             if usedNonLiteral {

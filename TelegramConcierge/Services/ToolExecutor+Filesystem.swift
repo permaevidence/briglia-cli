@@ -19,7 +19,9 @@ extension ToolExecutor {
         let offset = args.int("offset")
         let limit = args.int("limit")
         let pages = args.string("pages")
+        let token = StageMarkers.enter("fs.read_file", detail: StageMarkers.basename(path))
         let result = await FilesystemTools.shared.readFile(path: path, offset: offset, limit: limit, pages: pages)
+        StageMarkers.exit(token, result.content.contains("\"error\"") ? .error : .ok)
         return ToolResultMessage(toolCallId: call.id, content: result.content, fileAttachments: result.attachments)
     }
 
@@ -34,7 +36,10 @@ extension ToolExecutor {
             return "{\"error\": \"write_file requires 'content'\"}"
         }
         let description = args.string("description")
+        // Diagnostics: includes waiting for the FilesystemTools actor.
+        let token = StageMarkers.enter("fs.write_file", detail: StageMarkers.basename(path))
         let result = await FilesystemTools.shared.writeFile(path: path, content: content, description: description)
+        StageMarkers.exit(token, result.content.contains("\"error\"") ? .error : .ok)
         return result.content
     }
 
@@ -69,7 +74,9 @@ extension ToolExecutor {
             return "{\"error\": \"edit_file requires either 'edits' array or 'old_string'+'new_string'\"}"
         }
 
+        let token = StageMarkers.enter("fs.edit_file", detail: StageMarkers.basename(path))
         let result = await FilesystemTools.shared.editFile(path: path, edits: editPairs, replaceAll: replaceAll)
+        StageMarkers.exit(token, result.content.contains("\"error\"") ? .error : .ok)
         EditToolStats.log(tool: "edit_file", success: result.content.contains("\"success\":true"))
         return result.content
     }
@@ -81,7 +88,9 @@ extension ToolExecutor {
         guard let patchText = args.string("patch_text") else {
             return "{\"error\": \"apply_patch requires 'patch_text'\"}"
         }
+        let token = StageMarkers.enter("fs.apply_patch")
         let result = await ApplyPatch.run(patchText: patchText)
+        StageMarkers.exit(token, result.content.contains("\"error\"") ? .error : .ok)
         EditToolStats.log(tool: "apply_patch", success: result.content.contains("\"success\":true"))
         return result.content
     }
