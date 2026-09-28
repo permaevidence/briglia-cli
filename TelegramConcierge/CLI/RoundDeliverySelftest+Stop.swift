@@ -119,11 +119,16 @@ extension MidturnHarness {
         check("T6a the stopped job's completion was not appended in the next turn", carriers(manager).isEmpty)
     }
 
-    /// T6b: /stop interleaving at a drain await prevents the append.
+    /// T6b: /stop interleaving at a drain await prevents the append — also
+    /// of a result that finished after the stop's cutoff (so no stop filter
+    /// names it; only the post-await recheck of the run can refuse it).
     private func roundStopDuringRead(_ stage: String) async throws {
         let manager = await roundFresh()
         server.script([Self.chatTools([Self.bgCall("t6b-bg", "sleep 0.1; echo T6B_BG"), Self.fgCall("t6b-fg", "sleep 1.2")])])
-        onceAt(stage) { await manager._testStop() }
+        onceAt(stage) {
+            await manager._testStop()
+            await SubagentBackgroundRegistry.shared._testEnqueueCompletion(Self.injectedCompletion("t6b_late", final: "T6B_LATE"))
+        }
         manager._testStartTurn(for: user("T6b stop at \(stage)"))
         _ = await manager._testAwaitIdle(timeout: 30)
         _ = await waitUntil(timeout: 20) { manager._testMessages.contains { $0.content.hasPrefix("⛔ Work interrupted") } }

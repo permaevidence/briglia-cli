@@ -151,9 +151,16 @@ extension MidturnHarness {
     /// an earlier round of the turn) are never appended.
     private func roundReceiptsSkipped() async throws {
         let manager = await roundFresh()
-        server.script([Self.chatTools([Self.bgCall("t9-bg", "sleep 0.5; echo T9_OBSERVED")])])
+        // Round 1 lasts ~0.4 s (foreground sleep), so the rest of the script
+        // is queued before the second request; the job outlives round 1.
+        server.script([Self.chatTools([Self.bgCall("t9-bg", "sleep 1.2; echo T9_OBSERVED"), Self.fgCall("t9-hold", "sleep 0.4")])])
         manager._testStartTurn(for: user("T9 launch then wait for it"))
-        guard let job = await waitForRunningJob() else { check("T9 job started", false); return }
+        var found: BackgroundProcessRegistry.RunningJob?
+        _ = await waitUntil(timeout: 15) {
+            found = await BackgroundProcessRegistry.shared.runningMainOwnedJobs().first { $0.command.contains("T9_OBSERVED") }
+            return found != nil
+        }
+        guard let job = found else { check("T9 job started", false); return }
         server.script([
             Self.chatTools([(id: "t9-wait", name: "bash_manage", args: ["mode": "wait", "handle": job.handle, "wait_seconds": 20])]),
             Self.chatTools([Self.fgCall("t9-next", "sleep 0.2")]),

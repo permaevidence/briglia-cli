@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
 
 /// Pure rows: the appended section, the foreground split, the typed field
 /// and the sidecar sibling (additive in both directions), and the delivery
