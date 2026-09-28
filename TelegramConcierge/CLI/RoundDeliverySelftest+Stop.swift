@@ -155,7 +155,10 @@ extension MidturnHarness {
         _ = await waitUntil(timeout: 20) { manager._testMessages.contains { $0.content.hasPrefix("⛔ Work interrupted") } }
         check("T6c the interrupted outcome keeps the round with its section", carriers(manager).first?.content.contains("T6C_BG") == true,
               "carriers \(carriers(manager).map { String($0.content.suffix(160)) }) last \(manager._testMessages.last?.content.prefix(80) ?? "")")
-        check("T6c' acknowledged after the interrupted-outcome save", await roundSettled(manager))
+        // Only this item: the killed foreground command has its own (stopped)
+        // completion, delivered later by today's idle path.
+        check("T6c' acknowledged after the interrupted-outcome save",
+              await itemSettled(manager, carriers(manager).first?.deliveredCompletions.first))
         await manager._testIdleDrains()
         check("T6c'' no idle copy", !manager._testMessages.contains { $0.kind == .bashComplete && $0.content.contains("T6C_BG") })
     }

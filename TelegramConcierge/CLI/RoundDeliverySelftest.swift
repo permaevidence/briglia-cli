@@ -157,6 +157,18 @@ extension MidturnHarness {
         } && records().isEmpty
     }
 
+    /// One item settled: no reservation, not queued in either registry, no
+    /// crash record naming its completion id (other jobs may still be open).
+    func itemSettled(_ manager: ConversationManager, _ id: UUID?) async -> Bool {
+        guard let id else { return false }
+        return await waitUntil(timeout: 5) {
+            let bash = await BackgroundProcessRegistry.shared.pendingCompletionsForDelivery()
+            let sub = await SubagentBackgroundRegistry.shared.pendingCompletionsForDelivery()
+            return manager._testRoundReservations[id] == nil && !bash.contains { $0.messageId == id }
+                && !sub.contains { $0.messageId == id }
+        } && !records().contains { $0.completionMessageId == id && $0.completion == .owed }
+    }
+
     func savedConversationText() -> String {
         (try? String(contentsOf: StoragePaths.dataRoot.appendingPathComponent("conversation.json"), encoding: .utf8)) ?? ""
     }
