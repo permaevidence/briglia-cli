@@ -218,15 +218,13 @@ final class GitCheckpointTracker: @unchecked Sendable {
         StageMarkers.exit(launchToken, .ok)
 
         // Drain stdout on a background queue so a full pipe buffer can't
-        // deadlock the child while we wait.
-        let outputBox = NSMutableData()
-        let readQueue = DispatchQueue(label: "com.permaevidence.briglia.git-checkpoint.read")
-        readQueue.async {
-            // Runs on a dispatch thread: the task-local call is passed in.
-            let readerToken = StageMarkers.enter("git.reader_read_to_eof", detail: label, call: markerCall)
-            outputBox.append(out.fileHandleForReading.readDataToEndOfFile())
-            StageMarkers.exit(readerToken, .ok)
-        }
+        // deadlock the child while we wait. The reader is BOUNDED: waiting
+        // for EOF alone could last forever, because EOF needs every copy of
+        // the pipe's write end closed, and a descendant of git (a hook, a
+        // filter or fsmonitor helper, a daemon) can keep stdout open after
+        // git itself exited (reproduced on macOS and Linux, 2026-09-28).
+        let reader = BoundedPipeReader(pipe: out, label: label, call: markerCall)
+        reader.start()
 
         let waitToken = StageMarkers.enter("git.wait_exit", detail: label)
         if finished.wait(timeout: .now() + timeoutSeconds) == .timedOut {
@@ -238,21 +236,119 @@ final class GitCheckpointTracker: @unchecked Sendable {
                 _ = finished.wait(timeout: .now() + 2)
             }
             StageMarkers.exit(killToken, .ok)
+            reader.stopNow()
             runDetail = "timeout"
             return nil
         }
         StageMarkers.exit(waitToken, .ok)
-        // Barrier: ensure the reader finished before touching the data.
+        // git has exited, so everything it wrote is already in the pipe:
+        // drain what is there, then stop at EOF, at the first idle poll, or
+        // at the grace deadline — whichever comes first.
         let drainToken = StageMarkers.enter("git.drain_stdout_barrier", detail: label)
-        readQueue.sync {}
-        StageMarkers.exit(drainToken, .ok)
+        let drained = reader.finish(grace: Self.stdoutDrainGraceSeconds)
+        StageMarkers.exit(drainToken, drained.reachedEOF ? .ok : .error,
+                          detail: drained.reachedEOF ? "eof" : "stdout still held open by a descendant; stopped reading")
         guard process.terminationStatus == 0 else {
             runDetail = "exit \(process.terminationStatus)"
             return nil
         }
         runOutcome = .ok
         runDetail = label
-        return String(data: outputBox as Data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(data: drained.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// After git exits, the reader stops reading at EOF, at its first idle
+    /// poll, or when this grace passes. It is the READER's deadline, not a
+    /// strict return ceiling for `runGit`: `finish` then waits for the
+    /// reader thread to acknowledge for at most `grace + 1` s (3 s) — the
+    /// outer wait — so a pathological reader cannot hold the caller longer.
+    static let stdoutDrainGraceSeconds: Double = 2
+
+    /// poll(2)+read(2) reader for one pipe with a stop request and a hard
+    /// deadline (the corelibs readabilityHandler/readDataToEndOfFile
+    /// pitfalls do not apply). The pipe is retained until the reader thread
+    /// has finished, so its descriptor can never be closed (and reused)
+    /// under a read in progress.
+    final class BoundedPipeReader: @unchecked Sendable {
+        private let pipe: Pipe
+        private let label: String
+        private let call: StageMarkers.CallContext?
+        private let lock = NSLock()
+        private var data = Data()
+        private var reachedEOF = false
+        /// 0 = run until EOF; otherwise stop at the first idle poll or at
+        /// this monotonic deadline.
+        private var stopDeadlineNanos: UInt64 = 0
+        private let done = DispatchSemaphore(value: 0)
+
+        init(pipe: Pipe, label: String, call: StageMarkers.CallContext?) {
+            self.pipe = pipe
+            self.label = label
+            self.call = call
+        }
+
+        func start() {
+            DispatchQueue(label: "com.permaevidence.briglia.git-checkpoint.read").async { self.loop() }
+        }
+
+        private func stopDeadline() -> UInt64 {
+            lock.lock(); defer { lock.unlock() }
+            return stopDeadlineNanos
+        }
+
+        private func loop() {
+            let token = StageMarkers.enter("git.reader_read_to_eof", detail: label, call: call)
+            let fd = pipe.fileHandleForReading.fileDescriptor
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            var eof = false
+            while true {
+                let deadline = stopDeadline()
+                if deadline != 0 && StageMarkers.monotonicNanos() >= deadline { break }
+                var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let ready = poll(&pfd, 1, 50)
+                if ready < 0 {
+                    if errno == EINTR { continue }
+                    break
+                }
+                if ready == 0 {
+                    // Idle: keep waiting while git runs; once a stop was
+                    // requested, idle means everything git wrote is read.
+                    if deadline != 0 { break }
+                    continue
+                }
+                let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+                if n > 0 {
+                    lock.lock(); data.append(contentsOf: buffer[0..<n]); lock.unlock()
+                } else if n == 0 {
+                    eof = true
+                    break
+                } else if errno != EINTR && errno != EAGAIN {
+                    break
+                }
+            }
+            lock.lock(); reachedEOF = eof; lock.unlock()
+            StageMarkers.exit(token, eof ? .ok : .error, detail: eof ? "eof" : "stopped before eof")
+            done.signal()
+        }
+
+        /// Asks the reader to stop as soon as the pipe is idle, EOF is seen
+        /// or `grace` passes (the reader grace), then waits for it at most
+        /// `grace + 1` s (the outer wait) and returns what it read.
+        func finish(grace: Double) -> (data: Data, reachedEOF: Bool) {
+            lock.lock()
+            stopDeadlineNanos = StageMarkers.monotonicNanos() + UInt64(grace * 1_000_000_000)
+            lock.unlock()
+            _ = done.wait(timeout: .now() + grace + 1)
+            lock.lock(); defer { lock.unlock() }
+            return (data, reachedEOF)
+        }
+
+        /// Timeout path: stop reading without waiting.
+        func stopNow() {
+            lock.lock()
+            stopDeadlineNanos = StageMarkers.monotonicNanos()
+            lock.unlock()
+        }
     }
 
     // MARK: - Ledger

@@ -396,28 +396,64 @@ struct StageMarkersSelftest: AsyncParsableCommand {
         return path
     }
 
+    static func fakeGit(in dir: URL, name: String, body: String) -> String {
+        let path = dir.appendingPathComponent(name).path
+        FileManager.default.createFile(atPath: path, contents: Data(("#!/bin/sh\n" + body + "\n").utf8),
+                                       attributes: [.posixPermissions: 0o700])
+        return path
+    }
+
+    /// Git reader fix (separate commit): the stdout drain after git exits is
+    /// bounded, so a descendant holding stdout no longer stalls the call.
     static func gitReaderBarrier(_ check: Check, root: URL) throws {
         let dir = root.appendingPathComponent("fakegit")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let fake = try fakeGitHoldingStdout(in: dir, hold: 3)
+        let fake = try fakeGitHoldingStdout(in: dir, hold: 30)
         let ctx = StageMarkers.CallContext(callId: "call_sm_git", tool: "write_file", depth: 0)
         let start = Date()
         let out = StageMarkers.$call.withValue(ctx) {
-            GitCheckpointTracker.runGit(["stash", "create"], in: dir.path, timeoutSeconds: 1, executable: fake)
+            GitCheckpointTracker.runGit(["stash", "create"], in: dir.path, timeoutSeconds: 15, executable: fake)
         }
         let elapsed = Date().timeIntervalSince(start)
         StageMarkers.flush(timeout: 10)
         let recs = records(StageMarkers.logURL).filter { ($0["call"] as? String) == "call_sm_git" && $0["ev"] as? String == "exit" }
         let barrier = recs.first { $0["stage"] as? String == "git.drain_stdout_barrier" }
-        let waitExit = recs.first { $0["stage"] as? String == "git.wait_exit" }
-        print("  · fake git (descendant holds stdout 3 s, timeout 1 s): runGit returned after \(String(format: "%.2f", elapsed)) s, barrier stage \(barrier?["elapsed_ms"] ?? "-") ms")
-        // v0.2.40 behaviour, made visible: git exits at once (wait_exit ok),
-        // then the reader barrier waits for the descendant — past the 1 s
-        // timeout, unbounded in general.
-        check("SM11 the markers localize the Git reader wait: wait_exit ok, then the stdout barrier holds past the git timeout",
-              out == "deadbeefcafe" && waitExit?["outcome"] as? String == "ok"
-              && ((barrier?["elapsed_ms"] as? Double) ?? 0) >= 2500 && elapsed >= 2.5,
+        print("  · fake git (descendant holds stdout 30 s): runGit returned after \(String(format: "%.2f", elapsed)) s, barrier \(barrier?["elapsed_ms"] ?? "-") ms")
+        check("SM11 a descendant holding git's stdout no longer stalls runGit: output returned within the drain grace",
+              out == "deadbeefcafe" && elapsed < 4 && barrier?["outcome"] as? String == "error"
+              && (barrier?["detail"] as? String)?.contains("held open") == true,
               "out=\(out ?? "nil") elapsed=\(elapsed) barrier=\(barrier ?? [:])")
+
+        // G1 real git, unchanged output.
+        let repo = root.appendingPathComponent("realgit")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        shell("git init -q . && printf 'a\\n' > a.txt && git add a.txt && git -c user.name=t -c user.email=t@example.invalid commit -q -m init", in: repo.path)
+        let head = GitCheckpointTracker.runGit(["rev-parse", "HEAD"], in: repo.path)
+        check("G1 real git rev-parse HEAD returns the 40-hex SHA", head?.count == 40
+              && head?.allSatisfy { $0.isHexDigit } == true, head ?? "nil")
+
+        // G2 large output is captured completely (reader keeps up while git runs).
+        let big = fakeGit(in: dir, name: "fake-big", body: "python3 -c 'import sys; sys.stdout.write(\"a\" * 300000)'\nexit 0")
+        let bigOut = GitCheckpointTracker.runGit(["stash", "create"], in: dir.path, executable: big)
+        check("G2 300 KB of stdout is returned in full", bigOut?.count == 300_000, "\(bigOut?.count ?? -1)")
+
+        // G3 a slow writer: idle polls while git still runs never end the read.
+        let slow = fakeGit(in: dir, name: "fake-slow", body: "echo first\nsleep 1\necho second\nexit 0")
+        let slowOut = GitCheckpointTracker.runGit(["stash", "create"], in: dir.path, executable: slow)
+        check("G3 output written across a 1 s pause is fully captured", slowOut == "first\nsecond", slowOut ?? "nil")
+
+        // G4 the timeout path is unchanged: nil, bounded.
+        let hang = fakeGit(in: dir, name: "fake-hang", body: "sleep 20\necho late\nexit 0")
+        let t0 = Date()
+        let hangOut = GitCheckpointTracker.runGit(["stash", "create"], in: dir.path, timeoutSeconds: 1, executable: hang)
+        let hangElapsed = Date().timeIntervalSince(t0)
+        check("G4 a git that outlives the timeout still yields nil within the timeout + kill budget",
+              hangOut == nil && hangElapsed < 6, "out=\(hangOut ?? "nil") elapsed=\(hangElapsed)")
+
+        // G5 a non-zero exit is still a failure.
+        let fail = fakeGit(in: dir, name: "fake-fail", body: "echo nope\nexit 3")
+        check("G5 a non-zero git exit still yields nil",
+              GitCheckpointTracker.runGit(["stash", "create"], in: dir.path, executable: fail) == nil, "")
     }
 
     // MARK: - Child modes
