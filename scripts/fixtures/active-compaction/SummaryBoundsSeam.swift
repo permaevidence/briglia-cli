@@ -152,5 +152,71 @@ extension ConversationManager {
         try T.check(fellBack?.contains("[Fallback prune summary]") == true && fellBack?.contains("GIANT_PARTIAL") == false
                     && T.summaryRequests == 2,
             "SBL12 oversized historical summary: two rejected replies fall back as before" + tag)
+        try await activeTestPruneRefusalRetry(server: server, wire: wire)
+    }
+
+    /// A past-turn prune summary whose first reply is a tool call goes through
+    /// the refusal loop; rejected replies there share the same one-retry budget
+    /// and are charged like any other attempt.
+    /// Chat Completions only: Responses maintenance requests expose no tools,
+    /// and its decoder refuses a call to an unexposed tool before this loop.
+    func activeTestPruneRefusalRetry(server: CaptureServer, wire: ProviderWireProtocol) async throws {
+        guard wire == .chatCompletions else { return }
+        typealias T = CompactionTestInputs
+        let tag = " (Chat Completions)"
+        func round(_ id: String, cost: Int) -> ToolInteraction {
+            ToolInteraction(assistantMessage: AssistantToolCallMessage(content: "done", toolCalls: [
+                ToolCall(id: id, type: "function", function: FunctionCall(name: "read_file", arguments: "{}"))
+            ]), results: [ToolResultMessage(toolCallId: id, content: "evidence")], measuredTokenCost: cost)
+        }
+        func prune(_ script: [String]) async throws -> String {
+            try await activeTestSeed(); server.clear()
+            T.summaryScript = []; T.pruneScript = script; T.pruneRequests = 0
+            defer { T.pruneScript = [] }
+            messages = [Message(role: .user, content: "Earlier request"),
+                Message(role: .assistant, content: "Earlier answer", toolInteractions: [round("old", cost: 160000)]),
+                Message(role: .assistant, content: "Recent answer", toolInteractions: [round("recent", cost: 100000)]),
+                Message(role: .user, content: "Current task")]
+            guard saveConversation() else { throw T.Failure("prune refusal seed") }
+            lastPromptTokens = 250001
+            var history = messages
+            _ = try await pruneStoredToolInteractionsMidLoop(messagesForLLM: &history,
+                currentTurnInteractions: [], calendarContext: nil, emailContext: nil, chunkSummaries: [], totalChunkCount: 0,
+                currentUserMessageId: messages.last!.id, turnStartDate: Date(), tools: [], deferredMCPSummaries: [])
+            return history.compactMap(\.prunedContextSummary).joined(separator: "\n")
+        }
+        let tool = try T.body(protocol: wire, text: "", toolID: "refused", path: "/not-executed")
+        let good = try T.summaryBody(protocol: wire, text: "REFUSAL_RETRY_OK evidence verified.", cost: 0.1)
+        let empty = try T.summaryBody(protocol: wire, text: "")
+        let cut = try T.summaryBody(protocol: wire, text: "REFUSAL_PARTIAL", cut: true)
+        for (name, bad) in [("empty", empty), ("cut off", cut)] {
+            let kept = try await prune([tool, bad, good])
+            try T.check(kept.contains("REFUSAL_RETRY_OK") && !kept.contains("REFUSAL_PARTIAL") && T.pruneRequests == 3,
+                "SBL13 prune summary after a tool call: \(name) reply retried once, then the good reply is used" + tag)
+            let fallback = try await prune([tool, bad, bad])
+            try T.check(fallback.contains("[Fallback prune summary]") && !fallback.contains("REFUSAL_PARTIAL") && T.pruneRequests == 3,
+                "SBL14 prune summary after a tool call: two \(name) replies fall back to the programmatic summary" + tag)
+        }
+        // The budget is shared: a rejection before the tool call counts.
+        let shared = try await prune([empty, tool, empty])
+        try T.check(shared.contains("[Fallback prune summary]") && T.pruneRequests == 3,
+            "SBL15 one rejection before and one after a tool call exhaust the single retry" + tag)
+        // Refused tool calls are not rejected replies and do not spend the retry.
+        let tools = try await prune([tool, tool, good])
+        try T.check(tools.contains("REFUSAL_RETRY_OK") && T.pruneRequests == 3,
+            "SBL16 repeated tool calls still reach the summary (refusals are not rejections)" + tag)
+        for (name, cutOff) in [("cut-off", true), ("complete", false)] {
+            let before = KeychainHelper.openRouterSpendSnapshot().today
+            let charged = try await prune([tool, try T.summaryBody(protocol: wire, text: "", cut: cutOff, nullContent: true, cost: 0.3), good])
+            let delta = KeychainHelper.openRouterSpendSnapshot().today - before
+            try T.check(charged.contains("REFUSAL_RETRY_OK") && abs(delta - 0.4) < 1e-9 && T.pruneRequests == 3,
+                "SBL17 prune after a tool call: rejected \(name) no-text reply is charged (delta \(delta))")
+        }
+        let before = KeychainHelper.openRouterSpendSnapshot().today
+        let exhausted = try await prune([tool, try T.summaryBody(protocol: wire, text: "", cut: true, nullContent: true, cost: 0.3),
+                                         try T.summaryBody(protocol: wire, text: "", nullContent: true, cost: 0.2)])
+        let delta = KeychainHelper.openRouterSpendSnapshot().today - before
+        try T.check(exhausted.contains("[Fallback prune summary]") && abs(delta - 0.5) < 1e-9 && T.pruneRequests == 3,
+            "SBL18 prune after a tool call: two no-text replies are both charged, then the fallback (delta \(delta))")
     }
 }

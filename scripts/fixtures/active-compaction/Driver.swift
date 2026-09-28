@@ -30,7 +30,7 @@ enum CompactionTestInputs {
         lock.lock(); defer { lock.unlock() }
         let text = String(decoding: request.body, as: UTF8.self)
         if text.contains("ACTIVE TURN COMPACTION") { summaryRequests += 1; if !summaryScript.isEmpty { return summaryScript.removeFirst() } }
-        if text.contains("[PRUNE SUMMARY REQUEST") { pruneRequests += 1; if !pruneScript.isEmpty { return pruneScript.removeFirst() } }
+        if text.contains("[PRUNE SUMMARY REQUEST") || text.contains("[PRUNE SUMMARY RETRY") { pruneRequests += 1; if !pruneScript.isEmpty { return pruneScript.removeFirst() } }
         guard let wire = dynamicWire else { return nil }
         let tokens = request.body.count / 3
         if text.contains("ACTIVE TURN COMPACTION") {
