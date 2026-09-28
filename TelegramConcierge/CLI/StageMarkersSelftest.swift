@@ -64,6 +64,9 @@ struct StageMarkersSelftest: AsyncParsableCommand {
         Self.overhead(check)
         try Self.childRows(check, root: tempRoot)
         try Self.gitReaderBarrier(check, root: tempRoot)
+        try Self.customPathRows(check, root: tempRoot)
+        try Self.writeFailureRows(check, root: tempRoot)
+        try Self.stallReportRows(check, root: tempRoot)
         print("Stage markers selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }
     }
@@ -419,6 +422,7 @@ struct StageMarkersSelftest: AsyncParsableCommand {
     // MARK: - Child modes
 
     static func runChild(_ mode: String) async throws {
+        applyChildFileSizeLimit()
         let ctx = StageMarkers.CallContext(callId: "call_sm_\(mode)", tool: "selftest", depth: 0)
         switch mode {
         case "hold":
@@ -434,7 +438,7 @@ struct StageMarkersSelftest: AsyncParsableCommand {
                 Thread.sleep(forTimeInterval: 0.05)
                 StageMarkers.exit(fast, .ok)
             }
-            StageMarkers.flush(timeout: 10)
+            StageMarkers.flush(timeout: Double(ProcessInfo.processInfo.environment["SM_FLUSH_TIMEOUT"] ?? "") ?? 10)
             print("BODY-COMPLETED")
         case "basic":
             StageMarkers.$call.withValue(ctx) {
@@ -463,6 +467,8 @@ struct StageMarkersSelftest: AsyncParsableCommand {
             // Normal exit while the writer thread is stuck in open().
         case "bench":
             try await benchChild()
+        case "recover", "flood":
+            try round2Child(mode, ctx: ctx)
         default:
             throw ValidationError("unknown child mode \(mode)")
         }

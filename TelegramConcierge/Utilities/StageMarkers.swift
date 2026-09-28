@@ -25,17 +25,35 @@ import Glibc
 /// writer thread waits; the queue is bounded (`maxQueued`), and records that
 /// overflow it are counted and reported in the next written record.
 ///
+/// Write failures are never silent (Codex R2, 2026-09-28). Every `write(2)`
+/// result is checked on the writer thread: EINTR and short writes are
+/// retried; a record that still cannot be written (ENOSPC, EFBIG, EIO…) is
+/// counted, the first failure of an episode and then at most one notice a
+/// minute go to stderr, the first 50 unwritten records of an episode are
+/// copied to stderr (`[StageMarkers-unwritten] {…}`), a partial record is
+/// terminated with a newline before the next one, and the next record that
+/// IS written carries `write_failed_before`. Nothing is retried later and
+/// the tool path never waits. `briglia __stage-markers` reports malformed
+/// lines and sequence gaps, so a lossy log is visible when read.
+///
 /// Stall REPORTER, not a killer. A separate watchdog thread writes ONE
 /// `stall_suspected` record (log file and stderr) for a stage open longer
 /// than `BRIGLIA_STALL_REPORT_SECONDS` (default 120 s), with every open
 /// stage and, on Linux, the state/wait channel of each thread. It never
 /// cancels, fails, retries or otherwise touches the stage: the operation may
 /// still complete, and reporting it failed could cause overlapping writes.
+/// The complete report (not only a one-line alert) is written to stderr by
+/// the watchdog thread itself, outside the marker lock, so it does not depend
+/// on the log writer, which may be the thing that hangs (Codex R3). Delivery
+/// to stderr is still not guaranteed if stderr itself is blocked.
 ///
 /// Environment:
 /// - `BRIGLIA_STAGE_MARKERS=0` disables everything (no thread is started).
 /// - `BRIGLIA_STAGE_MARKERS_PATH=/abs/file` writes elsewhere, e.g. to
-///   container-local storage when the data directory is a slow mount.
+///   container-local storage when the data directory is a slow mount. Only
+///   directories missing on that path are created (0700); the mode of an
+///   existing directory, or of a symlink's target, is never changed (Codex
+///   R1). The log file itself is kept 0600.
 /// - `BRIGLIA_STAGE_MARKERS_STDERR=1` mirrors every record to stderr.
 /// - `BRIGLIA_STALL_REPORT_SECONDS=<n>` sets the reporter threshold.
 enum StageMarkers {
@@ -82,6 +100,12 @@ enum StageMarkers {
         return 8 * 1024 * 1024
     }()
     static let maxQueued = 10_000
+
+    /// True when `BRIGLIA_STAGE_MARKERS_PATH` names the log (outside
+    /// Briglia's private roots: existing directories are left alone).
+    static var usesCustomPath: Bool {
+        ProcessInfo.processInfo.environment["BRIGLIA_STAGE_MARKERS_PATH"]?.hasPrefix("/") == true
+    }
 
     /// Where the records go. Resolved once, on first use.
     static var logURL: URL {
@@ -143,6 +167,20 @@ enum StageMarkers {
         return Engine.shared.flush(timeout: timeout)
     }
 
+    /// Writer counters for this process (tests; the reader command works from
+    /// the file instead, since it runs in another process).
+    struct Stats: Sendable {
+        let written: UInt64
+        let failed: UInt64
+        let dropped: UInt64
+        let lastError: String?
+    }
+
+    static func stats() -> Stats {
+        guard enabled else { return Stats(written: 0, failed: 0, dropped: 0, lastError: nil) }
+        return Engine.shared.stats()
+    }
+
     /// Currently open stages (for tests and the doctor line).
     static func openStages() -> [(stage: String, callId: String?, tool: String?, elapsedMs: Int)] {
         guard enabled else { return [] }
@@ -202,7 +240,11 @@ enum StageMarkers {
         private var dropped = 0
         private var nextToken: UInt64 = 1
         private var nextSeq: UInt64 = 1
-        private var written: UInt64 = 0   // highest seq written (or skipped)
+        private var written: UInt64 = 0   // highest seq processed (written, failed or dropped)
+        private var writtenOK: UInt64 = 0
+        private var failedTotal: UInt64 = 0
+        private var droppedTotal: UInt64 = 0
+        private var lastWriteError: String?
         private var open: [UInt64: OpenStage] = [:]
         private var lastRecord: (seq: UInt64, kind: String, stage: String)?
         private var started = false
@@ -211,6 +253,15 @@ enum StageMarkers {
         private var handle: FileHandle?
         private var usingStderrFallback = false
         private var openFailureReported = false
+        /// A record was only partly written and not newline-terminated.
+        private var pendingFragment = false
+        /// Records not written since the last one that was.
+        private var failedSinceOK = 0
+        private var lastFailureNoticeNanos: UInt64 = 0
+        private var fallbackBudget = Engine.fallbackPerEpisode
+        private var lastReopenAfterFailureNanos: UInt64 = 0
+        static let fallbackPerEpisode = 50
+        static let noticeIntervalNanos: UInt64 = 60 * 1_000_000_000
 
         private func startIfNeeded() {
             // Caller holds `lock`.
@@ -226,7 +277,8 @@ enum StageMarkers {
             watchdog.start()
         }
 
-        private func enqueue(_ make: (UInt64) -> Record) {
+        @discardableResult
+        private func enqueue(_ make: (UInt64) -> Record) -> Record {
             // Caller holds `lock`.
             startIfNeeded()
             let seq = nextSeq
@@ -235,11 +287,20 @@ enum StageMarkers {
             lastRecord = (seq, record.kind.rawValue, record.stage)
             if queue.count >= StageMarkers.maxQueued {
                 dropped += 1
+                droppedTotal += 1
                 written = max(written, seq)
             } else {
                 queue.append(record)
             }
             lock.signal()
+            return record
+        }
+
+        func stats() -> StageMarkers.Stats {
+            lock.lock()
+            defer { lock.unlock() }
+            return StageMarkers.Stats(written: writtenOK, failed: failedTotal, dropped: droppedTotal,
+                                      lastError: lastWriteError)
         }
 
         func open(stage: String, call: CallContext?, round: Int?, startNanos: UInt64, detail: String?) -> UInt64 {
@@ -318,31 +379,102 @@ enum StageMarkers {
 
                 var droppedNote = droppedNow
                 for record in batch {
-                    let line = Self.render(record, dropped: droppedNote)
+                    let line = Self.render(record, dropped: droppedNote, writeFailedBefore: failedSinceOK)
                     droppedNote = 0
-                    writeLine(line)
-                    if StageMarkers.mirrorToStderr { Self.writeStderr(line) }
+                    let failure = writeLine(line)
+                    // The watchdog already put the full stall report on
+                    // stderr itself; do not mirror it twice.
+                    if StageMarkers.mirrorToStderr && record.kind != .stall { Self.writeStderr(line) }
+                    if let failure {
+                        noteWriteFailure(failure, line: line)
+                    } else if failedSinceOK > 0 {
+                        Self.writeStderr("[StageMarkers] log writes recovered: \(failedSinceOK) record(s) before this one were not written to \(StageMarkers.logURL.path)\n")
+                        failedSinceOK = 0
+                        fallbackBudget = Self.fallbackPerEpisode
+                        lastFailureNoticeNanos = 0
+                    }
                     lock.lock()
                     written = max(written, record.seq)
+                    if failure == nil { writtenOK += 1 } else {
+                        failedTotal += 1
+                        lastWriteError = failure
+                    }
                     lock.broadcast()
                     lock.unlock()
                 }
             }
         }
 
-        private func writeLine(_ line: String) {
+        /// Writes one record. Returns nil when every byte was written, else a
+        /// short description of the failure (writer thread only).
+        private func writeLine(_ line: String) -> String? {
             if handle == nil || (!usingStderrFallback && currentFileWasRemoved()) {
                 reopen()
             }
-            guard let handle else { return }
-            let bytes = Array(line.utf8)
-            let fd = handle.fileDescriptor
-            // ONE write per record; O_APPEND keeps concurrent writers
-            // (other Briglia processes) line-atomic for small records.
-            _ = bytes.withUnsafeBytes { raw in
-                Glibc_write(fd, raw.baseAddress, raw.count)
+            guard let handle else {
+                // Open failed and every record is mirrored to stderr already.
+                return "log file unavailable (records are on stderr)"
             }
-            rotateIfNeeded(fd: fd)
+            var bytes = Array(line.utf8)
+            // Terminate a fragment left by an earlier partial write, so the
+            // fragment stays one malformed line and this record parses.
+            if pendingFragment { bytes.insert(0x0A, at: 0) }
+            let fd = handle.fileDescriptor
+            // ONE write per record in the normal case; O_APPEND keeps
+            // concurrent writers (other Briglia processes) line-atomic for
+            // small records. EINTR and short writes continue the same record.
+            let (count, code) = Self.writeAll(fd, bytes)
+            if code == 0 {
+                pendingFragment = false
+                rotateIfNeeded(fd: fd)
+                return nil
+            }
+            if count > 0 { pendingFragment = bytes[count - 1] != 0x0A }
+            // A stale descriptor (a remounted volume) may recover on reopen;
+            // try at most every 5 s, and never for the stderr fallback.
+            if !usingStderrFallback, code == EBADF || code == EIO || code == ESTALE {
+                let now = StageMarkers.monotonicNanos()
+                if now &- lastReopenAfterFailureNanos >= 5_000_000_000 {
+                    lastReopenAfterFailureNanos = now
+                    try? self.handle?.close()
+                    self.handle = nil
+                }
+            }
+            let partial = count > 0 ? ", \(count) of \(bytes.count) bytes written" : ""
+            return "\(String(cString: strerror(code))) (errno \(code)\(partial))"
+        }
+
+        /// write(2) until done: EINTR retries, a short write continues with
+        /// the rest. Returns the bytes written and 0, or the errno that
+        /// stopped it (EIO for a zero-byte write).
+        static func writeAll(_ fd: Int32, _ bytes: [UInt8]) -> (Int, Int32) {
+            bytes.withUnsafeBytes { raw -> (Int, Int32) in
+                guard let base = raw.baseAddress else { return (0, 0) }
+                var offset = 0
+                while offset < raw.count {
+                    let n = Glibc_write(fd, base + offset, raw.count - offset)
+                    if n > 0 { offset += n; continue }
+                    if n < 0 && errno == EINTR { continue }
+                    return (offset, n == 0 ? EIO : errno)
+                }
+                return (offset, 0)
+            }
+        }
+
+        /// A record could not be written: count it, say so on stderr (first
+        /// failure, then at most once a minute) and copy the first records
+        /// of the episode to stderr so they are not simply gone.
+        private func noteWriteFailure(_ reason: String, line: String) {
+            failedSinceOK += 1
+            let now = StageMarkers.monotonicNanos()
+            if failedSinceOK == 1 || now &- lastFailureNoticeNanos >= Self.noticeIntervalNanos {
+                lastFailureNoticeNanos = now
+                Self.writeStderr("[StageMarkers] cannot write \(StageMarkers.logURL.path): \(reason); \(failedSinceOK) record(s) not written so far in this episode\(StageMarkers.mirrorToStderr ? "" : "; the first \(Self.fallbackPerEpisode) are copied to stderr")\n")
+            }
+            if !StageMarkers.mirrorToStderr, !usingStderrFallback, fallbackBudget > 0 {
+                fallbackBudget -= 1
+                Self.writeStderr("[StageMarkers-unwritten] " + line)
+            }
         }
 
         private func currentFileWasRemoved() -> Bool {
@@ -360,7 +492,13 @@ enum StageMarkers {
             usingStderrFallback = false
             let url = StageMarkers.logURL
             do {
-                try PrivateStorage.ensureDirectory(url.deletingLastPathComponent())
+                if StageMarkers.usesCustomPath {
+                    // Outside Briglia's roots: never tighten an existing
+                    // (possibly shared) directory or a symlink's target.
+                    try Self.createMissingDirectories(url.deletingLastPathComponent())
+                } else {
+                    try PrivateStorage.ensureDirectory(url.deletingLastPathComponent())
+                }
                 handle = try PrivateStorage.openForAppend(url)
             } catch {
                 if !openFailureReported {
@@ -372,6 +510,35 @@ enum StageMarkers {
                 // Keep diagnostics alive somewhere (never closed by us).
                 handle = FileHandle.standardError
                 usingStderrFallback = true
+            }
+        }
+
+        /// Creates only the directories that do not exist yet, 0700, and
+        /// changes nothing that already exists (symlinks are followed, their
+        /// targets left as they are). A directory created concurrently by
+        /// someone else (EEXIST) is left alone too.
+        static func createMissingDirectories(_ dir: URL) throws {
+            var missing: [String] = []
+            var probe = dir.standardizedFileURL.path
+            while true {
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: probe, isDirectory: &isDir) {
+                    guard isDir.boolValue else {
+                        throw PrivateStorage.StorageError(description: "\(probe) exists and is not a directory")
+                    }
+                    break
+                }
+                missing.insert(probe, at: 0)
+                let parent = (probe as NSString).deletingLastPathComponent
+                if parent == probe || parent.isEmpty { break }
+                probe = parent
+            }
+            for path in missing {
+                if mkdir(path, 0o700) != 0 {
+                    if errno == EEXIST { continue }
+                    throw PrivateStorage.StorageError(description: "could not create \(path): \(String(cString: strerror(errno)))")
+                }
+                // mkdir applies the umask, which can only narrow 0700.
             }
         }
 
@@ -387,10 +554,7 @@ enum StageMarkers {
         }
 
         static func writeStderr(_ line: String) {
-            let bytes = Array(line.utf8)
-            _ = bytes.withUnsafeBytes { raw in
-                Glibc_write(STDERR_FILENO, raw.baseAddress, raw.count)
-            }
+            _ = writeAll(STDERR_FILENO, Array(line.utf8))
         }
 
         // MARK: Watchdog thread (reporter only)
@@ -432,15 +596,17 @@ enum StageMarkers {
                     let wall = Date().timeIntervalSince1970
                     let elapsed = stage.elapsedNanos
                     lock.lock()
-                    enqueue { seq in
+                    let record = enqueue { seq in
                         Record(seq: seq, kind: .stall, stage: stage.stage, token: stage.token, callId: stage.callId,
                                tool: stage.tool, depth: nil, round: nil, monoNanos: now, wall: wall,
                                elapsedNanos: elapsed, outcome: nil, detail: nil, extraJSON: extra)
                     }
                     lock.unlock()
-                    // Also straight to stderr from this thread, so a report
-                    // exists even if the log volume itself is what hangs.
-                    Self.writeStderr("[StageMarkers] STALL SUSPECTED: stage \(stage.stage) open \(elapsed / 1_000_000) ms (call \(stage.callId ?? "-"), tool \(stage.tool ?? "-")); see \(StageMarkers.logURL.path)\n")
+                    // The COMPLETE report goes straight to stderr from this
+                    // thread, outside the lock and independent of the writer
+                    // thread: the log volume may be exactly what hangs.
+                    Self.writeStderr("[StageMarkers] STALL SUSPECTED: stage \(stage.stage) open \(elapsed / 1_000_000) ms (call \(stage.callId ?? "-"), tool \(stage.tool ?? "-")); full report follows and is also queued for \(StageMarkers.logURL.path)\n")
+                    Self.writeStderr("[StageMarkers] STALL REPORT " + Self.render(record, dropped: 0, writeFailedBefore: 0))
                 }
             }
         }
@@ -481,7 +647,7 @@ enum StageMarkers {
             return f
         }()
 
-        static func render(_ r: Record, dropped: Int) -> String {
+        static func render(_ r: Record, dropped: Int, writeFailedBefore: Int = 0) -> String {
             var s = "{\"v\":1,\"seq\":\(r.seq),\"t\":\(q(isoFormatter.string(from: Date(timeIntervalSince1970: r.wall))))"
             s += ",\"mono_ms\":\(String(format: "%.3f", Double(r.monoNanos) / 1_000_000))"
             s += ",\"pid\":\(getpid()),\"ev\":\(q(r.kind.rawValue)),\"stage\":\(q(r.stage))"
@@ -494,6 +660,7 @@ enum StageMarkers {
             if let outcome = r.outcome { s += ",\"outcome\":\(q(outcome))" }
             if let detail = r.detail { s += ",\"detail\":\(q(String(detail.prefix(200))))" }
             if dropped > 0 { s += ",\"dropped_before\":\(dropped)" }
+            if writeFailedBefore > 0 { s += ",\"write_failed_before\":\(writeFailedBefore)" }
             if let extra = r.extraJSON { s += "," + extra }
             return s + "}\n"
         }
