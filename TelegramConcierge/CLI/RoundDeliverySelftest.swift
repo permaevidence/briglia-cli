@@ -104,6 +104,7 @@ extension MidturnHarness {
         if section("durable") { try await roundDurabilitySection() }
         if section("crash") { try await roundCrashSection() }
         if section("compaction") { try await roundCompactionSection() }
+        if section("stale") { try await roundStaleReaderSection() }
     }
 
     // MARK: Shared helpers
@@ -118,6 +119,7 @@ extension MidturnHarness {
         RoundDelivery.overrideForTesting = nil
         ConversationManager.roundDeliveryInterleaveForTesting = nil
         ConversationManager.roundWithdrawalHoldForTesting = nil
+        ConversationManager.idleDrainAfterReadForTesting = nil
         ConversationManager.plainSalvageFaultForTesting = nil
         ConversationManager.historyWriteFaultForTesting = nil
         ConversationManager.checkpointWriteFaultForTesting = nil

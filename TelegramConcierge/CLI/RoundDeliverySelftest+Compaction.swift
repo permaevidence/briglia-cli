@@ -224,3 +224,53 @@ extension MidturnHarness {
               "records \(records().map(\.completion.rawValue))")
     }
 }
+
+extension MidturnHarness {
+    /// SR5 (Codex R1, compaction carrier): the delivered result's durable
+    /// carrier is a compaction snapshot (acknowledged through its sidecar)
+    /// and the withdrawal is held; a later turn's drain reads the queue,
+    /// the withdrawal finishes, and the drain resumes — no second copy.
+    func roundStaleCompactedCarrier() async throws {
+        try KeychainHelper.saveBatch([KeychainHelper.maxContextTokensKey: "250000", KeychainHelper.targetContextTokensKey: "70000",
+                                      KeychainHelper.archiveChunkSizeKey: "1000000"].mapValues { Optional($0) })
+        defer {
+            for key in [KeychainHelper.maxContextTokensKey, KeychainHelper.targetContextTokensKey, KeychainHelper.archiveChunkSizeKey] {
+                try? KeychainHelper.delete(key: key)
+            }
+        }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("rd-stale-\(UUID().uuidString).txt")
+        try Data(((0..<100).map { _ in String(repeating: "EXACT_EVIDENCE ", count: 55) }.joined(separator: "\n")).utf8).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        var release = false
+        let (manager, script, _) = await startCompactionTurn("SR5", responses: false, file: file.path) {
+            ConversationManager.roundWithdrawalHoldForTesting = { _ = await self.waitUntil(timeout: 60) { release } }
+        }
+        server.router = nil; server.concurrent = false
+        let snap = snapshotCarrying("SR5_UNIQUE_FACT")
+        let id = snap.id
+        check("SR5a compaction moved the carrier into a snapshot; acknowledged through its sidecar; withdrawal pending",
+              !script.summaries.isEmpty && id != nil && manager._testRoundReservations[id!]?.state == .acknowledging
+                && !carriers(manager).contains { $0.deliveredCompletions.contains(id!) },
+              "summaries \(script.summaries.count) id \(id?.uuidString ?? "nil") state \(id.flatMap { manager._testRoundReservations[$0]?.state }.map { "\($0)" } ?? "none")")
+        var withdrawn = false
+        onceAt("subagent-read") {
+            release = true
+            withdrawn = await self.waitUntil(timeout: 10) { id.map { manager._testRoundReservations[$0] == nil } ?? false }
+        }
+        server.script([
+            Self.chatTools([Self.fgCall("sr5-second", "echo next-turn")]),
+            Self.chatText("SR5 second turn done"),
+        ])
+        let before = server.completeRequests.count
+        manager._testStartTurn(for: user("SR5 second turn"))
+        _ = await manager._testAwaitIdle(timeout: 25)
+        check("SR5b withdrawal finished after the drain read and before its eligibility check", withdrawn)
+        check("SR5c no second copy in live history or in the next request; no idle copy, no extra wake",
+              !carriers(manager).contains { $0.deliveredCompletions.contains(id ?? UUID()) }
+                && !manager._testMessages.contains { $0.kind == .bashComplete }
+                && !(requestBodies().last ?? "").contains("SR5_UNIQUE_FACT")
+                && server.completeRequests.count == before + 2,
+              "requests \(server.completeRequests.count) vs \(before) + 2")
+        roundResetSeams()
+    }
+}
