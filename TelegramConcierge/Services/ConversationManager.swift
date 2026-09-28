@@ -269,6 +269,16 @@ class ConversationManager: ObservableObject {
     /// appended them. Acknowledged only after a saved history carries them;
     /// the idle drains skip every id listed here.
     private var roundDeliveryReservations: [UUID: RoundDeliveryReservation] = [:]
+    /// Completion ids acknowledged as delivered mid-turn (inserted when the
+    /// reservation turns `.acknowledging`, never removed for the life of
+    /// the process). A drain that read the registry queue BEFORE the
+    /// withdrawal may resume after the reservation is gone; the delivered
+    /// copy lives in a tool result's `deliveredCompletions`, not as a
+    /// top-level message id, so this set is what stops it from appending
+    /// the same completion again (Codex round-delivery review R1). Tiny
+    /// (one UUID per mid-turn delivery) and deliberately kept across Mind
+    /// import / data deletion: completion ids are never reused.
+    private var roundDeliveredIds: Set<UUID> = []
     /// Crash records of acknowledged round deliveries whose `.delivered`
     /// write failed: retried after later saves (startup reconciliation finds
     /// the typed evidence anyway).
@@ -10968,6 +10978,7 @@ class ConversationManager: ObservableObject {
         // copy and never a second turn for the same notice.
         let pending = await BackgroundProcessRegistry.shared.pendingCompletionsForDelivery()
         guard !pending.isEmpty else { return }
+        if let hook = Self.idleDrainAfterReadForTesting { await hook("idle-bash") }
         guard activeRunId == nil, activeProcessingTask == nil else { return }
 
         var lastWaking: Message? = nil
@@ -10975,7 +10986,7 @@ class ConversationManager: ObservableObject {
         for item in pending {
             // Appended to a tool round mid-turn and not yet acknowledged
             // (round delivery v3 §2.5): never a second copy.
-            if roundDeliveryReservations[item.messageId] != nil { continue }
+            if roundDeliveryReservations[item.messageId] != nil || roundDeliveredIds.contains(item.messageId) { continue }
             if pendingCompletionAcks[item.messageId] != nil { continue }
             if messages.contains(where: { $0.id == item.messageId }) {
                 pendingCompletionAcks[item.messageId] = item.jobUUID
@@ -11034,12 +11045,13 @@ class ConversationManager: ObservableObject {
         guard activeRunId == nil, activeProcessingTask == nil, workHeldReason == nil else { return }
         let completions = await SubagentBackgroundRegistry.shared.pendingCompletionsForDelivery()
         guard !completions.isEmpty else { return }
+        if let hook = Self.idleDrainAfterReadForTesting { await hook("idle-subagent") }
         guard activeRunId == nil, activeProcessingTask == nil else { return }
 
         // Same pattern as bash completions: append all, one turn, off the poll loop.
         var lastMessage: Message? = nil
         for completion in completions {
-            if roundDeliveryReservations[completion.messageId] != nil { continue }
+            if roundDeliveryReservations[completion.messageId] != nil || roundDeliveredIds.contains(completion.messageId) { continue }
             if pendingSubagentAcks[completion.messageId] != nil { continue }
             if messages.contains(where: { $0.id == completion.messageId }) {
                 pendingSubagentAcks[completion.messageId] = .some(completion.handle.jobId)
@@ -13537,6 +13549,10 @@ extension ConversationManager {
     /// Selftest seam: awaited before the registry withdrawal of acknowledged
     /// round deliveries (holds the in-flight window open).
     nonisolated(unsafe) static var roundWithdrawalHoldForTesting: (() async -> Void)?
+    /// Selftest seam: awaited by the idle drains right after their registry
+    /// read ("idle-bash", "idle-subagent"), so a test can finish a
+    /// withdrawal between that read and the eligibility checks.
+    nonisolated(unsafe) static var idleDrainAfterReadForTesting: ((String) async -> Void)?
 
     private func roundDeliveryAllowed(runId: UUID) -> Bool {
         activeRunId == runId && !Task.isCancelled && workHeldReason == nil && !isRestoringMind
@@ -13575,7 +13591,7 @@ extension ConversationManager {
         var reservations: [RoundDeliveryReservation] = []
         for item in bash {
             let id = item.messageId
-            guard roundDeliveryReservations[id] == nil, pendingCompletionAcks[id] == nil, !inHistory.contains(id),
+            guard roundDeliveryReservations[id] == nil, !roundDeliveredIds.contains(id), pendingCompletionAcks[id] == nil, !inHistory.contains(id),
                   !stopped.contains(item.jobUUID), !observed.contains(item.jobUUID) else { continue }
             items.append(.init(messageId: id, body: BashCompletionNotice.body(for: item.completion)))
             reservations.append(RoundDeliveryReservation(messageId: id, runId: runId, kind: .bash(jobUUID: item.jobUUID),
@@ -13586,7 +13602,7 @@ extension ConversationManager {
         for completion in subagents {
             let id = completion.messageId
             let job = completion.handle.jobId
-            guard roundDeliveryReservations[id] == nil, pendingSubagentAcks[id] == nil, !inHistory.contains(id),
+            guard roundDeliveryReservations[id] == nil, !roundDeliveredIds.contains(id), pendingSubagentAcks[id] == nil, !inHistory.contains(id),
                   !stoppedSubagentHandles.contains(completion.handle.id), !(job.map { stopped.contains($0) } ?? false) else { continue }
             let duration = completion.completedAt.timeIntervalSince(completion.handle.startedAt)
             items.append(.init(messageId: id, body: Self.backgroundSubagentCompletionBody(completion, durationStr: String(format: "%.1fs", duration))))
@@ -13651,6 +13667,7 @@ extension ConversationManager {
                 print("[ConversationManager] Background subagent spend (delivered mid-turn): +$\(formatUSD(reservation.unrecordedSpendUSD))")
             }
             roundDeliveryReservations[id] = reservation
+            roundDeliveredIds.insert(id)
             acknowledged.insert(id)
         }
         guard !acknowledged.isEmpty else { return }
@@ -13731,6 +13748,7 @@ extension ConversationManager {
 
     // Selftest seams (round delivery).
     var _testRoundReservations: [UUID: RoundDeliveryReservation] { roundDeliveryReservations }
+    var _testRoundDeliveredIds: Set<UUID> { roundDeliveredIds }
     var _testRoundRecordRetries: Set<UUID> { roundDeliveryRecordRetries }
     var _testSalvageWriteFailedRuns: Set<UUID> { turnSalvageWriteFailedRuns }
     var _testActiveRunId: UUID? { activeRunId }
