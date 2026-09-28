@@ -2785,14 +2785,22 @@ class ConversationManager: ObservableObject {
 
     /// Owner check before a Responses salvage write (round delivery v3,
     /// Codex acceptance check 2): a run stopped while a newer run owns the
-    /// recovery file must not replace that file with its own rounds. The
-    /// stopped run keeps its rounds in memory and saves them through its
-    /// interrupted-outcome path.
+    /// recovery file must not replace that file with its own rounds. Before
+    /// a batch runs, a stopped run starts nothing (cancellation); after it,
+    /// the completed round stays in memory and is saved through the stopped
+    /// run's interrupted-outcome path.
     private func requireSalvageOwnership(_ runId: UUID?) throws {
+        guard ownsSalvageFile(runId) else { throw CancellationError() }
+    }
+
+    /// Whether `runId` may write the recovery file (no newer run owns it);
+    /// a refusal is counted.
+    private func ownsSalvageFile(_ runId: UUID?) -> Bool {
         if let runId, let owner = activeRunId, owner != runId {
             salvageWritesRefusedForOwnership += 1
-            throw CancellationError()
+            return false
         }
+        return true
     }
 
     private func persistResponsesSalvage(_ interactions: [ToolInteraction]) throws {
@@ -7870,8 +7878,10 @@ class ConversationManager: ObservableObject {
                     var completed = toolInteractions
                     completed[completed.count - 1] = interaction
                     try Self.responsesSalvageFaultForTesting?("completed")
-                    try requireSalvageOwnership(salvageRunId)
-                    try persistResponsesSalvage(completed)
+                    // A run stopped while a newer run owns the recovery file
+                    // keeps its completed round in memory (its interrupted
+                    // outcome saves it) but never replaces that file.
+                    if ownsSalvageFile(salvageRunId) { try persistResponsesSalvage(completed) }
                     toolInteractions = completed
                 } else { toolInteractions.append(interaction) }
 
