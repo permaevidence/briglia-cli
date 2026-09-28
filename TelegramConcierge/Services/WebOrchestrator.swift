@@ -1173,7 +1173,7 @@ actor WebOrchestrator {
                 tailUserMessage: tail, context: transcript.context)
             let detail: String
             switch response {
-            case .text(let content, _, _, let promptTokens, let completionTokens, let spend, _):
+            case .text(let content, _, _, let promptTokens, let completionTokens, let spend, _, _):
                 addSpend(ResearchSpend.settle(reported: spend, promptTokens: promptTokens,
                     completionTokens: completionTokens, context: transcript.context), executionID: executionID)
                 let text = content.trimmingCharacters(in: .whitespacesAndNewlines)

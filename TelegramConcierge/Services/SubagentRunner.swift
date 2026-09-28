@@ -805,7 +805,7 @@ actor SubagentRunner {
                 markProgress()  // LLM responded — subagent is alive
 
                 switch response {
-                case .text(let content, _, _, let promptTk, let completionTk, let spend, let native):
+                case .text(let content, _, _, let promptTk, let completionTk, let spend, let native, _):
                     totalSpendUSD += runSpend(spend, promptTk, completionTk)
                     if let pt = promptTk { lastPromptTokens = pt }
                     // Web researcher: a final with no retrieval in this run gets
@@ -867,7 +867,7 @@ actor SubagentRunner {
                             markProgress()
 
                             switch retryResponse {
-                            case .text(let content, _, _, let retryPromptTk, let retryCompletionTk, let retrySpend, let native):
+                            case .text(let content, _, _, let retryPromptTk, let retryCompletionTk, let retrySpend, let native, _):
                                 totalSpendUSD += runSpend(retrySpend, retryPromptTk, retryCompletionTk)
                                 if let pt = retryPromptTk { lastPromptTokens = pt }
                                 finalText = content
@@ -1121,7 +1121,7 @@ actor SubagentRunner {
                     markProgress()
 
                     switch forceResponse {
-                    case .text(let content, _, _, let promptTk, let completionTk, let spend, let native):
+                    case .text(let content, _, _, let promptTk, let completionTk, let spend, let native, _):
                         totalSpendUSD += runSpend(spend, promptTk, completionTk)
                         if let pt = promptTk { lastPromptTokens = pt }
                         finalText = content
@@ -1869,7 +1869,7 @@ actor SubagentRunner {
                 )
 
                 switch response {
-                case .text(let content, _, _, _, _, _, _):
+                case .text(let content, _, _, _, _, _, _, _):
                     return content
                 case .toolCalls(let assistantMessage, let calls, _, _, _):
                     refusalInteractions.append(disabledToolInteraction(
@@ -1973,7 +1973,7 @@ actor SubagentRunner {
                     modelOverride: modelOverride, providerOverride: providerOverride,
                     reasoningEffortOverride: reasoningEffortOverride, textOnlyOverride: textOnlyOverride,
                     execution: execution, lane: lane)
-                guard case .text(let content, _, _, _, _, _, _) = response,
+                guard case .text(let content, _, _, _, _, _, _, _) = response,
                       !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       content.utf8.count <= Self.oversizedSummaryBytes else { return nil }
                 summary = content

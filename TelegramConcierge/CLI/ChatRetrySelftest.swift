@@ -155,7 +155,7 @@ struct ChatRetrySelftest: AsyncParsableCommand {
             server.script(statuses.map(body(for:)), statuses: statuses)
             do {
                 let answer = try await service.generateChatCompletion(conversation, context: ctx)
-                if case .text(let text, _, _, _, _, _, _) = answer { return (text, nil) }
+                if case .text(let text, _, _, _, _, _, _, _) = answer { return (text, nil) }
                 return (nil, "unexpected response shape")
             } catch OpenRouterError.apiError(let message) {
                 return (nil, message)

@@ -65,7 +65,7 @@ enum ResponsesAuxiliary {
             historyFingerprint: ResponsesReplayEnvelope.hash(try JSONEncoder().encode(input)), deliveryNonces: [])
         let response = try await ResponsesAdapter(context: context).send(input: input, tools: nil,
             receipt: receipt, maxOutputTokens: maxOutputTokens)
-        guard case .text(let text, _, _, _, _, _, _) = response else { throw ResponsesFailure.malformed("auxiliary request returned tools") }
+        guard case .text(let text, _, _, _, _, _, _, _) = response else { throw ResponsesFailure.malformed("auxiliary request returned tools") }
         return text
     }
 }

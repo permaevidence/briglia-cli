@@ -143,7 +143,10 @@ struct ChatCompletionsAdapter {
 
         // Regular text response
         guard let content = responseContent else {
-            throw OpenRouterError.noContent
+            // Same user-visible failure as before; the typed error also keeps
+            // the stop reason and spend so a bounded maintenance caller can
+            // account for the attempt and retry it.
+            throw ChatReplyWithoutText(finishReason: choice.finishReason, spendUSD: callSpendUSD)
         }
 
         return .text(
@@ -152,7 +155,8 @@ struct ChatCompletionsAdapter {
             reasoningDetails: choice.message.reasoningDetails,
             promptTokens: promptTokens,
             completionTokens: completionTokens,
-            spendUSD: callSpendUSD
+            spendUSD: callSpendUSD,
+            finishReason: choice.finishReason
         )
     }
 
@@ -167,4 +171,13 @@ struct ChatCompletionsAdapter {
         return formatted
     }
 
+}
+
+/// A Chat Completions choice with neither text nor tool calls. The description
+/// matches `OpenRouterError.noContent`, so ordinary callers report the same
+/// message as before; maintenance summaries read the carried stop reason/spend.
+struct ChatReplyWithoutText: Error, LocalizedError {
+    let finishReason: String?
+    let spendUSD: Double?
+    var errorDescription: String? { OpenRouterError.noContent.errorDescription }
 }

@@ -112,6 +112,8 @@ extension JSONValue {
 /// Shared by JSON and SSE. Only a complete, validated terminal snapshot becomes
 /// executable work; deltas and item-done events never escape as calls.
 enum ResponsesRoundDecoder {
+    /// A completed round with neither text nor calls (an empty reply).
+    static let noVisibleAnswer = "no visible answer or calls"
     static func decode(_ data: Data, scope: ResponsesScope, receipt: PreparedRequestReceipt,
                        allowedTools: Set<String>) throws -> ResponsesRound {
         guard data.count <= ResponsesLimits.roundBytes else { throw ResponsesFailure.overflow }
@@ -194,7 +196,7 @@ enum ResponsesRoundDecoder {
             default: throw ResponsesFailure.unsupported(type)
             }
         }
-        guard !text.isEmpty || !calls.isEmpty else { throw ResponsesFailure.malformed("no visible answer or calls") }
+        guard !text.isEmpty || !calls.isEmpty else { throw ResponsesFailure.malformed(noVisibleAnswer) }
         guard !refused || calls.isEmpty else { throw ResponsesFailure.malformed("refusal mixed with executable calls") }
         let visible: String? = text.isEmpty ? nil : text
         let envelope = ResponsesReplayEnvelope(version: 1, responseID: responseID, scope: scope,

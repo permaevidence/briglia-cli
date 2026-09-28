@@ -86,7 +86,7 @@ struct ChatAdapterSelftest: AsyncParsableCommand {
         let response = #"{"choices":[{"message":{"role":"assistant","content":"<think>private reasoning</think>Visible answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":101,"completion_tokens":17,"prompt_tokens_details":{"cached_tokens":80},"cost":0.2,"cost_details":{"upstream_inference_cost":0.3}}}"#
         server.script([response, response], statuses: [503, 200])
         let answer = try await service.generateChatCompletion(conversation, context: context)
-        if case .text(let text, let reasoning, _, let prompt, let completion, let spend, _) = answer {
+        if case .text(let text, let reasoning, _, let prompt, let completion, let spend, _, _) = answer {
             check("response parsing uses original MiniMax provider after settings change",
                   text == "Visible answer" && reasoning != nil)
             check("chat usage passes through prompt/completion and existing max-cost rule",
@@ -161,11 +161,11 @@ struct ChatAdapterSelftest: AsyncParsableCommand {
         check("kimi adapter: same shape unchanged (no field on the note)",
               try noteWire(model: "kimi-k3", provenance: "kimi-k3#opencode") == [nil, nil, "call it", nil])
         let zeroUsage = try adapter.decodeResponse(Data(#"{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":0,"completion_tokens":0}}"#.utf8))
-        if case .text(_, _, _, let prompt, let completion, let spend, _) = zeroUsage {
+        if case .text(_, _, _, let prompt, let completion, let spend, _, _) = zeroUsage {
             check("zero usage is preserved, absent spend remains nil", prompt == 0 && completion == 0 && spend == nil)
         } else { check("zero usage response", false) }
         let missingUsage = try adapter.decodeResponse(Data(#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#.utf8))
-        if case .text(_, _, _, let prompt, let completion, _, _) = missingUsage {
+        if case .text(_, _, _, let prompt, let completion, _, _, _) = missingUsage {
             check("absent usage stays absent", prompt == nil && completion == nil)
         } else { check("absent usage response", false) }
         do {

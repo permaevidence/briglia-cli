@@ -491,7 +491,7 @@ struct ResponsesSelftest: AsyncParsableCommand {
             server.script([String(decoding: terminal, as: UTF8.self)])
             let final = try await service.generateResponse(messages: [human], imagesDirectory: root,
                 documentsDirectory: root, tools: [tool], toolResultMessages: interactions, execution: selection, lane: .main)
-            guard case .text(let text, _, _, _, _, _, let metadata) = final else { throw ValidationError("expected terminal text") }
+            guard case .text(let text, _, _, _, _, _, let metadata, _) = final else { throw ValidationError("expected terminal text") }
             c.check("SSE final text and receipt \(native)", text == "Done" && metadata?.receipt.deliveryNonces == [annotation.deliveryNonce])
             let request = try Self.object(server.completeRequests.last!.body)
             let items = request["input"] as! [[String: Any]]
@@ -532,7 +532,7 @@ struct ResponsesSelftest: AsyncParsableCommand {
             noteItems[$0 + 1]["role"] as? String == "assistant"
             && (noteItems[$0 + 1]["content"] as? [[String: Any]])?.first?["text"] as? String == "Original final answer"
         } == true)
-        if case .text(_, _, _, _, _, _, let metadata) = checked {
+        if case .text(_, _, _, _, _, _, let metadata, _) = checked {
             c.check("historical reasoning cannot acknowledge user delivery", metadata?.receipt.deliveryNonces.isEmpty == true)
         } else { c.check("historical reasoning cannot acknowledge user delivery", false) }
         c.check("rendering never mutates saved reasoning", try historyEncoder.encode(reloaded) == saved)

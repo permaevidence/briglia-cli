@@ -744,7 +744,11 @@ struct WebSearchResult: Codable {
 // MARK: - LLM Response Types
 
 enum LLMResponse {
-    case text(String, reasoning: JSONValue?, reasoningDetails: JSONValue?, promptTokens: Int?, completionTokens: Int?, spendUSD: Double?, responses: ResponsesRoundMetadata? = nil)
+    /// `finishReason` is the provider's Chat Completions stop reason (for
+    /// example "stop" or "length"); nil when the transport has none (Responses
+    /// rejects incomplete rounds while decoding). Carried so bounded maintenance
+    /// summaries can refuse a cut-off reply; other callers ignore it.
+    case text(String, reasoning: JSONValue?, reasoningDetails: JSONValue?, promptTokens: Int?, completionTokens: Int?, spendUSD: Double?, responses: ResponsesRoundMetadata? = nil, finishReason: String? = nil)
     case toolCalls(assistantMessage: AssistantToolCallMessage, calls: [ToolCall], promptTokens: Int?, completionTokens: Int?, spendUSD: Double?)
 }
 

@@ -2754,7 +2754,7 @@ class ConversationManager: ObservableObject {
     private func clearResponsesMidTurnBatch(_ response: LLMResponse) {
         let receipt: PreparedRequestReceipt?
         switch response {
-        case .text(_, _, _, _, _, _, let metadata): receipt = metadata?.receipt
+        case .text(_, _, _, _, _, _, let metadata, _): receipt = metadata?.receipt
         case .toolCalls(let assistant, _, _, _, _): receipt = assistant.responsesReceipt
         }
         if let batch = inFlightMidTurnBatch, receipt?.deliveryNonces.contains(batch.nonce) == true {
@@ -7514,7 +7514,7 @@ class ConversationManager: ObservableObject {
             }
             
             switch response {
-            case .text(let content, let reasoning, let reasoningDetails, let promptTokens, let completionTokens, _, let native):
+            case .text(let content, let reasoning, let reasoningDetails, let promptTokens, let completionTokens, _, let native, _):
                 // LLM decided to respond with text - we're done
                 if let tokens = promptTokens {
                     lastPromptTokens = tokens
@@ -7984,7 +7984,7 @@ class ConversationManager: ObservableObject {
         let finalPromptTokens: Int?
         let finalCompTokens: Int?
         switch finalResponse {
-        case .text(_, _, _, let pt, let ct, _, _):
+        case .text(_, _, _, let pt, let ct, _, _, _):
             finalPromptTokens = pt
             finalCompTokens = ct
         case .toolCalls(_, _, let pt, let ct, _):
@@ -8015,7 +8015,7 @@ class ConversationManager: ObservableObject {
         }()
 
         switch finalResponse {
-        case .text(let content, let reasoning, let reasoningDetails, _, _, _, let native):
+        case .text(let content, let reasoning, let reasoningDetails, _, _, _, let native, _):
             let reasoningModel = (reasoning != nil || reasoningDetails != nil)
                 ? await openRouterService.activeModelIdentifier() : nil
             return ToolAwareResponse(
@@ -8145,7 +8145,7 @@ class ConversationManager: ObservableObject {
     
     private func spendUSD(from response: LLMResponse) -> Double? {
         switch response {
-        case .text(_, _, _, _, _, let spendUSD, _):
+        case .text(_, _, _, _, _, let spendUSD, _, _):
             return spendUSD
         case .toolCalls(_, _, _, _, let spendUSD):
             return spendUSD
@@ -8993,102 +8993,146 @@ class ConversationManager: ObservableObject {
             detail: manifest
         )
 
+        // Every prune-summary reply is charged through the normal spend path.
+        func recordPruneSummarySpend(_ spend: Double?) {
+            guard let spend, spend.isFinite, spend > 0 else { return }
+            KeychainHelper.recordOpenRouterSpend(spend)
+        }
         do {
-            let response = try await openRouterService.generateResponse(
-                messages: sourceMessages,
-                imagesDirectory: imagesDirectory,
-                documentsDirectory: documentsDirectory,
-                tools: summaryExecution == nil ? tools : [],
-                toolResultMessages: currentTurnInteractions,
-                calendarContext: calendarContext,
-                emailContext: emailContext,
-                chunkSummaries: chunkSummaries.isEmpty ? nil : chunkSummaries,
-                totalChunkCount: totalChunkCount,
-                currentUserMessageId: currentUserMessageId,
-                turnStartDate: turnStartDate,
-                tailUserMessage: tail,
-                deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
-                execution: summaryExecution, lane: .main
-            )
-            switch response {
-            case .text(let content, _, _, _, _, _, _):
-                let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-                DebugTelemetry.log(
-                    .info,
-                    summary: "prune summary completed",
-                    detail: "chars: \(trimmed.count)",
-                    durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000)
-                )
-                return trimmed.isEmpty ? nil : String(trimmed.prefix(14000))
-            case .toolCalls(let assistantMessage, let calls, _, _, _):
-                var retryInteractions = (currentTurnInteractions ?? []) + [
-                    disabledMaintenanceToolInteraction(
-                        assistantMessage: assistantMessage,
-                        calls: calls,
-                        reason: "Tool calls are disabled during the prune-summary maintenance pass. This tool was not executed. Return the requested prune summary as plain text only."
+            // An empty or provider-cut-off reply gets exactly one plain retry of
+            // the same request before the programmatic fallback below.
+            var rejection: CompactionSummaryPolicy.Rejection?
+            for attempt in 1...CompactionSummaryPolicy.attempts {
+                let response: LLMResponse
+                do {
+                    response = try await openRouterService.generateResponse(
+                        messages: sourceMessages,
+                        imagesDirectory: imagesDirectory,
+                        documentsDirectory: documentsDirectory,
+                        tools: summaryExecution == nil ? tools : [],
+                        toolResultMessages: currentTurnInteractions,
+                        calendarContext: calendarContext,
+                        emailContext: emailContext,
+                        chunkSummaries: chunkSummaries.isEmpty ? nil : chunkSummaries,
+                        totalChunkCount: totalChunkCount,
+                        currentUserMessageId: currentUserMessageId,
+                        turnStartDate: turnStartDate,
+                        tailUserMessage: tail,
+                        deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
+                        execution: summaryExecution, lane: .main
                     )
-                ]
-
-                for attempt in 1...4 {
-                    let retryTail = """
-                    [PRUNE SUMMARY RETRY \(attempt)/4 - system maintenance]
-                    The tool call(s) you requested were not executed because this is an internal pruning summary pass.
-                    Tool use remains disabled for this maintenance pass. Return plain text only.
-                    Produce the requested prune summary now, using only the conversation context already present above and the prune manifest.
-                    [END PRUNE SUMMARY RETRY]
-                    """
-
-                    do {
-                        let retryResponse = try await openRouterService.generateResponse(
-                            messages: sourceMessages,
-                            imagesDirectory: imagesDirectory,
-                            documentsDirectory: documentsDirectory,
-                            tools: summaryExecution == nil ? tools : [],
-                            toolResultMessages: retryInteractions,
-                            calendarContext: calendarContext,
-                            emailContext: emailContext,
-                            chunkSummaries: chunkSummaries.isEmpty ? nil : chunkSummaries,
-                            totalChunkCount: totalChunkCount,
-                            currentUserMessageId: currentUserMessageId,
-                            turnStartDate: turnStartDate,
-                            tailUserMessage: retryTail,
-                            deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
-                            execution: summaryExecution, lane: .main
-                        )
-                        switch retryResponse {
-                        case .text(let content, _, _, _, _, _, _):
-                            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-                            DebugTelemetry.log(
-                                .info,
-                                summary: "prune summary completed after tool refusal",
-                                detail: "attempt: \(attempt), chars: \(trimmed.count)",
-                                durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000)
-                            )
-                            return trimmed.isEmpty ? nil : String(trimmed.prefix(14000))
-                        case .toolCalls(let retryAssistant, let retryCalls, _, _, _):
-                            retryInteractions.append(
-                                disabledMaintenanceToolInteraction(
-                                    assistantMessage: retryAssistant,
-                                    calls: retryCalls,
-                                    reason: "Tool calls are disabled during the prune-summary maintenance pass. This tool was not executed. Return the requested prune summary as plain text only."
-                                )
-                            )
-                        }
-                    } catch {
-                        print("[ConversationManager] Prune summary retry \(attempt) failed after refusing tool calls: \(error)")
-                    }
+                } catch {
+                    guard let reason = CompactionSummaryPolicy.rejection(for: error) else { throw error }
+                    recordPruneSummarySpend(CompactionSummaryPolicy.spend(for: error))
+                    rejection = reason
+                    print("[ConversationManager] Prune summary attempt \(attempt)/\(CompactionSummaryPolicy.attempts) rejected: \(reason.reason)")
+                    continue
                 }
+                recordPruneSummarySpend(spendUSD(from: response))
+                switch response {
+                case .text(let content, _, _, _, _, _, _, let finish):
+                    let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if CompactionSummaryPolicy.isCutOff(finish) {
+                        rejection = .truncated("finish_reason: \(finish!)")
+                    } else if trimmed.isEmpty {
+                        rejection = .empty
+                    } else {
+                        DebugTelemetry.log(
+                            .info,
+                            summary: "prune summary completed",
+                            detail: "chars: \(trimmed.count), attempt: \(attempt)",
+                            durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000)
+                        )
+                        return String(trimmed.prefix(14000))
+                    }
+                    print("[ConversationManager] Prune summary attempt \(attempt)/\(CompactionSummaryPolicy.attempts) rejected: \(rejection!.reason)")
+                    continue
+                case .toolCalls(let assistantMessage, let calls, _, _, _):
+                    var retryInteractions = (currentTurnInteractions ?? []) + [
+                        disabledMaintenanceToolInteraction(
+                            assistantMessage: assistantMessage,
+                            calls: calls,
+                            reason: "Tool calls are disabled during the prune-summary maintenance pass. This tool was not executed. Return the requested prune summary as plain text only."
+                        )
+                    ]
 
-                print("[ConversationManager] Prune summary request kept returning tool calls after retries; falling back to compact log summary")
-                DebugTelemetry.log(
-                    .info,
-                    summary: "prune summary fallback: model returned tool calls",
-                    detail: manifest,
-                    durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000),
-                    isError: true
-                )
-                return fallbackPrunedContextSummary(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
+                    for attempt in 1...4 {
+                        let retryTail = """
+                        [PRUNE SUMMARY RETRY \(attempt)/4 - system maintenance]
+                        The tool call(s) you requested were not executed because this is an internal pruning summary pass.
+                        Tool use remains disabled for this maintenance pass. Return plain text only.
+                        Produce the requested prune summary now, using only the conversation context already present above and the prune manifest.
+                        [END PRUNE SUMMARY RETRY]
+                        """
+
+                        do {
+                            let retryResponse = try await openRouterService.generateResponse(
+                                messages: sourceMessages,
+                                imagesDirectory: imagesDirectory,
+                                documentsDirectory: documentsDirectory,
+                                tools: summaryExecution == nil ? tools : [],
+                                toolResultMessages: retryInteractions,
+                                calendarContext: calendarContext,
+                                emailContext: emailContext,
+                                chunkSummaries: chunkSummaries.isEmpty ? nil : chunkSummaries,
+                                totalChunkCount: totalChunkCount,
+                                currentUserMessageId: currentUserMessageId,
+                                turnStartDate: turnStartDate,
+                                tailUserMessage: retryTail,
+                                deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
+                                execution: summaryExecution, lane: .main
+                            )
+                            recordPruneSummarySpend(spendUSD(from: retryResponse))
+                            switch retryResponse {
+                            case .text(let content, _, _, _, _, _, _, let finish):
+                                // A cut-off reply is never a summary: try the next attempt.
+                                if CompactionSummaryPolicy.isCutOff(finish) {
+                                    print("[ConversationManager] Prune summary retry \(attempt) cut off by the provider (finish_reason: \(finish!))")
+                                    continue
+                                }
+                                let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                                DebugTelemetry.log(
+                                    .info,
+                                    summary: "prune summary completed after tool refusal",
+                                    detail: "attempt: \(attempt), chars: \(trimmed.count)",
+                                    durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000)
+                                )
+                                return trimmed.isEmpty ? nil : String(trimmed.prefix(14000))
+                            case .toolCalls(let retryAssistant, let retryCalls, _, _, _):
+                                retryInteractions.append(
+                                    disabledMaintenanceToolInteraction(
+                                        assistantMessage: retryAssistant,
+                                        calls: retryCalls,
+                                        reason: "Tool calls are disabled during the prune-summary maintenance pass. This tool was not executed. Return the requested prune summary as plain text only."
+                                    )
+                                )
+                            }
+                        } catch {
+                            print("[ConversationManager] Prune summary retry \(attempt) failed after refusing tool calls: \(error)")
+                        }
+                    }
+
+                    print("[ConversationManager] Prune summary request kept returning tool calls after retries; falling back to compact log summary")
+                    DebugTelemetry.log(
+                        .info,
+                        summary: "prune summary fallback: model returned tool calls",
+                        detail: manifest,
+                        durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000),
+                        isError: true
+                    )
+                    return fallbackPrunedContextSummary(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
+                }
             }
+            let reason = rejection?.reason ?? "no usable reply"
+            print("[ConversationManager] Prune summary rejected after \(CompactionSummaryPolicy.attempts) attempts (\(reason)); falling back to compact log summary")
+            DebugTelemetry.log(
+                .info,
+                summary: "prune summary fallback: reply rejected",
+                detail: "Prune summary rejected after \(CompactionSummaryPolicy.attempts) attempts: \(reason)",
+                durationMs: Int(Date().timeIntervalSince(summaryStart) * 1000),
+                isError: true
+            )
+            return fallbackPrunedContextSummary(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
         } catch {
             print("[ConversationManager] Failed to generate prune summary: \(error)")
             DebugTelemetry.log(
@@ -12991,7 +13035,7 @@ extension ConversationManager {
         guard let pending = pendingCompactionCalibration else { return }
         let measured: Int?
         switch response {
-        case .text(_, _, _, let tokens, _, _, _): measured = tokens
+        case .text(_, _, _, let tokens, _, _, _, _): measured = tokens
         case .toolCalls(_, _, let tokens, _, _): measured = tokens
         }
         guard let measured, measured > 0 else { return }
@@ -13138,7 +13182,9 @@ extension ConversationManager {
         var buffer = ""
         // At most ~64k conservative estimated input including prior summary,
         // instructions and source. Smaller provider rejection halves source.
-        let capacity = 112_000
+        // A prior summary longer than 36,000 bytes shrinks the source fragment
+        // by the excess (112,000 bytes otherwise, as before).
+        var capacity: Int { ActiveTurnBudget.summarySourceCapacity(priorSummaryBytes: summary.utf8.count) }
         func consume(_ fragment: String, depth: Int = 0) async throws {
             try Task.checkCancellation()
             let body = "Prior summary:\n" + summary + "\nNext consecutive source fragment:\n" + MarkerNeutralizer.escape(fragment)
@@ -13150,22 +13196,43 @@ extension ConversationManager {
                 guard estimate.tokens + ActiveTurnBudget.text(instruction) <= maintenanceInputCeiling else {
                     throw PruneArchiveStore.Failure("Compaction summary context exceeds the bounded maintenance input budget")
                 }
-                let response = try await openRouterService.generateResponse(
-                    messages: maintenanceMessages, imagesDirectory: imagesDirectory,
-                    documentsDirectory: documentsDirectory, tools: [], turnStartDate: date,
-                    tailSystemMessage: instruction, execution: maintenance, lane: .main)
-                if let spend = spendUSD(from: response), spend > 0 {
+                func recordMaintenanceSpend(_ spend: Double?) {
+                    guard let spend, spend.isFinite, spend > 0 else { return }
                     KeychainHelper.recordOpenRouterSpend(spend)
                     if let runID = activeRunId { activeTurnCheckpoints[runID]?.maintenanceSpendUSD += spend }
                 }
-                guard case .text(let text, _, _, _, _, _, _) = response,
-                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      text.utf8.count <= 36_000 else {
-                    throw PruneArchiveStore.Failure("Compaction summary missing or larger than the bounded output policy")
+                // Empty, non-text, cut-off or oversized replies get exactly one
+                // plain retry of the same request; every attempt is charged.
+                var rejection: CompactionSummaryPolicy.Rejection?
+                var accepted: String?
+                for attempt in 1...CompactionSummaryPolicy.attempts {
+                    try Task.checkCancellation()
+                    do {
+                        let response = try await openRouterService.generateResponse(
+                            messages: maintenanceMessages, imagesDirectory: imagesDirectory,
+                            documentsDirectory: documentsDirectory, tools: [], turnStartDate: date,
+                            tailSystemMessage: instruction, execution: maintenance, lane: .main)
+                        recordMaintenanceSpend(spendUSD(from: response))
+                        switch CompactionSummaryPolicy.validate(response) {
+                        case .success(let text): accepted = text
+                        case .failure(let reason): rejection = reason
+                        }
+                    } catch {
+                        guard let reason = CompactionSummaryPolicy.rejection(for: error) else { throw error }
+                        recordMaintenanceSpend(CompactionSummaryPolicy.spend(for: error))
+                        rejection = reason
+                    }
+                    if accepted != nil { break }
+                    print("[ActiveCompaction] Summary attempt \(attempt)/\(CompactionSummaryPolicy.attempts) rejected: \(rejection!.reason)")
+                }
+                guard let text = accepted else {
+                    throw CompactionSummaryPolicy.Rejected(rejection: rejection!, attempts: CompactionSummaryPolicy.attempts)
                 }
                 summary = text
             } catch {
                 if Self.isCancellation(error) { throw error }
+                // A rejected reply is not a provider size error: never halve.
+                if error is CompactionSummaryPolicy.Rejected { throw error }
                 // Context errors only: transient failures do not multiply work.
                 let detail = error.localizedDescription.lowercased()
                 guard depth < 3, fragment.utf8.count > 4096,

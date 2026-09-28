@@ -3034,7 +3034,7 @@ actor OpenRouterService {
             let receipt = PreparedRequestReceipt(requestID: UUID(),
                 historyFingerprint: ResponsesReplayEnvelope.hash(try JSONEncoder().encode(input)), deliveryNonces: [])
             let answer = try await ResponsesAdapter(context: descriptionSnapshot).send(input: input, tools: nil, receipt: receipt)
-            guard case .text(let text, _, _, _, _, _, _) = answer else { throw ResponsesFailure.malformed("file description returned tools") }
+            guard case .text(let text, _, _, _, _, _, _, _) = answer else { throw ResponsesFailure.malformed("file description returned tools") }
             content = text
         } else {
         let request = OpenRouterRequest(

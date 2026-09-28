@@ -14,7 +14,7 @@ struct ActiveTurnCompaction: Codable, Equatable {
     let throughRoundSequence: Int
     init(summaryText: String, reference: PruneArchiveReference, through: Int) throws {
         guard !summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              summaryText.utf8.count <= 36_000, through > 0 else {
+              summaryText.utf8.count <= CompactionSummaryPolicy.maxBytes, through > 0 else {
             throw PruneArchiveStore.Failure("Invalid active-turn summary")
         }
         version = 1; self.summaryText = summaryText
@@ -164,9 +164,19 @@ struct ActiveTurnBudget {
         n += message.pruneArchiveReferences.reduce(0) { $0 + text($1.promptText) }
         return n
     }
-    /// Allowance for the summary that replaces a compacted prefix (bounded at
-    /// 36,000 bytes by the maintenance policy); `fixed` includes it.
-    static let summaryAllowance = 16_000
+    /// Allowance for the summary that replaces a compacted prefix; `fixed`
+    /// includes it. It covers the largest accepted summary
+    /// (`CompactionSummaryPolicy.maxBytes`, ~21,846 estimated tokens) plus its
+    /// header and snapshot line, so selection always removes at least as much
+    /// as the summary can add back.
+    static let summaryAllowance = text(String(repeating: "x", count: CompactionSummaryPolicy.maxBytes)) + 1024
+    /// Source bytes per bounded-summary request. Prior summary plus source
+    /// keep the combined 148,000-byte bound they had when summaries were
+    /// capped at 36,000 bytes: a longer prior summary shrinks the source by the
+    /// excess, so the request stays inside the maintenance input budget.
+    static func summarySourceCapacity(priorSummaryBytes: Int) -> Int {
+        112_000 - max(0, priorSummaryBytes - CompactionSummaryPolicy.legacyMaxBytes)
+    }
     func prefixCount(rounds: [ToolInteraction], fixed: Int, target: Int, pendingNonce: String?) -> Int {
         guard !rounds.isEmpty else { return 0 }
         let costs = rounds.map(Self.round)
