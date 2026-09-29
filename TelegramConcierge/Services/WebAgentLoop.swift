@@ -66,7 +66,7 @@ struct OAIResponsesReq: Encodable {
     let tools: [JSONValue]
     var tool_choice: String? = nil
     var reasoning: Reasoning? = nil
-    let max_output_tokens: Int
+    // No max_output_tokens (owner rule 2026-09-29: no output caps).
     /// store:false + include reasoning.encrypted_content = stateless calls
     /// that still carry Luna's actual chain of thought between rounds.
     var store: Bool = false

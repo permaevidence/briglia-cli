@@ -59,12 +59,13 @@ struct WebAgentSelftest: AsyncParsableCommand {
         // MARK: 2. Chat request encoding
 
         let baseReq = ORChatReq(
-            model: "m", messages: [.init(role: "user", content: "hi")], max_tokens: 100,
-            max_completion_tokens: nil, temperature: 0.7, stream: false,
+            model: "m", messages: [.init(role: "user", content: "hi")], temperature: 0.7, stream: false,
             reasoning: nil, reasoning_effort: nil, provider: nil)
         let baseJSON = encodeJSON(baseReq)
         check("request without tools omits tools/tool_choice/response_format",
               baseJSON["tools"] == nil && baseJSON["tool_choice"] == nil && baseJSON["response_format"] == nil)
+        check("chat request carries no output-token cap (no max_tokens / max_completion_tokens)",
+              baseJSON["max_tokens"] == nil && baseJSON["max_completion_tokens"] == nil)
 
         var toolReq = baseReq
         toolReq.tools = WebAgentTools.chatTools
@@ -185,7 +186,7 @@ struct WebAgentSelftest: AsyncParsableCommand {
         let req = OAIResponsesReq(
             model: "gpt-5.6-luna", instructions: rTranscript.instructions,
             input: rTranscript.input, tools: WebAgentTools.responsesTools,
-            tool_choice: nil, reasoning: .init(effort: "high"), max_output_tokens: 32000)
+            tool_choice: nil, reasoning: .init(effort: "high"))
         let reqJSON = encodeJSON(req)
         let rTools = reqJSON["tools"] as? [[String: Any]] ?? []
         check("responses request: store=false, include=encrypted reasoning, flat strict tools",
@@ -195,7 +196,7 @@ struct WebAgentSelftest: AsyncParsableCommand {
               && rTools.allSatisfy { $0["strict"] as? Bool == true && $0["type"] as? String == "function" }
               && rTools.first?["name"] as? String == WebAgentTools.searchName
               && (reqJSON["reasoning"] as? [String: Any])?["effort"] as? String == "high"
-              && reqJSON["tool_choice"] == nil)
+              && reqJSON["tool_choice"] == nil && reqJSON["max_output_tokens"] == nil)
 
         // MARK: 7. Responses output parsing + verbatim replay
 

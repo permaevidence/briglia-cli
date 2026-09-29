@@ -638,6 +638,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         try await Self.runSubscriptionGroups(harness)
         try await Self.runMainModelGroups(harness)
         try await Self.runRound1Groups(harness)
+        try await Self.runExtractorRoomGroups(harness)
 
         print("Web subagent selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }

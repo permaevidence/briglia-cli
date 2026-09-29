@@ -167,6 +167,29 @@ enum WebSearchBackend: String {
     /// strict-JSON extraction in ~2.5 s (medium: ~5.5 s, same answer).
     static let openRouterExtractorEffort: ReasoningEffort = .low
 
+    /// The pinned host slug an OpenRouter reply was served by, from the
+    /// display name OpenRouter reports ("Reka", "DigitalOcean"), or nil
+    /// when the name is absent or not one of the pinned hosts.
+    static func extractorHostSlug(servedBy provider: String?) -> String? {
+        func key(_ s: String) -> String { String(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }) }
+        guard let provider, !key(provider).isEmpty else { return nil }
+        return openRouterExtractorHosts.first { key($0) == key(provider) }
+    }
+
+    /// The follow route for a retry after the listed hosts failed: the same
+    /// routing with those hosts removed from the pinned set, so OpenRouter
+    /// cannot resend the identical request to the host that just failed. If
+    /// every pinned host has failed, the full set again (never an empty
+    /// `only`, which would route anywhere).
+    static func steeredProvider(_ provider: ORChatReq.Provider, excluding failed: [String]) -> ORChatReq.Provider {
+        let pinned = provider.only ?? openRouterExtractorHosts
+        let remaining = pinned.filter { !failed.contains($0) }
+        var steered = ORChatReq.Provider(order: provider.order, only: remaining.isEmpty ? pinned : remaining,
+                                         allow_fallbacks: provider.allow_fallbacks, sort: provider.sort)
+        steered.require_parameters = provider.require_parameters
+        return steered
+    }
+
     /// The stored/inferred backend, ignoring the subscription follow — what
     /// serves when the main provider is not the subscription.
     static var configured: WebSearchBackend {
@@ -404,15 +427,16 @@ struct ORChatReq: Encodable {
     }
     let model: String
     let messages: [Msg]
-    let max_tokens: Int?
-    /// OpenAI-direct only: their reasoning models reject max_tokens.
-    let max_completion_tokens: Int?
+    // No output-token cap field (max_tokens / max_completion_tokens) by
+    // design (owner rule 2026-09-29): reasoning models may think at length,
+    // and a cap starved them into empty completions. Calls stay bounded by
+    // their timeouts, the output validation and the spend caps.
     let temperature: Double?
     let stream: Bool?
     let reasoning: Reasoning?
     /// OpenAI/OpenCode shape: top-level effort string instead of the object.
     let reasoning_effort: String?
-    let provider: Provider?
+    var provider: Provider?
     /// Native function calling for agent rounds (see WebAgentLoop.swift).
     var tools: [ORToolDef]? = nil
     var tool_choice: String? = nil
@@ -439,6 +463,96 @@ struct ORChatResp: Decodable {
     /// OpenRouter names the upstream provider that served the call; OpenAI
     /// and OpenCode omit it.
     let provider: String?
+}
+
+/// Why an HTTP-2xx OpenRouter stage reply carried no usable completion,
+/// decoded field by field so a partial envelope still yields what it has
+/// (the old log printed an opaque 300-byte prefix of the body, which the
+/// keepalive whitespace OpenRouter sends before the JSON often cut to
+/// nothing useful). Carries the reply's usage so a failed but billed
+/// attempt is still counted in spend.
+struct StageNoCompletion {
+    enum Kind: String {
+        /// finish_reason (or the host's native reason) is length: the output
+        /// cap ran out, typically all of it spent reasoning.
+        case lengthStarved = "length_starved"
+        /// The host stopped a reasoning loop (native_finish_reason
+        /// repetition) with no content.
+        case repetition
+        /// 2xx with nothing but whitespace: the upstream dropped the call;
+        /// OpenRouter does not say which host.
+        case emptyBody = "empty_body"
+        /// OpenRouter put an error object in a 2xx body.
+        case providerError = "provider_error"
+        /// A completion envelope with empty content for another reason.
+        case noContent = "no_content"
+        case unparseable
+    }
+    let kind: Kind
+    let generationId: String?
+    let provider: String?
+    let finishReason: String?
+    let nativeFinishReason: String?
+    let completionTokens: Int?
+    let reasoningTokens: Int?
+    let bodyBytes: Int
+    /// Error message (provider_error) or a short body prefix (unparseable).
+    let detail: String?
+    let usage: OpenRouterUsage?
+
+    private struct Envelope: Decodable {
+        struct Choice: Decodable {
+            let finish_reason: String?
+            let native_finish_reason: String?
+        }
+        struct Usage: Decodable {
+            struct Details: Decodable { let reasoning_tokens: Int? }
+            let completion_tokens: Int?
+            let completion_tokens_details: Details?
+        }
+        let id: String?
+        let provider: String?
+        let choices: [Choice]?
+        let usage: Usage?
+    }
+    private struct UsageOnly: Decodable { let usage: OpenRouterUsage? }
+
+    static func classify(_ data: Data) -> StageNoCompletion {
+        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        func make(_ kind: Kind, _ env: Envelope? = nil, provider: String? = nil, detail: String? = nil) -> StageNoCompletion {
+            let choice = env?.choices?.first
+            return StageNoCompletion(
+                kind: kind, generationId: env?.id, provider: provider ?? env?.provider,
+                finishReason: choice?.finish_reason, nativeFinishReason: choice?.native_finish_reason,
+                completionTokens: env?.usage?.completion_tokens,
+                reasoningTokens: env?.usage?.completion_tokens_details?.reasoning_tokens,
+                bodyBytes: data.count, detail: detail,
+                usage: (try? JSONDecoder().decode(UsageOnly.self, from: data))?.usage)
+        }
+        if text.isEmpty { return make(.emptyBody) }
+        if let apiError = try? JSONDecoder().decode(OpenRouterErrorResponse.self, from: data) {
+            let env = try? JSONDecoder().decode(Envelope.self, from: data)
+            return make(.providerError, env, provider: apiError.error.metadata?.providerName, detail: apiError.error.composedMessage)
+        }
+        guard let env = try? JSONDecoder().decode(Envelope.self, from: data), env.choices != nil || env.id != nil else {
+            return make(.unparseable, detail: String(text.prefix(300)))
+        }
+        let choice = env.choices?.first
+        let reasons = [choice?.finish_reason, choice?.native_finish_reason].compactMap { $0?.lowercased() }
+        if reasons.contains(where: { $0 == "length" || $0 == "max_tokens" }) { return make(.lengthStarved, env) }
+        if reasons.contains("repetition") { return make(.repetition, env) }
+        return make(.noContent, env)
+    }
+
+    /// The one-line diagnosis written to the web log for a failed attempt.
+    var logFields: String {
+        func v(_ s: String?) -> String { s.map { $0.isEmpty ? "\"\"" : $0 } ?? "-" }
+        func n(_ i: Int?) -> String { i.map(String.init) ?? "-" }
+        var line = "kind=\(kind.rawValue) provider=\(v(provider)) finish=\(v(finishReason)) native=\(v(nativeFinishReason)) completion_tokens=\(n(completionTokens)) reasoning_tokens=\(n(reasoningTokens)) gen=\(v(generationId)) body_bytes=\(bodyBytes)"
+        if let cost = usage?.cost?.value { line += " cost=\(cost)" }
+        if let detail, !detail.isEmpty { line += " detail=\(detail.prefix(300))" }
+        return line
+    }
 }
 
 struct ScrapeRequest: Codable {
@@ -1244,7 +1358,6 @@ actor WebOrchestrator {
             mode: mode,
             model: agentMdl,
             messages: transcript.messages,
-            maxTokens: 32000,
             reasoning: WebAgentSupport.includedInResponse(agentReasoning(for: mode)),
             provider: providerPreferences(forModel: agentMdl),
             temperature: 0.7,
@@ -1278,8 +1391,7 @@ actor WebOrchestrator {
                 droppedReasoning = true
                 webLog("[WebOrchestrator] \(stage) REASONING_DROPPED_FOR_TOOLS backend=\(backend.rawValue): \(httpError.localizedDescription.prefix(200))")
                 body = ORChatReq(
-                    model: body.model, messages: body.messages, max_tokens: body.max_tokens,
-                    max_completion_tokens: body.max_completion_tokens, temperature: body.temperature,
+                    model: body.model, messages: body.messages, temperature: body.temperature,
                     stream: body.stream, reasoning: nil, reasoning_effort: nil, provider: body.provider,
                     tools: body.tools, tool_choice: body.tool_choice, response_format: nil)
                 continue
@@ -1349,8 +1461,7 @@ actor WebOrchestrator {
             input: transcript.input,
             tools: WebAgentTools.responsesTools,
             tool_choice: toolChoice,
-            reasoning: effort.map { OAIResponsesReq.Reasoning(effort: $0) },
-            max_output_tokens: 32000
+            reasoning: effort.map { OAIResponsesReq.Reasoning(effort: $0) }
         )
         webLog("[WebOrchestrator] openai request stage=\(stage) mode=\(modeLabel(mode)) model=\(model) api=responses reasoning=\(effort ?? "default") input_items=\(transcript.input.count) tool_choice=\(toolChoice ?? "auto")")
 
@@ -1379,7 +1490,7 @@ actor WebOrchestrator {
                     let outTok = resp.usage?.output_tokens
                     webLog("[WebOrchestrator] openai response stage=\(stage) mode=\(modeLabel(mode)) status=\(resp.status ?? "nil") output_items=\(output.count) content_chars=\(round.visibleText.count) tool_calls=\(round.toolCalls.count) tokens=\(inTok.map(String.init) ?? "?")/\(outTok.map(String.init) ?? "?")")
                     if resp.status == "incomplete" {
-                        webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) status=incomplete output_tokens=\(outTok.map(String.init) ?? "?") max=32000")
+                        webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) status=incomplete output_tokens=\(outTok.map(String.init) ?? "?")")
                     }
                     if !round.visibleText.isEmpty || !round.toolCalls.isEmpty {
                         addSpend(estimatedOpenAISpendUSD(model: model, promptTokens: inTok, completionTokens: outTok), executionID: executionID)
@@ -1731,7 +1842,6 @@ actor WebOrchestrator {
         mode: ResearchMode,
         model: String,
         messages: [ORChatReq.Msg],
-        maxTokens: Int,
         reasoning: ORChatReq.Reasoning?,
         provider: ORChatReq.Provider?,
         temperature: Double,
@@ -1760,12 +1870,10 @@ actor WebOrchestrator {
             let providerOrder = providerToUse.order?.joined(separator: ",") ?? "nil"
             let providerOnly = providerToUse.only?.joined(separator: ",") ?? "nil"
             let providerFallbacks = providerToUse.allow_fallbacks.map(String.init) ?? "nil"
-            webLog("[WebOrchestrator] OpenRouter request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(reasoningLabel) \(formatLabel) max_tokens=\(maxTokens) provider_order=\(providerOrder) provider_only=\(providerOnly) provider_allow_fallbacks=\(providerFallbacks) provider_sort=\(providerToUse.sort ?? "nil")\(providerToUse.require_parameters == true ? " require_parameters=true" : "")")
+            webLog("[WebOrchestrator] OpenRouter request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(reasoningLabel) \(formatLabel) provider_order=\(providerOrder) provider_only=\(providerOnly) provider_allow_fallbacks=\(providerFallbacks) provider_sort=\(providerToUse.sort ?? "nil")\(providerToUse.require_parameters == true ? " require_parameters=true" : "")")
             return ORChatReq(
                 model: resolvedModel,
                 messages: messages,
-                max_tokens: maxTokens,
-                max_completion_tokens: nil,
                 temperature: temperature,
                 stream: false,
                 reasoning: reasoning,
@@ -1776,15 +1884,13 @@ actor WebOrchestrator {
         case .openai, .chatgpt:
             // (.chatgpt never reaches here: callOpenRouter routes it through
             // SubscriptionWebTransport before building a chat body.)
-            // OpenAI-native shape: reasoning models take max_completion_tokens
-            // plus a top-level reasoning_effort, and reject max_tokens,
+            // OpenAI-native shape: reasoning models take a top-level
+            // reasoning_effort, and reject max_tokens,
             // non-default temperature, and the OpenRouter provider block.
-            webLog("[WebOrchestrator] OpenAI request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(reasoningLabel) \(formatLabel) max_completion_tokens=\(maxTokens)")
+            webLog("[WebOrchestrator] OpenAI request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(reasoningLabel) \(formatLabel)")
             return ORChatReq(
                 model: resolvedModel,
                 messages: messages,
-                max_tokens: nil,
-                max_completion_tokens: maxTokens,
                 temperature: nil,
                 stream: false,
                 reasoning: nil,
@@ -1798,12 +1904,10 @@ actor WebOrchestrator {
             // edges) — the web stages only ever ask medium/high today, the
             // fold is the guarantee for any configured value.
             let openCodeEffort = OpenRouterService.normalizedOpenCodeReasoningEffort(effortString, for: resolvedModel)
-            webLog("[WebOrchestrator] OpenCode request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(openCodeEffort ?? reasoningLabel) max_tokens=\(maxTokens)")
+            webLog("[WebOrchestrator] OpenCode request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(openCodeEffort ?? reasoningLabel)")
             return ORChatReq(
                 model: resolvedModel,
                 messages: messages,
-                max_tokens: maxTokens,
-                max_completion_tokens: nil,
                 temperature: temperature,
                 stream: false,
                 reasoning: nil,
@@ -1818,7 +1922,6 @@ actor WebOrchestrator {
         mode: ResearchMode,
         model: String,
         messages: [ORChatReq.Msg],
-        maxTokens: Int,
         reasoning: ORChatReq.Reasoning? = nil,
         provider: ORChatReq.Provider? = nil,
         temperature: Double = 0.7,
@@ -1845,7 +1948,6 @@ actor WebOrchestrator {
             mode: mode,
             model: model,
             messages: messages,
-            maxTokens: maxTokens,
             reasoning: reasoning,
             provider: provider,
             temperature: temperature,
@@ -1853,6 +1955,7 @@ actor WebOrchestrator {
         )
         let maxCompletionAttempts = 3
         var completionAttempt = 1
+        var failedExtractorHosts: [String] = []
         while true {
             let data: Data
             do {
@@ -1893,7 +1996,7 @@ actor WebOrchestrator {
                 // truncated prefix even though the HTTP envelope is complete.
                 // This is the signature behind mid-JSON truncated agent steps.
                 if let finishReason = choice.finish_reason, finishReason != "stop" {
-                    webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) finish=\(finishReason) native=\(native) provider=\(served) content_chars=\(content.count) completion_tokens=\(completionTok) max_tokens=\(maxTokens)")
+                    webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) finish=\(finishReason) native=\(native) provider=\(served) content_chars=\(content.count) completion_tokens=\(completionTok)")
                 }
                 return content
             }
@@ -1904,6 +2007,37 @@ actor WebOrchestrator {
             // ("The data couldn't be read because it is missing") and killed
             // the whole pipeline; these failures are typically transient
             // provider errors, so retry, and name the real cause if we give up.
+            if backend == .openrouter {
+                // Diagnose the attempt (host, finish reasons, token split,
+                // generation id), count it in spend (the host billed it), and
+                // on the extractor follow steer the retry away from the host
+                // that failed instead of resending the identical request to
+                // it. Same 3-attempt ceiling; the output cap stays as is.
+                let failure = StageNoCompletion.classify(data)
+                addSpend(callSpendUSD(for: backend, model: resolvedModel, usage: failure.usage), executionID: executionID)
+                webLog("[WebOrchestrator] openrouter stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) \(failure.logFields)")
+                guard completionAttempt < maxCompletionAttempts else {
+                    throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
+                        NSLocalizedDescriptionKey: "openrouter returned no completion for stage '\(stage)' (model \(resolvedModel)) after \(maxCompletionAttempts) attempts: \(failure.kind.rawValue) from \(failure.provider ?? "an unnamed host")\(failure.detail.map { " — \($0.prefix(300))" } ?? "")"
+                    ])
+                }
+                var retryNote = "same route"
+                if selection.followsMainOpenRouter, let routed = provider {
+                    if let host = WebSearchBackend.extractorHostSlug(servedBy: failure.provider), !failedExtractorHosts.contains(host) {
+                        failedExtractorHosts.append(host)
+                    }
+                    if !failedExtractorHosts.isEmpty {
+                        body.provider = WebSearchBackend.steeredProvider(routed, excluding: failedExtractorHosts)
+                        retryNote = "hosts=\(body.provider?.only?.joined(separator: ",") ?? "-") excluded=\(failedExtractorHosts.joined(separator: ","))"
+                    } else {
+                        retryNote = "same hosts (failing host unknown)"
+                    }
+                }
+                webLog("[WebOrchestrator] openrouter stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
+                try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
+                completionAttempt += 1
+                continue
+            }
             let detail: String
             if let apiError = try? JSONDecoder().decode(OpenRouterErrorResponse.self, from: data) {
                 detail = apiError.error.composedMessage
@@ -2274,7 +2408,6 @@ actor WebOrchestrator {
             mode: .webSearch,
             model: ORModel.webFetchCompression,
             messages: messages,
-            maxTokens: 8_000,
             reasoning: makeReasoning(.medium),
             // Never nil here: callOpenRouter's nil-fallback pins to
             // Groq/Vertex, which don't host Luna.
@@ -2616,10 +2749,6 @@ actor WebOrchestrator {
             mode: mode,
             model: excerptModel(for: mode),
             messages: msgs,
-            // Luna's 1M window fits an 800K-char chunk plus a 32k output
-            // budget with room to spare (the old 16k cap existed for
-            // gpt-oss-120b's 131k window).
-            maxTokens: 32000,
             reasoning: excerptReasoning(for: mode),
             provider: providerPreferences(forModel: excerptModel(for: mode)),
             temperature: 0.1,
@@ -2701,7 +2830,6 @@ actor WebOrchestrator {
             mode: mode,
             model: excerptModel(for: mode),
             messages: msgs,
-            maxTokens: 8000,
             reasoning: excerptReasoning(for: mode),
             provider: providerPreferences(forModel: excerptModel(for: mode)),
             temperature: 0.1,
@@ -2797,9 +2925,10 @@ actor WebOrchestrator {
     /// the owner on 2026-09-21): chosen for its very high usage limits on
     /// OpenCode Go and 1M context. 2.5 probed 2026-08-01: swallows 312k-token
     /// inputs (so the 800K-char chunks fit), accurate on extraction, ~5-10x
-    /// slower than Luna. 2.6 Flash probed 2026-09-21 on this exact request
-    /// shape (temperature 0.1, max_tokens 32000, reasoning_effort
-    /// medium/high, a ~250k-token extraction input): see the v0.2.32 notes.
+    /// slower than Luna. 2.6 Flash probed 2026-09-21 on this request shape
+    /// (temperature 0.1, reasoning_effort medium/high, a ~250k-token
+    /// extraction input; max_tokens 32000 then, no cap since 2026-09-29):
+    /// see the v0.2.32 notes.
     /// MiMo accepts reasoning_effort low/medium/high only (400 on the rest),
     /// hence the fold in `buildChatBody`.
     private static let opencodeModel = "mimo-v2.6-flash"
