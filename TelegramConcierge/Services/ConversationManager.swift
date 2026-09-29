@@ -7763,7 +7763,12 @@ class ConversationManager: ObservableObject {
                     toolResults = calls.map(Self.notExecutedResult(for:))
                 } else {
                     if !executableCalls.isEmpty {
-                        let executedResults = try await toolExecutor.executeParallel(executableCalls)
+                        // Diagnostics: the round number rides on every stage
+                        // marker of this batch (a task-local; no behaviour
+                        // change).
+                        let executedResults = try await StageMarkers.$round.withValue(round) {
+                            try await toolExecutor.executeParallel(executableCalls)
+                        }
                         toolResults.append(contentsOf: executedResults)
                     }
                     if !blockedResults.isEmpty {
@@ -7832,6 +7837,9 @@ class ConversationManager: ObservableObject {
                 }
                 
                 print("[ConversationManager] Round \(round) tool execution complete")
+                StageMarkers.$round.withValue(round) {
+                    StageMarkers.event("round.execution_complete", detail: "\(orderedToolResults.count) result(s)", call: nil)
+                }
                 
                 // Record the batch delivery time on every result of this round
                 // (typed `completedAt`, one clock read per batch). The provider

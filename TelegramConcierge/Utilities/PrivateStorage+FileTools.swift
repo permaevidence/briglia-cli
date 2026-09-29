@@ -35,17 +35,29 @@ extension PrivateStorage {
     static func fileToolWrite(_ data: Data, toRequestedPath path: String,
                               outsideRoots: OutsideRootsWrite) throws {
         if fileToolPathIsInScope(path) {
-            try writeAtomically(data, to: URL(fileURLWithPath: path))
+            try StageMarkers.measure("fs.write.private_atomic") {
+                _ = try writeAtomically(data, to: URL(fileURLWithPath: path))
+            }
             return
         }
         let fm = FileManager.default
         switch outsideRoots {
         case .resolveAndPreserveMode:
-            let targetURL = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-            let previousMode = (try? fm.attributesOfItem(atPath: targetURL.path))?[.posixPermissions] as? NSNumber
-            try data.write(to: targetURL, options: .atomic)
+            let targetURL = StageMarkers.measure("fs.write.resolve_symlinks") {
+                URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            }
+            let previousMode = StageMarkers.measure("fs.write.stat_previous_mode") {
+                (try? fm.attributesOfItem(atPath: targetURL.path))?[.posixPermissions] as? NSNumber
+            }
+            // Foundation's atomic write: temp file in the same directory,
+            // then rename (no explicit fsync).
+            try StageMarkers.measure("fs.write.atomic_temp_and_rename") {
+                try data.write(to: targetURL, options: .atomic)
+            }
             if let previousMode {
-                try? fm.setAttributes([.posixPermissions: previousMode], ofItemAtPath: targetURL.path)
+                StageMarkers.measure("fs.write.restore_mode") {
+                    try? fm.setAttributes([.posixPermissions: previousMode], ofItemAtPath: targetURL.path)
+                }
             }
         case .resolveOnly:
             try data.write(to: URL(fileURLWithPath: path).resolvingSymlinksInPath(), options: .atomic)
