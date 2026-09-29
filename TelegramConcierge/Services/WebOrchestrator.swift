@@ -160,7 +160,11 @@ enum WebSearchBackend: String {
     /// almost always, hung ~90 s then returned an empty body; Morph, Nebius,
     /// Together (429s), Phala and Parasail failed some; Wafer and the fp4
     /// hosts were slow on large pages; eight hosts refused strict JSON.
-    static let openRouterExtractorHosts = ["reka", "makora", "digitalocean"]
+    /// Makora dropped 2026-09-29 (owner decision): with no output cap it ran
+    /// two reasoning loops to its 131k-token default (17 and 21 min, no
+    /// content) and often refused with 429 "capacity"; Reka (32/32) and
+    /// DigitalOcean (33/33) answered every uncapped probe.
+    static let openRouterExtractorHosts = ["reka", "digitalocean"]
 
     /// Low: the extractor copies facts out of a page; DeepSeek V4 Flash at
     /// low reasoned ~11 tokens on a small page and answered a 39k-token
