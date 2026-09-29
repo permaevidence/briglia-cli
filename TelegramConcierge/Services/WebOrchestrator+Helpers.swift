@@ -109,7 +109,8 @@ func webPipelineFailureText(_ prefix: String, error: Error) -> String {
 /// retried and always surfaces as CancellationError so /stop keeps working
 /// mid-request.
 func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4, retryTimeouts: Bool = true, usageRecord: ResponsesUsageStore.Record? = nil,
-                       fetch: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil) async throws -> Data {
+                       fetch: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil,
+                       deadline: ExtractorDeadline? = nil) async throws -> Data {
     var attempt = 1
     var lastError: Error?
 
@@ -170,6 +171,12 @@ func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4,
             }
             guard attempt < maxAttempts, isRetryableHTTPFailure(error) else { throw error }
             let delay = httpRetryDelay(forAttempt: attempt, retryAfter: (error as? HTTPError)?.retryAfter)
+            // A total deadline covers the backoff too: when the retry could
+            // only start at or past it, stop now (no request is in flight).
+            if let deadline, delay >= deadline.remaining {
+                webLog("[WebPipeline] \(label) failed (attempt \(attempt)/\(maxAttempts)): \(error.localizedDescription). Not retrying: the \(String(format: "%.2f", delay))s backoff reaches the total deadline")
+                throw deadline.exceeded(requestInFlight: false)
+            }
             webLog("[WebPipeline] \(label) failed (attempt \(attempt)/\(maxAttempts)): \(error.localizedDescription). Retrying in \(String(format: "%.2f", delay))s")
             try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             attempt += 1
@@ -180,7 +187,8 @@ func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4,
 }
 
 func httpJSONPostWithRetry<T: Encodable>(url: URL, body: T, headers: [String: String], timeout: TimeInterval, label: String, retryTimeouts: Bool = true, usageRecord: ResponsesUsageStore.Record? = nil,
-                                         fetch: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil) async throws -> Data {
+                                         fetch: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil,
+                                         deadline: ExtractorDeadline? = nil) async throws -> Data {
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -189,7 +197,7 @@ func httpJSONPostWithRetry<T: Encodable>(url: URL, body: T, headers: [String: St
         request.setValue(value, forHTTPHeaderField: key)
     }
     request.httpBody = try JSONEncoder().encode(body)
-    return try await httpDataWithRetry(request: request, label: label, retryTimeouts: retryTimeouts, usageRecord: usageRecord, fetch: fetch)
+    return try await httpDataWithRetry(request: request, label: label, retryTimeouts: retryTimeouts, usageRecord: usageRecord, fetch: fetch, deadline: deadline)
 }
 
 // MARK: - Total wall-clock deadline (OpenRouter extractor)
@@ -200,60 +208,97 @@ func httpJSONPostWithRetry<T: Encodable>(url: URL, body: T, headers: [String: St
 struct ExtractorDeadlineExceeded: LocalizedError {
     let seconds: TimeInterval
     let elapsed: TimeInterval
-    /// From the X-Generation-Id response header, when headers arrived.
+    /// True when the clock stopped Briglia waiting on a request that was
+    /// still open. Only Briglia's wait ends: a non-streaming OpenRouter
+    /// request keeps running and billing upstream after the client leaves,
+    /// so its cost is UNKNOWN (never zero). False when the deadline was
+    /// reached with nothing in flight (before a send, or in a transport
+    /// retry's backoff after a completed error response).
+    let requestInFlight: Bool
+    /// X-Generation-Id of the CURRENT transport attempt only (nil when that
+    /// attempt received no such header, or no headers at all).
     let generationId: String?
-    /// From the X-Provider-Name response header, when OpenRouter sent it.
+    /// X-Provider-Name of the current transport attempt only.
     let provider: String?
+    /// Generation ids seen on EARLIER transport attempts of this request
+    /// (completed error responses), kept apart for the log.
+    let earlierGenerationIds: [String]
     var errorDescription: String? {
-        "request exceeded its \(Int(seconds.rounded())) s total deadline after \(String(format: "%.1f", elapsed)) s"
+        "request reached its \(Int(seconds.rounded())) s total deadline after \(String(format: "%.1f", elapsed)) s"
     }
 }
 
 /// One logical request's total wall-clock deadline, counted from the first
-/// send and shared by its transport retries. URLRequest.timeoutInterval is an
-/// IDLE timeout: OpenRouter answers headers in ~1 s and then sends keepalive
-/// whitespace every second until the completion, so a host stuck in a
-/// reasoning loop never trips it. This clock ignores bytes entirely.
-/// It limits time only; the request body (and its output cap — none) is
-/// untouched.
+/// send and shared by its transport retries AND their backoff sleeps.
+/// URLRequest.timeoutInterval is an IDLE timeout: OpenRouter answers headers
+/// in ~1 s and then sends keepalive whitespace every second until the
+/// completion, so a host stuck in a reasoning loop never trips it. This
+/// clock ignores bytes entirely. It limits Briglia's wait only; the request
+/// body (and its output cap — none) is untouched, and the upstream
+/// generation is not stopped by it.
+/// Response identity (generation id, host) is tracked PER transport
+/// attempt: each send starts with none, a response without the headers
+/// leaves them unset, and callbacks of an older attempt are ignored.
 final class ExtractorDeadline: @unchecked Sendable {
     let seconds: TimeInterval
     private let started = ProcessInfo.processInfo.systemUptime
     private let lock = NSLock()
+    private var attempt = 0
     private var generationId: String?
     private var provider: String?
+    private var earlierGenerationIds: [String] = []
 
     init(seconds: TimeInterval) { self.seconds = seconds }
 
     var elapsed: TimeInterval { ProcessInfo.processInfo.systemUptime - started }
+    var remaining: TimeInterval { seconds - elapsed }
 
-    func observe(_ response: HTTPURLResponse) {
+    /// Start a new transport attempt: its identity starts empty.
+    func beginAttempt() -> Int {
         lock.lock(); defer { lock.unlock() }
-        if let id = response.value(forHTTPHeaderField: "X-Generation-Id"), !id.isEmpty { generationId = id }
-        if let name = response.value(forHTTPHeaderField: "X-Provider-Name"), !name.isEmpty { provider = name }
+        if let generationId { earlierGenerationIds.append(generationId) }
+        attempt += 1
+        generationId = nil; provider = nil
+        return attempt
     }
 
-    func exceeded() -> ExtractorDeadlineExceeded {
+    /// Record the response headers of `attempt` (ignored when a later
+    /// attempt has started). Absent headers stay absent.
+    func observe(_ response: HTTPURLResponse, attempt: Int) {
         lock.lock(); defer { lock.unlock() }
-        return ExtractorDeadlineExceeded(seconds: seconds, elapsed: elapsed, generationId: generationId, provider: provider)
+        guard attempt == self.attempt else { return }
+        generationId = response.value(forHTTPHeaderField: "X-Generation-Id").flatMap { $0.isEmpty ? nil : $0 }
+        provider = response.value(forHTTPHeaderField: "X-Provider-Name").flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    func exceeded(requestInFlight: Bool) -> ExtractorDeadlineExceeded {
+        lock.lock(); defer { lock.unlock() }
+        return ExtractorDeadlineExceeded(seconds: seconds, elapsed: elapsed, requestInFlight: requestInFlight,
+                                         generationId: requestInFlight ? generationId : nil,
+                                         provider: requestInFlight ? provider : nil,
+                                         earlierGenerationIds: earlierGenerationIds + (requestInFlight ? [] : generationId.map { [$0] } ?? []))
     }
 
     /// Send one HTTP attempt within what is left of the deadline.
     func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
-        let remaining = seconds - elapsed
-        guard remaining > 0 else { throw exceeded() }
-        return try await DeadlineHTTPTransport(owner: self).send(request, remaining: remaining)
+        let remaining = self.remaining
+        guard remaining > 0 else { throw exceeded(requestInFlight: false) }
+        let attempt = beginAttempt()
+        return try await DeadlineHTTPTransport(owner: self, attempt: attempt).send(request, remaining: remaining)
     }
 }
 
 /// URLSessionDataDelegate transport (Foundation and FoundationNetworking)
-/// with a hard wall-clock cut: on expiry the task is cancelled and the call
-/// throws ExtractorDeadlineExceeded. Response headers are recorded as soon
-/// as they arrive so the cut can name the generation (and host, if sent).
+/// with a hard wall-clock cut: on expiry the local task is cancelled (the
+/// connection closes; the upstream generation is NOT known to stop) and the
+/// call throws ExtractorDeadlineExceeded. Response headers are recorded, for
+/// this attempt only, as soon as they arrive so the cut can name the
+/// generation (and host, if sent).
 /// Outer task cancellation cancels the request and throws CancellationError.
 /// Redirects follow the session default, like URLSession.shared.
 final class DeadlineHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let owner: ExtractorDeadline
+    private let attempt: Int
     private let lock = NSLock()
     private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
     private var session: URLSession?
@@ -263,7 +308,7 @@ final class DeadlineHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked 
     private var response: URLResponse?
     private var data = Data()
 
-    init(owner: ExtractorDeadline) { self.owner = owner; super.init() }
+    init(owner: ExtractorDeadline, attempt: Int) { self.owner = owner; self.attempt = attempt; super.init() }
 
     func send(_ request: URLRequest, remaining: TimeInterval) async throws -> (Data, URLResponse) {
         try await withTaskCancellationHandler(operation: {
@@ -282,7 +327,7 @@ final class DeadlineHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked 
                 let task = session.dataTask(with: request); self.task = task
                 let timer = DispatchWorkItem { [weak self] in
                     guard let self else { return }
-                    self.finish(.failure(self.owner.exceeded()))
+                    self.finish(.failure(self.owner.exceeded(requestInFlight: true)))
                 }
                 self.timer = timer
                 DispatchQueue.global().asyncAfter(deadline: .now() + remaining, execute: timer)
@@ -306,7 +351,7 @@ final class DeadlineHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked 
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        if let http = response as? HTTPURLResponse { owner.observe(http) }
+        if let http = response as? HTTPURLResponse { owner.observe(http, attempt: attempt) }
         lock.lock(); self.response = response; lock.unlock()
         completionHandler(.allow)
     }

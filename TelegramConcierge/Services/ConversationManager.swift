@@ -11109,6 +11109,9 @@ class ConversationManager: ObservableObject {
     private func settleToolCharges() {
         ToolChargeLedger.settlePending()
         ToolChargeLedger.registerUnknownSpendForPreviousProcesses()
+        // Web extraction requests cut at their deadline: look their cost up
+        // later (rate-limited, off this actor).
+        CutRequestCostLookup.kickIfDue()
         if let failure = ToolChargeLedger.lastFailure {
             ToolChargeLedger.lastFailure = nil
             showMaintenanceNotice("Spend accounting: \(failure). The charge is kept and retried; totals still count it.")

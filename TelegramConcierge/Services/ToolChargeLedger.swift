@@ -89,6 +89,10 @@ struct SpendIncident: Codable, Equatable {
     var acceptedAt: Date? = nil
     var closedAt: Date? = nil
     var detail: String? = nil
+    /// OpenRouter generation id of a web extraction request Briglia stopped
+    /// waiting for (unknownAmount only): the key a later cost lookup uses.
+    /// Additive, omitted when nil (older binaries ignore it).
+    var generationId: String? = nil
 
     var affectsCurrentPeriods: Bool { kind == .ledgerUnreadable || kind == .recordsUnreadable }
     func affects(dayKey: String, monthKey: String) -> Bool {
@@ -581,6 +585,76 @@ enum ToolChargeLedger {
                          from: day, through: through, detail: detail)
     }
 
+    // MARK: Web extraction requests cut at their deadline
+
+    static let cutRequestDetailPrefix = "web extraction request cut at its deadline"
+    /// Kind of a cut request's charge once its cost is known.
+    static let cutRequestChargeKind = "web-cut"
+
+    /// Open (idempotently) the unknown-amount incident of an OpenRouter
+    /// extraction request Briglia stopped waiting for at its total deadline.
+    /// Leaving a non-streaming request does not stop the upstream
+    /// generation or its billing, so its cost is UNKNOWN until a lookup finds
+    /// it: never zero, never an estimate. Checked: a caller that cannot
+    /// record it must not start another paid attempt.
+    static func openCutRequestUnknown(chargeId: UUID, generationId: String?, provider: String?, stage: String, at date: Date = Date()) throws {
+        lock.lock(); defer { lock.unlock() }
+        let id = "unknown-amount:\(chargeId.uuidString.lowercased())"
+        try mutateIncidents("incident-open") { incidents in
+            guard !incidents.contains(where: { $0.id == id }) else { return }
+            var incident = SpendIncident(id: id, kind: .unknownAmount, periods: [dayKey(date)], openedAt: date, state: .open,
+                                         detail: "\(cutRequestDetailPrefix) (stage \(stage), host \(provider ?? "unnamed"), generation \(generationId ?? "unknown"))")
+            incident.generationId = generationId
+            incidents.append(incident)
+        }
+    }
+
+    /// Cut requests whose cost may still be looked up: an unknown-amount
+    /// incident with a generation id, open or accepted, younger than
+    /// `maxAge`.
+    static func pendingCutRequests(now: Date = Date(), maxAge: TimeInterval = 7 * 86_400) -> [SpendIncident] {
+        guard case .readable(let incidents) = loadIncidents() else { return [] }
+        return incidents.filter { $0.kind == .unknownAmount && $0.generationId != nil && $0.state != .closed
+            && now.timeIntervalSince($0.openedAt) <= maxAge }
+    }
+
+    /// Settle cut requests whose actual cost `lookup` finds: the charge
+    /// goes into the ledger under the incident's own id (so a repeated
+    /// lookup, a retry or a restart never counts it twice), and only then
+    /// the incident closes. Not found → the incident stays as it is (open
+    /// or accepted); a reported cost of 0 is not taken as final (the record
+    /// may predate the generation's end), so it also leaves the incident
+    /// unknown. Returns the number settled.
+    @discardableResult
+    static func reconcileCutRequests(now: Date = Date(), lookup: (String) async -> Double?) async -> Int {
+        var settled = 0
+        for incident in pendingCutRequests(now: now) {
+            guard let generationId = incident.generationId,
+                  let chargeId = UUID(uuidString: String(incident.id.dropFirst("unknown-amount:".count))),
+                  let cost = await lookup(generationId), cost.isFinite, cost > 0 else { continue }
+            do {
+                try recordInLedger(ToolChargeEntry(chargeId: chargeId, amountUSD: cost, providerReturnedAt: incident.openedAt,
+                                                   kind: cutRequestChargeKind))
+                try closeReconciled(id: incident.id, cost: cost, now: now)
+                settled += 1
+            } catch {
+                lastFailure = "could not record the looked-up cost of a cut web request: \(error.localizedDescription)"
+            }
+        }
+        return settled
+    }
+
+    private static func closeReconciled(id: String, cost: Double, now: Date) throws {
+        lock.lock(); defer { lock.unlock() }
+        try mutateIncidents("incident-reconcile") { incidents in
+            for i in incidents.indices where incidents[i].id == id && incidents[i].state != .closed {
+                incidents[i].state = .closed
+                incidents[i].closedAt = now
+                incidents[i].detail = (incidents[i].detail ?? "") + " — actual cost $\(SpendGate.formatUSD(cost)) recorded"
+            }
+        }
+    }
+
     /// A charge that existed only in memory was lost at a restart.
     static func openMemoryOnly(chargeId: UUID, day: Date, through: Date? = nil, detail: String) throws {
         try openIncident(id: "memory-only:\(chargeId.uuidString.lowercased())", kind: .memoryOnly,
@@ -903,6 +977,8 @@ enum ToolChargeLedger {
         var when = incident.periods.isEmpty ? "current totals" : incident.periods.joined(separator: ", ")
         if let through = incident.throughDay, let from = incident.periods.min() { when = "\(from) to \(through)" }
         switch incident.kind {
+        case .unknownAmount where incident.detail?.hasPrefix(cutRequestDetailPrefix) == true:
+            return "unknown cost of a \(incident.detail ?? cutRequestDetailPrefix) (\(when))"
         case .unknownAmount: return "unknown amount for background job \(incident.id.dropFirst("unknown-amount:".count).prefix(8)) (\(when))"
         case .memoryOnly: return "charge lost in a restart for job \(incident.id.dropFirst("memory-only:".count).prefix(8)) (\(when))"
         case .ledgerUnreadable: return "tool-charges.json unreadable — earlier totals unknown (episode \(incident.id.dropFirst("ledger-unreadable:".count).prefix(8)))"

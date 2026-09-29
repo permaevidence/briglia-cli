@@ -29,3 +29,4 @@ TelegramConcierge/Services/WebOrchestrator+Helpers.swift :: var request = URLReq
 TelegramConcierge/Services/WebOrchestrator.swift :: var req = URLRequest(url: proxyURL) :: Jina Reader proxy fetch, not a model request
 TelegramConcierge/Services/OpenRouterProviderPin.swift :: var request = URLRequest(url: url) :: OpenRouter model-endpoint listing (GET /models/{id}/endpoints) for /orprovider, not a model request
 TelegramConcierge/Services/SubscriptionAuth.swift :: var request = URLRequest(url: URL(string: SubscriptionEndpoint.issuer + path)!) :: Native OAuth POST to three fixed auth.openai.com paths; no inference/session affinity, bounded replies and redirect refusal
+TelegramConcierge/Services/CutRequestCostLookup.swift :: var request = URLRequest(url: url) :: OpenRouter generation-record lookup (GET /generation?id=) for the cost of a cut extractor request, not a model request

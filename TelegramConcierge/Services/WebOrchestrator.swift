@@ -170,6 +170,10 @@ enum WebSearchBackend: String {
     /// follow (extract.excerpts, extract.assets, web_fetch compression and
     /// its chunks), counted from the send regardless of keepalive bytes.
     /// A time limit, not a token cap: the body still sends no max_tokens.
+    /// It bounds Briglia's WAIT (transport retries and their backoff
+    /// included), not the upstream generation: a non-streaming request keeps
+    /// running and billing after the client leaves, so each cut request is
+    /// recorded as an unknown-spend incident (ToolChargeLedger).
     /// Owner decision 2026-09-29, after uncapped hosts looped for 17–21 min.
     static let openRouterExtractorDeadlineSeconds: TimeInterval = 300
     /// Selftest seam: a short deadline (never persisted).
@@ -1984,10 +1988,15 @@ actor WebOrchestrator {
         // The total wall-clock deadline applies to the OpenRouter follow's
         // extractor requests only (every callOpenRouter caller is an
         // extractor stage); other backends keep the plain transport.
+        // One deadline per COMPLETION attempt: the response-format fallback
+        // below resends within the same attempt and the same deadline, so the
+        // envelope is at most 3 deadlines plus the inter-attempt pauses.
+        // Other routes (non-follow /websearch openrouter, other backends,
+        // maintenance requests) get no total deadline.
         let deadlineApplies = backend == .openrouter && selection.followsMainOpenRouter
+        var deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline) : nil
         while true {
             let data: Data
-            let deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline) : nil
             do {
                 data = try await httpJSONPostWithRetry(
                     url: backend.endpoint,
@@ -1996,22 +2005,53 @@ actor WebOrchestrator {
                     timeout: timeout,
                     label: "\(backend.rawValue) \(stage)",
                     retryTimeouts: retryTimeouts,
-                    fetch: deadline.map { d in { @Sendable request in try await d.fetch(request) } }
+                    fetch: deadline.map { d in { @Sendable request in try await d.fetch(request) } },
+                    deadline: deadline
                 )
             } catch let exceeded as ExtractorDeadlineExceeded {
-                // Cut at the deadline: a failed attempt. No usage arrives with a
-                // cut request, so its cost is unknown (OpenRouter's generation
-                // record is not available for it) and nothing is added to spend.
-                webLog("[WebOrchestrator] openrouter stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) kind=deadline provider=\(exceeded.provider ?? "-") elapsed_s=\(String(format: "%.1f", exceeded.elapsed)) deadline_s=\(Int(exceeded.seconds.rounded())) gen=\(exceeded.generationId ?? "-") cost=unknown")
+                // The deadline ended Briglia's wait: a failed attempt. When a
+                // request was still open, closing the connection does NOT stop
+                // a non-streaming OpenRouter generation or its billing, and no
+                // usage arrives: its cost is UNKNOWN. It becomes an
+                // unknown-spend incident (keyed by its generation id when
+                // known, for a later cost lookup) that the spend gate and
+                // /spend see — never counted as zero, never estimated. If that
+                // cannot be recorded, no further paid attempt is made.
+                var costField = "cost=none(no request open)"
+                if exceeded.requestInFlight {
+                    let chargeId = UUID()
+                    do {
+                        try ToolChargeLedger.openCutRequestUnknown(chargeId: chargeId, generationId: exceeded.generationId,
+                                                                   provider: exceeded.provider, stage: stage)
+                        costField = "cost=unknown incident=unknown-amount:\(chargeId.uuidString.lowercased())"
+                    } catch {
+                        webLog("[WebOrchestrator] openrouter stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) kind=deadline provider=\(exceeded.provider ?? "-") elapsed_s=\(String(format: "%.1f", exceeded.elapsed)) deadline_s=\(Int(exceeded.seconds.rounded())) gen=\(exceeded.generationId ?? "-") cost=unknown incident=UNRECORDED")
+                        throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
+                            NSLocalizedDescriptionKey: "openrouter stage '\(stage)' stopped: a request cut at its deadline may still be billed and its unknown cost could not be recorded (\(error.localizedDescription)), so no further paid attempt is made"
+                        ])
+                    }
+                }
+                let earlier = exceeded.earlierGenerationIds.isEmpty ? "" : " earlier_gens=\(exceeded.earlierGenerationIds.joined(separator: ","))"
+                webLog("[WebOrchestrator] openrouter stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) kind=deadline provider=\(exceeded.provider ?? "-") elapsed_s=\(String(format: "%.1f", exceeded.elapsed)) deadline_s=\(Int(exceeded.seconds.rounded())) gen=\(exceeded.generationId ?? "-") \(costField)\(earlier)")
                 guard completionAttempt < maxCompletionAttempts else {
                     throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
                         NSLocalizedDescriptionKey: "openrouter returned no completion for stage '\(stage)' (model \(resolvedModel)) after \(maxCompletionAttempts) attempts: deadline from \(exceeded.provider ?? "an unnamed host") — \(exceeded.localizedDescription)"
+                    ])
+                }
+                // A further paid attempt obeys the configured spend policy: a
+                // reached cap, or a cap made unverifiable by an open unknown
+                // (this cut included), stops here until /spend accept-unknown.
+                if let pause = SpendGate.pauseReason() {
+                    webLog("[WebOrchestrator] openrouter stage=\(stage) not retried: spend gate paused (\(pause.prefix(160)))")
+                    throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
+                        NSLocalizedDescriptionKey: "openrouter stage '\(stage)' not retried after a deadline cut: \(pause)"
                     ])
                 }
                 let retryNote = steerAfterFailure(servedBy: exceeded.provider)
                 webLog("[WebOrchestrator] openrouter stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
                 try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
                 completionAttempt += 1
+                deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline) : nil
                 continue
             } catch let httpError as HTTPError where httpError.statusCode == 400 && body.response_format != nil {
                 // An OpenRouter upstream provider may reject response_format.
@@ -2071,6 +2111,7 @@ actor WebOrchestrator {
                 webLog("[WebOrchestrator] openrouter stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
                 try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
                 completionAttempt += 1
+                deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline) : nil
                 continue
             }
             let detail: String
