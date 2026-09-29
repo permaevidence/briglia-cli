@@ -1997,6 +1997,30 @@ actor WebOrchestrator {
         var deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline) : nil
         while true {
             let data: Data
+            // Paid-request gate and write-ahead (OpenRouter follow): EVERY
+            // extractor request — a new stage, chunk, page or retry — checks
+            // the spend policy before it is sent (a reached cap, or a cap made
+            // unverifiable by an open unknown, stops it; optional fallbacks
+            // then continue without any paid request), and is written ahead
+            // so a request abandoned mid-flight, or lost in a crash, stays an
+            // unknown charge. No durable record → not sent.
+            var flightId: UUID? = nil
+            if deadlineApplies {
+                if let pause = SpendGate.pauseReason() {
+                    webLog("[WebOrchestrator] openrouter stage=\(stage) not sent: spend gate paused (\(pause.prefix(160)))")
+                    throw NSError(domain: "WebOrchestrator", code: 3, userInfo: [
+                        NSLocalizedDescriptionKey: "openrouter stage '\(stage)' not sent: \(pause)"
+                    ])
+                }
+                let id = UUID()
+                do { try ToolChargeLedger.beginInFlight(chargeId: id, stage: stage) } catch {
+                    webLog("[WebOrchestrator] openrouter stage=\(stage) not sent: in-flight record could not be saved (\(error.localizedDescription))")
+                    throw NSError(domain: "WebOrchestrator", code: 3, userInfo: [
+                        NSLocalizedDescriptionKey: "openrouter stage '\(stage)' not sent: its spend could not be tracked durably (\(error.localizedDescription))"
+                    ])
+                }
+                flightId = id
+            }
             do {
                 data = try await httpJSONPostWithRetry(
                     url: backend.endpoint,
@@ -2008,27 +2032,25 @@ actor WebOrchestrator {
                     fetch: deadline.map { d in { @Sendable request in try await d.fetch(request) } },
                     deadline: deadline
                 )
+                if let flightId { ToolChargeLedger.endInFlight(chargeId: flightId) }
             } catch let exceeded as ExtractorDeadlineExceeded {
                 // The deadline ended Briglia's wait: a failed attempt. When a
                 // request was still open, closing the connection does NOT stop
                 // a non-streaming OpenRouter generation or its billing, and no
-                // usage arrives: its cost is UNKNOWN. It becomes an
-                // unknown-spend incident (keyed by its generation id when
-                // known, for a later cost lookup) that the spend gate and
-                // /spend see — never counted as zero, never estimated. If that
-                // cannot be recorded, no further paid attempt is made.
+                // usage arrives: its cost is UNKNOWN. Its write-ahead record
+                // becomes an unknown-spend incident (keyed by its generation id
+                // when known, for a later cost lookup) that the spend gate and
+                // /spend see — never counted as zero, never estimated. When the
+                // incident can't be saved yet, the record and a memory entry
+                // keep it (an open unknown in every snapshot, retried).
                 var costField = "cost=none(no request open)"
-                if exceeded.requestInFlight {
-                    let chargeId = UUID()
-                    do {
-                        try ToolChargeLedger.openCutRequestUnknown(chargeId: chargeId, generationId: exceeded.generationId,
-                                                                   provider: exceeded.provider, stage: stage)
-                        costField = "cost=unknown incident=unknown-amount:\(chargeId.uuidString.lowercased())"
-                    } catch {
-                        webLog("[WebOrchestrator] openrouter stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) kind=deadline provider=\(exceeded.provider ?? "-") elapsed_s=\(String(format: "%.1f", exceeded.elapsed)) deadline_s=\(Int(exceeded.seconds.rounded())) gen=\(exceeded.generationId ?? "-") cost=unknown incident=UNRECORDED")
-                        throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
-                            NSLocalizedDescriptionKey: "openrouter stage '\(stage)' stopped: a request cut at its deadline may still be billed and its unknown cost could not be recorded (\(error.localizedDescription)), so no further paid attempt is made"
-                        ])
+                if let flightId {
+                    if exceeded.requestInFlight {
+                        let saved = ToolChargeLedger.abandonInFlight(chargeId: flightId, generationId: exceeded.generationId,
+                                                                     provider: exceeded.provider, stage: stage, reason: "cut at its deadline")
+                        costField = "cost=unknown incident=unknown-amount:\(flightId.uuidString.lowercased())\(saved ? "" : " UNSAVED(kept, retried)")"
+                    } else {
+                        ToolChargeLedger.endInFlight(chargeId: flightId)
                     }
                 }
                 let earlier = exceeded.earlierGenerationIds.isEmpty ? "" : " earlier_gens=\(exceeded.earlierGenerationIds.joined(separator: ","))"
@@ -2038,21 +2060,31 @@ actor WebOrchestrator {
                         NSLocalizedDescriptionKey: "openrouter returned no completion for stage '\(stage)' (model \(resolvedModel)) after \(maxCompletionAttempts) attempts: deadline from \(exceeded.provider ?? "an unnamed host") — \(exceeded.localizedDescription)"
                     ])
                 }
-                // A further paid attempt obeys the configured spend policy: a
-                // reached cap, or a cap made unverifiable by an open unknown
-                // (this cut included), stops here until /spend accept-unknown.
-                if let pause = SpendGate.pauseReason() {
-                    webLog("[WebOrchestrator] openrouter stage=\(stage) not retried: spend gate paused (\(pause.prefix(160)))")
-                    throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
-                        NSLocalizedDescriptionKey: "openrouter stage '\(stage)' not retried after a deadline cut: \(pause)"
-                    ])
-                }
+                // The retry passes the paid-request gate at the top of the loop.
                 let retryNote = steerAfterFailure(servedBy: exceeded.provider)
                 webLog("[WebOrchestrator] openrouter stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
                 try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
                 completionAttempt += 1
                 deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline) : nil
                 continue
+            } catch let error where flightId != nil {
+                // Cancelled while the request was open: abandoned, cost
+                // unknown (as for a cut). Any other outcome ended the request.
+                if error is CancellationError, deadline?.cancelledWhileOpen == true, let flightId {
+                    let identity = deadline?.currentIdentity
+                    ToolChargeLedger.abandonInFlight(chargeId: flightId, generationId: identity?.generationId,
+                                                     provider: identity?.provider, stage: stage, reason: "cancelled while open")
+                } else if let flightId {
+                    ToolChargeLedger.endInFlight(chargeId: flightId)
+                }
+                if let httpError = error as? HTTPError, httpError.statusCode == 400, body.response_format != nil {
+                    let detail = httpError.localizedDescription.lowercased()
+                    guard detail.contains("response_format") || detail.contains("json_schema") else { throw httpError }
+                    webLog("[WebOrchestrator] \(stage) RESPONSE_FORMAT_DROPPED backend=\(backend.rawValue): \(httpError.localizedDescription.prefix(200))")
+                    body.response_format = nil
+                    continue
+                }
+                throw error
             } catch let httpError as HTTPError where httpError.statusCode == 400 && body.response_format != nil {
                 // An OpenRouter upstream provider may reject response_format.
                 // The prompt already demands the same JSON and the repair pass

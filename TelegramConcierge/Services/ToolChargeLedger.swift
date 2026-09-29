@@ -93,6 +93,10 @@ struct SpendIncident: Codable, Equatable {
     /// waiting for (unknownAmount only): the key a later cost lookup uses.
     /// Additive, omitted when nil (older binaries ignore it).
     var generationId: String? = nil
+    /// The actual cost of that request once a lookup found it: counted as a
+    /// known charge (union by chargeId with the ledger) and the incident no
+    /// longer counts as unknown. Additive, omitted when nil.
+    var knownAmountUSD: Double? = nil
 
     var affectsCurrentPeriods: Bool { kind == .ledgerUnreadable || kind == .recordsUnreadable }
     func affects(dayKey: String, monthKey: String) -> Bool {
@@ -206,6 +210,13 @@ enum ToolChargeLedger {
     }
     /// Selftests simulate a restart (memory is lost).
     static func forgetHeldForTesting() { heldLock.lock(); held.removeAll(); heldLock.unlock() }
+    /// Selftests: a restart — every in-memory accounting state is lost and
+    /// this process gets a new instance id.
+    static func simulateRestartForTesting() {
+        forgetHeldForTesting()
+        lock.lock(); abandonedUnsaved = [:]; endedUnremoved = []; heldCutIds = []; lock.unlock()
+        DetachedJobStore.instanceId = UUID()
+    }
 
     /// Surfaced as a maintenance notice by the manager.
     nonisolated(unsafe) static var lastFailure: String?
@@ -282,7 +293,8 @@ enum ToolChargeLedger {
         // the same values), or else the readable ledger (as its entry or a
         // conflict copy). A record carrying a different copy keeps its own;
         // neither copy is ever dropped for the other.
-        for charge in heldCharges() {
+        problems += settleCutRequestCharges()
+        for charge in heldCharges() where !heldCutIds.contains(charge.chargeId) {
             enum Outcome { case missing, adopted, differs(kind: String) }
             var outcome = Outcome.missing
             do {
@@ -364,6 +376,8 @@ enum ToolChargeLedger {
         lock.lock(); defer { lock.unlock() }
         let problems = settlePending() + registerUnknownSpendForPreviousProcesses(includeOwed: true)
         if !heldCharges().isEmpty { return problems.first ?? "a charge is held only in memory" }
+        _ = settleInFlight()
+        if !abandonedUnsaved.isEmpty { return "the unknown cost of an abandoned web request could not be saved yet" }
         do {
             let records = try DetachedJobStore.load()
             if records.contains(where: { $0.charge?.state == .pending }) {
@@ -585,74 +599,272 @@ enum ToolChargeLedger {
                          from: day, through: through, detail: detail)
     }
 
-    // MARK: Web extraction requests cut at their deadline
+    // MARK: Web extraction requests (OpenRouter follow) — unknown cost
+    //
+    // A non-streaming OpenRouter request keeps running and billing after
+    // the client leaves, and returns no usage when abandoned. Each extractor
+    // request is therefore WRITTEN AHEAD to `web-requests-in-flight.json`
+    // before it is sent (no durable record → the request is refused), and
+    // the record is removed when the reply arrives. A request abandoned
+    // mid-flight (deadline cut, cancellation) or left behind by a previous
+    // process becomes an unknown-amount incident; until that incident is
+    // saved, the in-flight record (disk) plus a memory entry keep the
+    // obligation, and the snapshot reports it as an open unknown.
+    // A cost found later is kept as a memory-held pending copy and on the
+    // incident (`knownAmountUSD`) until the ledger durably holds it: known
+    // amounts are never lost and survive /spend accept-unknown.
 
-    static let cutRequestDetailPrefix = "web extraction request cut at its deadline"
+    static let cutRequestDetailPrefix = "web extraction request"
     /// Kind of a cut request's charge once its cost is known.
     static let cutRequestChargeKind = "web-cut"
+    static var inFlightURL: URL { directory.appendingPathComponent("web-requests-in-flight.json") }
 
-    /// Open (idempotently) the unknown-amount incident of an OpenRouter
-    /// extraction request Briglia stopped waiting for at its total deadline.
-    /// Leaving a non-streaming request does not stop the upstream
-    /// generation or its billing, so its cost is UNKNOWN until a lookup finds
-    /// it: never zero, never an estimate. Checked: a caller that cannot
-    /// record it must not start another paid attempt.
-    static func openCutRequestUnknown(chargeId: UUID, generationId: String?, provider: String?, stage: String, at date: Date = Date()) throws {
+    struct InFlightRequest: Codable, Equatable {
+        let chargeId: UUID
+        let stage: String
+        let startedAt: Date
+        let instanceId: UUID
+    }
+    private struct InFlightFile: Codable {
+        var version = 1
+        var requests: [InFlightRequest]
+    }
+    enum InFlightState {
+        case readable([InFlightRequest])
+        case unreadable(String)
+    }
+    private struct Abandoned { let generationId: String?; let provider: String?; let stage: String; let reason: String; let at: Date }
+    /// Abandoned requests of THIS process whose incident is not saved yet.
+    private nonisolated(unsafe) static var abandonedUnsaved: [UUID: Abandoned] = [:]
+    /// Completed requests whose in-flight record could not be removed yet.
+    private nonisolated(unsafe) static var endedUnremoved: Set<UUID> = []
+    /// chargeIds of memory-held looked-up costs (settled here, not by the
+    /// job-record path of settlePending).
+    private nonisolated(unsafe) static var heldCutIds: Set<UUID> = []
+
+    static func loadInFlight() -> InFlightState {
+        let url = inFlightURL
+        var st = stat()
+        if lstat(url.path, &st) != 0 {
+            return errno == ENOENT ? .readable([]) : .unreadable("cannot stat: \(String(cString: strerror(errno)))")
+        }
+        guard let data = try? Data(contentsOf: url) else { return .unreadable("cannot read") }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .secondsSince1970
+        guard let file = try? decoder.decode(InFlightFile.self, from: data), file.version == 1 else { return .unreadable("undecodable") }
+        return .readable(file.requests)
+    }
+
+    private static func mutateInFlight(_ label: String, _ body: (inout [InFlightRequest]) -> Void) throws {
+        guard case .readable(var requests) = loadInFlight() else {
+            throw Failure("web-requests-in-flight.json unreadable — not overwritten")
+        }
+        let before = requests
+        body(&requests)
+        guard requests != before else { return }
+        try faultForTesting?(label)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .secondsSince1970
+        try PrivateStorage.ensureDirectory(directory)
+        try PrivateStorage.writeAtomically(try encoder.encode(InFlightFile(requests: requests)), to: inFlightURL)
+    }
+
+    /// Write-ahead before sending. Throws when the record cannot be made
+    /// durable: the caller must not send.
+    static func beginInFlight(chargeId: UUID, stage: String, at date: Date = Date()) throws {
         lock.lock(); defer { lock.unlock() }
-        let id = "unknown-amount:\(chargeId.uuidString.lowercased())"
+        try mutateInFlight("inflight-begin") {
+            $0.append(InFlightRequest(chargeId: chargeId, stage: stage, startedAt: date, instanceId: DetachedJobStore.instanceId))
+        }
+    }
+
+    /// The reply arrived (its known cost, if any, is counted by the caller).
+    static func endInFlight(chargeId: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        do { try mutateInFlight("inflight-end") { $0.removeAll { $0.chargeId == chargeId } } }
+        catch { endedUnremoved.insert(chargeId) }
+    }
+
+    /// The request was abandoned while open: its cost is unknown. Opens the
+    /// incident, then drops the in-flight record. Returns false when the
+    /// incident could not be saved yet (the record and a memory entry keep
+    /// the obligation; the snapshot counts it as an open unknown and retries).
+    @discardableResult
+    static func abandonInFlight(chargeId: UUID, generationId: String?, provider: String?, stage: String,
+                                reason: String, at date: Date = Date()) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let entry = Abandoned(generationId: generationId, provider: provider, stage: stage, reason: reason, at: date)
+        do {
+            try openCutIncident(chargeId: chargeId, entry)
+        } catch {
+            abandonedUnsaved[chargeId] = entry
+            lastFailure = "could not save the unknown cost of an abandoned web request (\(error.localizedDescription)); kept and retried"
+            return false
+        }
+        do { try mutateInFlight("inflight-end") { $0.removeAll { $0.chargeId == chargeId } } }
+        catch { endedUnremoved.insert(chargeId) }
+        return true
+    }
+
+    private static func incidentId(_ chargeId: UUID) -> String { "unknown-amount:\(chargeId.uuidString.lowercased())" }
+
+    private static func openCutIncident(chargeId: UUID, _ entry: Abandoned) throws {
+        let id = incidentId(chargeId)
         try mutateIncidents("incident-open") { incidents in
             guard !incidents.contains(where: { $0.id == id }) else { return }
-            var incident = SpendIncident(id: id, kind: .unknownAmount, periods: [dayKey(date)], openedAt: date, state: .open,
-                                         detail: "\(cutRequestDetailPrefix) (stage \(stage), host \(provider ?? "unnamed"), generation \(generationId ?? "unknown"))")
-            incident.generationId = generationId
+            var incident = SpendIncident(id: id, kind: .unknownAmount, periods: [dayKey(entry.at)], openedAt: entry.at, state: .open,
+                                         detail: "\(cutRequestDetailPrefix) \(entry.reason) (stage \(entry.stage), host \(entry.provider ?? "unnamed"), generation \(entry.generationId ?? "unknown"))")
+            incident.generationId = entry.generationId
             incidents.append(incident)
         }
     }
 
+    /// Retry the in-flight obligations (snapshot, idle poll): save pending
+    /// abandoned incidents, turn records left by a previous process into
+    /// incidents (interrupted by a restart), remove records of completed
+    /// requests. Returns open unknowns not saved yet (synthesized
+    /// incidents) and problems without identity.
+    private static func settleInFlight() -> (unsaved: [SpendIncident], problems: [String]) {
+        var unsaved: [SpendIncident] = []
+        var problems: [String] = []
+        for (chargeId, entry) in abandonedUnsaved {
+            if (try? openCutIncident(chargeId: chargeId, entry)) != nil {
+                abandonedUnsaved[chargeId] = nil
+                endedUnremoved.insert(chargeId)
+            }
+        }
+        switch loadInFlight() {
+        case .unreadable(let reason):
+            problems.append("web-requests-in-flight.json \(reason)")
+        case .readable(let requests):
+            for request in requests where request.instanceId != DetachedJobStore.instanceId && !endedUnremoved.contains(request.chargeId) {
+                let entry = Abandoned(generationId: nil, provider: nil, stage: request.stage, reason: "interrupted by a restart", at: request.startedAt)
+                if (try? openCutIncident(chargeId: request.chargeId, entry)) != nil {
+                    endedUnremoved.insert(request.chargeId)
+                } else {
+                    abandonedUnsaved[request.chargeId] = entry
+                }
+            }
+            if !endedUnremoved.isEmpty {
+                let ids = endedUnremoved
+                if (try? mutateInFlight("inflight-end") { $0.removeAll { ids.contains($0.chargeId) } }) != nil { endedUnremoved = [] }
+            }
+        }
+        for (chargeId, entry) in abandonedUnsaved {
+            unsaved.append(SpendIncident(id: incidentId(chargeId), kind: .unknownAmount, periods: [dayKey(entry.at)], openedAt: entry.at,
+                                         state: .open, detail: "\(cutRequestDetailPrefix) \(entry.reason) — not saved yet (stage \(entry.stage))",
+                                         generationId: entry.generationId))
+        }
+        return (unsaved, problems)
+    }
+
+    /// Kept for callers/tests that open a cut incident directly.
+    static func openCutRequestUnknown(chargeId: UUID, generationId: String?, provider: String?, stage: String, at date: Date = Date()) throws {
+        lock.lock(); defer { lock.unlock() }
+        try openCutIncident(chargeId: chargeId, Abandoned(generationId: generationId, provider: provider, stage: stage,
+                                                          reason: "cut at its deadline", at: date))
+    }
+
     /// Cut requests whose cost may still be looked up: an unknown-amount
-    /// incident with a generation id, open or accepted, younger than
-    /// `maxAge`.
+    /// incident with a generation id and no known amount yet, open or
+    /// accepted, younger than `maxAge`. Expiry never clears an incident.
     static func pendingCutRequests(now: Date = Date(), maxAge: TimeInterval = 7 * 86_400) -> [SpendIncident] {
         guard case .readable(let incidents) = loadIncidents() else { return [] }
         return incidents.filter { $0.kind == .unknownAmount && $0.generationId != nil && $0.state != .closed
-            && now.timeIntervalSince($0.openedAt) <= maxAge }
+            && $0.knownAmountUSD == nil && now.timeIntervalSince($0.openedAt) <= maxAge }
     }
 
-    /// Settle cut requests whose actual cost `lookup` finds: the charge
-    /// goes into the ledger under the incident's own id (so a repeated
-    /// lookup, a retry or a restart never counts it twice), and only then
-    /// the incident closes. Not found → the incident stays as it is (open
-    /// or accepted); a reported cost of 0 is not taken as final (the record
-    /// may predate the generation's end), so it also leaves the incident
-    /// unknown. Returns the number settled.
+    /// Settle cut requests whose actual cost `lookup` finds. The amount is
+    /// first held in memory (pending), then written onto the incident
+    /// (`knownAmountUSD`, durable across restarts), then into the ledger
+    /// under the incident's own id (idempotent), and only then is the
+    /// incident closed. Any failed step keeps what was saved; later steps
+    /// are retried by `settleCutRequestCharges` without a new lookup.
+    /// Not found, or a reported 0 (not taken as final without evidence of
+    /// finality), leaves the incident unknown. Returns the number settled.
     @discardableResult
     static func reconcileCutRequests(now: Date = Date(), lookup: (String) async -> Double?) async -> Int {
+        _ = settleCutRequestCharges(now: now)
         var settled = 0
         for incident in pendingCutRequests(now: now) {
             guard let generationId = incident.generationId,
                   let chargeId = UUID(uuidString: String(incident.id.dropFirst("unknown-amount:".count))),
                   let cost = await lookup(generationId), cost.isFinite, cost > 0 else { continue }
-            do {
-                try recordInLedger(ToolChargeEntry(chargeId: chargeId, amountUSD: cost, providerReturnedAt: incident.openedAt,
-                                                   kind: cutRequestChargeKind))
-                try closeReconciled(id: incident.id, cost: cost, now: now)
-                settled += 1
-            } catch {
-                lastFailure = "could not record the looked-up cost of a cut web request: \(error.localizedDescription)"
-            }
+            if keepKnownCost(chargeId: chargeId, incidentId: incident.id, cost: cost, at: incident.openedAt, now: now) { settled += 1 }
         }
         return settled
     }
 
-    private static func closeReconciled(id: String, cost: Double, now: Date) throws {
+    /// Hold → incident amount → ledger → close. True when fully settled.
+    private static func keepKnownCost(chargeId: UUID, incidentId id: String, cost: Double, at date: Date, now: Date) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        try mutateIncidents("incident-reconcile") { incidents in
-            for i in incidents.indices where incidents[i].id == id && incidents[i].state != .closed {
-                incidents[i].state = .closed
-                incidents[i].closedAt = now
-                incidents[i].detail = (incidents[i].detail ?? "") + " — actual cost $\(SpendGate.formatUSD(cost)) recorded"
+        hold(JobCharge(chargeId: chargeId, amountUSD: cost, providerReturnedAt: date, state: .pending))
+        heldCutIds.insert(chargeId)
+        do {
+            try mutateIncidents("incident-known") { incidents in
+                for i in incidents.indices where incidents[i].id == id && incidents[i].knownAmountUSD == nil {
+                    incidents[i].knownAmountUSD = cost
+                }
+            }
+        } catch {
+            lastFailure = "could not save the looked-up cost of a web request on its incident: \(error.localizedDescription); kept in memory and retried"
+        }
+        return settleKnown(chargeId: chargeId, incidentId: id, cost: cost, at: date, now: now)
+    }
+
+    private static func settleKnown(chargeId: UUID, incidentId id: String, cost: Double, at date: Date, now: Date) -> Bool {
+        do {
+            try recordInLedger(ToolChargeEntry(chargeId: chargeId, amountUSD: cost, providerReturnedAt: date, kind: cutRequestChargeKind))
+        } catch {
+            lastFailure = "could not record the looked-up cost of a web request: \(error.localizedDescription); kept and retried"
+            return false
+        }
+        release(JobCharge(chargeId: chargeId, amountUSD: cost, providerReturnedAt: date, state: .pending))
+        if !isHeldInMemory(chargeId) { heldCutIds.remove(chargeId) }
+        do {
+            try mutateIncidents("incident-reconcile") { incidents in
+                for i in incidents.indices where incidents[i].id == id && incidents[i].state != .closed {
+                    incidents[i].knownAmountUSD = incidents[i].knownAmountUSD ?? cost
+                    incidents[i].state = .closed
+                    incidents[i].closedAt = now
+                    incidents[i].detail = (incidents[i].detail ?? "") + " — actual cost $\(SpendGate.formatUSD(cost)) recorded"
+                }
+            }
+        } catch {
+            // The ledger holds the amount; the incident keeps its known
+            // amount (or is retried) and no longer counts as unknown.
+            return true
+        }
+        return true
+    }
+
+    /// Retry known looked-up costs not yet in the ledger (idle poll, before
+    /// each lookup run): memory-held copies, and incidents carrying
+    /// `knownAmountUSD` that are not closed (restart recovery). No remote
+    /// lookup is needed. Returns problems.
+    @discardableResult
+    static func settleCutRequestCharges(now: Date = Date()) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        var problems: [String] = []
+        let incidents: [SpendIncident] = { if case .readable(let list) = loadIncidents() { return list }; return [] }()
+        for charge in heldCharges() where heldCutIds.contains(charge.chargeId) {
+            let id = incidentId(charge.chargeId)
+            if incidents.first(where: { $0.id == id })?.knownAmountUSD == nil {
+                try? mutateIncidents("incident-known") { list in
+                    for i in list.indices where list[i].id == id && list[i].knownAmountUSD == nil { list[i].knownAmountUSD = charge.amountUSD }
+                }
+            }
+            if !settleKnown(chargeId: charge.chargeId, incidentId: id, cost: charge.amountUSD, at: charge.providerReturnedAt, now: now) {
+                problems.append("looked-up cost of web request \(charge.chargeId) held in memory")
             }
         }
+        for incident in incidents where incident.state != .closed {
+            guard let cost = incident.knownAmountUSD,
+                  let chargeId = UUID(uuidString: String(incident.id.dropFirst("unknown-amount:".count))) else { continue }
+            if !settleKnown(chargeId: chargeId, incidentId: incident.id, cost: cost, at: incident.openedAt, now: now) {
+                problems.append("looked-up cost of web request \(chargeId) not yet in the ledger (kept on its incident)")
+            }
+        }
+        return problems
     }
 
     /// A charge that existed only in memory was lost at a restart.
@@ -728,6 +940,10 @@ enum ToolChargeLedger {
             acceptanceInFlight = true
             snap.unidentified.append("acceptance roll-forward: \(error.localizedDescription)")
         }
+        // Abandoned web requests: save pending incidents / restart leftovers
+        // first; what is still unsaved counts as an open unknown below.
+        let inFlight = settleInFlight()
+        snap.unidentified += inFlight.problems
         var copies: [UUID: [(amount: Double, at: Date)]] = [:]
         switch loadLedger() {
         case .absent:
@@ -768,6 +984,16 @@ enum ToolChargeLedger {
             copies[charge.chargeId, default: []].append((charge.amountUSD, charge.providerReturnedAt))
             snap.pendingCount += 1
         }
+        let loadedIncidents = loadIncidents()
+        // A looked-up cost kept on its incident is a known charge (same
+        // chargeId as its ledger entry, so the union never doubles it).
+        if case .readable(let incidents) = loadedIncidents {
+            for incident in incidents {
+                guard let amount = incident.knownAmountUSD,
+                      let chargeId = UUID(uuidString: String(incident.id.dropFirst("unknown-amount:".count))) else { continue }
+                copies[chargeId, default: []].append((amount, incident.openedAt))
+            }
+        }
         let today = dayKey(referenceDate)
         let month = monthKey(referenceDate)
         // One rule for conflicting copies (§3.6.3): the largest amount,
@@ -779,12 +1005,14 @@ enum ToolChargeLedger {
             if days.contains(today) { snap.today += amount }
             if days.contains(where: { $0.hasPrefix(month + "-") }) { snap.month += amount }
         }
-        switch loadIncidents() {
+        switch loadedIncidents {
         case .readable(let incidents):
-            snap.incidents = incidents.filter { $0.state == .open && $0.affects(dayKey: today, monthKey: month) }
+            snap.incidents = incidents.filter { $0.state == .open && $0.knownAmountUSD == nil && $0.affects(dayKey: today, monthKey: month) }
         case .unreadable(let reason):
             snap.unidentified.append("spend-incidents.json \(reason)")
         }
+        let listed = Set(snap.incidents.map(\.id))
+        snap.incidents += inFlight.unsaved.filter { !listed.contains($0.id) && $0.affects(dayKey: today, monthKey: month) }
         return snap
     }
 
@@ -809,6 +1037,9 @@ enum ToolChargeLedger {
         }
         let open = snap.incidents
         guard !open.isEmpty else { return Acceptance(accepted: [], failure: nil) }
+        if !abandonedUnsaved.isEmpty {
+            return Acceptance(accepted: [], failure: "the unknown cost of an abandoned web request could not be saved yet (spend-incidents.json not writable) — it is retried; accept again once it is saved")
+        }
         let ids = open.map(\.id)
         // Unreadable ledger: the journaled replacement transaction first.
         if let ledgerIncident = open.first(where: { $0.kind == .ledgerUnreadable }) {
@@ -991,7 +1222,8 @@ enum ToolChargeLedger {
         forgetHeldForTesting()
         lastFailure = nil
         faultForTesting = nil
-        for url in [ledgerURL, incidentsURL, journalURL] { try? FileManager.default.removeItem(at: url) }
+        abandonedUnsaved = [:]; endedUnremoved = []; heldCutIds = []
+        for url in [ledgerURL, incidentsURL, journalURL, inFlightURL] { try? FileManager.default.removeItem(at: url) }
         if let items = try? FileManager.default.contentsOfDirectory(atPath: directory.path) {
             for name in items where name.hasPrefix("tool-charges.unreadable-") {
                 try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))

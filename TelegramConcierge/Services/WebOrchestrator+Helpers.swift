@@ -247,8 +247,17 @@ final class ExtractorDeadline: @unchecked Sendable {
     private var generationId: String?
     private var provider: String?
     private var earlierGenerationIds: [String] = []
+    private var cancelledOpen = false
 
     init(seconds: TimeInterval) { self.seconds = seconds }
+
+    /// True when a cancellation interrupted an OPEN transport attempt (sent,
+    /// no reply yet): that request may still be billed upstream.
+    var cancelledWhileOpen: Bool { lock.lock(); defer { lock.unlock() }; return cancelledOpen }
+    /// X-Generation-Id / X-Provider-Name of the current attempt.
+    var currentIdentity: (generationId: String?, provider: String?) {
+        lock.lock(); defer { lock.unlock() }; return (generationId, provider)
+    }
 
     var elapsed: TimeInterval { ProcessInfo.processInfo.systemUptime - started }
     var remaining: TimeInterval { seconds - elapsed }
@@ -279,12 +288,19 @@ final class ExtractorDeadline: @unchecked Sendable {
                                          earlierGenerationIds: earlierGenerationIds + (requestInFlight ? [] : generationId.map { [$0] } ?? []))
     }
 
+    private func markCancelledOpen() { lock.lock(); cancelledOpen = true; lock.unlock() }
+
     /// Send one HTTP attempt within what is left of the deadline.
     func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
         let remaining = self.remaining
         guard remaining > 0 else { throw exceeded(requestInFlight: false) }
         let attempt = beginAttempt()
-        return try await DeadlineHTTPTransport(owner: self, attempt: attempt).send(request, remaining: remaining)
+        do {
+            return try await DeadlineHTTPTransport(owner: self, attempt: attempt).send(request, remaining: remaining)
+        } catch is CancellationError {
+            markCancelledOpen()
+            throw CancellationError()
+        }
     }
 }
 
