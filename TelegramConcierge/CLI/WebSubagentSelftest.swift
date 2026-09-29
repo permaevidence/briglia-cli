@@ -639,6 +639,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         try await Self.runMainModelGroups(harness)
         try await Self.runRound1Groups(harness)
         try await Self.runExtractorRoomGroups(harness)
+        try await Self.runExtractorDeadlineGroup(harness)
 
         print("Web subagent selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }
@@ -672,7 +673,16 @@ final class WebFixtureState: @unchecked Sendable {
 /// agent rounds. One connection per request (`Connection: close`).
 final class WebFixtureServer: @unchecked Sendable {
     struct Request { let method: String; let path: String; let headers: [String: String]; let body: Data }
-    struct Response { var status = 200; var contentType = "application/json"; var body: String }
+    struct Response {
+        var status = 200; var contentType = "application/json"; var body: String
+        /// Extra response headers (e.g. OpenRouter's X-Generation-Id).
+        var headers: [String: String] = [:]
+        /// Send headers at once, then one keepalive space every `interval`
+        /// for `duration` seconds (as OpenRouter does while a host reasons),
+        /// then `body`; delimited by connection close. Stops early when the
+        /// client disconnects.
+        var trickle: (interval: TimeInterval, duration: TimeInterval)? = nil
+    }
 
     let port: Int
     private let listenFd: Int32
@@ -788,6 +798,12 @@ final class WebFixtureServer: @unchecked Sendable {
         var timeout = timeval(tv_sec: 10, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        #if !os(Linux)
+        // A client that hangs up mid-reply (a deadline cut, a cancelled job)
+        // must surface as EPIPE, not kill the selftest (Linux: MSG_NOSIGNAL below).
+        var noSigpipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size))
+        #endif
         var buffer = Data()
         var chunk = [UInt8](repeating: 0, count: 65536)
         var headerEnd: Int? = nil
@@ -821,16 +837,33 @@ final class WebFixtureServer: @unchecked Sendable {
             response = receive(request)
         }
         let reason = response.status == 200 ? "OK" : "Error"
-        let text = "HTTP/1.1 \(response.status) \(reason)\r\nContent-Type: \(response.contentType)\r\nContent-Length: \(response.body.utf8.count)\r\nConnection: close\r\n\r\n\(response.body)"
-        let bytes = Data(text.utf8)
-        bytes.withUnsafeBytes { raw in
-            var offset = 0
-            while offset < raw.count {
-                let n = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
-                if n < 0 && errno == EINTR { continue }
-                if n <= 0 { return }
-                offset += n
+        let extra = response.headers.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)\r\n" }.joined()
+        @discardableResult func send(_ text: String) -> Bool {
+            Data(text.utf8).withUnsafeBytes { raw in
+                var offset = 0
+                while offset < raw.count {
+                    #if os(Linux)
+                    let n = Foundation.send(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset, Int32(MSG_NOSIGNAL))
+                    #else
+                    let n = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                    #endif
+                    if n < 0 && errno == EINTR { continue }
+                    if n <= 0 { return false }
+                    offset += n
+                }
+                return true
             }
         }
+        if let trickle = response.trickle {
+            guard send("HTTP/1.1 \(response.status) \(reason)\r\nContent-Type: \(response.contentType)\r\n\(extra)Connection: close\r\n\r\n") else { return }
+            let end = Date().addingTimeInterval(trickle.duration)
+            while Date() < end {
+                Thread.sleep(forTimeInterval: trickle.interval)
+                guard send(" ") else { return }
+            }
+            send(response.body)
+            return
+        }
+        send("HTTP/1.1 \(response.status) \(reason)\r\nContent-Type: \(response.contentType)\r\nContent-Length: \(response.body.utf8.count)\r\n\(extra)Connection: close\r\n\r\n\(response.body)")
     }
 }

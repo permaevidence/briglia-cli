@@ -166,6 +166,16 @@ enum WebSearchBackend: String {
     /// DigitalOcean (33/33) answered every uncapped probe.
     static let openRouterExtractorHosts = ["reka", "digitalocean"]
 
+    /// Total wall-clock limit for ONE extractor request on the OpenRouter
+    /// follow (extract.excerpts, extract.assets, web_fetch compression and
+    /// its chunks), counted from the send regardless of keepalive bytes.
+    /// A time limit, not a token cap: the body still sends no max_tokens.
+    /// Owner decision 2026-09-29, after uncapped hosts looped for 17–21 min.
+    static let openRouterExtractorDeadlineSeconds: TimeInterval = 300
+    /// Selftest seam: a short deadline (never persisted).
+    static var extractorDeadlineOverride: TimeInterval?
+    static var openRouterExtractorDeadline: TimeInterval { extractorDeadlineOverride ?? openRouterExtractorDeadlineSeconds }
+
     /// Low: the extractor copies facts out of a page; DeepSeek V4 Flash at
     /// low reasoned ~11 tokens on a small page and answered a 39k-token
     /// strict-JSON extraction in ~2.5 s (medium: ~5.5 s, same answer).
@@ -1960,8 +1970,24 @@ actor WebOrchestrator {
         let maxCompletionAttempts = 3
         var completionAttempt = 1
         var failedExtractorHosts: [String] = []
+        // Steer the next attempt away from a failed extractor host (OpenRouter
+        // follow only); returns the retry note for the log.
+        func steerAfterFailure(servedBy host: String?) -> String {
+            guard selection.followsMainOpenRouter, let routed = provider else { return "same route" }
+            if let slug = WebSearchBackend.extractorHostSlug(servedBy: host), !failedExtractorHosts.contains(slug) {
+                failedExtractorHosts.append(slug)
+            }
+            guard !failedExtractorHosts.isEmpty else { return "same hosts (failing host unknown)" }
+            body.provider = WebSearchBackend.steeredProvider(routed, excluding: failedExtractorHosts)
+            return "hosts=\(body.provider?.only?.joined(separator: ",") ?? "-") excluded=\(failedExtractorHosts.joined(separator: ","))"
+        }
+        // The total wall-clock deadline applies to the OpenRouter follow's
+        // extractor requests only (every callOpenRouter caller is an
+        // extractor stage); other backends keep the plain transport.
+        let deadlineApplies = backend == .openrouter && selection.followsMainOpenRouter
         while true {
             let data: Data
+            let deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline) : nil
             do {
                 data = try await httpJSONPostWithRetry(
                     url: backend.endpoint,
@@ -1969,8 +1995,24 @@ actor WebOrchestrator {
                     headers: try requestHeaders(for: backend, url: backend.endpoint, lane: .ephemeral(executionID)),
                     timeout: timeout,
                     label: "\(backend.rawValue) \(stage)",
-                    retryTimeouts: retryTimeouts
+                    retryTimeouts: retryTimeouts,
+                    fetch: deadline.map { d in { @Sendable request in try await d.fetch(request) } }
                 )
+            } catch let exceeded as ExtractorDeadlineExceeded {
+                // Cut at the deadline: a failed attempt. No usage arrives with a
+                // cut request, so its cost is unknown (OpenRouter's generation
+                // record is not available for it) and nothing is added to spend.
+                webLog("[WebOrchestrator] openrouter stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) kind=deadline provider=\(exceeded.provider ?? "-") elapsed_s=\(String(format: "%.1f", exceeded.elapsed)) deadline_s=\(Int(exceeded.seconds.rounded())) gen=\(exceeded.generationId ?? "-") cost=unknown")
+                guard completionAttempt < maxCompletionAttempts else {
+                    throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
+                        NSLocalizedDescriptionKey: "openrouter returned no completion for stage '\(stage)' (model \(resolvedModel)) after \(maxCompletionAttempts) attempts: deadline from \(exceeded.provider ?? "an unnamed host") — \(exceeded.localizedDescription)"
+                    ])
+                }
+                let retryNote = steerAfterFailure(servedBy: exceeded.provider)
+                webLog("[WebOrchestrator] openrouter stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
+                try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
+                completionAttempt += 1
+                continue
             } catch let httpError as HTTPError where httpError.statusCode == 400 && body.response_format != nil {
                 // An OpenRouter upstream provider may reject response_format.
                 // The prompt already demands the same JSON and the repair pass
@@ -2025,18 +2067,7 @@ actor WebOrchestrator {
                         NSLocalizedDescriptionKey: "openrouter returned no completion for stage '\(stage)' (model \(resolvedModel)) after \(maxCompletionAttempts) attempts: \(failure.kind.rawValue) from \(failure.provider ?? "an unnamed host")\(failure.detail.map { " — \($0.prefix(300))" } ?? "")"
                     ])
                 }
-                var retryNote = "same route"
-                if selection.followsMainOpenRouter, let routed = provider {
-                    if let host = WebSearchBackend.extractorHostSlug(servedBy: failure.provider), !failedExtractorHosts.contains(host) {
-                        failedExtractorHosts.append(host)
-                    }
-                    if !failedExtractorHosts.isEmpty {
-                        body.provider = WebSearchBackend.steeredProvider(routed, excluding: failedExtractorHosts)
-                        retryNote = "hosts=\(body.provider?.only?.joined(separator: ",") ?? "-") excluded=\(failedExtractorHosts.joined(separator: ","))"
-                    } else {
-                        retryNote = "same hosts (failing host unknown)"
-                    }
-                }
+                let retryNote = steerAfterFailure(servedBy: failure.provider)
                 webLog("[WebOrchestrator] openrouter stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
                 try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
                 completionAttempt += 1

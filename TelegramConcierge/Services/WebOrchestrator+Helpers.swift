@@ -108,7 +108,8 @@ func webPipelineFailureText(_ prefix: String, error: Error) -> String {
 /// drops) with exponential backoff before giving up. Cancellation is never
 /// retried and always surfaces as CancellationError so /stop keeps working
 /// mid-request.
-func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4, retryTimeouts: Bool = true, usageRecord: ResponsesUsageStore.Record? = nil) async throws -> Data {
+func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4, retryTimeouts: Bool = true, usageRecord: ResponsesUsageStore.Record? = nil,
+                       fetch: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil) async throws -> Data {
     var attempt = 1
     var lastError: Error?
 
@@ -133,7 +134,8 @@ func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4,
                     catch { ResponsesUsageStore.warn() }
                 }
             }
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response): (Data, URLResponse)
+            if let fetch { (data, response) = try await fetch(request) } else { (data, response) = try await URLSession.shared.data(for: request) }
             status = (response as? HTTPURLResponse)?.statusCode
             if usageRecord != nil { counts = ResponsesUsageCounts.parse(data) }
             try HTTPError.throwIfBad(response, data: data)
@@ -177,7 +179,8 @@ func httpDataWithRetry(request: URLRequest, label: String, maxAttempts: Int = 4,
     throw lastError ?? URLError(.unknown)
 }
 
-func httpJSONPostWithRetry<T: Encodable>(url: URL, body: T, headers: [String: String], timeout: TimeInterval, label: String, retryTimeouts: Bool = true, usageRecord: ResponsesUsageStore.Record? = nil) async throws -> Data {
+func httpJSONPostWithRetry<T: Encodable>(url: URL, body: T, headers: [String: String], timeout: TimeInterval, label: String, retryTimeouts: Bool = true, usageRecord: ResponsesUsageStore.Record? = nil,
+                                         fetch: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil) async throws -> Data {
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -186,7 +189,143 @@ func httpJSONPostWithRetry<T: Encodable>(url: URL, body: T, headers: [String: St
         request.setValue(value, forHTTPHeaderField: key)
     }
     request.httpBody = try JSONEncoder().encode(body)
-    return try await httpDataWithRetry(request: request, label: label, retryTimeouts: retryTimeouts, usageRecord: usageRecord)
+    return try await httpDataWithRetry(request: request, label: label, retryTimeouts: retryTimeouts, usageRecord: usageRecord, fetch: fetch)
+}
+
+// MARK: - Total wall-clock deadline (OpenRouter extractor)
+
+/// A request that ran past its TOTAL wall-clock deadline. Not a transport
+/// failure: httpDataWithRetry never retries it (isRetryableHTTPFailure is
+/// false); the caller decides (the extractor retries on another host).
+struct ExtractorDeadlineExceeded: LocalizedError {
+    let seconds: TimeInterval
+    let elapsed: TimeInterval
+    /// From the X-Generation-Id response header, when headers arrived.
+    let generationId: String?
+    /// From the X-Provider-Name response header, when OpenRouter sent it.
+    let provider: String?
+    var errorDescription: String? {
+        "request exceeded its \(Int(seconds.rounded())) s total deadline after \(String(format: "%.1f", elapsed)) s"
+    }
+}
+
+/// One logical request's total wall-clock deadline, counted from the first
+/// send and shared by its transport retries. URLRequest.timeoutInterval is an
+/// IDLE timeout: OpenRouter answers headers in ~1 s and then sends keepalive
+/// whitespace every second until the completion, so a host stuck in a
+/// reasoning loop never trips it. This clock ignores bytes entirely.
+/// It limits time only; the request body (and its output cap — none) is
+/// untouched.
+final class ExtractorDeadline: @unchecked Sendable {
+    let seconds: TimeInterval
+    private let started = ProcessInfo.processInfo.systemUptime
+    private let lock = NSLock()
+    private var generationId: String?
+    private var provider: String?
+
+    init(seconds: TimeInterval) { self.seconds = seconds }
+
+    var elapsed: TimeInterval { ProcessInfo.processInfo.systemUptime - started }
+
+    func observe(_ response: HTTPURLResponse) {
+        lock.lock(); defer { lock.unlock() }
+        if let id = response.value(forHTTPHeaderField: "X-Generation-Id"), !id.isEmpty { generationId = id }
+        if let name = response.value(forHTTPHeaderField: "X-Provider-Name"), !name.isEmpty { provider = name }
+    }
+
+    func exceeded() -> ExtractorDeadlineExceeded {
+        lock.lock(); defer { lock.unlock() }
+        return ExtractorDeadlineExceeded(seconds: seconds, elapsed: elapsed, generationId: generationId, provider: provider)
+    }
+
+    /// Send one HTTP attempt within what is left of the deadline.
+    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let remaining = seconds - elapsed
+        guard remaining > 0 else { throw exceeded() }
+        return try await DeadlineHTTPTransport(owner: self).send(request, remaining: remaining)
+    }
+}
+
+/// URLSessionDataDelegate transport (Foundation and FoundationNetworking)
+/// with a hard wall-clock cut: on expiry the task is cancelled and the call
+/// throws ExtractorDeadlineExceeded. Response headers are recorded as soon
+/// as they arrive so the cut can name the generation (and host, if sent).
+/// Outer task cancellation cancels the request and throws CancellationError.
+/// Redirects follow the session default, like URLSession.shared.
+final class DeadlineHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let owner: ExtractorDeadline
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var timer: DispatchWorkItem?
+    private var completed = false
+    private var response: URLResponse?
+    private var data = Data()
+
+    init(owner: ExtractorDeadline) { self.owner = owner; super.init() }
+
+    func send(_ request: URLRequest, remaining: TimeInterval) async throws -> (Data, URLResponse) {
+        try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if completed { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
+                self.continuation = continuation
+                let config = URLSessionConfiguration.ephemeral
+                // Idle clock as before (request.timeoutInterval); the resource
+                // clock is only a backstop behind the wall-clock timer.
+                config.timeoutIntervalForRequest = request.timeoutInterval
+                config.timeoutIntervalForResource = remaining + 60
+                let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+                self.session = session
+                let task = session.dataTask(with: request); self.task = task
+                let timer = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.finish(.failure(self.owner.exceeded()))
+                }
+                self.timer = timer
+                DispatchQueue.global().asyncAfter(deadline: .now() + remaining, execute: timer)
+                task.resume(); lock.unlock()
+            }
+        }, onCancel: { self.finish(.failure(CancellationError())) })
+    }
+
+    private func finish(_ result: Result<(Data, URLResponse), Error>) {
+        lock.lock()
+        guard !completed else { lock.unlock(); return }
+        completed = true
+        let callback = continuation; continuation = nil
+        let task = task; self.task = nil
+        let session = session; self.session = nil
+        timer?.cancel(); timer = nil
+        lock.unlock()
+        task?.cancel(); session?.invalidateAndCancel()
+        callback?.resume(with: result)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse { owner.observe(http) }
+        lock.lock(); self.response = response; lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive bytes: Data) {
+        lock.lock(); if !completed { data.append(bytes) }; lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let response = self.response, data = self.data
+        lock.unlock()
+        if let error {
+            if let urlError = error as? URLError, urlError.code == .cancelled { finish(.failure(CancellationError())); return }
+            finish(.failure(error)); return
+        }
+        guard let response else { finish(.failure(URLError(.badServerResponse))); return }
+        finish(.success((data, response)))
+    }
 }
 
 func isRetryableHTTPFailure(_ error: Error) -> Bool {
