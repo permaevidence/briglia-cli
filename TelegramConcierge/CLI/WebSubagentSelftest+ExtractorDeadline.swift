@@ -60,11 +60,31 @@ extension WebSubagentSelftest {
         let queue = ResponseScripts()
         let baseRoute = serverD.route
         serverD.route = { request in
+            if request.path.hasPrefix("/deadline-direct") { return queue.pop("direct") ?? .init(status: 500, body: "{}") }
             guard let stage = stageOf(request) else { return baseRoute?(request) ?? .init(status: 500, body: "{}") }
             return queue.pop(stage) ?? .init(body: okBody(stage, provider: "DigitalOcean"))
         }
         defer { serverD.route = baseRoute }
         defer { WebSearchBackend.extractorDeadlineOverride = nil }
+        // Spend accounting on a scratch directory (never the real data root).
+        let ledgerDir = FileManager.default.temporaryDirectory.appendingPathComponent("briglia-websub-ledger-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: ledgerDir, withIntermediateDirectories: true)
+        let previousLedgerDir = ToolChargeLedger.directoryForTesting
+        ToolChargeLedger.directoryForTesting = ledgerDir
+        ToolChargeLedger.resetForTesting()
+        defer {
+            ToolChargeLedger.resetForTesting()
+            ToolChargeLedger.directoryForTesting = previousLedgerDir
+            try? FileManager.default.removeItem(at: ledgerDir)
+            CutRequestCostLookup.lookupOverride = nil
+        }
+        func incidents() -> [SpendIncident] {
+            if case .readable(let list) = ToolChargeLedger.loadIncidents() { return list }
+            return []
+        }
+        func incident(gen: String?) -> SpendIncident? {
+            incidents().first { $0.generationId == gen && $0.detail?.hasPrefix(ToolChargeLedger.cutRequestDetailPrefix) == true }
+        }
 
         let routerMain: [String: String?] = [ProviderProfiles.activeProfileKey: "openrouter", KeychainHelper.llmProviderKey: LLMProvider.openRouter.rawValue,
                                              KeychainHelper.openRouterApiKeyKey: "synthetic-or-key",
@@ -133,9 +153,20 @@ extension WebSubagentSelftest {
               && logText().contains("deadline_s=2 gen=gen-dl-runaway cost=unknown")
               && retryAfter("gen-dl-runaway").hasSuffix("stage=extract.assets retrying (attempt 2/3) hosts=reka excluded=digitalocean"),
               logLines("kind=deadline"))
-        check("21.3 spend: the cut attempt reports no usage, so only the successful calls are counted",
+        check("21.3 spend: the known spend is the successful calls only (the cut attempt reports no usage and is never counted as a number)",
               cutOut.map { abs($0.spendUSD - 0.0003 * Double(cutReqs.count - 1)) < 1e-12 } ?? false,
               "\(cutOut?.spendUSD ?? -1) over \(cutReqs.count) calls")
+        let cutIncident = incident(gen: "gen-dl-runaway")
+        let cutSnap = ToolChargeLedger.snapshot()
+        check("21.3b R1 cut then success: the cut request is a durable OPEN unknown-amount incident for today keyed by its generation id and host; the tool-charge snapshot is incomplete and lists it, and holds no invented amount",
+              cutIncident?.kind == .unknownAmount && cutIncident?.state == .open
+              && cutIncident?.periods == [ToolChargeLedger.dayKey(Date())]
+              && cutIncident?.detail?.contains("host DigitalOcean") == true
+              && logText().contains("gen=gen-dl-runaway cost=unknown incident=\(cutIncident?.id ?? "?")")
+              && !cutSnap.isComplete && cutSnap.incidents.contains { $0.id == cutIncident?.id }
+              && cutSnap.today == 0
+              && cutSnap.incidents.map(ToolChargeLedger.describe).contains { $0.hasPrefix("unknown cost of a web extraction request cut at its deadline") },
+              "\(String(describing: cutIncident)) today=\(cutSnap.today)")
 
         // 21.4 Host unknown (no X-Provider-Name): retried on the same hosts.
         queue.reset()
@@ -174,6 +205,11 @@ extension WebSubagentSelftest {
               && exFetch?.contains("Extractor deadline page text.") == true
               && logText().contains("after 3 attempts: deadline from Reka"),
               "\(exComp.map { only($0) ?? [] })")
+        let allCut = ["gen-dl-x1", "gen-dl-x2", "gen-dl-x3"].compactMap { incident(gen: $0) }
+        check("21.6b R1 all cuts: each of the three cut requests is its own open unknown-amount incident (distinct ids), none settled as zero",
+              allCut.count == 3 && Set(allCut.map(\.id)).count == 3 && allCut.allSatisfy { $0.state == .open }
+              && ToolChargeLedger.snapshot().today == 0,
+              "\(allCut.map(\.id))")
 
         // 21.7 Outer cancellation still stops a request mid-trickle: no retry,
         // no deadline record, prompt return.
@@ -217,9 +253,168 @@ extension WebSubagentSelftest {
         check("21.8 /websearch openrouter without the follow: no total deadline (a 2 s trickle under a 1 s test deadline still answers on the first request)",
               nfEx.count == 1 && nfOut?.docs.first?.excerpts == ["deadline excerpt"],
               "\(nfEx.count) requests \(nfOut?.docs.first?.excerpts ?? [])")
+
+        // ---- Round 3 (review of the deadline commit).
+
+        // 21.9 R2: the transport backoff is inside the total deadline. A
+        // 0.25 s deadline and an immediate 503 with Retry-After: 2 must not
+        // sleep the 2 s: one request, the deadline error at once, nothing in
+        // flight (so no unknown charge).
+        let directURL = URL(string: "http://127.0.0.1:\(serverD.port)/deadline-direct")!
+        func direct(_ deadlineSeconds: TimeInterval) async -> (Result<Data, Error>, [WebFixtureServer.Request], TimeInterval) {
+            serverD.clear()
+            let d = ExtractorDeadline(seconds: deadlineSeconds)
+            let t0 = now()
+            do {
+                let data = try await httpJSONPostWithRetry(url: directURL, body: ["probe": "r3"], headers: [:], timeout: 30,
+                                                           label: "deadline-direct", fetch: { @Sendable r in try await d.fetch(r) }, deadline: d)
+                return (.success(data), serverD.requests.filter { $0.path.hasPrefix("/deadline-direct") }, now() - t0)
+            } catch {
+                return (.failure(error), serverD.requests.filter { $0.path.hasPrefix("/deadline-direct") }, now() - t0)
+            }
+        }
+        queue.reset()
+        queue.push("direct", .init(status: 503, body: "{\"error\":\"busy\"}", headers: ["Retry-After": "2"]))
+        let (r2, r2Reqs, r2Elapsed) = await direct(0.25)
+        let r2Error: ExtractorDeadlineExceeded? = { if case .failure(let e) = r2 { return e as? ExtractorDeadlineExceeded }; return nil }()
+        check("21.9 R2 a 0.25 s deadline with an immediate 503 + Retry-After: 2 ends within the deadline envelope (not after the 2 s backoff): exactly 1 request, the deadline error, no request in flight",
+              r2Reqs.count == 1 && r2Error != nil && r2Error?.requestInFlight == false && r2Elapsed < 1.0,
+              "\(r2Reqs.count) requests, \(String(format: "%.3f", r2Elapsed))s, \(r2)")
+        queue.reset()
+        queue.push("direct", .init(status: 503, body: "{\"error\":\"busy\"}", headers: ["Retry-After": "1"]))
+        queue.push("direct", .init(body: "{\"ok\":true}"))
+        let (r2ok, r2okReqs, _) = await direct(5)
+        check("21.9b R2 control: a backoff that fits inside the deadline still retries (2 requests, success)",
+              r2okReqs.count == 2 && (try? r2ok.get()) != nil, "\(r2okReqs.count) requests \(r2ok)")
+
+        // 21.10 R3: identity is per transport attempt. First 503 names Reka
+        // and gen-old; the second answers anonymous 200 headers and trickles
+        // until the deadline: the cut must not inherit Reka/gen-old.
+        queue.reset()
+        queue.push("direct", .init(status: 503, body: "{\"error\":\"busy\"}", headers: ["X-Provider-Name": "Reka", "X-Generation-Id": "gen-old", "Retry-After": "0"]))
+        queue.push("direct", .init(body: "", trickle: (interval: 0.2, duration: 30)))
+        let (r3a, r3aReqs, _) = await direct(2)
+        let r3aError: ExtractorDeadlineExceeded? = { if case .failure(let e) = r3a { return e as? ExtractorDeadlineExceeded }; return nil }()
+        check("21.10 R3 an anonymous second response cut at the deadline is reported with NO host and NO generation id (gen-old kept apart as an earlier attempt), in flight; exactly 2 requests",
+              r3aReqs.count == 2 && r3aError?.requestInFlight == true && r3aError?.provider == nil && r3aError?.generationId == nil
+              && r3aError?.earlierGenerationIds == ["gen-old"],
+              "\(r3aReqs.count) requests \(String(describing: r3aError))")
+        // 21.11 The second attempt receives no headers at all before expiry.
+        queue.reset()
+        queue.push("direct", .init(status: 503, body: "{\"error\":\"busy\"}", headers: ["X-Provider-Name": "Reka", "X-Generation-Id": "gen-old2", "Retry-After": "0"]))
+        queue.push("direct", .init(body: "", silentFor: 8))
+        let (r3b, r3bReqs, _) = await direct(2)
+        let r3bError: ExtractorDeadlineExceeded? = { if case .failure(let e) = r3b { return e as? ExtractorDeadlineExceeded }; return nil }()
+        check("21.11 R3 a second attempt that receives no headers before the deadline is reported with no host and no generation id (gen-old2 earlier), in flight; exactly 2 requests",
+              r3bReqs.count == 2 && r3bError?.requestInFlight == true && r3bError?.provider == nil && r3bError?.generationId == nil
+              && r3bError?.earlierGenerationIds == ["gen-old2"],
+              "\(r3bReqs.count) requests \(String(describing: r3bError))")
+        // 21.11b A late callback of an older attempt cannot rename the current one.
+        let lateDeadline = ExtractorDeadline(seconds: 60)
+        let firstAttempt = lateDeadline.beginAttempt()
+        _ = lateDeadline.beginAttempt()
+        lateDeadline.observe(HTTPURLResponse(url: directURL, statusCode: 200, httpVersion: nil,
+                                             headerFields: ["X-Provider-Name": "Reka", "X-Generation-Id": "gen-late"])!, attempt: firstAttempt)
+        let lateCut = lateDeadline.exceeded(requestInFlight: true)
+        check("21.11b R3 headers delivered late by an older attempt are ignored for the current attempt",
+              lateCut.provider == nil && lateCut.generationId == nil, "\(lateCut)")
+
+        // 21.12 The response-format fallback resends within the SAME attempt
+        // and deadline: a 400 rejecting response_format after 1.2 s, then a
+        // runaway, is cut at ~2 s from the attempt start (not 3.2 s).
+        WebSearchBackend.extractorDeadlineOverride = 2
+        queue.reset()
+        queue.push("excerpts", .init(status: 400, body: "{\"error\":{\"message\":\"response_format json_schema is not supported by this provider\"}}",
+                                     trickle: (interval: 0.2, duration: 1.2)))
+        queue.push("excerpts", runaway(gen: "gen-dl-fmt", provider: "Reka"))
+        let (fmtOut, fmtReqs, fmtTotal) = await extract("deadline format fallback")
+        let fmtEx = fmtReqs.filter { stageOf($0) == "excerpts" }
+        let fmtLine = logText().components(separatedBy: "\n").last { $0.contains("gen=gen-dl-fmt ") } ?? ""
+        // Attempt 1 = 2 s (400 at 1.2 s + resend cut at the SAME 2 s clock),
+        // then the 1.5 s pause and a fast attempt 2: ~3.5 s. A fresh clock
+        // for the resend would make attempt 1 last 3.2 s (~4.7 s total).
+        check("21.12 the response_format fallback shares the attempt's deadline: the resent request is cut when the attempt's 2 s clock runs out (total ~3.5 s, not ~4.7 s), then attempt 2 answers",
+              fmtEx.count == 3 && fmtLine.contains("attempt=1/3") && fmtTotal >= 3.3 && fmtTotal < 4.3
+              && fmtOut?.docs.first?.excerpts == ["deadline excerpt"],
+              "\(fmtEx.count) requests, total \(String(format: "%.2f", fmtTotal))s")
+
+        // 21.13 Restart: the unknown stays (the incident is on disk).
+        ToolChargeLedger.forgetHeldForTesting()
+        let afterRestart = incident(gen: "gen-dl-runaway")
+        check("21.13 R1 restart: a cut request's unknown-amount incident survives a restart (on disk) and still makes the snapshot incomplete",
+              afterRestart?.state == .open && !ToolChargeLedger.snapshot().isComplete, "\(String(describing: afterRestart))")
+
+        // 21.14 Later usage recovery, deduplicated across lookups/restarts.
+        let costs: [String: Double] = ["gen-dl-runaway": 0.0042, "gen-dl-x1": 0]
+        let lookup: (String) async -> Double? = { gen in costs[gen] }
+        let settledFirst = await ToolChargeLedger.reconcileCutRequests(lookup: lookup)
+        let recovered = incident(gen: "gen-dl-runaway")
+        let zeroCost = incident(gen: "gen-dl-x1")
+        let todayAfter = ToolChargeLedger.snapshot().today
+        let ledgerEntries: [ToolChargeEntry] = { if case .readable(_, let e, _) = ToolChargeLedger.loadLedger() { return e }; return [] }()
+        check("21.14 R1 later usage recovery: a looked-up cost settles exactly that cut request (ledger entry kind web-cut under the incident's id, dated at the cut; incident closed); a reported $0 or a missing record leaves the others unknown",
+              settledFirst == 1 && recovered?.state == .closed && zeroCost?.state == .open
+              && ledgerEntries.filter { $0.kind == ToolChargeLedger.cutRequestChargeKind }.count == 1
+              && ledgerEntries.first { $0.kind == ToolChargeLedger.cutRequestChargeKind }.map {
+                  "unknown-amount:\($0.chargeId.uuidString.lowercased())" == recovered?.id && abs($0.amountUSD - 0.0042) < 1e-12 } == true
+              && abs(todayAfter - 0.0042) < 1e-12,
+              "settled \(settledFirst) today \(todayAfter) \(ledgerEntries)")
+        ToolChargeLedger.forgetHeldForTesting()
+        let settledAgain = await ToolChargeLedger.reconcileCutRequests(lookup: lookup)
+        let entriesAgain: [ToolChargeEntry] = { if case .readable(_, let e, _) = ToolChargeLedger.loadLedger() { return e }; return [] }()
+        check("21.14b R1 dedup: looking up again (after a simulated restart) settles nothing new and never counts the recovered cost twice",
+              settledAgain == 0 && entriesAgain.filter { $0.kind == ToolChargeLedger.cutRequestChargeKind }.count == 1
+              && abs(ToolChargeLedger.snapshot().today - 0.0042) < 1e-12,
+              "settled \(settledAgain) \(entriesAgain.count) entries")
+        check("21.14c the generation record parser reads data.total_cost and nothing else",
+              CutRequestCostLookup.parseTotalCost(Data("{\"data\":{\"id\":\"gen-x\",\"total_cost\":0.0123,\"provider_name\":\"Reka\"}}".utf8)) == 0.0123
+              && CutRequestCostLookup.parseTotalCost(Data("{\"error\":{\"code\":404}}".utf8)) == nil
+              && CutRequestCostLookup.parseTotalCost(Data("{\"data\":{\"id\":\"gen-x\"}}".utf8)) == nil)
+
+        // 21.15 Configured cap: a cut opens an unknown, so the cap can't be
+        // verified and the paid retry does not start; /spend accept-unknown
+        // (acceptance of the incidents open now) lets paid work resume.
+        ToolChargeLedger.resetForTesting()
+        let capped = routerMain.merging([KeychainHelper.openRouterToolSpendLimitDailyUSDKey: "50"]) { _, new in new }
+        WebSearchBackend.extractorDeadlineOverride = 1
+        queue.reset()
+        queue.push("excerpts", runaway(gen: "gen-dl-cap", provider: "Reka"))
+        let capURL = nextURL()
+        fixtures.pages[capURL] = page
+        serverD.clear()
+        let (_, pauseAfterCut): (WebOrchestrator.WebExtractOutcome?, String?) = await withMainSlots(capped) {
+            let out = try? await orchestrator.executeWebExtract(requests: [.init(url: capURL, focus: "deadline cap")], mode: .webSearch)
+            return (out, SpendGate.pauseReason())
+        }
+        let capEx = serverD.requests.filter { stageOf($0) == "excerpts" }
+        check("21.15 R1 with a daily cap configured, a cut makes spend unverifiable: the paid retry is NOT sent (1 excerpts request), the stage says why, and the spend gate pauses paid work",
+              capEx.count == 1 && logText().contains("stage=extract.excerpts not retried: spend gate paused")
+              && pauseAfterCut?.contains("unknown cost of a web extraction request cut at its deadline") == true,
+              "\(capEx.count) requests, pause: \(pauseAfterCut?.prefix(120) ?? "nil")")
+        let (accepted, pauseAfterAccept): (ToolChargeLedger.Acceptance, String?) = await withMainSlots(capped) {
+            (ToolChargeLedger.acceptOpenIncidents(channel: "selftest"), SpendGate.pauseReason())
+        }
+        check("21.15b R1 /spend accept-unknown accepts exactly that open cut incident; the gate then allows paid work again",
+              accepted.accepted.count == 1 && accepted.accepted.first?.generationId == "gen-dl-cap" && pauseAfterAccept == nil,
+              "\(accepted.accepted.map(\.id)) \(pauseAfterAccept ?? "nil")")
+
+        // 21.16 The unknown cannot be recorded: no further paid attempt.
+        ToolChargeLedger.resetForTesting()
+        ToolChargeLedger.faultForTesting = { label in if label == "incident-open" { throw ToolChargeLedger.Failure("injected incident write failure") } }
+        queue.reset()
+        queue.push("excerpts", runaway(gen: "gen-dl-unrec", provider: "Reka"))
+        let (_, unrecReqs, _) = await extract("deadline unrecorded")
+        ToolChargeLedger.faultForTesting = nil
+        let unrecEx = unrecReqs.filter { stageOf($0) == "excerpts" }
+        check("21.16 R1 when the cut request's unknown cost cannot be recorded, the stage stops: no second paid request, logged incident=UNRECORDED",
+              unrecEx.count == 1
+              && logText().contains("gen=gen-dl-unrec cost=unknown incident=UNRECORDED"),
+              "\(unrecEx.count) requests")
+
         WebSearchBackend.extractorDeadlineOverride = nil
     }
 }
+
 
 /// Per-stage scripted fixture responses for group 21 (thread-safe).
 final class ResponseScripts: @unchecked Sendable {

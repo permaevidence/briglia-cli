@@ -682,6 +682,9 @@ final class WebFixtureServer: @unchecked Sendable {
         /// then `body`; delimited by connection close. Stops early when the
         /// client disconnects.
         var trickle: (interval: TimeInterval, duration: TimeInterval)? = nil
+        /// Hold the connection this long before sending ANYTHING (not even
+        /// headers): a request that is open but has not been answered.
+        var silentFor: TimeInterval? = nil
     }
 
     let port: Int
@@ -854,6 +857,7 @@ final class WebFixtureServer: @unchecked Sendable {
                 return true
             }
         }
+        if let silence = response.silentFor { Thread.sleep(forTimeInterval: silence) }
         if let trickle = response.trickle {
             guard send("HTTP/1.1 \(response.status) \(reason)\r\nContent-Type: \(response.contentType)\r\n\(extra)Connection: close\r\n\r\n") else { return }
             let end = Date().addingTimeInterval(trickle.duration)
