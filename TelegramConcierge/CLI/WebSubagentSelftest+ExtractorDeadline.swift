@@ -572,6 +572,20 @@ extension WebSubagentSelftest {
               abs(closeSnap.today - 0.7) < 1e-9 && closeSnap.isComplete && ledgerCut().count == 1,
               "today \(closeSnap.today) complete \(closeSnap.isComplete)")
 
+        // Round 5 rows (per-send gate, dropped connections, period ranges).
+        func extractWith(_ slots: [String: String?], _ focus: String) async -> ([String], String?) {
+            let url = nextURL()
+            fixtures.pages[url] = page
+            serverD.clear()
+            let pause = await withMainSlots(slots) {
+                _ = try? await orchestrator.executeWebExtract(requests: [.init(url: url, focus: focus)], mode: .webSearch)
+                return SpendGate.pauseReason()
+            }
+            return (serverD.requests.compactMap(stageOf), pause)
+        }
+        try await runExtractorSendRows(.init(check: check, serverD: serverD, queue: queue, extractWith: extractWith,
+                                             plain: routerMain, capped: capped, incidents: incidents, inFlight: inFlight, faults: faults))
+
         WebSearchBackend.extractorDeadlineOverride = nil
     }
 }

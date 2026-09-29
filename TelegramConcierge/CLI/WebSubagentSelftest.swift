@@ -685,6 +685,9 @@ final class WebFixtureServer: @unchecked Sendable {
         /// Hold the connection this long before sending ANYTHING (not even
         /// headers): a request that is open but has not been answered.
         var silentFor: TimeInterval? = nil
+        /// Send the headers (declaring a much longer body) and `body`, then
+        /// close: the connection drops after the response started.
+        var disconnectAfterHeaders = false
     }
 
     let port: Int
@@ -856,6 +859,10 @@ final class WebFixtureServer: @unchecked Sendable {
                 }
                 return true
             }
+        }
+        if response.disconnectAfterHeaders {
+            send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\n\(extra)Connection: close\r\n\r\n\(response.body)")
+            return
         }
         if let silence = response.silentFor { Thread.sleep(forTimeInterval: silence) }
         if let trickle = response.trickle {
