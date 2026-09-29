@@ -238,6 +238,7 @@ extension WebSubagentSelftest {
               && !logText().contains("gen=gen-dl-cancel-a") && !logText().contains("gen=gen-dl-cancel-e"),
               "\(String(format: "%.1f", cancelElapsed))s, \(cancelStages.compactMap(stageOf))")
 
+        let cancelledIncidents = incidents().filter { $0.detail?.contains("cancelled while open") == true }.count
         // 21.8 Scope: /websearch openrouter without the follow has no deadline.
         WebSearchBackend.extractorDeadlineOverride = 1
         queue.reset()
@@ -388,7 +389,7 @@ extension WebSubagentSelftest {
         }
         let capEx = serverD.requests.filter { stageOf($0) == "excerpts" }
         check("21.15 R1 with a daily cap configured, a cut makes spend unverifiable: the paid retry is NOT sent (1 excerpts request), the stage says why, and the spend gate pauses paid work",
-              capEx.count == 1 && logText().contains("stage=extract.excerpts not retried: spend gate paused")
+              capEx.count == 1 && logText().contains("stage=extract.excerpts not sent: spend gate paused")
               && pauseAfterCut?.contains("unknown cost of a web extraction request cut at its deadline") == true,
               "\(capEx.count) requests, pause: \(pauseAfterCut?.prefix(120) ?? "nil")")
         let (accepted, pauseAfterAccept): (ToolChargeLedger.Acceptance, String?) = await withMainSlots(capped) {
@@ -398,18 +399,178 @@ extension WebSubagentSelftest {
               accepted.accepted.count == 1 && accepted.accepted.first?.generationId == "gen-dl-cap" && pauseAfterAccept == nil,
               "\(accepted.accepted.map(\.id)) \(pauseAfterAccept ?? "nil")")
 
-        // 21.16 The unknown cannot be recorded: no further paid attempt.
+        func faults(_ labels: Set<String>) {
+            ToolChargeLedger.faultForTesting = labels.isEmpty ? nil : { label in
+                if labels.contains(label) { throw ToolChargeLedger.Failure("injected \(label) failure") }
+            }
+        }
+        func inFlight() -> [ToolChargeLedger.InFlightRequest] {
+            if case .readable(let list) = ToolChargeLedger.loadInFlight() { return list }
+            return []
+        }
+        func extractCapped(_ focus: String) async -> ([String], String?) {
+            let url = nextURL()
+            fixtures.pages[url] = page
+            serverD.clear()
+            let pause = await withMainSlots(capped) {
+                _ = try? await orchestrator.executeWebExtract(requests: [.init(url: url, focus: focus)], mode: .webSearch)
+                return SpendGate.pauseReason()
+            }
+            return (serverD.requests.compactMap(stageOf), pause)
+        }
+
+        // 21.16 The incident can't be saved at the cut: the obligation is
+        // kept (write-ahead record on disk + memory), the snapshot stays
+        // incomplete, the save is retried, and a restart keeps it.
         ToolChargeLedger.resetForTesting()
-        ToolChargeLedger.faultForTesting = { label in if label == "incident-open" { throw ToolChargeLedger.Failure("injected incident write failure") } }
+        faults(["incident-open"])
         queue.reset()
         queue.push("excerpts", runaway(gen: "gen-dl-unrec", provider: "Reka"))
         let (_, unrecReqs, _) = await extract("deadline unrecorded")
+        let unrecSnap = ToolChargeLedger.snapshot()
+        let unrecInFlight = inFlight()
+        faults([])
+        let unrecAfter = ToolChargeLedger.snapshot()
+        let unrecSaved = incidents().first { $0.generationId == "gen-dl-unrec" }
+        check("21.16 R2 a cut whose incident can't be saved stays an OPEN unknown (write-ahead record kept on disk, snapshot incomplete and listing it, logged UNSAVED); once writes work the next snapshot saves the incident and clears the record",
+              unrecReqs.filter { stageOf($0) == "excerpts" }.count == 2
+              && logText().contains("gen=gen-dl-unrec cost=unknown incident=unknown-amount:") && logText().contains("UNSAVED(kept, retried)")
+              && !unrecSnap.isComplete && unrecSnap.incidents.contains { $0.generationId == "gen-dl-unrec" }
+              && unrecInFlight.count == 1
+              && unrecSaved?.state == .open && !unrecAfter.isComplete && inFlight().isEmpty,
+              "snap complete \(unrecSnap.isComplete) inFlight \(unrecInFlight.count) saved \(String(describing: unrecSaved?.id))")
+        let refused = ToolChargeLedger.acceptOpenIncidents(channel: "selftest")
+        check("21.16b accept-unknown accepts the saved incident normally", refused.failure == nil && refused.accepted.contains { $0.generationId == "gen-dl-unrec" },
+              "\(refused.failure ?? "") \(refused.accepted.map(\.id))")
+        // Restart while the incident still can't be saved: the write-ahead
+        // record of the previous process becomes an incident afterwards.
+        ToolChargeLedger.resetForTesting()
+        faults(["incident-open"])
+        queue.reset()
+        queue.push("excerpts", runaway(gen: "gen-dl-unrec-restart", provider: "Reka"))
+        _ = await extract("deadline unrecorded restart")
+        let pendingAccept = ToolChargeLedger.acceptOpenIncidents(channel: "selftest")
+        ToolChargeLedger.simulateRestartForTesting()
+        let restartSnapFaulted = ToolChargeLedger.snapshot()
+        faults([])
+        let restartSnap = ToolChargeLedger.snapshot()
+        let restarted = incidents().filter { $0.detail?.contains("interrupted by a restart") == true }
+        check("21.16c R2 restart: accept-unknown refuses while the unknown is unsaved; after a restart the previous process's write-ahead record is still an open unknown (faulted) and becomes a saved incident once writes work",
+              pendingAccept.failure != nil && pendingAccept.accepted.isEmpty
+              && !restartSnapFaulted.isComplete && restarted.count == 1 && restarted.first?.state == .open
+              && !restartSnap.isComplete && inFlight().isEmpty,
+              "accept \(pendingAccept.failure ?? "nil") faulted complete \(restartSnapFaulted.isComplete) restarted \(restarted.count)")
+        // No durable write-ahead record → the request is not sent.
+        ToolChargeLedger.resetForTesting()
+        faults(["inflight-begin"])
+        queue.reset()
+        let (_, noTrackReqs, _) = await extract("deadline untracked")
+        faults([])
+        check("21.16d R2 if the write-ahead record can't be saved the extractor request is refused before sending (no excerpts/assets request)",
+              noTrackReqs.filter { stageOf($0) != nil }.isEmpty && logText().contains("not sent: in-flight record could not be saved"),
+              "\(noTrackReqs.compactMap(stageOf))")
+        // 21.7b Cancellation while open abandons the request: unknown cost.
+        check("21.7b a job cancelled while its extractor request was open left that request as an unknown (\"cancelled while open\"), not as nothing",
+              cancelledIncidents > 0, "\(cancelledIncidents)")
+
+        // CODEX-A (round 3 reproduction): an optional asset cut must not let
+        // a new paid excerpts request start.
+        ToolChargeLedger.resetForTesting()
+        queue.reset()
+        queue.push("assets", runaway(gen: "gen-codex-assets-cap", provider: "Reka"))
+        let (afterAssetRequests, assetPause) = await extractCapped("asset cap")
+        check("CODEX-A no paid excerpts after asset cut opens cap pause", !afterAssetRequests.contains("excerpts") && assetPause != nil,
+              "stages=\(afterAssetRequests), paused=\(assetPause != nil)")
+        // Also a web_fetch compression after the pause: nothing paid sent.
+        let fetchURL = nextURL()
+        fixtures.pages[fetchURL] = page
+        serverD.clear()
+        let pausedFetch = await withMainSlots(capped) {
+            try? await orchestrator.readUrlContentWithMetadata(url: fetchURL, prompt: "paused", refresh: true).result.content
+        }
+        check("21.17 R1 while paused, a new web_fetch compression sends no paid request and falls back to the raw page",
+              serverD.requests.compactMap(stageOf).isEmpty && pausedFetch?.contains("Extractor deadline page text.") == true,
+              "\(serverD.requests.compactMap(stageOf))")
+
+        // CODEX-B (round 3 reproduction).
+        ToolChargeLedger.resetForTesting()
+        faults(["incident-open"])
+        queue.reset()
+        queue.push("excerpts", runaway(gen: "gen-codex-unrecorded", provider: "Reka"))
+        let failedURL = nextURL()
+        fixtures.pages[failedURL] = page
+        let lostPause = await withMainSlots(capped) {
+            _ = try? await orchestrator.executeWebExtract(requests: [.init(url: failedURL, focus: "unrecorded cap")], mode: .webSearch)
+            ToolChargeLedger.faultForTesting = nil
+            return SpendGate.pauseReason()
+        }
+        let lostSnapshot = ToolChargeLedger.snapshot()
+        check("CODEX-B failed incident save does not erase unknown spend", !lostSnapshot.isComplete && lostPause != nil,
+              "complete=\(lostSnapshot.isComplete), incidents=\(incidents().count), paused=\(lostPause != nil)")
+
+        // CODEX-C (round 3 reproduction).
+        ToolChargeLedger.resetForTesting()
+        let knownID = UUID()
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: knownID, generationId: "gen-codex-known", provider: "Reka", stage: "test")
+        faults(["ledger-write"])
+        _ = await ToolChargeLedger.reconcileCutRequests { _ in 0.7 }
         ToolChargeLedger.faultForTesting = nil
-        let unrecEx = unrecReqs.filter { stageOf($0) == "excerpts" }
-        check("21.16 R1 when the cut request's unknown cost cannot be recorded, the stage stops: no second paid request, logged incident=UNRECORDED",
-              unrecEx.count == 1
-              && logText().contains("gen=gen-dl-unrec cost=unknown incident=UNRECORDED"),
-              "\(unrecEx.count) requests")
+        let beforeAcceptance = ToolChargeLedger.snapshot().today
+        _ = ToolChargeLedger.acceptOpenIncidents(channel: "selftest")
+        _ = await ToolChargeLedger.reconcileCutRequests { _ in nil }
+        let afterAcceptance = ToolChargeLedger.snapshot()
+        check("CODEX-C known lookup cost retained despite ledger write failure and unknown acceptance", abs(afterAcceptance.today - 0.7) < 1e-9,
+              "before=\(beforeAcceptance) after=\(afterAcceptance.today) complete=\(afterAcceptance.isComplete)")
+
+        func ledgerCut() -> [ToolChargeEntry] {
+            if case .readable(_, let e, _) = ToolChargeLedger.loadLedger() { return e.filter { $0.kind == ToolChargeLedger.cutRequestChargeKind } }
+            return []
+        }
+        // 21.18 Ledger write fails, restart before it is retried: the known
+        // amount survives on the incident; settlement needs no new lookup.
+        ToolChargeLedger.resetForTesting()
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-known-restart", provider: "Reka", stage: "test")
+        faults(["ledger-write"])
+        _ = await ToolChargeLedger.reconcileCutRequests { _ in 0.7 }
+        ToolChargeLedger.simulateRestartForTesting()
+        let restartKnown = ToolChargeLedger.snapshot()
+        let lookupsAfterRestart = LookupCounter()
+        _ = await ToolChargeLedger.reconcileCutRequests { _ in lookupsAfterRestart.bump(); return nil }
+        let stillFaulted = ledgerCut().count
+        faults([])
+        _ = ToolChargeLedger.settleCutRequestCharges()
+        let settledKnown = incidents().first { $0.generationId == "gen-known-restart" }
+        check("21.18 R3 restart after a failed ledger write: the known $0.70 stays counted (kept on the incident), the incident no longer counts as unknown, no new lookup is made, and the retry writes it to the ledger once and closes the incident",
+              abs(restartKnown.today - 0.7) < 1e-9 && restartKnown.isComplete && lookupsAfterRestart.value == 0 && stillFaulted == 0
+              && ledgerCut().count == 1 && settledKnown?.state == .closed && abs(ToolChargeLedger.snapshot().today - 0.7) < 1e-9,
+              "today \(restartKnown.today) complete \(restartKnown.isComplete) lookups \(lookupsAfterRestart.value) ledger \(ledgerCut().count) state \(String(describing: settledKnown?.state))")
+        // 21.19 Both the incident and the ledger writes fail: the amount is
+        // memory-held (counted), accept-unknown keeps it, and it settles
+        // once storage works.
+        ToolChargeLedger.resetForTesting()
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-known-held", provider: "Reka", stage: "test")
+        faults(["ledger-write", "incident-known"])
+        _ = await ToolChargeLedger.reconcileCutRequests { _ in 0.7 }
+        let heldBefore = ToolChargeLedger.snapshot().today
+        faults(["ledger-write", "incident-known", "incident-reconcile"])
+        let heldAccept = ToolChargeLedger.acceptOpenIncidents(channel: "selftest")
+        faults([])
+        let heldAfterAccept = ToolChargeLedger.snapshot().today
+        _ = ToolChargeLedger.settleCutRequestCharges()
+        check("21.19 R3 incident and ledger writes both failing: the $0.70 is memory-held and counted, survives accept-unknown, and is written to the ledger exactly once when storage works",
+              abs(heldBefore - 0.7) < 1e-9 && heldAccept.failure == nil && abs(heldAfterAccept - 0.7) < 1e-9
+              && ledgerCut().count == 1 && abs(ToolChargeLedger.snapshot().today - 0.7) < 1e-9 && ToolChargeLedger.heldCharges().isEmpty,
+              "before \(heldBefore) accept \(heldAccept.failure ?? "ok") after \(heldAfterAccept) ledger \(ledgerCut().count)")
+        // 21.20 The incident close fails after the ledger write: counted once.
+        ToolChargeLedger.resetForTesting()
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-known-close", provider: "Reka", stage: "test")
+        faults(["incident-reconcile"])
+        _ = await ToolChargeLedger.reconcileCutRequests { _ in 0.7 }
+        faults([])
+        let closeSnap = ToolChargeLedger.snapshot()
+        check("21.20 R3 incident closure failing after the ledger write: the $0.70 counts once (ledger and incident share the charge id) and the incident no longer counts as unknown",
+              abs(closeSnap.today - 0.7) < 1e-9 && closeSnap.isComplete && ledgerCut().count == 1,
+              "today \(closeSnap.today) complete \(closeSnap.isComplete)")
 
         WebSearchBackend.extractorDeadlineOverride = nil
     }
@@ -428,4 +589,10 @@ final class ResponseScripts: @unchecked Sendable {
         let first = q.removeFirst(); queues[stage] = q
         return first
     }
+}
+
+final class LookupCounter: @unchecked Sendable {
+    private let lock = NSLock(); private var n = 0
+    func bump() { lock.lock(); n += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return n }
 }
