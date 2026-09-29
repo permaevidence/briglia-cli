@@ -33,11 +33,19 @@ extension WebSubagentSelftest {
             return b["max_tokens"] == nil && b["max_completion_tokens"] == nil && b["max_output_tokens"] == nil
         }
         func near(_ a: Double?, _ b: Double) -> Bool { a.map { abs($0 - b) < 1e-12 } ?? false }
+        /// Canonical JSON bytes (sorted keys) of a decoded body. Portable:
+        /// NSDictionary.isEqual(to:) with nested JSON values reports unequal
+        /// on Linux corelibs-foundation even for identical bodies.
+        func canonical(_ d: [String: Any]) -> Data? { try? JSONSerialization.data(withJSONObject: d, options: [.sortedKeys]) }
+        func sameBody(_ a: [String: Any], _ b: [String: Any]) -> Bool {
+            guard let x = canonical(a), let y = canonical(b) else { return false }
+            return x == y
+        }
         /// A body identical to `a` except for the provider block.
         func sameButProvider(_ a: WebFixtureServer.Request, _ b: WebFixtureServer.Request) -> Bool {
             var x = body(a), y = body(b)
             x["provider"] = nil; y["provider"] = nil
-            return NSDictionary(dictionary: x).isEqual(to: y)
+            return sameBody(x, y)
         }
 
         // An OpenRouter chat envelope as the hosts return it (keepalive
@@ -221,7 +229,7 @@ extension WebSubagentSelftest {
         check("20.11 /websearch openrouter without the follow: the Luna model is unchanged, no cap on any stage, the retry is NOT steered (identical body), but the failed attempt is logged and counted in spend",
               nfEx.count == 2 && body(nfEx[0])["model"] as? String == ORModel.webExcerpts
               && nfAssets.allSatisfy(uncapped) && nfEx.allSatisfy(uncapped) && !nfAssets.isEmpty
-              && NSDictionary(dictionary: body(nfEx[0])).isEqual(to: body(nfEx[1]))
+              && sameBody(body(nfEx[0]), body(nfEx[1]))
               && (nfOut?.spendUSD ?? 0) >= 0.02 - 1e-12
               && logText().contains("gen=gen-nf"),
               "\(nfEx.map { only($0) ?? ["nil"] }) \(nfOut?.spendUSD ?? -1)")
