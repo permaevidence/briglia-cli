@@ -633,7 +633,10 @@ enum ToolChargeLedger {
         case readable([InFlightRequest])
         case unreadable(String)
     }
-    private struct Abandoned { let generationId: String?; let provider: String?; let stage: String; let reason: String; let at: Date }
+    /// `startedAt`…`at`: the interval the request may have spent in (its
+    /// send through its abandonment, or through a restart's recovery when
+    /// its end is unknown). The incident covers every day of it.
+    private struct Abandoned { let generationId: String?; let provider: String?; let stage: String; let reason: String; let startedAt: Date; let at: Date }
     /// Abandoned requests of THIS process whose incident is not saved yet.
     private nonisolated(unsafe) static var abandonedUnsaved: [UUID: Abandoned] = [:]
     /// Completed requests whose in-flight record could not be removed yet.
@@ -690,9 +693,10 @@ enum ToolChargeLedger {
     /// the obligation; the snapshot counts it as an open unknown and retries).
     @discardableResult
     static func abandonInFlight(chargeId: UUID, generationId: String?, provider: String?, stage: String,
-                                reason: String, at date: Date = Date()) -> Bool {
+                                reason: String, startedAt: Date? = nil, at date: Date = Date()) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        let entry = Abandoned(generationId: generationId, provider: provider, stage: stage, reason: reason, at: date)
+        let entry = Abandoned(generationId: generationId, provider: provider, stage: stage, reason: reason,
+                              startedAt: min(startedAt ?? date, date), at: date)
         do {
             try openCutIncident(chargeId: chargeId, entry)
         } catch {
@@ -711,11 +715,21 @@ enum ToolChargeLedger {
         let id = incidentId(chargeId)
         try mutateIncidents("incident-open") { incidents in
             guard !incidents.contains(where: { $0.id == id }) else { return }
-            var incident = SpendIncident(id: id, kind: .unknownAmount, periods: [dayKey(entry.at)], openedAt: entry.at, state: .open,
-                                         detail: "\(cutRequestDetailPrefix) \(entry.reason) (stage \(entry.stage), host \(entry.provider ?? "unnamed"), generation \(entry.generationId ?? "unknown"))")
-            incident.generationId = entry.generationId
-            incidents.append(incident)
+            incidents.append(cutIncident(id: id, entry,
+                                         detail: "\(cutRequestDetailPrefix) \(entry.reason) (stage \(entry.stage), host \(entry.provider ?? "unnamed"), generation \(entry.generationId ?? "unknown"))"))
         }
+    }
+
+    /// The unknown amount may belong to any day from the send through the
+    /// abandonment/recovery (range-aware, like a lost background job): never
+    /// only the launch day, so a day, month or year boundary crossed while
+    /// the request was open keeps it in the new period's accounting.
+    private static func cutIncident(id: String, _ entry: Abandoned, detail: String) -> SpendIncident {
+        var incident = SpendIncident(id: id, kind: .unknownAmount, periods: [dayKey(entry.startedAt)], openedAt: entry.at, state: .open,
+                                     detail: detail, generationId: entry.generationId)
+        let first = dayKey(entry.startedAt), last = dayKey(entry.at)
+        if last > first { incident.throughDay = last }
+        return incident
     }
 
     /// Retry the in-flight obligations (snapshot, idle poll): save pending
@@ -737,7 +751,9 @@ enum ToolChargeLedger {
             problems.append("web-requests-in-flight.json \(reason)")
         case .readable(let requests):
             for request in requests where request.instanceId != DetachedJobStore.instanceId && !endedUnremoved.contains(request.chargeId) {
-                let entry = Abandoned(generationId: nil, provider: nil, stage: request.stage, reason: "interrupted by a restart", at: request.startedAt)
+                // Its end is unknown: it may have spent through this recovery.
+                let entry = Abandoned(generationId: nil, provider: nil, stage: request.stage, reason: "interrupted by a restart",
+                                      startedAt: request.startedAt, at: max(Date(), request.startedAt))
                 if (try? openCutIncident(chargeId: request.chargeId, entry)) != nil {
                     endedUnremoved.insert(request.chargeId)
                 } else {
@@ -750,9 +766,8 @@ enum ToolChargeLedger {
             }
         }
         for (chargeId, entry) in abandonedUnsaved {
-            unsaved.append(SpendIncident(id: incidentId(chargeId), kind: .unknownAmount, periods: [dayKey(entry.at)], openedAt: entry.at,
-                                         state: .open, detail: "\(cutRequestDetailPrefix) \(entry.reason) — not saved yet (stage \(entry.stage))",
-                                         generationId: entry.generationId))
+            unsaved.append(cutIncident(id: incidentId(chargeId), entry,
+                                       detail: "\(cutRequestDetailPrefix) \(entry.reason) — not saved yet (stage \(entry.stage))"))
         }
         return (unsaved, problems)
     }
@@ -761,7 +776,7 @@ enum ToolChargeLedger {
     static func openCutRequestUnknown(chargeId: UUID, generationId: String?, provider: String?, stage: String, at date: Date = Date()) throws {
         lock.lock(); defer { lock.unlock() }
         try openCutIncident(chargeId: chargeId, Abandoned(generationId: generationId, provider: provider, stage: stage,
-                                                          reason: "cut at its deadline", at: date))
+                                                          reason: "cut at its deadline", startedAt: date, at: date))
     }
 
     /// Cut requests whose cost may still be looked up: an unknown-amount

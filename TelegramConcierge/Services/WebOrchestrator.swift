@@ -1994,33 +1994,15 @@ actor WebOrchestrator {
         // Other routes (non-follow /websearch openrouter, other backends,
         // maintenance requests) get no total deadline.
         let deadlineApplies = backend == .openrouter && selection.followsMainOpenRouter
-        var deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline) : nil
+        var deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline, spendStage: stage) : nil
         while true {
             let data: Data
-            // Paid-request gate and write-ahead (OpenRouter follow): EVERY
-            // extractor request — a new stage, chunk, page or retry — checks
-            // the spend policy before it is sent (a reached cap, or a cap made
-            // unverifiable by an open unknown, stops it; optional fallbacks
-            // then continue without any paid request), and is written ahead
-            // so a request abandoned mid-flight, or lost in a crash, stays an
-            // unknown charge. No durable record → not sent.
-            var flightId: UUID? = nil
-            if deadlineApplies {
-                if let pause = SpendGate.pauseReason() {
-                    webLog("[WebOrchestrator] openrouter stage=\(stage) not sent: spend gate paused (\(pause.prefix(160)))")
-                    throw NSError(domain: "WebOrchestrator", code: 3, userInfo: [
-                        NSLocalizedDescriptionKey: "openrouter stage '\(stage)' not sent: \(pause)"
-                    ])
-                }
-                let id = UUID()
-                do { try ToolChargeLedger.beginInFlight(chargeId: id, stage: stage) } catch {
-                    webLog("[WebOrchestrator] openrouter stage=\(stage) not sent: in-flight record could not be saved (\(error.localizedDescription))")
-                    throw NSError(domain: "WebOrchestrator", code: 3, userInfo: [
-                        NSLocalizedDescriptionKey: "openrouter stage '\(stage)' not sent: its spend could not be tracked durably (\(error.localizedDescription))"
-                    ])
-                }
-                flightId = id
-            }
+            // Paid-request gate and write-ahead (OpenRouter follow) live in
+            // ExtractorDeadline.fetch, so they apply to EVERY actual HTTP
+            // send — a new stage, chunk, page, completion retry, or a
+            // transport retry inside httpDataWithRetry — each under its own
+            // charge id; a send whose outcome is unknown becomes an
+            // unknown-amount incident before any retry.
             do {
                 data = try await httpJSONPostWithRetry(
                     url: backend.endpoint,
@@ -2032,7 +2014,6 @@ actor WebOrchestrator {
                     fetch: deadline.map { d in { @Sendable request in try await d.fetch(request) } },
                     deadline: deadline
                 )
-                if let flightId { ToolChargeLedger.endInFlight(chargeId: flightId) }
             } catch let exceeded as ExtractorDeadlineExceeded {
                 // The deadline ended Briglia's wait: a failed attempt. When a
                 // request was still open, closing the connection does NOT stop
@@ -2044,14 +2025,8 @@ actor WebOrchestrator {
                 // incident can't be saved yet, the record and a memory entry
                 // keep it (an open unknown in every snapshot, retried).
                 var costField = "cost=none(no request open)"
-                if let flightId {
-                    if exceeded.requestInFlight {
-                        let saved = ToolChargeLedger.abandonInFlight(chargeId: flightId, generationId: exceeded.generationId,
-                                                                     provider: exceeded.provider, stage: stage, reason: "cut at its deadline")
-                        costField = "cost=unknown incident=unknown-amount:\(flightId.uuidString.lowercased())\(saved ? "" : " UNSAVED(kept, retried)")"
-                    } else {
-                        ToolChargeLedger.endInFlight(chargeId: flightId)
-                    }
+                if let chargeId = exceeded.incidentChargeId {
+                    costField = "cost=unknown incident=unknown-amount:\(chargeId.uuidString.lowercased())\(exceeded.incidentSaved ? "" : " UNSAVED(kept, retried)")"
                 }
                 let earlier = exceeded.earlierGenerationIds.isEmpty ? "" : " earlier_gens=\(exceeded.earlierGenerationIds.joined(separator: ","))"
                 webLog("[WebOrchestrator] openrouter stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) kind=deadline provider=\(exceeded.provider ?? "-") elapsed_s=\(String(format: "%.1f", exceeded.elapsed)) deadline_s=\(Int(exceeded.seconds.rounded())) gen=\(exceeded.generationId ?? "-") \(costField)\(earlier)")
@@ -2060,31 +2035,13 @@ actor WebOrchestrator {
                         NSLocalizedDescriptionKey: "openrouter returned no completion for stage '\(stage)' (model \(resolvedModel)) after \(maxCompletionAttempts) attempts: deadline from \(exceeded.provider ?? "an unnamed host") — \(exceeded.localizedDescription)"
                     ])
                 }
-                // The retry passes the paid-request gate at the top of the loop.
+                // The retry passes the paid-request gate at its send (fetch).
                 let retryNote = steerAfterFailure(servedBy: exceeded.provider)
                 webLog("[WebOrchestrator] openrouter stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
                 try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
                 completionAttempt += 1
-                deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline) : nil
+                deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline, spendStage: stage) : nil
                 continue
-            } catch let error where flightId != nil {
-                // Cancelled while the request was open: abandoned, cost
-                // unknown (as for a cut). Any other outcome ended the request.
-                if error is CancellationError, deadline?.cancelledWhileOpen == true, let flightId {
-                    let identity = deadline?.currentIdentity
-                    ToolChargeLedger.abandonInFlight(chargeId: flightId, generationId: identity?.generationId,
-                                                     provider: identity?.provider, stage: stage, reason: "cancelled while open")
-                } else if let flightId {
-                    ToolChargeLedger.endInFlight(chargeId: flightId)
-                }
-                if let httpError = error as? HTTPError, httpError.statusCode == 400, body.response_format != nil {
-                    let detail = httpError.localizedDescription.lowercased()
-                    guard detail.contains("response_format") || detail.contains("json_schema") else { throw httpError }
-                    webLog("[WebOrchestrator] \(stage) RESPONSE_FORMAT_DROPPED backend=\(backend.rawValue): \(httpError.localizedDescription.prefix(200))")
-                    body.response_format = nil
-                    continue
-                }
-                throw error
             } catch let httpError as HTTPError where httpError.statusCode == 400 && body.response_format != nil {
                 // An OpenRouter upstream provider may reject response_format.
                 // The prompt already demands the same JSON and the repair pass
@@ -2143,7 +2100,7 @@ actor WebOrchestrator {
                 webLog("[WebOrchestrator] openrouter stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
                 try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
                 completionAttempt += 1
-                deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline) : nil
+                deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline, spendStage: stage) : nil
                 continue
             }
             let detail: String

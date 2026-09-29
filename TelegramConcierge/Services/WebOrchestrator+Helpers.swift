@@ -223,6 +223,10 @@ struct ExtractorDeadlineExceeded: LocalizedError {
     /// Generation ids seen on EARLIER transport attempts of this request
     /// (completed error responses), kept apart for the log.
     let earlierGenerationIds: [String]
+    /// Spend-tracked sends only: the unknown-amount incident (charge id) the
+    /// cut request became, and whether it was saved yet.
+    var incidentChargeId: UUID? = nil
+    var incidentSaved = true
     var errorDescription: String? {
         "request reached its \(Int(seconds.rounded())) s total deadline after \(String(format: "%.1f", elapsed)) s"
     }
@@ -241,6 +245,9 @@ struct ExtractorDeadlineExceeded: LocalizedError {
 /// leaves them unset, and callbacks of an older attempt are ignored.
 final class ExtractorDeadline: @unchecked Sendable {
     let seconds: TimeInterval
+    /// Stage name when every actual HTTP send is a paid, spend-tracked
+    /// extractor request (OpenRouter follow); nil = plain deadline only.
+    let spendStage: String?
     private let started = ProcessInfo.processInfo.systemUptime
     private let lock = NSLock()
     private var attempt = 0
@@ -249,7 +256,7 @@ final class ExtractorDeadline: @unchecked Sendable {
     private var earlierGenerationIds: [String] = []
     private var cancelledOpen = false
 
-    init(seconds: TimeInterval) { self.seconds = seconds }
+    init(seconds: TimeInterval, spendStage: String? = nil) { self.seconds = seconds; self.spendStage = spendStage }
 
     /// True when a cancellation interrupted an OPEN transport attempt (sent,
     /// no reply yet): that request may still be billed upstream.
@@ -291,15 +298,97 @@ final class ExtractorDeadline: @unchecked Sendable {
     private func markCancelledOpen() { lock.lock(); cancelledOpen = true; lock.unlock() }
 
     /// Send one HTTP attempt within what is left of the deadline.
+    /// With `spendStage` set, EVERY actual send — the first and each
+    /// transport retry of httpDataWithRetry — is a paid request: it checks
+    /// the spend gate right before sending (a pause opened meanwhile by
+    /// another request stops it; work already sent is left alone) and is
+    /// written ahead under its own charge id (no durable record → not sent).
+    /// A send whose billable outcome is unknown — cut at the deadline,
+    /// cancelled while open, or a connection that failed after the request
+    /// may have reached the host — becomes an unknown-amount incident BEFORE
+    /// the error returns to the retry loop. Only a complete HTTP response, or
+    /// a failure that demonstrably happened before anything was sent (DNS,
+    /// connect, TLS), ends the record without one.
     func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
         let remaining = self.remaining
         guard remaining > 0 else { throw exceeded(requestInFlight: false) }
+        var chargeId: UUID? = nil
+        let sentAt = Date()
+        try Task.checkCancellation()
+        if let stage = spendStage { chargeId = try Self.admitPaidSend(stage: stage) }
         let attempt = beginAttempt()
+        let transport = DeadlineHTTPTransport(owner: self, attempt: attempt)
         do {
-            return try await DeadlineHTTPTransport(owner: self, attempt: attempt).send(request, remaining: remaining)
+            let result = try await transport.send(request, remaining: remaining)
+            if let chargeId { ToolChargeLedger.endInFlight(chargeId: chargeId) }
+            return result
+        } catch var cut as ExtractorDeadlineExceeded {
+            if let chargeId, let stage = spendStage {
+                if cut.requestInFlight {
+                    cut.incidentSaved = ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: cut.generationId, provider: cut.provider,
+                                                                         stage: stage, reason: "cut at its deadline", startedAt: sentAt)
+                    cut.incidentChargeId = chargeId
+                } else {
+                    ToolChargeLedger.endInFlight(chargeId: chargeId)
+                }
+            }
+            throw cut
         } catch is CancellationError {
             markCancelledOpen()
+            if let chargeId, let stage = spendStage {
+                let identity = currentIdentity
+                ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: identity.generationId, provider: identity.provider,
+                                                 stage: stage, reason: "cancelled while open", startedAt: sentAt)
+            }
             throw CancellationError()
+        } catch {
+            if let chargeId, let stage = spendStage {
+                if !transport.receivedResponse && Self.demonstrablyUnsent(error) {
+                    ToolChargeLedger.endInFlight(chargeId: chargeId)
+                } else {
+                    let identity = currentIdentity
+                    let saved = ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: identity.generationId, provider: identity.provider,
+                                                                 stage: stage, reason: "connection failed before its reply completed", startedAt: sentAt)
+                    webLog("[WebOrchestrator] openrouter stage=\(stage) CONNECTION_FAILED provider=\(identity.provider ?? "-") gen=\(identity.generationId ?? "-") cost=unknown incident=unknown-amount:\(chargeId.uuidString.lowercased())\(saved ? "" : " UNSAVED(kept, retried)") error=\(error.localizedDescription.prefix(160))")
+                }
+            }
+            throw error
+        }
+    }
+
+    /// Spend gate + write-ahead for one paid send. Throws (not retryable)
+    /// when paid work is paused or the send can't be tracked durably.
+    private static func admitPaidSend(stage: String) throws -> UUID {
+        if let pause = SpendGate.pauseReason() {
+            webLog("[WebOrchestrator] openrouter stage=\(stage) not sent: spend gate paused (\(pause.prefix(160)))")
+            throw NSError(domain: "WebOrchestrator", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "openrouter stage '\(stage)' not sent: \(pause)"
+            ])
+        }
+        let id = UUID()
+        do { try ToolChargeLedger.beginInFlight(chargeId: id, stage: stage) } catch {
+            webLog("[WebOrchestrator] openrouter stage=\(stage) not sent: in-flight record could not be saved (\(error.localizedDescription))")
+            throw NSError(domain: "WebOrchestrator", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "openrouter stage '\(stage)' not sent: its spend could not be tracked durably (\(error.localizedDescription))"
+            ])
+        }
+        return id
+    }
+
+    /// Failures that happen before any request byte can reach the host
+    /// (name resolution, connecting, TLS, an unusable URL) and no response
+    /// arrived: nothing was generated, so nothing can be billed.
+    static func demonstrablyUnsent(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost, .notConnectedToInternet,
+             .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate,
+             .serverCertificateNotYetValid, .serverCertificateHasUnknownRoot,
+             .clientCertificateRejected, .clientCertificateRequired,
+             .badURL, .unsupportedURL:
+            return true
+        default:
+            return false
         }
     }
 }
@@ -325,6 +414,9 @@ final class DeadlineHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked 
     private var data = Data()
 
     init(owner: ExtractorDeadline, attempt: Int) { self.owner = owner; self.attempt = attempt; super.init() }
+
+    /// True once response headers arrived: the host received the request.
+    var receivedResponse: Bool { lock.lock(); defer { lock.unlock() }; return response != nil }
 
     func send(_ request: URLRequest, remaining: TimeInterval) async throws -> (Data, URLResponse) {
         try await withTaskCancellationHandler(operation: {
