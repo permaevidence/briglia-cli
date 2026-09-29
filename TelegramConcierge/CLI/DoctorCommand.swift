@@ -346,7 +346,7 @@ struct Doctor: AsyncParsableCommand {
             if !baseURL.isEmpty && !model.isEmpty {
                 let failure: String?
                 if let context = ResponsesAuxiliary.inheritedSnapshot(lane: .probe(UUID()), effortOverride: ResponsesAdapter.probeEffort(model: model)) {
-                    do { _ = try await ResponsesAuxiliary.text(context: context, messages: [("user", "Reply OK.")], maxOutputTokens: 2048); failure = nil }
+                    do { _ = try await ResponsesAuxiliary.text(context: context, messages: [("user", "Reply OK.")]); failure = nil }
                     catch { failure = error.localizedDescription }
                 } else { failure = await Probes.chatCompletion(baseURL: baseURL, apiKey: mainKey, model: model) }
                 check("main agent responds", ok: failure == nil, hint: failure)

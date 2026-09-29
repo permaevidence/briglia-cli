@@ -318,8 +318,13 @@ def main():
             from read_file_description_migration import migrate_lifecycle
             from reasoning_history_removal_migration import migrate_lifecycle as migrate_reasoning_history_removal_lifecycle
             from subagent_dialogue_compaction_lifecycle_migration import migrate_lifecycle as migrate_subagent_dialogue_lifecycle
-            # r11 (explicit image send), r10 (AGENTS.md bullet), r9 (runtime identity), r8 (reply policy) and r7 (chronology) restore the candidate; earlier gates remain unchanged.
-            verify_migration(migrate_subagent_dialogue_lifecycle(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"]))), results["candidate"], compare)
+            from output_cap_removal_migration import migrate_lifecycle as migrate_output_cap_removal_lifecycle, verify_candidate as verify_no_output_cap
+            # r12 (no output-token caps) migrates the reference's setup probe and
+            # asserts the candidate sends no cap anywhere; r11 (explicit image
+            # send), r10 (AGENTS.md bullet), r9 (runtime identity), r8 (reply
+            # policy) and r7 (chronology) restore the candidate; earlier gates
+            # remain unchanged.
+            verify_migration(migrate_output_cap_removal_lifecycle(migrate_subagent_dialogue_lifecycle(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"])))), verify_no_output_cap(results["candidate"]), compare)
             # New-binary export MUST open with the pinned release's actual importer.
             imported = root / "cross-import"
             env = dict(os.environ, SWIFT_DETERMINISTIC_HASHING="1", LC_ALL="C", TZ="UTC")
@@ -329,7 +334,7 @@ def main():
                     json.loads((imported / "import.json").read_text()))
             wire.command(["python3", str(ROOT / "scripts/chat_lifecycle_client_test.py"),
                           str(root / "candidate-capture/status.json")])
-        print("DIAGNOSTIC ONLY" if args.candidate_only else "Lifecycle r3–r11 migrations and shipped-client differential PASS")
+        print("DIAGNOSTIC ONLY" if args.candidate_only else "Lifecycle r3–r12 migrations and shipped-client differential PASS")
     finally:
         print(f"Evidence: {root}", flush=True)
         if not args.keep_trees:

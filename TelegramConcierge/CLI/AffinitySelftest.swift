@@ -679,7 +679,6 @@ struct AffinitySelftest: AsyncParsableCommand {
                 request.httpBody = try JSONSerialization.data(withJSONObject: [
                     "model": "glm-5.3-flash",
                     "messages": [["role": "user", "content": "Reply with OK"]],
-                    "max_tokens": 10,
                 ])
                 let (data, response) = try await URLSession.shared.data(for: request)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? -1

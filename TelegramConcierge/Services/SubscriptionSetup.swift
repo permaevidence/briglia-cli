@@ -128,7 +128,7 @@ struct SubscriptionSetup {
                 var context = ProviderExecutionContext.responsesAPI(baseURL: SubscriptionEndpoint.inference,
                     key: state.generation, model: model, lane: .probe(UUID()), effort: ResponsesAdapter.probeEffort(model: model))
                 context.profileIdentity = "chatgpt"; context.subscriptionGeneration = state.generation; context.nativeToolMedia = false
-                _ = try await ResponsesAuxiliary.text(context: context, messages: [("user", "Reply OK.")], maxOutputTokens: 2048)
+                _ = try await ResponsesAuxiliary.text(context: context, messages: [("user", "Reply OK.")])
                 try checkpoint(); try Task.checkCancellation(); try store.validate(generation: state.generation)
                 return ok(["state": "verified", "generation": state.generation])
             }

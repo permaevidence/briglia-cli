@@ -212,7 +212,8 @@ enum Probes {
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
             "model": model,
             "messages": [["role": "user", "content": "Reply with OK"]],
-            "max_tokens": 10,
+            // No output cap (owner rule 2026-09-29): a reasoning model can
+            // spend a 10-token cap before answering and fail the probe.
         ])
         return await expectHTTP200(request, service: "endpoint")
     }

@@ -1,0 +1,10 @@
+{
+  "revision": 1,
+  "removed": "\"max_tokens\":10,",
+  "lifecycle_captures": ["probe-0"],
+  "max_occurrences_per_request": 1,
+  "reason": "Owner rule 2026-09-29: no output-token cap in any request Briglia builds (a reasoning model can spend a 10-token cap before answering and fail the setup probe). The Chat Completions setup probe (Probes.chatCompletion, WizardIO) drops \"max_tokens\": 10; under deterministic hashing its remaining keys keep their order, so the body loses exactly this byte sequence.",
+  "source_change": "WizardIO.chatCompletion no longer sends max_tokens (wip/or-extractor-room); the Responses probes drop max_output_tokens 2048, the web pipeline and maintenance summaries drop their caps, none of which occur in any frozen capture",
+  "requests_without_the_field": "every other lifecycle capture and every chat-wire fixture carries no output cap at SOURCE and passes through unchanged, still compared byte for byte; the candidate must not add one",
+  "review": "private-docs docs/review/OR_EXTRACTOR_ROOM_CODEX_REQUEST_2026-09-29.md"
+}

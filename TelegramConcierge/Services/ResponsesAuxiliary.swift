@@ -7,7 +7,7 @@ extension Probes {
             let context = ProviderExecutionContext.responsesAPI(baseURL: baseURL, key: apiKey, model: model, lane: lane,
                 effort: ResponsesAdapter.probeEffort(model: model))
             _ = try await ResponsesAuxiliary.text(context: context,
-                messages: [("user", "Reply OK.")], maxOutputTokens: 2048)
+                messages: [("user", "Reply OK.")])
             return nil
         } catch { return error.localizedDescription }
     }
