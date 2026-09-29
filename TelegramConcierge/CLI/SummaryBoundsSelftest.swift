@@ -27,6 +27,7 @@ struct SummaryBoundsSelftest: AsyncParsableCommand {
         try Self.decoding(check)
         try Self.budget(check)
         try Self.legacyTolerance(check)
+        try Self.noOutputCap(check)
         print("Summary bounds selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }
     }
@@ -202,5 +203,36 @@ struct SummaryBoundsSelftest: AsyncParsableCommand {
         let kept = try JSONDecoder().decode(Message.self, from: JSONSerialization.data(withJSONObject: encoded))
         check("SB4c a 65,536-byte persisted summary round-trips",
               kept.activeTurnCompaction?.summaryText.utf8.count == CompactionSummaryPolicy.maxBytes, "")
+    }
+
+    /// SB5 (2026-09-29, owner rule): compaction/prune summary requests carry
+    /// no output-token cap on either wire; the input sizing still keeps the
+    /// same reply reserve.
+    static func noOutputCap(_ check: Check) throws {
+        func context(_ endpoint: String) -> ProviderExecutionContext {
+            ProviderExecutionContext(provider: .openAICompatible, model: "fixture-model",
+                endpoint: endpoint, authorization: "Bearer synthetic", affinityKey: "synthetic",
+                lane: .main, provenance: "fixture-model#fixture", providerPreferences: nil, reasoning: nil, reasoningEffort: "high",
+                thinkingType: nil, useReasoningContent: false, textOnly: false, anthropicCacheControl: false, renderPDFAsImages: false)
+                .forOperation(.pruneSummary)
+        }
+        let message = OpenRouterAPIMessage(role: "user", content: .text("summarize"))
+        var bodies: [[String: Any]] = []
+        for endpoint in ["http://127.0.0.1:9/v1/chat/completions", "https://api.openai.com/v1/chat/completions", "https://openrouter.ai/api/v1/chat/completions"] {
+            let request = try ChatCompletionsAdapter(context: context(endpoint)).makeRequest(messages: [message], tools: nil)
+            bodies.append((try? JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any]) ?? [:])
+        }
+        check("SB5a Chat Completions summary requests send no max_tokens / max_completion_tokens (custom, OpenAI and OpenRouter endpoints), effort kept",
+              bodies.count == 3 && bodies.allSatisfy { $0["max_tokens"] == nil && $0["max_completion_tokens"] == nil && $0["model"] as? String == "fixture-model" }
+              && bodies.allSatisfy { ($0["reasoning_effort"] as? String) == "high" || (($0["reasoning"] as? [String: Any])?["effort"] as? String) == "high" },
+              "\(bodies.map { $0.keys.sorted() })")
+        var responsesContext = context("http://127.0.0.1:9/v1/responses")
+        responsesContext.wireProtocol = .responses
+        let responsesRequest = try ResponsesAdapter(context: responsesContext).request(input: [ResponsesAdapter.message(role: "user", text: "summarize")], tools: nil)
+        let responsesBody = (try? JSONSerialization.jsonObject(with: responsesRequest.httpBody ?? Data()) as? [String: Any]) ?? [:]
+        check("SB5b Responses summary request (the maintenance send path) carries no max_output_tokens",
+              responsesBody["max_output_tokens"] == nil && responsesBody["model"] as? String == "fixture-model", "\(responsesBody.keys.sorted())")
+        check("SB5c the maintenance input sizing still reserves 16,384 context tokens for the reply (no output cap is sent)",
+              ConversationManager.maintenanceReplyReserveTokens == 16_384, "")
     }
 }

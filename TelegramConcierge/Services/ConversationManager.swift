@@ -13330,6 +13330,10 @@ extension ConversationManager {
         print("[ActiveCompaction] generation=\(candidate.generation) removed=\(count) retained=\(candidate.retainedInteractions.count) before=\(before) after=\(after) configuredMax=\(budget.maximum) outputReserve=\(budget.reserve) margin=10%")
     }
 
+    /// Context tokens kept free for the maintenance summary's reply when the
+    /// compaction input is sized. Not an output cap: nothing is sent.
+    nonisolated static let maintenanceReplyReserveTokens = 16_384
+
     /// Always bounded, including apparently small prefixes. Long single tool
     /// outputs are covered in consecutive fragments; no head/tail omission.
     private func summarizeActivePrefix(_ rounds: [ToolInteraction], previous: String?,
@@ -13339,8 +13343,12 @@ extension ConversationManager {
         else { selected = await openRouterService.executionContext(modelOverride: nil, providerOverride: nil,
             reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main) }
         var maintenance = selected.forOperation(.pruneSummary)
-        maintenance.maintenanceOutputTokenLimit = 16_384
-        let maintenanceInputCeiling = min(64_000, max(1, (configuredMaxContextTokens() - 16_384) * 85 / 100))
+        // No output cap is sent (owner rule 2026-09-29: some models think for
+        // a long time). The reply stays bounded by the summary policy
+        // (65,536 bytes, cut-off/empty rejection, one retry) and the request
+        // timeout; this context space is still reserved for it when sizing
+        // the input (the figure the old 16,384-token cap used).
+        let maintenanceInputCeiling = min(64_000, max(1, (configuredMaxContextTokens() - Self.maintenanceReplyReserveTokens) * 85 / 100))
         defer { maintenance.responsesTurn.close() }
         var summary = previous ?? ""
         let instruction = """

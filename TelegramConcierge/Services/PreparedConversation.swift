@@ -43,7 +43,6 @@ struct ProviderExecutionContext {
     var wireProtocol: ProviderWireProtocol = .chatCompletions
     var profileIdentity: String = "legacy"
     var nativeToolMedia: Bool = true
-    var maintenanceOutputTokenLimit: Int? = nil
     var configurationError: String? = nil
 
     var subscriptionGeneration: String? = nil

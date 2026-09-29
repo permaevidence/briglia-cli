@@ -198,7 +198,7 @@ extension OpenRouterService {
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
         let receipt = PreparedRequestReceipt(requestID: UUID(),
             historyFingerprint: ResponsesReplayEnvelope.hash(try encoder.encode(input)), deliveryNonces: nonces)
-        return try await ResponsesAdapter(context: context).send(input: input, tools: conversation.tools, receipt: receipt, maxOutputTokens: context.maintenanceOutputTokenLimit)
+        return try await ResponsesAdapter(context: context).send(input: input, tools: conversation.tools, receipt: receipt)
     }
 
     /// Only readable Chat Completions reasoning crosses protocols. Never dump
