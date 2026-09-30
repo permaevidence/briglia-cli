@@ -993,13 +993,28 @@ struct ProviderSelftest: AsyncParsableCommand {
               && ProviderProfiles.wireProtocol(.local, model: "gpt-5.6-luna") == .chatCompletions)
         check("P1 the Responses effort list for Luna is the one the Go gateway accepts (none…max, no minimal)",
               ResponsesAdapter.allowedEfforts(model: "gpt-5.6-luna") == ["none", "low", "medium", "high", "xhigh", "max"])
-        check("P1 GPT-6 Sol/Luna take the live-verified subscription efforts (none…max, no minimal); GPT-6 Sol is the subscription default and first in the catalog",
+        check("P1 GPT-6 Sol/Luna take the live-verified subscription efforts (none…max, no minimal); GPT-6 Sol and Luna stay in the catalog",
               ["gpt-6-sol", "gpt-6-luna", "gpt-6-sol-2026-09-22"].allSatisfy {
                   ResponsesAdapter.allowedEfforts(model: $0) == ["none", "low", "medium", "high", "xhigh", "max"]
               }
-              && ResponsesAdapter.subscriptionDefaultModel == "gpt-6-sol"
-              && ResponsesAdapter.subscriptionModelChoices.first?.id == "gpt-6-sol"
+              && ResponsesAdapter.subscriptionModelChoices.contains { $0.id == "gpt-6-sol" }
               && ResponsesAdapter.subscriptionModelChoices.contains { $0.id == "gpt-6-luna" })
+        // v0.2.44: GPT-6.1 Sol (live-verified 2026-09-30 on the subscription:
+        // low…max; none and minimal answer 400) is the NEW-setup default.
+        check("P1b GPT-6.1 Sol takes low…max only (no none/minimal), dated ids too; it is the subscription default and first in the catalog",
+              ["gpt-6.1-sol", "gpt-6.1-sol-2026-09-27"].allSatisfy {
+                  ResponsesAdapter.allowedEfforts(model: $0) == ["low", "medium", "high", "xhigh", "max"]
+              }
+              && ResponsesAdapter.subscriptionDefaultModel == "gpt-6.1-sol"
+              && ResponsesAdapter.subscriptionModelChoices.first.map { $0.id == "gpt-6.1-sol" && $0.label == "GPT-6.1 Sol" } == true)
+        check("P1c effort carried across a subscription model switch: kept when accepted, none/minimal → low on GPT-6.1 Sol, max → xhigh where there is no max, unknown dropped",
+              ResponsesAdapter.compatibleEffort("high", model: "gpt-6.1-sol") == "high"
+              && ResponsesAdapter.compatibleEffort("max", model: "gpt-6.1-sol") == "max"
+              && ResponsesAdapter.compatibleEffort("none", model: "gpt-6.1-sol") == "low"
+              && ResponsesAdapter.compatibleEffort("minimal", model: "gpt-6.1-sol") == "low"
+              && ResponsesAdapter.compatibleEffort("none", model: "gpt-6-sol") == "none"
+              && ResponsesAdapter.compatibleEffort("max", model: "o-unknown") == "xhigh"
+              && ResponsesAdapter.compatibleEffort("ultra", model: "gpt-6.1-sol") == nil)
 
         // P2 — activation stamps the slot; requests resolve per effective model.
         try ProviderProfiles.saveProfile(.opencode, apiKey: "oc-synthetic-key-1234567890", baseURL: nil,
@@ -1347,6 +1362,42 @@ struct ProviderSelftest: AsyncParsableCommand {
               && snap[KeychainHelper.openAICompatibleReasoningEffortKey] == "high"
               && !reply.contains("Responses API"),
               "slot=\(snap[ProviderProfiles.runtimeProtocolKey] ?? "nil") textOnly=\(snap[KeychainHelper.textOnlyModelEnabledKey] ?? "nil") \(reply)")
+
+        // S1 (v0.2.44) — /model on the ChatGPT subscription: GPT-6.1 Sol has
+        // no none/minimal, so a stored 'none' becomes 'low' visibly (runtime
+        // slot AND the saved subscription profile), instead of failing the
+        // next request; an accepted effort is kept; the saved model follows.
+        func subscriptionSlots(model: String, effort: String) throws {
+            try KeychainHelper.saveBatch([ProviderProfiles.activeProfileKey: ProviderProfiles.Profile.chatgpt.rawValue,
+                                          KeychainHelper.llmProviderKey: LLMProvider.openAICompatible.rawValue,
+                                          KeychainHelper.openAICompatibleBaseURLKey: SubscriptionEndpoint.inference,
+                                          KeychainHelper.openAICompatibleModelKey: model,
+                                          KeychainHelper.openAICompatibleReasoningEffortKey: effort,
+                                          ProviderProfiles.subscriptionModelKey: model,
+                                          ProviderProfiles.subscriptionEffortKey: effort])
+        }
+        try subscriptionSlots(model: "gpt-6-sol", effort: "none")
+        let solReply = (await manager.handleTerminalCommand("/model gpt-6.1-sol") ?? []).joined(separator: "\n")
+        let solSnap = KeychainHelper.loadSnapshot()
+        check("S1 /model gpt-6.1-sol on the subscription with effort 'none': model stored, effort rewritten to 'low' in the runtime slot and the subscription profile, and said so",
+              solSnap[KeychainHelper.openAICompatibleModelKey] == "gpt-6.1-sol" && solSnap[ProviderProfiles.subscriptionModelKey] == "gpt-6.1-sol"
+              && solSnap[KeychainHelper.openAICompatibleReasoningEffortKey] == "low" && solSnap[ProviderProfiles.subscriptionEffortKey] == "low"
+              && solReply.contains("isn't available on gpt-6.1-sol; set to low"),
+              "effort=\(solSnap[KeychainHelper.openAICompatibleReasoningEffortKey] ?? "nil") profile=\(solSnap[ProviderProfiles.subscriptionEffortKey] ?? "nil") \(solReply)")
+        try subscriptionSlots(model: "gpt-6.1-sol", effort: "high")
+        let backReply = (await manager.handleTerminalCommand("/model gpt-6-sol") ?? []).joined(separator: "\n")
+        let backSnap = KeychainHelper.loadSnapshot()
+        check("S1 /model gpt-6-sol on the subscription with effort 'high': the effort is kept, no effort note",
+              backSnap[KeychainHelper.openAICompatibleModelKey] == "gpt-6-sol" && backSnap[KeychainHelper.openAICompatibleReasoningEffortKey] == "high"
+              && backSnap[ProviderProfiles.subscriptionEffortKey] == "high" && !backReply.contains("isn't available"), backReply)
+        // Existing installs keep their model: the new default only fills an
+        // unset subscription model (setup, status, sign-in, menu).
+        check("S1 an existing subscription profile keeps its stored model; only an unset one gets the new default GPT-6.1 Sol",
+              ProviderProfiles.configuredModel(.chatgpt) == "gpt-6-sol"
+              && (ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel) == "gpt-6-sol")
+        try KeychainHelper.saveBatch([ProviderProfiles.subscriptionModelKey: String?.none])
+        check("S1 with no stored subscription model the default is GPT-6.1 Sol",
+              (ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel) == "gpt-6.1-sol")
         return failures
     }
 

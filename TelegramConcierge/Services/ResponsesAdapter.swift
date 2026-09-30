@@ -9,11 +9,16 @@ struct ResponsesAdapter {
     /// The subscription models Briglia documents (owner list, 2026-09-06;
     /// GPT-6 Sol/Luna added 2026-09-23, verified live on the subscription
     /// backend: vision, tools, encrypted reasoning replay, effort
-    /// none/low/medium/high/xhigh/max, minimal rejected). GPT-6 Sol is the
-    /// default for new subscription profiles. One source for the Telegram /model buttons,
+    /// none/low/medium/high/xhigh/max, minimal rejected). GPT-6.1 Sol added
+    /// 2026-09-30 (verified live on the subscription: text, tools, vision,
+    /// encrypted reasoning replay — a corrupted item is refused with
+    /// invalid_encrypted_content — effort low/medium/high/xhigh/max; none and
+    /// minimal rejected with 400) and is the default for NEW subscription
+    /// profiles; an existing profile keeps its stored model. One source for the Telegram /model buttons,
     /// the `briglia subscription` hint and — drift-checked by the
     /// telegram-menu selftest — the two browser pages' model pickers.
     static let subscriptionModelChoices: [(id: String, label: String)] = [
+        ("gpt-6.1-sol", "GPT-6.1 Sol"),
         ("gpt-6-sol", "GPT-6 Sol"),
         ("gpt-6-luna", "GPT-6 Luna"),
         ("gpt-6-astra", "GPT-6 Astra"),
@@ -23,12 +28,13 @@ struct ResponsesAdapter {
     ]
 
     /// Default model for a new ChatGPT subscription profile.
-    static let subscriptionDefaultModel = "gpt-6-sol"
+    static let subscriptionDefaultModel = "gpt-6.1-sol"
 
     /// Documented model capabilities, separate from Codex subscription settings.
     /// Unknown models retain the common API enum; max is opt-in for documented models.
     static func allowedEfforts(model: String) -> [String] {
-        if model == "gpt-6-astra" || model.hasPrefix("gpt-6-astra-20") {
+        if model == "gpt-6-astra" || model.hasPrefix("gpt-6-astra-20")
+            || model == "gpt-6.1-sol" || model.hasPrefix("gpt-6.1-sol-20") {
             return ["low", "medium", "high", "xhigh", "max"]
         }
         if ["gpt-6-sol", "gpt-6-luna", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].contains(where: {
@@ -37,6 +43,20 @@ struct ResponsesAdapter {
             return ["none", "low", "medium", "high", "xhigh", "max"]
         }
         return ["none", "minimal", "low", "medium", "high", "xhigh"]
+    }
+
+    /// A stored effort for `model` after a model switch: kept when the model
+    /// accepts it; `none`/`minimal` (below the model's lowest level) become
+    /// `low` when the model has it; anything else unsupported is dropped
+    /// (nil = endpoint default). Stored settings are rewritten visibly by
+    /// `/model`; nothing is rewritten silently.
+    static func compatibleEffort(_ effort: String, model: String) -> String? {
+        let raw = effort.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let allowed = allowedEfforts(model: model)
+        if allowed.contains(raw) { return raw }
+        if ["none", "minimal"].contains(raw), allowed.contains("low") { return "low" }
+        if raw == "max", allowed.contains("xhigh") { return "xhigh" }
+        return nil
     }
 
     static func probeEffort(model: String) -> String? {

@@ -36,7 +36,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-MODELS = [{"id": "gpt-6-sol", "label": "GPT-6 Sol", "recommended": True}, {"id": "gpt-6-luna", "label": "GPT-6 Luna"},
+MODELS = [{"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "recommended": True}, {"id": "gpt-6-sol", "label": "GPT-6 Sol"}, {"id": "gpt-6-luna", "label": "GPT-6 Luna"},
           {"id": "gpt-6-astra", "label": "GPT-6 Astra"}, {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna"},
           {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"}, {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"}]
 TITLES_IT = {"name": "Il tuo nome", "serper": "Ricerca web", "jina": "Lettura pagine web", "openai": "Voce e immagini",
@@ -56,7 +56,7 @@ class Fake:
     def __init__(self, platform="macos"):
         self.platform = platform
         self.name = ""
-        self.chatgpt = {"state": "signed_out", "active": False, "model": "gpt-6-sol", "effort": "high", "other_provider": None, "login": None}
+        self.chatgpt = {"state": "signed_out", "active": False, "model": "gpt-6.1-sol", "effort": "high", "other_provider": None, "login": None}
         self.telegram = {"configured": False, "chat_id": "", "bot": None, "pending": None}
         self.keys = {"serper": None, "jina": None, "openai": None, "agentmail": None}
         self.email = {"on": False, "inbox": "", "tool_installed": False}
@@ -370,7 +370,7 @@ def main():
         page.wait_for_selector("text=Sign-in cancelled.")
         f.auto_signin = True
         page.click("text=Sign in with ChatGPT")
-        page.wait_for_selector("text=Briglia thinks with GPT-6 Sol", timeout=8000)
+        page.wait_for_selector("text=Briglia thinks with GPT-6.1 Sol", timeout=8000)
         check("browser sign-in completes by polling, no button needed", f.chatgpt["state"] == "signed_in")
         shot(page, "04-chatgpt-signed-in")
         page.click("text=Continue →")

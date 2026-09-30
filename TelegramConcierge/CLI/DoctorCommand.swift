@@ -151,6 +151,14 @@ struct Doctor: AsyncParsableCommand {
                 check("ChatGPT subscription login", ok: state?.credential != nil && state?.requiresLogin != true && state?.generation == mainKey,
                       hint: "run briglia subscription login, then select the profile")
                 note("Subscription billing; quota unknown. Image, transcription and web services may use separate API billing.")
+                let subModel = ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel
+                let subEffort = (ProviderProfiles.configuredEffort(.chatgpt) ?? "").lowercased()
+                let efforts = ResponsesAdapter.allowedEfforts(model: subModel)
+                note("subscription model: \(subModel)\(subModel == ResponsesAdapter.subscriptionDefaultModel ? " (the default for new setups)" : "; new setups default to \(ResponsesAdapter.subscriptionDefaultModel)") — efforts \(efforts.joined(separator: ", "))")
+                if !subEffort.isEmpty {
+                    check("subscription reasoning effort '\(subEffort)' accepted by \(subModel)", ok: efforts.contains(subEffort),
+                          hint: "use /effort \(efforts.contains("high") ? "high" : efforts.first ?? "off") (or /effort off)")
+                }
             } catch { check("ChatGPT subscription credential storage", ok: false, hint: error.localizedDescription) }
         }
 

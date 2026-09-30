@@ -5165,6 +5165,21 @@ class ConversationManager: ObservableObject {
                 }
             }
         }
+        // ChatGPT subscription (v0.2.44): the model sets which efforts the
+        // endpoint accepts (GPT-6.1 Sol has no none/minimal), so a stored
+        // effort the new model rejects is replaced visibly here instead of
+        // failing the next request.
+        if ProviderProfiles.activeProfile() == .chatgpt {
+            let effort = KeychainHelper.load(key: KeychainHelper.openAICompatibleReasoningEffortKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let compatible = ResponsesAdapter.compatibleEffort(effort, model: stored)
+            if !effort.isEmpty, compatible != effort {
+                changes[KeychainHelper.openAICompatibleReasoningEffortKey] = compatible
+                adjustedEffort = .some(compatible)
+                note += compatible.map { " Reasoning effort \"\(effort)\" isn't available on \(stored); set to \($0)." }
+                    ?? " Reasoning effort \"\(effort)\" isn't available on \(stored); cleared (endpoint default)."
+            }
+        }
         try? KeychainHelper.saveBatch(changes)
         modelRoutingGeneration += 1
         // Remember the switch in the active provider profile so /provider

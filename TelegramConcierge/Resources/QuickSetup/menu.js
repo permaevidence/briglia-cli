@@ -1001,7 +1001,7 @@
         out.push(h('p', { text: T('Right now Briglia uses ', 'Adesso Briglia usa ') + c.other_provider + '.' }));
         out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', onclick: function () { act('chatgpt_use', {}, 'ai'); } }, [T('Use ChatGPT for Briglia', 'Usa ChatGPT per Briglia')])]));
       }
-      out.push(h('p', { class: 'small', text: T('Model — GPT-6 Sol is recommended. Not every plan includes every model.', 'Modello: consigliato GPT-6 Sol. Non tutti i piani includono tutti i modelli.') }));
+      out.push(h('p', { class: 'small', text: T('Model — GPT-6.1 Sol is recommended. Not every plan includes every model.', 'Modello: consigliato GPT-6.1 Sol. Non tutti i piani includono tutti i modelli.') }));
       out.push(h('div', { class: 'choices' }, (c.models || []).map(function (m) {
         return h('button', { class: 'choice' + (m.id === c.model ? ' sel' : ''), type: 'button', disabled: inflight > 0,
           onclick: function () { if (m.id !== c.model) act('chatgpt_model', { model: m.id }, 'ai'); } },

@@ -428,7 +428,7 @@ final class MenuSelftestContext {
 
         r = await act(wf, ["action": "chatgpt_browser"])
         check("browser sign-in opens the ChatGPT link", ok(r) && w.urlsOpened.first?.hasPrefix("https://auth.example/") == true)
-        check("after sign-in ChatGPT is selected with GPT-6 Sol + high and checked", w.snap.chatgpt == .signedIn(active: true, model: "gpt-6-sol", effort: "high", generation: "g1") && done(wf, "ai"))
+        check("after sign-in ChatGPT is selected with GPT-6.1 Sol (the new-setup default since v0.2.44) + high and checked", w.snap.chatgpt == .signedIn(active: true, model: "gpt-6.1-sol", effort: "high", generation: "g1") && done(wf, "ai"))
         st = wf.status()
         check("a finished sign-in leaves no login state behind", (st["chatgpt"] as? [String: Any])?["login"] == nil)
 
