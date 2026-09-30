@@ -350,6 +350,7 @@ final class ExtractorDeadline: @unchecked Sendable {
                     let saved = ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: identity.generationId, provider: identity.provider,
                                                                  stage: stage, reason: "connection failed before its reply completed", startedAt: sentAt)
                     webLog("[WebOrchestrator] openrouter stage=\(stage) CONNECTION_FAILED provider=\(identity.provider ?? "-") gen=\(identity.generationId ?? "-") cost=unknown incident=unknown-amount:\(chargeId.uuidString.lowercased())\(saved ? "" : " UNSAVED(kept, retried)") error=\(error.localizedDescription.prefix(160))")
+                    CutRequestCostLookup.logAfterFailure(stage: stage, generationId: identity.generationId, after: "connection_failed")
                 }
             }
             throw error

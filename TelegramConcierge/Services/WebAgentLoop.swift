@@ -213,53 +213,28 @@ enum WebAgentTools {
 /// that support it); NOT on opencode (mimo ignores it — probed 2026-08-16).
 /// The prompt-JSON + repair path stays as the universal fallback.
 enum WebExtractionSchemas {
+    /// One-pass extraction by selection (2026-09-30): block numbers/ranges
+    /// plus link and image numbers. The model never writes text or URLs.
     static let excerpts = ORResponseFormat(json_schema: .init(
-        name: "excerpts",
+        name: "page_blocks",
         strict: true,
         schema: .object([
             "type": .string("object"),
             "properties": .object([
-                "excerpts": .object([
+                "blocks": .object([
                     "type": .string("array"),
                     "items": .object(["type": .string("string")])
-                ])
-            ]),
-            "required": .array([.string("excerpts")]),
-            "additionalProperties": .bool(false)
-        ])))
-
-    static let assets = ORResponseFormat(json_schema: .init(
-        name: "page_assets",
-        strict: true,
-        schema: .object([
-            "type": .string("object"),
-            "properties": .object([
+                ]),
                 "links": .object([
                     "type": .string("array"),
-                    "items": .object([
-                        "type": .string("object"),
-                        "properties": .object([
-                            "text": .object(["type": .string("string")]),
-                            "url": .object(["type": .string("string")])
-                        ]),
-                        "required": .array([.string("text"), .string("url")]),
-                        "additionalProperties": .bool(false)
-                    ])
+                    "items": .object(["type": .string("integer")])
                 ]),
                 "images": .object([
                     "type": .string("array"),
-                    "items": .object([
-                        "type": .string("object"),
-                        "properties": .object([
-                            "caption": .object(["type": .string("string")]),
-                            "url": .object(["type": .array([.string("string"), .string("null")])])
-                        ]),
-                        "required": .array([.string("caption"), .string("url")]),
-                        "additionalProperties": .bool(false)
-                    ])
+                    "items": .object(["type": .string("integer")])
                 ])
             ]),
-            "required": .array([.string("links"), .string("images")]),
+            "required": .array([.string("blocks"), .string("links"), .string("images")]),
             "additionalProperties": .bool(false)
         ])))
 }

@@ -794,19 +794,30 @@ enum ToolChargeLedger {
     /// under the incident's own id (idempotent), and only then is the
     /// incident closed. Any failed step keeps what was saved; later steps
     /// are retried by `settleCutRequestCharges` without a new lookup.
-    /// Not found, or a reported 0 (not taken as final without evidence of
-    /// finality), leaves the incident unknown. Returns the number settled.
+    /// Not found, or a reported 0 without evidence of finality, leaves the
+    /// incident unknown. Exactly 0 settles only when the record says the
+    /// request was cancelled (`OpenRouterGenerationRecord.settlementCost`;
+    /// owner decision 2026-09-29) — through the same hold → incident →
+    /// ledger → close path, once, under the incident's own id. Returns the
+    /// number settled.
     @discardableResult
-    static func reconcileCutRequests(now: Date = Date(), lookup: (String) async -> Double?) async -> Int {
+    static func reconcileCutRequestRecords(now: Date = Date(), lookupRecord: (String) async -> OpenRouterGenerationRecord?) async -> Int {
         _ = settleCutRequestCharges(now: now)
         var settled = 0
         for incident in pendingCutRequests(now: now) {
             guard let generationId = incident.generationId,
                   let chargeId = UUID(uuidString: String(incident.id.dropFirst("unknown-amount:".count))),
-                  let cost = await lookup(generationId), cost.isFinite, cost > 0 else { continue }
+                  let cost = await lookupRecord(generationId)?.settlementCost else { continue }
             if keepKnownCost(chargeId: chargeId, incidentId: incident.id, cost: cost, at: incident.openedAt, now: now) { settled += 1 }
         }
         return settled
+    }
+
+    /// Cost-only lookups (no cancellation evidence): a reported 0 never
+    /// settles through this form.
+    @discardableResult
+    static func reconcileCutRequests(now: Date = Date(), lookup: (String) async -> Double?) async -> Int {
+        await reconcileCutRequestRecords(now: now, lookupRecord: { id in await lookup(id).map { OpenRouterGenerationRecord(totalCost: $0) } })
     }
 
     /// Hold → incident amount → ledger → close. True when fully settled.

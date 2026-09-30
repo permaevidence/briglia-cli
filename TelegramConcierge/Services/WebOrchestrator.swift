@@ -167,7 +167,7 @@ enum WebSearchBackend: String {
     static let openRouterExtractorHosts = ["reka", "digitalocean"]
 
     /// Total wall-clock limit for ONE extractor request on the OpenRouter
-    /// follow (extract.excerpts, extract.assets, web_fetch compression and
+    /// follow (extract.excerpts, web_fetch compression and
     /// its chunks), counted from the send regardless of keepalive bytes.
     /// A time limit, not a token cap: the body still sends no max_tokens.
     /// It bounds Briglia's WAIT (transport retries and their backoff
@@ -449,7 +449,10 @@ struct ORChatReq: Encodable {
     // design (owner rule 2026-09-29): reasoning models may think at length,
     // and a cap starved them into empty completions. Calls stay bounded by
     // their timeouts, the output validation and the spend caps.
-    let temperature: Double?
+    // No temperature field either, by design (owner rule 2026-09-29): every
+    // web request uses the host/model default sampling. Temperature 0.1 on
+    // DeepSeek V4 Flash looped the hidden reasoning on ~1 in 5 extract.assets
+    // calls (0 of 57 at 1.0/unset); the field is gone so no path can send one.
     let stream: Bool?
     let reasoning: Reasoning?
     /// OpenAI/OpenCode shape: top-level effort string instead of the object.
@@ -593,22 +596,6 @@ struct SerperSearchResp: Decodable {
     let knowledgeGraph: KG?
 }
 
-struct ExcerptOut: Decodable { let excerpts: [String] }
-
-struct RelevantAssetOut: Decodable {
-    struct Link: Decodable {
-        let text: String?
-        let url: String?
-    }
-
-    struct Image: Decodable {
-        let caption: String?
-        let url: String?
-    }
-
-    let links: [Link]?
-    let images: [Image]?
-}
 
 // MARK: - Web Context Types
 struct WebContext: Codable {
@@ -1378,7 +1365,6 @@ actor WebOrchestrator {
             messages: transcript.messages,
             reasoning: WebAgentSupport.includedInResponse(agentReasoning(for: mode)),
             provider: providerPreferences(forModel: agentMdl),
-            temperature: 0.7,
             responseFormat: nil
         )
         body.tools = WebAgentTools.chatTools
@@ -1409,7 +1395,7 @@ actor WebOrchestrator {
                 droppedReasoning = true
                 webLog("[WebOrchestrator] \(stage) REASONING_DROPPED_FOR_TOOLS backend=\(backend.rawValue): \(httpError.localizedDescription.prefix(200))")
                 body = ORChatReq(
-                    model: body.model, messages: body.messages, temperature: body.temperature,
+                    model: body.model, messages: body.messages,
                     stream: body.stream, reasoning: nil, reasoning_effort: nil, provider: body.provider,
                     tools: body.tools, tool_choice: body.tool_choice, response_format: nil)
                 continue
@@ -1862,7 +1848,6 @@ actor WebOrchestrator {
         messages: [ORChatReq.Msg],
         reasoning: ORChatReq.Reasoning?,
         provider: ORChatReq.Provider?,
-        temperature: Double,
         responseFormat: ORResponseFormat?
     ) -> ORChatReq {
         let resolvedModel = self.resolvedModel(for: backend, requested: model)
@@ -1892,7 +1877,6 @@ actor WebOrchestrator {
             return ORChatReq(
                 model: resolvedModel,
                 messages: messages,
-                temperature: temperature,
                 stream: false,
                 reasoning: reasoning,
                 reasoning_effort: nil,
@@ -1903,13 +1887,12 @@ actor WebOrchestrator {
             // (.chatgpt never reaches here: callOpenRouter routes it through
             // SubscriptionWebTransport before building a chat body.)
             // OpenAI-native shape: reasoning models take a top-level
-            // reasoning_effort, and reject max_tokens,
-            // non-default temperature, and the OpenRouter provider block.
+            // reasoning_effort, and reject max_tokens and the OpenRouter
+            // provider block (no web request sends a temperature).
             webLog("[WebOrchestrator] OpenAI request stage=\(stage) mode=\(modeLabel(mode)) model=\(resolvedModel) reasoning=\(reasoningLabel) \(formatLabel)")
             return ORChatReq(
                 model: resolvedModel,
                 messages: messages,
-                temperature: nil,
                 stream: false,
                 reasoning: nil,
                 reasoning_effort: effortString,
@@ -1926,7 +1909,6 @@ actor WebOrchestrator {
             return ORChatReq(
                 model: resolvedModel,
                 messages: messages,
-                temperature: temperature,
                 stream: false,
                 reasoning: nil,
                 reasoning_effort: openCodeEffort,
@@ -1942,7 +1924,6 @@ actor WebOrchestrator {
         messages: [ORChatReq.Msg],
         reasoning: ORChatReq.Reasoning? = nil,
         provider: ORChatReq.Provider? = nil,
-        temperature: Double = 0.7,
         timeout: TimeInterval = 120,
         retryTimeouts: Bool = true,
         responseFormat: ORResponseFormat? = nil,
@@ -1968,7 +1949,6 @@ actor WebOrchestrator {
             messages: messages,
             reasoning: reasoning,
             provider: provider,
-            temperature: temperature,
             responseFormat: responseFormat
         )
         let maxCompletionAttempts = 3
@@ -2030,6 +2010,10 @@ actor WebOrchestrator {
                 }
                 let earlier = exceeded.earlierGenerationIds.isEmpty ? "" : " earlier_gens=\(exceeded.earlierGenerationIds.joined(separator: ","))"
                 webLog("[WebOrchestrator] openrouter stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) kind=deadline provider=\(exceeded.provider ?? "-") elapsed_s=\(String(format: "%.1f", exceeded.elapsed)) deadline_s=\(Int(exceeded.seconds.rounded())) gen=\(exceeded.generationId ?? "-") \(costField)\(earlier)")
+                // Non-streamed: OpenRouter names the host only in the final
+                // body. Its generation record names it (and the tokens and
+                // cost) seconds later — looked up in the background, logged.
+                CutRequestCostLookup.logAfterFailure(stage: stage, generationId: exceeded.generationId, after: "deadline")
                 guard completionAttempt < maxCompletionAttempts else {
                     throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
                         NSLocalizedDescriptionKey: "openrouter returned no completion for stage '\(stage)' (model \(resolvedModel)) after \(maxCompletionAttempts) attempts: deadline from \(exceeded.provider ?? "an unnamed host") — \(exceeded.localizedDescription)"
@@ -2091,6 +2075,7 @@ actor WebOrchestrator {
                 let failure = StageNoCompletion.classify(data)
                 addSpend(callSpendUSD(for: backend, model: resolvedModel, usage: failure.usage), executionID: executionID)
                 webLog("[WebOrchestrator] openrouter stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) \(failure.logFields)")
+                CutRequestCostLookup.logAfterFailure(stage: stage, generationId: failure.generationId, after: failure.kind.rawValue)
                 guard completionAttempt < maxCompletionAttempts else {
                     throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
                         NSLocalizedDescriptionKey: "openrouter returned no completion for stage '\(stage)' (model \(resolvedModel)) after \(maxCompletionAttempts) attempts: \(failure.kind.rawValue) from \(failure.provider ?? "an unnamed host")\(failure.detail.map { " — \($0.prefix(300))" } ?? "")"
@@ -2369,8 +2354,9 @@ actor WebOrchestrator {
             markdownCache[normalizedURL] = CachedMarkdown(title: title, markdown: content, cachedAt: Date(), fetchedAt: fetchedAt)
         }
 
-        let links = extractLinksFromMarkdown(rawMarkdown)
-        let images = extractImageReferences(rawMarkdown)
+        // Page-order lists (first 50 links / 20 images), parsed by
+        // WebPageLinks (titles not glued onto URLs).
+        let (links, images) = WebPageLinks.pageOrder(rawMarkdown)
 
         // Pages within the single-call budget keep the original one-shot path.
         // Larger pages are chunked and fanned out so the tail of the page is
@@ -2477,7 +2463,6 @@ actor WebOrchestrator {
             // Never nil here: callOpenRouter's nil-fallback pins to
             // Groq/Vertex, which don't host Luna.
             provider: providerPreferences(forModel: ORModel.webFetchCompression),
-            temperature: 0.1,
             executionID: executionID
         )
     }
@@ -2643,61 +2628,6 @@ actor WebOrchestrator {
         return out
     }
     
-    private func extractLinksFromMarkdown(_ text: String) -> [ExtractedLink] {
-        // Match markdown links: [text](url)
-        let pattern = #"\[([^\]]+)\]\((https?://[^)]+)\)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        
-        let range = NSRange(text.startIndex..., in: text)
-        let matches = regex.matches(in: text, range: range)
-        
-        return matches.compactMap { match -> ExtractedLink? in
-            guard let textRange = Range(match.range(at: 1), in: text),
-                  let urlRange = Range(match.range(at: 2), in: text) else { return nil }
-            return ExtractedLink(
-                text: String(text[textRange]),
-                url: String(text[urlRange])
-            )
-        }.prefix(50).map { $0 } // Limit to 50 links
-    }
-    
-    private func extractImageReferences(_ text: String) -> [ExtractedImage] {
-        // Match markdown images: ![alt](url) and Jina's Image [n]: caption format
-        var images: [ExtractedImage] = []
-        
-        // Standard markdown images
-        let mdPattern = #"!\[([^\]]*)\]\((https?://[^)]+)\)"#
-        if let regex = try? NSRegularExpression(pattern: mdPattern) {
-            let range = NSRange(text.startIndex..., in: text)
-            let matches = regex.matches(in: text, range: range)
-            for match in matches {
-                if let altRange = Range(match.range(at: 1), in: text),
-                   let urlRange = Range(match.range(at: 2), in: text) {
-                    images.append(ExtractedImage(
-                        caption: String(text[altRange]),
-                        url: String(text[urlRange])
-                    ))
-                }
-            }
-        }
-        
-        // Jina's captioned images: "Image [1]: description"
-        let jinaPattern = #"Image \[(\d+)\]: ([^\n]+)"#
-        if let regex = try? NSRegularExpression(pattern: jinaPattern) {
-            let range = NSRange(text.startIndex..., in: text)
-            let matches = regex.matches(in: text, range: range)
-            for match in matches {
-                if let captionRange = Range(match.range(at: 2), in: text) {
-                    images.append(ExtractedImage(
-                        caption: String(text[captionRange]),
-                        url: nil // Jina captions don't always include the URL
-                    ))
-                }
-            }
-        }
-        
-        return Array(images.prefix(20)) // Limit to 20 images
-    }
     
     private func scrapeAndExtract(
         url: String,
@@ -2713,100 +2643,91 @@ actor WebOrchestrator {
             return ScrapedDoc(url: url, source: host, title: maybeTitle, excerpts: [], links: [], images: [], retrievedAtStep: atStep)
         }
 
-        let candidateLinks = extractLinksFromMarkdown(rawContent)
-        let candidateImages = extractImageReferences(rawContent)
-        let relevantAssets: (links: [ExtractedLink], images: [ExtractedImage])?
-        do {
-            relevantAssets = try await extractRelevantLinksAndImages(
-                page: rawContent,
-                focus: focus,
-                candidateLinks: candidateLinks,
-                candidateImages: candidateImages,
-                mode: mode,
-                executionID: executionID
-            )
-        } catch where Self.isUsageExhausted(error) {
-            throw error
-        } catch {
-            relevantAssets = nil   // optional step: ordinary failures stay best-effort
-        }
-        let relevantLinks = relevantAssets?.links ?? []
-        let relevantImages = relevantAssets?.images ?? []
-
+        // Small page: no model call. The raw text, links included, goes to
+        // the researcher as is.
         if rawContent.count <= excerptThreshold {
-            return ScrapedDoc(
-                url: url,
-                source: host,
-                title: maybeTitle,
-                excerpts: [rawContent],
-                links: relevantLinks,
-                images: relevantImages,
-                retrievedAtStep: atStep
-            )
+            return ScrapedDoc(url: url, source: host, title: maybeTitle, excerpts: [rawContent], links: [], images: [], retrievedAtStep: atStep)
         }
 
-        if rawContent.count <= chunkSizeChars {
-            let ex = try await extractExcerpts(
-                page: rawContent,
-                focus: focus,
-                mode: mode,
-                executionID: executionID
-            )
-            return ScrapedDoc(
-                url: url,
-                source: host,
-                title: maybeTitle,
-                excerpts: ex,
-                links: relevantLinks,
-                images: relevantImages,
-                retrievedAtStep: atStep
-            )
-        }
-
-        let chunks = makeChunks(for: rawContent, chunk: chunkSizeChars, maxChunks: maxChunksForExtraction, overlap: chunkOverlapChars)
-        var allExcerpts: [String] = []
-
+        // One request per chunk: the model selects numbered blocks and
+        // links/images (page-wide numbers, so chunks agree); Briglia copies
+        // the blocks verbatim from the original markdown.
+        let page = WebPageLinks.annotate(rawContent, pageURL: url)
+        let chunks = page.text.count <= chunkSizeChars
+            ? [page.text]
+            : makeChunks(for: page.text, chunk: chunkSizeChars, maxChunks: maxChunksForExtraction, overlap: chunkOverlapChars)
+        var blockPicks: [BlockPick] = [], linkPicks: [PagePick] = [], imagePicks: [PagePick] = []
+        var malformed = 0
         for chunk in chunks {
             do {
-                let ex = try await extractExcerpts(
-                    page: chunk,
-                    focus: focus,
-                    mode: mode,
-                    executionID: executionID
-                )
-                if !ex.isEmpty { allExcerpts.append(contentsOf: ex) }
+                let out = try await extractExcerpts(page: chunk, focus: focus, mode: mode, executionID: executionID)
+                blockPicks.append(contentsOf: out.blocks)
+                linkPicks.append(contentsOf: out.links)
+                imagePicks.append(contentsOf: out.images)
+                malformed += out.malformed
             } catch is CancellationError { throw CancellationError() }
             catch where Self.isUsageExhausted(error) {
                 // Stop issuing sequential requests against a known-exhausted
                 // subscription; the quota error reaches the tool boundary.
                 throw error
             }
-            catch { /* continue */ }
+            catch where chunks.count == 1 { throw error }
+            catch { /* continue with the other chunks */ }
         }
-
+        let resolved = Self.resolvePicks(page: page, blocks: blockPicks, links: linkPicks, images: imagePicks)
+        if resolved.dropped + malformed > 0 {
+            webLog("[WebOrchestrator] extract.excerpts picks: dropped \(resolved.dropped + malformed) (out of range or malformed; page has \(page.blocks.count) blocks, \(page.links.count) links, \(page.images.count) images)")
+        }
         return ScrapedDoc(
             url: url,
             source: host,
             title: maybeTitle,
-            excerpts: dedupeExcerpts(allExcerpts),
-            links: relevantLinks,
-            images: relevantImages,
+            excerpts: resolved.excerpts,
+            links: resolved.links,
+            images: resolved.images,
             retrievedAtStep: atStep
         )
     }
-    
+
+    /// Block picks to verbatim excerpts (union over chunks; adjacent or
+    /// overlapping ranges merge; a range reaching past the last block is
+    /// dropped whole), link/image picks to exact URLs (out of range dropped,
+    /// duplicates once, pick order, no cap); a link or image that sits inside
+    /// a selected block is not repeated in the lists.
+    static func resolvePicks(page: WebPageLinks.Annotated, blocks: [BlockPick], links: [PagePick], images: [PagePick])
+        -> (excerpts: [String], links: [ExtractedLink], images: [ExtractedImage], dropped: Int)
+    {
+        var selected = Set<Int>(), dropped = 0
+        for pick in blocks {
+            guard pick.first >= 1, pick.last <= page.blocks.count else { dropped += 1; continue }
+            selected.formUnion(pick.first...pick.last)
+        }
+        let l = WebPageLinks.map(links, in: page.links)
+        let i = WebPageLinks.map(images, in: page.images)
+        let keptLinks = zip(l.items, l.numbers).filter { !page.covered(page.linkOffsets[$0.1 - 1], by: selected) }.map(\.0)
+        let keptImages = zip(i.items, i.numbers).filter { !page.covered(page.imageOffsets[$0.1 - 1], by: selected) }.map(\.0)
+        return (page.excerpts(for: selected), keptLinks, keptImages, dropped + l.dropped + i.dropped)
+    }
+
+    /// Instructions of the one-pass extraction stage. The model selects by
+    /// number and never retypes text (output tokens are the slow part).
+    static let excerptSystemPrompt = """
+    Select the parts of the provided TEXT that are relevant to the given FOCUS, by number. Never copy text and never write URLs.
+    TEXT is split into numbered blocks; each block starts with a marker such as ⟨P12⟩. Inside the blocks every link is marked [text]⟨L7⟩ and every image ![caption]⟨I3⟩. All numbers are page-wide.
+    - "blocks": every content block that answers or supports the FOCUS, as single blocks ("P12") or ranges ("P12-P15"). Select all of them, not only the best one; skip navigation and boilerplate.
+    - "links": the numbers of pertinent links that are not inside your selected blocks. Any link can be pertinent, including menu or footer links (for example contact, returns, dealers, documentation).
+    - "images": the numbers of pertinent images that are not inside your selected blocks.
+    OUTPUT STRICT JSON ONLY: { "blocks": ["P12-P15", "P40"], "links": [7, 31], "images": [3] }
+    """
+
     private func extractExcerpts(
         page: String,
         focus: String,
         mode: ResearchMode,
         executionID: UUID
-    ) async throws -> [String] {
-        let sys = """
-        Cite verbatim and in full the most relevant parts of the provided TEXT for the given FOCUS.
-        OUTPUT STRICT JSON ONLY: { "excerpts": ["...", "..."] }
-        """
+    ) async throws -> BlockPicksOut {
         let msgs: [ORChatReq.Msg] = [
-            .init(role: "system", content: sys),
+            .init(role: "system", content: Self.excerptSystemPrompt),
             .init(role: "user", content: "FOCUS:\n\(focus)\n\nTEXT:\n\(page.prefix(chunkSizeChars))")
         ]
         let raw = try await callOpenRouter(
@@ -2816,159 +2737,20 @@ actor WebOrchestrator {
             messages: msgs,
             reasoning: excerptReasoning(for: mode),
             provider: providerPreferences(forModel: excerptModel(for: mode)),
-            temperature: 0.1,
             responseFormat: WebExtractionSchemas.excerpts,
             executionID: executionID
         )
         if let d = extractFirstJSONObjectData(from: raw),
-           let out = try? JSONDecoder().decode(ExcerptOut.self, from: d) {
-            return out.excerpts
+           let out = try? JSONDecoder().decode(BlockPicksOut.self, from: d) {
+            return out
         }
-        // This site used to silently drop the whole chunk's excerpts on a
-        // malformed payload — try the structural repair before giving up.
         if let repair = repairFirstJSONObjectData(from: raw),
-           let out = try? JSONDecoder().decode(ExcerptOut.self, from: repair.data) {
+           let out = try? JSONDecoder().decode(BlockPicksOut.self, from: repair.data) {
             webLog("[WebOrchestrator] extract.excerpts REPAIRED_JSON \(repair.note) chars=\(raw.count)")
-            return out.excerpts
+            return out
         }
-        return []
-    }
-
-    private func extractRelevantLinksAndImages(
-        page: String,
-        focus: String,
-        candidateLinks: [ExtractedLink],
-        candidateImages: [ExtractedImage],
-        mode: ResearchMode,
-        executionID: UUID
-    ) async throws -> (links: [ExtractedLink], images: [ExtractedImage]) {
-        guard !candidateLinks.isEmpty || !candidateImages.isEmpty else { return ([], []) }
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .prettyPrinted
-        let linksJSON = String(
-            data: (try? encoder.encode(candidateLinks)) ?? Data("[]".utf8),
-            encoding: .utf8
-        ) ?? "[]"
-        let imagesJSON = String(
-            data: (try? encoder.encode(candidateImages)) ?? Data("[]".utf8),
-            encoding: .utf8
-        ) ?? "[]"
-
-        let sys = """
-        You extract focus-relevant page assets from provided candidates.
-        Return STRICT JSON only in this schema:
-        {
-          "links": [{ "text": "...", "url": "https://..." }],
-          "images": [{ "caption": "...", "url": "https://..." | null }]
-        }
-
-        Rules:
-        - Select only items relevant to FOCUS.
-        - Use only URLs and items that appear in candidates; do not invent.
-        - Keep URLs exact.
-        - Return at most 8 links and 8 images.
-        """
-
-        let msgs: [ORChatReq.Msg] = [
-            .init(role: "system", content: sys),
-            .init(
-                role: "user",
-                content: """
-                FOCUS:
-                \(focus)
-
-                CANDIDATE_LINKS_JSON:
-                \(linksJSON)
-
-                CANDIDATE_IMAGES_JSON:
-                \(imagesJSON)
-
-                PAGE_CONTEXT:
-                \(page.prefixing(60000))
-                """
-            )
-        ]
-
-        let raw = try await callOpenRouter(
-            stage: "extract.assets",
-            mode: mode,
-            model: excerptModel(for: mode),
-            messages: msgs,
-            reasoning: excerptReasoning(for: mode),
-            provider: providerPreferences(forModel: excerptModel(for: mode)),
-            temperature: 0.1,
-            responseFormat: WebExtractionSchemas.assets,
-            executionID: executionID
-        )
-
-        var decoded: RelevantAssetOut?
-        if let d = extractFirstJSONObjectData(from: raw) {
-            decoded = try? JSONDecoder().decode(RelevantAssetOut.self, from: d)
-        }
-        if decoded == nil, let repair = repairFirstJSONObjectData(from: raw),
-           let out = try? JSONDecoder().decode(RelevantAssetOut.self, from: repair.data) {
-            webLog("[WebOrchestrator] extract.assets REPAIRED_JSON \(repair.note) chars=\(raw.count)")
-            decoded = out
-        }
-        guard let out = decoded else {
-            return ([], [])
-        }
-
-        let linkLookup: [String: ExtractedLink] = Dictionary(
-            candidateLinks.map { ($0.url, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        let imageURLPairs: [(String, ExtractedImage)] = candidateImages.compactMap { image in
-            guard let url = image.url else { return nil }
-            return (url, image)
-        }
-        let imageURLLookup: [String: ExtractedImage] = Dictionary(
-            imageURLPairs,
-            uniquingKeysWith: { first, _ in first }
-        )
-        let imageCaptionLookup: [String: ExtractedImage] = Dictionary(
-            candidateImages.map { ($0.caption.lowercased(), $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-
-        let modelLinks = out.links ?? []
-        let modelImages = out.images ?? []
-
-        let filteredLinks = modelLinks.compactMap { item -> ExtractedLink? in
-            guard let url = item.url?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !url.isEmpty,
-                  let candidate = linkLookup[url] else { return nil }
-            let text = item.text?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let resolvedText: String
-            if let text, !text.isEmpty {
-                resolvedText = text
-            } else {
-                resolvedText = candidate.text
-            }
-            return ExtractedLink(text: resolvedText, url: candidate.url)
-        }
-
-        let filteredImages = modelImages.compactMap { item -> ExtractedImage? in
-            let caption = item.caption?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-            if let rawURL = item.url?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !rawURL.isEmpty,
-               let candidate = imageURLLookup[rawURL] {
-                return ExtractedImage(caption: caption.isEmpty ? candidate.caption : caption, url: candidate.url)
-            }
-
-            if !caption.isEmpty, let candidate = imageCaptionLookup[caption.lowercased()] {
-                return candidate
-            }
-
-            return nil
-        }
-
-        return (
-            links: dedupeLinks(filteredLinks).prefix(8).map { $0 },
-            images: dedupeImages(filteredImages).prefix(8).map { $0 }
-        )
+        webLog("[WebOrchestrator] extract.excerpts INVALID_JSON chars=\(raw.count)")
+        return BlockPicksOut(blocks: [])
     }
     
     private func configuredMainModel() -> String {
@@ -2991,7 +2773,8 @@ actor WebOrchestrator {
     /// OpenCode Go and 1M context. 2.5 probed 2026-08-01: swallows 312k-token
     /// inputs (so the 800K-char chunks fit), accurate on extraction, ~5-10x
     /// slower than Luna. 2.6 Flash probed 2026-09-21 on this request shape
-    /// (temperature 0.1, reasoning_effort medium/high, a ~250k-token
+    /// (temperature 0.1 then — none since 2026-09-29, probed not worse —
+    /// reasoning_effort medium/high, a ~250k-token
     /// extraction input; max_tokens 32000 then, no cap since 2026-09-29):
     /// see the v0.2.32 notes.
     /// MiMo accepts reasoning_effort low/medium/high only (400 on the rest),
@@ -3110,37 +2893,6 @@ actor WebOrchestrator {
             startOffset += step
         }
         return result
-    }
-    
-    private func dedupeExcerpts(_ arr: [String]) -> [String] {
-        var seen = Set<String>()
-        var out: [String] = []
-        for x in arr {
-            let key = x.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !key.isEmpty, seen.insert(key).inserted { out.append(x) }
-        }
-        return out
-    }
-
-    private func dedupeLinks(_ arr: [ExtractedLink]) -> [ExtractedLink] {
-        var seen = Set<String>()
-        var out: [ExtractedLink] = []
-        for x in arr {
-            let key = x.url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if !key.isEmpty, seen.insert(key).inserted { out.append(x) }
-        }
-        return out
-    }
-
-    private func dedupeImages(_ arr: [ExtractedImage]) -> [ExtractedImage] {
-        var seen = Set<String>()
-        var out: [ExtractedImage] = []
-        for x in arr {
-            let key = (x.url?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
-                ?? "caption:\(x.caption.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
-            if !key.isEmpty, seen.insert(key).inserted { out.append(x) }
-        }
-        return out
     }
 }
 
