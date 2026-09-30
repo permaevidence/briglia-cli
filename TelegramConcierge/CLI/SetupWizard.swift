@@ -499,7 +499,7 @@ struct SetupWizard {
            (stored[KeychainHelper.openAITranscriptionApiKeyKey] ?? "").isEmpty {
             print("""
             With OpenRouter as your main provider, your OpenRouter key also covers:
-              • web page reading for research (DeepSeek V4 Flash, fastest host)
+              • web page reading for research (GPT-6 Luna via OpenRouter)
               • voice message transcription (gpt-transcribe via OpenRouter)
               • image generation (Google Gemini image models via OpenRouter)
               • OCR of scanned documents (GPT-6 Luna via OpenRouter)

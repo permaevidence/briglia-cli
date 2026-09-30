@@ -100,6 +100,8 @@ enum CutRequestCostLookup {
         var out = OpenRouterGenerationRecord()
         if let cost = number(record["total_cost"]), cost >= 0 { out.totalCost = cost }
         out.cancelled = bool(record["cancelled"])
+        out.isByok = bool(record["is_byok"])
+        if let upstream = number(record["upstream_inference_cost"]), upstream >= 0 { out.upstreamInferenceCost = upstream }
         out.provider = (record["provider_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         out.promptTokens = int(record["native_tokens_prompt"]) ?? int(record["tokens_prompt"])
         out.completionTokens = int(record["native_tokens_completion"]) ?? int(record["tokens_completion"])
@@ -164,16 +166,33 @@ struct OpenRouterGenerationRecord: Equatable {
     var reasoningTokens: Int?
     var finishReason: String?
     var generationTimeMs: Double?
+    /// Bring-your-own-key request: OpenRouter's `total_cost` is only its
+    /// fee; the provider bills the user's own key `upstream_inference_cost`.
+    var isByok: Bool?
+    var upstreamInferenceCost: Double?
 
-    init(totalCost: Double? = nil, cancelled: Bool? = nil, provider: String? = nil) {
+    init(totalCost: Double? = nil, cancelled: Bool? = nil, provider: String? = nil,
+         isByok: Bool? = nil, upstreamInferenceCost: Double? = nil) {
         self.totalCost = totalCost; self.cancelled = cancelled; self.provider = provider
+        self.isByok = isByok; self.upstreamInferenceCost = upstreamInferenceCost
     }
 
     /// The amount that settles a cut request's unknown-amount incident, or
     /// nil (it stays unknown): a positive reported cost, or exactly 0 when
-    /// the record also says the request was cancelled.
+    /// the record also says the request was cancelled. On a BYOK request
+    /// (GPT-6 Luna on an OpenRouter account with its own OpenAI key) the
+    /// billed amount is the upstream cost on the user's key, so the record
+    /// settles only when it reports one: the larger of fee and upstream cost
+    /// when positive, 0 only when both are reported 0 on a cancelled
+    /// request; a BYOK record without an upstream cost stays unknown.
     var settlementCost: Double? {
         guard let cost = totalCost, cost.isFinite, cost >= 0 else { return nil }
+        if isByok == true {
+            guard let upstream = upstreamInferenceCost, upstream.isFinite, upstream >= 0 else { return nil }
+            let billed = max(cost, upstream)
+            if billed > 0 { return billed }
+            return cancelled == true ? 0 : nil
+        }
         if cost > 0 { return cost }
         return cancelled == true ? 0 : nil
     }
@@ -181,6 +200,6 @@ struct OpenRouterGenerationRecord: Equatable {
     var logFields: String {
         func s<T>(_ v: T?) -> String { v.map { "\($0)" } ?? "-" }
         let time = generationTimeMs.map { String(format: "%.1f", $0 / 1000) } ?? "-"
-        return "provider=\(provider ?? "-") upstream_status=\(s(upstreamStatus)) cancelled=\(s(cancelled)) finish=\(finishReason ?? "-") prompt_tokens=\(s(promptTokens)) completion_tokens=\(s(completionTokens)) reasoning_tokens=\(s(reasoningTokens)) generation_s=\(time) cost=\(totalCost.map { SpendGate.formatUSD($0) } ?? "-")"
+        return "provider=\(provider ?? "-") upstream_status=\(s(upstreamStatus)) cancelled=\(s(cancelled)) finish=\(finishReason ?? "-") prompt_tokens=\(s(promptTokens)) completion_tokens=\(s(completionTokens)) reasoning_tokens=\(s(reasoningTokens)) generation_s=\(time) cost=\(totalCost.map { SpendGate.formatUSD($0) } ?? "-")\(isByok == true ? " byok upstream_cost=\(upstreamInferenceCost.map { SpendGate.formatUSD($0) } ?? "-")" : "")"
     }
 }

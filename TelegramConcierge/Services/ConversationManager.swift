@@ -5861,7 +5861,7 @@ class ConversationManager: ObservableObject {
         if followSelection.backend == .chatgpt {
             followNote = " While /provider is chatgpt, web page reading keeps using the subscription; this choice applies on other providers."
         } else if followSelection.followsMainOpenRouter {
-            followNote = " While /provider is openrouter, web page reading uses \(ORModel.openRouterExtractor) on OpenRouter's fastest host; this choice applies on other providers."
+            followNote = " While /provider is openrouter, web page reading uses GPT-6 Luna (\(ORModel.openRouterExtractor)) on OpenRouter, OpenAI or Azure host; this choice applies on other providers."
         } else {
             followNote = ""
         }

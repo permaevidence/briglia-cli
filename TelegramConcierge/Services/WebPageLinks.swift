@@ -231,9 +231,11 @@ enum WebPageLinks {
         /// Block `P(n)` is `blocks[n - 1]`: a UTF-16 range of the original.
         let blocks: [Range<Int>]
         let original: [UInt16]
-        /// Original offsets of every occurrence of each link / image number.
-        let linkOffsets: [[Int]]
-        let imageOffsets: [[Int]]
+        /// Original UTF-16 spans of every occurrence of each link / image
+        /// number: the whole markup (`[text](url)`, `![caption](url)`, a
+        /// reader caption line), not just its start.
+        let linkSpans: [[Range<Int>]]
+        let imageSpans: [[Range<Int>]]
 
         /// The selected blocks as excerpts: sorted, adjacent or overlapping
         /// block runs merged, each run the original slice from its first
@@ -249,9 +251,25 @@ enum WebPageLinks {
             }
         }
 
-        /// True when an occurrence of the offsets lies inside a selected block.
-        func covered(_ offsets: [Int], by numbers: Set<Int>) -> Bool {
-            offsets.contains { o in numbers.contains { n in n >= 1 && n <= blocks.count && blocks[n - 1].contains(o) } }
+        /// Index (0-based) of the block containing original offset `o`, or nil.
+        func blockIndex(containing o: Int) -> Int? {
+            var lo = 0, hi = blocks.count
+            while lo < hi { let mid = (lo + hi) / 2; if blocks[mid].upperBound <= o { lo = mid + 1 } else { hi = mid } }
+            return lo < blocks.count && blocks[lo].lowerBound <= o ? lo : nil
+        }
+
+        /// True when some occurrence is COMPLETELY inside the returned
+        /// excerpts: every block from the one holding its first unit to the
+        /// one holding its last unit is selected (a run is copied from its
+        /// first block's start to its last block's end, so the whole markup
+        /// — caption and URL — is then in the excerpt). An occurrence whose
+        /// markup only starts in a selected block does not count.
+        func covered(_ spans: [Range<Int>], by numbers: Set<Int>) -> Bool {
+            spans.contains { span in
+                guard !span.isEmpty, let first = blockIndex(containing: span.lowerBound),
+                      let last = blockIndex(containing: span.upperBound - 1), first <= last else { return false }
+                return (first...last).allSatisfy { numbers.contains($0 + 1) }
+            }
         }
     }
 
@@ -354,6 +372,37 @@ enum WebPageLinks {
             }
         }
         close()
+        // Markup spans never cross a block boundary (whatever kind the first
+        // line had: heading, table row and image lines are closed at once,
+        // so the line-level continuation above cannot see them). A block
+        // whose end falls inside a link/image markup absorbs every following
+        // block up to the markup's end: the caption, the URL and the block
+        // marker then stay together (a boundary inside a markup would leave
+        // a block the annotator cannot mark, and an excerpt with half an image).
+        func spanEnd(strictlyContaining p: Int) -> Int? {
+            var lo = 0, hi = spans.count
+            while lo < hi { let mid = (lo + hi) / 2; if spans[mid].range.upperBound <= p { lo = mid + 1 } else { hi = mid } }
+            return lo < spans.count && spans[lo].range.lowerBound < p ? spans[lo].range.upperBound : nil
+        }
+        var glued: [(range: Range<Int>, kind: LineKind)] = []
+        var r = 0
+        while r < raw.count {
+            var block = raw[r]; r += 1
+            while let end = spanEnd(strictlyContaining: block.range.upperBound) {
+                var upper = max(block.range.upperBound, end)
+                while r < raw.count, raw[r].range.lowerBound < upper {
+                    upper = max(upper, raw[r].range.upperBound); r += 1
+                }
+                // The markup may end mid-line: the rest of that line joins too.
+                var lineEnd = upper
+                while lineEnd < u.count, u[lineEnd] != nl { lineEnd += 1 }
+                block = (block.range.lowerBound..<max(upper, lineEnd), block.kind)
+                while r < raw.count, raw[r].range.lowerBound < block.range.upperBound {
+                    block = (block.range.lowerBound..<max(block.range.upperBound, raw[r].range.upperBound), block.kind); r += 1
+                }
+            }
+            glued.append(block)
+        }
         // Merge runs of link-only blocks (menus, footers: blank lines between
         // items) together with the short one-line labels among them ("BIKES",
         // "E-BIKES"): one block for the whole run; each link keeps its number.
@@ -361,7 +410,7 @@ enum WebPageLinks {
             b.kind == .text && b.range.count <= 40 && !u[b.range].contains(nl)
         }
         var merged: [(range: Range<Int>, kind: LineKind)] = []
-        for b in raw {
+        for b in glued {
             if let last = merged.last, (last.kind == .linkOnly || short(last)), (b.kind == .linkOnly || short(b)) {
                 let kind: LineKind = (last.kind == .linkOnly || b.kind == .linkOnly) ? .linkOnly : .text
                 merged[merged.count - 1] = (last.range.lowerBound..<b.range.upperBound, kind)
@@ -417,17 +466,17 @@ enum WebPageLinks {
         let base = URL(string: pageURL)
         var out: [UInt16] = []
         out.reserveCapacity(u.count + blockRanges.count * 8)
-        var links: [ExtractedLink] = [], linkOffsets: [[Int]] = [], linkNumber: [String: Int] = [:]
-        var images: [ExtractedImage] = [], imageOffsets: [[Int]] = [], imageNumber: [String: Int] = [:]
+        var links: [ExtractedLink] = [], linkSpans: [[Range<Int>]] = [], linkNumber: [String: Int] = [:]
+        var images: [ExtractedImage] = [], imageSpans: [[Range<Int>]] = [], imageNumber: [String: Int] = [:]
         // Insertions at original offsets: block markers and reader captions.
         var inserts: [(at: Int, text: String)] = blockRanges.enumerated().map { ($0.element.lowerBound, blockMarker($0.offset + 1) + " ") }
         for cap in readerCaptions(markdown) {
             let key = "caption:" + cap.caption
             let n = imageNumber[key] ?? {
-                images.append(ExtractedImage(caption: cap.caption, url: nil)); imageOffsets.append([])
+                images.append(ExtractedImage(caption: cap.caption, url: nil)); imageSpans.append([])
                 imageNumber[key] = images.count; return images.count
             }()
-            imageOffsets[n - 1].append(cap.offset)
+            imageSpans[n - 1].append(cap.offset..<cap.lineEnd)
             inserts.append((cap.lineEnd, " " + imageMarker(n)))
         }
         inserts.sort { $0.at < $1.at }
@@ -454,7 +503,13 @@ enum WebPageLinks {
             while i <= to {
                 if topLevel, nextInsert < inserts.count, inserts[nextInsert].at <= i {
                     let at = inserts[nextInsert].at
-                    if at >= copyStart { flush(at); out.append(contentsOf: inserts[nextInsert].text.utf16) }
+                    // An insertion inside a markup just copied (a reader
+                    // caption line ending inside a wrapped link) goes right
+                    // after that markup, never dropped. Block markers never
+                    // land there: blocks(_:maxChars:) keeps every markup in
+                    // one block.
+                    if at >= copyStart { flush(at) }
+                    out.append(contentsOf: inserts[nextInsert].text.utf16)
                     nextInsert += 1
                     continue
                 }
@@ -468,10 +523,10 @@ enum WebPageLinks {
                 if isImage {
                     if let url = httpURL(m.target), !isTracking(url) {
                         let n = imageNumber[url] ?? {
-                            images.append(ExtractedImage(caption: inner, url: url)); imageOffsets.append([])
+                            images.append(ExtractedImage(caption: inner, url: url)); imageSpans.append([])
                             imageNumber[url] = images.count; return images.count
                         }()
-                        imageOffsets[n - 1].append(i - 1)
+                        imageSpans[n - 1].append((i - 1)..<(m.end + 1))
                         out.append(contentsOf: imageMarker(n).utf16)
                     } else if !targetURL(m.target).lowercased().hasPrefix("data:") {
                         out.append(contentsOf: u[(m.close + 1)...m.end])
@@ -483,10 +538,10 @@ enum WebPageLinks {
                         n = known
                         if links[n - 1].text.isEmpty, !text.isEmpty { links[n - 1] = ExtractedLink(text: text, url: url) }
                     } else {
-                        links.append(ExtractedLink(text: text, url: url)); linkOffsets.append([])
+                        links.append(ExtractedLink(text: text, url: url)); linkSpans.append([])
                         linkNumber[url] = links.count; n = links.count
                     }
-                    linkOffsets[n - 1].append(i)
+                    linkSpans[n - 1].append(i..<(m.end + 1))
                     out.append(contentsOf: linkMarker(n).utf16)
                 }
                 // Self link, anchor, javascript:, tracking: text stays, target goes.
@@ -497,7 +552,7 @@ enum WebPageLinks {
         }
         walk(0, u.count, topLevel: true)
         return Annotated(text: String(decoding: out, as: UTF16.self), links: links, images: images, blocks: blockRanges,
-                         original: u, linkOffsets: linkOffsets, imageOffsets: imageOffsets)
+                         original: u, linkSpans: linkSpans, imageSpans: imageSpans)
     }
 
     // MARK: Mapping the model's numbers

@@ -22,13 +22,18 @@ enum ORModel {
     /// invisible to the calling agent, so selection judgment matters here.
     static let webFetchCompression = "openai/gpt-6-luna"
     /// Page extraction and web_fetch compression while OpenRouter is the
-    /// MAIN provider (owner decision 2026-09-25): DeepSeek V4 Flash, routed
-    /// by OpenRouter to the fastest of the pinned hosts
-    /// (`WebSearchBackend.openRouterExtractorHosts`, `provider.sort: "throughput"`),
-    /// at low effort. Verified live 2026-09-25: id in /models, 30+ hosts,
-    /// strict-JSON extraction of a 39k-token page in ~2.5 s. Spend is the
-    /// served host's `usage.cost` (host prices differ several-fold).
-    static let openRouterExtractor = "deepseek/deepseek-v4-flash-0731"
+    /// MAIN provider: GPT-6 Luna, the same model and effort (medium) as the
+    /// OpenAI and ChatGPT lanes, on the hosts in
+    /// `WebSearchBackend.openRouterExtractorHosts` (owner decision
+    /// 2026-09-30: block selection answers in a few hundred tokens, so the
+    /// model's speed decides; Luna ~4.5 s a page against 12.5 s for DeepSeek
+    /// V4 Flash on Reka and 28 s on DigitalOcean). It was
+    /// `deepseek/deepseek-v4-flash-0731` at low effort from 2026-09-25.
+    /// Verified live 2026-09-30 on /models: id `openai/gpt-6-luna`, 1.05M
+    /// context, response_format + structured_outputs + reasoning_effort, list
+    /// price $0.10/M in, $0.50/M out. Spend is what OpenRouter reports
+    /// (`usage.cost`, or the upstream cost on a BYOK key).
+    static let openRouterExtractor = "openai/gpt-6-luna"
     static let defaultMainModel  = KeychainHelper.defaultWebSearchModel
 }
 
@@ -121,7 +126,7 @@ enum WebSearchBackend: String {
 
     /// The backend serving the mechanical stages plus whether it is the
     /// OpenRouter follow (main provider = OpenRouter ⇒ extraction on
-    /// `ORModel.openRouterExtractor`, fastest host), read from ONE settings
+    /// `ORModel.openRouterExtractor` on the pinned hosts), read from ONE settings
     /// snapshot so the two can never disagree.
     static var activeSelection: (backend: WebSearchBackend, followsMainOpenRouter: Bool) {
         if let processOverride { return (processOverride, false) }
@@ -140,31 +145,34 @@ enum WebSearchBackend: String {
     }
 
     /// The model/effort/routing a mechanical stage actually sends. Unchanged
-    /// unless the OpenRouter follow holds; then DeepSeek V4 Flash at low
-    /// effort on the fastest pinned extraction host, the /orprovider pin deliberately ignored
-    /// (it governs the main model; its host may not serve this one), strict
-    /// response_format honoured by requiring hosts that support it.
+    /// unless the OpenRouter follow holds; then GPT-6 Luna at the stage's own
+    /// effort (medium, as on the OpenAI lane) on the pinned extraction hosts,
+    /// the /orprovider pin deliberately ignored (it governs the main model;
+    /// its host may not serve this one), strict response_format honoured by
+    /// requiring hosts that support it.
     static func stageRoute(followsMainOpenRouter: Bool, model: String, reasoning: ORChatReq.Reasoning?,
                            provider: ORChatReq.Provider?, hasResponseFormat: Bool)
         -> (model: String, reasoning: ORChatReq.Reasoning?, provider: ORChatReq.Provider?) {
         guard followsMainOpenRouter else { return (model, reasoning, provider) }
-        var routing = ORChatReq.Provider(order: nil, only: openRouterExtractorHosts, allow_fallbacks: true, sort: "throughput")
+        var routing = ORChatReq.Provider(order: nil, only: openRouterExtractorHosts, allow_fallbacks: true, sort: nil)
         if hasResponseFormat { routing.require_parameters = true }
-        return (ORModel.openRouterExtractor, makeReasoning(openRouterExtractorEffort), routing)
+        return (ORModel.openRouterExtractor, reasoning, routing)
     }
 
-    /// Hosts the extractor may use; OpenRouter picks the fastest of them.
-    /// Owner decision 2026-09-27 after live strict-JSON extraction probes
-    /// (14 per host, a 126 KB and an 18 KB page): Reka, Makora and
-    /// DigitalOcean passed 14/14. Cohere, which the unrestricted sort chose
-    /// almost always, hung ~90 s then returned an empty body; Morph, Nebius,
-    /// Together (429s), Phala and Parasail failed some; Wafer and the fp4
-    /// hosts were slow on large pages; eight hosts refused strict JSON.
-    /// Makora dropped 2026-09-29 (owner decision): with no output cap it ran
-    /// two reasoning loops to its 131k-token default (17 and 21 min, no
-    /// content) and often refused with 429 "capacity"; Reka (32/32) and
-    /// DigitalOcean (33/33) answered every uncapped probe.
-    static let openRouterExtractorHosts = ["reka", "digitalocean"]
+    /// Hosts the extractor may use (GPT-6 Luna since 2026-09-30). OpenRouter
+    /// serves Luna from OpenAI and Azure at list price, plus an `openai/flex`
+    /// endpoint (half price, flex processing: p90 latency ~24 s on
+    /// OpenRouter's stats), an `openai/fast` one (double price) and Amazon
+    /// Bedrock (no response_format). The slugs `openai` and `azure` select
+    /// the standard list-price endpoints only (verified by the billed rate:
+    /// `openai` = 1.0×, `openai/flex` 0.5×, `openai/fast` 2.0×); with no
+    /// `only`, a key without an OpenAI BYOK would be sent to the cheapest
+    /// endpoint, flex. Both returned valid strict JSON on every probe
+    /// (medians 4–6 s on 15–53k-token pages). A failed host is excluded on
+    /// the retry, so an OpenAI outage falls to Azure and back.
+    /// Until 2026-09-30 DeepSeek V4 Flash ran here on Reka and DigitalOcean
+    /// (Makora dropped 2026-09-29; Cohere and others failed earlier probes).
+    static let openRouterExtractorHosts = ["openai", "azure"]
 
     /// Total wall-clock limit for ONE extractor request on the OpenRouter
     /// follow (extract.excerpts, web_fetch compression and
@@ -180,13 +188,8 @@ enum WebSearchBackend: String {
     static var extractorDeadlineOverride: TimeInterval?
     static var openRouterExtractorDeadline: TimeInterval { extractorDeadlineOverride ?? openRouterExtractorDeadlineSeconds }
 
-    /// Low: the extractor copies facts out of a page; DeepSeek V4 Flash at
-    /// low reasoned ~11 tokens on a small page and answered a 39k-token
-    /// strict-JSON extraction in ~2.5 s (medium: ~5.5 s, same answer).
-    static let openRouterExtractorEffort: ReasoningEffort = .low
-
     /// The pinned host slug an OpenRouter reply was served by, from the
-    /// display name OpenRouter reports ("Reka", "DigitalOcean"), or nil
+    /// display name OpenRouter reports ("OpenAI", "Azure"), or nil
     /// when the name is absent or not one of the pinned hosts.
     static func extractorHostSlug(servedBy provider: String?) -> String? {
         func key(_ s: String) -> String { String(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }) }
@@ -313,7 +316,7 @@ enum WebSearchBackend: String {
     }
 
     /// /websearch and doctor wording for the OpenRouter follow.
-    static var openRouterFollowSummary: String { "\(ORModel.openRouterExtractor) via openrouter.ai, fastest host" }
+    static var openRouterFollowSummary: String { "GPT-6 Luna (\(ORModel.openRouterExtractor)) via openrouter.ai, OpenAI or Azure host" }
 
     /// What actually answers searches on this backend — shown by /websearch.
     var modelSummary: String {
@@ -2692,8 +2695,8 @@ actor WebOrchestrator {
     /// Block picks to verbatim excerpts (union over chunks; adjacent or
     /// overlapping ranges merge; a range reaching past the last block is
     /// dropped whole), link/image picks to exact URLs (out of range dropped,
-    /// duplicates once, pick order, no cap); a link or image that sits inside
-    /// a selected block is not repeated in the lists.
+    /// duplicates once, pick order, no cap); a link or image whose whole
+    /// markup is inside the returned excerpts is not repeated in the lists.
     static func resolvePicks(page: WebPageLinks.Annotated, blocks: [BlockPick], links: [PagePick], images: [PagePick])
         -> (excerpts: [String], links: [ExtractedLink], images: [ExtractedImage], dropped: Int)
     {
@@ -2704,8 +2707,8 @@ actor WebOrchestrator {
         }
         let l = WebPageLinks.map(links, in: page.links)
         let i = WebPageLinks.map(images, in: page.images)
-        let keptLinks = zip(l.items, l.numbers).filter { !page.covered(page.linkOffsets[$0.1 - 1], by: selected) }.map(\.0)
-        let keptImages = zip(i.items, i.numbers).filter { !page.covered(page.imageOffsets[$0.1 - 1], by: selected) }.map(\.0)
+        let keptLinks = zip(l.items, l.numbers).filter { !page.covered(page.linkSpans[$0.1 - 1], by: selected) }.map(\.0)
+        let keptImages = zip(i.items, i.numbers).filter { !page.covered(page.imageSpans[$0.1 - 1], by: selected) }.map(\.0)
         return (page.excerpts(for: selected), keptLinks, keptImages, dropped + l.dropped + i.dropped)
     }
 
