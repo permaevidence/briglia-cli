@@ -129,14 +129,19 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         func modelRoute(_ server: WebFixtureServer, responses: Bool) -> @Sendable (WebFixtureServer.Request) -> WebFixtureServer.Response {
             { request in
                 let text = String(decoding: request.body, as: UTF8.self)
+                // OpenCode Go's page stages go through Responses since
+                // v0.2.44 (GPT-6 Luna): answer them in that shape.
+                let stageReply: (String) -> String = { reply in
+                    request.path.hasSuffix("/responses") ? WebFixtureServer.responsesBody(reply, id: "stage") : WebFixtureServer.chatBody(reply)
+                }
                 if text.contains("You extract information from a web page") {
                     let start = text.range(of: "--- PAGE CONTENT (markdown) ---")?.upperBound ?? text.startIndex
                     let end = text.range(of: "--- END PAGE CONTENT ---")?.lowerBound ?? text.endIndex
                     let raw = String(text[start..<end]).replacingOccurrences(of: "\\n", with: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                    return .init(body: WebFixtureServer.chatBody("COMPRESSED: " + raw))
+                    return .init(body: stageReply("COMPRESSED: " + raw))
                 }
                 if text.contains("Select the parts of the provided TEXT") {
-                    return .init(body: WebFixtureServer.chatBody(fixtures.excerptResponse))
+                    return .init(body: stageReply(fixtures.excerptResponse))
                 }
                 if let status = server.popStatus(), status != 200 {
                     return .init(status: status, body: "{\"error\":{\"message\":\"injected \(status)\"}}")
@@ -465,9 +470,12 @@ struct WebSubagentSelftest: AsyncParsableCommand {
                 let t = String(decoding: $0.body, as: UTF8.self)
                 return t.contains("You extract information from a web page") || t.contains("Select the parts of the provided TEXT")
             }
-            check("4.3b OpenCode web backend: a 'minimal' page stage reaches mimo-v2.6-flash as reasoning_effort 'low' (per-model fold in the web body)",
-                  !foldRequests.isEmpty && foldRequests.allSatisfy { body($0)["model"] as? String == "mimo-v2.6-flash" && body($0)["reasoning_effort"] as? String == "low" },
-                  "\(foldRequests.count) page-stage requests of \(serverB.requests.count), efforts \(foldRequests.map { body($0)["reasoning_effort"] as? String ?? "nil" }); tool: \(foldResult.content.prefix(200))")
+            // v0.2.44: the OpenCode page stages run GPT-6 Luna over Responses;
+            // Luna rejects 'minimal', so the per-model fold sends 'low'.
+            check("4.3b OpenCode web backend: a 'minimal' page stage reaches gpt-6-luna on /zen/go/v1/responses as reasoning.effort 'low' (per-model fold in the web body)",
+                  !foldRequests.isEmpty && foldRequests.allSatisfy { body($0)["model"] as? String == "gpt-6-luna" && $0.path.hasSuffix("/zen/go/v1/responses")
+                      && (body($0)["reasoning"] as? [String: Any])?["effort"] as? String == "low" && body($0)["reasoning_effort"] == nil },
+                  "\(foldRequests.count) page-stage requests of \(serverB.requests.count), efforts \(foldRequests.map { ((body($0)["reasoning"] as? [String: Any])?["effort"] as? String) ?? "nil" }); tool: \(foldResult.content.prefix(200))")
             // 4.4 resume, no lookup → prior_sources_only with n of m (after the one nudge).
             serverA.clear()
             serverA.script([WebFixtureServer.chatBody("From what I read: delta."), WebFixtureServer.chatBody("Still from what I read: delta.")])
@@ -648,6 +656,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         try await Self.runExtractorDeadlineGroup(harness)
         try await Self.runExtractorLoopGroup(harness)
         try await Self.runExtractorLoopSettlementRows(harness)
+        try await Self.runAllLaneDeadlineGroup(harness)
         let tally = WebFixtureServer.modelRequestTally
         check("22.17 whole-run guard: of every model request the fixture servers received in this selftest (main agent, Web researcher, legacy web loop rounds, all extractor stages, every backend), none carries a temperature",
               tally.total > 100 && tally.withTemperature.isEmpty, "\(tally.total) requests, with temperature: \(tally.withTemperature.prefix(5))")

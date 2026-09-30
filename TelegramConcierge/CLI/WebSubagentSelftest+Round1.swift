@@ -263,7 +263,7 @@ extension WebSubagentSelftest {
         if let savedSelection { UserDefaults.standard.set(savedSelection, forKey: WebSearchBackend.selectionKey) } else { UserDefaults.standard.removeObject(forKey: WebSearchBackend.selectionKey) }
         let customStages = pageStages(serverB)
         check("19.15 other main providers unchanged: a custom main keeps extraction on the /websearch backend (opencode here) with its pipeline model; nothing on OpenRouter",
-              !customStages.isEmpty && pageStages(serverD).isEmpty && customStages.allSatisfy { body($0)["model"] as? String == "mimo-v2.6-flash" && body($0)["provider"] == nil },
+              !customStages.isEmpty && pageStages(serverD).isEmpty && customStages.allSatisfy { body($0)["model"] as? String == "gpt-6-luna" && $0.path.hasSuffix("/zen/go/v1/responses") && body($0)["provider"] == nil },
               "\(customStages.count) B, \(pageStages(serverD).count) D")
         WebSearchBackend.processOverride = .opencode
     }

@@ -119,9 +119,9 @@ extension WebSubagentSelftest {
         _ = try? await orchestrator.readUrlContentWithMetadata(url: ocURL, prompt: "opencode loop fetch", refresh: true)
         WebSearchBackend.processOverride = nil
         let ocStages = serverB.requests.filter { stageOf($0) != nil }
-        kit.check("22.2 OpenCode backend: excerpts and web_fetch compression send NO temperature (was 0.1) and no output cap; reasoning_effort still sent",
+        kit.check("22.2 OpenCode backend: excerpts and web_fetch compression send NO temperature (was 0.1) and no output cap; the reasoning effort still sent (Responses reasoning.effort medium since v0.2.44)",
                   Set(ocStages.compactMap(stageOf)) == ["excerpts", "compression"] && ocStages.allSatisfy(noTemperatureNoCap)
-                  && ocStages.allSatisfy { body($0)["reasoning_effort"] as? String != nil },
+                  && ocStages.allSatisfy { (body($0)["reasoning"] as? [String: Any])?["effort"] as? String == "medium" },
                   "\(ocStages.map { "\(stageOf($0) ?? "?"):t=\(body($0)["temperature"] ?? "none")" })")
 
         try await runExtractorOnePassRows(kit, shopRequests: shopReqs)

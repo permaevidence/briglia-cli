@@ -97,8 +97,8 @@ extension WebSubagentSelftest {
                   && body($0)["model"] as? String == "mimo-v2.6-pro" && effort($0) == "high" }
               && oc.modelUsed == "mimo-v2.6-pro (inherited)",
               oc.error ?? "rounds \(ocRounds.count) models \(ocRounds.map { body($0)["model"] as? String ?? "nil" }) efforts \(ocRounds.map { effort($0) ?? "nil" })")
-        check("18.2 the page extractor is unchanged: its stage runs on the web backend with the WEB key and the pipeline model, never the main model",
-              !ocStages.isEmpty && ocStages.allSatisfy { $0.headers["authorization"] == "Bearer synthetic-web-opencode-key" && body($0)["model"] as? String == "mimo-v2.6-flash" },
+        check("18.2 the page extractor is unchanged: its stage runs on the web backend with the WEB key and the pipeline model (OpenCode: GPT-6 Luna over Responses since v0.2.44), never the main model",
+              !ocStages.isEmpty && ocStages.allSatisfy { $0.headers["authorization"] == "Bearer synthetic-web-opencode-key" && body($0)["model"] as? String == "gpt-6-luna" && $0.path.hasSuffix("/zen/go/v1/responses") },
               "\(ocStages.count) stages, models \(ocStages.map { body($0)["model"] as? String ?? "nil" })")
         serverB.clear()
         serverB.script([WebFixtureServer.chatBody("Second session answer."), WebFixtureServer.chatBody("Second session answer.")])
@@ -252,8 +252,8 @@ extension WebSubagentSelftest {
               secondLegacy.contains { ($0["tool_calls"] as? [[String: Any]])?.contains { (($0["function"] as? [String: Any])?["name"] as? String) == "fetch_and_extract" } == true }
               && secondLegacy.contains { $0["role"] as? String == "tool" && (($0["content"] as? String) ?? "").contains("main model long page text") },
               "\(secondLegacy.count) messages")
-        check("18.13 legacy loop extraction unchanged: fetch_and_extract's page stage on the web backend with the web key and the pipeline model",
-              !legacyStages.isEmpty && legacyStages.allSatisfy { $0.headers["authorization"] == "Bearer synthetic-web-opencode-key" && body($0)["model"] as? String == "mimo-v2.6-flash" },
+        check("18.13 legacy loop extraction unchanged: fetch_and_extract's page stage on the web backend with the web key and the pipeline model (OpenCode: GPT-6 Luna over Responses)",
+              !legacyStages.isEmpty && legacyStages.allSatisfy { $0.headers["authorization"] == "Bearer synthetic-web-opencode-key" && body($0)["model"] as? String == "gpt-6-luna" && $0.path.hasSuffix("/zen/go/v1/responses") },
               "\(legacyStages.count)")
 
         // 18.14 Legacy loop on a Responses main: zero-search nudge as the next request's tail, main effort.

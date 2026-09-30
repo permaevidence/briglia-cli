@@ -240,8 +240,8 @@ extension WebSubagentSelftest {
         _ = try? await orchestrator.executeWebExtract(requests: [.init(url: ocURL, focus: "opencode room")], mode: .webSearch)
         _ = try? await orchestrator.readUrlContentWithMetadata(url: ocURL, prompt: "opencode room fetch", refresh: true)
         let ocStages = serverB.requests.filter { stageOf($0) != nil }
-        check("20.12 OpenCode backend: excerpts (one pass) and web_fetch compression send no output cap (was 8000/32000/8000), no provider block, pipeline model; nothing reaches OpenRouter",
-              !ocStages.isEmpty && ocStages.allSatisfy { uncapped($0) && body($0)["provider"] == nil && body($0)["model"] as? String == "mimo-v2.6-flash" }
+        check("20.12 OpenCode backend: excerpts (one pass) and web_fetch compression send no output cap (was 8000/32000/8000), no provider block, the pipeline model (GPT-6 Luna over Responses since v0.2.44); nothing reaches OpenRouter",
+              !ocStages.isEmpty && ocStages.allSatisfy { uncapped($0) && body($0)["provider"] == nil && body($0)["model"] as? String == "gpt-6-luna" && $0.path.hasSuffix("/zen/go/v1/responses") }
               && Set(ocStages.compactMap(stageOf)) == ["excerpts", "compression"]
               && serverD.requests.filter { stageOf($0) != nil }.isEmpty,
               "\(ocStages.map { "\(stageOf($0) ?? "?"):\(body($0)["max_tokens"] ?? "none")" })")

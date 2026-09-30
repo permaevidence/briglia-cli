@@ -132,9 +132,9 @@ extension WebSubagentSelftest {
             String(logText().components(separatedBy: "\n").filter { $0.contains(needle) }.joined(separator: " | ").prefix(600))
         }
 
-        check("21.0 the extractor deadline is a named 300 s constant, and only a test override changes it",
-              WebSearchBackend.openRouterExtractorDeadlineSeconds == 300 && WebSearchBackend.extractorDeadlineOverride == nil
-              && WebSearchBackend.openRouterExtractorDeadline == 300)
+        check("21.0 the extractor deadline is a named 120 s constant (v0.2.44; 300 s on the OpenRouter follow before), and only a test override changes it",
+              WebSearchBackend.extractorDeadlineSeconds == 120 && WebSearchBackend.extractorDeadlineOverride == nil
+              && WebSearchBackend.extractorDeadline == 120)
 
         // 21.1 A runaway host (whitespace forever) is cut at the deadline and
         // the retry goes to the other host.
@@ -237,7 +237,10 @@ extension WebSubagentSelftest {
               "\(String(format: "%.1f", cancelElapsed))s, \(cancelStages.compactMap(stageOf))")
 
         let cancelledIncidents = incidents().filter { $0.detail?.contains("cancelled while open") == true }.count
-        // 21.8 Scope: /websearch openrouter without the follow has no deadline.
+        // 21.8 Scope (v0.2.44): /websearch openrouter without the follow now
+        // has the same total deadline and unknown-charge accounting (it was
+        // exempt before; owner decision 2026-09-30: every backend).
+        let incidentsBeforeNF = incidents().count
         WebSearchBackend.extractorDeadlineOverride = 1
         queue.reset()
         queue.push("excerpts", slow("excerpts", seconds: 2))
@@ -249,9 +252,10 @@ extension WebSubagentSelftest {
         let nfOut = try? await orchestrator.executeWebExtract(requests: [.init(url: nfURL, focus: "deadline non-follow")], mode: .webSearch)
         WebSearchBackend.processOverride = nil
         let nfEx = serverD.requests.filter { stageOf($0) == "excerpts" }
-        check("21.8 /websearch openrouter without the follow: no total deadline (a 2 s trickle under a 1 s test deadline still answers on the first request)",
-              nfEx.count == 1 && nfOut?.docs.first?.excerpts == ["# Deadline page"],
-              "\(nfEx.count) requests \(nfOut?.docs.first?.excerpts ?? [])")
+        let nfIncidents = incidents().count - incidentsBeforeNF
+        check("21.8 /websearch openrouter without the follow: the total deadline applies too (v0.2.44) — a 2 s trickle under a 1 s test deadline is cut, becomes one unknown-amount incident (billed per request), and the retry answers",
+              nfEx.count == 2 && nfOut?.docs.first?.excerpts == ["# Deadline page"] && nfIncidents == 1,
+              "\(nfEx.count) requests, \(nfIncidents) new incidents, \(nfOut?.docs.first?.excerpts ?? [])")
 
         // ---- Round 3 (review of the deadline commit).
 
