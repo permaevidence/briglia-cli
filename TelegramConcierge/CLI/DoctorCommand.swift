@@ -130,8 +130,9 @@ struct Doctor: AsyncParsableCommand {
         } else if WebSearchBackend.active == .chatgpt {
             note("web page-reading backend (extraction, web_fetch; research runs on the main model): chatgpt (follows the ChatGPT subscription provider; \(WebSearchBackend.configured.rawValue) on other providers, \(backendSource))")
         } else {
-            note("web page-reading backend (extraction, web_fetch; research runs on the main model): \(WebSearchBackend.active.rawValue) (\(backendSource))")
+            note("web page-reading backend (extraction, web_fetch; research runs on the main model): \(WebSearchBackend.active.rawValue) — \(WebSearchBackend.active.modelSummary) (\(backendSource))")
         }
+        note("web page-reading time limit: \(Int(WebSearchBackend.extractorDeadline)) s per request on every backend, up to 3 attempts (a cut request on OpenRouter or the OpenAI API key counts as an unknown charge in /spend)")
         note("web subagent: \(AvailableTools.webSubagentEnabled ? "on" : "off"); Web preset available: \(serperKey.isEmpty ? "no (Serper key missing)" : (AvailableTools.webSubagentActive ? "yes" : "no (switch off)"))")
         var ocrBackend = KeychainHelper.load(key: KeychainHelper.visionPreprocessorBackendKey)
             ?? (openAIKey.isEmpty ? "openrouter (no OpenAI key)" : "openai")

@@ -93,7 +93,10 @@ enum WebSearchBackend: String {
 
     case openrouter   // current OpenRouter envelope, models as configured
     case openai       // api.openai.com — same models, native slugs (no "openai/" prefix)
-    case opencode     // default — OpenCode Go, mimo-v2.6-flash on every stage (huge usage limits, slower)
+    /// OpenCode Go. Page extraction and web_fetch compression run on GPT-6
+    /// Luna over the Responses API (`WebOrchestrator.opencodeExtractorModel`,
+    /// v0.2.44; mimo-v2.6-flash over chat completions before).
+    case opencode
     /// The user's ChatGPT subscription (chatgpt.com Responses, streamed).
     /// Never stored and never selectable with /websearch: it is DERIVED —
     /// active exactly while the main provider is the ChatGPT subscription
@@ -174,19 +177,32 @@ enum WebSearchBackend: String {
     /// (Makora dropped 2026-09-29; Cohere and others failed earlier probes).
     static let openRouterExtractorHosts = ["openai", "azure"]
 
-    /// Total wall-clock limit for ONE extractor request on the OpenRouter
-    /// follow (extract.excerpts, web_fetch compression and
-    /// its chunks), counted from the send regardless of keepalive bytes.
-    /// A time limit, not a token cap: the body still sends no max_tokens.
-    /// It bounds Briglia's WAIT (transport retries and their backoff
-    /// included), not the upstream generation: a non-streaming request keeps
+    /// Total wall-clock limit for ONE extractor request (extract.excerpts,
+    /// web_fetch compression and its chunks) on EVERY page-reading backend:
+    /// OpenRouter (follow or /websearch), the OpenAI API key, the ChatGPT
+    /// subscription and OpenCode Go. Counted from the first send of a
+    /// completion attempt, transport retries and their backoff included,
+    /// regardless of keepalive bytes. A time limit, not a token cap: no
+    /// body sends an output cap. It bounds Briglia's WAIT, not the upstream
+    /// generation: a paid per-call request (OpenRouter, OpenAI API key) keeps
     /// running and billing after the client leaves, so each cut request is
-    /// recorded as an unknown-spend incident (ToolChargeLedger).
-    /// Owner decision 2026-09-29, after uncapped hosts looped for 17–21 min.
-    static let openRouterExtractorDeadlineSeconds: TimeInterval = 300
+    /// recorded as an unknown-spend incident (ToolChargeLedger); the flat
+    /// subscriptions (ChatGPT, OpenCode Go) have no per-call charge.
+    /// Owner decisions: 300 s on the OpenRouter follow (2026-09-29, after
+    /// uncapped hosts looped for 17–21 min); 120 s on every backend
+    /// (2026-09-30: the one-pass block extractor returns identifiers only —
+    /// slowest GPT-6 Luna extraction seen 64 s, a 291k-token page up to 29 s).
+    static let extractorDeadlineSeconds: TimeInterval = 120
     /// Selftest seam: a short deadline (never persisted).
     static var extractorDeadlineOverride: TimeInterval?
-    static var openRouterExtractorDeadline: TimeInterval { extractorDeadlineOverride ?? openRouterExtractorDeadlineSeconds }
+    static var extractorDeadline: TimeInterval { extractorDeadlineOverride ?? extractorDeadlineSeconds }
+
+    /// Backends billed per request. A request cut at its deadline (or
+    /// otherwise abandoned while open) there has an UNKNOWN cost: written
+    /// ahead, gated by the spend pause, and turned into an unknown-amount
+    /// incident when abandoned. The ChatGPT subscription and OpenCode Go
+    /// are flat allowances: no per-request dollars, nothing to record.
+    var billedPerRequest: Bool { self == .openrouter || self == .openai }
 
     /// The pinned host slug an OpenRouter reply was served by, from the
     /// display name OpenRouter reports ("OpenAI", "Azure"), or nil
@@ -323,7 +339,7 @@ enum WebSearchBackend: String {
         switch self {
         case .openrouter: return "configured models via openrouter.ai"
         case .openai:     return "GPT-6 Luna via api.openai.com"
-        case .opencode:   return "mimo-v2.6-flash (slower, huge usage limits)"
+        case .opencode:   return "GPT-6 Luna via your OpenCode Go plan"
         case .chatgpt:    return "GPT-6 Luna via your ChatGPT subscription"
         }
     }
@@ -338,7 +354,9 @@ enum WebSearchBackend: String {
                 if let raw = env["BRIGLIA_DEV_AFFINITY_OPENCODE_BASE"], !raw.isEmpty, let url = URL(string: raw + "/zen/go/v1/chat/completions") { return url }
             case .openrouter:
                 if let raw = env["BRIGLIA_DEV_AFFINITY_OPENROUTER_BASE"], !raw.isEmpty, let url = URL(string: raw + "/api/v1/chat/completions") { return url }
-            case .openai, .chatgpt:
+            case .openai:
+                if let raw = env["BRIGLIA_DEV_OPENAI_WEB_BASE"], !raw.isEmpty, let url = URL(string: raw + "/v1/chat/completions") { return url }
+            case .chatgpt:
                 break
             }
         }
@@ -351,10 +369,22 @@ enum WebSearchBackend: String {
         }
     }
 
-    /// Whether extraction stages attach strict `response_format`. OpenAI
-    /// enforces it (verified), OpenRouter forwards it to supporting
-    /// providers; OpenCode's mimo ignores it (probed 2026-08-16), so sending
-    /// it there is pointless.
+    /// OpenCode Go's Responses route: the extraction stages' transport on
+    /// that backend since v0.2.44 (GPT-6 Luna is served on Go over Responses
+    /// only; verified 2026-09-30: non-streamed JSON reply, strict
+    /// `text.format` json_schema honoured, reasoning effort medium).
+    static var openCodeResponsesEndpoint: URL {
+        if adaCLIVersion.hasSuffix("-dev"), let raw = ProcessInfo.processInfo.environment["BRIGLIA_DEV_AFFINITY_OPENCODE_BASE"],
+           !raw.isEmpty, let url = URL(string: raw + "/zen/go/v1/responses") { return url }
+        return URL(string: "https://opencode.ai/zen/go/v1/responses")!
+    }
+
+    /// Whether a CHAT-COMPLETIONS extraction body attaches strict
+    /// `response_format`. OpenAI enforces it (verified), OpenRouter forwards
+    /// it to supporting providers; OpenCode's chat route served mimo, which
+    /// ignores it (probed 2026-08-16). OpenCode's extraction stages now go
+    /// through Responses (`openCodeResponsesEndpoint`), where GPT-6 Luna
+    /// honours the strict `text.format` schema and it is always attached.
     var supportsResponseFormat: Bool { self != .opencode }
 }
 
@@ -1943,7 +1973,12 @@ actor WebOrchestrator {
                 reasoning: reasoning, timeout: timeout, responseFormat: responseFormat,
                 executionID: executionID)
         }
-        let resolvedModel = self.resolvedModel(for: backend, requested: model)
+        if backend == .opencode {
+            return try await callOpenCodeResponsesStage(
+                stage: stage, mode: mode, messages: messages, reasoning: reasoning,
+                timeout: timeout, responseFormat: responseFormat, executionID: executionID)
+        }
+        let resolvedModel = self.stageModel(for: backend, requested: model)
         var body = buildChatBody(
             backend: backend,
             stage: stage,
@@ -1968,16 +2003,23 @@ actor WebOrchestrator {
             body.provider = WebSearchBackend.steeredProvider(routed, excluding: failedExtractorHosts)
             return "hosts=\(body.provider?.only?.joined(separator: ",") ?? "-") excluded=\(failedExtractorHosts.joined(separator: ","))"
         }
-        // The total wall-clock deadline applies to the OpenRouter follow's
-        // extractor requests only (every callOpenRouter caller is an
-        // extractor stage); other backends keep the plain transport.
-        // One deadline per COMPLETION attempt: the response-format fallback
-        // below resends within the same attempt and the same deadline, so the
-        // envelope is at most 3 deadlines plus the inter-attempt pauses.
-        // Other routes (non-follow /websearch openrouter, other backends,
-        // maintenance requests) get no total deadline.
-        let deadlineApplies = backend == .openrouter && selection.followsMainOpenRouter
-        var deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline, spendStage: stage) : nil
+        // The total wall-clock deadline applies to every extractor request
+        // (every callOpenRouter caller is an extractor stage) on every
+        // backend since v0.2.44 (owner decision 2026-09-30; the OpenRouter
+        // follow only before). One deadline per COMPLETION attempt: the
+        // response-format fallback below resends within the same attempt and
+        // the same deadline, so the envelope is at most 3 deadlines plus the
+        // inter-attempt pauses. On a backend billed per request (OpenRouter,
+        // OpenAI API key) every send is also spend-gated and written ahead,
+        // and an abandoned send becomes an unknown-amount incident.
+        func makeDeadline() -> ExtractorDeadline {
+            ExtractorDeadline(seconds: WebSearchBackend.extractorDeadline,
+                              spendStage: backend.billedPerRequest ? stage : nil,
+                              backendLabel: backend.rawValue,
+                              readsGenerationHeaders: backend == .openrouter,
+                              hostLabel: backend == .openrouter ? nil : backend.displayName)
+        }
+        var deadline: ExtractorDeadline? = makeDeadline()
         while true {
             let data: Data
             // Paid-request gate and write-ahead (OpenRouter follow) live in
@@ -2012,22 +2054,23 @@ actor WebOrchestrator {
                     costField = "cost=unknown incident=unknown-amount:\(chargeId.uuidString.lowercased())\(exceeded.incidentSaved ? "" : " UNSAVED(kept, retried)")"
                 }
                 let earlier = exceeded.earlierGenerationIds.isEmpty ? "" : " earlier_gens=\(exceeded.earlierGenerationIds.joined(separator: ","))"
-                webLog("[WebOrchestrator] openrouter stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) kind=deadline provider=\(exceeded.provider ?? "-") elapsed_s=\(String(format: "%.1f", exceeded.elapsed)) deadline_s=\(Int(exceeded.seconds.rounded())) gen=\(exceeded.generationId ?? "-") \(costField)\(earlier)")
+                if !backend.billedPerRequest { costField = "cost=none(flat plan)" }
+                webLog("[WebOrchestrator] \(backend.rawValue) stage=\(stage) NO_COMPLETION attempt=\(completionAttempt)/\(maxCompletionAttempts) kind=deadline provider=\(exceeded.provider ?? "-") elapsed_s=\(String(format: "%.1f", exceeded.elapsed)) deadline_s=\(Int(exceeded.seconds.rounded())) gen=\(exceeded.generationId ?? "-") \(costField)\(earlier)")
                 // Non-streamed: OpenRouter names the host only in the final
                 // body. Its generation record names it (and the tokens and
                 // cost) seconds later — looked up in the background, logged.
                 CutRequestCostLookup.logAfterFailure(stage: stage, generationId: exceeded.generationId, after: "deadline")
                 guard completionAttempt < maxCompletionAttempts else {
                     throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
-                        NSLocalizedDescriptionKey: "openrouter returned no completion for stage '\(stage)' (model \(resolvedModel)) after \(maxCompletionAttempts) attempts: deadline from \(exceeded.provider ?? "an unnamed host") — \(exceeded.localizedDescription)"
+                        NSLocalizedDescriptionKey: "\(backend.rawValue) returned no completion for stage '\(stage)' (model \(resolvedModel)) after \(maxCompletionAttempts) attempts: deadline from \(exceeded.provider ?? "an unnamed host") — \(exceeded.localizedDescription)"
                     ])
                 }
                 // The retry passes the paid-request gate at its send (fetch).
                 let retryNote = steerAfterFailure(servedBy: exceeded.provider)
-                webLog("[WebOrchestrator] openrouter stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
+                webLog("[WebOrchestrator] \(backend.rawValue) stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
                 try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
                 completionAttempt += 1
-                deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline, spendStage: stage) : nil
+                deadline = makeDeadline()
                 continue
             } catch let httpError as HTTPError where httpError.statusCode == 400 && body.response_format != nil {
                 // An OpenRouter upstream provider may reject response_format.
@@ -2088,7 +2131,7 @@ actor WebOrchestrator {
                 webLog("[WebOrchestrator] openrouter stage=\(stage) retrying (attempt \(completionAttempt + 1)/\(maxCompletionAttempts)) \(retryNote)")
                 try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
                 completionAttempt += 1
-                deadline = deadlineApplies ? ExtractorDeadline(seconds: WebSearchBackend.openRouterExtractorDeadline, spendStage: stage) : nil
+                deadline = makeDeadline()
                 continue
             }
             let detail: String
@@ -2108,6 +2151,7 @@ actor WebOrchestrator {
             webLog("[WebOrchestrator] \(backend.rawValue) stage=\(stage) returned no completion (attempt \(completionAttempt)/\(maxCompletionAttempts)): \(detail). Retrying...")
             try await Task.sleep(nanoseconds: UInt64(Double(completionAttempt) * 1_500_000_000))
             completionAttempt += 1
+            deadline = makeDeadline()
         }
     }
     
@@ -2115,7 +2159,8 @@ actor WebOrchestrator {
     /// the ChatGPT subscription: Responses, streamed, strict JSON schema as
     /// `text.format` when the stage asks for one. Spend is $0 (flat
     /// subscription allowance). Empty output retries like the chat path; a
-    /// failed response or usage exhaustion throws (no API fallback).
+    /// failed response or usage exhaustion throws (no API fallback). Each
+    /// completion attempt has the extractor's total deadline (v0.2.44).
     private func callSubscriptionStage(
         stage: String,
         mode: ResearchMode,
@@ -2136,16 +2181,23 @@ actor WebOrchestrator {
         let maxAttempts = 3
         var attempt = 1
         while true {
-            let data = try await SubscriptionWebTransport.post(body: body, lane: .ephemeral(executionID), timeout: max(timeout, 120))
+            let deadline = ExtractorDeadline(seconds: WebSearchBackend.extractorDeadline, backendLabel: WebSearchBackend.chatgpt.rawValue,
+                                             readsGenerationHeaders: false, hostLabel: WebSearchBackend.chatgpt.displayName)
             var detail = "empty response body"
-            if let resp = try? JSONDecoder().decode(OAIResponsesResp.self, from: data) {
-                let text = SubscriptionWebTransport.outputText(resp)
-                webLog("[WebOrchestrator] chatgpt response stage=\(stage) mode=\(modeLabel(mode)) status=\(resp.status ?? "nil") chars=\(text.count) tokens=\(resp.usage?.input_tokens.map(String.init) ?? "?")/\(resp.usage?.output_tokens.map(String.init) ?? "?")")
-                if resp.status == "incomplete" {
-                    webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) status=incomplete backend=chatgpt content_chars=\(text.count)")
+            do {
+                let data = try await SubscriptionWebTransport.post(body: body, lane: .ephemeral(executionID), timeout: max(timeout, 120), deadline: deadline)
+                if let resp = try? JSONDecoder().decode(OAIResponsesResp.self, from: data) {
+                    let text = SubscriptionWebTransport.outputText(resp)
+                    webLog("[WebOrchestrator] chatgpt response stage=\(stage) mode=\(modeLabel(mode)) status=\(resp.status ?? "nil") chars=\(text.count) tokens=\(resp.usage?.input_tokens.map(String.init) ?? "?")/\(resp.usage?.output_tokens.map(String.init) ?? "?")")
+                    if resp.status == "incomplete" {
+                        webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) status=incomplete backend=chatgpt content_chars=\(text.count)")
+                    }
+                    if !text.isEmpty { return text }
+                    detail = "no output text (status \(resp.status ?? "nil"))"
                 }
-                if !text.isEmpty { return text }
-                detail = "no output text (status \(resp.status ?? "nil"))"
+            } catch let exceeded as ExtractorDeadlineExceeded {
+                logDeadlineCut(backend: .chatgpt, stage: stage, attempt: attempt, of: maxAttempts, exceeded)
+                detail = "deadline — \(exceeded.localizedDescription)"
             }
             guard attempt < maxAttempts else {
                 throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
@@ -2156,6 +2208,78 @@ actor WebOrchestrator {
             try await Task.sleep(nanoseconds: UInt64(Double(attempt) * 1_500_000_000))
             attempt += 1
         }
+    }
+
+    /// One extraction stage (excerpts, web_fetch compression) on OpenCode Go
+    /// (v0.2.44): `opencodeExtractorModel` (GPT-6 Luna) over the Go gateway's
+    /// Responses route — Luna is not served there on chat completions —
+    /// non-streamed, `store:false`, the strict JSON schema as `text.format`
+    /// when the stage asks for one, the stage's effort (medium) folded for
+    /// Luna. The same 3 completion attempts and total deadline as the other
+    /// backends; no spend (flat Go plan) and no model fallback.
+    private func callOpenCodeResponsesStage(
+        stage: String,
+        mode: ResearchMode,
+        messages: [ORChatReq.Msg],
+        reasoning: ORChatReq.Reasoning?,
+        timeout: TimeInterval,
+        responseFormat: ORResponseFormat?,
+        executionID: UUID
+    ) async throws -> String {
+        let model = Self.opencodeExtractorModel
+        let effort = OpenCodeGo.compatibleEffort(reasoning?.effort, for: model)
+        let schema = responseFormat.map { (name: $0.json_schema.name, schema: $0.json_schema.schema) }
+        var body = SubscriptionWebTransport.stageBody(
+            model: model, messages: messages.map { (role: $0.role, text: $0.content ?? "") },
+            effort: effort, jsonSchema: schema)
+        body["store"] = .bool(false)
+        body["stream"] = .bool(false)
+        let url = WebSearchBackend.openCodeResponsesEndpoint
+        webLog("[WebOrchestrator] opencode request stage=\(stage) mode=\(modeLabel(mode)) model=\(model) api=responses reasoning=\(effort ?? "default") rf=\(schema?.name ?? "none")")
+        let maxAttempts = 3
+        var attempt = 1
+        while true {
+            let deadline = ExtractorDeadline(seconds: WebSearchBackend.extractorDeadline, backendLabel: WebSearchBackend.opencode.rawValue,
+                                             readsGenerationHeaders: false, hostLabel: WebSearchBackend.opencode.displayName)
+            var detail = "empty response body"
+            do {
+                let data = try await httpJSONPostWithRetry(
+                    url: url, body: JSONValue.object(body),
+                    headers: try requestHeaders(for: .opencode, url: url, lane: .ephemeral(executionID)),
+                    timeout: timeout, label: "opencode \(stage)",
+                    fetch: { @Sendable request in try await deadline.fetch(request) },
+                    deadline: deadline)
+                if let resp = try? JSONDecoder().decode(OAIResponsesResp.self, from: data) {
+                    let text = SubscriptionWebTransport.outputText(resp)
+                    webLog("[WebOrchestrator] opencode response stage=\(stage) mode=\(modeLabel(mode)) api=responses status=\(resp.status ?? "nil") chars=\(text.count) tokens=\(resp.usage?.input_tokens.map(String.init) ?? "?")/\(resp.usage?.output_tokens.map(String.init) ?? "?")")
+                    if resp.status == "incomplete" {
+                        webLog("[WebOrchestrator] TRUNCATED_GENERATION stage=\(stage) status=incomplete backend=opencode content_chars=\(text.count)")
+                    }
+                    if !text.isEmpty, resp.status == "completed" || resp.status == "incomplete" { return text }
+                    detail = "no output text (status \(resp.status ?? "nil"))"
+                } else {
+                    let snippet = String(data: data.prefix(300), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    detail = snippet.isEmpty ? "empty response body" : "unexpected response: \(snippet)"
+                }
+            } catch let exceeded as ExtractorDeadlineExceeded {
+                logDeadlineCut(backend: .opencode, stage: stage, attempt: attempt, of: maxAttempts, exceeded)
+                detail = "deadline — \(exceeded.localizedDescription)"
+            }
+            guard attempt < maxAttempts else {
+                throw NSError(domain: "WebOrchestrator", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "opencode returned no completion for stage '\(stage)' (model \(model)) after \(maxAttempts) attempts: \(detail)"
+                ])
+            }
+            webLog("[WebOrchestrator] opencode stage=\(stage) returned no completion (attempt \(attempt)/\(maxAttempts)): \(detail). Retrying...")
+            try await Task.sleep(nanoseconds: UInt64(Double(attempt) * 1_500_000_000))
+            attempt += 1
+        }
+    }
+
+    /// The uniform deadline line for the flat-plan backends (same fields as
+    /// the chat path's `kind=deadline` line; no per-request charge).
+    private func logDeadlineCut(backend: WebSearchBackend, stage: String, attempt: Int, of maxAttempts: Int, _ exceeded: ExtractorDeadlineExceeded) {
+        webLog("[WebOrchestrator] \(backend.rawValue) stage=\(stage) NO_COMPLETION attempt=\(attempt)/\(maxAttempts) kind=deadline provider=\(exceeded.provider ?? "-") elapsed_s=\(String(format: "%.1f", exceeded.elapsed)) deadline_s=\(Int(exceeded.seconds.rounded())) gen=- cost=none(flat plan)")
     }
 
     /// gpt-5.6-luna pricing (verified 2026-08-03 — DOUBLED from the Aug 1
@@ -2783,11 +2907,29 @@ actor WebOrchestrator {
     /// MiMo accepts reasoning_effort low/medium/high only (400 on the rest),
     /// hence the fold in `buildChatBody`.
     private static let opencodeModel = "mimo-v2.6-flash"
-    /// The same pin, for `WebSearchBackend.researchModel`.
+    /// The same pin, for `WebSearchBackend.researchModel`. Since v0.2.44 it
+    /// only serves the orchestrator's own agent rounds when no main-agent
+    /// service drives them (test harnesses; product research runs on the
+    /// main model since 2026-09-25) — no product path sends it.
     static var opencodeResearchModel: String { opencodeModel }
+
+    /// Page extraction and web_fetch compression on OpenCode Go (owner
+    /// decision 2026-09-30): GPT-6 Luna at the stage's effort (medium), over
+    /// Responses — the Go gateway serves Luna on /responses only. Measured
+    /// 2026-09-30 on 16 pages ×3: 6.0 s a page median against 11.7 s for
+    /// mimo-v2.6-flash, same facts (84/84) and footer links (6/6), no
+    /// errors, ~30% less text to the researcher. No MiMo fallback.
+    static let opencodeExtractorModel = "gpt-6-luna"
 
     private func resolvedModel(for backend: WebSearchBackend, requested: String) -> String {
         WebSearchBackend.researchModel(for: backend, requested: requested).model
+    }
+
+    /// The model an extraction stage (excerpts, web_fetch compression)
+    /// sends on `backend`: the research resolver, except OpenCode Go, whose
+    /// stages run on `opencodeExtractorModel`.
+    private func stageModel(for backend: WebSearchBackend, requested: String) -> String {
+        backend == .opencode ? Self.opencodeExtractorModel : resolvedModel(for: backend, requested: requested)
     }
 
     private func apiKey(for backend: WebSearchBackend) -> String {

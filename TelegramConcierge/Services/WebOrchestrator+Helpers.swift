@@ -200,7 +200,7 @@ func httpJSONPostWithRetry<T: Encodable>(url: URL, body: T, headers: [String: St
     return try await httpDataWithRetry(request: request, label: label, retryTimeouts: retryTimeouts, usageRecord: usageRecord, fetch: fetch, deadline: deadline)
 }
 
-// MARK: - Total wall-clock deadline (OpenRouter extractor)
+// MARK: - Total wall-clock deadline (extractor stages, every backend)
 
 /// A request that ran past its TOTAL wall-clock deadline. Not a transport
 /// failure: httpDataWithRetry never retries it (isRetryableHTTPFailure is
@@ -246,8 +246,17 @@ struct ExtractorDeadlineExceeded: LocalizedError {
 final class ExtractorDeadline: @unchecked Sendable {
     let seconds: TimeInterval
     /// Stage name when every actual HTTP send is a paid, spend-tracked
-    /// extractor request (OpenRouter follow); nil = plain deadline only.
+    /// extractor request (a backend billed per request: OpenRouter, the
+    /// OpenAI API key); nil = plain deadline only (flat plans).
     let spendStage: String?
+    /// Backend name for log lines and refusals ("openrouter", "openai", …).
+    let backendLabel: String
+    /// OpenRouter's X-Generation-Id / X-Provider-Name are read (and a cut
+    /// request's generation id recorded for the later cost lookup) only on
+    /// OpenRouter: another backend's headers never feed that lookup.
+    let readsGenerationHeaders: Bool
+    /// Host named in an incident when the reply named none (e.g. "OpenAI").
+    let hostLabel: String?
     private let started = ProcessInfo.processInfo.systemUptime
     private let lock = NSLock()
     private var attempt = 0
@@ -256,7 +265,11 @@ final class ExtractorDeadline: @unchecked Sendable {
     private var earlierGenerationIds: [String] = []
     private var cancelledOpen = false
 
-    init(seconds: TimeInterval, spendStage: String? = nil) { self.seconds = seconds; self.spendStage = spendStage }
+    init(seconds: TimeInterval, spendStage: String? = nil, backendLabel: String = "openrouter",
+         readsGenerationHeaders: Bool = true, hostLabel: String? = nil) {
+        self.seconds = seconds; self.spendStage = spendStage; self.backendLabel = backendLabel
+        self.readsGenerationHeaders = readsGenerationHeaders; self.hostLabel = hostLabel
+    }
 
     /// True when a cancellation interrupted an OPEN transport attempt (sent,
     /// no reply yet): that request may still be billed upstream.
@@ -282,7 +295,7 @@ final class ExtractorDeadline: @unchecked Sendable {
     /// attempt has started). Absent headers stay absent.
     func observe(_ response: HTTPURLResponse, attempt: Int) {
         lock.lock(); defer { lock.unlock() }
-        guard attempt == self.attempt else { return }
+        guard readsGenerationHeaders, attempt == self.attempt else { return }
         generationId = response.value(forHTTPHeaderField: "X-Generation-Id").flatMap { $0.isEmpty ? nil : $0 }
         provider = response.value(forHTTPHeaderField: "X-Provider-Name").flatMap { $0.isEmpty ? nil : $0 }
     }
@@ -315,7 +328,7 @@ final class ExtractorDeadline: @unchecked Sendable {
         var chargeId: UUID? = nil
         let sentAt = Date()
         try Task.checkCancellation()
-        if let stage = spendStage { chargeId = try Self.admitPaidSend(stage: stage) }
+        if let stage = spendStage { chargeId = try Self.admitPaidSend(stage: stage, backend: backendLabel) }
         let attempt = beginAttempt()
         let transport = DeadlineHTTPTransport(owner: self, attempt: attempt)
         do {
@@ -325,7 +338,7 @@ final class ExtractorDeadline: @unchecked Sendable {
         } catch var cut as ExtractorDeadlineExceeded {
             if let chargeId, let stage = spendStage {
                 if cut.requestInFlight {
-                    cut.incidentSaved = ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: cut.generationId, provider: cut.provider,
+                    cut.incidentSaved = ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: cut.generationId, provider: cut.provider ?? hostLabel,
                                                                          stage: stage, reason: "cut at its deadline", startedAt: sentAt)
                     cut.incidentChargeId = chargeId
                 } else {
@@ -337,7 +350,7 @@ final class ExtractorDeadline: @unchecked Sendable {
             markCancelledOpen()
             if let chargeId, let stage = spendStage {
                 let identity = currentIdentity
-                ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: identity.generationId, provider: identity.provider,
+                ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: identity.generationId, provider: identity.provider ?? hostLabel,
                                                  stage: stage, reason: "cancelled while open", startedAt: sentAt)
             }
             throw CancellationError()
@@ -347,9 +360,9 @@ final class ExtractorDeadline: @unchecked Sendable {
                     ToolChargeLedger.endInFlight(chargeId: chargeId)
                 } else {
                     let identity = currentIdentity
-                    let saved = ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: identity.generationId, provider: identity.provider,
+                    let saved = ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: identity.generationId, provider: identity.provider ?? hostLabel,
                                                                  stage: stage, reason: "connection failed before its reply completed", startedAt: sentAt)
-                    webLog("[WebOrchestrator] openrouter stage=\(stage) CONNECTION_FAILED provider=\(identity.provider ?? "-") gen=\(identity.generationId ?? "-") cost=unknown incident=unknown-amount:\(chargeId.uuidString.lowercased())\(saved ? "" : " UNSAVED(kept, retried)") error=\(error.localizedDescription.prefix(160))")
+                    webLog("[WebOrchestrator] \(backendLabel) stage=\(stage) CONNECTION_FAILED provider=\(identity.provider ?? "-") gen=\(identity.generationId ?? "-") cost=unknown incident=unknown-amount:\(chargeId.uuidString.lowercased())\(saved ? "" : " UNSAVED(kept, retried)") error=\(error.localizedDescription.prefix(160))")
                     CutRequestCostLookup.logAfterFailure(stage: stage, generationId: identity.generationId, after: "connection_failed")
                 }
             }
@@ -359,18 +372,18 @@ final class ExtractorDeadline: @unchecked Sendable {
 
     /// Spend gate + write-ahead for one paid send. Throws (not retryable)
     /// when paid work is paused or the send can't be tracked durably.
-    private static func admitPaidSend(stage: String) throws -> UUID {
+    private static func admitPaidSend(stage: String, backend: String) throws -> UUID {
         if let pause = SpendGate.pauseReason() {
-            webLog("[WebOrchestrator] openrouter stage=\(stage) not sent: spend gate paused (\(pause.prefix(160)))")
+            webLog("[WebOrchestrator] \(backend) stage=\(stage) not sent: spend gate paused (\(pause.prefix(160)))")
             throw NSError(domain: "WebOrchestrator", code: 3, userInfo: [
-                NSLocalizedDescriptionKey: "openrouter stage '\(stage)' not sent: \(pause)"
+                NSLocalizedDescriptionKey: "\(backend) stage '\(stage)' not sent: \(pause)"
             ])
         }
         let id = UUID()
         do { try ToolChargeLedger.beginInFlight(chargeId: id, stage: stage) } catch {
-            webLog("[WebOrchestrator] openrouter stage=\(stage) not sent: in-flight record could not be saved (\(error.localizedDescription))")
+            webLog("[WebOrchestrator] \(backend) stage=\(stage) not sent: in-flight record could not be saved (\(error.localizedDescription))")
             throw NSError(domain: "WebOrchestrator", code: 3, userInfo: [
-                NSLocalizedDescriptionKey: "openrouter stage '\(stage)' not sent: its spend could not be tracked durably (\(error.localizedDescription))"
+                NSLocalizedDescriptionKey: "\(backend) stage '\(stage)' not sent: its spend could not be tracked durably (\(error.localizedDescription))"
             ])
         }
         return id
@@ -390,6 +403,32 @@ final class ExtractorDeadline: @unchecked Sendable {
             return true
         default:
             return false
+        }
+    }
+}
+
+extension ExtractorDeadline {
+    /// Run ONE open request that does not go through `fetch` (the ChatGPT
+    /// subscription's streamed Responses transport) within what is left of
+    /// the deadline. On expiry the request task is cancelled (the connection
+    /// closes) and the call throws ExtractorDeadlineExceeded with
+    /// `requestInFlight`; an error or cancellation of the request itself
+    /// propagates unchanged. Keepalive bytes cannot extend it: the clock
+    /// ignores the stream entirely.
+    func race<T: Sendable>(_ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        let remaining = self.remaining
+        guard remaining > 0 else { throw exceeded(requestInFlight: false) }
+        _ = beginAttempt()
+        return try await withThrowingTaskGroup(of: T?.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(max(0, remaining) * 1_000_000_000))
+                return nil
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw CancellationError() }
+            if let value = first { return value }
+            throw self.exceeded(requestInFlight: true)
         }
     }
 }

@@ -71,7 +71,13 @@ enum SubscriptionWebTransport {
     /// POST one web request through the subscription and return the terminal
     /// response JSON. Retries transient failures (408/409/429/5xx, dropped
     /// connections) up to three times; never retries usage exhaustion.
-    static func post(body: [String: JSONValue], lane: AffinityLane, timeout: TimeInterval) async throws -> Data {
+    /// With a `deadline` (extraction stages, v0.2.44) every send and every
+    /// retry pause fit inside that total wall-clock budget: a send still open
+    /// at expiry is cancelled and ExtractorDeadlineExceeded is thrown (never
+    /// retried here); a pause that would reach it stops at once. The login
+    /// lookup/refresh is never cut by it.
+    static func post(body: [String: JSONValue], lane: AffinityLane, timeout: TimeInterval,
+                     deadline: ExtractorDeadline? = nil) async throws -> Data {
         guard let generation = activeGeneration() else {
             throw SubscriptionError("The ChatGPT subscription is no longer the active provider")
         }
@@ -82,7 +88,10 @@ enum SubscriptionWebTransport {
         while true {
             try Task.checkCancellation()
             do {
+                if let deadline, deadline.remaining <= 0 { throw deadline.exceeded(requestInFlight: false) }
                 if adaCLIVersion.hasSuffix("-dev"), let sendOverride {
+                    let pending = request
+                    if let deadline { return try validatedTerminal(try await deadline.race { try await sendOverride(pending) }) }
                     return try validatedTerminal(try await sendOverride(request))
                 }
                 let login = SubscriptionLogin()
@@ -92,9 +101,16 @@ enum SubscriptionWebTransport {
                 request.setValue("Bearer " + credential.access, forHTTPHeaderField: "Authorization")
                 request.setValue(credential.account, forHTTPHeaderField: "ChatGPT-Account-Id")
                 usedAccess = credential.access
+                if let deadline {
+                    let pending = request
+                    return try validatedTerminal(try await deadline.race {
+                        try await ResponsesHTTPTransport().send(pending, overallTimeout: timeout, subscription: true)
+                    })
+                }
                 return try validatedTerminal(try await ResponsesHTTPTransport().send(request, overallTimeout: timeout, subscription: true))
             } catch {
                 try Task.checkCancellation()
+                if error is ExtractorDeadlineExceeded { throw error }
                 if let failure = error as? SubscriptionError, failure.usageExhausted { throw failure }
                 if case ResponsesFailure.http(401, _) = error {
                     guard !didRefreshAfter401 else {
@@ -117,6 +133,7 @@ enum SubscriptionWebTransport {
                     retry = true
                 } else { retry = false }
                 guard retry, attempt < 3 else { throw error }
+                if let deadline, min(30, max(0, delay)) >= deadline.remaining { throw deadline.exceeded(requestInFlight: false) }
                 try await Task.sleep(nanoseconds: UInt64(min(30, max(0, delay)) * 1_000_000_000))
                 attempt += 1
             }
