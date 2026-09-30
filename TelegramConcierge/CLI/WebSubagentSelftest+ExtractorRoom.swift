@@ -22,8 +22,7 @@ extension WebSubagentSelftest {
         func text(_ request: WebFixtureServer.Request) -> String { String(decoding: request.body, as: UTF8.self) }
         func stageOf(_ request: WebFixtureServer.Request) -> String? {
             let t = text(request)
-            if t.contains("focus-relevant page assets") { return "assets" }
-            if t.contains("Cite verbatim and in full") { return "excerpts" }
+            if t.contains("Select the parts of the provided TEXT") { return "excerpts" }
             if t.contains("You extract information from a web page") { return "compression" }
             return nil
         }
@@ -65,8 +64,8 @@ extension WebSubagentSelftest {
         func ok(_ stage: String, provider: String) -> String {
             let content: String
             switch stage {
-            case "assets": content = "{\"links\":[{\"text\":\"Docs\",\"url\":\"https://example.test/docs\"}],\"images\":[]}"
-            case "excerpts": content = "{\"excerpts\":[\"room excerpt\"]}"
+            // One pass (2026-09-30): quotes plus picks; L1 = Docs.
+            case "excerpts": content = "{\"blocks\":[\"P1\"],\"links\":[1],\"images\":[]}"
             default: content = "COMPRESSED: room page"
             }
             return envelope(content: content, provider: provider, finish: "stop", native: "stop", completion: 700, reasoning: 500, cost: 0.0003, id: "gen-fixture-ok")
@@ -84,8 +83,7 @@ extension WebSubagentSelftest {
         let baseRoute = serverD.route
         serverD.route = { request in
             let t = String(decoding: request.body, as: UTF8.self)
-            let stage: String? = t.contains("focus-relevant page assets") ? "assets"
-                : t.contains("Cite verbatim and in full") ? "excerpts"
+            let stage: String? = t.contains("Select the parts of the provided TEXT") ? "excerpts"
                 : t.contains("You extract information from a web page") ? "compression" : nil
             guard let stage else { return baseRoute?(request) ?? .init(status: 500, body: "{}") }
             return .init(body: scripts.pop(stage) ?? ok(stage, provider: "DigitalOcean"))
@@ -132,8 +130,8 @@ extension WebSubagentSelftest {
         let (plainFetch, fetchReqs) = await fetch("room cap fetch")
         let followStages = (plainReqs + fetchReqs).filter { stageOf($0) != nil }
         let stagesSeen = Set(followStages.compactMap(stageOf))
-        check("20.1 OpenRouter follow: extract.assets, extract.excerpts and web_fetch compression send no output cap, effort low (reasoning never capped or disabled)",
-              stagesSeen == ["assets", "excerpts", "compression"]
+        check("20.1 OpenRouter follow: extract.excerpts (one pass, no assets request) and web_fetch compression send no output cap, effort low (reasoning never capped or disabled)",
+              stagesSeen == ["excerpts", "compression"]
               && followStages.allSatisfy { uncapped($0) && (body($0)["reasoning"] as? [String: Any])?["effort"] as? String == "low"
                   && (body($0)["reasoning"] as? [String: Any])?["max_tokens"] == nil && (body($0)["reasoning"] as? [String: Any])?["enabled"] == nil }
               && plain?.docs.isEmpty == false && plainFetch?.contains("COMPRESSED: room page") == true,
@@ -149,7 +147,7 @@ extension WebSubagentSelftest {
               && uncapped(starvedEx[1]) && sameButProvider(starvedEx[0], starvedEx[1])
               && (body(starvedEx[1])["provider"] as? [String: Any])?["sort"] as? String == "throughput"
               && (body(starvedEx[1])["provider"] as? [String: Any])?["require_parameters"] as? Bool == true
-              && starvedOut?.docs.first?.excerpts == ["room excerpt"],
+              && starvedOut?.docs.first?.excerpts == ["# Room page"],
               "\(starvedEx.map { only($0) ?? [] }) \(starvedOut?.docs.first?.excerpts ?? [])")
         check("20.3 spend counts the failed (billed) attempt: 0.02 starved + 0.0003 per successful stage call",
               near(starvedOut?.spendUSD, 0.02 + 0.0003 * Double(starvedReqs.count - 1)), "\(starvedOut?.spendUSD ?? -1) over \(starvedReqs.count) calls")
@@ -163,10 +161,10 @@ extension WebSubagentSelftest {
         // 20.5 Repetition on both pinned hosts in turn → the third attempt
         // gets the full pinned set again (never an empty or unpinned route).
         scripts.reset()
-        scripts.push("assets", repeated("DigitalOcean", id: "gen-rep-1"))
-        scripts.push("assets", repeated("Reka", id: "gen-rep-2"))
+        scripts.push("excerpts", repeated("DigitalOcean", id: "gen-rep-1"))
+        scripts.push("excerpts", repeated("Reka", id: "gen-rep-2"))
         let (repOut, repReqs) = await extract("room repetition")
-        let repAssets = repReqs.filter { stageOf($0) == "assets" }
+        let repAssets = repReqs.filter { stageOf($0) == "excerpts" }
         check("20.5 repetition (native_finish_reason repetition, no content) from DigitalOcean then Reka: the second attempt excludes DigitalOcean, the third (both failed) restores the full pinned set, uncapped, 3 attempts; links kept",
               repAssets.count == 3 && only(repAssets[0]) == ["reka", "digitalocean"] && only(repAssets[1]) == ["reka"] && only(repAssets[2]) == ["reka", "digitalocean"]
               && repAssets.allSatisfy(uncapped) && sameButProvider(repAssets[0], repAssets[2])
@@ -184,7 +182,7 @@ extension WebSubagentSelftest {
         let emptyEx = emptyReqs.filter { stageOf($0) == "excerpts" }
         check("20.8 empty (whitespace-only) body: retried once on the same pinned hosts (the failing host is unknown), logged kind=empty_body with its byte count, no spend for it",
               emptyEx.count == 2 && only(emptyEx[1]) == ["reka", "digitalocean"] && sameButProvider(emptyEx[0], emptyEx[1])
-              && emptyOut?.docs.first?.excerpts == ["room excerpt"]
+              && emptyOut?.docs.first?.excerpts == ["# Room page"]
               && near(emptyOut?.spendUSD, 0.0003 * Double(emptyReqs.count - 1))
               && logText().contains("stage=extract.excerpts NO_COMPLETION attempt=1/3 kind=empty_body provider=- finish=- native=- completion_tokens=- reasoning_tokens=- gen=- body_bytes=")
               && logText().contains("retrying (attempt 2/3) same hosts (failing host unknown)"),
@@ -228,7 +226,7 @@ extension WebSubagentSelftest {
         let nfEx = nfReqs.filter { stageOf($0) == "excerpts" }, nfAssets = nfReqs.filter { stageOf($0) == "assets" }
         check("20.11 /websearch openrouter without the follow: the Luna model is unchanged, no cap on any stage, the retry is NOT steered (identical body), but the failed attempt is logged and counted in spend",
               nfEx.count == 2 && body(nfEx[0])["model"] as? String == ORModel.webExcerpts
-              && nfAssets.allSatisfy(uncapped) && nfEx.allSatisfy(uncapped) && !nfAssets.isEmpty
+              && nfAssets.isEmpty && nfEx.allSatisfy(uncapped)
               && sameBody(body(nfEx[0]), body(nfEx[1]))
               && (nfOut?.spendUSD ?? 0) >= 0.02 - 1e-12
               && logText().contains("gen=gen-nf"),
@@ -242,9 +240,9 @@ extension WebSubagentSelftest {
         _ = try? await orchestrator.executeWebExtract(requests: [.init(url: ocURL, focus: "opencode room")], mode: .webSearch)
         _ = try? await orchestrator.readUrlContentWithMetadata(url: ocURL, prompt: "opencode room fetch", refresh: true)
         let ocStages = serverB.requests.filter { stageOf($0) != nil }
-        check("20.12 OpenCode backend: assets, excerpts and web_fetch compression send no output cap (was 8000/32000/8000), no provider block, pipeline model; nothing reaches OpenRouter",
+        check("20.12 OpenCode backend: excerpts (one pass) and web_fetch compression send no output cap (was 8000/32000/8000), no provider block, pipeline model; nothing reaches OpenRouter",
               !ocStages.isEmpty && ocStages.allSatisfy { uncapped($0) && body($0)["provider"] == nil && body($0)["model"] as? String == "mimo-v2.6-flash" }
-              && Set(ocStages.compactMap(stageOf)) == ["assets", "excerpts", "compression"]
+              && Set(ocStages.compactMap(stageOf)) == ["excerpts", "compression"]
               && serverD.requests.filter { stageOf($0) != nil }.isEmpty,
               "\(ocStages.map { "\(stageOf($0) ?? "?"):\(body($0)["max_tokens"] ?? "none")" })")
         WebSearchBackend.processOverride = nil

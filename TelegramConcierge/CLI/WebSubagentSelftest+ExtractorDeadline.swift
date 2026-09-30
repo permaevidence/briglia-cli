@@ -19,8 +19,7 @@ extension WebSubagentSelftest {
         let body = h.body
         func stageOf(_ request: WebFixtureServer.Request) -> String? {
             let t = String(decoding: request.body, as: UTF8.self)
-            if t.contains("focus-relevant page assets") { return "assets" }
-            if t.contains("Cite verbatim and in full") { return "excerpts" }
+            if t.contains("Select the parts of the provided TEXT") { return "excerpts" }
             if t.contains("You extract information from a web page") { return "compression" }
             return nil
         }
@@ -32,8 +31,8 @@ extension WebSubagentSelftest {
         func okBody(_ stage: String, provider: String) -> String {
             let content: String
             switch stage {
-            case "assets": content = "{\"links\":[{\"text\":\"Docs\",\"url\":\"https://example.test/docs\"}],\"images\":[]}"
-            case "excerpts": content = "{\"excerpts\":[\"deadline excerpt\"]}"
+            // One pass (2026-09-30): quotes plus picks; L1 = Docs.
+            case "excerpts": content = "{\"blocks\":[\"P1\"],\"links\":[1],\"images\":[]}"
             default: content = "COMPRESSED: deadline page"
             }
             let object: [String: Any] = [
@@ -125,7 +124,8 @@ extension WebSubagentSelftest {
         /// (the log is cumulative across groups, so match by position).
         func retryAfter(_ gen: String) -> String {
             let lines = logText().components(separatedBy: "\n")
-            guard let i = lines.lastIndex(where: { $0.contains("gen=\(gen) ") }) else { return "" }
+            // The background GENERATION_LOOKUP line also names the id; skip it.
+            guard let i = lines.lastIndex(where: { $0.contains("gen=\(gen) ") && !$0.contains("GENERATION_LOOKUP") }) else { return "" }
             return lines[(i + 1)...].first { $0.contains(" retrying (attempt ") } ?? ""
         }
         func logLines(_ needle: String) -> String {
@@ -140,18 +140,18 @@ extension WebSubagentSelftest {
         // the retry goes to the other host.
         WebSearchBackend.extractorDeadlineOverride = 2
         queue.reset()
-        queue.push("assets", runaway(gen: "gen-dl-runaway", provider: "DigitalOcean"))
+        queue.push("excerpts", runaway(gen: "gen-dl-runaway", provider: "DigitalOcean"))
         let (cutOut, cutReqs, cutElapsed) = await extract("deadline runaway")
-        let cutAssets = cutReqs.filter { stageOf($0) == "assets" }
+        let cutAssets = cutReqs.filter { stageOf($0) == "excerpts" }
         check("21.1 a host trickling whitespace forever is cut at the 2 s test deadline and retried once on the other pinned host (digitalocean excluded), both requests uncapped; the retry's links are used",
               cutAssets.count == 2 && only(cutAssets[0]) == ["reka", "digitalocean"] && only(cutAssets[1]) == ["reka"]
               && cutAssets.allSatisfy(uncapped) && cutOut?.docs.first?.links.map(\.url) == ["https://example.test/docs"]
               && cutElapsed >= 2 && cutElapsed < 15,
               "\(cutAssets.map { only($0) ?? [] }) elapsed \(String(format: "%.1f", cutElapsed))s links \(cutOut?.docs.first?.links.map(\.url) ?? [])")
         check("21.2 the cut is logged as a failed attempt: kind=deadline, host from X-Provider-Name, elapsed, deadline, generation id from X-Generation-Id, cost unknown; then the steered retry",
-              logText().contains("openrouter stage=extract.assets NO_COMPLETION attempt=1/3 kind=deadline provider=DigitalOcean elapsed_s=")
+              logText().contains("openrouter stage=extract.excerpts NO_COMPLETION attempt=1/3 kind=deadline provider=DigitalOcean elapsed_s=")
               && logText().contains("deadline_s=2 gen=gen-dl-runaway cost=unknown")
-              && retryAfter("gen-dl-runaway").hasSuffix("stage=extract.assets retrying (attempt 2/3) hosts=reka excluded=digitalocean"),
+              && retryAfter("gen-dl-runaway").hasSuffix("stage=extract.excerpts retrying (attempt 2/3) hosts=reka excluded=digitalocean"),
               logLines("kind=deadline"))
         check("21.3 spend: the known spend is the successful calls only (the cut attempt reports no usage and is never counted as a number)",
               cutOut.map { abs($0.spendUSD - 0.0003 * Double(cutReqs.count - 1)) < 1e-12 } ?? false,
@@ -175,7 +175,7 @@ extension WebSubagentSelftest {
         let anonEx = anonReqs.filter { stageOf($0) == "excerpts" }
         check("21.4 a cut request whose host OpenRouter did not name is retried on the same pinned hosts, logged provider=- with its generation id",
               anonEx.count == 2 && only(anonEx[0]) == ["reka", "digitalocean"] && only(anonEx[1]) == ["reka", "digitalocean"]
-              && anonOut?.docs.first?.excerpts == ["deadline excerpt"]
+              && anonOut?.docs.first?.excerpts == ["# Deadline page"]
               && logText().contains("kind=deadline provider=- elapsed_s=") && logText().contains("gen=gen-dl-anon cost=unknown")
               && retryAfter("gen-dl-anon").hasSuffix("stage=extract.excerpts retrying (attempt 2/3) same hosts (failing host unknown)"),
               "\(anonEx.map { only($0) ?? [] }) \(logLines("gen-dl-anon"))")
@@ -187,7 +187,7 @@ extension WebSubagentSelftest {
         let (slowOut, slowReqs, slowElapsed) = await extract("deadline slow")
         let slowEx = slowReqs.filter { stageOf($0) == "excerpts" }
         check("21.5 a reply that trickles whitespace for 1.5 s and then answers, under a 4 s deadline, succeeds on the first request with no deadline log",
-              slowEx.count == 1 && slowOut?.docs.first?.excerpts == ["deadline excerpt"] && slowElapsed >= 1.5
+              slowEx.count == 1 && slowOut?.docs.first?.excerpts == ["# Deadline page"] && slowElapsed >= 1.5
               && !logText().contains("gen=gen-slow"),
               "\(slowEx.count) requests, \(String(format: "%.1f", slowElapsed))s")
 
@@ -215,7 +215,6 @@ extension WebSubagentSelftest {
         // no deadline record, prompt return.
         WebSearchBackend.extractorDeadlineOverride = 60
         queue.reset()
-        queue.push("assets", runaway(gen: "gen-dl-cancel-a", provider: "Reka"))
         queue.push("excerpts", runaway(gen: "gen-dl-cancel-e", provider: "Reka"))
         let cancelURL = nextURL()
         fixtures.pages[cancelURL] = page
@@ -233,9 +232,8 @@ extension WebSubagentSelftest {
         try? await Task.sleep(nanoseconds: 2_500_000_000)   // a wrongly scheduled retry would land here
         let cancelStages = serverD.requests.filter { stageOf($0) != nil }
         check("21.7 cancelling the outer job mid-trickle (60 s deadline) returns within seconds, sends no retry and records no deadline cut",
-              cancelElapsed < 6 && cancelStages.filter { stageOf($0) == "assets" }.count <= 1
-              && cancelStages.filter { stageOf($0) == "excerpts" }.count <= 1
-              && !logText().contains("gen=gen-dl-cancel-a") && !logText().contains("gen=gen-dl-cancel-e"),
+              cancelElapsed < 6 && cancelStages.filter { stageOf($0) == "excerpts" }.count <= 1
+              && !logText().contains("gen=gen-dl-cancel-e"),
               "\(String(format: "%.1f", cancelElapsed))s, \(cancelStages.compactMap(stageOf))")
 
         let cancelledIncidents = incidents().filter { $0.detail?.contains("cancelled while open") == true }.count
@@ -252,7 +250,7 @@ extension WebSubagentSelftest {
         WebSearchBackend.processOverride = nil
         let nfEx = serverD.requests.filter { stageOf($0) == "excerpts" }
         check("21.8 /websearch openrouter without the follow: no total deadline (a 2 s trickle under a 1 s test deadline still answers on the first request)",
-              nfEx.count == 1 && nfOut?.docs.first?.excerpts == ["deadline excerpt"],
+              nfEx.count == 1 && nfOut?.docs.first?.excerpts == ["# Deadline page"],
               "\(nfEx.count) requests \(nfOut?.docs.first?.excerpts ?? [])")
 
         // ---- Round 3 (review of the deadline commit).
@@ -330,13 +328,13 @@ extension WebSubagentSelftest {
         queue.push("excerpts", runaway(gen: "gen-dl-fmt", provider: "Reka"))
         let (fmtOut, fmtReqs, fmtTotal) = await extract("deadline format fallback")
         let fmtEx = fmtReqs.filter { stageOf($0) == "excerpts" }
-        let fmtLine = logText().components(separatedBy: "\n").last { $0.contains("gen=gen-dl-fmt ") } ?? ""
+        let fmtLine = logText().components(separatedBy: "\n").last { $0.contains("gen=gen-dl-fmt ") && !$0.contains("GENERATION_LOOKUP") } ?? ""
         // Attempt 1 = 2 s (400 at 1.2 s + resend cut at the SAME 2 s clock),
         // then the 1.5 s pause and a fast attempt 2: ~3.5 s. A fresh clock
         // for the resend would make attempt 1 last 3.2 s (~4.7 s total).
         check("21.12 the response_format fallback shares the attempt's deadline: the resent request is cut when the attempt's 2 s clock runs out (total ~3.5 s, not ~4.7 s), then attempt 2 answers",
               fmtEx.count == 3 && fmtLine.contains("attempt=1/3") && fmtTotal >= 3.3 && fmtTotal < 4.3
-              && fmtOut?.docs.first?.excerpts == ["deadline excerpt"],
+              && fmtOut?.docs.first?.excerpts == ["# Deadline page"],
               "\(fmtEx.count) requests, total \(String(format: "%.2f", fmtTotal))s")
 
         // 21.13 Restart: the unknown stays (the incident is on disk).
@@ -466,20 +464,21 @@ extension WebSubagentSelftest {
         queue.reset()
         let (_, noTrackReqs, _) = await extract("deadline untracked")
         faults([])
-        check("21.16d R2 if the write-ahead record can't be saved the extractor request is refused before sending (no excerpts/assets request)",
+        check("21.16d R2 if the write-ahead record can't be saved the extractor request is refused before sending (no excerpts request)",
               noTrackReqs.filter { stageOf($0) != nil }.isEmpty && logText().contains("not sent: in-flight record could not be saved"),
               "\(noTrackReqs.compactMap(stageOf))")
         // 21.7b Cancellation while open abandons the request: unknown cost.
         check("21.7b a job cancelled while its extractor request was open left that request as an unknown (\"cancelled while open\"), not as nothing",
               cancelledIncidents > 0, "\(cancelledIncidents)")
 
-        // CODEX-A (round 3 reproduction): an optional asset cut must not let
-        // a new paid excerpts request start.
+        // CODEX-A (round 3 reproduction, one pass since 2026-09-30: the
+        // separate assets request is gone): a cut that opens the cap pause
+        // lets no further paid extraction request start.
         ToolChargeLedger.resetForTesting()
         queue.reset()
-        queue.push("assets", runaway(gen: "gen-codex-assets-cap", provider: "Reka"))
+        queue.push("excerpts", runaway(gen: "gen-codex-assets-cap", provider: "Reka"))
         let (afterAssetRequests, assetPause) = await extractCapped("asset cap")
-        check("CODEX-A no paid excerpts after asset cut opens cap pause", !afterAssetRequests.contains("excerpts") && assetPause != nil,
+        check("CODEX-A no further paid extraction request after a cut opens the cap pause", afterAssetRequests.filter { $0 == "excerpts" }.count == 1 && assetPause != nil,
               "stages=\(afterAssetRequests), paused=\(assetPause != nil)")
         // Also a web_fetch compression after the pause: nothing paid sent.
         let fetchURL = nextURL()

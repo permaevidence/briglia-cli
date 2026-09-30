@@ -55,7 +55,7 @@ extension WebSubagentSelftest {
             server.requests.filter { text($0).contains("You are a research agent") || text($0).contains("You are a deep research agent") }
         }
         func pageStages(_ server: WebFixtureServer) -> [WebFixtureServer.Request] {
-            server.requests.filter { text($0).contains("Cite verbatim and in full") || text($0).contains("You extract information from a web page") }
+            server.requests.filter { text($0).contains("Select the parts of the provided TEXT") || text($0).contains("You extract information from a web page") }
         }
         func effort(_ request: WebFixtureServer.Request) -> String? {
             let b = body(request)
@@ -73,7 +73,7 @@ extension WebSubagentSelftest {
         await executor.configure(openRouterKey: "", serperKey: "synthetic-serper-key", jinaKey: "synthetic-jina-key")
         let longURL = "https://example.test/main-model-long"
         fixtures.pages[longURL] = String(repeating: "main model long page text ", count: 700)
-        fixtures.excerptResponse = "{\"excerpts\":[\"main model excerpt\"]}"
+        fixtures.excerptResponse = "{\"blocks\":[\"P1\"],\"links\":[],\"images\":[]}"
         func web(_ prompt: String) -> SubagentRunner.Invocation {
             SubagentRunner.Invocation(subagentType: "Web", description: "main-model", taskPrompt: prompt, modelOverride: nil, runInBackground: false, deliverable: .short)
         }
@@ -250,7 +250,7 @@ extension WebSubagentSelftest {
         let secondLegacy = legacyRounds.count >= 2 ? ((body(legacyRounds[1])["messages"] as? [[String: Any]]) ?? []) : []
         check("18.12b legacy loop transcript: the second round replays the first round's fetch_and_extract call and its tool result (main serializer)",
               secondLegacy.contains { ($0["tool_calls"] as? [[String: Any]])?.contains { (($0["function"] as? [String: Any])?["name"] as? String) == "fetch_and_extract" } == true }
-              && secondLegacy.contains { $0["role"] as? String == "tool" && (($0["content"] as? String) ?? "").contains("main model excerpt") },
+              && secondLegacy.contains { $0["role"] as? String == "tool" && (($0["content"] as? String) ?? "").contains("main model long page text") },
               "\(secondLegacy.count) messages")
         check("18.13 legacy loop extraction unchanged: fetch_and_extract's page stage on the web backend with the web key and the pipeline model",
               !legacyStages.isEmpty && legacyStages.allSatisfy { $0.headers["authorization"] == "Bearer synthetic-web-opencode-key" && body($0)["model"] as? String == "mimo-v2.6-flash" },

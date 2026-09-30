@@ -26,8 +26,7 @@ extension WebSubagentSelftest {
         }
         func pageStages(_ server: WebFixtureServer) -> [WebFixtureServer.Request] { stageFilter(server.requests) }
         func stageFilter(_ requests: [WebFixtureServer.Request]) -> [WebFixtureServer.Request] {
-            requests.filter { text($0).contains("Cite verbatim and in full") || text($0).contains("You extract information from a web page")
-                || text($0).contains("focus-relevant page assets") }
+            requests.filter { text($0).contains("Select the parts of the provided TEXT") || text($0).contains("You extract information from a web page") }
         }
         func near(_ a: Double?, _ b: Double) -> Bool { a.map { abs($0 - b) < 1e-12 } ?? false }
         h.state.webFlag = true
@@ -189,8 +188,7 @@ extension WebSubagentSelftest {
             let t = String(decoding: request.body, as: UTF8.self)
             let content: String
             if t.contains("You extract information from a web page") { content = "COMPRESSED: deepseek page" }
-            else if t.contains("Cite verbatim and in full") { content = "{\"excerpts\":[\"deepseek excerpt\"]}" }
-            else if t.contains("focus-relevant page assets") { content = "{\"links\":[],\"images\":[]}" }
+            else if t.contains("Select the parts of the provided TEXT") { content = "{\"blocks\":[\"P1\"],\"links\":[],\"images\":[]}" }
             else { return baseDRoute?(request) ?? .init(status: 500, body: "{}") }
             var object = (try? JSONSerialization.jsonObject(with: Data(WebFixtureServer.chatBody(content).utf8)) as? [String: Any]) ?? [:]
             var usage = (object["usage"] as? [String: Any]) ?? [:]
@@ -216,7 +214,7 @@ extension WebSubagentSelftest {
         let stagesD = pageStages(serverD)
         func provider(_ r: WebFixtureServer.Request) -> [String: Any] { (body(r)["provider"] as? [String: Any]) ?? [:] }
         func effortOf(_ r: WebFixtureServer.Request) -> String? { (body(r)["reasoning"] as? [String: Any])?["effort"] as? String }
-        let excerptStages = stagesD.filter { text($0).contains("Cite verbatim and in full") }
+        let excerptStages = stagesD.filter { text($0).contains("Select the parts of the provided TEXT") }
         let fetchStages = stagesD.filter { text($0).contains("You extract information from a web page") }
         check("19.11 OpenRouter main: web_extract's excerpt stage and web_fetch compression go to OpenRouter (D) with the OpenRouter key, deepseek/deepseek-v4-flash-0731, reasoning low, provider sort=throughput over the pinned extraction hosts; nothing on the /websearch backend",
               !excerptStages.isEmpty && !fetchStages.isEmpty && pageStages(serverB).isEmpty && pageStages(serverC).isEmpty

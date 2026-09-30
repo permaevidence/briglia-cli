@@ -59,13 +59,15 @@ struct WebAgentSelftest: AsyncParsableCommand {
         // MARK: 2. Chat request encoding
 
         let baseReq = ORChatReq(
-            model: "m", messages: [.init(role: "user", content: "hi")], temperature: 0.7, stream: false,
+            model: "m", messages: [.init(role: "user", content: "hi")], stream: false,
             reasoning: nil, reasoning_effort: nil, provider: nil)
         let baseJSON = encodeJSON(baseReq)
         check("request without tools omits tools/tool_choice/response_format",
               baseJSON["tools"] == nil && baseJSON["tool_choice"] == nil && baseJSON["response_format"] == nil)
         check("chat request carries no output-token cap (no max_tokens / max_completion_tokens)",
               baseJSON["max_tokens"] == nil && baseJSON["max_completion_tokens"] == nil)
+        check("chat request carries no temperature (the field no longer exists: host/model default sampling)",
+              baseJSON["temperature"] == nil)
 
         var toolReq = baseReq
         toolReq.tools = WebAgentTools.chatTools
@@ -87,7 +89,7 @@ struct WebAgentSelftest: AsyncParsableCommand {
         let rfSchema = rf["json_schema"] as? [String: Any] ?? [:]
         check("response_format encodes json_schema strict envelope",
               rf["type"] as? String == "json_schema"
-              && rfSchema["name"] as? String == "excerpts"
+              && rfSchema["name"] as? String == "page_blocks"
               && rfSchema["strict"] as? Bool == true
               && rfSchema["schema"] != nil)
 
@@ -281,7 +283,6 @@ struct WebAgentSelftest: AsyncParsableCommand {
             ("search params", WebAgentTools.searchParameters),
             ("fetch params", WebAgentTools.fetchParameters),
             ("excerpts rf", WebExtractionSchemas.excerpts.json_schema.schema),
-            ("assets rf", WebExtractionSchemas.assets.json_schema.schema),
         ]
         for (name, schema) in strictSchemas {
             let err = validateStrictObject(schema, path: name)
@@ -289,13 +290,10 @@ struct WebAgentSelftest: AsyncParsableCommand {
         }
 
         // The strict decode targets must accept a schema-conforming payload.
-        let excerptsPayload = "{\"excerpts\":[\"a\"]}"
-        check("ExcerptOut decodes schema-shaped payload",
-              (try? JSONDecoder().decode(ExcerptOut.self, from: Data(excerptsPayload.utf8)))?.excerpts == ["a"])
-        let assetsPayload = "{\"links\":[{\"text\":\"t\",\"url\":\"u\"}],\"images\":[{\"caption\":\"c\",\"url\":null}]}"
-        let assetsOut = try? JSONDecoder().decode(RelevantAssetOut.self, from: Data(assetsPayload.utf8))
-        check("RelevantAssetOut decodes schema-shaped payload (incl. null image url)",
-              assetsOut?.links?.first?.url == "u" && assetsOut?.images?.first?.url == nil)
+        let picksPayload = "{\"blocks\":[\"P2-P4\",\"P9\"],\"links\":[3,1],\"images\":[2]}"
+        let picks = try? JSONDecoder().decode(BlockPicksOut.self, from: Data(picksPayload.utf8))
+        check("BlockPicksOut decodes the schema-shaped payload (block ranges plus link/image numbers)",
+              picks?.blocks == [BlockPick(first: 2, last: 4), BlockPick(first: 9, last: 9)] && picks?.links == [.number(3), .number(1)] && picks?.images == [.number(2)])
 
         // MARK: 10. Tool argument decoding (the loop's parse of model calls)
 

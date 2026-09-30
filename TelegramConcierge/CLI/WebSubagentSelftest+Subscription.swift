@@ -372,8 +372,8 @@ extension WebSubagentSelftest {
             let outcome = try await orchestrator.executeWebExtract(requests: [.init(url: "https://example.test/r2-assets", focus: "spec")], mode: .webSearch)
             assetQuota = "docs=\(outcome.docs.count) failures=\(outcome.failures.count)"
         } catch { assetQuota = error.localizedDescription }
-        check("16.16n web_extract asset step: quota is an error, not an empty best-effort result",
-              captured.all.count == 1 && assetQuota.contains(quotaText),
+        check("16.16n small page (≤ 8,000 chars): no extraction request at all since the one-pass change (the raw text, links included, goes to the researcher), so no quota is spent or hit",
+              captured.all.count == 0 && assetQuota == "docs=1 failures=0",
               "sends=\(captured.all.count) result=\(assetQuota.prefix(80))")
 
         // Merge pass: dense sections overflow the 30KB cap, then the merge

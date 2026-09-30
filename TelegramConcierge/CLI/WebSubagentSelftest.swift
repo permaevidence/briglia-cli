@@ -64,6 +64,12 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         let state = MutableState(clock: at(2026, 4, 10, 10, 0, 0), subagentsFlag: true, webFlag: false)
         HarnessClock.overrideForTesting = { state.clock }
         defer { HarnessClock.overrideForTesting = nil }
+        // Never reach openrouter.ai for a generation record from a selftest
+        // (failed-attempt logging runs in the background): no record unless
+        // a group installs one; no waiting between tries.
+        CutRequestCostLookup.recordOverride = { _ in nil }
+        CutRequestCostLookup.failureLookupDelays = [0]
+        defer { CutRequestCostLookup.recordOverride = nil; CutRequestCostLookup.failureLookupDelays = [3, 10, 30] }
         // Flag seams (never the machine's UserDefaults).
         AvailableTools.subagentsStoredFlagOverrideForTesting = { state.subagentsFlag }
         AvailableTools.webSubagentStoredFlagOverrideForTesting = { state.webFlag }
@@ -92,9 +98,11 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         let fixtures = WebFixtureState()
         serverS.route = { request in
             if request.method == "POST", request.path.hasSuffix("/search") {
-                fixtures.serperCalls += 1
                 let query = (try? JSONSerialization.jsonObject(with: request.body) as? [String: Any])?["q"] as? String ?? "?"
-                fixtures.serperQueries.append(query)
+                // One locked step: `serperCalls += 1` through the property is
+                // a get-then-set, and concurrent searches lost counts (row 2.1
+                // flaked 2 in 5 once the fixture servers did a little more work).
+                fixtures.recordSerperCall(query)
                 switch fixtures.serperMode {
                 case .failing: return .init(status: 500, body: "{\"error\":\"injected\"}")
                 case .empty: return .init(body: "{\"organic\":[]}")
@@ -110,13 +118,13 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             }
             if request.method == "GET", request.path.hasPrefix("/reader/") {
                 let target = String(request.path.dropFirst("/reader/".count))
-                fixtures.readerGets.append(target)
+                fixtures.recordReaderGet(target)
                 let page = fixtures.pages[target] ?? "# Page\n\nPage text for \(target). Nothing to see."
                 return .init(contentType: "text/plain", body: page)
             }
             return .init(status: 404, body: "{}")
         }
-        // Model fixtures: pipeline stages (compression, excerpts, assets) are
+        // Model fixtures: pipeline stages (compression, excerpts) are
         // answered mechanically; agent rounds pop the server's script queue.
         func modelRoute(_ server: WebFixtureServer, responses: Bool) -> @Sendable (WebFixtureServer.Request) -> WebFixtureServer.Response {
             { request in
@@ -127,11 +135,8 @@ struct WebSubagentSelftest: AsyncParsableCommand {
                     let raw = String(text[start..<end]).replacingOccurrences(of: "\\n", with: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
                     return .init(body: WebFixtureServer.chatBody("COMPRESSED: " + raw))
                 }
-                if text.contains("Cite verbatim and in full") {
+                if text.contains("Select the parts of the provided TEXT") {
                     return .init(body: WebFixtureServer.chatBody(fixtures.excerptResponse))
-                }
-                if text.contains("focus-relevant page assets") {
-                    return .init(body: WebFixtureServer.chatBody("{\"links\":[],\"images\":[]}"))
                 }
                 if let status = server.popStatus(), status != 200 {
                     return .init(status: status, body: "{\"error\":{\"message\":\"injected \(status)\"}}")
@@ -177,7 +182,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         func agentRequests(_ server: WebFixtureServer) -> [WebFixtureServer.Request] {
             server.requests.filter { request in
                 let text = String(decoding: request.body, as: UTF8.self)
-                return !text.contains("You extract information from a web page") && !text.contains("Cite verbatim and in full") && !text.contains("focus-relevant page assets")
+                return !text.contains("You extract information from a web page") && !text.contains("Select the parts of the provided TEXT")
             }
         }
         let webQueryCall = { (id: String, queries: [String]) -> (String, String) in
@@ -265,8 +270,9 @@ struct WebSubagentSelftest: AsyncParsableCommand {
                   && (alpha?["fetched_at"] as? String)?.hasPrefix("2026-04-10 10:00:00") == true
                   && alpha?["previously_fetched"] == nil, extract.content.prefix(400).description)
             // Long page → excerpt model; oversized excerpt → clamped and marked.
-            fixtures.pages["https://example.test/long"] = String(repeating: "long page text ", count: 700)
-            fixtures.excerptResponse = "{\"excerpts\":[\"" + String(repeating: "x", count: 130_000) + "\"]}"
+            // (Block selection since 2026-09-30: a 130k page, every block picked.)
+            fixtures.pages["https://example.test/long"] = String(repeating: "long page text ", count: 8_700)
+            fixtures.excerptResponse = "{\"blocks\":[" + (1...300).map { "\"P\($0)\"" }.joined(separator: ",") + "],\"links\":[],\"images\":[]}"
             let (lname, largs) = webExtractCall(["https://example.test/long"])
             let long = try await executor.executeParallel([ToolCall(id: "x2", type: "function", function: FunctionCall(name: lname, arguments: largs))])[0]
             let longObject = body(WebFixtureServer.Request(method: "", path: "", headers: [:], body: Data(long.content.utf8)))
@@ -457,7 +463,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
             ReasoningSettings.excerpts = .medium
             let foldRequests = serverB.requests.filter {
                 let t = String(decoding: $0.body, as: UTF8.self)
-                return t.contains("You extract information from a web page") || t.contains("Cite verbatim and in full")
+                return t.contains("You extract information from a web page") || t.contains("Select the parts of the provided TEXT")
             }
             check("4.3b OpenCode web backend: a 'minimal' page stage reaches mimo-v2.6-flash as reasoning_effort 'low' (per-model fold in the web body)",
                   !foldRequests.isEmpty && foldRequests.allSatisfy { body($0)["model"] as? String == "mimo-v2.6-flash" && body($0)["reasoning_effort"] as? String == "low" },
@@ -640,6 +646,11 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         try await Self.runRound1Groups(harness)
         try await Self.runExtractorRoomGroups(harness)
         try await Self.runExtractorDeadlineGroup(harness)
+        try await Self.runExtractorLoopGroup(harness)
+        try await Self.runExtractorLoopSettlementRows(harness)
+        let tally = WebFixtureServer.modelRequestTally
+        check("22.17 whole-run guard: of every model request the fixture servers received in this selftest (main agent, Web researcher, legacy web loop rounds, all extractor stages, every backend), none carries a temperature",
+              tally.total > 100 && tally.withTemperature.isEmpty, "\(tally.total) requests, with temperature: \(tally.withTemperature.prefix(5))")
 
         print("Web subagent selftest: \(total - failures)/\(total) passed")
         if failures > 0 { throw ExitCode.failure }
@@ -656,7 +667,7 @@ final class WebFixtureState: @unchecked Sendable {
     private var _serperQueries: [String] = []
     private var _readerGets: [String] = []
     private var _pages: [String: String] = [:]
-    private var _excerptResponse = "{\"excerpts\":[]}"
+    private var _excerptResponse = "{\"blocks\":[],\"links\":[],\"images\":[]}"
     private var _retryStatuses: [Int] = []
     var serperMode: SerperMode { get { lock.lock(); defer { lock.unlock() }; return _serperMode } set { lock.lock(); _serperMode = newValue; lock.unlock() } }
     var serperCalls: Int { get { lock.lock(); defer { lock.unlock() }; return _serperCalls } set { lock.lock(); _serperCalls = newValue; lock.unlock() } }
@@ -665,6 +676,8 @@ final class WebFixtureState: @unchecked Sendable {
     var pages: [String: String] { get { lock.lock(); defer { lock.unlock() }; return _pages } set { lock.lock(); _pages = newValue; lock.unlock() } }
     var excerptResponse: String { get { lock.lock(); defer { lock.unlock() }; return _excerptResponse } set { lock.lock(); _excerptResponse = newValue; lock.unlock() } }
     var retryStatuses: [Int] { get { lock.lock(); defer { lock.unlock() }; return _retryStatuses } set { lock.lock(); _retryStatuses = newValue; lock.unlock() } }
+    func recordReaderGet(_ target: String) { lock.lock(); _readerGets.append(target); lock.unlock() }
+    func recordSerperCall(_ query: String) { lock.lock(); _serperCalls += 1; _serperQueries.append(query); lock.unlock() }
 }
 
 /// Loopback HTTP/1.1 server for the Web selftest: records every request
@@ -703,6 +716,21 @@ final class WebFixtureServer: @unchecked Sendable {
         set { lock.lock(); _route = newValue; lock.unlock() }
     }
     var requests: [Request] { lock.lock(); defer { lock.unlock() }; return recorded }
+    /// Every JSON model request any fixture server received this run
+    /// (never cleared) and how many carried a top-level `temperature`:
+    /// the whole-run guard of group 22 (no web request sends one).
+    private static let tallyLock = NSLock()
+    nonisolated(unsafe) private static var _modelRequests = 0
+    nonisolated(unsafe) private static var _withTemperature: [String] = []
+    static func tallyModelRequest(_ body: Data) {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any], object["model"] != nil else { return }
+        tallyLock.lock(); defer { tallyLock.unlock() }
+        _modelRequests += 1
+        if object["temperature"] != nil { _withTemperature.append("\(object["model"] ?? "?")") }
+    }
+    static var modelRequestTally: (total: Int, withTemperature: [String]) {
+        tallyLock.lock(); defer { tallyLock.unlock() }; return (_modelRequests, _withTemperature)
+    }
     /// Observation seam (owner decision 2026-09-25: the Web researcher runs
     /// on the MAIN endpoint). When set, a request this server RECEIVED that
     /// the closure maps to another fixture is recorded and answered by that
@@ -717,6 +745,7 @@ final class WebFixtureServer: @unchecked Sendable {
     }
     fileprivate func receive(_ request: Request) -> Response {
         lock.lock(); recorded.append(request); let responder = _route; lock.unlock()
+        WebFixtureServer.tallyModelRequest(request.body)
         return responder?(request) ?? Response(status: 500, body: "{\"error\":\"no route\"}")
     }
     func clear() { lock.lock(); recorded = []; scripts = []; statuses = []; lock.unlock() }

@@ -29,8 +29,7 @@ extension WebSubagentSelftest {
 
     @Sendable static func extractorStage(_ request: WebFixtureServer.Request) -> String? {
         let t = String(decoding: request.body, as: UTF8.self)
-        if t.contains("focus-relevant page assets") { return "assets" }
-        if t.contains("Cite verbatim and in full") { return "excerpts" }
+        if t.contains("Select the parts of the provided TEXT") { return "excerpts" }
         if t.contains("You extract information from a web page") { return "compression" }
         return nil
     }
