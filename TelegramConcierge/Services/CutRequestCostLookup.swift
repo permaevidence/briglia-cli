@@ -180,16 +180,22 @@ struct OpenRouterGenerationRecord: Equatable {
     /// The amount that settles a cut request's unknown-amount incident, or
     /// nil (it stays unknown): a positive reported cost, or exactly 0 when
     /// the record also says the request was cancelled. On a BYOK request
-    /// (GPT-6 Luna on an OpenRouter account with its own OpenAI key) the
-    /// billed amount is the upstream cost on the user's key, so the record
-    /// settles only when it reports one: the larger of fee and upstream cost
-    /// when positive, 0 only when both are reported 0 on a cancelled
-    /// request; a BYOK record without an upstream cost stays unknown.
+    /// (GPT-6 Luna on an OpenRouter account with its own OpenAI key) two
+    /// SEPARATE charges exist: OpenRouter's BYOK fee (`total_cost`, taken
+    /// from OpenRouter credits, often 0 within the free allowance) and the
+    /// provider's charge on the user's own key (`upstream_inference_cost`).
+    /// The record settles at their SUM, both as reported (no fee estimate),
+    /// and only when it reports the upstream charge; 0 only when both are
+    /// reported 0 on a cancelled request; a BYOK record without an upstream
+    /// cost, or with a non-finite sum, stays unknown. Non-BYOK records keep
+    /// the plain `total_cost` rule (upstream is a breakdown there, not an
+    /// extra charge).
     var settlementCost: Double? {
         guard let cost = totalCost, cost.isFinite, cost >= 0 else { return nil }
         if isByok == true {
             guard let upstream = upstreamInferenceCost, upstream.isFinite, upstream >= 0 else { return nil }
-            let billed = max(cost, upstream)
+            let billed = cost + upstream
+            guard billed.isFinite else { return nil }
             if billed > 0 { return billed }
             return cancelled == true ? 0 : nil
         }

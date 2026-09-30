@@ -107,18 +107,18 @@ extension WebSubagentSelftest {
               && lookups.value == 0 && ledgerCut().filter { $0.chargeId == heldID }.count == 1 && incident("gen-zero-held")?.state == .closed,
               "state \(String(describing: heldIncident?.state)) known \(String(describing: heldIncident?.knownAmountUSD)) complete \(heldSnap.isComplete) lookups \(lookups.value)")
 
-        // 22.17 BYOK (GPT-6 Luna on an OpenRouter account with its own OpenAI
+        // 22.21 BYOK (GPT-6 Luna on an OpenRouter account with its own OpenAI
         // key): total_cost is only OpenRouter's fee, the user's key is billed
         // upstream_inference_cost — a $0 total is not evidence of $0 spent.
         let byok = { (s: String) in CutRequestCostLookup.parseRecord(Data("{\"data\":{\(s)}}".utf8))?.settlementCost }
         let byokRecord = CutRequestCostLookup.parseRecord(Data("{\"data\":{\"total_cost\":0,\"is_byok\":true,\"upstream_inference_cost\":0.0031,\"cancelled\":true,\"provider_name\":\"OpenAI\"}}".utf8))
-        check("22.17 BYOK records: the upstream cost settles (0.0031, not the $0 total); a BYOK record without an upstream cost stays unknown even when cancelled at $0 or with a positive fee; $0 only when fee and upstream are both 0 on a cancelled request; the log names the upstream cost",
+        check("22.21 BYOK records: the upstream cost settles (0.0031, not the $0 total); fee 0.0002 + upstream 0.0050 settles at their sum 0.0052; a BYOK record without an upstream cost stays unknown even when cancelled at $0 or with a positive fee; $0 only when fee and upstream are both 0 on a cancelled request; the log names the upstream cost",
               byokRecord?.isByok == true && byokRecord?.settlementCost == 0.0031
               && byok("\"total_cost\":0,\"is_byok\":true,\"cancelled\":true") == nil
               && byok("\"total_cost\":0.0002,\"is_byok\":true") == nil
               && byok("\"total_cost\":0,\"is_byok\":true,\"upstream_inference_cost\":0,\"cancelled\":true") == 0
               && byok("\"total_cost\":0,\"is_byok\":true,\"upstream_inference_cost\":0") == nil
-              && byok("\"total_cost\":0.0002,\"is_byok\":true,\"upstream_inference_cost\":0.0050") == 0.0050
+              && byok("\"total_cost\":0.0002,\"is_byok\":true,\"upstream_inference_cost\":0.0050").map { abs($0 - 0.0052) < 1e-12 } == true
               && byok("\"total_cost\":0,\"is_byok\":false,\"cancelled\":true") == 0
               && byokRecord?.logFields.contains("byok upstream_cost=") == true,
               "\(String(describing: byokRecord))")
@@ -131,9 +131,51 @@ extension WebSubagentSelftest {
             "gen-byok-zero": .init(totalCost: 0, cancelled: true, provider: "OpenAI", isByok: true),
         ]
         let byokSettled = await ToolChargeLedger.reconcileCutRequestRecords { byokRecords[$0] }
-        check("22.18 reconcile with BYOK records: the incident with an upstream cost closes at that cost (ledger entry 0.0031 under its own id); the cancelled $0 BYOK record without an upstream cost stays OPEN (unknown), totals incomplete",
+        check("22.22 reconcile with BYOK records: the incident with an upstream cost closes at that cost (ledger entry 0.0031 under its own id); the cancelled $0 BYOK record without an upstream cost stays OPEN (unknown), totals incomplete",
               byokSettled == 1 && incident("gen-byok-paid")?.state == .closed && ledgerCut().first { $0.chargeId == byokID }?.amountUSD == 0.0031
               && incident("gen-byok-zero")?.state == .open && !ToolChargeLedger.snapshot().isComplete,
               "settled \(byokSettled) entries \(ledgerCut().map(\.amountUSD))")
+
+        // 22.23 BYOK fee and provider charge are two separate charges: summed,
+        // as reported, never the larger one; non-BYOK upstream is a breakdown.
+        let codexFixture = CutRequestCostLookup.parseRecord(Data("{\"data\":{\"is_byok\":true,\"total_cost\":0.05,\"upstream_inference_cost\":1.0,\"cancelled\":true}}".utf8))
+        check("22.23 BYOK fee $0.05 + provider charge $1.00 settles at $1.05 (not $1.00), cancelled or not; a non-finite sum stays unknown; a non-BYOK record with an upstream breakdown settles at total_cost only",
+              codexFixture?.settlementCost.map { abs($0 - 1.05) < 1e-12 } == true
+              && byok("\"is_byok\":true,\"total_cost\":0.05,\"upstream_inference_cost\":1.0").map { abs($0 - 1.05) < 1e-12 } == true
+              && byok("\"is_byok\":true,\"total_cost\":1e308,\"upstream_inference_cost\":1e308") == nil
+              && byok("\"is_byok\":false,\"total_cost\":0.05,\"upstream_inference_cost\":0.04") == 0.05
+              && byok("\"total_cost\":0.05,\"upstream_inference_cost\":0.04") == 0.05,
+              "\(String(describing: codexFixture?.settlementCost))")
+
+        // 22.24 The summed amount through the ledger: recorded once, a second
+        // reconcile adds nothing, a failed ledger write keeps the incident open
+        // with the known $1.05 and the next run writes it once, no new lookup.
+        ToolChargeLedger.resetForTesting()
+        let sumID = UUID()
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: sumID, generationId: "gen-byok-sum", provider: nil, stage: "extract.excerpts")
+        let sumRecord = OpenRouterGenerationRecord(totalCost: 0.05, cancelled: true, provider: "OpenAI", isByok: true, upstreamInferenceCost: 1.0)
+        let firstSum = await ToolChargeLedger.reconcileCutRequestRecords { $0 == "gen-byok-sum" ? sumRecord : nil }
+        ToolChargeLedger.forgetHeldForTesting()
+        let againSum = await ToolChargeLedger.reconcileCutRequestRecords { $0 == "gen-byok-sum" ? sumRecord : nil }
+        let sumEntries = ledgerCut().filter { $0.chargeId == sumID }
+        let sumToday = ToolChargeLedger.snapshot().today
+        let sumState = incident("gen-byok-sum")?.state
+        ToolChargeLedger.resetForTesting()
+        let faultID = UUID()
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: faultID, generationId: "gen-byok-fault", provider: nil, stage: "extract.excerpts")
+        faults(["ledger-write"])
+        _ = await ToolChargeLedger.reconcileCutRequestRecords { _ in sumRecord }
+        faults([])
+        let faultHeld = incident("gen-byok-fault")
+        let sumLookups = LookupCounter()
+        _ = await ToolChargeLedger.reconcileCutRequestRecords { _ in sumLookups.bump(); return nil }
+        let faultEntries = ledgerCut().filter { $0.chargeId == faultID }
+        check("22.24 BYOK sum through the ledger: one entry of $1.05 under the incident id, a repeat reconcile (after a simulated restart) adds nothing, today's total $1.05; a failed ledger write keeps the incident open carrying the known $1.05 and the next run writes exactly one $1.05 entry with no new lookup",
+              firstSum == 1 && againSum == 0 && sumEntries.count == 1 && sumEntries.first.map { abs($0.amountUSD - 1.05) < 1e-12 } == true
+              && abs(sumToday - 1.05) < 1e-12 && sumState == .closed
+              && faultHeld?.state == .open && faultHeld?.knownAmountUSD.map { abs($0 - 1.05) < 1e-12 } == true
+              && sumLookups.value == 0 && faultEntries.count == 1 && faultEntries.first.map { abs($0.amountUSD - 1.05) < 1e-12 } == true
+              && incident("gen-byok-fault")?.state == .closed,
+              "first \(firstSum) again \(againSum) entries \(sumEntries.map(\.amountUSD)) today \(sumToday) held \(String(describing: faultHeld?.knownAmountUSD)) faultEntries \(faultEntries.map(\.amountUSD)) lookups \(sumLookups.value)")
     }
 }
