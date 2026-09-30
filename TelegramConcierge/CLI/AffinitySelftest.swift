@@ -845,12 +845,14 @@ final class CaptureServer: @unchecked Sendable {
         var parser = CaptureRequestParser()
         var chunk = [UInt8](repeating: 0, count: 65536)
         var routed: (body: String, delay: TimeInterval)? = nil
+        var target = ""
         do {
             while true {
                 let n = chunk.withUnsafeMutableBytes { read(fd, $0.baseAddress!, $0.count) }
                 if n < 0 && errno == EINTR { continue }
                 guard n > 0 else { throw CaptureRequestParser.Invalid("EOF or timeout before complete request") }
                 if let request = try parser.append(Data(chunk[0..<n])) {
+                    target = request.target
                     lock.lock(); recorded.append(request); let observer = _requestObserver; let route = _router; lock.unlock()
                     observer?(request)
                     routed = route?(request)
@@ -869,7 +871,9 @@ final class CaptureServer: @unchecked Sendable {
         let scripted = routed?.body ?? (responseQueue.isEmpty ? nil : responseQueue.removeFirst())
         let status = routed != nil ? 200 : (statusQueue.isEmpty ? fallbackStatus : statusQueue.removeFirst())
         lock.unlock()
-        let body = scripted ?? (status == 200
+        // OpenCode Go's page stages use Responses since v0.2.44 (GPT-6 Luna).
+        let responsesOK = "{\"id\":\"resp_cap\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_cap\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\(encodedContent),\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"
+        let body = scripted ?? (status == 200 && target.hasSuffix("/responses") ? responsesOK : status == 200
             ? "{\"id\":\"cap\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\(encodedContent)},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}"
             : "{\"error\":{\"message\":\"injected \(status)\"}}")
         let reason = status == 200 ? "OK" : "Service Unavailable"
