@@ -54,8 +54,8 @@ extension WebSubagentSelftest {
             var message: [String: Any] = ["role": "assistant", "reasoning": "thinking"]
             message["content"] = content ?? NSNull()
             let object: [String: Any] = [
-                "id": id, "object": "chat.completion", "created": 1_790_000_000, "model": "deepseek/deepseek-v4-flash-0731",
-                "provider": "Reka", "choices": [["index": 0, "finish_reason": finish, "native_finish_reason": native, "message": message]],
+                "id": id, "object": "chat.completion", "created": 1_790_000_000, "model": "openai/gpt-6-luna",
+                "provider": "OpenAI", "choices": [["index": 0, "finish_reason": finish, "native_finish_reason": native, "message": message]],
                 "usage": ["prompt_tokens": 9000, "completion_tokens": 700, "total_tokens": 9700, "cost": cost,
                           "completion_tokens_details": ["reasoning_tokens": 500]]]
             return String(decoding: try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
@@ -105,9 +105,9 @@ extension WebSubagentSelftest {
         serverD.clear()
         _ = await withMainSlots(routerMain) { try? await orchestrator.readUrlContentWithMetadata(url: fetchURL, prompt: "Widget X100 accessories", refresh: true) }
         let orStages = (shopReqs + serverD.requests).filter { stageOf($0) != nil }
-        kit.check("22.1 OpenRouter follow: extract.excerpts and web_fetch compression send NO temperature (was 0.1) and still no output cap; reasoning effort unchanged",
+        kit.check("22.1 OpenRouter follow: extract.excerpts and web_fetch compression send NO temperature (was 0.1) and still no output cap; reasoning effort medium (the OpenAI lane's)",
                   Set(orStages.compactMap(stageOf)) == ["excerpts", "compression"] && orStages.allSatisfy(noTemperatureNoCap)
-                  && orStages.allSatisfy { (body($0)["reasoning"] as? [String: Any])?["effort"] as? String == "low" },
+                  && orStages.allSatisfy { (body($0)["reasoning"] as? [String: Any])?["effort"] as? String == "medium" },
                   "\(orStages.map { "\(stageOf($0) ?? "?"):t=\(body($0)["temperature"] ?? "none")" })")
 
         // 22.2 OpenCode backend: same.
@@ -133,7 +133,7 @@ extension WebSubagentSelftest {
         CutRequestCostLookup.recordOverride = { gen in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             guard gen == "gen-loop-starved" else { return nil }
-            var record = OpenRouterGenerationRecord(totalCost: 0, cancelled: true, provider: "Reka")
+            var record = OpenRouterGenerationRecord(totalCost: 0, cancelled: true, provider: "OpenAI")
             record.upstreamStatus = 499; record.completionTokens = 31540; record.reasoningTokens = 31540; record.promptTokens = 17920
             return record
         }
@@ -155,7 +155,7 @@ extension WebSubagentSelftest {
         let lookupLine = await waitLine("GENERATION_LOOKUP gen=gen-loop-starved")
         kit.check("22.10 a failed attempt (length-starved, generation id known) gets its generation record looked up off the critical path: the stage finished before the lookup returned, then the log names host, upstream status, cancelled, tokens and cost",
                   !lineBefore && stageSeconds < 4.0
-                  && lookupLine.contains("stage=extract.excerpts GENERATION_LOOKUP gen=gen-loop-starved after=length_starved provider=Reka upstream_status=499 cancelled=true")
+                  && lookupLine.contains("stage=extract.excerpts GENERATION_LOOKUP gen=gen-loop-starved after=length_starved provider=OpenAI upstream_status=499 cancelled=true")
                   && lookupLine.contains("completion_tokens=31540 reasoning_tokens=31540") && lookupLine.contains("cost=0"),
                   "stage \(String(format: "%.2f", stageSeconds))s line: \(lookupLine)")
         kit.scripts.reset()

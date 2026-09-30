@@ -44,7 +44,7 @@ extension WebSubagentSelftest {
         """
         let record = CutRequestCostLookup.parseRecord(Data(field.utf8))
         let parse = { (s: String) in CutRequestCostLookup.parseRecord(Data(s.utf8)) }
-        check("22.12 generation record parser: the field cut's record (Reka, 499, cancelled, 31,540 reasoning tokens, cost 0) → settles at exactly $0; 0 without cancelled, a missing cost, a 404 body → no settlement; a positive cost settles at that cost",
+        check("22.12 generation record parser: the field cut's record (499, cancelled, 31,540 reasoning tokens, cost 0) → settles at exactly $0; 0 without cancelled, a missing cost, a 404 body → no settlement; a positive cost settles at that cost",
               record?.provider == "Reka" && record?.upstreamStatus == 499 && record?.cancelled == true && record?.reasoningTokens == 31540
               && record?.promptTokens == 17920 && record?.settlementCost == 0 && record.map { abs(($0.generationTimeMs ?? 0) - 300743) < 1 } == true
               && parse("{\"data\":{\"total_cost\":0,\"cancelled\":false}}")?.settlementCost == nil
@@ -63,9 +63,9 @@ extension WebSubagentSelftest {
         try ToolChargeLedger.openCutRequestUnknown(chargeId: plainZeroID, generationId: "gen-zero-plain", provider: nil, stage: "extract.assets")
         try ToolChargeLedger.openCutRequestUnknown(chargeId: paidID, generationId: "gen-zero-paid", provider: nil, stage: "extract.assets")
         let records: [String: OpenRouterGenerationRecord] = [
-            "gen-zero-cancelled": .init(totalCost: 0, cancelled: true, provider: "Reka"),
-            "gen-zero-plain": .init(totalCost: 0, cancelled: nil, provider: "Reka"),
-            "gen-zero-paid": .init(totalCost: 0.0021, cancelled: true, provider: "Reka"),
+            "gen-zero-cancelled": .init(totalCost: 0, cancelled: true, provider: "OpenAI"),
+            "gen-zero-plain": .init(totalCost: 0, cancelled: nil, provider: "OpenAI"),
+            "gen-zero-paid": .init(totalCost: 0.0021, cancelled: true, provider: "OpenAI"),
         ]
         let settled = await ToolChargeLedger.reconcileCutRequestRecords { records[$0] }
         let zero = incident("gen-zero-cancelled")
@@ -106,5 +106,34 @@ extension WebSubagentSelftest {
               heldIncident?.state == .open && heldIncident?.knownAmountUSD == 0 && heldSnap.isComplete
               && lookups.value == 0 && ledgerCut().filter { $0.chargeId == heldID }.count == 1 && incident("gen-zero-held")?.state == .closed,
               "state \(String(describing: heldIncident?.state)) known \(String(describing: heldIncident?.knownAmountUSD)) complete \(heldSnap.isComplete) lookups \(lookups.value)")
+
+        // 22.17 BYOK (GPT-6 Luna on an OpenRouter account with its own OpenAI
+        // key): total_cost is only OpenRouter's fee, the user's key is billed
+        // upstream_inference_cost — a $0 total is not evidence of $0 spent.
+        let byok = { (s: String) in CutRequestCostLookup.parseRecord(Data("{\"data\":{\(s)}}".utf8))?.settlementCost }
+        let byokRecord = CutRequestCostLookup.parseRecord(Data("{\"data\":{\"total_cost\":0,\"is_byok\":true,\"upstream_inference_cost\":0.0031,\"cancelled\":true,\"provider_name\":\"OpenAI\"}}".utf8))
+        check("22.17 BYOK records: the upstream cost settles (0.0031, not the $0 total); a BYOK record without an upstream cost stays unknown even when cancelled at $0 or with a positive fee; $0 only when fee and upstream are both 0 on a cancelled request; the log names the upstream cost",
+              byokRecord?.isByok == true && byokRecord?.settlementCost == 0.0031
+              && byok("\"total_cost\":0,\"is_byok\":true,\"cancelled\":true") == nil
+              && byok("\"total_cost\":0.0002,\"is_byok\":true") == nil
+              && byok("\"total_cost\":0,\"is_byok\":true,\"upstream_inference_cost\":0,\"cancelled\":true") == 0
+              && byok("\"total_cost\":0,\"is_byok\":true,\"upstream_inference_cost\":0") == nil
+              && byok("\"total_cost\":0.0002,\"is_byok\":true,\"upstream_inference_cost\":0.0050") == 0.0050
+              && byok("\"total_cost\":0,\"is_byok\":false,\"cancelled\":true") == 0
+              && byokRecord?.logFields.contains("byok upstream_cost=") == true,
+              "\(String(describing: byokRecord))")
+        ToolChargeLedger.resetForTesting()
+        let byokID = UUID(), byokOpenID = UUID()
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: byokID, generationId: "gen-byok-paid", provider: nil, stage: "extract.excerpts")
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: byokOpenID, generationId: "gen-byok-zero", provider: nil, stage: "extract.excerpts")
+        let byokRecords: [String: OpenRouterGenerationRecord] = [
+            "gen-byok-paid": .init(totalCost: 0, cancelled: true, provider: "OpenAI", isByok: true, upstreamInferenceCost: 0.0031),
+            "gen-byok-zero": .init(totalCost: 0, cancelled: true, provider: "OpenAI", isByok: true),
+        ]
+        let byokSettled = await ToolChargeLedger.reconcileCutRequestRecords { byokRecords[$0] }
+        check("22.18 reconcile with BYOK records: the incident with an upstream cost closes at that cost (ledger entry 0.0031 under its own id); the cancelled $0 BYOK record without an upstream cost stays OPEN (unknown), totals incomplete",
+              byokSettled == 1 && incident("gen-byok-paid")?.state == .closed && ledgerCut().first { $0.chargeId == byokID }?.amountUSD == 0.0031
+              && incident("gen-byok-zero")?.state == .open && !ToolChargeLedger.snapshot().isComplete,
+              "settled \(byokSettled) entries \(ledgerCut().map(\.amountUSD))")
     }
 }

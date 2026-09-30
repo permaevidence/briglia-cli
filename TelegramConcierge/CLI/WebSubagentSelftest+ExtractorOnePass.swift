@@ -72,6 +72,7 @@ extension WebSubagentSelftest {
                   merged.excerpts == [expected] && merged.dropped == 1 && merged.links.map(\.url) == ["https://shop.test/returns", "https://shop.test/login"], "")
         runExtractorParserRows(kit)
         runExtractorBlockRows(kit)
+        try await runExtractorMultilineRows(kit)
     }
 
     /// 22.8: the parser behind web_fetch's lists.

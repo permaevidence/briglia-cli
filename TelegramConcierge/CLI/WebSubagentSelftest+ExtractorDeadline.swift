@@ -36,7 +36,7 @@ extension WebSubagentSelftest {
             default: content = "COMPRESSED: deadline page"
             }
             let object: [String: Any] = [
-                "id": "gen-deadline-ok", "object": "chat.completion", "created": 1_790_000_000, "model": "deepseek/deepseek-v4-flash-0731",
+                "id": "gen-deadline-ok", "object": "chat.completion", "created": 1_790_000_000, "model": "openai/gpt-6-luna",
                 "provider": provider,
                 "choices": [["index": 0, "finish_reason": "stop", "native_finish_reason": "stop",
                              "message": ["role": "assistant", "content": content, "reasoning": "thinking"] as [String: Any]]],
@@ -53,7 +53,7 @@ extension WebSubagentSelftest {
         }
         /// Slow but finishing: whitespace for `seconds`, then a real answer.
         func slow(_ stage: String, seconds: TimeInterval) -> WebFixtureServer.Response {
-            .init(body: okBody(stage, provider: "Reka"), headers: ["X-Generation-Id": "gen-slow"], trickle: (interval: 0.2, duration: seconds))
+            .init(body: okBody(stage, provider: "OpenAI"), headers: ["X-Generation-Id": "gen-slow"], trickle: (interval: 0.2, duration: seconds))
         }
 
         let queue = ResponseScripts()
@@ -61,7 +61,7 @@ extension WebSubagentSelftest {
         serverD.route = { request in
             if request.path.hasPrefix("/deadline-direct") { return queue.pop("direct") ?? .init(status: 500, body: "{}") }
             guard let stage = stageOf(request) else { return baseRoute?(request) ?? .init(status: 500, body: "{}") }
-            return queue.pop(stage) ?? .init(body: okBody(stage, provider: "DigitalOcean"))
+            return queue.pop(stage) ?? .init(body: okBody(stage, provider: "Azure"))
         }
         defer { serverD.route = baseRoute }
         defer { WebSearchBackend.extractorDeadlineOverride = nil }
@@ -140,18 +140,18 @@ extension WebSubagentSelftest {
         // the retry goes to the other host.
         WebSearchBackend.extractorDeadlineOverride = 2
         queue.reset()
-        queue.push("excerpts", runaway(gen: "gen-dl-runaway", provider: "DigitalOcean"))
+        queue.push("excerpts", runaway(gen: "gen-dl-runaway", provider: "Azure"))
         let (cutOut, cutReqs, cutElapsed) = await extract("deadline runaway")
         let cutAssets = cutReqs.filter { stageOf($0) == "excerpts" }
-        check("21.1 a host trickling whitespace forever is cut at the 2 s test deadline and retried once on the other pinned host (digitalocean excluded), both requests uncapped; the retry's links are used",
-              cutAssets.count == 2 && only(cutAssets[0]) == ["reka", "digitalocean"] && only(cutAssets[1]) == ["reka"]
+        check("21.1 a host trickling whitespace forever is cut at the 2 s test deadline and retried once on the other pinned host (azure excluded), both requests uncapped; the retry's links are used",
+              cutAssets.count == 2 && only(cutAssets[0]) == ["openai", "azure"] && only(cutAssets[1]) == ["openai"]
               && cutAssets.allSatisfy(uncapped) && cutOut?.docs.first?.links.map(\.url) == ["https://example.test/docs"]
               && cutElapsed >= 2 && cutElapsed < 15,
               "\(cutAssets.map { only($0) ?? [] }) elapsed \(String(format: "%.1f", cutElapsed))s links \(cutOut?.docs.first?.links.map(\.url) ?? [])")
         check("21.2 the cut is logged as a failed attempt: kind=deadline, host from X-Provider-Name, elapsed, deadline, generation id from X-Generation-Id, cost unknown; then the steered retry",
-              logText().contains("openrouter stage=extract.excerpts NO_COMPLETION attempt=1/3 kind=deadline provider=DigitalOcean elapsed_s=")
+              logText().contains("openrouter stage=extract.excerpts NO_COMPLETION attempt=1/3 kind=deadline provider=Azure elapsed_s=")
               && logText().contains("deadline_s=2 gen=gen-dl-runaway cost=unknown")
-              && retryAfter("gen-dl-runaway").hasSuffix("stage=extract.excerpts retrying (attempt 2/3) hosts=reka excluded=digitalocean"),
+              && retryAfter("gen-dl-runaway").hasSuffix("stage=extract.excerpts retrying (attempt 2/3) hosts=openai excluded=azure"),
               logLines("kind=deadline"))
         check("21.3 spend: the known spend is the successful calls only (the cut attempt reports no usage and is never counted as a number)",
               cutOut.map { abs($0.spendUSD - 0.0003 * Double(cutReqs.count - 1)) < 1e-12 } ?? false,
@@ -161,7 +161,7 @@ extension WebSubagentSelftest {
         check("21.3b R1 cut then success: the cut request is a durable OPEN unknown-amount incident for today keyed by its generation id and host; the tool-charge snapshot is incomplete and lists it, and holds no invented amount",
               cutIncident?.kind == .unknownAmount && cutIncident?.state == .open
               && cutIncident?.periods == [ToolChargeLedger.dayKey(Date())]
-              && cutIncident?.detail?.contains("host DigitalOcean") == true
+              && cutIncident?.detail?.contains("host Azure") == true
               && logText().contains("gen=gen-dl-runaway cost=unknown incident=\(cutIncident?.id ?? "?")")
               && !cutSnap.isComplete && cutSnap.incidents.contains { $0.id == cutIncident?.id }
               && cutSnap.today == 0
@@ -174,7 +174,7 @@ extension WebSubagentSelftest {
         let (anonOut, anonReqs, _) = await extract("deadline anonymous")
         let anonEx = anonReqs.filter { stageOf($0) == "excerpts" }
         check("21.4 a cut request whose host OpenRouter did not name is retried on the same pinned hosts, logged provider=- with its generation id",
-              anonEx.count == 2 && only(anonEx[0]) == ["reka", "digitalocean"] && only(anonEx[1]) == ["reka", "digitalocean"]
+              anonEx.count == 2 && only(anonEx[0]) == ["openai", "azure"] && only(anonEx[1]) == ["openai", "azure"]
               && anonOut?.docs.first?.excerpts == ["# Deadline page"]
               && logText().contains("kind=deadline provider=- elapsed_s=") && logText().contains("gen=gen-dl-anon cost=unknown")
               && retryAfter("gen-dl-anon").hasSuffix("stage=extract.excerpts retrying (attempt 2/3) same hosts (failing host unknown)"),
@@ -194,16 +194,16 @@ extension WebSubagentSelftest {
         // 21.6 Three cuts: the 3-attempt ceiling holds; web_fetch falls back.
         WebSearchBackend.extractorDeadlineOverride = 1
         queue.reset()
-        queue.push("compression", runaway(gen: "gen-dl-x1", provider: "Reka"))
-        queue.push("compression", runaway(gen: "gen-dl-x2", provider: "DigitalOcean"))
-        queue.push("compression", runaway(gen: "gen-dl-x3", provider: "Reka"))
+        queue.push("compression", runaway(gen: "gen-dl-x1", provider: "OpenAI"))
+        queue.push("compression", runaway(gen: "gen-dl-x2", provider: "Azure"))
+        queue.push("compression", runaway(gen: "gen-dl-x3", provider: "OpenAI"))
         let (exFetch, exReqs) = await fetch("deadline exhausted")
         let exComp = exReqs.filter { stageOf($0) == "compression" }
-        check("21.6 three cut web_fetch compression attempts: exactly 3 requests (reka,digitalocean → digitalocean → reka,digitalocean), then the stage fails naming the deadline and web_fetch falls back to raw markdown",
-              exComp.count == 3 && only(exComp[0]) == ["reka", "digitalocean"] && only(exComp[1]) == ["digitalocean"] && only(exComp[2]) == ["reka", "digitalocean"]
+        check("21.6 three cut web_fetch compression attempts: exactly 3 requests (openai,azure → azure → openai,azure), then the stage fails naming the deadline and web_fetch falls back to raw markdown",
+              exComp.count == 3 && only(exComp[0]) == ["openai", "azure"] && only(exComp[1]) == ["azure"] && only(exComp[2]) == ["openai", "azure"]
               && exComp.allSatisfy(uncapped)
               && exFetch?.contains("Extractor deadline page text.") == true
-              && logText().contains("after 3 attempts: deadline from Reka"),
+              && logText().contains("after 3 attempts: deadline from OpenAI"),
               "\(exComp.map { only($0) ?? [] })")
         let allCut = ["gen-dl-x1", "gen-dl-x2", "gen-dl-x3"].compactMap { incident(gen: $0) }
         check("21.6b R1 all cuts: each of the three cut requests is its own open unknown-amount incident (distinct ids), none settled as zero",
@@ -215,7 +215,7 @@ extension WebSubagentSelftest {
         // no deadline record, prompt return.
         WebSearchBackend.extractorDeadlineOverride = 60
         queue.reset()
-        queue.push("excerpts", runaway(gen: "gen-dl-cancel-e", provider: "Reka"))
+        queue.push("excerpts", runaway(gen: "gen-dl-cancel-e", provider: "OpenAI"))
         let cancelURL = nextURL()
         fixtures.pages[cancelURL] = page
         serverD.clear()
@@ -286,11 +286,11 @@ extension WebSubagentSelftest {
         check("21.9b R2 control: a backoff that fits inside the deadline still retries (2 requests, success)",
               r2okReqs.count == 2 && (try? r2ok.get()) != nil, "\(r2okReqs.count) requests \(r2ok)")
 
-        // 21.10 R3: identity is per transport attempt. First 503 names Reka
+        // 21.10 R3: identity is per transport attempt. First 503 names OpenAI
         // and gen-old; the second answers anonymous 200 headers and trickles
-        // until the deadline: the cut must not inherit Reka/gen-old.
+        // until the deadline: the cut must not inherit OpenAI/gen-old.
         queue.reset()
-        queue.push("direct", .init(status: 503, body: "{\"error\":\"busy\"}", headers: ["X-Provider-Name": "Reka", "X-Generation-Id": "gen-old", "Retry-After": "0"]))
+        queue.push("direct", .init(status: 503, body: "{\"error\":\"busy\"}", headers: ["X-Provider-Name": "OpenAI", "X-Generation-Id": "gen-old", "Retry-After": "0"]))
         queue.push("direct", .init(body: "", trickle: (interval: 0.2, duration: 30)))
         let (r3a, r3aReqs, _) = await direct(2)
         let r3aError: ExtractorDeadlineExceeded? = { if case .failure(let e) = r3a { return e as? ExtractorDeadlineExceeded }; return nil }()
@@ -300,7 +300,7 @@ extension WebSubagentSelftest {
               "\(r3aReqs.count) requests \(String(describing: r3aError))")
         // 21.11 The second attempt receives no headers at all before expiry.
         queue.reset()
-        queue.push("direct", .init(status: 503, body: "{\"error\":\"busy\"}", headers: ["X-Provider-Name": "Reka", "X-Generation-Id": "gen-old2", "Retry-After": "0"]))
+        queue.push("direct", .init(status: 503, body: "{\"error\":\"busy\"}", headers: ["X-Provider-Name": "OpenAI", "X-Generation-Id": "gen-old2", "Retry-After": "0"]))
         queue.push("direct", .init(body: "", silentFor: 8))
         let (r3b, r3bReqs, _) = await direct(2)
         let r3bError: ExtractorDeadlineExceeded? = { if case .failure(let e) = r3b { return e as? ExtractorDeadlineExceeded }; return nil }()
@@ -313,7 +313,7 @@ extension WebSubagentSelftest {
         let firstAttempt = lateDeadline.beginAttempt()
         _ = lateDeadline.beginAttempt()
         lateDeadline.observe(HTTPURLResponse(url: directURL, statusCode: 200, httpVersion: nil,
-                                             headerFields: ["X-Provider-Name": "Reka", "X-Generation-Id": "gen-late"])!, attempt: firstAttempt)
+                                             headerFields: ["X-Provider-Name": "OpenAI", "X-Generation-Id": "gen-late"])!, attempt: firstAttempt)
         let lateCut = lateDeadline.exceeded(requestInFlight: true)
         check("21.11b R3 headers delivered late by an older attempt are ignored for the current attempt",
               lateCut.provider == nil && lateCut.generationId == nil, "\(lateCut)")
@@ -325,7 +325,7 @@ extension WebSubagentSelftest {
         queue.reset()
         queue.push("excerpts", .init(status: 400, body: "{\"error\":{\"message\":\"response_format json_schema is not supported by this provider\"}}",
                                      trickle: (interval: 0.2, duration: 1.2)))
-        queue.push("excerpts", runaway(gen: "gen-dl-fmt", provider: "Reka"))
+        queue.push("excerpts", runaway(gen: "gen-dl-fmt", provider: "OpenAI"))
         let (fmtOut, fmtReqs, fmtTotal) = await extract("deadline format fallback")
         let fmtEx = fmtReqs.filter { stageOf($0) == "excerpts" }
         let fmtLine = logText().components(separatedBy: "\n").last { $0.contains("gen=gen-dl-fmt ") && !$0.contains("GENERATION_LOOKUP") } ?? ""
@@ -366,7 +366,7 @@ extension WebSubagentSelftest {
               && abs(ToolChargeLedger.snapshot().today - 0.0042) < 1e-12,
               "settled \(settledAgain) \(entriesAgain.count) entries")
         check("21.14c the generation record parser reads data.total_cost and nothing else",
-              CutRequestCostLookup.parseTotalCost(Data("{\"data\":{\"id\":\"gen-x\",\"total_cost\":0.0123,\"provider_name\":\"Reka\"}}".utf8)) == 0.0123
+              CutRequestCostLookup.parseTotalCost(Data("{\"data\":{\"id\":\"gen-x\",\"total_cost\":0.0123,\"provider_name\":\"OpenAI\"}}".utf8)) == 0.0123
               && CutRequestCostLookup.parseTotalCost(Data("{\"error\":{\"code\":404}}".utf8)) == nil
               && CutRequestCostLookup.parseTotalCost(Data("{\"data\":{\"id\":\"gen-x\"}}".utf8)) == nil)
 
@@ -377,7 +377,7 @@ extension WebSubagentSelftest {
         let capped = routerMain.merging([KeychainHelper.openRouterToolSpendLimitDailyUSDKey: "50"]) { _, new in new }
         WebSearchBackend.extractorDeadlineOverride = 1
         queue.reset()
-        queue.push("excerpts", runaway(gen: "gen-dl-cap", provider: "Reka"))
+        queue.push("excerpts", runaway(gen: "gen-dl-cap", provider: "OpenAI"))
         let capURL = nextURL()
         fixtures.pages[capURL] = page
         serverD.clear()
@@ -423,7 +423,7 @@ extension WebSubagentSelftest {
         ToolChargeLedger.resetForTesting()
         faults(["incident-open"])
         queue.reset()
-        queue.push("excerpts", runaway(gen: "gen-dl-unrec", provider: "Reka"))
+        queue.push("excerpts", runaway(gen: "gen-dl-unrec", provider: "OpenAI"))
         let (_, unrecReqs, _) = await extract("deadline unrecorded")
         let unrecSnap = ToolChargeLedger.snapshot()
         let unrecInFlight = inFlight()
@@ -445,7 +445,7 @@ extension WebSubagentSelftest {
         ToolChargeLedger.resetForTesting()
         faults(["incident-open"])
         queue.reset()
-        queue.push("excerpts", runaway(gen: "gen-dl-unrec-restart", provider: "Reka"))
+        queue.push("excerpts", runaway(gen: "gen-dl-unrec-restart", provider: "OpenAI"))
         _ = await extract("deadline unrecorded restart")
         let pendingAccept = ToolChargeLedger.acceptOpenIncidents(channel: "selftest")
         ToolChargeLedger.simulateRestartForTesting()
@@ -476,7 +476,7 @@ extension WebSubagentSelftest {
         // lets no further paid extraction request start.
         ToolChargeLedger.resetForTesting()
         queue.reset()
-        queue.push("excerpts", runaway(gen: "gen-codex-assets-cap", provider: "Reka"))
+        queue.push("excerpts", runaway(gen: "gen-codex-assets-cap", provider: "OpenAI"))
         let (afterAssetRequests, assetPause) = await extractCapped("asset cap")
         check("CODEX-A no further paid extraction request after a cut opens the cap pause", afterAssetRequests.filter { $0 == "excerpts" }.count == 1 && assetPause != nil,
               "stages=\(afterAssetRequests), paused=\(assetPause != nil)")
@@ -495,7 +495,7 @@ extension WebSubagentSelftest {
         ToolChargeLedger.resetForTesting()
         faults(["incident-open"])
         queue.reset()
-        queue.push("excerpts", runaway(gen: "gen-codex-unrecorded", provider: "Reka"))
+        queue.push("excerpts", runaway(gen: "gen-codex-unrecorded", provider: "OpenAI"))
         let failedURL = nextURL()
         fixtures.pages[failedURL] = page
         let lostPause = await withMainSlots(capped) {
@@ -510,7 +510,7 @@ extension WebSubagentSelftest {
         // CODEX-C (round 3 reproduction).
         ToolChargeLedger.resetForTesting()
         let knownID = UUID()
-        try ToolChargeLedger.openCutRequestUnknown(chargeId: knownID, generationId: "gen-codex-known", provider: "Reka", stage: "test")
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: knownID, generationId: "gen-codex-known", provider: "OpenAI", stage: "test")
         faults(["ledger-write"])
         _ = await ToolChargeLedger.reconcileCutRequests { _ in 0.7 }
         ToolChargeLedger.faultForTesting = nil
@@ -528,7 +528,7 @@ extension WebSubagentSelftest {
         // 21.18 Ledger write fails, restart before it is retried: the known
         // amount survives on the incident; settlement needs no new lookup.
         ToolChargeLedger.resetForTesting()
-        try ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-known-restart", provider: "Reka", stage: "test")
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-known-restart", provider: "OpenAI", stage: "test")
         faults(["ledger-write"])
         _ = await ToolChargeLedger.reconcileCutRequests { _ in 0.7 }
         ToolChargeLedger.simulateRestartForTesting()
@@ -547,7 +547,7 @@ extension WebSubagentSelftest {
         // memory-held (counted), accept-unknown keeps it, and it settles
         // once storage works.
         ToolChargeLedger.resetForTesting()
-        try ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-known-held", provider: "Reka", stage: "test")
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-known-held", provider: "OpenAI", stage: "test")
         faults(["ledger-write", "incident-known"])
         _ = await ToolChargeLedger.reconcileCutRequests { _ in 0.7 }
         let heldBefore = ToolChargeLedger.snapshot().today
@@ -562,7 +562,7 @@ extension WebSubagentSelftest {
               "before \(heldBefore) accept \(heldAccept.failure ?? "ok") after \(heldAfterAccept) ledger \(ledgerCut().count)")
         // 21.20 The incident close fails after the ledger write: counted once.
         ToolChargeLedger.resetForTesting()
-        try ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-known-close", provider: "Reka", stage: "test")
+        try ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-known-close", provider: "OpenAI", stage: "test")
         faults(["incident-reconcile"])
         _ = await ToolChargeLedger.reconcileCutRequests { _ in 0.7 }
         faults([])

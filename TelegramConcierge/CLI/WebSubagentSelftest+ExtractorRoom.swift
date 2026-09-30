@@ -54,7 +54,7 @@ extension WebSubagentSelftest {
             var message: [String: Any] = ["role": "assistant", "reasoning": String(repeating: "thinking ", count: 20)]
             message["content"] = content ?? NSNull()
             let object: [String: Any] = [
-                "id": id, "object": "chat.completion", "created": 1_790_000_000, "model": "deepseek/deepseek-v4-flash-0731",
+                "id": id, "object": "chat.completion", "created": 1_790_000_000, "model": "openai/gpt-6-luna",
                 "provider": provider,
                 "choices": [["index": 0, "finish_reason": finish, "native_finish_reason": native, "message": message]],
                 "usage": ["prompt_tokens": 9000, "completion_tokens": completion, "total_tokens": 9000 + completion, "cost": cost,
@@ -76,9 +76,9 @@ extension WebSubagentSelftest {
         func repeated(_ host: String, id: String) -> String {
             envelope(content: nil, provider: host, finish: "stop", native: "repetition", completion: 4100, reasoning: 4100, cost: 0.004, id: id)
         }
-        let providerError = "{\"error\":{\"message\":\"Provider returned error\",\"code\":502,\"metadata\":{\"provider_name\":\"Reka\",\"raw\":\"upstream reset\"}}}"
+        let providerError = "{\"error\":{\"message\":\"Provider returned error\",\"code\":502,\"metadata\":{\"provider_name\":\"OpenAI\",\"raw\":\"upstream reset\"}}}"
 
-        // Per-stage scripted replies; an exhausted queue answers ok from DigitalOcean.
+        // Per-stage scripted replies; an exhausted queue answers ok from Azure.
         let scripts = StageScripts()
         let baseRoute = serverD.route
         serverD.route = { request in
@@ -86,7 +86,7 @@ extension WebSubagentSelftest {
             let stage: String? = t.contains("Select the parts of the provided TEXT") ? "excerpts"
                 : t.contains("You extract information from a web page") ? "compression" : nil
             guard let stage else { return baseRoute?(request) ?? .init(status: 500, body: "{}") }
-            return .init(body: scripts.pop(stage) ?? ok(stage, provider: "DigitalOcean"))
+            return .init(body: scripts.pop(stage) ?? ok(stage, provider: "Azure"))
         }
         defer { serverD.route = baseRoute }
 
@@ -130,22 +130,22 @@ extension WebSubagentSelftest {
         let (plainFetch, fetchReqs) = await fetch("room cap fetch")
         let followStages = (plainReqs + fetchReqs).filter { stageOf($0) != nil }
         let stagesSeen = Set(followStages.compactMap(stageOf))
-        check("20.1 OpenRouter follow: extract.excerpts (one pass, no assets request) and web_fetch compression send no output cap, effort low (reasoning never capped or disabled)",
+        check("20.1 OpenRouter follow: extract.excerpts (one pass, no assets request) and web_fetch compression send no output cap, effort medium as on the OpenAI lane (reasoning never capped or disabled)",
               stagesSeen == ["excerpts", "compression"]
-              && followStages.allSatisfy { uncapped($0) && (body($0)["reasoning"] as? [String: Any])?["effort"] as? String == "low"
+              && followStages.allSatisfy { uncapped($0) && (body($0)["reasoning"] as? [String: Any])?["effort"] as? String == "medium"
                   && (body($0)["reasoning"] as? [String: Any])?["max_tokens"] == nil && (body($0)["reasoning"] as? [String: Any])?["enabled"] == nil }
               && plain?.docs.isEmpty == false && plainFetch?.contains("COMPRESSED: room page") == true,
               "\(followStages.map { "\(stageOf($0) ?? "?"):\(body($0)["max_tokens"] ?? "none")" })")
 
-        // 20.2 Length-starved on Reka (a host default cap) → the retry excludes Reka.
+        // 20.2 Length-starved on OpenAI (a host default cap) → the retry excludes OpenAI.
         scripts.reset()
-        scripts.push("excerpts", starved("Reka", id: "gen-fixture-starved"))
+        scripts.push("excerpts", starved("OpenAI", id: "gen-fixture-starved"))
         let (starvedOut, starvedReqs) = await extract("room starved")
         let starvedEx = starvedReqs.filter { stageOf($0) == "excerpts" }
-        check("20.2 length-starved excerpts reply (finish length, 0 content) from Reka: exactly one retry, pinned set minus reka, still uncapped, body otherwise identical; the retry's excerpts are used",
-              starvedEx.count == 2 && only(starvedEx[0]) == ["reka", "digitalocean"] && only(starvedEx[1]) == ["digitalocean"]
+        check("20.2 length-starved excerpts reply (finish length, 0 content) from OpenAI: exactly one retry, pinned set minus openai, still uncapped, body otherwise identical; the retry's excerpts are used",
+              starvedEx.count == 2 && only(starvedEx[0]) == ["openai", "azure"] && only(starvedEx[1]) == ["azure"]
               && uncapped(starvedEx[1]) && sameButProvider(starvedEx[0], starvedEx[1])
-              && (body(starvedEx[1])["provider"] as? [String: Any])?["sort"] as? String == "throughput"
+              && (body(starvedEx[1])["provider"] as? [String: Any])?["sort"] == nil
               && (body(starvedEx[1])["provider"] as? [String: Any])?["require_parameters"] as? Bool == true
               && starvedOut?.docs.first?.excerpts == ["# Room page"],
               "\(starvedEx.map { only($0) ?? [] }) \(starvedOut?.docs.first?.excerpts ?? [])")
@@ -153,27 +153,27 @@ extension WebSubagentSelftest {
               near(starvedOut?.spendUSD, 0.02 + 0.0003 * Double(starvedReqs.count - 1)), "\(starvedOut?.spendUSD ?? -1) over \(starvedReqs.count) calls")
         let log1 = logText()
         check("20.4 diagnostics: the failed attempt's log line names kind, host, finish and native reasons, completion/reasoning tokens, generation id and cost; no opaque body snippet",
-              log1.contains("openrouter stage=extract.excerpts NO_COMPLETION attempt=1/3 kind=length_starved provider=Reka finish=length native=length completion_tokens=32000 reasoning_tokens=31990 gen=gen-fixture-starved")
-              && log1.contains("cost=0.02") && log1.contains("retrying (attempt 2/3) hosts=digitalocean excluded=reka")
+              log1.contains("openrouter stage=extract.excerpts NO_COMPLETION attempt=1/3 kind=length_starved provider=OpenAI finish=length native=length completion_tokens=32000 reasoning_tokens=31990 gen=gen-fixture-starved")
+              && log1.contains("cost=0.02") && log1.contains("retrying (attempt 2/3) hosts=azure excluded=openai")
               && !log1.contains("openrouter stage=extract.excerpts returned no completion"),
               String(log1.components(separatedBy: "\n").filter { $0.contains("NO_COMPLETION") || $0.contains("retrying") }.joined(separator: " | ").prefix(600)))
 
         // 20.5 Repetition on both pinned hosts in turn → the third attempt
         // gets the full pinned set again (never an empty or unpinned route).
         scripts.reset()
-        scripts.push("excerpts", repeated("DigitalOcean", id: "gen-rep-1"))
-        scripts.push("excerpts", repeated("Reka", id: "gen-rep-2"))
+        scripts.push("excerpts", repeated("Azure", id: "gen-rep-1"))
+        scripts.push("excerpts", repeated("OpenAI", id: "gen-rep-2"))
         let (repOut, repReqs) = await extract("room repetition")
         let repAssets = repReqs.filter { stageOf($0) == "excerpts" }
-        check("20.5 repetition (native_finish_reason repetition, no content) from DigitalOcean then Reka: the second attempt excludes DigitalOcean, the third (both failed) restores the full pinned set, uncapped, 3 attempts; links kept",
-              repAssets.count == 3 && only(repAssets[0]) == ["reka", "digitalocean"] && only(repAssets[1]) == ["reka"] && only(repAssets[2]) == ["reka", "digitalocean"]
+        check("20.5 repetition (native_finish_reason repetition, no content) from Azure then OpenAI: the second attempt excludes Azure, the third (both failed) restores the full pinned set, uncapped, 3 attempts; links kept",
+              repAssets.count == 3 && only(repAssets[0]) == ["openai", "azure"] && only(repAssets[1]) == ["openai"] && only(repAssets[2]) == ["openai", "azure"]
               && repAssets.allSatisfy(uncapped) && sameButProvider(repAssets[0], repAssets[2])
               && repOut?.docs.first?.links.map(\.url) == ["https://example.test/docs"],
               "\(repAssets.map { only($0) ?? [] }) links \(repOut?.docs.first?.links.map(\.url) ?? [])")
         check("20.6 spend counts both failed repetition attempts (0.004 each) plus the successful calls",
               near(repOut?.spendUSD, 0.008 + 0.0003 * Double(repReqs.count - 2)), "\(repOut?.spendUSD ?? -1) over \(repReqs.count) calls")
         check("20.7 repetition diagnostics name the host and the native reason",
-              logText().contains("NO_COMPLETION attempt=1/3 kind=repetition provider=DigitalOcean finish=stop native=repetition completion_tokens=4100 reasoning_tokens=4100 gen=gen-rep-1"))
+              logText().contains("NO_COMPLETION attempt=1/3 kind=repetition provider=Azure finish=stop native=repetition completion_tokens=4100 reasoning_tokens=4100 gen=gen-rep-1"))
 
         // 20.8 Empty body: host unknown → same hosts, logged as empty_body; nothing billed.
         scripts.reset()
@@ -181,7 +181,7 @@ extension WebSubagentSelftest {
         let (emptyOut, emptyReqs) = await extract("room empty")
         let emptyEx = emptyReqs.filter { stageOf($0) == "excerpts" }
         check("20.8 empty (whitespace-only) body: retried once on the same pinned hosts (the failing host is unknown), logged kind=empty_body with its byte count, no spend for it",
-              emptyEx.count == 2 && only(emptyEx[1]) == ["reka", "digitalocean"] && sameButProvider(emptyEx[0], emptyEx[1])
+              emptyEx.count == 2 && only(emptyEx[1]) == ["openai", "azure"] && sameButProvider(emptyEx[0], emptyEx[1])
               && emptyOut?.docs.first?.excerpts == ["# Room page"]
               && near(emptyOut?.spendUSD, 0.0003 * Double(emptyReqs.count - 1))
               && logText().contains("stage=extract.excerpts NO_COMPLETION attempt=1/3 kind=empty_body provider=- finish=- native=- completion_tokens=- reasoning_tokens=- gen=- body_bytes=")
@@ -193,28 +193,28 @@ extension WebSubagentSelftest {
         scripts.push("compression", providerError)
         let (errFetch, errReqs) = await fetch("room provider error")
         let errComp = errReqs.filter { stageOf($0) == "compression" }
-        check("20.9 a 2xx error object whose metadata names Reka: logged kind=provider_error with the message, retried without reka",
-              errComp.count == 2 && only(errComp[1]) == ["digitalocean"] && errFetch?.contains("COMPRESSED: room page") == true
-              && logText().contains("kind=provider_error provider=Reka"),
+        check("20.9 a 2xx error object whose metadata names OpenAI: logged kind=provider_error with the message, retried without openai",
+              errComp.count == 2 && only(errComp[1]) == ["azure"] && errFetch?.contains("COMPRESSED: room page") == true
+              && logText().contains("kind=provider_error provider=OpenAI"),
               "\(errComp.map { only($0) ?? [] })")
 
         // 20.10 Three failures: the ceiling holds, the error names the cause.
         scripts.reset()
-        scripts.push("compression", starved("Reka", id: "gen-x1"))
-        scripts.push("compression", starved("DigitalOcean", id: "gen-x2"))
-        scripts.push("compression", starved("Reka", id: "gen-x3"))
+        scripts.push("compression", starved("OpenAI", id: "gen-x1"))
+        scripts.push("compression", starved("Azure", id: "gen-x2"))
+        scripts.push("compression", starved("OpenAI", id: "gen-x3"))
         let (exhaustedFetch, exReqs) = await fetch("room exhausted")
         let exComp = exReqs.filter { stageOf($0) == "compression" }
-        check("20.10 three length-starved attempts: exactly 3 requests (reka,digitalocean → digitalocean → reka,digitalocean once both failed), then the stage fails with the named cause and web_fetch falls back to raw markdown",
-              exComp.count == 3 && only(exComp[0]) == ["reka", "digitalocean"] && only(exComp[1]) == ["digitalocean"] && only(exComp[2]) == ["reka", "digitalocean"]
+        check("20.10 three length-starved attempts: exactly 3 requests (openai,azure → azure → openai,azure once both failed), then the stage fails with the named cause and web_fetch falls back to raw markdown",
+              exComp.count == 3 && only(exComp[0]) == ["openai", "azure"] && only(exComp[1]) == ["azure"] && only(exComp[2]) == ["openai", "azure"]
               && exhaustedFetch?.contains("Extractor room page text.") == true
-              && logText().contains("after 3 attempts: length_starved from Reka"),
+              && logText().contains("after 3 attempts: length_starved from OpenAI"),
               "\(exComp.map { only($0) ?? [] })")
 
         // 20.11 Non-follow OpenRouter backend (/websearch openrouter, Luna):
         // cap unchanged, no steering; diagnostics and spend still apply.
         scripts.reset()
-        scripts.push("excerpts", starved("Reka", id: "gen-nf"))
+        scripts.push("excerpts", starved("OpenAI", id: "gen-nf"))
         let nfURL = nextURL()
         fixtures.pages[nfURL] = page
         serverD.clear()
@@ -249,19 +249,20 @@ extension WebSubagentSelftest {
 
         // 20.13 Pure rules: classifier, host slugs, steering never empties the set.
         func classify(_ s: String) -> StageNoCompletion { StageNoCompletion.classify(Data(s.utf8)) }
-        let pinned = ORChatReq.Provider(order: nil, only: WebSearchBackend.openRouterExtractorHosts, allow_fallbacks: true, sort: "throughput")
-        check("20.13 classifier + helpers: length/repetition/empty/error/no-content/unparseable kinds; usage decoded for spend; display names map to pinned slugs (Cohere and the dropped Makora do not); excluding every host restores the full set",
-              classify(starved("Reka", id: "g")).kind == .lengthStarved && classify(starved("Reka", id: "g")).usage?.cost?.value == 0.02
-              && classify(repeated("DigitalOcean", id: "g")).kind == .repetition && classify(" \n").kind == .emptyBody
-              && classify(providerError).kind == .providerError && classify(providerError).provider == "Reka"
-              && classify(envelope(content: "", provider: "Reka", finish: "stop", native: "stop", completion: 3, reasoning: 0, cost: 0, id: "g")).kind == .noContent
+        let pinned = ORChatReq.Provider(order: nil, only: WebSearchBackend.openRouterExtractorHosts, allow_fallbacks: true, sort: nil)
+        check("20.13 classifier + helpers: length/repetition/empty/error/no-content/unparseable kinds; usage decoded for spend; display names map to pinned slugs (Cohere, Bedrock and the former DeepSeek hosts Reka, DigitalOcean and Makora do not); excluding every host restores the full set",
+              classify(starved("OpenAI", id: "g")).kind == .lengthStarved && classify(starved("OpenAI", id: "g")).usage?.cost?.value == 0.02
+              && classify(repeated("Azure", id: "g")).kind == .repetition && classify(" \n").kind == .emptyBody
+              && classify(providerError).kind == .providerError && classify(providerError).provider == "OpenAI"
+              && classify(envelope(content: "", provider: "OpenAI", finish: "stop", native: "stop", completion: 3, reasoning: 0, cost: 0, id: "g")).kind == .noContent
               && classify("<html>bad gateway</html>").kind == .unparseable
-              && WebSearchBackend.extractorHostSlug(servedBy: "DigitalOcean") == "digitalocean" && WebSearchBackend.extractorHostSlug(servedBy: "Reka") == "reka"
+              && WebSearchBackend.extractorHostSlug(servedBy: "Azure") == "azure" && WebSearchBackend.extractorHostSlug(servedBy: "OpenAI") == "openai"
               && WebSearchBackend.extractorHostSlug(servedBy: "Cohere") == nil && WebSearchBackend.extractorHostSlug(servedBy: nil) == nil
-              && WebSearchBackend.extractorHostSlug(servedBy: "Makora") == nil
-              && WebSearchBackend.steeredProvider(pinned, excluding: ["reka", "digitalocean"]).only == ["reka", "digitalocean"])
-        check("20.14 host pin is exactly reka + digitalocean (Makora dropped 2026-09-29 after runaway uncapped reasoning loops and 429 capacity refusals)",
-              WebSearchBackend.openRouterExtractorHosts == ["reka", "digitalocean"], "\(WebSearchBackend.openRouterExtractorHosts)")
+              && WebSearchBackend.extractorHostSlug(servedBy: "Makora") == nil && WebSearchBackend.extractorHostSlug(servedBy: "Reka") == nil
+              && WebSearchBackend.extractorHostSlug(servedBy: "DigitalOcean") == nil && WebSearchBackend.extractorHostSlug(servedBy: "Amazon Bedrock") == nil
+              && WebSearchBackend.steeredProvider(pinned, excluding: ["openai", "azure"]).only == ["openai", "azure"])
+        check("20.14 host pin is exactly openai + azure for GPT-6 Luna (standard list-price endpoints; the DeepSeek hosts Reka/DigitalOcean are gone since 2026-09-30, Makora since 2026-09-29)",
+              WebSearchBackend.openRouterExtractorHosts == ["openai", "azure"], "\(WebSearchBackend.openRouterExtractorHosts)")
     }
 }
 

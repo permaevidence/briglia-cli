@@ -56,7 +56,7 @@ extension WebSubagentSelftest {
             if extractorStage(request) == "excerpts" {
                 retryCount.bump()
                 if retryCount.value == 1 {
-                    try? ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-concurrent-cut", provider: "Reka", stage: "concurrent")
+                    try? ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-concurrent-cut", provider: "OpenAI", stage: "concurrent")
                     return .init(status: 503, body: "{}", headers: ["Retry-After": "0"])
                 }
             }
@@ -76,7 +76,7 @@ extension WebSubagentSelftest {
                 backoffCount.bump()
                 if backoffCount.value == 1 {
                     DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
-                        try? ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-backoff-cut", provider: "Reka", stage: "concurrent")
+                        try? ToolChargeLedger.openCutRequestUnknown(chargeId: UUID(), generationId: "gen-backoff-cut", provider: "OpenAI", stage: "concurrent")
                     }
                     return .init(status: 503, body: "{}", headers: ["Retry-After": "1"])
                 }
@@ -114,7 +114,7 @@ extension WebSubagentSelftest {
         // response, then the connection drops.
         ToolChargeLedger.resetForTesting()
         queue.reset()
-        queue.push("excerpts", .init(body: "{", headers: ["X-Generation-Id": "gen-codex-disconnected", "X-Provider-Name": "Reka"], disconnectAfterHeaders: true))
+        queue.push("excerpts", .init(body: "{", headers: ["X-Generation-Id": "gen-codex-disconnected", "X-Provider-Name": "OpenAI"], disconnectAfterHeaders: true))
         let (disconnectedStages, disconnectedPause) = await c.extractWith(c.capped, "connection cut after response headers")
         let disconnectedSnapshot = ToolChargeLedger.snapshot()
         c.check("CODEX-F connection loss after a response starts preserves an unknown charge and gates retries", !disconnectedSnapshot.isComplete && disconnectedPause != nil,
@@ -129,7 +129,7 @@ extension WebSubagentSelftest {
         // sent under its OWN charge id and completes (its record ends).
         ToolChargeLedger.resetForTesting()
         queue.reset()
-        queue.push("excerpts", .init(body: "{", headers: ["X-Generation-Id": "gen-disc-nocap", "X-Provider-Name": "Reka"], disconnectAfterHeaders: true))
+        queue.push("excerpts", .init(body: "{", headers: ["X-Generation-Id": "gen-disc-nocap", "X-Provider-Name": "OpenAI"], disconnectAfterHeaders: true))
         let (noCapStages, noCapPause) = await c.extractWith(c.plain, "connection cut without cap")
         let noCapIncidents = c.incidents()
         // Darwin reports the cut as URLError.networkConnectionLost, which the
@@ -212,7 +212,7 @@ extension WebSubagentSelftest {
         let liveId = UUID()
         let liveStart = monthStart.addingTimeInterval(-30), liveEnd = monthStart.addingTimeInterval(30)
         try ToolChargeLedger.beginInFlight(chargeId: liveId, stage: "live-cross", at: liveStart)
-        ToolChargeLedger.abandonInFlight(chargeId: liveId, generationId: "gen-live-cross", provider: "Reka", stage: "live-cross",
+        ToolChargeLedger.abandonInFlight(chargeId: liveId, generationId: "gen-live-cross", provider: "OpenAI", stage: "live-cross",
                                          reason: "cut at its deadline", startedAt: liveStart, at: liveEnd)
         let liveIncident = c.incidents().first { $0.generationId == "gen-live-cross" }
         let before = ToolChargeLedger.snapshot(referenceDate: monthStart.addingTimeInterval(-60))
