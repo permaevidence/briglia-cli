@@ -1752,7 +1752,14 @@ actor ConversationArchiveService {
         dateFormatter.dateStyle = .medium
         dateFormatter.timeStyle = .short
         
+        // The FULL chunk text, never cut. A consolidated chunk is 4 x the
+        // configured chunk size (~160k characters at the default size), and a
+        // former fixed 100,000-character prefix silently hid its last ~40%
+        // from the summarizer. The chunk size is what bounds this text; a
+        // request too large for the model fails visibly through the existing
+        // retry and maintenance-alert path instead of being shortened.
         let conversationText = await formatMessagesForSummary(messages)
+        print("[ArchiveService] Summary input: \(conversationText.count) characters, \(messages.count) messages (full chunk)")
         let sharedContextPrompt = archiveSharedContextPrompt(for: context)
         
         let systemPrompt = """
@@ -1771,7 +1778,7 @@ actor ConversationArchiveService {
         CONVERSATION SEGMENT TO SUMMARIZE
         Period: \(dateFormatter.string(from: startDate)) to \(dateFormatter.string(from: endDate))
         
-        \(conversationText.prefix(100000))
+        \(conversationText)
         \(archiveContinuationBlock(context.currentConversationContext, label: "IMMEDIATE CONTINUATION AFTER CONVERSATION SEGMENT"))
         """
         
@@ -1856,6 +1863,8 @@ actor ConversationArchiveService {
         onMaintenancePhase?(.extractingUserContext, true)
         defer { onMaintenancePhase?(.extractingUserContext, false) }
         let existingContext = KeychainHelper.load(key: KeychainHelper.structuredUserContextKey) ?? ""
+        // Same rule as the chunk summary: the full chunk text, never a fixed
+        // prefix (facts stated late in a long chunk used to go unseen).
         let conversationText = await formatMessagesForSummary(messages)
 
         let dateFormatter = DateFormatter()
@@ -1904,7 +1913,7 @@ actor ConversationArchiveService {
         CONVERSATION SEGMENT
         Period: \(dateFormatter.string(from: startDate)) to \(dateFormatter.string(from: endDate))
 
-        \(conversationText.prefix(100000))
+        \(conversationText)
         \(archiveContinuationBlock(context.currentConversationContext, label: "IMMEDIATE CONTINUATION AFTER CONVERSATION SEGMENT"))
         """
 

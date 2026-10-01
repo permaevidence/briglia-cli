@@ -472,6 +472,13 @@ def main():
     result = run_selftest([ADA, "__summary-bounds-selftest"], capture_output=True, text=True, timeout=120)
     check("summary bounds selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # Archive summaries and user-fact extraction see the FULL chunk: real
+    # archiveMessages + consolidation against a loopback fixture, sentinels
+    # past the former 100,000-character cut. Re-executes itself in a private
+    # scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__archive-full-chunk-selftest"], capture_output=True, text=True, timeout=180)
+    check("archive full-chunk selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # Tool stage markers (write_file stall diagnostics): real write_file path
     # records, SIGKILL durability, the stall reporter (report only), rotation,
     # a hung log volume, and the Git reader barrier made visible.
