@@ -441,7 +441,8 @@ extension ExtractorDeadline {
 /// generation (and host, if sent).
 /// Outer task cancellation cancels the request and throws CancellationError.
 /// Redirects follow the session default, like URLSession.shared.
-final class DeadlineHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class DeadlineHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataTaskDelegate, @unchecked Sendable {
+    let refusesRedirects = false
     private let owner: ExtractorDeadline
     private let attempt: Int
     private let lock = NSLock()
@@ -465,14 +466,21 @@ final class DeadlineHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked 
                 lock.lock()
                 if completed { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
                 self.continuation = continuation
-                let config = URLSessionConfiguration.ephemeral
-                // Idle clock as before (request.timeoutInterval); the resource
-                // clock is only a backstop behind the wall-clock timer.
-                config.timeoutIntervalForRequest = request.timeoutInterval
-                config.timeoutIntervalForResource = remaining + 60
-                let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-                self.session = session
-                let task = session.dataTask(with: request); self.task = task
+                let task: URLSessionDataTask
+                if let shared = SharedDataTaskSession.active {
+                    // Linux: never one session per request (see SharedDataTaskSession).
+                    task = shared.dataTask(with: request, delegate: self)
+                } else {
+                    let config = URLSessionConfiguration.ephemeral
+                    // Idle clock as before (request.timeoutInterval); the resource
+                    // clock is only a backstop behind the wall-clock timer.
+                    config.timeoutIntervalForRequest = request.timeoutInterval
+                    config.timeoutIntervalForResource = remaining + 60
+                    let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+                    self.session = session
+                    task = session.dataTask(with: request)
+                }
+                self.task = task
                 let timer = DispatchWorkItem { [weak self] in
                     guard let self else { return }
                     self.finish(.failure(self.owner.exceeded(requestInFlight: true)))

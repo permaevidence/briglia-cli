@@ -279,7 +279,8 @@ struct SubscriptionAuthStore {
 
 /// Auth response bodies and URLs containing codes are never included in errors.
 /// Redirects are refused even on the same host. Separate from model transport.
-final class SubscriptionAuthHTTP: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class SubscriptionAuthHTTP: NSObject, URLSessionDataDelegate, RoutedDataTaskDelegate, @unchecked Sendable {
+    let refusesRedirects = true
     typealias Reply = (Data, Int)
     private let lock = NSLock()
     private var bytes = Data()
@@ -311,6 +312,10 @@ final class SubscriptionAuthHTTP: NSObject, URLSessionDataDelegate, @unchecked S
                 lock.lock(); defer { lock.unlock() }
                 if cancelled { continuation.resume(throwing: CancellationError()); return }
                 self.continuation = continuation
+                if let shared = SharedDataTaskSession.active {
+                    // Linux: never one session per request (see SharedDataTaskSession).
+                    task = shared.dataTask(with: request, delegate: self); task!.resume(); return
+                }
                 let config = URLSessionConfiguration.ephemeral
                 config.httpCookieStorage = nil; config.urlCache = nil; config.timeoutIntervalForResource = 30
                 let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
@@ -337,7 +342,9 @@ final class SubscriptionAuthHTTP: NSObject, URLSessionDataDelegate, @unchecked S
         lock.lock(); let continuation = self.continuation; self.continuation = nil; lock.unlock()
         if let error { continuation?.resume(throwing: error is CancellationError ? error : SubscriptionError("Authentication network request failed; retry login")) }
         else { continuation?.resume(returning: (bytes, status)) }
-        session.invalidateAndCancel(); self.session = nil
+        // Only this request's own session; the shared one is never invalidated.
+        if let own = self.session, own === session { own.invalidateAndCancel() }
+        self.session = nil
     }
 }
 

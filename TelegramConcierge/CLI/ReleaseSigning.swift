@@ -503,6 +503,7 @@ final class BoundedHTTP: NSObject, @unchecked Sendable {
     }
 
     private func run(url: URL, timeout: TimeInterval) async throws -> Int64 {
+        if let shared = SharedDataTaskSession.active { return try await runShared(shared, url: url, timeout: timeout) }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = timeout
         let delegateQueue = OperationQueue()
@@ -519,6 +520,24 @@ final class BoundedHTTP: NSObject, @unchecked Sendable {
             let delegate = session.delegate as! Delegate
             delegate.continuation = continuation
             session.dataTask(with: request).resume()
+        }
+        if let writeError { throw writeError }
+        guard httpStatus == 200 else {
+            throw FetchError(message: "HTTP \(httpStatus) fetching \(url.absoluteString)")
+        }
+        return received
+    }
+
+    /// Linux: the process-wide session (see SharedDataTaskSession); a
+    /// per-download session is never created, so none is ever torn down.
+    /// The request carries the same idle timeout the old session had.
+    private func runShared(_ shared: SharedDataTaskSession, url: URL, timeout: TimeInterval) async throws -> Int64 {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        let delegate = Delegate(owner: self)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            delegate.continuation = continuation
+            shared.dataTask(with: request, delegate: delegate).resume()
         }
         if let writeError { throw writeError }
         guard httpStatus == 200 else {
@@ -566,7 +585,8 @@ final class BoundedHTTP: NSObject, @unchecked Sendable {
         }
     }
 
-    fileprivate final class Delegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    fileprivate final class Delegate: NSObject, URLSessionDataDelegate, RoutedDataTaskDelegate, @unchecked Sendable {
+        let refusesRedirects = false
         let owner: BoundedHTTP
         var continuation: CheckedContinuation<Void, Error>?
         init(owner: BoundedHTTP) { self.owner = owner }

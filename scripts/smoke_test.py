@@ -495,6 +495,15 @@ def main():
     result = run_selftest([os.path.abspath(ADA), "__process-pipe-selftest"], capture_output=True, text=True, timeout=300)
     check("process pipe selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # Linux libcurl 8.14 crash (SIGABRT "_MultiHandle deallocated with
+    # non-zero retain count"): page reads, Responses and release fetches go
+    # through one process-lifetime URLSession on Linux instead of dropping a
+    # session per request. Concurrent reads, deadline cuts, cancellation,
+    # timeouts, redirects, byte caps, a mixed storm, all routes released.
+    # Re-executes itself in a private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__urlsession-teardown-selftest"], capture_output=True, text=True, timeout=300)
+    check("urlsession teardown selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # Tool stage markers (write_file stall diagnostics): real write_file path
     # records, SIGKILL durability, the stall reporter (report only), rotation,
     # a hung log volume, and the Git reader barrier made visible.

@@ -216,7 +216,8 @@ struct ResponsesStreamAssembler {
 /// URLSessionDataDelegate works on both Foundation and FoundationNetworking.
 /// All parser/task/continuation state is serialized under the lock, including
 /// cancellation before start and late callbacks. Credentials never follow redirects.
-final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataTaskDelegate, @unchecked Sendable {
+    let refusesRedirects = true
     private let lock = NSLock()
     private let routingContext: ProviderExecutionContext?
     init(routingContext: ProviderExecutionContext? = nil) {
@@ -269,14 +270,23 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, @unchecked
                 if completed { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
                 self.assembler.subscription = subscription
                 self.continuation = continuation
-                let config = URLSessionConfiguration.ephemeral
-                // Own the idle clock so its behavior matches FoundationNetworking
-                // and Darwin. URLSession's resource clock remains a second bound.
-                config.timeoutIntervalForRequest = overallTimeout
-                config.timeoutIntervalForResource = overallTimeout
-                let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-                self.session = session
-                let task = session.dataTask(with: request); self.task = task
+                let task: URLSessionDataTask
+                if let shared = SharedDataTaskSession.active {
+                    // Linux: never one session per request (see SharedDataTaskSession).
+                    // Every production caller sets request.timeoutInterval, which
+                    // FoundationNetworking already preferred over the config value.
+                    task = shared.dataTask(with: request, delegate: self)
+                } else {
+                    let config = URLSessionConfiguration.ephemeral
+                    // Own the idle clock so its behavior matches FoundationNetworking
+                    // and Darwin. URLSession's resource clock remains a second bound.
+                    config.timeoutIntervalForRequest = overallTimeout
+                    config.timeoutIntervalForResource = overallTimeout
+                    let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+                    self.session = session
+                    task = session.dataTask(with: request)
+                }
+                self.task = task
                 self.idleTimeout = idleTimeout ?? request.timeoutInterval
                 armPhaseTimerLocked(connectTimeout ?? request.timeoutInterval, phase: "connect")
                 let timer = DispatchWorkItem { [weak self] in
