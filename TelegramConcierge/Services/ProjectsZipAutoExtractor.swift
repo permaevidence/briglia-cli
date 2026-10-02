@@ -322,7 +322,7 @@ final class ProjectsZipAutoExtractor {
 
         let output = capture.finish(within: 2)
         let stdout = String(data: output.stdout, encoding: .utf8) ?? ""
-        let stderr = String(data: output.stderr, encoding: .utf8) ?? ""
+        let stderr = ProcessOutputCapture.text(output.stderr)
 
         guard process.terminationStatus == 0 else {
             let stderrMessage = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -338,12 +338,14 @@ final class ProjectsZipAutoExtractor {
             )
         }
 
-        // A cut listing could hide an unsafe entry from the path check.
-        guard !output.stdoutTruncated else {
+        // Only a complete listing may be used: a cut or unfinished one could
+        // hide an unsafe entry from the path check. A zero exit status does
+        // not prove the output was read to its end.
+        if let problem = output.stdoutProblem {
             throw NSError(
                 domain: "ProjectsZipAutoExtractor",
-                code: Int(EFBIG),
-                userInfo: [NSLocalizedDescriptionKey: "\(context) unzip output exceeded \(ProcessOutputCapture.defaultLimit / 1_048_576) MB."]
+                code: Int(output.stdoutTruncated ? EFBIG : EIO),
+                userInfo: [NSLocalizedDescriptionKey: "\(context) unzip output \(problem)."]
             )
         }
 

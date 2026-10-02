@@ -111,7 +111,7 @@ extension ProcessPipeSelftest {
 
     // MARK: - S1-S5: ToolExecutor.runShortcutProcess
 
-    typealias ShortcutResult = (exitCode: Int32, stdoutData: Data, stderrData: Data)
+    typealias ShortcutResult = ToolExecutor.ShortcutProcessResult
 
     final class CallNote: @unchecked Sendable {
         private let lock = NSLock()
@@ -133,7 +133,8 @@ extension ProcessPipeSelftest {
         let big = script(dir, "sc-1mb", flood(megabyte, "s"))
         let r1 = await shortcutRun(big)
         check("S1 1 MB of stdout comes back complete, exit 0 (\(secs(r1.elapsed)) s)",
-              r1.value?.exitCode == 0 && r1.value?.stdoutData == Data(repeating: UInt8(ascii: "s"), count: megabyte)
+              r1.value?.exitCode == 0 && r1.value?.outputProblem == nil
+              && r1.value?.stdoutData == Data(repeating: UInt8(ascii: "s"), count: megabyte)
               && r1.elapsed < promptBound, "exit \(r1.value?.exitCode ?? -99) \(r1.value?.stdoutData.count ?? -1) bytes")
         let piped = "\(flood(100_000, "p")) | /bin/cat"
         let r2 = await shortcutRun("/bin/sh", ["-c", piped])
@@ -166,66 +167,4 @@ extension ProcessPipeSelftest {
         check("S5b the timed-out run was reaped", DiffPipeSelftest.childPids(named: ["sleep", "sc-stuck"]).isEmpty, "")
     }
 
-    // MARK: - H1: a descendant keeps the pipe open after the child exits
-
-    /// The child prints "done" and exits, leaving a background grandchild that
-    /// holds its stdout. Reading to EOF would wait for the grandchild; each
-    /// helper must return within its 2 s post-exit grace with what was read.
-    /// macOS only: on Linux corelibs the orphan also holds Foundation's exit
-    /// detection, so the wait is decided by the existing exit polling, not
-    /// by this grace.
-    static func descendantHoldsPipe(_ check: Check, dir: URL) async {
-        #if os(macOS)
-        let pidFile = dir.appendingPathComponent("holder.pid").path
-        let holder = script(dir, "holder", "printf 'done'\n(exec sleep 31) &\necho $! > '\(pidFile)'\nexit 0")
-        func reapHolder() {
-            if let text = try? String(contentsOfFile: pidFile, encoding: .utf8), let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                kill(pid, SIGKILL)
-            }
-        }
-        let z = await zipRun(holder)
-        reapHolder()
-        let g = await gwsRun(holder)
-        reapHolder()
-        let s = await shortcutRun(holder)
-        reapHolder()
-        check("H1 a grandchild holding stdout cannot hang unzip / gws / shortcuts helpers (\(secs(z.elapsed)) / \(secs(g.elapsed)) / \(secs(s.elapsed)) s)",
-              z.value == "OK:done" && g.value?.stdout == "done" && s.value?.exitCode == 0 && s.value?.stdoutData == Data("done".utf8)
-              && max(z.elapsed, g.elapsed, s.elapsed) < promptBound,
-              "zip \(z.value ?? "hung") gws \(g.value?.stdout ?? g.value?.failureDetail ?? "hung") shortcuts \(s.value.map { String(decoding: $0.stdoutData, as: UTF8.self) } ?? "hung")")
-        #endif
-    }
-
-    // MARK: - L1-L3: bounded capture memory
-
-    /// Each stream keeps at most `limit` bytes but is still drained, so a
-    /// child writing without end cannot grow Briglia's memory, and a cut
-    /// unzip listing / gws result fails instead of being used.
-    static func captureLimits(_ check: Check, dir: URL) async {
-        let big = script(dir, "cap-1mb", flood(megabyte, "c"))
-        let capped = await bounded { () -> String in
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: big)
-            let out = Pipe()
-            p.standardOutput = out
-            p.standardError = FileHandle.nullDevice
-            guard (try? p.run()) != nil else { return "launch failed" }
-            let capture = ProcessOutputCapture(stdout: out, stderr: nil, limit: 100_000)
-            capture.start()
-            let exited = ProcessOutputCapture.waitForExit(p, until: Date().addingTimeInterval(10))
-            let o = capture.finish(within: 2)
-            return "\(exited) \(o.stdout.count) \(o.stdoutTruncated) \(o.stdout == Data(repeating: UInt8(ascii: "c"), count: 100_000))"
-        }
-        check("L1 1 MB through a 100,000-byte limit: child not blocked, prefix kept, flagged truncated (\(secs(capped.elapsed)) s)",
-              capped.value == "true 100000 true true" && capped.elapsed < promptBound, capped.value ?? "hung")
-        let huge = script(dir, "cap-70mb", flood(70 * megabyte, "h"))
-        let z = await zipRun(huge)
-        check("L2 unzip output over 64 MB fails clearly instead of a cut listing (\(secs(z.elapsed)) s)",
-              z.value == "ERR \(EFBIG):Failed to inspect ZIP archive. unzip output exceeded 64 MB." && z.elapsed < promptBound * 2,
-              String((z.value ?? "hung").prefix(120)))
-        let g = await gwsRun(huge)
-        check("L3 gws output over 64 MB fails as \"output exceeded 64 MB\" (\(secs(g.elapsed)) s)",
-              g.value?.stdout == nil && g.value?.failureDetail == "output exceeded 64 MB" && g.elapsed < promptBound * 2,
-              g.value?.failureDetail ?? "hung")
-    }
 }

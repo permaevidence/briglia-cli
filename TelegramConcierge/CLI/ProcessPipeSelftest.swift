@@ -111,7 +111,9 @@ struct ProcessPipeSelftest: AsyncParsableCommand {
         await shortcutsLargeOutput(check, dir: work)
         await shortcutsErrorsAndTimeout(check, dir: work)
         await descendantHoldsPipe(check, dir: work)
+        await readerLifetime(check, dir: work)
         await captureLimits(check, dir: work)
+        await shortcutsCompleteness(check, dir: work)
         leftovers(check)
         print("Process pipe selftest: \(total - failures)/\(total) passed")
         return failures

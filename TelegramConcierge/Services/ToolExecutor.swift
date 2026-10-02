@@ -3580,13 +3580,21 @@ extension ToolExecutor {
         var exitCode: Int32 = 0
         var appleEventsPermissionDenied = false
         var appleScriptErrorText = ""
+        // Set when a capture could not get the shortcut's complete output
+        // (over 64 MB, held open, read error). The result is then a clear
+        // failure with no output: a cut prefix is never returned as text or
+        // saved as an image.
+        var outputProblem: String? = nil
         
         // PRIMARY: Use Shortcuts Events (AppleScript), which is working on this machine.
         print("[ToolExecutor] Starting shortcut '\(shortcutName)' via AppleScript Shortcuts Events")
         let appleScriptPrimary = await runShortcutViaAppleScript(name: shortcutName, input: args.input, timeoutSeconds: timeoutSeconds)
         exitCode = appleScriptPrimary.exitCode
         
-        if appleScriptPrimary.exitCode == 0, !appleScriptPrimary.outputData.isEmpty {
+        if let problem = appleScriptPrimary.outputProblem {
+            outputProblem = problem
+            print("[ToolExecutor] osascript \(problem)")
+        } else if appleScriptPrimary.exitCode == 0, !appleScriptPrimary.outputData.isEmpty {
             finalOutputData = appleScriptPrimary.outputData
             print("[ToolExecutor] AppleScript primary captured: \(finalOutputData.count) bytes")
         } else {
@@ -3653,6 +3661,9 @@ extension ToolExecutor {
             if !fileOutputData.isEmpty {
                 finalOutputData = fileOutputData
                 print("[ToolExecutor] CLI fallback file captured: \(fileOutputData.count) bytes")
+            } else if let problem = primaryResult.outputProblem {
+                outputProblem = problem
+                print("[ToolExecutor] CLI fallback stdout \(problem)")
             } else if !primaryResult.stdoutData.isEmpty {
                 finalOutputData = primaryResult.stdoutData
                 print("[ToolExecutor] CLI fallback stdout captured: \(primaryResult.stdoutData.count) bytes")
@@ -3661,7 +3672,7 @@ extension ToolExecutor {
             }
             
             // Known CLI quirk fallback: omit --output-path and force a pipe (| cat).
-            if finalOutputData.isEmpty && primaryResult.exitCode == 0 {
+            if finalOutputData.isEmpty && primaryResult.exitCode == 0 && outputProblem == nil {
                 let escapedName = shortcutName.replacingOccurrences(of: "'", with: "'\\''")
                 var noOutputPathCommand = "/usr/bin/shortcuts run '\(escapedName)'"
                 if let inputFile = inputFile {
@@ -3678,7 +3689,10 @@ extension ToolExecutor {
                     register: { [self] in self.registerRunningProcess($0) }
                 )
                 
-                if !pipedFallback.stdoutData.isEmpty {
+                if let problem = pipedFallback.outputProblem {
+                    outputProblem = problem
+                    print("[ToolExecutor] Piped CLI fallback \(problem)")
+                } else if !pipedFallback.stdoutData.isEmpty {
                     finalOutputData = pipedFallback.stdoutData
                     print("[ToolExecutor] Piped CLI fallback captured: \(finalOutputData.count) bytes")
                 } else {
@@ -3698,6 +3712,39 @@ extension ToolExecutor {
         print("[ToolExecutor] Shortcut '\(shortcutName)' finished with exit code: \(exitCode)")
         print("[ToolExecutor] Final output: \(finalOutputData.count) bytes")
         
+        let built = Self.buildShortcutResult(
+            shortcutName: shortcutName,
+            exitCode: exitCode,
+            finalOutputData: finalOutputData,
+            outputProblem: outputProblem,
+            appleEventsPermissionDenied: appleEventsPermissionDenied,
+            appleScriptErrorText: appleScriptErrorText,
+            saveImage: { [documentsDirectory, imagesDirectory] data, savedFilename, mimeType in
+                let savedPath = documentsDirectory.appendingPathComponent(savedFilename)
+                let imagePath = imagesDirectory.appendingPathComponent(savedFilename)
+                try? PrivateStorage.writeAtomically(data, to: savedPath)
+                try? PrivateStorage.writeAtomically(data, to: imagePath)
+                return FileAttachment(data: data, mimeType: mimeType, filename: savedFilename, sourcePath: savedPath.path)
+            }
+        )
+        return ToolResultMessage(toolCallId: call.id, content: built.content, fileAttachment: built.attachment)
+    }
+
+    /// Builds the run_shortcut tool result from the captured output. Static
+    /// (no executor state) so the selftest can drive the real result logic.
+    /// With `outputProblem` set the result is a failure with error_code
+    /// output_incomplete, and nothing is decoded, saved or attached: the
+    /// capture keeps no cut prefix to begin with.
+    nonisolated static func buildShortcutResult(
+        shortcutName: String,
+        exitCode: Int32,
+        finalOutputData: Data,
+        outputProblem: String?,
+        appleEventsPermissionDenied: Bool,
+        appleScriptErrorText: String,
+        saveImage: (_ data: Data, _ savedFilename: String, _ mimeType: String) -> FileAttachment?
+    ) -> (content: String, attachment: FileAttachment?) {
+        let finalOutputData = outputProblem == nil ? finalOutputData : Data()
         // Check if output contains binary media (image) by checking magic bytes
         var fileAttachment: FileAttachment? = nil
         var outputInfo = ""
@@ -3716,19 +3763,14 @@ extension ToolExecutor {
                 }
                 
                 let savedFilename = "shortcut_\(UUID().uuidString).\(fileExtension)"
-                let savedPath = documentsDirectory.appendingPathComponent(savedFilename)
-                let imagePath = imagesDirectory.appendingPathComponent(savedFilename)
-                
-                try? PrivateStorage.writeAtomically(finalOutputData, to: savedPath)
-                try? PrivateStorage.writeAtomically(finalOutputData, to: imagePath)
-                
-                fileAttachment = FileAttachment(data: finalOutputData, mimeType: mimeType, filename: savedFilename, sourcePath: savedPath.path)
+                fileAttachment = saveImage(finalOutputData, savedFilename, mimeType)
                 outputInfo = ", \"output_file\": {\"filename\": \"\(savedFilename)\", \"mimeType\": \"\(mimeType)\", \"sizeBytes\": \(finalOutputData.count), \"message\": \"Image output saved and visible for analysis\"}"
                 
                 print("[ToolExecutor] Shortcut produced image output: \(savedFilename) (\(finalOutputData.count) bytes)")
             } else {
                 // Text output from stdout
-                let textOutput = String(data: finalOutputData, encoding: .utf8) ?? ""
+                // Never "" for non-empty output: invalid bytes become U+FFFD.
+                let textOutput = ProcessOutputCapture.text(finalOutputData)
                 if !textOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let escapedOutput = textOutput.trimmingCharacters(in: .whitespacesAndNewlines)
                         .replacingOccurrences(of: "\\", with: "\\\\")
@@ -3742,20 +3784,25 @@ extension ToolExecutor {
         }
         
         // Build result
-        let permissionDeniedNoOutput = appleEventsPermissionDenied && finalOutputData.isEmpty
-        let success = (exitCode == 0) && !permissionDeniedNoOutput
+        let permissionDeniedNoOutput = appleEventsPermissionDenied && finalOutputData.isEmpty && outputProblem == nil
+        let success = (exitCode == 0) && !permissionDeniedNoOutput && outputProblem == nil
         
         var result = "{\"success\": \(success), \"exit_code\": \(exitCode), \"shortcut\": \"\(shortcutName.replacingOccurrences(of: "\"", with: "\\\""))\""
         
         result += outputInfo
         
-        if permissionDeniedNoOutput {
+        if let problem = outputProblem {
+            let message = "Shortcut '\(shortcutName)' ran, but its \(problem); no output was returned."
+            result += ", \"error_code\": \"output_incomplete\", \"message\": \"\(message.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
+        } else if permissionDeniedNoOutput {
             result += ", \"error_code\": \"apple_events_permission_denied\""
         } else if success && finalOutputData.isEmpty {
             result += ", \"warning\": \"Shortcut executed but returned no output\""
         }
         
-        if permissionDeniedNoOutput {
+        if outputProblem != nil {
+            // message already set above
+        } else if permissionDeniedNoOutput {
             let errorMessage = "AppleEvents permission denied while running Shortcuts Events (-10004). In System Settings > Privacy & Security > Automation, allow this app to control Shortcuts Events, then retry."
             let escapedMessage = errorMessage
                 .replacingOccurrences(of: "\\", with: "\\\\")
@@ -3778,12 +3825,11 @@ extension ToolExecutor {
         }
         
         result += "}"
-        
-        return ToolResultMessage(toolCallId: call.id, content: result, fileAttachment: fileAttachment)
+        return (result, fileAttachment)
     }
     
     /// Detect MIME type from file data by checking magic bytes
-    private func detectMimeType(from data: Data) -> String {
+    nonisolated static func detectMimeType(from data: Data) -> String {
         guard data.count >= 12 else { return "application/octet-stream" }
         
         let bytes = [UInt8](data.prefix(12))
@@ -3826,15 +3872,25 @@ extension ToolExecutor {
         return "application/octet-stream"
     }
     
-    private func runShortcutViaAppleScript(name: String, input: String?, timeoutSeconds: Double) async -> (exitCode: Int32, outputData: Data, errorText: String) {
+    /// (status, output, error text, outputProblem). `outputProblem` is set when
+    /// the output could not be captured completely; `outputData` is then empty.
+    typealias ShortcutRunOutput = (exitCode: Int32, outputData: Data, errorText: String, outputProblem: String?)
+
+    private func runShortcutViaAppleScript(name: String, input: String?, timeoutSeconds: Double) async -> ShortcutRunOutput {
         // Prefer in-process AppleScript so sandbox/TCC permissions apply to this app directly.
-        let inProcessResult = await runShortcutViaInProcessAppleScript(name: name, input: input)
+        let inProcess = await runShortcutViaInProcessAppleScript(name: name, input: input)
+        let inProcessResult: ShortcutRunOutput = (inProcess.exitCode, inProcess.outputData, inProcess.errorText, nil)
         if inProcessResult.exitCode == 0 || !inProcessResult.errorText.isEmpty {
             return inProcessResult
         }
         
         print("[ToolExecutor] In-process AppleScript returned empty output; trying osascript fallback...")
         let osascriptResult = await runShortcutViaOSAScript(name: name, input: input, timeoutSeconds: timeoutSeconds)
+        // Incomplete output is final: running the shortcut again through the
+        // CLI would repeat its side effects and hit the same limit.
+        if osascriptResult.outputProblem != nil {
+            return osascriptResult
+        }
         if osascriptResult.exitCode == 0, !osascriptResult.outputData.isEmpty {
             return osascriptResult
         }
@@ -3894,7 +3950,7 @@ extension ToolExecutor {
         #endif
     }
     
-    private func runShortcutViaOSAScript(name: String, input: String?, timeoutSeconds: Double) async -> (exitCode: Int32, outputData: Data, errorText: String) {
+    private func runShortcutViaOSAScript(name: String, input: String?, timeoutSeconds: Double) async -> ShortcutRunOutput {
         let escapedName = name
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
@@ -3914,15 +3970,28 @@ extension ToolExecutor {
             timeoutSeconds: timeoutSeconds,
             register: { [self] in self.registerRunningProcess($0) }
         )
-        return (result.exitCode, result.stdoutData, String(data: result.stderrData, encoding: .utf8) ?? "")
+        return (result.exitCode, result.stdoutData, ProcessOutputCapture.text(result.stderrData), result.outputProblem)
+    }
+
+    /// Result of one shortcuts-related process. `outputProblem` is set when
+    /// stdout is not the complete output (over the 64 MB capture limit, still
+    /// held open by a background process, or a read error); `stdoutData` is
+    /// then EMPTY, so no caller can save, attach or decode a cut prefix as if
+    /// it were the shortcut's result.
+    struct ShortcutProcessResult: Sendable {
+        let exitCode: Int32
+        let stdoutData: Data
+        let stderrData: Data
+        let outputProblem: String?
     }
 
     /// Runs one shortcuts-related process (the CLI, its `| cat` fallback, or
     /// osascript) with the shortcut timeout. stdout and stderr are drained
     /// WHILE it runs; reading them only in the termination handler blocked any
     /// shortcut printing > 64 KB until the timeout terminated it. Same results
-    /// as before: (status, stdout, stderr); a launch failure is (-1, empty,
-    /// the error text); the timeout sends terminate() as before.
+    /// as before (status, stdout, stderr; a launch failure is -1, empty, the
+    /// error text; the timeout sends terminate()), plus `outputProblem` when
+    /// stdout could not be captured completely.
     nonisolated static func runShortcutProcess(
         executable: String,
         arguments: [String],
@@ -3930,7 +3999,7 @@ extension ToolExecutor {
         register: @escaping @Sendable (Process) -> Void,
         onTimeout: (@Sendable () -> Void)? = nil,
         onLaunchFailure: (@Sendable (Error) -> Void)? = nil
-    ) async -> (exitCode: Int32, stdoutData: Data, stderrData: Data) {
+    ) async -> ShortcutProcessResult {
         await withCheckedContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
@@ -3945,7 +4014,12 @@ extension ToolExecutor {
             process.terminationHandler = { proc in
                 ToolExecutor.unregisterRunningProcess(proc)
                 let output = capture.finish(within: 2)
-                continuation.resume(returning: (proc.terminationStatus, output.stdout, output.stderr))
+                let problem = output.stdoutProblem
+                continuation.resume(returning: ShortcutProcessResult(
+                    exitCode: proc.terminationStatus,
+                    stdoutData: problem == nil ? output.stdout : Data(),
+                    stderrData: output.stderr,
+                    outputProblem: problem.map { "output \($0)" }))
             }
             
             do {
@@ -3960,7 +4034,8 @@ extension ToolExecutor {
                 }
             } catch {
                 onLaunchFailure?(error)
-                continuation.resume(returning: (-1, Data(), Data(error.localizedDescription.utf8)))
+                continuation.resume(returning: ShortcutProcessResult(
+                    exitCode: -1, stdoutData: Data(), stderrData: Data(error.localizedDescription.utf8), outputProblem: nil))
             }
         }
     }

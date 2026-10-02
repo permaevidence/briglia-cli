@@ -891,17 +891,18 @@ actor GoogleWorkspaceService {
         process.waitUntilExit()
         let output = capture.finish(within: 2)
         let stdout = String(data: output.stdout, encoding: .utf8) ?? ""
-        let stderr = String(data: output.stderr, encoding: .utf8) ?? ""
+        let stderr = ProcessOutputCapture.text(output.stderr)
         let head = stderr.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200)
         let stderrHead = head.isEmpty ? nil : String(head)
         guard process.terminationStatus == 0 else {
             print("[GoogleWorkspaceService] \(executable) exit=\(process.terminationStatus); stderr head: \(head)")
             return ProcessRunResult(stdout: nil, failureDetail: "exit \(process.terminationStatus)\(head.isEmpty ? "" : ": \(head)")", stderrHead: stderrHead)
         }
-        guard !output.stdoutTruncated else {
-            let limit = "\(ProcessOutputCapture.defaultLimit / 1_048_576) MB"
-            print("[GoogleWorkspaceService] \(executable) output exceeded \(limit)")
-            return ProcessRunResult(stdout: nil, failureDetail: "output exceeded \(limit)", stderrHead: stderrHead)
+        // Callers parse this stdout (gws JSON, versions): never hand over a
+        // cut or unfinished capture as if it were the whole output.
+        if let problem = output.stdoutProblem {
+            print("[GoogleWorkspaceService] \(executable) output \(problem)")
+            return ProcessRunResult(stdout: nil, failureDetail: "output \(problem)", stderrHead: stderrHead)
         }
         return ProcessRunResult(stdout: stdout, failureDetail: nil, stderrHead: stderrHead)
     }
