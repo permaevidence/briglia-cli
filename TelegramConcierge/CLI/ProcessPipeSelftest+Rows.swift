@@ -158,6 +158,12 @@ extension ProcessPipeSelftest {
         check("S4b launch failure: (-1, no stdout, the error text)",
               r2.value?.exitCode == -1 && r2.value?.stdoutData.isEmpty == true && r2.value?.stderrData.isEmpty == false
               && flag.get.hasPrefix("launch: "), flag.get)
+        // S5 is macOS only. The Shortcuts tool exists only on macOS
+        // (shortcutsEnabled is false on Linux), and its timeout sends SIGTERM
+        // alone, unchanged since 0.2.45. In the Linux CI container that
+        // SIGTERM did not end the stuck child within the bound, so the row
+        // would test a path Linux never runs and leave a sleeper for X1.
+        #if os(macOS)
         let stuck = script(dir, "sc-stuck", "exec sleep 30")
         let timeoutFlag = CallNote()
         let r3 = await shortcutRun(stuck, timeout: 0.5, flag: timeoutFlag)
@@ -165,6 +171,7 @@ extension ProcessPipeSelftest {
               r3.value != nil && r3.value?.exitCode != 0 && timeoutFlag.get == "timeout" && r3.elapsed < promptBound,
               "exit \(r3.value?.exitCode ?? -99) flag \(timeoutFlag.get)")
         check("S5b the timed-out run was reaped", DiffPipeSelftest.childPids(named: ["sleep", "sc-stuck"]).isEmpty, "")
+        #endif
     }
 
 }
