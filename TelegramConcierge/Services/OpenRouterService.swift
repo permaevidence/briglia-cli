@@ -1181,7 +1181,8 @@ actor OpenRouterService {
             lines.append("Subagent session events: \(events.joined(separator: "; "))")
         }
 
-        lines.append(contentsOf: message.pruneArchiveReferences.map(\.promptText))
+        lines.append(contentsOf: message.renderedPruneArchiveReferences.map(\.promptText))
+        lines.append(contentsOf: message.demotedSummaryNotes)
 
         if let summary = message.prunedContextSummary?.trimmingCharacters(in: .whitespacesAndNewlines),
            !summary.isEmpty {
@@ -1212,6 +1213,7 @@ actor OpenRouterService {
     /// or tool interactions — those are managed by the Watermark pruner separately.
     /// Does NOT count prunedContextSummary either: those summaries are active-context
     /// system hints only and are stripped before archive chunk storage/summarization.
+    /// Demoted summary lines (`demotedPruneSummaries`) are not counted for the same reason.
     ///
     /// For compressible synthetic messages (emails, subagent completions, reminders)
     /// we count the *post-compaction stub* size (~50 tokens) instead of the full

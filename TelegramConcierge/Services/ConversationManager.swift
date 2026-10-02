@@ -95,6 +95,8 @@ class ConversationManager: ObservableObject {
     /// Transient completion notice for the app UI (e.g. manual prune result).
     /// Auto-clears after a few seconds.
     @Published private(set) var maintenanceNotice: String?
+    /// One demotion-snapshot failure notice per episode (Part B §4.4).
+    private var demotionSnapshotNoticeShown = false
     private var maintenanceNoticeClearTask: Task<Void, Never>?
     /// Maps archive-service phases to activity ids so begin/end pairs match.
     private var maintenancePhaseActivityIds: [ConversationArchiveService.MaintenancePhase: UUID] = [:]
@@ -6324,12 +6326,7 @@ class ConversationManager: ObservableObject {
             // Count only the summary/reference delta, so existing notes are
             // not charged twice. Use the committed view, including nil-summary
             // and explicit no-snapshot outcomes.
-            func noteTokens(_ history: [Message]) -> Int {
-                history.reduce(0) { total, message in
-                    total + (message.prunedContextSummary?.count ?? 0) / 4
-                        + message.pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 }
-                }
-            }
+            func noteTokens(_ history: [Message]) -> Int { Self.manualPruneNoteTokens(history) }
             totalTokens += noteTokens(committed) - noteTokens(plannedSource)
         } catch {
             let failure = error.localizedDescription
@@ -8587,7 +8584,7 @@ class ConversationManager: ObservableObject {
     private func estimatedPromptTokens(for message: Message, isLMStudio: Bool? = nil) -> Int {
         var tokens = max(message.content.count / 4 + 1, 1)
         tokens += message.activeTurnCompaction.map { ActiveTurnBudget.text($0.promptText) } ?? 0
-        tokens += prunedContextSummaryTokens(for: message) + message.pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 }
+        tokens += prunedContextSummaryTokens(for: message) + message.renderedPruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 }
         // Replayed final-response reasoning costs prompt tokens; keep the
         // estimate symmetric with the prune savings that subtract it.
         tokens += estimatedFinalReasoningTokens(message)
@@ -8741,8 +8738,10 @@ class ConversationManager: ObservableObject {
     }
 
     private func prunedContextSummaryTokens(for message: Message) -> Int {
-        guard let summary = message.prunedContextSummary, !summary.isEmpty else { return 0 }
-        return max(summary.count / 4, 1)
+        // Demoted lines render as one metadata line each (Part B §7).
+        let demoted = message.demotedSummaryNotes.reduce(0) { $0 + $1.count / 4 }
+        guard let summary = message.prunedContextSummary, !summary.isEmpty else { return demoted }
+        return max(summary.count / 4, 1) + demoted
     }
 
     private func buildPrunePlan(
@@ -8832,6 +8831,11 @@ class ConversationManager: ObservableObject {
                 + " Stored conversation is approximately \(preimageBytes.count) bytes; snapshot size may differ. Nothing was pruned. Free space and retry, or explicitly send /prune nosnapshot to discard details for this prune only.")
         }
         defer { PruneArchiveStore.release(reference) }
+        // Demotion snapshot (summary retention Part B): pinned from creation
+        // until this function exits, i.e. after the checked history write
+        // and the retention call below.
+        var demotionReference: PruneArchiveReference?
+        defer { PruneArchiveStore.release(demotionReference) }
         let text = await summary(summarySource ?? source)
         for action in plan.actions {
             switch action {
@@ -8852,13 +8856,25 @@ class ConversationManager: ObservableObject {
         applyPrunePlan(plan, to: &candidateView)
         _ = pruneCompressibleUserMessages(upToIndex: safeBoundary, in: &candidateView)
         if plan.toolActionCount > 0 { pruneOldCompactToolLogs(in: &candidateView) }
+        let hadSummary = PruneSummaryRetention.isFullAnchor(candidateView[anchor])
         var summaryParts = [candidateView[anchor].prunedContextSummary, text].compactMap { $0 }.filter { !$0.isEmpty }
         if noSnapshot { summaryParts.append("Detailed history discarded by explicit /prune nosnapshot; no new snapshot was saved.") }
         candidateView[anchor].prunedContextSummary = summaryParts.isEmpty ? nil : summaryParts.joined(separator: "\n\n")
+        if !(text ?? "").isEmpty || noSnapshot {
+            // Coverage of what this prune actually summarized: its manifest.
+            let fresh = Self.coverageRecordingDisabledForTesting ? nil
+                : PruneSummaryRetention.coverage(of: source, manifest: plan.affectedIndices + compressedIndices)
+            candidateView[anchor].prunedContextSummaryCoverage = PruneSummaryRetention.merged(
+                hadSummary: hadSummary, previous: candidateView[anchor].prunedContextSummaryCoverage, fresh: fresh)
+        }
         if let reference { candidateView[anchor].pruneArchiveReferences.append(reference) }
         if let measured = candidateView[anchor].measuredTokens {
             candidateView[anchor].measuredTokens = measured + (reference?.promptText.count ?? 0) / 4
         }
+        if !noSnapshot {
+            demotionReference = demoteOlderSummaryAnchors(in: &candidateView, sourceIDs: sourceIDs, trigger: trigger)
+        }
+        Self.beforePruneHistoryWriteForTesting?()
         var replacements: [UUID: Message] = [:]
         for (old, updated) in zip(source, candidateView) {
             if try encoder.encode(old) != encoder.encode(updated) { replacements[updated.id] = updated }
@@ -8877,9 +8893,69 @@ class ConversationManager: ObservableObject {
         applyPrunePlan(plan, to: &trackerPreimage, clearTrackers: true)
         cleanupOrphanedToolAttachmentSnapshots(additionalLiveInteractions: currentRounds)
         TruncationService.cleanupOldFiles()
-        do { try PruneArchiveStore.retainLatest(protecting: Set([reference?.id].compactMap { $0 })) }
+        do { try PruneArchiveStore.retainLatest(protecting: Set([reference?.id, demotionReference?.id].compactMap { $0 })) }
         catch { showMaintenanceNotice("Snapshot retention: \(error.localizedDescription)") }
         return candidateView
+    }
+
+    /// Metadata-note tokens the manual prune counts as its summary/reference
+    /// delta: summaries, demoted lines (their wrapper) and the snapshot links
+    /// rendered through their generic text, each as character count / 4.
+    static func manualPruneNoteTokens(_ history: [Message]) -> Int {
+        history.reduce(0) { total, message in
+            total + (message.prunedContextSummary?.count ?? 0) / 4
+                + message.demotedSummaryNotes.reduce(0) { $0 + $1.count / 4 }
+                + message.renderedPruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 }
+        }
+    }
+
+    /// Summary retention (Part B §4): inside the prune commit only. Keeps the
+    /// newest three summary anchors in full and demotes every older one to a
+    /// deterministic line pointing at a snapshot written FIRST. A failed
+    /// snapshot keeps every anchor in full (the next prune retries); the
+    /// prune itself is never blocked. Returns the pinned demotion snapshot.
+    private func demoteOlderSummaryAnchors(in view: inout [Message], sourceIDs: Set<UUID>, trigger: String) -> PruneArchiveReference? {
+        let anchors = view.indices.filter { PruneSummaryRetention.isFullAnchor(view[$0]) }
+        guard anchors.count > PruneSummaryRetention.maxFullPruneSummaryAnchors else { return nil }
+        // A summary outside the prune's source would make the count wrong.
+        if messages.contains(where: { !sourceIDs.contains($0.id) && PruneSummaryRetention.isFullAnchor($0) }) {
+            print("[PruneRetention] summary outside the prune source; demotion skipped")
+            return nil
+        }
+        let selected = Array(anchors.dropLast(PruneSummaryRetention.maxFullPruneSummaryAnchors))
+        let demotionRef: PruneArchiveReference
+        do {
+            demotionRef = try PruneArchiveStore.write(messages: selected.map { view[$0] }, trigger: trigger,
+                removedIDs: selected.map { view[$0].id }, leadNote: PruneSummaryRetention.snapshotLeadNote, pin: true)
+            demotionSnapshotNoticeShown = false
+        } catch {
+            print("[PruneRetention] demotion snapshot failed: \(error.localizedDescription)")
+            if !demotionSnapshotNoticeShown {
+                demotionSnapshotNoticeShown = true
+                showMaintenanceNotice("Older summaries stay in full for now: their snapshot could not be saved (\(error.localizedDescription)). The next prune retries.")
+            }
+            return nil
+        }
+        Self.afterDemotionSnapshotForTesting?(demotionRef)
+        for index in selected {
+            let message = view[index]
+            guard let summary = message.prunedContextSummary else { continue }
+            let recorded = message.prunedContextSummaryCoverage.flatMap { $0.isValid ? $0 : nil }
+            guard let coverage = recorded ?? PruneSummaryRetention.legacyCoverage(in: view, anchor: index),
+                  let line = PruneSummaryRetention.line(for: coverage, snapshot: demotionRef),
+                  let record = try? DemotedPruneSummary(line: line, snapshot: demotionRef, coverage: coverage) else {
+                print("[PruneRetention] demotion line over budget; anchor kept in full")
+                continue
+            }
+            view[index].demotedPruneSummaries.append(record)
+            view[index].prunedContextSummary = nil
+            view[index].prunedContextSummaryCoverage = nil
+            if !view[index].pruneArchiveReferences.contains(demotionRef) { view[index].pruneArchiveReferences.append(demotionRef) }
+            if let measured = view[index].measuredTokens {
+                view[index].measuredTokens = max(1, measured - summary.count / 4 + PruneSummaryRetention.wrapper(line).count / 4)
+            }
+        }
+        return demotionRef
     }
 
     private func appendPrunedContextSummary(_ summary: String, toMessageAt index: Int) {
@@ -9551,7 +9627,7 @@ class ConversationManager: ObservableObject {
             isMidLoop: true
         )
 
-        let oldMetadataTokens = messagesForLLM.reduce(0) { $0 + prunedContextSummaryTokens(for: $1) + $1.pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 } }
+        let oldMetadataTokens = messagesForLLM.reduce(0) { $0 + prunedContextSummaryTokens(for: $1) + $1.renderedPruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 } }
         messagesForLLM = try await commitPrune(plan: plan, compressedIndices: compressedIndices, safeBoundary: safeBoundary,
                 source: plannedSource, currentRounds: currentTurnInteractions, trigger: "mid-turn") { snapshotForSummary in
                 await generatePrunedContextSummary(
@@ -9570,7 +9646,7 @@ class ConversationManager: ObservableObject {
         )
             }
         totalTokens -= plan.savedTokens
-        totalTokens += messagesForLLM.reduce(0) { $0 + prunedContextSummaryTokens(for: $1) + $1.pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 } } - oldMetadataTokens
+        totalTokens += messagesForLLM.reduce(0) { $0 + prunedContextSummaryTokens(for: $1) + $1.renderedPruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 } } - oldMetadataTokens
         let anyPruned = !plan.actions.isEmpty || !compressedIndices.isEmpty
         // If we pruned but context is STILL over budget, report exhausted so the
         // caller can force a response rather than looping indefinitely.
@@ -11517,6 +11593,7 @@ class ConversationManager: ObservableObject {
         if let historyLoadFailure { throw HistoryUnreadable(reason: historyLoadFailure) }
         try Self.historyWriteFaultForTesting?()
         try PrivateStorage.writeAtomically(data, to: conversationFileURL)
+        try Self.historyPostWriteFaultForTesting?()
     }
 
     /// Requalify pre-v0.1.28 reasoning provenance (bare model ids) for
@@ -11704,6 +11781,13 @@ class ConversationManager: ObservableObject {
     nonisolated(unsafe) static var historyWriteFaultForTesting: (() throws -> Void)?
     /// Selftest seam: throw to simulate a failed turn-checkpoint write.
     nonisolated(unsafe) static var checkpointWriteFaultForTesting: (() throws -> Void)?
+    /// Selftest seam: throw AFTER the history file was replaced (a failed
+    /// post-rename fsync: the disk holds the new state, the call fails).
+    nonisolated(unsafe) static var historyPostWriteFaultForTesting: (() throws -> Void)?
+    /// Selftest seams (summary retention Part B).
+    nonisolated(unsafe) static var beforePruneHistoryWriteForTesting: (() -> Void)?
+    nonisolated(unsafe) static var afterDemotionSnapshotForTesting: ((PruneArchiveReference) -> Void)?
+    nonisolated(unsafe) static var coverageRecordingDisabledForTesting = false
 
     private func clearTurnSalvageFile() {
         do {
@@ -13456,6 +13540,7 @@ extension ConversationManager {
             try await add("\nCANONICAL TASK CONTEXT (historical \(message.role.rawValue))\n" + message.content)
             if let summary = message.activeTurnCompaction { try await add(summary.summaryText) }
             if let summary = message.prunedContextSummary { try await add(summary) }
+            for note in message.demotedSummaryNotes { try await add(note) }
             for path in message.imageFileNames + message.documentFileNames { try await add("\nAttachment: " + path) }
         }
         for round in rounds {
@@ -13886,4 +13971,30 @@ extension ConversationManager {
     func _testPersistQueue(_ queue: [Message]) { pendingMidTurnMessages = queue; _ = persistPendingMidTurnQueue() }
     var _testSeenGeneration: UInt64 { seenGenerationAtRequest }
     var _testToolLog: [(label: String, failed: Bool)] { currentTurnToolLog.map { ($0.label, $0.failed) } }
+}
+
+// MARK: - Summary retention (Part B) selftest seams
+//
+// Test-only entry points for `__prune-retention-selftest` (private scratch
+// roots). They call the production commit, loader and estimators.
+extension ConversationManager {
+    /// The real `commitPrune` over a tool-interaction plan for `affected`
+    /// indices of the current history, with a scripted summary text.
+    /// `sourceCount` limits the source to a prefix of history (as a mid-loop
+    /// prune's request view can be); `currentRounds` are the in-flight rounds.
+    func _testRetentionPrune(affected: [Int], compressed: [Int] = [], trigger: String, noSnapshot: Bool = false,
+                             sourceCount: Int? = nil, currentRounds: [ToolInteraction] = [],
+                             summary: String?) async throws -> [Message] {
+        let plan = PrunePlan(actions: affected.map { .toolInteractions(index: $0, savedTokens: 0) },
+                             pruningBoundary: (affected.max() ?? -1) + 1)
+        let source = sourceCount.map { Array(messages.prefix($0)) } ?? messages
+        return try await commitPrune(plan: plan, compressedIndices: compressed, safeBoundary: 0, source: source,
+                                     currentRounds: currentRounds, trigger: trigger, noSnapshot: noSnapshot) { _ in summary }
+    }
+    func _testMetadataNote(_ message: Message) async -> String? { await openRouterService.historyMetadataNote(for: message) }
+    func _testManualPrune(noSnapshot: Bool = false) async { await manualPruneToolInteractions(notify: nil, noSnapshot: noSnapshot) }
+    func _testSummaryNoteTokens(_ message: Message) -> Int { prunedContextSummaryTokens(for: message) }
+    func _testPromptTokens(_ message: Message) -> Int { estimatedPromptTokens(for: message, isLMStudio: false) }
+    var _testMaintenanceNotice: String? { maintenanceNotice }
+    var _testArchiveService: ConversationArchiveService { archiveService }
 }

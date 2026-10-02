@@ -161,7 +161,8 @@ struct ActiveTurnBudget {
         if let summary = message.activeTurnCompaction { n += text(summary.promptText) }
         if let summary = message.prunedContextSummary { n += text(summary) }
         if let log = message.compactToolLog { n += text(log) }
-        n += message.pruneArchiveReferences.reduce(0) { $0 + text($1.promptText) }
+        n += message.renderedPruneArchiveReferences.reduce(0) { $0 + text($1.promptText) }
+        n += message.demotedSummaryNotes.reduce(0) { $0 + text($1) }
         return n
     }
     /// Allowance for the summary that replaces a compacted prefix; `fixed`

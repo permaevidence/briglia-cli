@@ -91,6 +91,21 @@ struct Message: Identifiable, Codable, Equatable {
     var pruneArchiveReferences: [PruneArchiveReference] = []
     var activeTurnCompaction: ActiveTurnCompaction? = nil
     var prunedContextSummary: String?
+    /// Coverage of the live `prunedContextSummary`, recorded at prune time
+    /// (summary retention Part B). Local bookkeeping; never rendered.
+    var prunedContextSummaryCoverage: PruneSummaryCoverage? = nil
+    /// Older summary anchors demoted to one-line snapshot pointers.
+    var demotedPruneSummaries: [DemotedPruneSummary] = []
+
+    /// Snapshot links rendered through their generic text: a demoted line's
+    /// own snapshot is shown once, inside that line.
+    var renderedPruneArchiveReferences: [PruneArchiveReference] {
+        guard !demotedPruneSummaries.isEmpty else { return pruneArchiveReferences }
+        let demoted = Set(demotedPruneSummaries.map(\.snapshot.id))
+        return pruneArchiveReferences.filter { !demoted.contains($0.id) }
+    }
+    /// The rendered metadata text of each demoted line.
+    var demotedSummaryNotes: [String] { demotedPruneSummaries.map { PruneSummaryRetention.wrapper($0.line) } }
 
     // When true, inline multimodal data (images/PDFs) is skipped and replaced
     // by text hints with descriptions. Set by the Watermark pruner alongside
@@ -146,7 +161,8 @@ struct Message: Identifiable, Codable, Equatable {
     /// otherwise a rough estimate (~4 chars/token + media + tool costs).
     var displayTokenCount: Int {
         if let measured = measuredTokens { return measured }
-        var tokens = max(content.count / 4, 1) + pruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 }
+        var tokens = max(content.count / 4, 1) + renderedPruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 }
+        tokens += demotedSummaryNotes.reduce(0) { $0 + $1.count / 4 }
         if let prunedContextSummary, !prunedContextSummary.isEmpty {
             tokens += prunedContextSummary.count / 4
         }
@@ -259,7 +275,7 @@ struct Message: Identifiable, Codable, Equatable {
         case imageFileNames, documentFileNames, imageFileSizes, documentFileSizes
         case referencedImageFileNames, referencedDocumentFileNames
         case referencedDocumentFileSizes
-        case downloadedDocumentFileNames, editedFilePaths, generatedFilePaths, accessedProjectIds, subagentSessionEvents, toolInteractions, compactToolLog, finalReasoning, finalReasoningDetails, finalReasoningModel, prunedContextSummary, mediaPruned, measuredToolTokens, measuredTokens, kind, originChannel
+        case downloadedDocumentFileNames, editedFilePaths, generatedFilePaths, accessedProjectIds, subagentSessionEvents, toolInteractions, compactToolLog, finalReasoning, finalReasoningDetails, finalReasoningModel, prunedContextSummary, prunedContextSummaryCoverage, demotedPruneSummaries, mediaPruned, measuredToolTokens, measuredTokens, kind, originChannel
         // Legacy single-value fields (for decoding old data)
         case imageFileName, documentFileName, imageFileSize, documentFileSize
         case referencedImageFileName, referencedDocumentFileName
@@ -369,6 +385,8 @@ struct Message: Identifiable, Codable, Equatable {
             }
         }
         prunedContextSummary = try? container.decodeIfPresent(String.self, forKey: .prunedContextSummary)
+        prunedContextSummaryCoverage = (try? container.decodeIfPresent(PruneSummaryCoverage.self, forKey: .prunedContextSummaryCoverage)) ?? nil
+        demotedPruneSummaries = DemotedPruneSummary.decodeLeniently(from: container, forKey: .demotedPruneSummaries)
 
         // Media pruned flag (new field, default false for old messages)
         mediaPruned = (try? container.decodeIfPresent(Bool.self, forKey: .mediaPruned)) ?? false
@@ -426,6 +444,8 @@ struct Message: Identifiable, Codable, Equatable {
         if !pruneArchiveReferences.isEmpty { try container.encode(pruneArchiveReferences, forKey: .pruneArchiveReferences) }
         try container.encodeIfPresent(activeTurnCompaction, forKey: .activeTurnCompaction)
         try container.encodeIfPresent(prunedContextSummary, forKey: .prunedContextSummary)
+        try container.encodeIfPresent(prunedContextSummaryCoverage, forKey: .prunedContextSummaryCoverage)
+        if !demotedPruneSummaries.isEmpty { try container.encode(demotedPruneSummaries, forKey: .demotedPruneSummaries) }
         // Only encode mediaPruned when true (non-default)
         if mediaPruned {
             try container.encode(mediaPruned, forKey: .mediaPruned)
@@ -458,6 +478,8 @@ struct Message: Identifiable, Codable, Equatable {
         lhs.accessedProjectIds == rhs.accessedProjectIds &&
         lhs.pruneArchiveReferences == rhs.pruneArchiveReferences &&
         lhs.prunedContextSummary == rhs.prunedContextSummary &&
+        lhs.prunedContextSummaryCoverage == rhs.prunedContextSummaryCoverage &&
+        lhs.demotedPruneSummaries == rhs.demotedPruneSummaries &&
         lhs.activeTurnCompaction == rhs.activeTurnCompaction &&
         lhs.kind == rhs.kind
     }

@@ -66,6 +66,7 @@ jobs:
           python3 scripts/chronology_lifecycle_migration_test.py
           python3 scripts/web_subagent_r2_lifecycle_migration_test.py
           python3 scripts/output_cap_removal_migration_test.py
+          python3 scripts/summary_retention_lifecycle_migration_test.py
           python3 scripts/prune_schema_contract_test.py
       - name: Chat Completions lifecycle r3 and shipped-client differential gate
         run: python3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline scripts/fixtures/chat-lifecycle/ci-linux-x86_64-r2.json
@@ -145,6 +146,7 @@ jobs:
           python3 scripts/chronology_lifecycle_migration_test.py
           python3 scripts/web_subagent_r2_lifecycle_migration_test.py
           python3 scripts/output_cap_removal_migration_test.py
+          python3 scripts/summary_retention_lifecycle_migration_test.py
           python3 scripts/prune_schema_contract_test.py
       - name: Chat Completions lifecycle r3 and shipped-client differential gate
         # The frozen macOS fixture embeds rendered PDF pages whose Apple ICC

@@ -126,7 +126,7 @@ enum PruneArchiveStore {
 
     static func write(messages: [Message], currentRounds: [ToolInteraction] = [],
                       alternateMessages: [Message] = [], trigger: String,
-                      removedIDs: [UUID], removedCallIDs: [String] = [], priorActiveSummary: ActiveTurnCompaction? = nil, directory: URL = root, pin: Bool = false) throws -> PruneArchiveReference {
+                      removedIDs: [UUID], removedCallIDs: [String] = [], priorActiveSummary: ActiveTurnCompaction? = nil, leadNote: String? = nil, directory: URL = root, pin: Bool = false) throws -> PruneArchiveReference {
         lock.lock(); defer { lock.unlock() }
         _ = try directoryExists(directory)
         try PrivateStorage.ensureDirectory(directory)
@@ -187,6 +187,8 @@ enum PruneArchiveStore {
         let header = Header(version: 1, id: id, created: now, trigger: trigger,
                             messages: messages.count, rounds: messages.reduce(0) { $0 + $1.toolInteractions.count } + newRounds.count)
         try line("BRIGLIA SNAPSHOT 1 " + json(header))
+        // Free body text only; the header (and its trigger whitelist) is unchanged.
+        if let leadNote { try line(leadNote) }
         let local = ISO8601DateFormatter(); local.timeZone = .current
         try line("Created UTC: " + ISO8601DateFormatter().string(from: now))
         try line("Created local: " + local.string(from: now))
@@ -265,6 +267,13 @@ enum PruneArchiveStore {
                 try line("Prior snapshot: " + summary.latestSnapshotReference.relativePath)
             }
             if let summary = message.prunedContextSummary { try line("Prior pruning summary:"); try line(summary) }
+            if let coverage = message.prunedContextSummaryCoverage, coverage.isValid {
+                try line("Prior pruning summary coverage: " + PruneSummaryRetention.span(coverage)
+                         + (coverage.complete ? "" : " (approx.)") + "; files: " + json(coverage.files))
+            }
+            for record in message.demotedPruneSummaries {
+                try line("Demoted summary line: " + record.line + " (full text: " + record.snapshot.relativePath + ")")
+            }
             if let log = message.compactToolLog { try line("Compact tool log:"); try line(log) }
             try line("Readable final reasoning:"); try readable(message.finalReasoning); try readable(message.finalReasoningDetails)
             if let model = message.finalReasoningModel { try line("Final model/provider: " + model) }
@@ -373,9 +382,21 @@ enum PruneArchiveStore {
         // an open crash record. The limit may be exceeded temporarily; it is
         // restored as records settle.
         let proofPinned = SettlementEvidence.pinnedSnapshotIds(snapshots: directory, entries: all)
+        // Summary retention (Part B §6): a snapshot behind a demoted summary
+        // line in the COMMITTED history (disk, not memory: right after a
+        // restart, a Mind import or a post-rename write failure) is spared.
+        // Unreadable history deletes nothing this run and does not throw.
+        let demotionLinked: Set<UUID>
+        switch PruneSummaryRetention.liveDemotionSnapshots(historyFile: directory.deletingLastPathComponent().appendingPathComponent("conversation.json")) {
+        case .absent: demotionLinked = []
+        case .snapshots(let ids): demotionLinked = ids
+        case .unreadable(let reason):
+            print("[PruneRetention] history unreadable; retention skipped (\(reason))")
+            return
+        }
         let doomed = all.filter { entry in
             guard excess > 0, !protecting.contains(entry.reference.id), pinned[entry.reference.id] == nil,
-                  !proofPinned.contains(entry.reference.id) else { return false }
+                  !proofPinned.contains(entry.reference.id), !demotionLinked.contains(entry.reference.id) else { return false }
             excess -= 1
             return true
         }

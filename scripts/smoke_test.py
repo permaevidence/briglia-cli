@@ -479,6 +479,15 @@ def main():
     result = run_selftest([os.path.abspath(ADA), "__archive-full-chunk-selftest"], capture_output=True, text=True, timeout=180)
     check("archive full-chunk selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # Past-turn summary retention (Part B): the newest 3 prune-summary
+    # anchors stay in full, older ones become a deterministic one-line
+    # snapshot pointer (300-scalar budget, recorded coverage, approx. rule),
+    # demotion inside the prune commit, snapshot protection in retention via
+    # the committed history. Re-executes itself in a private scratch home and
+    # preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__prune-retention-selftest"], capture_output=True, text=True, timeout=900)
+    check("prune retention selftest", result.returncode == 0, (result.stdout + result.stderr)[-2500:])
+
     # File-tool diff pipe deadlock: full rewrites (~80 KB and >1 MB) through
     # the real write_file / edit_file / apply_patch paths return with a capped
     # diff, small diffs unchanged, a stuck diff is killed and reaped at the

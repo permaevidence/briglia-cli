@@ -2581,6 +2581,8 @@ actor ConversationArchiveService {
             || message.hasFinalReasoningPayload
             || message.compactToolLog != nil
             || message.prunedContextSummary != nil
+            || message.prunedContextSummaryCoverage != nil
+            || !message.demotedPruneSummaries.isEmpty
             || message.activeTurnCompaction != nil
             || message.measuredToolTokens != nil
             || message.measuredTokens != nil
@@ -3125,4 +3127,10 @@ enum ArchiveError: LocalizedError {
             return false
         }
     }
+}
+
+// Selftest seams (summary retention Part B): the archive's real sanitizer.
+extension ConversationArchiveService {
+    func _testSanitizeForArchive(_ message: Message) -> Message { sanitizeMessageForArchive(message) }
+    func _testNeedsArchiveSanitization(_ message: Message) -> Bool { messageNeedsArchiveSanitization(message) }
 }

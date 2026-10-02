@@ -1,0 +1,24 @@
+{
+ "purpose": "r13 summary retention Part B (2026-10-02, plan SUMMARY_BOUNDS_AND_RETENTION v5): every prune that appends a summary now records prunedContextSummaryCoverage on its anchor (persisted bookkeeping, never rendered, never in a request). The frozen lifecycle driver commits one prune summary in each listed scenario and never holds more than three anchors, so nothing is demoted. Candidate-side only: exactly one coverage object is removed from each listed scenario's durable, snapshot and rawConversation views (rawConversation by exact byte removal of the key and its value); no capture may carry a coverage or demotion key; no observation may carry demotedPruneSummaries. Everything else is compared by the earlier rules unchanged.",
+ "key": "prunedContextSummaryCoverage",
+ "scenarios": [
+  "automatic-protected",
+  "automatic-prune",
+  "estimated",
+  "exhausted-after-prune",
+  "exhausted-protected",
+  "large-reasoning",
+  "manual",
+  "media-prune",
+  "over-prunable",
+  "reasoning-only",
+  "summary-tools-refused",
+  "synthetic-prune",
+  "unsent-delta"
+ ],
+ "views": [
+  "durable",
+  "snapshot"
+ ],
+ "per_view": 1
+}
