@@ -24,10 +24,15 @@ import Darwin
 ///
 /// Reader lifetime is bounded by `finish`: if a stream has not reached EOF
 /// by the grace deadline (a descendant still holds the write end), its
-/// reader is told to stop, leaves its poll loop within one poll interval,
-/// closes its read end and exits. Nothing is left running after `finish`
-/// returns; a descendant that keeps writing afterwards gets EPIPE / SIGPIPE,
-/// as with any reader that stops reading. Descendants are never signalled.
+/// reader is told to stop, normally leaves its poll loop within one poll
+/// interval, closes its read end and exits. `finish` is a terminal state:
+/// a `start()` that arrives after it (the launching thread was slower than a
+/// terminationHandler that already gave up) starts nothing, and a `start()`
+/// already in progress completes before `finish` stops its readers. So no
+/// reader is left running after `finish` returns. Briglia never signals a
+/// descendant, but once the read end is closed a descendant that writes again
+/// gets EPIPE, and the OS normally ends it with SIGPIPE; a descendant meant
+/// to outlive the call should redirect its output.
 ///
 /// Each stream keeps at most `limit` bytes; anything beyond is still read
 /// (so the child never blocks) but dropped, and the stream is flagged as
@@ -95,9 +100,17 @@ final class ProcessOutputCapture: @unchecked Sendable {
 
     private let stdoutReader: Reader?
     private let stderrReader: Reader?
+    /// Guards `startedFlag` / `finishedFlag`. `start()` holds it while it
+    /// spawns the readers, so `finish` sees either "not started" (and then
+    /// forbids any later start) or "readers running" — never a half start.
     private let stateLock = NSLock()
     private var startedFlag = false
+    private var finishedFlag = false
     private let started = DispatchSemaphore(value: 0)
+    /// Selftest only: runs inside `start()` after it claimed the start and
+    /// before the readers are spawned, to force the "finish while start is
+    /// in progress" interleaving. Always nil in production.
+    var startPauseForTesting: (() -> Void)?
 
     init(stdout: Pipe?, stderr: Pipe?, limit: Int = defaultLimit) {
         stdoutReader = stdout.map { Reader($0.fileHandleForReading, limit: limit) }
@@ -107,38 +120,58 @@ final class ProcessOutputCapture: @unchecked Sendable {
     /// Starts the readers. Call only after `process.run()` succeeded: before
     /// that the parent still holds the pipes' write ends, so EOF would never
     /// arrive.
+    /// Does nothing if `finish` already ran: the output is then reported as
+    /// "not captured" and no reader may outlive that `finish`.
     func start() {
         stateLock.lock()
-        guard !startedFlag else { stateLock.unlock(); return }
+        guard !startedFlag, !finishedFlag else { stateLock.unlock(); return }
         startedFlag = true
-        stateLock.unlock()
+        startPauseForTesting?()
         stdoutReader?.start()
         stderrReader?.start()
+        stateLock.unlock()
         started.signal()
     }
 
     /// Waits up to `grace` for both streams to reach EOF (the child has
     /// normally exited by now, so this is the time to read what is left in
     /// the pipe, microseconds in practice), then stops any reader still
-    /// waiting and returns what was read with how each stream ended. Returns
-    /// within `grace` plus one reader poll interval; no reader thread is left
-    /// running. Call once.
+    /// waiting and returns what was read with how each stream ended.
+    /// Normally returns within `grace` plus one reader poll interval; the
+    /// wait for each reader to leave is additionally guarded at 5 s, only
+    /// reachable under a stalled scheduler. No reader thread is left running.
+    /// Terminal: a later `start()` does nothing. Call once.
     func finish(within grace: TimeInterval) -> Output {
         let deadline = Date().addingTimeInterval(grace)
         // A terminationHandler can fire before the launching code reached
         // start(); give it the same grace.
         if started.wait(timeout: .now() + max(0, deadline.timeIntervalSinceNow)) == .success {
             started.signal()
+            stateLock.lock(); finishedFlag = true; stateLock.unlock()
         } else {
-            return Output(stdout: Data(), stderr: Data(), stdoutTruncated: false, stderrTruncated: false,
-                          stdoutEnd: stdoutReader == nil ? .eof : .notStarted,
-                          stderrEnd: stderrReader == nil ? .eof : .notStarted)
+            // Decide under the lock: either no start has claimed the
+            // readers yet (then none ever will), or a start is in progress
+            // and holds the lock until its readers exist (then stop them
+            // below like any other).
+            stateLock.lock()
+            finishedFlag = true
+            let readersExist = startedFlag
+            stateLock.unlock()
+            if !readersExist {
+                // No reader will ever own these read ends now; close them so
+                // nothing stays open on our side.
+                stdoutReader?.closeUnstarted()
+                stderrReader?.closeUnstarted()
+                return Output(stdout: Data(), stderr: Data(), stdoutTruncated: false, stderrTruncated: false,
+                              stdoutEnd: stdoutReader == nil ? .eof : .notStarted,
+                              stderrEnd: stderrReader == nil ? .eof : .notStarted)
+            }
         }
         stdoutReader?.wait(until: deadline)
         stderrReader?.wait(until: deadline)
         // Stop whatever has not reached EOF, then wait for the threads to
-        // leave (bounded by one poll interval; the extra seconds are only a
-        // guard against a stalled scheduler).
+        // leave (normally within one poll interval; the 5 s per reader is
+        // only a guard against a stalled scheduler).
         stdoutReader?.cancel()
         stderrReader?.cancel()
         stdoutReader?.waitStopped(seconds: 5)
@@ -254,6 +287,10 @@ final class ProcessOutputCapture: @unchecked Sendable {
         }
 
         func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+
+        /// Only for a reader whose thread can no longer be started (the
+        /// capture finished first), so no thread can be using the fd.
+        func closeUnstarted() { try? handle.close() }
 
         func waitStopped(seconds: TimeInterval) {
             if stopped.wait(timeout: .now() + seconds) == .success { stopped.signal() }

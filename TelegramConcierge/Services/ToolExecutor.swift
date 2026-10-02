@@ -3998,7 +3998,8 @@ extension ToolExecutor {
         timeoutSeconds: Double,
         register: @escaping @Sendable (Process) -> Void,
         onTimeout: (@Sendable () -> Void)? = nil,
-        onLaunchFailure: (@Sendable (Error) -> Void)? = nil
+        onLaunchFailure: (@Sendable (Error) -> Void)? = nil,
+        afterLaunchForTesting: (@Sendable () -> Void)? = nil
     ) async -> ShortcutProcessResult {
         await withCheckedContinuation { continuation in
             let process = Process()
@@ -4024,6 +4025,9 @@ extension ToolExecutor {
             
             do {
                 try process.run()
+                // Selftest only (nil in production): delays the launching
+                // thread so the terminationHandler's finish() runs first.
+                afterLaunchForTesting?()
                 capture.start()
                 register(process)
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds) {

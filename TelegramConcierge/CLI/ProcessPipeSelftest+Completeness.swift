@@ -211,6 +211,101 @@ extension ProcessPipeSelftest {
               ProcessOutputCapture.Output.problem(truncated: false, end: .readError(EIO)) == "could not be read completely (read error \(EIO))", "")
     }
 
+    // MARK: - R4: finish is terminal, even against a late or in-progress start
+
+    /// Synchronous wrapper so async rows can wait on a test semaphore.
+    static func waitSignal(_ s: DispatchSemaphore, _ seconds: Double) {
+        _ = s.wait(timeout: .now() + seconds)
+    }
+
+    /// Starts `holderScript` (prints "done", leaves a sleeper holding stdout
+    /// + stderr) and returns the process, its pipes and the sleeper pid.
+    static func launchHolder(_ dir: URL, _ name: String) -> (Pipe, Pipe, Int32?)? {
+        let pidFile = dir.appendingPathComponent(name + ".pid").path
+        let exe = holderScript(dir, name, body: "printf 'done'", pidFile: pidFile)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        p.standardInput = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        return (out, err, readPid(pidFile))
+    }
+
+    /// A terminationHandler's finish() gave up waiting for
+    /// start() (the launching thread was delayed), then the late start()
+    /// spawned readers that lived until the descendant closed the pipe.
+    static func lateStart(_ check: Check, dir: URL) async {
+        let baseThreads = ProcessOutputCapture.liveReaderThreads
+        let baseReaders = ProcessOutputCapture.bufferedBytes
+        var pids: [Int32] = []
+
+        // R4a: finish before start, then the late start.
+        if let (out, err, pid) = launchHolder(dir, "late-start") {
+            if let pid { pids.append(pid) }
+            let capture = ProcessOutputCapture(stdout: out, stderr: err)
+            let o = capture.finish(within: 0.2)
+            capture.start()
+            usleep(300_000) // room for any reader the late start might spawn
+            let threads = ProcessOutputCapture.liveReaderThreads - baseThreads
+            let bytes = ProcessOutputCapture.bufferedBytes - baseReaders
+            let holderAlive = pid.map(alive) ?? false
+            check("R4a finish before start reports \"not captured\", and a later start creates no reader while the descendant still holds the pipe",
+                  o.stdoutEnd == .notStarted && o.stderrEnd == .notStarted && threads == 0 && bytes == 0 && holderAlive,
+                  "end \(o.stdoutEnd)/\(o.stderrEnd), threads +\(threads), buffered +\(bytes), holder alive \(holderAlive)")
+        } else {
+            check("R4a finish before start, then late start", false, "launch failed")
+        }
+
+        // R4b: finish while start() is in progress (claimed, readers not yet spawned).
+        if let (out, err, pid) = launchHolder(dir, "mid-start") {
+            if let pid { pids.append(pid) }
+            let capture = ProcessOutputCapture(stdout: out, stderr: err)
+            let entered = DispatchSemaphore(value: 0)
+            capture.startPauseForTesting = { entered.signal(); usleep(800_000) }
+            let starter = Thread { capture.start() }
+            starter.start()
+            waitSignal(entered, 5)
+            let o = capture.finish(within: 0.2)
+            usleep(300_000)
+            let threads = ProcessOutputCapture.liveReaderThreads - baseThreads
+            let bytes = ProcessOutputCapture.bufferedBytes - baseReaders
+            let holderAlive = pid.map(alive) ?? false
+            check("R4b finish racing a start in progress stops that start's readers: none running, no bytes held, output not complete, descendant still alive",
+                  threads == 0 && bytes == 0 && !o.stdoutComplete && holderAlive,
+                  "end \(o.stdoutEnd)/\(o.stderrEnd), threads +\(threads), buffered +\(bytes), holder alive \(holderAlive)")
+        } else {
+            check("R4b finish racing start in progress", false, "launch failed")
+        }
+
+        // R4c: the same race through the production runShortcutProcess:
+        // the launching thread pauses after process.run(), so the
+        // terminationHandler's finish() gives up (2 s grace) before start().
+        #if os(macOS)
+        let pidFile = dir.appendingPathComponent("sc-late.pid").path
+        let exe = holderScript(dir, "sc-late", body: "printf 'done'", pidFile: pidFile)
+        let resumed = DispatchSemaphore(value: 0)
+        let r = await bounded { () -> ShortcutResult in
+            await ToolExecutor.runShortcutProcess(
+                executable: exe, arguments: [], timeoutSeconds: 10, register: { _ in },
+                afterLaunchForTesting: { usleep(3_000_000); resumed.signal() })
+        }
+        waitSignal(resumed, 10)
+        usleep(300_000) // the launching thread now ran capture.start()
+        let pid = readPid(pidFile)
+        if let pid { pids.append(pid) }
+        let threads = ProcessOutputCapture.liveReaderThreads - baseThreads
+        let bytes = ProcessOutputCapture.bufferedBytes - baseReaders
+        let holderAlive = pid.map(alive) ?? false
+        check("R4c shortcuts: launching thread delayed past the grace → \"not captured\" failure, and its late start leaves no reader while the grandchild runs",
+              r.value?.exitCode == 0 && r.value?.stdoutData.isEmpty == true && r.value?.outputProblem == "output was not captured"
+              && threads == 0 && bytes == 0 && holderAlive,
+              "problem \(r.value?.outputProblem ?? "none"), threads +\(threads), buffered +\(bytes), holder alive \(holderAlive)")
+        #endif
+        for pid in pids { kill(pid, SIGKILL) }
+    }
+
     /// Through each production helper: the child prints "done" and exits,
     /// leaving a sleeper holding stdout + stderr. Each helper returns within
     /// its 2 s grace, reports the output as incomplete instead of using it,

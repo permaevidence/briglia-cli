@@ -112,6 +112,7 @@ struct ProcessPipeSelftest: AsyncParsableCommand {
         await shortcutsErrorsAndTimeout(check, dir: work)
         await descendantHoldsPipe(check, dir: work)
         await readerLifetime(check, dir: work)
+        await lateStart(check, dir: work)
         await captureLimits(check, dir: work)
         await shortcutsCompleteness(check, dir: work)
         leftovers(check)
