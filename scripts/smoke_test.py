@@ -479,6 +479,14 @@ def main():
     result = run_selftest([os.path.abspath(ADA), "__archive-full-chunk-selftest"], capture_output=True, text=True, timeout=180)
     check("archive full-chunk selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # File-tool diff pipe deadlock: full rewrites (~80 KB and >1 MB) through
+    # the real write_file / edit_file / apply_patch paths return with a capped
+    # diff, small diffs unchanged, a stuck diff is killed and reaped at the
+    # deadline, stderr can't block, no diff child or temp file left behind.
+    # Re-executes itself in a private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__diff-pipe-selftest"], capture_output=True, text=True, timeout=300)
+    check("diff pipe selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # Tool stage markers (write_file stall diagnostics): real write_file path
     # records, SIGKILL durability, the stall reporter (report only), rotation,
     # a hung log volume, and the Git reader barrier made visible.

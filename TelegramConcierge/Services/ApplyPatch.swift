@@ -114,7 +114,7 @@ enum ApplyPatch {
             // without re-reading each file.
             var diffsByPath: [String: Any] = [:]
             for file in writtenFiles {
-                if let diff = DiffUtil.unifiedDiff(old: file.oldText, new: file.newText, path: file.path) {
+                if let diff = StageMarkers.measure("fs.diff", { DiffUtil.unifiedDiff(old: file.oldText, new: file.newText, path: file.path) }) {
                     diffsByPath[file.path] = diff
                 }
             }
