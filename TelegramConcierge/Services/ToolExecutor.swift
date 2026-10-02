@@ -3624,37 +3624,14 @@ extension ToolExecutor {
             
             print("[ToolExecutor] CLI fallback command: /usr/bin/shortcuts run '<shortcut name>' --output-path '<sandbox temp file>'")
             
-            let primaryResult: (exitCode: Int32, stdoutData: Data, stderrData: Data) = await withCheckedContinuation { continuation in
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
-                process.arguments = processArguments
-                
-                let stdoutPipe = Pipe()
-                let stderrPipe = Pipe()
-                process.standardOutput = stdoutPipe
-                process.standardError = stderrPipe
-                
-                process.terminationHandler = { proc in
-                    ToolExecutor.unregisterRunningProcess(proc)
-                    let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                    continuation.resume(returning: (proc.terminationStatus, outData, errData))
-                }
-                
-                do {
-                    try process.run()
-                    self.registerRunningProcess(process)
-                    DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds) {
-                        if process.isRunning {
-                            process.terminate()
-                            print("[ToolExecutor] Shortcut '\(shortcutName)' TIMED OUT")
-                        }
-                    }
-                } catch {
-                    print("[ToolExecutor] Failed to launch: \(error)")
-                    continuation.resume(returning: (-1, Data(), Data(error.localizedDescription.utf8)))
-                }
-            }
+            let primaryResult = await Self.runShortcutProcess(
+                executable: "/usr/bin/shortcuts",
+                arguments: processArguments,
+                timeoutSeconds: timeoutSeconds,
+                register: { [self] in self.registerRunningProcess($0) },
+                onTimeout: { print("[ToolExecutor] Shortcut '\(shortcutName)' TIMED OUT") },
+                onLaunchFailure: { print("[ToolExecutor] Failed to launch: \($0)") }
+            )
             
             exitCode = primaryResult.exitCode
             print("[ToolExecutor] CLI fallback exit code: \(primaryResult.exitCode)")
@@ -3694,35 +3671,12 @@ extension ToolExecutor {
                 noOutputPathCommand += " | /bin/cat"
                 print("[ToolExecutor] Retrying CLI with no --output-path + pipe fallback...")
                 
-                let pipedFallback = await withCheckedContinuation { (continuation: CheckedContinuation<(exitCode: Int32, stdoutData: Data, stderrData: Data), Never>) in
-                    let process = Process()
-                    process.executableURL = URL(fileURLWithPath: "/bin/sh")
-                    process.arguments = ["-c", noOutputPathCommand]
-                    
-                    let stdoutPipe = Pipe()
-                    let stderrPipe = Pipe()
-                    process.standardOutput = stdoutPipe
-                    process.standardError = stderrPipe
-                    
-                    process.terminationHandler = { proc in
-                        ToolExecutor.unregisterRunningProcess(proc)
-                        let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                        let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                        continuation.resume(returning: (proc.terminationStatus, outData, errData))
-                    }
-                    
-                    do {
-                        try process.run()
-                        self.registerRunningProcess(process)
-                        DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds) {
-                            if process.isRunning {
-                                process.terminate()
-                            }
-                        }
-                    } catch {
-                        continuation.resume(returning: (-1, Data(), Data(error.localizedDescription.utf8)))
-                    }
-                }
+                let pipedFallback = await Self.runShortcutProcess(
+                    executable: "/bin/sh",
+                    arguments: ["-c", noOutputPathCommand],
+                    timeoutSeconds: timeoutSeconds,
+                    register: { [self] in self.registerRunningProcess($0) }
+                )
                 
                 if !pipedFallback.stdoutData.isEmpty {
                     finalOutputData = pipedFallback.stdoutData
@@ -3941,49 +3895,72 @@ extension ToolExecutor {
     }
     
     private func runShortcutViaOSAScript(name: String, input: String?, timeoutSeconds: Double) async -> (exitCode: Int32, outputData: Data, errorText: String) {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            
-            let escapedName = name
+        let escapedName = name
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let scriptLine: String
+        if let input, !input.isEmpty {
+            let escapedInput = input
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
-            let scriptLine: String
-            if let input, !input.isEmpty {
-                let escapedInput = input
-                    .replacingOccurrences(of: "\\", with: "\\\\")
-                    .replacingOccurrences(of: "\"", with: "\\\"")
-                scriptLine = "tell application id \"com.apple.shortcuts\" to run shortcut \"\(escapedName)\" with input \"\(escapedInput)\""
-            } else {
-                scriptLine = "tell application id \"com.apple.shortcuts\" to run shortcut \"\(escapedName)\""
-            }
-            
-            let arguments = ["-l", "AppleScript", "-e", scriptLine]
+            scriptLine = "tell application id \"com.apple.shortcuts\" to run shortcut \"\(escapedName)\" with input \"\(escapedInput)\""
+        } else {
+            scriptLine = "tell application id \"com.apple.shortcuts\" to run shortcut \"\(escapedName)\""
+        }
+        
+        let result = await Self.runShortcutProcess(
+            executable: "/usr/bin/osascript",
+            arguments: ["-l", "AppleScript", "-e", scriptLine],
+            timeoutSeconds: timeoutSeconds,
+            register: { [self] in self.registerRunningProcess($0) }
+        )
+        return (result.exitCode, result.stdoutData, String(data: result.stderrData, encoding: .utf8) ?? "")
+    }
+
+    /// Runs one shortcuts-related process (the CLI, its `| cat` fallback, or
+    /// osascript) with the shortcut timeout. stdout and stderr are drained
+    /// WHILE it runs; reading them only in the termination handler blocked any
+    /// shortcut printing > 64 KB until the timeout terminated it. Same results
+    /// as before: (status, stdout, stderr); a launch failure is (-1, empty,
+    /// the error text); the timeout sends terminate() as before.
+    nonisolated static func runShortcutProcess(
+        executable: String,
+        arguments: [String],
+        timeoutSeconds: Double,
+        register: @escaping @Sendable (Process) -> Void,
+        onTimeout: (@Sendable () -> Void)? = nil,
+        onLaunchFailure: (@Sendable (Error) -> Void)? = nil
+    ) async -> (exitCode: Int32, stdoutData: Data, stderrData: Data) {
+        await withCheckedContinuation { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
             
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
+            let capture = ProcessOutputCapture(stdout: stdoutPipe, stderr: stderrPipe)
             
             process.terminationHandler = { proc in
                 ToolExecutor.unregisterRunningProcess(proc)
-                let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                let errText = String(data: errData, encoding: .utf8) ?? ""
-                continuation.resume(returning: (proc.terminationStatus, outData, errText))
+                let output = capture.finish(within: 2)
+                continuation.resume(returning: (proc.terminationStatus, output.stdout, output.stderr))
             }
             
             do {
                 try process.run()
-                self.registerRunningProcess(process)
+                capture.start()
+                register(process)
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds) {
                     if process.isRunning {
                         process.terminate()
+                        onTimeout?()
                     }
                 }
             } catch {
-                continuation.resume(returning: (-1, Data(), error.localizedDescription))
+                onLaunchFailure?(error)
+                continuation.resume(returning: (-1, Data(), Data(error.localizedDescription.utf8)))
             }
         }
     }

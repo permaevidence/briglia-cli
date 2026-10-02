@@ -866,6 +866,11 @@ actor GoogleWorkspaceService {
             print("[GoogleWorkspaceService] failed to launch \(executable): \(error)")
             return ProcessRunResult(stdout: nil, failureDetail: "failed to launch \(executable): \(error.localizedDescription)", stderrHead: nil)
         }
+        // Drain both pipes while the child runs: reading them only after exit
+        // stalled any child writing > 64 KB (large gws JSON, brew/pip logs)
+        // until the timeout, which then reported "timed out".
+        let capture = ProcessOutputCapture(stdout: outPipe, stderr: errPipe)
+        capture.start()
 
         let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
         while process.isRunning && Date() < deadline {
@@ -878,20 +883,25 @@ actor GoogleWorkspaceService {
                 _ = Darwin.kill(process.processIdentifier, SIGKILL)
             }
             process.waitUntilExit()
+            _ = capture.finish(within: 2)
             print("[GoogleWorkspaceService] \(executable) timed out after \(timeoutSeconds)s")
             return ProcessRunResult(stdout: nil, failureDetail: "timed out after \(timeoutSeconds)s", stderrHead: nil)
         }
 
         process.waitUntilExit()
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdout = String(data: data, encoding: .utf8) ?? ""
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderr = String(data: errData, encoding: .utf8) ?? ""
+        let output = capture.finish(within: 2)
+        let stdout = String(data: output.stdout, encoding: .utf8) ?? ""
+        let stderr = String(data: output.stderr, encoding: .utf8) ?? ""
         let head = stderr.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200)
         let stderrHead = head.isEmpty ? nil : String(head)
         guard process.terminationStatus == 0 else {
             print("[GoogleWorkspaceService] \(executable) exit=\(process.terminationStatus); stderr head: \(head)")
             return ProcessRunResult(stdout: nil, failureDetail: "exit \(process.terminationStatus)\(head.isEmpty ? "" : ": \(head)")", stderrHead: stderrHead)
+        }
+        guard !output.stdoutTruncated else {
+            let limit = "\(ProcessOutputCapture.defaultLimit / 1_048_576) MB"
+            print("[GoogleWorkspaceService] \(executable) output exceeded \(limit)")
+            return ProcessRunResult(stdout: nil, failureDetail: "output exceeded \(limit)", stderrHead: stderrHead)
         }
         return ProcessRunResult(stdout: stdout, failureDetail: nil, stderrHead: stderrHead)
     }

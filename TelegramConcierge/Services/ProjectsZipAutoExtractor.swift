@@ -220,7 +220,7 @@ final class ProjectsZipAutoExtractor {
 
     private func extractAndRemoveArchive(at archiveURL: URL) {
         do {
-            try unzipArchive(archiveURL: archiveURL, destinationURL: projectsDirectory)
+            try Self.unzipArchive(archiveURL: archiveURL, destinationURL: projectsDirectory)
             try fileManager.removeItem(at: archiveURL)
             failureTimestamps.removeValue(forKey: archiveURL.path)
             print("[ProjectsZipAutoExtractor] Extracted and removed \(archiveURL.lastPathComponent)")
@@ -230,8 +230,19 @@ final class ProjectsZipAutoExtractor {
         }
     }
 
-    private func unzipArchive(archiveURL: URL, destinationURL: URL) throws {
-        let entries = try listArchiveEntries(archiveURL: archiveURL)
+    /// Backstop for one unzip run (listing or extraction). Only a broken or
+    /// stuck unzip comes near it: extracting several GB takes minutes. On
+    /// expiry unzip is killed and reaped and the archive fails like any other
+    /// unzip error (kept in place, retried later).
+    static let unzipTimeout: TimeInterval = 30 * 60
+
+    static func unzipArchive(
+        archiveURL: URL,
+        destinationURL: URL,
+        unzipPath: String = "/usr/bin/unzip",
+        timeout: TimeInterval = unzipTimeout
+    ) throws {
+        let entries = try listArchiveEntries(archiveURL: archiveURL, unzipPath: unzipPath, timeout: timeout)
         guard !entries.isEmpty else {
             throw NSError(
                 domain: "ProjectsZipAutoExtractor",
@@ -249,17 +260,23 @@ final class ProjectsZipAutoExtractor {
         }
 
         _ = try runProcess(
-            executablePath: "/usr/bin/unzip",
+            executablePath: unzipPath,
             arguments: ["-qq", "-n", archiveURL.path, "-d", destinationURL.path],
-            context: "Failed to extract ZIP archive."
+            context: "Failed to extract ZIP archive.",
+            timeout: timeout
         )
     }
 
-    private func listArchiveEntries(archiveURL: URL) throws -> [String] {
+    static func listArchiveEntries(
+        archiveURL: URL,
+        unzipPath: String = "/usr/bin/unzip",
+        timeout: TimeInterval = unzipTimeout
+    ) throws -> [String] {
         let stdout = try runProcess(
-            executablePath: "/usr/bin/unzip",
+            executablePath: unzipPath,
             arguments: ["-Z1", archiveURL.path],
-            context: "Failed to inspect ZIP archive."
+            context: "Failed to inspect ZIP archive.",
+            timeout: timeout
         )
 
         return stdout
@@ -268,10 +285,14 @@ final class ProjectsZipAutoExtractor {
             .filter { !$0.isEmpty }
     }
 
-    private func runProcess(
+    /// Runs unzip and returns its stdout. Both pipes are drained WHILE unzip
+    /// runs: reading them only after exit hung forever once the output passed
+    /// one pipe buffer (~64 KB, e.g. `-Z1` on a zip of ~1,500+ entries).
+    static func runProcess(
         executablePath: String,
         arguments: [String],
-        context: String
+        context: String,
+        timeout: TimeInterval = unzipTimeout
     ) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
@@ -281,14 +302,27 @@ final class ProjectsZipAutoExtractor {
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        process.standardInput = FileHandle.nullDevice
 
         try process.run()
-        process.waitUntilExit()
+        let capture = ProcessOutputCapture(stdout: stdoutPipe, stderr: stderrPipe)
+        capture.start()
 
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        guard ProcessOutputCapture.waitForExit(process, until: Date().addingTimeInterval(timeout)) else {
+            kill(process.processIdentifier, SIGKILL)
+            _ = ProcessOutputCapture.waitForExit(process, until: Date().addingTimeInterval(2))
+            _ = capture.finish(within: 2)
+            let limit = timeout >= 60 ? "\(Int(timeout / 60)) minutes" : "\(timeout) seconds"
+            throw NSError(
+                domain: "ProjectsZipAutoExtractor",
+                code: Int(ETIMEDOUT),
+                userInfo: [NSLocalizedDescriptionKey: "\(context) unzip did not finish within \(limit) and was stopped."]
+            )
+        }
+
+        let output = capture.finish(within: 2)
+        let stdout = String(data: output.stdout, encoding: .utf8) ?? ""
+        let stderr = String(data: output.stderr, encoding: .utf8) ?? ""
 
         guard process.terminationStatus == 0 else {
             let stderrMessage = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -304,10 +338,19 @@ final class ProjectsZipAutoExtractor {
             )
         }
 
+        // A cut listing could hide an unsafe entry from the path check.
+        guard !output.stdoutTruncated else {
+            throw NSError(
+                domain: "ProjectsZipAutoExtractor",
+                code: Int(EFBIG),
+                userInfo: [NSLocalizedDescriptionKey: "\(context) unzip output exceeded \(ProcessOutputCapture.defaultLimit / 1_048_576) MB."]
+            )
+        }
+
         return stdout
     }
 
-    private func isSafeArchiveEntryPath(_ path: String) -> Bool {
+    static func isSafeArchiveEntryPath(_ path: String) -> Bool {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
 
