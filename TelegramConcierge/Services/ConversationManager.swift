@@ -8952,7 +8952,10 @@ class ConversationManager: ObservableObject {
             view[index].prunedContextSummaryCoverage = nil
             if !view[index].pruneArchiveReferences.contains(demotionRef) { view[index].pruneArchiveReferences.append(demotionRef) }
             if let measured = view[index].measuredTokens {
-                view[index].measuredTokens = max(1, measured - summary.count / 4 + PruneSummaryRetention.wrapper(line).count / 4)
+                // Saturating: measuredTokens is persisted, so never trap on it.
+                let delta = PruneSummaryRetention.wrapper(line).count / 4 - summary.count / 4
+                let (sum, overflow) = measured.addingReportingOverflow(delta)
+                view[index].measuredTokens = max(1, overflow ? (delta < 0 ? 1 : Int.max) : sum)
             }
         }
         return demotionRef

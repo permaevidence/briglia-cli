@@ -123,6 +123,7 @@ final class RetentionHarness {
         if section("protection") { try await protectionEntrySection(); try await protectionFailureSection() }
         if section("fields") { try await fieldsSection() }
         if section("wire") { try await wireSection() }
+        if section("extremes") { try await extremesSection() }
     }
 
     // MARK: Provider and state

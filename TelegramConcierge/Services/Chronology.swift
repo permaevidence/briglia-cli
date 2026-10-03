@@ -64,8 +64,10 @@ enum Chronology {
     }
 
     static func offsetLabel(seconds: Int) -> String {
-        let magnitude = abs(seconds)
-        return String(format: "UTC%@%02d:%02d", seconds < 0 ? "-" : "+", magnitude / 3600, (magnitude % 3600) / 60)
+        // `magnitude` (not `abs`) so no input can trap; identical output for
+        // every real offset.
+        let magnitude = seconds.magnitude
+        return String(format: "UTC%@%02d:%02d", seconds < 0 ? "-" : "+", Int(magnitude / 3600), Int((magnitude % 3600) / 60))
     }
 
     /// `[HH:mm]` for the reply-time metadata line and transcript stamps.

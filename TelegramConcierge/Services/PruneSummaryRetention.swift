@@ -15,6 +15,29 @@ struct PruneSummaryCoverage: Codable, Equatable {
     static let maxFileBytes = 1024
     static let maxOffsetSeconds = 64_800
 
+    /// Overflow-safe: an inclusive range check, never `abs`, which traps on
+    /// `Int.min`. Persisted values are untrusted.
+    static func isValidOffset(_ seconds: Int) -> Bool {
+        (-maxOffsetSeconds...maxOffsetSeconds).contains(seconds)
+    }
+
+    /// Reference-date seconds that can render a year in 1000...9999 in some
+    /// valid offset (one day of slack each side; the exact year check runs
+    /// after this). Bounds the date before any formatting, so a huge or
+    /// negative persisted value never reaches the date formatter.
+    static let renderableSeconds: ClosedRange<TimeInterval> = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let low = calendar.date(from: DateComponents(era: 1, year: 999, month: 12, day: 31))!
+        let high = calendar.date(from: DateComponents(era: 1, year: 10_000, month: 1, day: 2))!
+        return low.timeIntervalSinceReferenceDate...high.timeIntervalSinceReferenceDate
+    }()
+
+    static func isRenderableDate(_ date: Date) -> Bool {
+        let seconds = date.timeIntervalSinceReferenceDate
+        return seconds.isFinite && renderableSeconds.contains(seconds)
+    }
+
     let version: Int
     let start: Date
     let startOffsetSeconds: Int
@@ -52,9 +75,9 @@ struct PruneSummaryCoverage: Codable, Equatable {
 
     var isValid: Bool {
         guard version == 1,
-              start.timeIntervalSinceReferenceDate.isFinite, end.timeIntervalSinceReferenceDate.isFinite,
+              Self.isRenderableDate(start), Self.isRenderableDate(end),
               start <= end,
-              abs(startOffsetSeconds) <= Self.maxOffsetSeconds, abs(endOffsetSeconds) <= Self.maxOffsetSeconds,
+              Self.isValidOffset(startOffsetSeconds), Self.isValidOffset(endOffsetSeconds),
               files.count <= Self.maxFiles,
               files.allSatisfy({ $0.utf8.count <= Self.maxFileBytes && !$0.unicodeScalars.contains("\u{0}") })
         else { return false }
@@ -198,7 +221,7 @@ enum PruneSummaryRetention {
 
     /// Coverage after appending a new summary part to an anchor.
     static func merged(hadSummary: Bool, previous: PruneSummaryCoverage?, fresh: PruneSummaryCoverage?) -> PruneSummaryCoverage? {
-        guard let fresh else { return nil }
+        guard let fresh, fresh.isValid else { return nil }
         guard hadSummary else { return fresh }
         // Part of the text has unknown coverage: keep what is known, approx.
         guard let previous, previous.isValid else {
@@ -251,7 +274,7 @@ enum PruneSummaryRetention {
     }
 
     static func localYear(_ date: Date, offset: Int) -> Int? {
-        guard abs(offset) <= PruneSummaryCoverage.maxOffsetSeconds, date.timeIntervalSinceReferenceDate.isFinite else { return nil }
+        guard PruneSummaryCoverage.isValidOffset(offset), PruneSummaryCoverage.isRenderableDate(date) else { return nil }
         return Int(formatter("yyyy", offset: offset).string(from: date))
     }
 
