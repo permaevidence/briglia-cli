@@ -28,7 +28,7 @@ def valid(coverage, what):
         raise RuntimeError(f'r13: {what}: malformed coverage {coverage!r}')
     if not isinstance(coverage['complete'], bool) or not isinstance(coverage['files'], list) or len(coverage['files']) > 20 \
             or not all(isinstance(f, str) for f in coverage['files']) or coverage['start'] > coverage['end'] \
-            or abs(coverage['startOffsetSeconds']) > 64800 or abs(coverage['endOffsetSeconds']) > 64800:
+            or abs(coverage['startOffsetSeconds']) > 50400 or abs(coverage['endOffsetSeconds']) > 50400:
         raise RuntimeError(f'r13: {what}: invalid coverage {coverage!r}')
     return coverage
 

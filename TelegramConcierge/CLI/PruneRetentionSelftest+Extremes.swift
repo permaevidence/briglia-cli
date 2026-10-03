@@ -11,7 +11,11 @@ import Darwin
 /// load, prune + demotion, merge, retention protection and Mind import.
 extension RetentionHarness {
 
-    static let extremeOffsets: [Int] = [Int.min, Int.min + 1, Int.max, -64_801, 64_801]
+    /// ±50,401 is just past the accepted ±14:00; ±53,969/53,970 straddle the
+    /// Linux `DateFormatter` trap (≥ ±53,970 s rounds to ±15:00 and traps);
+    /// ±64,800 (±18:00) was accepted before and crashed Linux.
+    static let extremeOffsets: [Int] = [Int.min, Int.min + 1, Int.max, -64_801, 64_801, -64_800, 64_800,
+                                        -54_000, 54_000, -53_970, 53_970, -53_969, 53_969, -50_401, 50_401]
     /// A date that renders as year "2000" in yyyy (year of era), but BC.
     func bcYear2000() -> Double {
         var calendar = Calendar(identifier: .gregorian)
@@ -76,7 +80,9 @@ extension RetentionHarness {
         var allOK = true
         let cases: [(String, String, Int)] = [("full", "startOffsetSeconds", Int.min), ("full", "endOffsetSeconds", Int.min),
                                               ("demoted", "startOffsetSeconds", Int.min), ("demoted", "endOffsetSeconds", Int.min),
-                                              ("full", "startOffsetSeconds", Int.max), ("full", "startOffsetSeconds", 72_000)]
+                                              ("full", "startOffsetSeconds", Int.max), ("full", "startOffsetSeconds", 72_000),
+                                              ("full", "startOffsetSeconds", 64_800), ("demoted", "endOffsetSeconds", -64_800),
+                                              ("full", "endOffsetSeconds", 53_970), ("demoted", "startOffsetSeconds", -54_000)]
         for (index, (placement, field, value)) in cases.enumerated() {
             let root = probe.appendingPathComponent("\(index)")
             let config = root.appendingPathComponent("config"), data = root.appendingPathComponent("data/briglia")
@@ -141,17 +147,64 @@ extension RetentionHarness {
             if (try? PruneSummaryCoverage(start: d, startOffsetSeconds: 0, end: d, endOffsetSeconds: 0, complete: true, files: [])) != nil { bad.append("date \(t)") }
             if PruneSummaryRetention.localYear(d, offset: 0) != nil { bad.append("localYear(date \(t))") }
         }
-        for o in [-64_800, 64_800] {
+        for o in [-50_400, 50_400] {
             if (try? PruneSummaryCoverage(start: base, startOffsetSeconds: o, end: base, endOffsetSeconds: o, complete: true, files: [])) == nil { bad.append("boundary \(o) rejected") }
         }
-        check("X2 extreme offsets/dates (Int.min/max, ±64,801, NaN, ±inf, ±1e308, 9.3e18, 2000 BC) rejected without trapping; ±64,800 accepted",
+        check("X2 extreme offsets/dates (Int.min/max, ±64,801, ±64,800, ±54,000, ±53,970, ±53,969, ±50,401, NaN, ±inf, ±1e308, 9.3e18, 2000 BC) rejected without trapping; ±50,400 accepted",
               bad.isEmpty, bad.joined(separator: ", "))
+        renderRows()
         let labels = [Chronology.offsetLabel(seconds: 7200), Chronology.offsetLabel(seconds: -34_200), Chronology.offsetLabel(seconds: 0),
                       Chronology.offsetLabel(seconds: 64_800), Chronology.offsetLabel(seconds: -64_800)]
         let extreme = [Chronology.offsetLabel(seconds: Int.min), Chronology.offsetLabel(seconds: Int.max)]
         check("X2b offsetLabel output unchanged for real offsets and non-trapping at Int.min/Int.max",
               labels == ["UTC+02:00", "UTC-09:30", "UTC+00:00", "UTC+18:00", "UTC-18:00"] && extreme.allSatisfy { $0.hasPrefix("UTC") },
               (labels + extreme).joined(separator: " "))
+    }
+
+    // MARK: X2c/X2d rendering every accepted offset (Linux formatter trap)
+
+    /// Every offset the validator accepts must format on both Foundations.
+    /// Quarter hours across ±14:00 plus odd seconds, each at the earliest and
+    /// latest renderable local minute and a present-day date, same and mixed
+    /// endpoint offsets. A trap here kills the suite (as on Linux CI).
+    func renderRows() {
+        // Odd seconds only at present-day dates: Foundation rounds a
+        // sub-minute zone, so midnight 1 Jan 1000 in it can render as 999
+        // and is (correctly) rejected; real offsets are whole minutes.
+        let oddSeconds = [-50_399, 50_399, -1, 1, 12_345, -12_345]
+        let offsets = Array(stride(from: -50_400, through: 50_400, by: 900)) + [19_800, 20_700, 31_500, 45_900, -34_200] + oddSeconds
+        var bad: [String] = []
+        var rendered = 0
+        for o in offsets {
+            let odd = oddSeconds.contains(o)
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(secondsFromGMT: o)!
+            let first = calendar.date(from: DateComponents(year: 1000, month: 1, day: 1, hour: 0, minute: 0))!
+            let last = calendar.date(from: DateComponents(year: 9999, month: 12, day: 31, hour: 23, minute: 59))!
+            let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+            let cases = [(now, now.addingTimeInterval(86_400), o), (now, now, -o)] + (odd ? [] : [(first, first, o), (last, last, o)])
+            for (start, end, eo) in cases {
+                guard let c = try? PruneSummaryCoverage(start: start, startOffsetSeconds: o, end: end, endOffsetSeconds: eo, complete: true, files: []) else {
+                    bad.append("\(o)/\(eo) rejected"); continue
+                }
+                let span = PruneSummaryRetention.span(c)
+                rendered += 1
+                if span.isEmpty || !span.contains("UTC") { bad.append("\(o) span '\(span)'") }
+            }
+            if !odd, PruneSummaryRetention.localYear(first, offset: o) != 1000 { bad.append("\(o) first year") }
+            if !odd, PruneSummaryRetention.localYear(last, offset: o) != 9999 { bad.append("\(o) last year") }
+        }
+        check("X2c every accepted offset (±14:00 quarter hours, real half/three-quarter hours; odd seconds today only) formats at years 1000/9999 and today without trapping (\(rendered) spans)",
+              bad.isEmpty, bad.prefix(10).joined(separator: ", "))
+        // The formatter cache itself never hands an out-of-range offset to
+        // Foundation, even if a future caller skips validation.
+        let probe = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let utc = PruneSummaryRetention.formatter("yyyy-MM-dd HH:mm", offset: 0).string(from: probe)
+        let direct = [64_800, -64_800, 54_000, -53_970, Int.min, Int.max].map {
+            PruneSummaryRetention.formatter("yyyy-MM-dd HH:mm", offset: $0).string(from: probe)
+        }
+        check("X2d formatter(_:offset:) with unvalidated ±64,800/54,000/−53,970/Int.min/Int.max falls back to UTC without trapping",
+              utc == "2026-05-09 06:13" && direct.allSatisfy { $0 == utc }, ([utc] + direct).joined(separator: " | "))
     }
 
     // MARK: X3 loader

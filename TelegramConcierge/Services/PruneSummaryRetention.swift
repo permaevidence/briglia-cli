@@ -13,7 +13,12 @@ import Darwin
 struct PruneSummaryCoverage: Codable, Equatable {
     static let maxFiles = 20
     static let maxFileBytes = 1024
-    static let maxOffsetSeconds = 64_800
+    /// ±14:00, the real-world range of UTC offsets (−12:00…+14:00). Wider
+    /// values must never reach a `DateFormatter`: on Linux (corelibs
+    /// Foundation) assigning a zone of ±53,970 s or more (it rounds to
+    /// ±15:00) traps in `DateFormatter.State._setFormatterAttributes`, so a
+    /// saved ±18:00 offset would crash startup there.
+    static let maxOffsetSeconds = 50_400
 
     /// Overflow-safe: an inclusive range check, never `abs`, which traps on
     /// `Int.min`. Persisted values are untrusted.
@@ -267,7 +272,10 @@ enum PruneSummaryRetention {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.calendar = Calendar(identifier: .gregorian)
-        f.timeZone = TimeZone(secondsFromGMT: offset) ?? TimeZone(secondsFromGMT: 0)!
+        // Callers pass validated offsets; an unvalidated one falls back to
+        // UTC rather than reaching Linux's formatter trap (see maxOffsetSeconds).
+        let safeOffset = PruneSummaryCoverage.isValidOffset(offset) ? offset : 0
+        f.timeZone = TimeZone(secondsFromGMT: safeOffset) ?? TimeZone(secondsFromGMT: 0)!
         f.dateFormat = format
         formatters[key] = f
         return f
