@@ -38,6 +38,8 @@ struct UserContextMaintenanceSelftest: AsyncParsableCommand {
     /// parent before it re-executes into scratch roots); the preview refuses
     /// to touch anything inside them.
     @Option(name: .customLong("real-root"), help: .hidden) var realRoots: [String] = []
+    /// A COPY of an archive folder (summaries) to build the shared context from.
+    @Option(name: .customLong("archive-copy"), help: .hidden) var archiveCopy: String?
 
     static let linkName = "briglia-mw-ucm-selftest"
     static let rootPrefix = "briglia-ucm-"
@@ -54,12 +56,13 @@ struct UserContextMaintenanceSelftest: AsyncParsableCommand {
         if livePreview {
             guard Self.previewAdmitted() else { print(Self.refusalText); throw ExitCode(2) }
             if child {
-                try await Self.runPreviewChild(profile: profile, out: out, credentials: credentials, realRoots: realRoots)
+                try await Self.runPreviewChild(profile: profile, out: out, credentials: credentials, realRoots: realRoots, archiveCopy: archiveCopy)
             } else {
                 var extra: [String] = ["--live-preview"]
                 if let profile { extra += ["--profile", profile] }
                 if let out { extra += ["--out", out] }
                 if let credentials { extra += ["--credentials", credentials] }
+                if let archiveCopy { extra += ["--archive-copy", archiveCopy] }
                 for root in [StoragePaths.configRoot.path, StoragePaths.dataRoot.path] { extra += ["--real-root", root] }
                 try Self.reexecIsolated(extra: extra)
             }

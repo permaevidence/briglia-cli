@@ -51,7 +51,7 @@ extension UserContextMaintenanceSelftest {
         }
     }
 
-    static func runPreviewChild(profile: String?, out: String?, credentials: String?, realRoots: [String]) async throws {
+    static func runPreviewChild(profile: String?, out: String?, credentials: String?, realRoots: [String], archiveCopy: String? = nil) async throws {
         guard StoragePaths.dataRoot.path.contains(rootPrefix), ProcessInfo.processInfo.processName == linkName else {
             print("✖ refusing: the preview runs only in its isolated scratch home"); throw PreviewRefusal(description: "not isolated")
         }
@@ -66,7 +66,8 @@ extension UserContextMaintenanceSelftest {
                     realHome.appendingPathComponent(".config/ada"), realHome.appendingPathComponent(".local/share/ada")]
             + realRoots.map { URL(fileURLWithPath: $0) }
         let outURL = URL(fileURLWithPath: out)
-        guard rootsOutside([StoragePaths.configRoot, StoragePaths.dataRoot, outURL], real: real) else {
+        let archiveSource = archiveCopy.map { URL(fileURLWithPath: $0) }
+        guard rootsOutside([StoragePaths.configRoot, StoragePaths.dataRoot, outURL] + (archiveSource.map { [$0] } ?? []), real: real) else {
             let shown = [StoragePaths.configRoot, StoragePaths.dataRoot, outURL].map { $0.resolvingSymlinksInPath().path }
             throw PreviewRefusal(description: "a scratch or output root resolves into a real Briglia root: \(shown) vs \(real.map(\.path))")
         }
@@ -74,12 +75,35 @@ extension UserContextMaintenanceSelftest {
         let text = try String(contentsOf: URL(fileURLWithPath: profile), encoding: .utf8)
         for (key, value) in settings where key != "openrouter_api_key" { try KeychainHelper.save(key: key, value: value) }
         try KeychainHelper.save(key: KeychainHelper.structuredUserContextKey, value: text)
+        if let archiveSource {
+            // Copy the summaries' archive COPY into the scratch data root.
+            let target = StoragePaths.dataRoot.appendingPathComponent("archive", isDirectory: true)
+            try? FileManager.default.removeItem(at: target)
+            try PrivateStorage.ensureDirectory(StoragePaths.dataRoot)
+            try FileManager.default.copyItem(at: archiveSource, to: target)
+            for name in [UserContextMaintenance.stateFileName, RetiredUserFacts.fileName] {
+                try? FileManager.default.removeItem(at: target.appendingPathComponent(name))
+            }
+        }
         let archive = ConversationArchiveService()
         if let key = settings["openrouter_api_key"] { await archive.configure(apiKey: key) }
+        // The shared context exactly as ConversationManager.buildSummarizationContext
+        // builds it for an archive event (prompt summary items, profile, names;
+        // no continuation messages here).
+        var shared: ConversationArchiveService.SummarizationContext? = nil
+        if archiveSource != nil {
+            let items = await archive.getPromptSummaryItems(recentConsolidatedCount: 5)
+            shared = ConversationArchiveService.SummarizationContext(
+                personaContext: text, assistantName: settings[KeychainHelper.assistantNameKey],
+                userName: settings[KeychainHelper.userNameKey],
+                previousSummaries: items.sorted { $0.startDate < $1.startDate }.map(\.summary),
+                currentConversationContext: nil)
+            print("Shared context: \(items.count) summary item(s), \(await archive.maintenanceSharedContextPrompt(for: shared!)?.count ?? 0) characters")
+        }
         var captured: UserContextMaintenanceReport?
         UserContextMaintenance.testHooks = UserContextMaintenanceHooks(onReport: { captured = $0 })
         UserContextMaintenance.testPolicy = nil
-        await archive.maintainUserContextIfNeeded(event: .archive)
+        await archive.maintainUserContextIfNeeded(event: .archive, sharedContext: shared)
         guard let report = captured else { throw PreviewRefusal(description: "no maintenance run happened (profile \(text.count) chars)") }
         let result = KeychainHelper.load(key: KeychainHelper.structuredUserContextKey) ?? ""
         try PrivateStorage.ensureDirectory(outURL)
@@ -92,7 +116,7 @@ extension UserContextMaintenanceSelftest {
 
     static func previewMarkdown(_ r: UserContextMaintenanceReport, before: String, after: String) -> String {
         var md = "# User-profile maintenance preview\n\n"
-        md += "Size: **\(UserContextMaintenance.grouped(r.sizeBefore)) → \(UserContextMaintenance.grouped(r.sizeAfter)) characters** (target 30,000, threshold 40,000). Passes: \(r.passes). Model requests: \(r.sends). Outcome: \(r.outcome).\n\n"
+        md += "Size: **\(UserContextMaintenance.grouped(r.sizeBefore)) → \(UserContextMaintenance.grouped(r.sizeAfter)) characters** (target 30,000, threshold 40,000). Passes: \(r.passes). Model requests: \(r.sends). Outcome: \(r.outcome). Shared archive context: \(UserContextMaintenance.grouped(r.sharedContextChars)) characters.\n\n"
         md += "Dropped \(r.drops.count) facts (\(UserContextMaintenance.grouped(r.charsDropped)) chars), shortened \(r.edits.count) (saved \(UserContextMaintenance.grouped(r.charsEditedDelta)) chars), added \(r.adds.count) (\(UserContextMaintenance.grouped(r.charsAdded)) chars). Ignored operations: \(r.opsIgnored.count).\n\n"
         md += "## Dropped\n\n"
         var lastSection: String? = nil
@@ -118,6 +142,7 @@ extension UserContextMaintenanceSelftest {
         provider=\(settings[KeychainHelper.llmProviderKey] ?? "?") model=\(model)
         reason=\(r.reason.rawValue) outcome=\(r.outcome) passes=\(r.passes) sends=\(r.sends) auth_requests=\(r.authRequests)
         seconds=\(String(format: "%.1f", r.seconds)) pass_seconds=\(r.passSeconds.map { String(format: "%.1f", $0) }.joined(separator: "/"))
+        shared_context_chars=\(r.sharedContextChars)
         tokens_in=\(r.promptTokens) tokens_out=\(r.completionTokens) finish_reasons=\(r.finishReasons.joined(separator: ","))
         size=\(r.sizeBefore)->\(r.sizeAfter) dropped_chars=\(r.charsDropped) edit_saved_chars=\(r.charsEditedDelta) added_chars=\(r.charsAdded)
         ops_applied=\(r.opsApplied) ops_ignored=\(r.opsIgnored.count)
