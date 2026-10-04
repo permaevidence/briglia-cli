@@ -37,23 +37,28 @@ extension UserContextMaintenanceSelftest {
                 listing.hasPrefix("# Profile\n[1] (12 chars) NAME: Matteo\n[2] (9 chars) likes tea"), listing)
         let prompt = UserContextMaintenance.systemPrompt(document: UserProfileDocument(UCMHarness.profile(size: 36_622)),
             assistantName: "Bree", userName: "Matteo", policy: .standard, pass: 1)
-        h.check("P3 v6.2 status line: size and facts, 30,000 as a ceiling (\"or less; going lower is fine\"), no quota",
-                prompt.contains("It must end up at 30,000 characters or less; going lower is fine") && prompt.contains("facts.")
+        h.check("P3 v6.3 status line: size and facts, aim for about 30,000 and don't go much below it, no quota",
+                prompt.contains("Aim for about 30,000 characters. Don't go much below it: removing a lasting fact just to save space is worse than staying near the target.")
+                && prompt.contains("facts.") && !prompt.contains("going lower is fine")
                 && !prompt.contains("Remove at least") && !prompt.contains("Target:"))
         h.check("P3 v6.2 purpose: lasting facts every turn; one-off research, task details, prices, logistics, version histories do not belong",
                 prompt.contains("so the assistant always knows the lasting facts about the user")
                 && prompt.contains("results of one-off research, task details, prices, logistics, version histories"))
-        h.check("P3 v6.2 keeps people, relationships, life context and preferences; whole finished topics first; best cleanup, not smallest",
+        h.check("P3 v6.3 keeps people, relationships, life context and preferences; whole finished topics first; no 'best cleanup' push",
                 prompt.contains("Keep facts about people, relationships, life context and persistent preferences, even when they are short or old")
                 && prompt.contains("Prefer removing whole topics that are finished or tied to one task before trimming single facts")
-                && prompt.contains("Do the best cleanup, not the smallest one"))
+                && !prompt.contains("Do the best cleanup, not the smallest one"))
+        h.check("P3 v6.3 finished one-off work goes entirely (no one-line summary); recurring topics are not finished; upcoming events kept",
+                prompt.contains("A finished one-off investigation or task goes entirely: don't keep a one-line summary of it; it stays in the archive.")
+                && prompt.contains("A topic that keeps coming back in the summaries because the user is still working on it is not finished.")
+                && prompt.contains("Keep upcoming commitments and events until their date has passed."))
         h.check("P3 v6.2 summaries only to judge what matters; facts and edits only from the PROFILE",
                 prompt.contains("use it only to judge what still matters to the user")
                 && prompt.contains("Take every fact and edit only from the PROFILE below; never add anything from the summaries"))
         let pass2 = UserContextMaintenance.systemPrompt(document: UserProfileDocument(UCMHarness.profile(size: 36_622)),
             assistantName: "Bree", userName: "Matteo", policy: .standard, pass: 2)
-        h.check("P3 v6.2 pass-2 line: over the limit, remove more of what does not serve the purpose",
-                pass2.contains("characters over the limit of 30,000") && pass2.contains("Remove more of what does not serve the profile's purpose."))
+        h.check("P3 v6.3 pass-2 line: above the target of about 30,000, remove more but not much below the target",
+                pass2.contains("characters above the target of about 30,000") && pass2.contains("Remove more of what does not serve the profile's purpose, but don't go much below the target."))
         h.check("P3 v6.1 prompt: no 'or it is ignored' length rule, whole-profile emphasis, grouping sentence",
                 !prompt.contains("or it is ignored") && prompt.contains("size of the WHOLE profile")
                 && prompt.contains("to group several facts, drop them and add one fact that covers them"))

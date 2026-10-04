@@ -27,7 +27,7 @@ extension UserContextMaintenanceSelftest {
         h.check("E3 two passes at most, then accepted (no third pass)", sends == 2, "sends \(sends)")
         let e3Pass2 = h.maintenanceRequests.last.map { UCMHarness.systemText($0.body) } ?? ""
         h.check("E3 pass 2 is renumbered and says how far over the target it still is",
-                e3Pass2.contains("Still ") && e3Pass2.contains("over the limit of 30,000") && e3Pass2.contains("[1] "))
+                e3Pass2.contains("Still ") && e3Pass2.contains("above the target of about 30,000") && e3Pass2.contains("[1] "))
 
         // E4: pass-2 failure keeps pass 1's commit.
         archive = try h.fresh(profile: p45)

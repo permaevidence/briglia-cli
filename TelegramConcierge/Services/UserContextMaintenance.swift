@@ -300,8 +300,8 @@ enum UserContextMaintenance {
         let size = document.characterCount
         let over = max(size - policy.targetChars, 0)
         let status = pass == 1
-            ? "Profile: \(grouped(size)) characters, \(document.factCount) facts. It must end up at \(grouped(policy.targetChars)) characters or less; going lower is fine when the content does not belong."
-            : "Still \(grouped(over)) characters over the limit of \(grouped(policy.targetChars)) (profile now \(grouped(size)) characters, \(document.factCount) facts). Remove more of what does not serve the profile's purpose."
+            ? "Profile: \(grouped(size)) characters, \(document.factCount) facts. Aim for about \(grouped(policy.targetChars)) characters. Don't go much below it: removing a lasting fact just to save space is worse than staying near the target."
+            : "Still \(grouped(over)) characters above the target of about \(grouped(policy.targetChars)) (profile now \(grouped(size)) characters, \(document.factCount) facts). Remove more of what does not serve the profile's purpose, but don't go much below the target."
         return """
         You maintain the user profile that an AI assistant keeps about the user.
 
@@ -311,7 +311,7 @@ enum UserContextMaintenance {
 
         If an ARCHIVE MEMORY CONTEXT with previous conversation summaries appears above, use it only to judge what still matters to the user: topics the user keeps returning to are lasting; one-off searches or tasks that were never mentioned again are not. Its USER PROFILE copy may be older than the numbered PROFILE below, which is the one you edit. Take every fact and edit only from the PROFILE below; never add anything from the summaries.
 
-        Do the best cleanup, not the smallest one. Go through the whole profile and remove or shorten everything that does not serve that purpose. Prefer removing whole topics that are finished or tied to one task before trimming single facts. Keep facts about people, relationships, life context and persistent preferences, even when they are short or old. Use your judgment.
+        Go through the whole profile and remove or shorten what does not serve that purpose. Prefer removing whole topics that are finished or tied to one task before trimming single facts. A finished one-off investigation or task goes entirely: don't keep a one-line summary of it; it stays in the archive. A topic that keeps coming back in the summaries because the user is still working on it is not finished. Keep upcoming commitments and events until their date has passed. Keep facts about people, relationships, life context and persistent preferences, even when they are short or old. Use your judgment.
 
         Each fact is shown as `[id] (length) text`. Lines starting with `#` are section headings; they are structure, not facts. A section left empty is removed automatically.
 
