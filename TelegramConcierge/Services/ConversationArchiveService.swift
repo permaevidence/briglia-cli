@@ -824,7 +824,10 @@ actor ConversationArchiveService {
         // API backfills user-context work without waiting for the next archive
         // event — and without delaying the first live prompt.
         await retryPendingContextExtractions()
-        await maintainUserContextIfNeeded(event: .startupRecovery)
+        // The manager builds `defaultContext` exactly like a live archive
+        // event's context (prompt summary items + profile + names); empty
+        // when the caller has none, and then maintenance runs without it.
+        await maintainUserContextIfNeeded(event: .startupRecovery, sharedContext: defaultContext)
 
         // Ensure every chunk has its greppable plaintext sidecar: covers
         // archives created before sidecars existed and any dropped by
@@ -1083,7 +1086,9 @@ actor ConversationArchiveService {
         // The archive lane just proved healthy — drain any backlog that piled up
         // while the API was broken.
         await retryPendingContextExtractions()
-        await maintainUserContextIfNeeded(event: .archive)
+        // Same SummarizationContext the fresh extraction above used, so the
+        // leading shared archive block is byte-identical (provider prefix cache).
+        await maintainUserContextIfNeeded(event: .archive, sharedContext: context)
 
         // Check if we need to consolidate
         await checkAndConsolidate()
@@ -2302,19 +2307,29 @@ actor ConversationArchiveService {
     /// are enforced where requests leave the process: here for Chat
     /// Completions (one send, no tool-call re-ask), inside the Responses
     /// adapter otherwise (with its internal retries switched off).
-    func maintenanceModelCall(systemPrompt: String, userPrompt: String,
+    func maintenanceModelCall(systemPrompt: String, userPrompt: String, sharedContextPrompt: String? = nil,
                               budget: SendBudget, authBudget: SendBudget) async throws -> MaintenanceReply {
+        let shared = sharedContextPrompt.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
         if var context = ResponsesAuxiliary.inheritedSnapshot(lane: .archive) {
             if let error = context.configurationError { throw UserContextMaintenance.ConfigurationError(reason: error) }
             context.sendBudget = budget
             context.authBudget = authBudget
             context.adapterRetries = .none
-            let reply = try await ResponsesAuxiliary.detailed(context: context, messages: [
-                ("system", archiveSystemPrefix), ("system", systemPrompt), ("user", userPrompt)])
+            var input = [("system", archiveSystemPrefix)]
+            if let shared { input.append(("system", shared)) }
+            input += [("system", systemPrompt), ("user", userPrompt)]
+            let reply = try await ResponsesAuxiliary.detailed(context: context, messages: input)
             return MaintenanceReply(text: reply.text, finishReason: nil,
                                     promptTokens: reply.promptTokens, completionTokens: reply.completionTokens)
         }
-        return try await callLLMDetailed(systemPrompt: systemPrompt, userPrompt: userPrompt, budget: budget)
+        return try await callLLMDetailed(systemPrompt: systemPrompt, userPrompt: userPrompt,
+                                         sharedContextPrompt: shared, budget: budget)
+    }
+
+    /// The archive lane's shared context block for a SummarizationContext —
+    /// the exact string fact extraction sends (nil when empty).
+    func maintenanceSharedContextPrompt(for context: SummarizationContext) -> String? {
+        archiveSharedContextPrompt(for: context)
     }
 
     /// Chat Completions variant of `callLLM` for budgeted callers: the same
@@ -2323,7 +2338,8 @@ actor ConversationArchiveService {
     /// `finish_reason` and token counts returned, and a tool-call reply
     /// treated as a failed attempt instead of being re-asked. `callLLM`
     /// itself is unchanged.
-    func callLLMDetailed(systemPrompt: String, userPrompt: String, budget: SendBudget) async throws -> MaintenanceReply {
+    func callLLMDetailed(systemPrompt: String, userPrompt: String, sharedContextPrompt: String? = nil,
+                         budget: SendBudget) async throws -> MaintenanceReply {
         let usingCustomEndpoint = isCustomEndpoint
         if usingCustomEndpoint && model.isEmpty {
             throw ArchiveError.notConfigured(reason: "Model name is not configured for archive operations")
@@ -2362,10 +2378,13 @@ actor ConversationArchiveService {
             reasoningEffortField = nil
             thinking = nil
         }
+        var messages: [Request.Message] = [.init(role: "system", content: archiveSystemPrefix)]
+        if let sharedContextPrompt, !sharedContextPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            messages.append(.init(role: "system", content: sharedContextPrompt))
+        }
+        messages += [.init(role: "system", content: systemPrompt), .init(role: "user", content: userPrompt)]
         let body = Request(model: model,
-                           messages: [.init(role: "system", content: archiveSystemPrefix),
-                                      .init(role: "system", content: systemPrompt),
-                                      .init(role: "user", content: userPrompt)],
+                           messages: messages,
                            max_tokens: nil, reasoning: reasoningConfig,
                            reasoning_effort: reasoningEffortField, thinking: thinking)
 

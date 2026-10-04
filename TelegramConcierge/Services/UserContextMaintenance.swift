@@ -178,6 +178,8 @@ struct UserContextMaintenanceReport {
     }
     var reason: UserContextMaintenanceState.Reason
     var outcome: Outcome = .completed
+    /// Size of the shared archive context block sent (0 = none).
+    var sharedContextChars = 0
     var passes = 0
     var sends = 0
     var authRequests = 0
@@ -298,12 +300,18 @@ enum UserContextMaintenance {
         let size = document.characterCount
         let over = max(size - policy.targetChars, 0)
         let status = pass == 1
-            ? "Profile: \(grouped(size)) characters, \(document.factCount) facts. Target: \(grouped(policy.targetChars)) characters. Remove at least \(grouped(over)) characters."
-            : "Still \(grouped(over)) characters over the target of \(grouped(policy.targetChars)) (profile now \(grouped(size)) characters, \(document.factCount) facts)."
+            ? "Profile: \(grouped(size)) characters, \(document.factCount) facts. It must end up at \(grouped(policy.targetChars)) characters or less; going lower is fine when the content does not belong."
+            : "Still \(grouped(over)) characters over the limit of \(grouped(policy.targetChars)) (profile now \(grouped(size)) characters, \(document.factCount) facts). Remove more of what does not serve the profile's purpose."
         return """
-        You maintain the user profile that an AI assistant keeps about the user. The profile is included in the assistant's context on every turn. Nothing removed here is lost: the full conversations stay in the long-term archive (chunk summaries and raw transcripts), which the assistant can search whenever it needs details, and every fact you remove or shorten is also kept word for word in a retired-facts file.
+        You maintain the user profile that an AI assistant keeps about the user.
 
-        Keep what is useful to know about the user over the long term. Remove or shorten what is less relevant, too tied to one task or moment, or no longer true. Use your judgment.
+        What the profile is for: it is included in the assistant's context on every turn, so the assistant always knows the lasting facts about the user — who they are, the people in their life (family, friends, colleagues, with names and relationships), their life situation, their ongoing projects, and their persistent preferences and ways of working. It is not a record of tasks. Recent work is already visible to the assistant through the conversation itself and its summaries, and older work stays in the long-term archive (chunk summaries and raw transcripts), which the assistant can search whenever it needs details. So results of one-off research, task details, prices, logistics, version histories and anything finished or no longer true do not belong here, however detailed or carefully written they are.
+
+        Nothing removed here is lost: every fact you remove or shorten is also kept word for word in a retired-facts file.
+
+        If an ARCHIVE MEMORY CONTEXT with previous conversation summaries appears above, use it only to judge what still matters to the user: topics the user keeps returning to are lasting; one-off searches or tasks that were never mentioned again are not. Its USER PROFILE copy may be older than the numbered PROFILE below, which is the one you edit. Take every fact and edit only from the PROFILE below; never add anything from the summaries.
+
+        Do the best cleanup, not the smallest one. Go through the whole profile and remove or shorten everything that does not serve that purpose. Prefer removing whole topics that are finished or tied to one task before trimming single facts. Keep facts about people, relationships, life context and persistent preferences, even when they are short or old. Use your judgment.
 
         Each fact is shown as `[id] (length) text`. Lines starting with `#` are section headings; they are structure, not facts. A section left empty is removed automatically.
 
@@ -317,7 +325,7 @@ enum UserContextMaintenance {
 
         \(status)
 
-        What counts is the size of the WHOLE profile after all your operations: bring it down to about the target, so what you drop and shorten must clearly outweigh what you add.
+        What counts is the size of the WHOLE profile after all your operations, so what you drop and shorten must outweigh what you add.
 
         Reply with one JSON object and nothing else: {"drop":[ids],"edit":[{"id":id,"text":"..."}],"add":[{"text":"...","after":id}]}. `drop` removes facts. `edit` replaces a fact's text (without its bullet) with a shorter version. `add` adds a new one-line fact; to group several facts, drop them and add one fact that covers them. `after` is optional. Facts you don't mention stay exactly as they are.
         """
@@ -376,7 +384,7 @@ enum UserContextMaintenance {
 extension ConversationArchiveService {
 
     /// The ordered decision procedure (§7.2) and, when it says so, one run.
-    func maintainUserContextIfNeeded(event: UserContextMaintenanceEvent) async {
+    func maintainUserContextIfNeeded(event: UserContextMaintenanceEvent, sharedContext: SummarizationContext? = nil) async {
         let runtime = userContextMaintenanceRuntime
         guard !runtime.running else { return }
         runtime.running = true
@@ -466,7 +474,11 @@ extension ConversationArchiveService {
         guard await persistMaintenanceState(state, authoritativeOnFailure: beforeAttempt) else { return }
 
         maintenancePhase(.restructuringUserContext, true)
-        let report = await runUserContextMaintenance(reason: reason, policy: policy)
+        let shared = sharedContext.flatMap { maintenanceSharedContextPrompt(for: $0) }
+        if shared == nil {
+            print("[ArchiveService] User profile maintenance: no shared archive context available (\(event.rawValue)); running on the profile alone")
+        }
+        let report = await runUserContextMaintenance(reason: reason, policy: policy, sharedContextPrompt: shared)
         maintenancePhase(.restructuringUserContext, false)
         UserContextMaintenance.testHooks?.onReport?(report)
         logMaintenanceReport(report)
@@ -533,8 +545,10 @@ extension ConversationArchiveService {
     /// At most `maxPasses` passes; every model send and login refresh
     /// counted at the transport; never a loop.
     private func runUserContextMaintenance(reason: UserContextMaintenanceState.Reason,
-                                           policy: UserContextMaintenancePolicy) async -> UserContextMaintenanceReport {
+                                           policy: UserContextMaintenancePolicy,
+                                           sharedContextPrompt: String?) async -> UserContextMaintenanceReport {
         var report = UserContextMaintenanceReport(reason: reason)
+        report.sharedContextChars = sharedContextPrompt?.count ?? 0
         let started = Date()
         let budget = SendBudget(limit: policy.maxModelSendsPerRun)
         let auth = SendBudget(limit: policy.maxAuthRequestsPerRun, exhausted: { AuthBudgetExhausted(limit: $0) })
@@ -572,6 +586,7 @@ extension ConversationArchiveService {
                 if Task.isCancelled { return finish(.cancelled) }
                 do {
                     let reply = try await maintenanceModelCall(systemPrompt: system, userPrompt: UserContextMaintenance.userPrompt,
+                                                               sharedContextPrompt: sharedContextPrompt,
                                                                budget: budget, authBudget: auth)
                     report.promptTokens += reply.promptTokens ?? 0
                     report.completionTokens += reply.completionTokens ?? 0
@@ -649,6 +664,6 @@ extension ConversationArchiveService {
         case .cancelled: outcome = "cancelled"
         }
         let passTimes = r.passSeconds.map { String(format: "%.1f", $0) }.joined(separator: "/")
-        print("[ArchiveService] User profile maintenance: reason=\(r.reason.rawValue) passes=\(r.passes) sends=\(r.sends) auth=\(r.authRequests) seconds=\(String(format: "%.1f", r.seconds)) pass_seconds=\(passTimes.isEmpty ? "-" : passTimes) tokens_in=\(r.promptTokens) tokens_out=\(r.completionTokens) size=\(r.sizeBefore)->\(r.sizeAfter) dropped_chars=\(r.charsDropped) edit_saved_chars=\(r.charsEditedDelta) added_chars=\(r.charsAdded) ops_applied=\(r.opsApplied) ops_ignored=\(r.opsIgnored.count) outcome=\(outcome)")
+        print("[ArchiveService] User profile maintenance: reason=\(r.reason.rawValue) passes=\(r.passes) sends=\(r.sends) auth=\(r.authRequests) seconds=\(String(format: "%.1f", r.seconds)) pass_seconds=\(passTimes.isEmpty ? "-" : passTimes) tokens_in=\(r.promptTokens) tokens_out=\(r.completionTokens) size=\(r.sizeBefore)->\(r.sizeAfter) dropped_chars=\(r.charsDropped) edit_saved_chars=\(r.charsEditedDelta) added_chars=\(r.charsAdded) ops_applied=\(r.opsApplied) ops_ignored=\(r.opsIgnored.count) shared_context_chars=\(r.sharedContextChars) outcome=\(outcome)")
     }
 }
