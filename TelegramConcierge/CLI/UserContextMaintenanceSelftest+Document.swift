@@ -51,7 +51,7 @@ extension UserContextMaintenanceSelftest {
         h.check("P3 v6.3 finished one-off work goes entirely (no one-line summary); recurring topics are not finished; upcoming events kept",
                 prompt.contains("A finished one-off investigation or task goes entirely: don't keep a one-line summary of it; it stays in the archive.")
                 && prompt.contains("A topic that keeps coming back in the summaries because the user is still working on it is not finished.")
-                && prompt.contains("Keep upcoming commitments and events until their date has passed."))
+                && prompt.contains("Keep upcoming commitments and events until their date has passed;"))
         h.check("P3 v6.2 summaries only to judge what matters; facts and edits only from the PROFILE",
                 prompt.contains("use it only to judge what still matters to the user")
                 && prompt.contains("Take every fact and edit only from the PROFILE below; never add anything from the summaries"))

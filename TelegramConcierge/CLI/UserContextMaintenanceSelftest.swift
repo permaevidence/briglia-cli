@@ -133,6 +133,7 @@ struct UserContextMaintenanceSelftest: AsyncParsableCommand {
             ("existing", existingUserRows),
             ("wire", wireRows),
             ("shared", sharedContextRows),
+            ("date", dateRows),
             ("preview", previewHarnessRows),
         ]
         for (name, group) in groups where only == nil || only == name {

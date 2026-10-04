@@ -158,6 +158,8 @@ enum UserContextStateLoad: Equatable {
 /// selftest) = production behaviour.
 struct UserContextMaintenanceHooks {
     var now: (() -> Date)? = nil
+    /// The time zone the run's date is rendered in (v6.4); nil = current.
+    var timeZone: TimeZone? = nil
     var beforeStateWrite: (() throws -> Void)? = nil
     var beforeRetiredAppend: (() throws -> Void)? = nil
     var afterRetiredAppend: (() throws -> Void)? = nil
@@ -230,6 +232,27 @@ enum UserContextMaintenance {
 
     static var policy: UserContextMaintenancePolicy { testPolicy ?? .standard }
     static func now() -> Date { testHooks?.now?() ?? Date() }
+    static func timeZone() -> TimeZone { testHooks?.timeZone ?? TimeZone.current }
+
+    /// v6.4: the run's local date for the upcoming-events rule, e.g.
+    /// "Sunday, 4 October 2026 (Europe/Rome, UTC+02:00)". Built from
+    /// calendar components (no DateFormatter, no locale), so it is the same
+    /// on every platform and language setting.
+    static func todayLine(now: Date, timeZone: TimeZone) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let c = calendar.dateComponents([.year, .month, .day, .weekday], from: now)
+        let weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        let months = ["January", "February", "March", "April", "May", "June", "July",
+                      "August", "September", "October", "November", "December"]
+        let weekday = weekdays[min(max((c.weekday ?? 1) - 1, 0), 6)]
+        let month = months[min(max((c.month ?? 1) - 1, 0), 11)]
+        let seconds = timeZone.secondsFromGMT(for: now)
+        let sign = seconds < 0 ? "-" : "+"
+        let minutes = abs(seconds) / 60
+        let offset = "UTC\(sign)\(String(format: "%02d:%02d", minutes / 60, minutes % 60))"
+        return "\(weekday), \(c.day ?? 1) \(month) \(c.year ?? 0) (\(timeZone.identifier), \(offset))"
+    }
 
     static func loadState(at url: URL = stateURL) -> UserContextStateLoad {
         var st = stat()
@@ -296,7 +319,9 @@ enum UserContextMaintenance {
     // MARK: - Prompt (§5, v6.1)
 
     static func systemPrompt(document: UserProfileDocument, assistantName: String, userName: String,
-                             policy: UserContextMaintenancePolicy, pass: Int) -> String {
+                             policy: UserContextMaintenancePolicy, pass: Int,
+                             now: Date = UserContextMaintenance.now(),
+                             timeZone: TimeZone = UserContextMaintenance.timeZone()) -> String {
         let size = document.characterCount
         let over = max(size - policy.targetChars, 0)
         let status = pass == 1
@@ -311,9 +336,11 @@ enum UserContextMaintenance {
 
         If an ARCHIVE MEMORY CONTEXT with previous conversation summaries appears above, use it only to judge what still matters to the user: topics the user keeps returning to are lasting; one-off searches or tasks that were never mentioned again are not. Its USER PROFILE copy may be older than the numbered PROFILE below, which is the one you edit. Take every fact and edit only from the PROFILE below; never add anything from the summaries.
 
-        Go through the whole profile and remove or shorten what does not serve that purpose. Prefer removing whole topics that are finished or tied to one task before trimming single facts. A finished one-off investigation or task goes entirely: don't keep a one-line summary of it; it stays in the archive. A topic that keeps coming back in the summaries because the user is still working on it is not finished. Keep upcoming commitments and events until their date has passed. Keep facts about people, relationships, life context and persistent preferences, even when they are short or old. Use your judgment.
+        Go through the whole profile and remove or shorten what does not serve that purpose. Prefer removing whole topics that are finished or tied to one task before trimming single facts. A finished one-off investigation or task goes entirely: don't keep a one-line summary of it; it stays in the archive. A topic that keeps coming back in the summaries because the user is still working on it is not finished. Keep upcoming commitments and events until their date has passed; today's date is given below, and if an event's date is unclear, don't assume it has passed. Keep facts about people, relationships, life context and persistent preferences, even when they are short or old. Use your judgment.
 
         Each fact is shown as `[id] (length) text`. Lines starting with `#` are section headings; they are structure, not facts. A section left empty is removed automatically.
+
+        TODAY: \(todayLine(now: now, timeZone: timeZone))
 
         IDENTITY (current, authoritative):
         Assistant name: \(assistantName.isEmpty ? "not specified" : assistantName)
@@ -550,6 +577,9 @@ extension ConversationArchiveService {
         var report = UserContextMaintenanceReport(reason: reason)
         report.sharedContextChars = sharedContextPrompt?.count ?? 0
         let started = Date()
+        // v6.4: one date for the whole run (every pass and retry).
+        let runNow = UserContextMaintenance.now()
+        let runTimeZone = UserContextMaintenance.timeZone()
         let budget = SendBudget(limit: policy.maxModelSendsPerRun)
         let auth = SendBudget(limit: policy.maxAuthRequestsPerRun, exhausted: { AuthBudgetExhausted(limit: $0) })
         let assistantName = KeychainHelper.load(key: KeychainHelper.assistantNameKey) ?? ""
@@ -573,7 +603,8 @@ extension ConversationArchiveService {
             report.passes = pass
             await UserContextMaintenance.testHooks?.afterSnapshot?(pass)
             let system = UserContextMaintenance.systemPrompt(document: document, assistantName: assistantName,
-                                                             userName: userName, policy: policy, pass: pass)
+                                                             userName: userName, policy: policy, pass: pass,
+                                                             now: runNow, timeZone: runTimeZone)
             var operations: UserProfileDocument.Operations?
             var lastError: Error?
             var failureKind: UserContextMaintenanceState.FailureKind = .transient
