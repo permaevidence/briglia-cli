@@ -89,6 +89,8 @@ jobs:
         run: python3 scripts/prune_archive_owner_test.py
       - name: Responses real-owner lifecycle
         run: python3 scripts/responses_lifecycle_test.py
+      - name: User-profile maintenance against v0.2.48 (unchanged requests, downgrade and re-upgrade)
+        run: python3 scripts/user_context_wire_test.py
       - name: Smoke test
         run: python3 scripts/smoke_test.py .build/debug/briglia
         env:
@@ -180,6 +182,8 @@ jobs:
         run: python3 scripts/prune_archive_owner_test.py
       - name: Responses real-owner lifecycle
         run: python3 scripts/responses_lifecycle_test.py
+      - name: User-profile maintenance against v0.2.48 (unchanged requests, downgrade and re-upgrade)
+        run: python3 scripts/user_context_wire_test.py
       - name: Smoke test
         run: python3 scripts/smoke_test.py .build/debug/briglia
       - name: Quick-setup browser test (best effort on the macOS runner)

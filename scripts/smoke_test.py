@@ -479,6 +479,16 @@ def main():
     result = run_selftest([os.path.abspath(ADA), "__archive-full-chunk-selftest"], capture_output=True, text=True, timeout=180)
     check("archive full-chunk selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # User-profile maintenance with edit operations: numbered facts, drop /
+    # edit / add applied deterministically, retired facts kept word for word,
+    # 40k/30k soft threshold, one-time cleanup, budgets counted at the
+    # transport (Chat Completions and Responses), cooldowns and the growth
+    # gate, damaged state preserved, crash and conflict safety, Mind and
+    # /deleteuserdata, existing-user formats. Re-executes itself in a private
+    # scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__user-context-maintenance-selftest"], capture_output=True, text=True, timeout=900)
+    check("user-context maintenance selftest", result.returncode == 0, (result.stdout + result.stderr)[-2500:])
+
     # Past-turn summary retention (Part B): the newest 3 prune-summary
     # anchors stay in full, older ones become a deterministic one-line
     # snapshot pointer (300-scalar budget, recorded coverage, approx. rule),

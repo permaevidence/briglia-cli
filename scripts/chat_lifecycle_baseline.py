@@ -150,6 +150,28 @@ def instrument(tree):
     return evidence
 
 
+# Reviewed instrumentation deltas, applied to the pinned reference's evidence
+# only when it has exactly the listed old values (anything else still fails).
+# User-profile maintenance (USER_CONTEXT_EDIT_OPS_PLAN v6.1): the v0.2.48
+# rewrite-retry flag `ada.archive.restructureRetryPending` is no longer read or
+# set; its four accesses in ConversationArchiveService.swift became one
+# removal there (/deleteuserdata) and one removal in UserContextMaintenance.swift
+# (first state load). Both are redirected like every other access.
+REVIEWED_DEFAULTS_DELTAS = {
+    "TelegramConcierge/Services/ConversationArchiveService.swift:defaults": (4, 1),
+    "TelegramConcierge/Services/UserContextMaintenance.swift:defaults": (None, 1),
+}
+
+
+def reviewed_defaults_delta(evidence):
+    adjusted = dict(evidence)
+    for key, (old, new) in REVIEWED_DEFAULTS_DELTAS.items():
+        if adjusted.get(key) != old:
+            raise RuntimeError(f"Reviewed defaults delta no longer matches the reference: {key} = {adjusted.get(key)!r}, expected {old!r}")
+        adjusted[key] = new
+    return adjusted
+
+
 def expected_affinity(lane):
     payload = b"briglia-affinity-v1"
     for part in (hashlib.sha256(b"synthetic-lifecycle-key").digest(), lane.encode()):
@@ -287,7 +309,8 @@ def main():
                         (tree / name).parent.mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(ROOT / name, tree / name, follow_symlinks=False)
             evidence = instrument(tree)
-            if label == "reference": reference_evidence = evidence
+            if label == "reference":
+                reference_evidence = reviewed_defaults_delta(evidence)
             elif reference_evidence is not None and evidence != reference_evidence:
                 raise RuntimeError("Instrumentation differs between release and candidate: inspect per-file UserDefaults counts and seam hashes; extraction moves require explicit review, not silent relaxation")
             scratch = (args.scratch_root or root / "build") / label

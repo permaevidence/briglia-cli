@@ -163,6 +163,7 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
             await manager.p2ReadOnlyCommands()
             try await runSubscription(manager, server: server, root: root, file: file)
             try await runSubscriptionRecovery(manager, server: server)
+            try await runSubscriptionMaintenanceBudget(server: server)
         }
         print("Responses lifecycle PASS")
     }
@@ -205,12 +206,12 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         try P2Life.require(workerIDs.count == 3 && Set(workerIDs).count == 1 && workerIDs.first != identifiers.first, "subscription subagent session affinity is stable and separate from main")
         server.clear(); P2Life.contexts = []
         let summary = String(repeating: "Useful archived fixture facts. ", count: 120)
-        server.script([try P2Life.body(summary), try P2Life.body(summary), try P2Life.body("You prefer concise replies."),
+        server.script([try P2Life.body(summary), try P2Life.body(summary), try P2Life.body("{\"edit\":[{\"id\":1,\"text\":\"You prefer concise replies.\"}]}"),
                        try P2Life.body("Structured subscription context"), try P2Life.body("fixture.png: Description retained.")])
         let archive = ConversationArchiveService(); await archive.configure(apiKey: "unused")
         try P2Life.require(try await archive.p2Summary() == summary.trimmingCharacters(in: .whitespacesAndNewlines), "subscription archive summary")
         try P2Life.require(try await archive.p2Meta() == summary.trimmingCharacters(in: .whitespacesAndNewlines), "subscription historical meta summary")
-        try P2Life.require(await archive.p2Restructure(), "subscription context restructuring")
+        try P2Life.require(await archive.p2Maintain(), "subscription context maintenance")
         _ = try await UserContextStructurer.structure(assistantName: "Fixture", userName: "User", rawContext: "Concise", existingContext: "", config: .fromKeychain())
         let service = OpenRouterService(); await service.configure(apiKey: "unused")
         let descriptions = try await service.generateFileDescriptions(files: [("fixture.png", Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKElEQVR4nO3NsQ0AAAzCMP5/un0CNkuZ41wybXsHAAAAAAAAAAAAxR4yw/wuPL6QkAAAAABJRU5ErkJggg==")!, "image/png")],
@@ -227,6 +228,78 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         server.clear()
         _ = try await manager.p2Turn(human: Message(role: .user, content: "This cannot dispatch after logout"))
         try P2Life.require(await manager.p2Error() != nil && server.completeRequests.isEmpty, "logout fails closed before another manager request")
+    }
+
+    /// User-profile maintenance budgets on the subscription transport
+    /// (E5h/E5i/E5k): sends counted before every transport send, the
+    /// post-401 refresh only with a send left, refreshes counted before the
+    /// token request, adapter-internal retries off.
+    @MainActor private func runSubscriptionMaintenanceBudget(server: CaptureServer) async throws {
+        let store = SubscriptionAuthStore()
+        P2Life.subscriptionCaptureURL = URL(string: "http://127.0.0.1:\(server.port)/responses")!
+        defer { P2Life.subscriptionCaptureURL = nil; P2Life.failRefresh = false }
+        func budgeted(_ generation: String, sends: Int, auth: Int) -> ProviderExecutionContext {
+            var context = ProviderExecutionContext.responsesAPI(baseURL: SubscriptionEndpoint.inference, key: generation,
+                model: "gpt-5.6-luna", lane: .archive, effort: "high")
+            context.subscriptionGeneration = generation; context.profileIdentity = "chatgpt"; context.nativeToolMedia = false
+            context.sendBudget = SendBudget(limit: sends)
+            context.authBudget = SendBudget(limit: auth, exhausted: { AuthBudgetExhausted(limit: $0) })
+            context.adapterRetries = .none
+            return context
+        }
+        func send(_ context: ProviderExecutionContext) async -> Error? {
+            let receipt = PreparedRequestReceipt(requestID: UUID(), historyFingerprint: "maintenance-budget", deliveryNonces: [])
+            do { _ = try await ResponsesAdapter(context: context).send(input: [ResponsesAdapter.message(role: "user", text: "Maintain")], tools: nil, receipt: receipt); return nil }
+            catch { return error }
+        }
+        func login(expired: Bool = false) async throws -> String {
+            let pending = try await store.beginLogin()
+            return try await store.commitLogin(SubscriptionSelftest.credential(expired: expired), pending: pending)
+        }
+        // Valid token, success: no refresh at all.
+        var generation = try await login()
+        P2Life.refreshCalls = 0; server.clear(); server.script([try P2Life.body("OK")])
+        var context = budgeted(generation, sends: 6, auth: 2)
+        var error = await send(context)
+        try P2Life.require(error == nil && P2Life.refreshCalls == 0 && context.sendBudget?.consumed == 1 && context.authBudget?.consumed == 0,
+            "maintenance budget: valid token sends once and never refreshes")
+        // 401 → one counted refresh → one counted resend.
+        generation = try await login()
+        P2Life.refreshCalls = 0; server.clear(); server.script(["{}", try P2Life.body("OK")], statuses: [401, 200])
+        context = budgeted(generation, sends: 6, auth: 2)
+        error = await send(context)
+        try P2Life.require(error == nil && server.completeRequests.count == 2 && P2Life.refreshCalls == 1
+            && context.sendBudget?.consumed == 2 && context.authBudget?.consumed == 1, "maintenance budget: 401 refresh and resend are both counted")
+        // One send left: a 401 never triggers a refresh.
+        generation = try await login()
+        let storeBefore = try Data(contentsOf: store.file)
+        P2Life.refreshCalls = 0; server.clear(); server.script(["{}"], statuses: [401])
+        context = budgeted(generation, sends: 1, auth: 2)
+        error = await send(context)
+        try P2Life.require(error is SendBudgetExhausted && server.completeRequests.count == 1 && P2Life.refreshCalls == 0
+            && (try Data(contentsOf: store.file)) == storeBefore, "maintenance budget: no refresh without a send left; login store untouched")
+        // Expired token with no refresh left: nothing sent, nothing written, not a login error.
+        generation = try await login(expired: true)
+        let expiredBefore = try Data(contentsOf: store.file)
+        P2Life.refreshCalls = 0; server.clear(); server.script([try P2Life.body("OK")])
+        context = budgeted(generation, sends: 6, auth: 0)
+        error = await send(context)
+        try P2Life.require(error is AuthBudgetExhausted && server.completeRequests.isEmpty && P2Life.refreshCalls == 0
+            && (try Data(contentsOf: store.file)) == expiredBefore && (try store.read()?.requiresLogin) != true,
+            "maintenance budget: exhausted refresh budget sends nothing and leaves the login valid")
+        // Two refreshes allowed, the third refused: expired token refresh (1), 401 refresh (2) → second 401 ends.
+        generation = try await login(expired: true)
+        P2Life.refreshCalls = 0; server.clear(); server.script(["{}", "{}"], statuses: [401, 401])
+        context = budgeted(generation, sends: 6, auth: 2)
+        error = await send(context)
+        try P2Life.require(error != nil && P2Life.refreshCalls == 2 && context.authBudget?.consumed == 2 && server.completeRequests.count == 2,
+            "maintenance budget: at most two counted refreshes per run")
+        // Adapter-internal retries off: one send on 503.
+        generation = try await login()
+        server.clear(); server.script(["{}", try P2Life.body("OK")], statuses: [503, 200])
+        context = budgeted(generation, sends: 6, auth: 2)
+        error = await send(context)
+        try P2Life.require(error != nil && server.completeRequests.count == 1, "maintenance budget: no adapter-internal retry")
     }
 
     @MainActor private func runSubscriptionRecovery(_ manager: ConversationManager, server: CaptureServer) async throws {
@@ -394,12 +467,12 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         let archive = ConversationArchiveService()
         await archive.configure(apiKey: "synthetic-unused-key")
         let summary = String(repeating: "Detailed fixture facts retained for the future. ", count: 100)
-        server.script([try P2Life.body(summary), try P2Life.body(summary), try P2Life.body("You prefer concise replies and durable local memory.")])
+        server.script([try P2Life.body(summary), try P2Life.body(summary), try P2Life.body("{\"edit\":[{\"id\":1,\"text\":\"You prefer concise replies and durable local memory.\"}]}")])
         try P2Life.require(try await archive.p2Summary() == summary.trimmingCharacters(in: .whitespacesAndNewlines), "Responses archive summary decoded")
         try P2Life.require(try await archive.p2Meta() == summary.trimmingCharacters(in: .whitespacesAndNewlines), "Responses archive meta-summary decoded")
         try KeychainHelper.save(key: KeychainHelper.structuredUserContextKey, value: "You prefer concise replies.")
-        try P2Life.require(await archive.p2Restructure(), "Responses archive restructure saved")
-        try P2Life.require(KeychainHelper.load(key: KeychainHelper.structuredUserContextKey) == "You prefer concise replies and durable local memory.", "restructured facts persist")
+        try P2Life.require(await archive.p2Maintain(), "Responses archive profile maintenance saved")
+        try P2Life.require(KeychainHelper.load(key: KeychainHelper.structuredUserContextKey) == "You prefer concise replies and durable local memory.", "maintained facts persist")
         server.script([try P2Life.body("Structured user fixture"), try P2Life.body("Structured second fixture"), try P2Life.body("fixture.png: A small red square.")])
         for index in 0..<2 {
             let structured = try await UserContextStructurer.structure(assistantName: "Fixture", userName: "User",
