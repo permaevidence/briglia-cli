@@ -12139,7 +12139,7 @@ class ConversationManager: ObservableObject {
         if let failure = UserDataWipe.remove(PruneArchiveStore.root.path, label: "conversation snapshots") { failures.append(failure) }
 
         // 2. Clear all archived chunks
-        await archiveService.clearAllArchives()
+        failures += await archiveService.clearAllArchives()
 
         // 3. Clear all reminders (also clears the trigger spool, fire
         //    outbox, watcher scripts/state, and pinned-session refs).

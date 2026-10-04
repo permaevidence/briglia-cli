@@ -52,6 +52,14 @@ struct ProviderExecutionContext {
     /// generic name (the Web researcher records "subagent:web",
     /// WEB_SUBAGENT_PLAN §4.4). nil = derive from `lane` as before.
     var usageLaneLabel: String? = nil
+    /// User-profile maintenance only (USER_CONTEXT_EDIT_OPS_PLAN §7.5): a
+    /// model-send budget consumed before every transport send (first send,
+    /// internal retries, post-401 resend), a login-refresh budget consumed
+    /// before every token-endpoint request, and no adapter-internal retries.
+    /// The defaults reproduce the previous behaviour exactly.
+    var sendBudget: SendBudget? = nil
+    var authBudget: SendBudget? = nil
+    var adapterRetries: AdapterRetryPolicy = .standard
 
     var responsesScope: ResponsesScope {
         ResponsesScope(endpoint: (try? ResponsesAdapter.endpoint(endpoint)) ?? endpoint, profile: profileIdentity, model: model,

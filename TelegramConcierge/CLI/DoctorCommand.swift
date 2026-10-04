@@ -184,6 +184,12 @@ struct Doctor: AsyncParsableCommand {
             if finding.problem { check(finding.text, ok: false, hint: finding.hint) } else { note(finding.text) }
         }
 
+        print("\nUser profile maintenance")
+        for finding in UserContextMaintenance.doctorFindings(
+            profileSize: (KeychainHelper.load(key: KeychainHelper.structuredUserContextKey) ?? "").count) {
+            if finding.problem { check(finding.text, ok: false, hint: finding.hint) } else { note(finding.text) }
+        }
+
         print("\nCache diagnostics")
         do { note(try ResponsesUsageStore().diagnostic()) }
         catch { check("cache statistics unreadable", ok: false, hint: "Check responses_usage.json ownership, permissions and format; model requests can continue without statistics.") }

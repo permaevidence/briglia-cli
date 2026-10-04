@@ -364,12 +364,8 @@ actor ConversationArchiveService {
     /// so a broken API can't add failed LLM calls to every turn start.
     private let metaSummaryRetryCooldown: TimeInterval = 900
     private var metaSummaryBackoffUntil: Date? = nil
-    /// Persisted flag: a restructure pass gave up and should be retried on the
-    /// next successful archive event instead of waiting for the next consolidation.
-    private static let restructureRetryDefaultsKey = "ada.archive.restructureRetryPending"
-    /// Soft ceiling for the structured user context (~5000 tokens). Crossing it
-    /// flags an intelligent restructure pass — content is never truncated to fit.
-    private static let userContextMaxChars = 20000
+    /// Process-local memory of user-profile maintenance (UserContextMaintenance.swift).
+    let userContextMaintenanceRuntime = UserContextMaintenanceRuntime()
     
     // Archive LLM config
     private var currentProvider: LLMProvider {
@@ -828,7 +824,7 @@ actor ConversationArchiveService {
         // API backfills user-context work without waiting for the next archive
         // event — and without delaying the first live prompt.
         await retryPendingContextExtractions()
-        await retryRestructureIfFlagged()
+        await maintainUserContextIfNeeded(event: .startupRecovery)
 
         // Ensure every chunk has its greppable plaintext sidecar: covers
         // archives created before sidecars existed and any dropped by
@@ -850,13 +846,19 @@ actor ConversationArchiveService {
         loadPendingIndex()
         loadPendingMetaIndex()
         loadPendingExtractions()
+        // Maintenance state is re-read from disk at every event; only the
+        // process-local memory about the previous files is dropped.
+        userContextMaintenanceRuntime.suppressed = false
+        userContextMaintenanceRuntime.inMemoryState = nil
         sanitizeExistingArchiveFiles()
         Task { await self.backfillSidecars() }
         print("[ArchiveService] Reloaded index from disk (\(chunkIndex.chunks.count) chunks)")
     }
     
-    /// Clear all archived chunks and indices (for memory reset)
-    func clearAllArchives() {
+    /// Clear all archived chunks and indices (for memory reset). Returns the
+    /// user-profile maintenance files that could not be removed.
+    @discardableResult
+    func clearAllArchives() -> [String] {
         // Delete all chunk files
         for chunk in chunkIndex.chunks {
             let fileURL = archiveFolder.appendingPathComponent(chunk.rawContentFileName)
@@ -883,8 +885,30 @@ actor ConversationArchiveService {
         savePendingIndex()
         savePendingMetaIndex()
         savePendingExtractions()
-        
+
+        // User-profile maintenance: the retired facts (any rotated copies
+        // too), the state file, the v0.2.48 retry flag, in-memory state.
+        var failures: [String] = []
+        let archiveDir = archiveFolder
+        var maintenanceFiles = [UserContextMaintenance.stateFileName, RetiredUserFacts.fileName]
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: archiveDir.path) {
+            maintenanceFiles += names.filter { $0.hasPrefix("retired_user_facts.") && $0.hasSuffix(".jsonl") && $0 != RetiredUserFacts.fileName }
+        }
+        for name in maintenanceFiles {
+            if let failure = UserDataWipe.remove(archiveDir.appendingPathComponent(name).path, label: name) {
+                failures.append(failure)
+            }
+        }
+        UserDefaults.standard.removeObject(forKey: UserContextMaintenance.legacyRetryFlagKey)
+        let runtime = userContextMaintenanceRuntime
+        runtime.suppressed = false
+        runtime.inMemoryState = nil
+        runtime.damaged = false
+        runtime.damagedAlerted = false
+        runtime.storageAlerted = false
+
         print("[ArchiveService] Cleared all archives")
+        return failures
     }
     
     // MARK: - Public Interface
@@ -1059,7 +1083,7 @@ actor ConversationArchiveService {
         // The archive lane just proved healthy — drain any backlog that piled up
         // while the API was broken.
         await retryPendingContextExtractions()
-        await retryRestructureIfFlagged()
+        await maintainUserContextIfNeeded(event: .archive)
 
         // Check if we need to consolidate
         await checkAndConsolidate()
@@ -1449,14 +1473,8 @@ actor ConversationArchiveService {
         // can make a future main-agent turn pay for archive work and disturb
         // the main prompt cache.
         await refreshHistoricalMetaSummariesIfNeeded(recentConsolidatedCount: 5)
-
-        // Restructure user context at consolidation time (~every 4 chunks).
-        // After several append-only additions, the context may have duplicates or could
-        // benefit from reorganization. This does a full intelligent merge.
-        if notifyStatus {
-            onStatusNotification?("🧠 Reorganizing the user profile…")
-        }
-        await restructureUserContext()
+        // Consolidation never touches the user profile: the full rewrite that
+        // used to follow here is gone (USER_CONTEXT_EDIT_OPS_PLAN decision 9).
     }
 
     private func refreshHistoricalMetaSummariesIfNeeded(recentConsolidatedCount: Int) async {
@@ -1936,15 +1954,10 @@ actor ConversationArchiveService {
 
                 // Save the FULL text — never prefix-truncate: the newest facts live at
                 // the end, so a cut would silently drop exactly what was just learned.
-                // Overflow instead flags a restructure pass (drained later this same
-                // archive event), which compacts intelligently under the 45% loss guard.
+                // Size is handled by profile maintenance later this same archive
+                // event, which reads the profile size directly.
                 try KeychainHelper.save(key: KeychainHelper.structuredUserContextKey, value: updated)
-                if updated.count > Self.userContextMaxChars {
-                    UserDefaults.standard.set(true, forKey: Self.restructureRetryDefaultsKey)
-                    print("[ArchiveService] User context: appended new facts from chunk (\(updated.count) chars > \(Self.userContextMaxChars) — restructure flagged)")
-                } else {
-                    print("[ArchiveService] User context: appended new facts from chunk")
-                }
+                print("[ArchiveService] User context: appended new facts from chunk")
                 return true
 
             } catch is CancellationError {
@@ -2031,132 +2044,6 @@ actor ConversationArchiveService {
         }
 
         await MaintenanceAlertCenter.shared.reportSuccess(.userContextExtraction)
-    }
-
-    /// Re-run a restructure pass that previously gave up, once the archive lane
-    /// is healthy again.
-    private func retryRestructureIfFlagged() async {
-        guard UserDefaults.standard.bool(forKey: Self.restructureRetryDefaultsKey) else { return }
-        await restructureUserContext()
-    }
-
-    /// Phase 2: Restructure the user context — deduplicate, correct, reorganize, and trim.
-    /// This is a full intelligent merge: the model receives the COMPLETE existing context and
-    /// produces a clean, organized version. Nothing is lost — only redundancy is removed and
-    /// structure is improved. Triggered at consolidation time (~every 4 chunks).
-    ///
-    /// Bounded: this is an OPTIMIZATION pass — on failure the original context is
-    /// intact and untouched, so giving up loses nothing. A give-up sets a retry
-    /// flag drained after the next successful archive event; the next
-    /// consolidation retries regardless.
-    @discardableResult
-    private func restructureUserContext() async -> Bool {
-        let existingContext = KeychainHelper.load(key: KeychainHelper.structuredUserContextKey) ?? ""
-        guard !existingContext.isEmpty else { return true }
-        onMaintenancePhase?(.restructuringUserContext, true)
-        defer { onMaintenancePhase?(.restructuringUserContext, false) }
-
-        let maxChars = Self.userContextMaxChars
-        let currentTokens = existingContext.count / 4
-
-        let assistantName = KeychainHelper.load(key: KeychainHelper.assistantNameKey) ?? ""
-        let userName = KeychainHelper.load(key: KeychainHelper.userNameKey) ?? ""
-
-        let systemPrompt = """
-        You are reorganizing an AI assistant's persistent memory about the user.
-
-        ⚠️ TOKEN LIMIT: ~5000 tokens (~20,000 characters). Currently using ~\(currentTokens) tokens.
-
-        EXISTING CONTEXT (your ONLY source — do not invent anything):
-        ---
-        \(existingContext)
-        ---
-
-        YOUR TASK: Produce a clean, well-organized version of the SAME information.
-
-        RULES:
-        - PRESERVE every fact, relationship, preference, and detail from the existing context
-        - Deduplicate: merge repeated or near-duplicate facts into single entries
-        - Correct obvious inconsistencies (e.g., contradictory facts — keep the one that appears later/more recent)
-        - Organize by categories (Personal, Relationships, Work, Preferences, Places, etc.) if not already organized
-        - Remove any contingent one-off details that don't belong in a durable profile
-        - Stay within the token limit — be concise but NEVER drop important information
-        - If the context is already clean and well-organized, reproduce it as-is
-
-        ⚠️ MINIMUM OUTPUT LENGTH: this is a REORGANIZATION, not a summary. Your output must be at least \(existingContext.count * 9 / 20) characters (the existing context is \(existingContext.count) characters). If you compress below that, distinct facts have been lost and the result will be rejected. Reproduce every distinct fact; only true duplicates may be merged.
-
-        Assistant Name: \(assistantName.isEmpty ? "not specified" : assistantName)
-        User Name: \(userName.isEmpty ? "not specified" : userName)
-
-        Output ONLY the final structured context. No explanations, no preamble.
-        """
-
-        // Bounded retry: empty responses, too-short results, and thrown errors all
-        // consume attempts. On give-up the original context stays untouched and a
-        // retry flag defers the pass to the next healthy archive event.
-        var lastFailureDescription = "unknown error"
-        var lastFailureWasValidation = false
-
-        for attempt in 1...maintenanceRetryLimit {
-            do {
-                try Task.checkCancellation()
-                let response = try await callLLM(systemPrompt: systemPrompt, userPrompt: "Restructure the user context above.")
-                let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
-
-                guard !trimmed.isEmpty else {
-                    lastFailureDescription = "model returned an empty response"
-                    lastFailureWasValidation = true
-                    print("[ArchiveService] User context restructure: empty response (attempt \(attempt))")
-                    continue
-                }
-
-                // Safety check: restructured context should not be dramatically shorter
-                // (would indicate the model dropped information). Allow up to 55% shrinkage
-                // from dedup/cleanup, but not more. (45% floor: reasoning-heavy models
-                // legitimately compact verbose entries harder than the old 60% floor
-                // allowed, which made them fail this gate persistently.)
-                let minAcceptableLength = existingContext.count * 9 / 20 // 45% of original
-                if trimmed.count < minAcceptableLength && existingContext.count > 500 {
-                    lastFailureDescription = "restructured context too short (\(trimmed.count) of \(existingContext.count) chars, minimum \(minAcceptableLength))"
-                    lastFailureWasValidation = true
-                    print("[ArchiveService] User context restructure: result too short (attempt \(attempt)): \(lastFailureDescription)")
-                    continue
-                }
-
-                // Save the full output — never prefix-truncate a valid restructure
-                // (a cut would sever whole facts mid-sentence). If the model overshot
-                // the target size, leave the retry flag set so a later pass compresses
-                // further; otherwise clear it.
-                try KeychainHelper.save(key: KeychainHelper.structuredUserContextKey, value: trimmed)
-                print("[ArchiveService] User context restructured (\(existingContext.count) → \(trimmed.count) chars)")
-                UserDefaults.standard.set(trimmed.count > maxChars, forKey: Self.restructureRetryDefaultsKey)
-                await MaintenanceAlertCenter.shared.reportSuccess(.userContextRestructure)
-                return true
-
-            } catch is CancellationError {
-                return false
-            } catch {
-                lastFailureDescription = error.localizedDescription
-                lastFailureWasValidation = false
-                if ArchiveError.isDeterministicFailure(error) { break }
-                if attempt < maintenanceRetryLimit {
-                    let delay = min(2.0 * pow(2.0, Double(attempt - 1)), 30.0)
-                    print("[ArchiveService] User context restructure failed (attempt \(attempt)): \(error). Retrying in \(Int(delay))s...")
-                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                }
-            }
-        }
-
-        // Give up: the existing context is intact — skipping this pass loses
-        // nothing. Flag it for retry after the next healthy archive event.
-        UserDefaults.standard.set(true, forKey: Self.restructureRetryDefaultsKey)
-        print("[ArchiveService] Giving up on user context restructure this pass: \(lastFailureDescription)")
-        await MaintenanceAlertCenter.shared.reportFailure(
-            .userContextRestructure,
-            error: lastFailureDescription,
-            deterministic: lastFailureWasValidation
-        )
-        return false
     }
 
     private func buildHistoricalMetaSummaryContext(for batch: [ConversationChunk]) -> SummarizationContext {
@@ -2396,6 +2283,125 @@ actor ConversationArchiveService {
         throw ArchiveError.apiError
     }
     
+    // MARK: - User-profile maintenance transport
+
+    func maintenancePhase(_ phase: MaintenancePhase, _ active: Bool) {
+        onMaintenancePhase?(phase, active)
+    }
+
+    struct MaintenanceReply {
+        let text: String
+        let finishReason: String?
+        let promptTokens: Int?
+        let completionTokens: Int?
+    }
+
+    /// One user-profile maintenance request on the archive lane, same layout
+    /// as every archive request (archive prefix, task system prompt, user
+    /// prompt; no tools, no output cap). The send and login-refresh budgets
+    /// are enforced where requests leave the process: here for Chat
+    /// Completions (one send, no tool-call re-ask), inside the Responses
+    /// adapter otherwise (with its internal retries switched off).
+    func maintenanceModelCall(systemPrompt: String, userPrompt: String,
+                              budget: SendBudget, authBudget: SendBudget) async throws -> MaintenanceReply {
+        if var context = ResponsesAuxiliary.inheritedSnapshot(lane: .archive) {
+            if let error = context.configurationError { throw UserContextMaintenance.ConfigurationError(reason: error) }
+            context.sendBudget = budget
+            context.authBudget = authBudget
+            context.adapterRetries = .none
+            let reply = try await ResponsesAuxiliary.detailed(context: context, messages: [
+                ("system", archiveSystemPrefix), ("system", systemPrompt), ("user", userPrompt)])
+            return MaintenanceReply(text: reply.text, finishReason: nil,
+                                    promptTokens: reply.promptTokens, completionTokens: reply.completionTokens)
+        }
+        return try await callLLMDetailed(systemPrompt: systemPrompt, userPrompt: userPrompt, budget: budget)
+    }
+
+    /// Chat Completions variant of `callLLM` for budgeted callers: the same
+    /// request body (same fields, same order, same reasoning rules), exactly
+    /// one send consumed from `budget` before it goes out, the provider's
+    /// `finish_reason` and token counts returned, and a tool-call reply
+    /// treated as a failed attempt instead of being re-asked. `callLLM`
+    /// itself is unchanged.
+    func callLLMDetailed(systemPrompt: String, userPrompt: String, budget: SendBudget) async throws -> MaintenanceReply {
+        let usingCustomEndpoint = isCustomEndpoint
+        if usingCustomEndpoint && model.isEmpty {
+            throw ArchiveError.notConfigured(reason: "Model name is not configured for archive operations")
+        }
+        if !usingCustomEndpoint && apiKey.isEmpty {
+            throw ArchiveError.notConfigured(reason: "OpenRouter API key is not configured for archive operations")
+        }
+
+        struct Request: Encodable {
+            struct Message: Encodable { let role: String; let content: String }
+            struct ReasoningConfig: Encodable { let effort: String }
+            struct ThinkingConfig: Encodable { let type: String }
+            let model: String
+            let messages: [Message]
+            let max_tokens: Int?
+            let reasoning: ReasoningConfig?
+            let reasoning_effort: String?
+            let thinking: ThinkingConfig?
+        }
+
+        let reasoningConfig: Request.ReasoningConfig?
+        let reasoningEffortField: String?
+        let thinking: Request.ThinkingConfig?
+        switch currentProvider {
+        case .openRouter:
+            reasoningConfig = reasoningEffort.map { .init(effort: $0) }
+            reasoningEffortField = nil
+            thinking = nil
+        case .openAICompatible:
+            reasoningConfig = nil
+            let fields = chatReasoning
+            reasoningEffortField = fields.reasoningEffort
+            thinking = fields.thinkingType.map { .init(type: $0) }
+        case .lmStudio:
+            reasoningConfig = nil
+            reasoningEffortField = nil
+            thinking = nil
+        }
+        let body = Request(model: model,
+                           messages: [.init(role: "system", content: archiveSystemPrefix),
+                                      .init(role: "system", content: systemPrompt),
+                                      .init(role: "user", content: userPrompt)],
+                           max_tokens: nil, reasoning: reasoningConfig,
+                           reasoning_effort: reasoningEffortField, thinking: thinking)
+
+        var request = URLRequest(url: baseURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(authorizationHeaderValue, forHTTPHeaderField: "Authorization")
+        try SessionAffinity.decorate(&request, apiKey: activeAPIKey, lane: .archive)
+        request.timeoutInterval = usingCustomEndpoint ? 1200 : 360
+        request.httpBody = try JSONEncoder().encode(body)
+
+        try budget.consume()
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let bodyPreview = String(data: data.prefix(300), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw ArchiveError.apiHTTPError(status: status, detail: (bodyPreview?.isEmpty == false) ? bodyPreview : nil)
+        }
+        // Lenient on the optional fields: an odd finish_reason or usage shape
+        // must not turn a usable reply into a decode failure.
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = object["choices"] as? [[String: Any]], let first = choices.first,
+              let message = first["message"] as? [String: Any] else {
+            throw ArchiveError.apiError
+        }
+        if let calls = message["tool_calls"] as? [Any], !calls.isEmpty {
+            throw UserContextMaintenance.ToolCallReply()
+        }
+        let usage = object["usage"] as? [String: Any]
+        return MaintenanceReply(text: message["content"] as? String ?? "",
+                                finishReason: first["finish_reason"] as? String,
+                                promptTokens: usage?["prompt_tokens"] as? Int,
+                                completionTokens: usage?["completion_tokens"] as? Int)
+    }
+
     // MARK: - Helpers
     
     /// Check if a filename is a video (videos are not sent to Gemini, so they cost 0 tokens)

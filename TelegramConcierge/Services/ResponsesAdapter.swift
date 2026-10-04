@@ -166,7 +166,9 @@ struct ResponsesAdapter {
             do {
                 if let generation = context.subscriptionGeneration {
                     let login = SubscriptionLogin()
-                    let credential = try await login.store.credential(generation: generation, refresh: login.refresh)
+                    // Budgeted (maintenance) contexts: no refresh when no send is left.
+                    try context.sendBudget?.requireCapacity()
+                    let credential = try await login.store.credential(generation: generation, refresh: Self.refresher(login, context.authBudget))
                     try Task.checkCancellation()
                     try login.store.validate(generation: generation)
                     request.setValue("Bearer " + credential.access, forHTTPHeaderField: "Authorization")
@@ -175,6 +177,9 @@ struct ResponsesAdapter {
                 }
                 request.setValue(context.subscriptionGeneration == nil ? nil : context.responsesTurn.value(for: context.responsesScope),
                     forHTTPHeaderField: ResponsesTurn.header)
+                // Budgeted contexts count every send here: the first, any
+                // internal retry and the post-401 resend. nil = no budget.
+                try context.sendBudget?.consume()
                 dispatch += 1
                 let transport = ResponsesHTTPTransport(routingContext: context)
                 let usage = ResponsesUsageStore()
@@ -221,9 +226,11 @@ struct ResponsesAdapter {
                         try await SubscriptionAuthStore().requireLogin(generation: generation, rejectedAccess: usedAccess)
                         throw SubscriptionError("ChatGPT rejected the refreshed login; sign in again")
                     }
+                    // Budgeted contexts never refresh for a resend they could not make.
+                    try context.sendBudget?.requireCapacity()
                     didRefreshAfter401 = true
                     let login = SubscriptionLogin()
-                    _ = try await login.store.credential(generation: generation, rejectedAccess: usedAccess, refresh: login.refresh)
+                    _ = try await login.store.credential(generation: generation, rejectedAccess: usedAccess, refresh: Self.refresher(login, context.authBudget))
                     continue
                 }
                 var delay = Double(1 << attempt)
@@ -234,12 +241,23 @@ struct ResponsesAdapter {
                 } else if let e = error as? URLError {
                     retry = [.timedOut, .networkConnectionLost, .cannotConnectToHost, .notConnectedToInternet].contains(e.code)
                 } else { retry = false }
-                guard retry, attempt < 3 else { throw error }
+                guard retry, attempt < 3, context.adapterRetries == .standard else { throw error }
                 try await Task.sleep(nanoseconds: UInt64(min(30, max(0, delay)) * 1_000_000_000))
                 attempt += 1
             }
         }
         throw ResponsesFailure.disconnected
+    }
+
+    /// The login-refresh closure: the plain `login.refresh` unless a refresh
+    /// budget is set, in which case one unit is consumed immediately before
+    /// the token-endpoint request (only when a network refresh happens).
+    static func refresher(_ login: SubscriptionLogin, _ budget: SendBudget?) -> (String) async throws -> SubscriptionCredential {
+        guard let budget else { return login.refresh }
+        return { token in
+            try budget.consume()
+            return try await login.refresh(token)
+        }
     }
 
     /// The ChatGPT subscription and the OpenAI API are hosted endpoints even

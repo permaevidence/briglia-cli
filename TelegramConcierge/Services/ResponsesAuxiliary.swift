@@ -68,4 +68,22 @@ enum ResponsesAuxiliary {
         guard case .text(let text, _, _, _, _, _, _, _) = response else { throw ResponsesFailure.malformed("auxiliary request returned tools") }
         return text
     }
+
+    /// User-profile maintenance: the same request as `text`, also reporting
+    /// token counts. The caller's context carries its send/refresh budgets
+    /// and retry policy (USER_CONTEXT_EDIT_OPS_PLAN §7.5). A cut-off reply
+    /// surfaces as `ResponsesFailure.incomplete` from the decoder.
+    static func detailed(context: ProviderExecutionContext, messages: [(String, String)])
+        async throws -> (text: String, promptTokens: Int?, completionTokens: Int?) {
+        defer { context.responsesTurn.close() }
+        let input = messages.map { ResponsesAdapter.message(role: $0.0, text: MarkerNeutralizer.escape($0.1)) }
+        let receipt = PreparedRequestReceipt(requestID: UUID(),
+            historyFingerprint: ResponsesReplayEnvelope.hash(try JSONEncoder().encode(input)), deliveryNonces: [])
+        let response = try await ResponsesAdapter(context: context).send(input: input, tools: nil,
+            receipt: receipt, maxOutputTokens: nil)
+        guard case .text(let text, _, _, let prompt, let completion, _, _, _) = response else {
+            throw ResponsesFailure.malformed("auxiliary request returned tools")
+        }
+        return (text, prompt, completion)
+    }
 }
