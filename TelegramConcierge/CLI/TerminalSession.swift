@@ -234,6 +234,13 @@ final class TerminalSession {
             .sink { print("\n· \($0)") }
             .store(in: &cancellables)
 
+        // /stop visibility (§4.2): every local stop notice, repeats included
+        // (deliberately no removeDuplicates).
+        manager.stopNoticeEvents
+            .receive(on: mainScheduler)
+            .sink { print("\n· \($0)") }
+            .store(in: &cancellables)
+
         // Agent-initiated mid-turn messages (mid_turn_message_user tool) need
         // no dedicated pipe: delivery appends a durable assistant message to
         // history, which renderNewMessages prints live — and privacy mode's
@@ -359,6 +366,9 @@ final class TerminalSession {
             if let tokens = manager.lastPromptTokens {
                 print("  context: ~\(tokens) tokens")
             }
+            for line in manager.stoppedRunStatusLines() {
+                print("  " + line)
+            }
             prompt()
 
         case line == "/prune":
@@ -386,16 +396,20 @@ final class TerminalSession {
             // Everything else routes through the SAME command set Telegram
             // uses (/model, /effort, /spend, /hide, /llm…), so the surfaces
             // can't drift apart.
-            if let responses = await manager.handleTerminalCommand(line) {
-                if responses.isEmpty {
-                    print("  done")
-                } else {
-                    for response in responses {
-                        print("  " + response.replacingOccurrences(of: "\n", with: "\n  "))
+            // Delivery-aware: the lines are printed BEFORE any follow-up
+            // notice of this command is released (/stop visibility §4.2).
+            await manager.handleTerminalCommand(line) { responses in
+                if let responses {
+                    if responses.isEmpty {
+                        print("  done")
+                    } else {
+                        for response in responses {
+                            print("  " + response.replacingOccurrences(of: "\n", with: "\n  "))
+                        }
                     }
+                } else {
+                    print("  unknown command \(line) — try /help")
                 }
-            } else {
-                print("  unknown command \(line) — try /help")
             }
             prompt()
 

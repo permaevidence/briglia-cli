@@ -42,6 +42,9 @@ import Glibc
 /// stage and, on Linux, the state/wait channel of each thread. It never
 /// cancels, fails, retries or otherwise touches the stage: the operation may
 /// still complete, and reporting it failed could cause overlapping writes.
+/// A `stall_suspected` record therefore means a duration threshold was
+/// crossed, not a proven deadlock: the memory archive (`archive.wait`,
+/// `archive.phase.*`, diagnostics only) can legitimately run for minutes.
 /// The complete report (not only a one-line alert) is written to stderr by
 /// the watchdog thread itself, outside the marker lock, so it does not depend
 /// on the log writer, which may be the thing that hangs (Codex R3). Delivery

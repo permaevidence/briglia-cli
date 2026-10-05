@@ -85,6 +85,53 @@ class ConversationManager: ObservableObject {
     }
     @Published private(set) var maintenanceActivities: [MaintenanceActivity] = []
 
+    // MARK: /stop visibility (STOP_VISIBILITY_PLAN v3 §3) — in memory only
+
+    /// A stopped request whose turn task has not ended yet. Created by the
+    /// /stop that captured the running task; `ended` is set only by that
+    /// run's single watcher, which then drops the entry. Keyed by run id, so
+    /// a newer turn never touches it.
+    struct StoppedRunFinishing: Equatable {
+        let runId: UUID
+        /// Recognises a repeated /stop that reaches the interrupted-turn
+        /// marker branch (no envelope checkpoint owner).
+        let triggerMessageId: UUID?
+        let stoppedAt: Date
+        /// A "still finishing" reply was issued for this run.
+        var announced = false
+        var ended: Date? = nil
+        /// At most one completion notice per run (per notice series).
+        var completionQueued = false
+        /// The run's notice series, one per destination.
+        var series: [NoticeSeries.Target: UUID] = [:]
+    }
+    @Published private(set) var stoppedRunsFinishing: [UUID: StoppedRunFinishing] = [:]
+    private var stoppedRunWatchers: [UUID: Task<Void, Never>] = [:]
+
+    /// What a run is doing, written by the run's own code next to the
+    /// existing activity updates and keyed by ITS run id — the only source
+    /// used to name a stopped request's remaining work (process-wide
+    /// activity can belong to a newer turn).
+    enum RunPhase: Equatable {
+        case model(Date)
+        case tools(callIds: [String], labels: [String], Date)
+        case archiveWait(Date)
+    }
+    private var runPhases: [UUID: RunPhase] = [:]
+
+    /// Undeduplicated local notices (terminal and app socket): ordinary /stop
+    /// replies of local stops and the ordered follow-ups of local series.
+    let stopNoticeEvents = PassthroughSubject<String, Never>()
+    /// Every live visibility-notice series (for invalidation).
+    private var noticeSeriesRegistry: [UUID: NoticeSeries] = [:]
+    /// Fingerprint of the Telegram token registered last (a change bumps the
+    /// Telegram notice generation).
+    private var registeredTelegramTokenIdentity: String?
+    /// Stage-marker tokens of open archive maintenance phases (diagnostics).
+    private var archivePhaseMarkerTokens: [ConversationArchiveService.MaintenancePhase: StageMarkers.Token] = [:]
+    /// Test seam: replaces `StageMarkers.openStages()` for attribution.
+    nonisolated(unsafe) static var openStagesProviderForTesting: (() -> [(stage: String, callId: String?, tool: String?, elapsedMs: Int)])?
+
     /// True while a Mind backup is being restored. The poll loop and turn
     /// entry points check this so no channel intake, reminder, background
     /// completion or user turn can run against in-memory state that is about
@@ -136,9 +183,28 @@ class ConversationManager: ObservableObject {
             if let stale = maintenancePhaseActivityIds.removeValue(forKey: phase) {
                 endMaintenance(stale)
             }
+            // Diagnostics only (§5): the re-begin path closes the stale
+            // stage marker first, like the stale banner entry above.
+            if let staleToken = archivePhaseMarkerTokens.removeValue(forKey: phase) {
+                StageMarkers.exit(staleToken, .ok, detail: "re-begin")
+            }
+            archivePhaseMarkerTokens[phase] = StageMarkers.enter(Self.archivePhaseMarkerName(phase), call: nil)
             maintenancePhaseActivityIds[phase] = beginMaintenance(kind)
-        } else if let id = maintenancePhaseActivityIds.removeValue(forKey: phase) {
-            endMaintenance(id)
+        } else {
+            if let token = archivePhaseMarkerTokens.removeValue(forKey: phase) {
+                StageMarkers.exit(token, .ok)
+            }
+            if let id = maintenancePhaseActivityIds.removeValue(forKey: phase) {
+                endMaintenance(id)
+            }
+        }
+    }
+
+    static func archivePhaseMarkerName(_ phase: ConversationArchiveService.MaintenancePhase) -> String {
+        switch phase {
+        case .consolidating: return "archive.phase.consolidating"
+        case .extractingUserContext: return "archive.phase.extract"
+        case .restructuringUserContext: return "archive.phase.restructure"
         }
     }
 
@@ -518,6 +584,14 @@ class ConversationManager: ObservableObject {
         let chatId = (KeychainHelper.load(key: KeychainHelper.telegramChatIdKey) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let telegramConfigured = !token.isEmpty && Int(chatId) != nil
+        // /stop visibility: a token change (or removal) is a new transport
+        // identity for visibility notices — bump BEFORE the actor adopts it.
+        let tokenIdentity = telegramConfigured ? TelegramBotService.credentialIdentity(token) : nil
+        if let previous = registeredTelegramTokenIdentity, previous != tokenIdentity {
+            NoticeChannelGenerations.bump(.telegram)
+            invalidateNoticeSeries(kind: .telegram)
+        }
+        registeredTelegramTokenIdentity = tokenIdentity
         if telegramConfigured {
             pairedChatId = Int(chatId)
             await telegramService.configure(token: token)
@@ -3349,6 +3423,9 @@ class ConversationManager: ObservableObject {
             // delivery; those still carried by unsaved history stay reserved
             // until a later save. Run-scoped: never a newer run's items.
             releaseRoundDeliveryReservations(ofRun: runId)
+            // /stop visibility: this run's own phase record (run-keyed; a
+            // newer run's entry is never touched).
+            runPhases.removeValue(forKey: runId)
             if activeRunId == runId {
                 activeRunId = nil
                 activeProcessingTask = nil
@@ -3412,6 +3489,7 @@ class ConversationManager: ObservableObject {
         currentTurnToolLog = []
         currentTurnLogIsActive = true
         turnActivity = TurnActivity(kind: .thinking, startedAt: Date())
+        runPhases[runId] = .model(Date())
 
         // Mid-turn early wake (§3.1): arm this run and give the main
         // executor its wake scope (run id + history anchor for crash-record
@@ -3738,6 +3816,22 @@ class ConversationManager: ObservableObject {
             return true
         }
         func close() { isOpen = false }
+
+        /// /stop visibility (§4.2): follow-ups that must come AFTER this
+        /// command's result wait until the caller handed the result to its
+        /// client (`markDelivered`).
+        private var deliveredHandlers: [() -> Void] = []
+        private(set) var isDelivered = false
+        func onDelivered(_ handler: @escaping () -> Void) {
+            if isDelivered { handler() } else { deliveredHandlers.append(handler) }
+        }
+        func markDelivered() {
+            guard !isDelivered else { return }
+            isDelivered = true
+            let handlers = deliveredHandlers
+            deliveredHandlers = []
+            for handler in handlers { handler() }
+        }
     }
     @TaskLocal private static var commandCapture: CommandResponseCapture?
 
@@ -3752,12 +3846,25 @@ class ConversationManager: ObservableObject {
     /// makes `replyAddress` resolve to the wireless app channel for the
     /// command's own task only.
     func handleTerminalCommand(_ text: String) async -> [String]? {
+        var result: [String]? = nil
+        await handleTerminalCommand(text) { result = $0 }
+        return result
+    }
+
+    /// Delivery-aware variant (/stop visibility §4.2): `deliver` runs
+    /// synchronously on the main actor with the response lines (nil for an
+    /// unknown command) and must hand them to the client (enqueue the
+    /// socket `command_result`, print the terminal lines); only THEN are
+    /// follow-up notices of this command (e.g. a stopped request's completion)
+    /// released, so they can never precede the command's own result.
+    func handleTerminalCommand(_ text: String, deliver: ([String]?) -> Void) async {
         let capture = CommandResponseCapture()
-        defer { capture.close() }
         let handled = await Self.$commandCapture.withValue(capture) {
             await handleControlCommandIfNeeded(text)
         }
-        return handled ? capture.lines : nil
+        capture.close()
+        deliver(handled ? capture.lines : nil)
+        capture.markDelivered()
     }
 
     // MARK: - Telegram command menus (inline keyboards)
@@ -4814,6 +4921,19 @@ class ConversationManager: ObservableObject {
         try? await sendText(text)
     }
 
+    /// /switchbot steps 3–4: drop the old bot's parked replies, retire its
+    /// visibility notices (§4.1: invalidated, never re-sent; the new
+    /// Telegram generation makes a notice already queued toward the actor
+    /// refuse to build its request with the new token — checked at
+    /// credential capture), then adopt the new bot.
+    private func cutOverTelegramBot(to token: String) async {
+        parkedOutbound.removeAll { $0.address.kind == .telegram }
+        NoticeChannelGenerations.bump(.telegram)
+        invalidateNoticeSeries(kind: .telegram)
+        await telegramService.adoptNewBot(token: token)
+        await updateTelegramChannelRegistration()
+    }
+
     /// Execute a confirmed /switchbot. Called ONLY from the poll loop's clean
     /// boundary: no getUpdates batch is in flight there, so every confirm for
     /// the OLD bot has already been persisted under its own token hash —
@@ -4862,12 +4982,10 @@ class ConversationManager: ObservableObject {
         //    token (which cannot reach the old owner's chat after a
         //    handoff). Their text survives in conversation history — the
         //    park queue's documented durability assumption.
-        parkedOutbound.removeAll { $0.address.kind == .telegram }
-
+        //
         // 4. Fresh offsets under the new token's hash, then rebuild the
         //    channel registration (pairedChatId, trimmed command menu).
-        await telegramService.adoptNewBot(token: pending.newToken)
-        await updateTelegramChannelRegistration()
+        await cutOverTelegramBot(to: pending.newToken)
 
         // 5. Ambient output follows Briglia's new home.
         if lastUserChannelAddress?.kind == .telegram, let address = telegramAddress {
@@ -6019,6 +6137,10 @@ class ConversationManager: ObservableObject {
            let pin = OpenRouterProviderPin.statusLine() {
             contextLine += "\n" + pin
         }
+        // /stop visibility (R3): stopped requests still finishing, before
+        // the background section.
+        let stoppedLines = stoppedRunStatusLines()
+        if !stoppedLines.isEmpty { contextLine += "\n" + stoppedLines.joined(separator: "\n") }
         // Mid-turn early wake (§3.11): background work and retained
         // obligations; the hidden test setting announces itself first.
         if let background = await backgroundStatusSection() { contextLine += "\n" + background }
@@ -6567,6 +6689,12 @@ class ConversationManager: ObservableObject {
         // From here to the turn cancellation below there is NO suspension
         // point: the running turn cannot drain a held message into its next
         // request between the snapshot and the cancel.
+        //
+        // /stop visibility (§3.1): capture the running task and its run —
+        // pure reads, nothing awaited, nothing changed.
+        let stoppedTask = wasRunning ? activeProcessingTask : nil
+        let stoppedRun = wasRunning ? activeRunId : nil
+        let stoppedTrigger = wasRunning ? activeTurnTriggerMessage?.id : nil
         var affected = items.jobUUIDs.union(stoppedSubagentJobs)
         if let records = try? DetachedJobStore.load() {
             affected.formUnion(records.filter { $0.completion == .owed }.map(\.jobId))
@@ -6620,6 +6748,23 @@ class ConversationManager: ObservableObject {
                 print("[ConversationManager] /stop could not stamp crash records: \(error.localizedDescription)")
             }
         }
+        // /stop visibility: a repeated /stop for a request that is still
+        // finishing is matched by its run id (envelope checkpoint owner:
+        // the run is still active) or by its trigger (the interrupted-turn
+        // marker branch, F2). Otherwise a newly captured task gets ONE entry
+        // and ONE watcher. Synchronous; no suspension.
+        var repeatRun: UUID? = nil
+        if let run = stoppedRun, stoppedRunsFinishing[run]?.ended == nil, stoppedRunsFinishing[run] != nil {
+            repeatRun = run
+        } else if stoppedPendingTurn, let trigger,
+                  let match = stoppedRunsFinishing.values.first(where: { $0.triggerMessageId == trigger && $0.ended == nil }) {
+            repeatRun = match.runId
+        }
+        if repeatRun == nil, let run = stoppedRun, let task = stoppedTask {
+            registerStoppedRun(run, task: task, triggerMessageId: stoppedTrigger)
+        }
+        let observedRun = repeatRun ?? (stoppedTask != nil ? stoppedRun : nil)
+
         // Stopped items never start work until settled — across turns (a
         // new user message never clears this) and restarts (the marker).
         stoppedJobIds.formUnion(affected)
@@ -6646,20 +6791,29 @@ class ConversationManager: ObservableObject {
         await toolExecutor.cancelAllRunningProcesses()
         ToolExecutor.clearPendingToolOutputs()
 
-        // 5. Confirm up to 3 s (actual exits, not just signals sent).
-        var unconfirmed = Set(stoppedBash.map(\.jobUUID))
-        let confirmDeadline = Date().addingTimeInterval(3)
-        while !unconfirmed.isEmpty && Date() < confirmDeadline {
-            for job in unconfirmed where await BackgroundProcessRegistry.shared.settlementInfo(uuid: job).settled {
-                unconfirmed.remove(job)
-            }
-            if !unconfirmed.isEmpty { try? await Task.sleep(nanoseconds: 50_000_000) }
-        }
+        // 5. Confirm up to 3 s (actual exits, not just signals sent) — and,
+        //    as an independent predicate, observe for at most 2.5 s whether
+        //    the captured turn task ended (§3.3). The turn side only reads a
+        //    flag set by the run's watcher; it never awaits the task.
+        let unconfirmed = await Self.observeStopGrace(
+            bashJobs: Set(stoppedBash.map(\.jobUUID)),
+            isSettled: { job in await BackgroundProcessRegistry.shared.settlementInfo(uuid: job).settled },
+            turnEnded: observedRun.map { run in { [weak self] in self?.stoppedRunHasEnded(run) ?? true } }
+        )
 
-        // 6. Reply: "stopped" only for confirmed exits.
-        var text = wasRunning ? "⛔ I stopped the current work."
-            : stoppedPendingTurn ? "⛔ I stopped the interrupted request; it won't resume."
-            : (stoppedBash.isEmpty ? "I'm not doing anything at the moment." : "⛔ Stopped.")
+        // 6. Reply: "stopped" only for confirmed exits. Decided ONCE, here,
+        //    synchronously: either the captured run ended (today's text) or
+        //    it is announced as still finishing (§2 R1/R4).
+        let stillFinishing = observedRun.flatMap { stoppedRunHasEnded($0) ? nil : $0 }
+        var text: String
+        if let run = stillFinishing {
+            let lead = repeatRun != nil ? "⛔ Already stopping." : "⛔ Stop requested."
+            text = "\(lead) The request is still finishing: \(describeStillFinishing(runId: run)). I'll notify you when it ends."
+        } else {
+            text = wasRunning ? "⛔ I stopped the current work."
+                : stoppedPendingTurn ? "⛔ I stopped the interrupted request; it won't resume."
+                : (stoppedBash.isEmpty ? "I'm not doing anything at the moment." : "⛔ Stopped.")
+        }
         if killedBackgroundSubagents > 0 {
             text += " Also stopped \(killedBackgroundSubagents) background assistant\(killedBackgroundSubagents == 1 ? "" : "s")."
         }
@@ -6685,9 +6839,294 @@ class ConversationManager: ObservableObject {
         if markerFailure != nil {
             text += " (I couldn't save the stop to disk — if Briglia restarts in the next moments it may resume the stopped request.)"
         }
-        try? await sendText(text, to: address)
+        if let run = stillFinishing {
+            // Ordered delivery (§4): the reply heads (or joins) the run's
+            // notice series; the stop path does not wait for its retries.
+            deliverStillFinishingReply(text, run: run, address: address)
+            Self.afterStopDecisionForTesting?(self, run)
+        } else {
+            try? await sendText(text, to: address)
+            // F1: a local stop's reply is visible on the terminal and app.
+            if address?.kind == .app, Self.commandCapture?.isOpen != true {
+                stopNoticeEvents.send(text)
+            }
+        }
 
         statusMessage = wasRunning ? "Cancelled" : "Listening... (Last check: \(formattedTime()))"
+    }
+
+    // MARK: - /stop visibility (STOP_VISIBILITY_PLAN v3)
+
+    /// Test seam (SV10d): runs synchronously right after a "still
+    /// finishing" decision was delivered. nil in production.
+    nonisolated(unsafe) static var afterStopDecisionForTesting: (@MainActor (ConversationManager, UUID) -> Void)?
+
+    static let stopBashConfirmSeconds: TimeInterval = 3
+    static let stopTurnObserveSeconds: TimeInterval = 2.5
+
+    nonisolated static func monotonicSeconds() -> TimeInterval {
+        TimeInterval(StageMarkers.monotonicNanos()) / 1_000_000_000
+    }
+
+    /// The /stop confirmation window (§3.3): two INDEPENDENT predicates.
+    /// Bash exits are confirmed for up to 3 s exactly as before; the
+    /// captured turn is observed for at most 2.5 s, only when there is one,
+    /// by reading a flag (never awaiting the task). Ends as soon as both
+    /// sides are done. Returns the Bash jobs still unconfirmed.
+    static func observeStopGrace(
+        bashJobs: Set<UUID>,
+        isSettled: (UUID) async -> Bool,
+        turnEnded: (() -> Bool)?,
+        now: () -> TimeInterval = monotonicSeconds,
+        pause: () async -> Void = { try? await Task.sleep(nanoseconds: 50_000_000) }
+    ) async -> Set<UUID> {
+        var unconfirmed = bashJobs
+        let start = now()
+        let bashDeadline = start + stopBashConfirmSeconds
+        let turnDeadline = start + stopTurnObserveSeconds
+        while true {
+            let bashOpen = !unconfirmed.isEmpty && now() < bashDeadline
+            let turnOpen = turnEnded.map { !$0() } == true && now() < turnDeadline
+            if !bashOpen && !turnOpen { break }
+            if bashOpen {
+                for job in unconfirmed where await isSettled(job) {
+                    unconfirmed.remove(job)
+                }
+            }
+            if !unconfirmed.isEmpty || turnOpen { await pause() }
+        }
+        return unconfirmed
+    }
+
+    /// One entry and one watcher per captured run (§3.1). Only the watcher
+    /// sets `ended`; nothing on the stop path awaits the task.
+    private func registerStoppedRun(_ run: UUID, task: Task<Void, Never>, triggerMessageId: UUID?) {
+        guard stoppedRunsFinishing[run] == nil, stoppedRunWatchers[run] == nil else { return }
+        stoppedRunsFinishing[run] = StoppedRunFinishing(runId: run, triggerMessageId: triggerMessageId, stoppedAt: Date())
+        stoppedRunWatchers[run] = Task { @MainActor [weak self] in
+            await task.value
+            self?.stoppedRunEnded(run)
+        }
+    }
+
+    private func stoppedRunHasEnded(_ run: UUID) -> Bool {
+        guard let entry = stoppedRunsFinishing[run] else { return true }
+        return entry.ended != nil
+    }
+
+    /// The watcher: the captured turn task has ended. Status surfaces drop
+    /// the run at once, whatever happens to delivery; an announced run gets
+    /// its one completion notice, appended BEHIND every earlier notice of
+    /// each of its series (terminal: nothing may follow it).
+    private func stoppedRunEnded(_ run: UUID) {
+        stoppedRunWatchers[run] = nil
+        guard var entry = stoppedRunsFinishing[run] else { return }
+        entry.ended = Date()
+        if entry.announced && !entry.completionQueued {
+            entry.completionQueued = true
+            let after = Self.stopDuration(Int(Date().timeIntervalSince(entry.stoppedAt)))
+            let text = "✅ The stopped request has ended. (it ended \(after) after /stop)"
+            for id in entry.series.values {
+                noticeSeriesRegistry[id]?.append(text, terminal: true)
+            }
+        }
+        gaveUpNoticeSeries.subtract(entry.series.values)
+        stoppedRunsFinishing.removeValue(forKey: run)
+    }
+
+    /// "2m 10s"-style durations for the visibility texts.
+    static func stopDuration(_ seconds: Int) -> String {
+        let s = max(0, seconds)
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return "\(s / 60)m \(String(format: "%02d", s % 60))s" }
+        return "\(s / 3600)h \(String(format: "%02d", (s % 3600) / 60))m"
+    }
+
+    /// What a stopped request is still doing — ONLY from its own run-keyed
+    /// phase record (§3.2). Process-wide maintenance is never attributed.
+    func describeStillFinishing(runId: UUID, now: Date = Date()) -> String {
+        func running(_ since: Date) -> String { "(running \(Self.stopDuration(Int(now.timeIntervalSince(since)))))" }
+        switch runPhases[runId] {
+        case .archiveWait(let since):
+            return "memory archiving continues \(running(since))"
+        case .tools(let callIds, let labels, let since):
+            let shown = labels.prefix(3).joined(separator: ", ") + (labels.count > 3 ? " (+\(labels.count - 3) more)" : "")
+            if let refined = refinedToolStage(callIds: callIds) {
+                return "\(shown) — \(refined) \(running(since))"
+            }
+            return "\(shown) \(running(since))"
+        case .model(let since):
+            return "last seen waiting for the model's reply \(running(since))"
+        case nil:
+            return "finishing the stopped request"
+        }
+    }
+
+    /// Refines a tool batch label with open stage markers that are
+    /// POSITIVELY tied to that batch: entries whose call id belongs to it,
+    /// with exactly one open `tool.execute` per call id. Any ambiguity, no
+    /// open stage, or markers disabled → nil (the batch label alone).
+    private func refinedToolStage(callIds: [String]) -> String? {
+        let stages = (Self.openStagesProviderForTesting ?? StageMarkers.openStages)()
+        guard !stages.isEmpty else { return nil }
+        var parts: [String] = []
+        for id in callIds {
+            let mine = stages.filter { $0.callId == id }
+            let executions = mine.filter { $0.stage == "tool.execute" }.count
+            if executions > 1 { return nil }   // ambiguous: maybe another run's call
+            guard executions == 1 else { continue }
+            if let known = mine.sorted(by: { $0.elapsedMs < $1.elapsedMs })
+                .lazy.compactMap({ Self.stageDescription($0.stage) }).first,
+               !parts.contains(known) {
+                parts.append(known)
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    static func stageDescription(_ stage: String) -> String? {
+        if stage.hasPrefix("git.") { return "saving a git checkpoint" }
+        if stage == "fs.diff" { return "computing a file diff" }
+        if stage.hasPrefix("fs.write") { return "writing a file" }
+        if stage == "lsp.diagnostics" { return "checking diagnostics" }
+        return nil
+    }
+
+    /// Delivers a "still finishing" reply (§4): the captured command window
+    /// keeps the reply in its lines (as today) and holds later items until
+    /// the caller handed the result to its client; a local stop emits on the
+    /// undeduplicated local stream; a wire stop heads (or joins) the run's
+    /// ordered series for that chat. Synchronous with the decision.
+    private func deliverStillFinishingReply(_ text: String, run: UUID, address: ChannelAddress?) {
+        guard stoppedRunsFinishing[run] != nil else { return }
+        stoppedRunsFinishing[run]?.announced = true
+        if let capture = Self.commandCapture, capture.isOpen, address == nil || address?.kind == .app {
+            _ = capture.append(text)
+            if let series = runNoticeSeries(run, target: .local, awaitingCapture: true) {
+                capture.onDelivered { [weak series] in series?.releaseCapture() }
+            }
+            return
+        }
+        if address?.kind == .app {
+            runNoticeSeries(run, target: .local, awaitingCapture: false)?.append(text)
+            return
+        }
+        guard let destination = address ?? replyAddress, destination.kind != .app else { return }
+        runNoticeSeries(run, target: .wire(destination), awaitingCapture: false)?.append(text)
+    }
+
+    /// The run's series for `target`: the open one (repeat replies join it),
+    /// or a new one when there is none or the earlier one was invalidated by
+    /// intentional clearing. A series that GAVE UP is never replaced: no new
+    /// retry lifetime for the same failed delivery (Codex round 3).
+    private func runNoticeSeries(_ run: UUID, target: NoticeSeries.Target, awaitingCapture: Bool) -> NoticeSeries? {
+        if let id = stoppedRunsFinishing[run]?.series[target] {
+            if gaveUpNoticeSeries.contains(id) { return nil }
+            if let existing = noticeSeriesRegistry[id], !existing.isClosed, !existing.terminalQueued {
+                if awaitingCapture { existing.holdForCapture() }
+                return existing
+            }
+        }
+        guard let series = makeNoticeSeries(target: target, awaitingCapture: awaitingCapture) else { return nil }
+        stoppedRunsFinishing[run]?.series[target] = series.id
+        return series
+    }
+
+    /// Ids of series that gave up (kept so a run never restarts them).
+    private var gaveUpNoticeSeries: Set<UUID> = []
+
+    /// A new ordered series. Wire: nil when no channel is registered for
+    /// the address (nothing is sent). The channel generation is captured
+    /// now and re-checked before every attempt — and, for Telegram, again
+    /// inside the actor at credential capture.
+    private func makeNoticeSeries(target: NoticeSeries.Target, awaitingCapture: Bool) -> NoticeSeries? {
+        let series: NoticeSeries
+        switch target {
+        case .local:
+            series = NoticeSeries(localEmit: { [weak self] text in self?.stopNoticeEvents.send(text) },
+                                  awaitingCapture: awaitingCapture)
+        case .wire(let address):
+            guard channels[address.kind] != nil else { return nil }
+            let kind = address.kind
+            let generation = NoticeChannelGenerations.current(kind)
+            series = NoticeSeries(
+                wire: address, generation: generation,
+                attempt: { [weak self] text in
+                    guard let self, let channel = self.channels[kind] else { throw NoticeTransportError.credentialsChanged }
+                    if let telegram = channel as? TelegramBotService {
+                        try await telegram.sendNoticeText(chatId: address.chatId, text: text, expectedGeneration: generation)
+                    } else {
+                        try await channel.sendText(chatId: address.chatId, text: text)
+                    }
+                },
+                isCurrent: { [weak self] in
+                    NoticeChannelGenerations.current(kind) == generation && self?.channels[kind] != nil
+                },
+                afterDelivery: { [weak self] in await self?.flushParkedOutbound() }
+            )
+        }
+        series.log = { print("[ConversationManager] \($0)") }
+        series.onFinished = { [weak self] finished in
+            self?.noticeSeriesRegistry.removeValue(forKey: finished.id)
+            if finished.gaveUp { self?.gaveUpNoticeSeries.insert(finished.id) }
+        }
+        noticeSeriesRegistry[series.id] = series
+        return series
+    }
+
+    /// Intentional clearing: pending items and waiting retries dropped,
+    /// nothing re-sent. Status observation continues.
+    private func invalidateNoticeSeries(kind: ChannelKind) {
+        for series in Array(noticeSeriesRegistry.values) {
+            if case .wire(let address) = series.target, address.kind == kind { series.invalidate() }
+        }
+    }
+
+    private func invalidateAllNoticeSeries() {
+        for series in Array(noticeSeriesRegistry.values) { series.invalidate() }
+    }
+
+    /// /deleteuserdata: pending visibility notices are dropped with the rest
+    /// of the outbound state (nothing re-sent); every channel generation
+    /// moves on.
+    private func retireVisibilityNoticesForWipe() {
+        for kind in ChannelKind.allCases { NoticeChannelGenerations.bump(kind) }
+        invalidateAllNoticeSeries()
+    }
+
+    /// /status lines (§4.3, R3): each stopped-but-finishing request, then —
+    /// separately and only alongside them — process-wide maintenance, never
+    /// attributed to a stopped request.
+    func stoppedRunStatusLines(now: Date = Date()) -> [String] {
+        let finishing = stoppedRunsFinishing.values.filter { $0.ended == nil }.sorted { $0.stoppedAt < $1.stoppedAt }
+        var lines = finishing.map {
+            "⛔ Stopped \(Self.stopDuration(Int(now.timeIntervalSince($0.stoppedAt)))) ago, still finishing: \(describeStillFinishing(runId: $0.runId, now: now))"
+        }
+        if !lines.isEmpty, !maintenanceActivities.isEmpty {
+            let parts = maintenanceActivities.map {
+                "\(Self.maintenanceLabel($0.kind)) (\(Self.stopDuration(Int(now.timeIntervalSince($0.startedAt)))))"
+            }
+            lines.append("Also running: " + parts.joined(separator: ", "))
+        }
+        return lines
+    }
+
+    /// The app socket's composed activity suffix: present whether or not a
+    /// newer turn is active; no stage label while privacy mode is on.
+    func stoppedRunActivitySuffix(privacy: Bool, now: Date = Date()) -> String? {
+        guard let oldest = stoppedRunsFinishing.values.filter({ $0.ended == nil }).min(by: { $0.stoppedAt < $1.stoppedAt }) else { return nil }
+        let age = Self.stopDuration(Int(now.timeIntervalSince(oldest.stoppedAt)))
+        if privacy { return "stopped request still finishing (\(age))" }
+        return "stopped request still finishing: \(describeStillFinishing(runId: oldest.runId, now: now))"
+    }
+
+    static func maintenanceLabel(_ kind: MaintenanceActivity.Kind) -> String {
+        switch kind {
+        case .summarizingHistory: return "memory archiving — summarizing older conversation"
+        case .consolidating: return "memory archiving — merging memory chunks"
+        case .userContext: return "memory archiving — updating the user profile"
+        case .pruning: return "compressing old tool outputs"
+        }
     }
 
     /// Mind import / wipe: drop crash records, the stop marker and the
@@ -7337,7 +7776,14 @@ class ConversationManager: ObservableObject {
                 // Wait for the archive task. For Task<Bool, Never>, the await doesn't
                 // throw on parent cancellation — it just waits until the detached work
                 // completes. /stop can't sabotage the archive mid-flight.
+                // /stop visibility: this run is waiting for the archive
+                // (phase record + diagnostics-only stage marker, closed on
+                // the single path out of the await).
+                if let salvageRunId { runPhases[salvageRunId] = .archiveWait(Date()) }
+                let archiveWaitMarker = StageMarkers.enter("archive.wait", call: nil)
                 let (archived, archiveReceipt) = await archiveTask.value
+                StageMarkers.exit(archiveWaitMarker, archived ? .ok : .error)
+                if let salvageRunId { runPhases[salvageRunId] = .model(Date()) }
                 defer { PruneArchiveStore.release(archiveReceipt) }
 
                 if archived {
@@ -7751,6 +8197,11 @@ class ConversationManager: ObservableObject {
                         kind: .tools(currentTurnToolLog.suffix(executableCalls.count).map { $0.label }),
                         startedAt: now
                     )
+                    if let salvageRunId {
+                        runPhases[salvageRunId] = .tools(callIds: executableCalls.map(\.id),
+                                                         labels: currentTurnToolLog.suffix(executableCalls.count).map { $0.label },
+                                                         now)
+                    }
                 }
                 statusMessage = "Executing tools (round \(round))..."
                 
@@ -7817,6 +8268,7 @@ class ConversationManager: ObservableObject {
                 // the next step. Reset the activity clock so the live
                 // indicator shows this phase's own elapsed time.
                 turnActivity = TurnActivity(kind: .thinking, startedAt: Date())
+                if let salvageRunId { runPhases[salvageRunId] = .model(Date()) }
 
                 // Extract subagent session events from Agent tool results.
                 for (idx, call) in calls.enumerated() where call.function.name == "Agent" {
@@ -12094,6 +12546,7 @@ class ConversationManager: ObservableObject {
         persistPendingInboundBuffers()
         setPendingContinuation(nil)
         parkedOutbound.removeAll()
+        retireVisibilityNoticesForWipe()
         pendingAmbientTriggers.removeAll()
         _ = persistPendingAmbientTriggers()
         pendingWatcherFireMessages.removeAll()
@@ -14000,4 +14453,33 @@ extension ConversationManager {
     func _testPromptTokens(_ message: Message) -> Int { estimatedPromptTokens(for: message, isLMStudio: false) }
     var _testMaintenanceNotice: String? { maintenanceNotice }
     var _testArchiveService: ConversationArchiveService { archiveService }
+}
+
+// MARK: - /stop visibility selftest seams
+//
+// Test-only entry points for `__stop-visibility-selftest` (private scratch
+// roots). They call the production paths; none replaces an implementation.
+extension ConversationManager {
+    func _svRegisterChannel(_ channel: any ChatChannel) { channels[channel.kind] = channel }
+    func _svUnregisterChannel(_ kind: ChannelKind) { channels.removeValue(forKey: kind) }
+    func _svSetLastUserAddress(_ address: ChannelAddress?) { lastUserChannelAddress = address }
+    func _svStop(notify address: ChannelAddress?) async { await stopActiveExecution(notify: address) }
+    func _svSendOrdinary(_ text: String, to address: ChannelAddress) async { try? await sendText(text, to: address) }
+    var _svParkedTexts: [String] { parkedOutbound.items.map(\.text) }
+    var _svLiveSeries: [NoticeSeries] { Array(noticeSeriesRegistry.values) }
+    func _svSeries(ofRun run: UUID) -> [NoticeSeries.Target: UUID] { stoppedRunsFinishing[run]?.series ?? [:] }
+    func _svSeries(id: UUID) -> NoticeSeries? { noticeSeriesRegistry[id] }
+    func _svRunPhase(_ run: UUID) -> RunPhase? { runPhases[run] }
+    var _svActiveRunId: UUID? { activeRunId }
+    var _svWatcherCount: Int { stoppedRunWatchers.count }
+    func _svCutOverTelegramBot(to token: String) async { await cutOverTelegramBot(to: token) }
+    func _svRetireForWipe() { retireVisibilityNoticesForWipe() }
+    func _svArchivePhase(_ phase: ConversationArchiveService.MaintenancePhase, began: Bool) {
+        handleArchiveMaintenancePhase(phase, began: began)
+    }
+    func _svBeginMaintenance(_ kind: MaintenanceActivity.Kind) -> UUID { beginMaintenance(kind) }
+    func _svEndMaintenance(_ id: UUID) { endMaintenance(id) }
+    func _svRunEnded(_ run: UUID) { stoppedRunEnded(run) }
+    func _svRegisterTelegram() async { await updateTelegramChannelRegistration() }
+    func _svSetArchiveBackoff(until date: Date) { archiveRetryBackoffUntil = date }
 }

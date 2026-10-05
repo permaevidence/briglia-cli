@@ -400,6 +400,10 @@ actor ToolExecutor {
     
     // MARK: - Execution
     
+    /// /stop visibility test seam (SV3): called synchronously inside the
+    /// tool body stage with the tool name. nil in production.
+    nonisolated(unsafe) static var toolBodyHoldForTesting: (@Sendable (String) -> Void)?
+
     /// Execute a single tool call and return the result
     func execute(_ call: ToolCall, acquireToken: StageMarkers.Token? = nil) async throws -> ToolResultMessage {
         // Stage markers (diagnostics only; never change behaviour): the
@@ -437,6 +441,10 @@ actor ToolExecutor {
             let bodyToken = StageMarkers.enter("tool.body")
             var result: ToolResultMessage
             do {
+                // Test seam (/stop visibility SV3): a hung helper that blocks
+                // the TOOL EXECUTOR's thread, never the main actor. nil in
+                // production.
+                if let hold = Self.toolBodyHoldForTesting { hold(call.function.name) }
                 result = try await self.executeBody(call)
                 StageMarkers.exit(bodyToken, .ok)
             } catch {

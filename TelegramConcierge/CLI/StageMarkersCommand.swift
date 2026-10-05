@@ -41,7 +41,13 @@ struct StageMarkersCommand: ParsableCommand {
         } else {
             print(lines.suffix(max(1, last)).joined(separator: "\n"))
         }
+        if lines.contains(where: { $0.contains("\"stall_suspected\"") }) {
+            print(Self.stallNote)
+        }
     }
+
+    /// /stop visibility (Codex Q3): what a stall report does and does not mean.
+    static let stallNote = "Note: a stall_suspected record means a stage stayed open longer than the reporting threshold — not that it is proven hung. Memory archiving (archive.wait / archive.phase.*) can legitimately take minutes; its timeouts and retries are unchanged and nothing is cancelled by the report."
 }
 
 enum StageMarkersReader {

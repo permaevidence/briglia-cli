@@ -337,6 +337,21 @@ final class AppChatSocketServer {
                 self?.broadcast(["type": "notice", "message": message])
             }
             .store(in: &cancellables)
+
+        // /stop visibility (§4.2): every local stop notice, repeats included
+        // (deliberately no removeDuplicates); the UT app shows `notice`.
+        manager.stopNoticeEvents
+            .receive(on: mainScheduler)
+            .sink { [weak self] message in
+                self?.broadcast(["type": "notice", "message": message])
+            }
+            .store(in: &cancellables)
+
+        // A stopped request starting/finishing changes the composed activity.
+        manager.$stoppedRunsFinishing
+            .receive(on: mainScheduler)
+            .sink { [weak self] _ in self?.broadcastStatus() }
+            .store(in: &cancellables)
     }
 
     private func broadcastNewMessages(_ messages: [Message]) {
@@ -382,11 +397,22 @@ final class AppChatSocketServer {
         event["turn_active"] = manager.isTurnActive
         event["privacy"] = manager.isPrivacyModeEnabled
         event["status"] = manager.statusMessage
-        if let activity = manager.turnActivity {
-            event["activity"] = Self.activityDescription(
-                activity, privacy: manager.isPrivacyModeEnabled)
-        }
+        event["activity"] = Self.composedActivity(
+            current: manager.turnActivity.map { Self.activityDescription($0, privacy: manager.isPrivacyModeEnabled) },
+            stopped: manager.stoppedRunActivitySuffix(privacy: manager.isPrivacyModeEnabled))
         return event
+    }
+
+    /// /stop visibility (§4.3): the current activity plus, separately, a
+    /// stopped request that is still finishing — both, whether or not a
+    /// newer turn runs. No new JSON key. nil (key omitted) when neither.
+    nonisolated static func composedActivity(current: String?, stopped: String?) -> String? {
+        switch (current, stopped) {
+        case let (current?, stopped?): return "\(current) · \(stopped)"
+        case let (current?, nil): return current
+        case let (nil, stopped?): return stopped
+        case (nil, nil): return nil
+        }
     }
 
     /// Fast, readable refusal for an attachment path before it is handed to
@@ -628,15 +654,19 @@ final class AppChatSocketServer {
             }
             // Same shared command set the terminal and Telegram use. Runs
             // detached: some commands (e.g. /prune) take a while.
+            // Delivery-aware: `command_result` is ENQUEUED on this client's
+            // serial write queue before any follow-up notice of the command
+            // is released (/stop visibility §4.2).
             Task { @MainActor in
-                let responses = await manager.handleTerminalCommand(commandLine)
-                var event: [String: Any] = [
-                    "type": "command_result",
-                    "handled": responses != nil,
-                    "lines": responses ?? [],
-                ]
-                if let ref { event["ref"] = ref }
-                client.send(event)
+                await manager.handleTerminalCommand(commandLine) { responses in
+                    var event: [String: Any] = [
+                        "type": "command_result",
+                        "handled": responses != nil,
+                        "lines": responses ?? [],
+                    ]
+                    if let ref { event["ref"] = ref }
+                    client.send(event)
+                }
             }
 
         default:

@@ -338,6 +338,15 @@ actor TelegramBotService {
     /// plain message with the request body unchanged from before keyboards
     /// existed.
     func sendMessage(chatId: Int, text: String, keyboard: TelegramInlineKeyboardMarkup? = nil) async throws {
+        let request = try makeSendMessageRequest(chatId: chatId, text: text, keyboard: keyboard)
+        let (data, response) = try await transportData(for: request)
+        try checkSendMessageResponse(data: data, response: response)
+    }
+
+    /// Builds the sendMessage request from the CURRENT token. Synchronous:
+    /// the token is captured at this call, with no suspension inside.
+    private func makeSendMessageRequest(chatId: Int, text: String,
+                                        keyboard: TelegramInlineKeyboardMarkup?) throws -> URLRequest {
         guard !botToken.isEmpty else {
             throw TelegramError.notConfigured
         }
@@ -362,19 +371,58 @@ actor TelegramBotService {
         )
 
         request.httpBody = try JSONEncoder().encode(body)
+        return request
+    }
 
-        let (data, response) = try await transportData(for: request)
-
+    private func checkSendMessageResponse(data: Data, response: URLResponse) throws {
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
             try throwInvalidResponse(response, data: data)
         }
-        
+
         let decoded = try JSONDecoder().decode(TelegramResponse<TelegramMessage>.self, from: data)
-        
+
         guard decoded.ok else {
             throw TelegramError.apiError(decoded.description ?? "Failed to send message")
         }
+    }
+
+    // MARK: - Visibility notices (/stop visibility plan v3 §4.1)
+
+    /// Test seam: runs on the actor BEFORE credential capture (the actor is
+    /// reentrant, so a bot replacement can run while it is suspended here).
+    nonisolated(unsafe) static var noticePreCaptureHookForTesting: (@Sendable () async -> Void)?
+    /// Test seam: receives the built notice request instead of the network.
+    nonisolated(unsafe) static var noticeRequestInterceptForTesting: (@Sendable (URLRequest) -> Void)?
+
+    /// One notice send (a `NoticeSeries` attempt). The channel generation the
+    /// series was created under is checked HERE, at the actor that owns the
+    /// credentials, and the request is built from `botToken` with no
+    /// suspension between the check and the capture — so a notice delayed
+    /// behind a /switchbot (or /deleteuserdata, or any token change) can
+    /// never be built with replacement credentials. A request already on the
+    /// wire cannot be recalled. Ordinary sends are unchanged.
+    func sendNoticeText(chatId: String, text: String, expectedGeneration: UInt64) async throws {
+        if let hook = Self.noticePreCaptureHookForTesting { await hook() }
+        guard NoticeChannelGenerations.current(.telegram) == expectedGeneration else {
+            throw NoticeTransportError.credentialsChanged
+        }
+        guard let numericId = Int(chatId) else {
+            throw TelegramError.apiError("Invalid Telegram chat id: \(chatId)")
+        }
+        let request = try makeSendMessageRequest(chatId: numericId, text: text, keyboard: nil)
+        if let intercept = Self.noticeRequestInterceptForTesting {
+            intercept(request)
+            return
+        }
+        let (data, response) = try await transportData(for: request)
+        try checkSendMessageResponse(data: data, response: response)
+    }
+
+    /// Fingerprint of a bot token (never the token itself), used by the
+    /// manager to notice a token change at channel registration.
+    nonisolated static func credentialIdentity(_ token: String) -> String {
+        SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
     }
     
     /// Registers the slash-command menu shown in Telegram (the "/" autocomplete

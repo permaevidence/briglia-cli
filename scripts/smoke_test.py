@@ -463,6 +463,18 @@ def main():
     check("midturn-roundresult-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-quinquies. /stop visibility: an honest reply when the stopped
+    # request is still finishing (archive wait, hung helper), run-scoped
+    # attribution, one ordered completion notice per stopped request (own
+    # per-series retries, give-up, invalidation on /switchbot and
+    # /deleteuserdata, generation check at Telegram credential capture),
+    # undeduplicated local notices, status surfaces, archive stage markers.
+    # Re-executes itself in a private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__stop-visibility-selftest"], capture_output=True,
+                          text=True, timeout=900)
+    check("stop-visibility-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     result = run_selftest([ADA, "__prune-archive-selftest"], capture_output=True, text=True, timeout=120)
     check("prune archive selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
