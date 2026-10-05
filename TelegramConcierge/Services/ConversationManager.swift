@@ -1061,6 +1061,9 @@ class ConversationManager: ObservableObject {
     /// polling resumes. Cleared by restart implicitly (in-memory).
     private var stalledConfirmUpdateId: Int? = nil
     private var durabilityStallAnnounced = false
+    /// The current disk-saving pause episode's notice series (/stop
+    /// visibility §9, A3): an entry notice and at most one recovery notice.
+    private var durabilityStallSeriesId: UUID?
     /// The user message whose turn is currently running — lets the stall
     /// recovery recreate a failed active-turn marker for the LIVE turn
     /// before confirming its update.
@@ -1737,16 +1740,7 @@ class ConversationManager: ObservableObject {
                             // the skipped confirm was protecting. Retry the
                             // writes each tick; confirm and resume when they
                             // land. A crash while stalled re-delivers.
-                            if saveConversation(), persistPendingMidTurnQueue(),
-                               persistPendingInboundBuffers(), remarkActiveTurnIfNeeded() {
-                                await telegramService.confirmProcessed(updateId: stalledId)
-                                stalledConfirmUpdateId = nil
-                                durabilityStallAnnounced = false
-                                print("[ConversationManager] Durable writes recovered — confirmed update \(stalledId), polling resumes")
-                            } else if !durabilityStallAnnounced {
-                                durabilityStallAnnounced = true
-                                print("[ConversationManager] Telegram polling PAUSED — durable writes failing with unconfirmed updates outstanding; retrying every tick")
-                            }
+                            await retryDurabilityStall(stalledId)
                         } else {
                         let polled = try await telegramService.getUpdates()
 
@@ -4934,6 +4928,55 @@ class ConversationManager: ObservableObject {
         await updateTelegramChannelRegistration()
     }
 
+    /// One durability-stall tick of the poll loop: retry the durable writes;
+    /// confirm and resume when they land. Unchanged behaviour; the A3
+    /// notices only observe the episode's start and end and are never
+    /// awaited (no history write, no offset, no confirmation change).
+    private func retryDurabilityStall(_ stalledId: Int) async {
+        if saveConversation(), persistPendingMidTurnQueue(),
+           persistPendingInboundBuffers(), remarkActiveTurnIfNeeded() {
+            await telegramService.confirmProcessed(updateId: stalledId)
+            stalledConfirmUpdateId = nil
+            durabilityStallAnnounced = false
+            print("[ConversationManager] Durable writes recovered — confirmed update \(stalledId), polling resumes")
+            noteDurabilityStallRecovered()
+        } else if !durabilityStallAnnounced {
+            durabilityStallAnnounced = true
+            print("[ConversationManager] Telegram polling PAUSED — durable writes failing with unconfirmed updates outstanding; retrying every tick")
+            noteDurabilityStallBegan()
+        }
+    }
+
+    static let durabilityStallEntryText = "⚠️ I can't save to disk right now, so I've paused reading new Telegram messages. New Telegram messages and commands will wait until saving works again; the terminal and app still accept /stop. I'll tell you when saving works again."
+    static let durabilityStallRecoveryText = "✅ Saving works again; I'm reading Telegram messages again."
+
+    /// A3 entry: one notice per stall episode, as an ordered series to the
+    /// Telegram chat captured NOW with the current channel generation (right
+    /// even when the last user channel was WhatsApp; never migrates to a
+    /// replacement bot). Not awaited.
+    private func noteDurabilityStallBegan() {
+        guard durabilityStallSeriesId == nil, let address = telegramAddress,
+              let series = makeNoticeSeries(target: .wire(address), awaitingCapture: false) else { return }
+        durabilityStallSeriesId = series.id
+        series.append(Self.durabilityStallEntryText)
+    }
+
+    /// A3 recovery: if no entry send has begun yet, the episode coalesces
+    /// away and NEITHER notice is sent; otherwise the recovery is queued
+    /// behind the entry (sent only after the entry's send settled, so a
+    /// delayed entry or retry can never follow it). An invalidated or
+    /// given-up series sends nothing more.
+    private func noteDurabilityStallRecovered() {
+        guard let id = durabilityStallSeriesId else { return }
+        durabilityStallSeriesId = nil
+        guard let series = noticeSeriesRegistry[id], !series.isClosed else { return }
+        if !series.anySendBegun {
+            series.invalidate()
+            return
+        }
+        series.append(Self.durabilityStallRecoveryText, terminal: true)
+    }
+
     /// Execute a confirmed /switchbot. Called ONLY from the poll loop's clean
     /// boundary: no getUpdates batch is in flight there, so every confirm for
     /// the OLD bot has already been persisted under its own token hash —
@@ -7166,6 +7209,7 @@ class ConversationManager: ObservableObject {
     private func retireVisibilityNoticesForWipe() {
         for kind in ChannelKind.allCases { NoticeChannelGenerations.bump(kind) }
         invalidateAllNoticeSeries()
+        durabilityStallSeriesId = nil
     }
 
     /// /status lines (§4.3, R3): each stopped-but-finishing request, then —
@@ -14556,4 +14600,15 @@ extension ConversationManager {
     func _svRunEnded(_ run: UUID) { stoppedRunEnded(run) }
     func _svRegisterTelegram() async { await updateTelegramChannelRegistration() }
     func _svSetArchiveBackoff(until date: Date) { archiveRetryBackoffUntil = date }
+    // A3 (disk-saving pause/recovery notices)
+    func _svSetPairedChatId(_ id: Int?) { pairedChatId = id }
+    func _svSetStalledConfirm(_ updateId: Int?) { stalledConfirmUpdateId = updateId }
+    var _svStalledConfirm: Int? { stalledConfirmUpdateId }
+    func _svDurabilityTick() async {
+        if let stalled = stalledConfirmUpdateId { await retryDurabilityStall(stalled) }
+    }
+    func _svStallBeganThenRecoveredSynchronously() {
+        noteDurabilityStallBegan()
+        noteDurabilityStallRecovered()
+    }
 }

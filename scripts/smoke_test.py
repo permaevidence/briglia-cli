@@ -2141,9 +2141,12 @@ def main():
         with tg_lock:
             tg_state["updates"].clear()
             tg_state["offsets"].clear()
+            tg_state["sent"].clear()
             llm_state["bodies"].clear()
 
         phase7_state = {"premature_701": None, "confirmed_during_stall": None}
+        stall_entry = "I can't save to disk right now, so I've paused reading new Telegram messages"
+        stall_recovery = "Saving works again; I'm reading Telegram messages again."
 
         def phase7(pwait, push, pout, proc):
             push([tg_update(700, "durability stall probe")])
@@ -2166,8 +2169,10 @@ def main():
             deadline = time.time() + 15
             while time.time() < deadline:
                 with tg_lock:
-                    if 701 in tg_state["offsets"]:
-                        return
+                    resumed = 701 in tg_state["offsets"]
+                    noticed = any(stall_recovery in m.get("text", "") for m in tg_state["sent"])
+                if resumed and noticed:
+                    return
                 time.sleep(0.3)
 
         tg_mark("phase7-start")
@@ -2192,6 +2197,15 @@ def main():
               and rc7 == 0,
               f"resumed_701={resumed_701} persisted={persisted7} rc={rc7}\n"
               + out7[-2500:])
+        # /stop visibility A3: one pause notice, then one recovery notice, in
+        # that order, on the real poller (polling/offsets checked above).
+        with tg_lock:
+            sent7 = [m.get("text", "") for m in tg_state["sent"]]
+        entries7 = [i for i, t in enumerate(sent7) if stall_entry in t]
+        recoveries7 = [i for i, t in enumerate(sent7) if stall_recovery in t]
+        check("poller: disk-saving pause and recovery notices, once each, in order",
+              len(entries7) == 1 and len(recoveries7) == 1 and entries7[0] < recoveries7[0],
+              f"sent={sent7[-6:]}")
 
         # Phase 8: /upgrade behind a stalled update in the SAME batch must be
         # refused — its own confirmProcessed(higher id) would implicitly

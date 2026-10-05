@@ -276,6 +276,7 @@ final class StopVisibilityHarness {
         if section("local") { await localSection() }
         if section("restart") { await restartSection() }
         if section("repeat") { await repeatSection() }
+        if section("a3") { await a3Section() }
     }
 
     func configureProvider() throws {
@@ -315,6 +316,7 @@ final class StopVisibilityHarness {
         ConversationManager.openStagesProviderForTesting = nil
         ConversationManager.afterStopDecisionForTesting = nil
         ConversationManager.stopCutoffInterleaveForTesting = nil
+        ConversationManager.historyWriteFaultForTesting = nil
         NoticeSeries.clockOverrideForTesting = nil
         TelegramBotService.noticePreCaptureHookForTesting = nil
         TelegramBotService.noticeRequestInterceptForTesting = nil
