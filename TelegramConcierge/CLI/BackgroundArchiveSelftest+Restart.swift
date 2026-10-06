@@ -216,8 +216,9 @@ extension BackgroundArchiveHarness {
               "\(channel.delivered)")
     }
 
-    /// Two covering parts: the first commits, the second is refused — the
-    /// alert stays open until the remainder commits too.
+    /// Two covering parts. Turn 1: the first part is refused (alert opens).
+    /// Turn 2: the first part commits, the second is refused — the alert
+    /// must stay open. Turn 3: the remainder commits; only then it closes.
     private func partialPrefixSection() async {
         let channel = SVRecordingChannel(kind: .telegram)
         let history = archiveSizedHistory(count: 6)
@@ -229,21 +230,29 @@ extension BackgroundArchiveHarness {
             _ = try await archive.archiveMessages(Array(history[2..<4]))
         } catch { check("BR8 setup", false, "\(error)"); return }
         var live = history
+        live[1].content += " (changed)"
         live[3].content += " (changed)"
         let manager = await makeManager(channel: channel, history: live)
-        await turn(manager, "partial prefix", reply: "ok")
-        check("BR8 the first covered part commits; the refused second part stays live",
+        await turn(manager, "both parts changed", reply: "ok")
+        check("BR8 turn 1: the first part is refused, nothing removed, one alert",
+              contains(manager, history.prefix(4).map(\.id)) && entryAlerts(channel).count == 1, "\(channel.delivered)")
+        func repair(_ index: Int) {
+            var repaired = manager._testMessages
+            if let i = repaired.firstIndex(where: { $0.id == history[index].id }) { repaired[i].content = history[index].content }
+            manager._testReplaceMessages(repaired)
+            _ = manager._testSave()
+        }
+        repair(1)
+        await turn(manager, "first part repaired", reply: "ok")
+        check("BR8 turn 2: the first covered part commits; the refused second part stays live",
               containsNone(manager, [history[0].id, history[1].id]) && contains(manager, [history[2].id, history[3].id]))
-        check("BR8 one alert for the unresolved remainder, no recovery yet", entryAlerts(channel).count == 1 && recoveryAlerts(channel).isEmpty,
-              "\(channel.delivered)")
+        check("BR8 turn 2: the unresolved remainder keeps the alert open (no recovery after the first part)",
+              entryAlerts(channel).count == 1 && recoveryAlerts(channel).isEmpty, "\(channel.delivered)")
         await MaintenanceAlertCenter.shared.reportSuccess(.conversationSummary)
         check("BR8 startup-recovery-style .conversationSummary success does not close it", recoveryAlerts(channel).isEmpty)
-        var repaired = manager._testMessages
-        if let i = repaired.firstIndex(where: { $0.id == history[3].id }) { repaired[i].content = history[3].content }
-        manager._testReplaceMessages(repaired)
-        _ = manager._testSave()
-        await turn(manager, "remainder", reply: "ok")
-        check("BR8 the remainder commits and only then the alert closes, once",
+        repair(3)
+        await turn(manager, "remainder repaired", reply: "ok")
+        check("BR8 turn 3: the remainder commits and only then the alert closes, once",
               containsNone(manager, [history[2].id, history[3].id]) && recoveryAlerts(channel).count == 1, "\(channel.delivered)")
     }
 
