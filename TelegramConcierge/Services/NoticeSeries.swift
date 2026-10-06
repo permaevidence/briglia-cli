@@ -87,7 +87,15 @@ final class NoticeSeries {
     /// Channel generation captured at creation; every attempt re-checks it.
     let generation: UInt64
 
-    private(set) var pending: [String] = []
+    /// One queued notice; `text == nil` is a slot RESERVED by a repeated
+    /// /stop that is still deciding its wording (Codex impl review R1):
+    /// nothing behind it — in particular the run's completion — is sent
+    /// until it is resolved.
+    private struct Slot {
+        let id = UUID()
+        var text: String?
+    }
+    private var pending: [Slot] = []
     /// Texts whose send settled successfully, in order (status and tests).
     private(set) var delivered: [String] = []
     private(set) var inFlight = false
@@ -151,8 +159,30 @@ final class NoticeSeries {
     @discardableResult
     func append(_ text: String, terminal: Bool = false) -> Bool {
         guard !isClosed, !terminalQueued else { return false }
-        pending.append(text)
+        pending.append(Slot(text: text))
         if terminal { terminalQueued = true }
+        pump()
+        return true
+    }
+
+    /// Reserves this series' NEXT position for a reply whose text is not
+    /// decided yet (a repeated /stop entering its grace wait). Later items —
+    /// including a terminal completion queued meanwhile — wait behind the
+    /// reservation until `resolve`. nil when closed or the terminal notice is
+    /// already queued.
+    func reserve() -> UUID? {
+        guard !isClosed, !terminalQueued else { return nil }
+        let slot = Slot(text: nil)
+        pending.append(slot)
+        return slot.id
+    }
+
+    /// Fills (or, with nil, withdraws) a reservation in place; false when
+    /// it no longer exists (the series was invalidated or gave up).
+    @discardableResult
+    func resolve(_ reservation: UUID, text: String?) -> Bool {
+        guard !isClosed, let index = pending.firstIndex(where: { $0.id == reservation && $0.text == nil }) else { return false }
+        if let text { pending[index].text = text } else { pending.remove(at: index) }
         pump()
         return true
     }
@@ -181,14 +211,14 @@ final class NoticeSeries {
     }
 
     private func pump() {
-        guard !isClosed, captureHolds == 0, !pending.isEmpty else { reportFinishedIfDone(); return }
+        guard !isClosed, captureHolds == 0, pending.first?.text != nil else { reportFinishedIfDone(); return }
         if let localEmit {
             // Local delivery cannot fail and settles immediately.
-            while captureHolds == 0, !isClosed, !pending.isEmpty {
-                let head = pending.removeFirst()
+            while captureHolds == 0, !isClosed, let text = pending.first?.text {
+                pending.removeFirst()
                 anySendBegun = true
-                localEmit(head)
-                delivered.append(head)
+                localEmit(text)
+                delivered.append(text)
             }
             reportFinishedIfDone()
             return
@@ -200,13 +230,13 @@ final class NoticeSeries {
             // Synchronous with the drain's final emptiness check: an append
             // that raced it either was drained or starts a new pump below.
             self.pumpTask = nil
-            if !self.isClosed, self.captureHolds == 0, !self.pending.isEmpty { self.pump() }
+            if !self.isClosed, self.captureHolds == 0, self.pending.first?.text != nil { self.pump() }
             self.reportFinishedIfDone()
         }
     }
 
     private func drain() async {
-        while !isClosed, captureHolds == 0, let head = pending.first {
+        while !isClosed, captureHolds == 0, let head = pending.first, let text = head.text {
             if headFirstAttemptNanos == nil { headFirstAttemptNanos = clock.nowNanos() }
             var failedAttempts = 0
             var sent = false
@@ -225,7 +255,7 @@ final class NoticeSeries {
                 anySendBegun = true
                 inFlight = true
                 do {
-                    try await attempt(head)
+                    try await attempt(text)
                     inFlight = false
                     sent = true
                     break
@@ -246,9 +276,9 @@ final class NoticeSeries {
                 waitTask = nil
             }
             // A late success after invalidation must not advance or append.
-            guard sent, !isClosed, pending.first == head else { break }
+            guard sent, !isClosed, pending.first?.id == head.id else { break }
             pending.removeFirst()
-            delivered.append(head)
+            delivered.append(text)
             headFirstAttemptNanos = nil
             await afterDelivery()
         }

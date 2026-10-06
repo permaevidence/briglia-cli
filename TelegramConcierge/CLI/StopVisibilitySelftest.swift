@@ -236,6 +236,8 @@ final class StopVisibilityHarness {
     let apiKey = "synthetic-stopvis-key"
     let telegramAddress = ChannelAddress(kind: .telegram, chatId: "424242")
     var cancellables: Set<AnyCancellable> = []
+    /// Large source file read by the envelope-owner fixture (SR3/SR4).
+    var envelopeSourcePath: String?
 
     init(only: String?) throws {
         self.only = only
@@ -273,6 +275,7 @@ final class StopVisibilityHarness {
         if section("transport") { await transportSection() }
         if section("local") { await localSection() }
         if section("restart") { await restartSection() }
+        if section("repeat") { await repeatSection() }
     }
 
     func configureProvider() throws {

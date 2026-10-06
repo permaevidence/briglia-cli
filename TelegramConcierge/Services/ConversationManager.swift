@@ -6764,6 +6764,12 @@ class ConversationManager: ObservableObject {
             registerStoppedRun(run, task: task, triggerMessageId: stoppedTrigger)
         }
         let observedRun = repeatRun ?? (stoppedTask != nil ? stoppedRun : nil)
+        // A repeat for an ALREADY-ANNOUNCED run reserves its place in that
+        // run's ordered notices now, before any await (Codex impl review
+        // R1): if the run ends during the grace wait below, its completion
+        // queues BEHIND this reply instead of the reply escaping through
+        // ordinary delivery. Synchronous; no suspension.
+        let repeatSlot = repeatRun.flatMap { reserveRepeatSlot(run: $0, address: address) }
 
         // Stopped items never start work until settled — across turns (a
         // new user message never clears this) and restarts (the marker).
@@ -6809,6 +6815,13 @@ class ConversationManager: ObservableObject {
         if let run = stillFinishing {
             let lead = repeatRun != nil ? "⛔ Already stopping." : "⛔ Stop requested."
             text = "\(lead) The request is still finishing: \(describeStillFinishing(runId: run)). I'll notify you when it ends."
+        } else if repeatRun != nil {
+            // The repeat entered while the stopped request was still
+            // finishing and it ended during this command's wait: never the
+            // fresh-stop or interrupted-request wording. With a reserved slot
+            // the run's completion notice follows this reply on the same
+            // surface; otherwise say it here.
+            text = repeatSlot != nil ? Self.repeatEndedWithCompletionLead : Self.repeatEndedLead
         } else {
             text = wasRunning ? "⛔ I stopped the current work."
                 : stoppedPendingTurn ? "⛔ I stopped the interrupted request; it won't resume."
@@ -6842,9 +6855,16 @@ class ConversationManager: ObservableObject {
         if let run = stillFinishing {
             // Ordered delivery (§4): the reply heads (or joins) the run's
             // notice series; the stop path does not wait for its retries.
-            deliverStillFinishingReply(text, run: run, address: address)
+            deliverStillFinishingReply(text, run: run, address: address, slot: repeatSlot)
             Self.afterStopDecisionForTesting?(self, run)
+        } else if let repeatSlot, fillRepeatSlot(repeatSlot, text: text) {
+            // Delivered in its reserved place, ahead of the completion.
         } else {
+            // The reserved place vanished (series invalidated or gave up):
+            // no completion follows here, so the reply says it ended.
+            if repeatRun != nil, repeatSlot != nil, text.hasPrefix(Self.repeatEndedWithCompletionLead) {
+                text = Self.repeatEndedLead + text.dropFirst(Self.repeatEndedWithCompletionLead.count)
+            }
             try? await sendText(text, to: address)
             // F1: a local stop's reply is visible on the terminal and app.
             if address?.kind == .app, Self.commandCapture?.isOpen != true {
@@ -6862,6 +6882,11 @@ class ConversationManager: ObservableObject {
     nonisolated(unsafe) static var afterStopDecisionForTesting: (@MainActor (ConversationManager, UUID) -> Void)?
 
     static let stopBashConfirmSeconds: TimeInterval = 3
+    /// A repeated /stop whose request ended during its wait (Codex impl
+    /// review R1): the run's completion follows on the same surface…
+    static let repeatEndedWithCompletionLead = "⛔ Already stopping."
+    /// …or, with no reserved place, the reply itself says it ended.
+    static let repeatEndedLead = "⛔ Already stopping; the stopped request has now ended."
     static let stopTurnObserveSeconds: TimeInterval = 2.5
 
     nonisolated static func monotonicSeconds() -> TimeInterval {
@@ -6997,9 +7022,10 @@ class ConversationManager: ObservableObject {
     /// the caller handed the result to its client; a local stop emits on the
     /// undeduplicated local stream; a wire stop heads (or joins) the run's
     /// ordered series for that chat. Synchronous with the decision.
-    private func deliverStillFinishingReply(_ text: String, run: UUID, address: ChannelAddress?) {
+    private func deliverStillFinishingReply(_ text: String, run: UUID, address: ChannelAddress?, slot: RepeatSlot? = nil) {
         guard stoppedRunsFinishing[run] != nil else { return }
         stoppedRunsFinishing[run]?.announced = true
+        if let slot, fillRepeatSlot(slot, text: text) { return }
         if let capture = Self.commandCapture, capture.isOpen, address == nil || address?.kind == .app {
             _ = capture.append(text)
             if let series = runNoticeSeries(run, target: .local, awaitingCapture: true) {
@@ -7013,6 +7039,54 @@ class ConversationManager: ObservableObject {
         }
         guard let destination = address ?? replyAddress, destination.kind != .app else { return }
         runNoticeSeries(run, target: .wire(destination), awaitingCapture: false)?.append(text)
+    }
+
+    /// A repeated /stop's reserved place in its run's ordered notices.
+    enum RepeatSlot {
+        /// Captured command window: the run's local series holds every
+        /// later item until the command's own result was handed over.
+        case capture
+        /// A reserved position in a wire or local series.
+        case series(NoticeSeries, UUID)
+    }
+
+    /// Reserves, synchronously and before the grace wait, where a repeated
+    /// /stop's reply goes in its run's ordered notices (Codex impl review
+    /// R1). Only for a run whose "still finishing" reply was already issued
+    /// and whose completion is not queued yet; a first stop keeps today's
+    /// behaviour. nil when no place can be reserved (e.g. a series that gave
+    /// up — no new retry lifetime, D2).
+    private func reserveRepeatSlot(run: UUID, address: ChannelAddress?) -> RepeatSlot? {
+        guard let entry = stoppedRunsFinishing[run], entry.announced,
+              entry.ended == nil, !entry.completionQueued else { return nil }
+        if let capture = Self.commandCapture, capture.isOpen, address == nil || address?.kind == .app {
+            guard let series = runNoticeSeries(run, target: .local, awaitingCapture: true) else { return nil }
+            capture.onDelivered { [weak series] in series?.releaseCapture() }
+            return .capture
+        }
+        let target: NoticeSeries.Target
+        if address?.kind == .app {
+            target = .local
+        } else {
+            guard let destination = address ?? replyAddress, destination.kind != .app else { return nil }
+            target = .wire(destination)
+        }
+        guard let series = runNoticeSeries(run, target: target, awaitingCapture: false),
+              let reservation = series.reserve() else { return nil }
+        return .series(series, reservation)
+    }
+
+    /// Puts the decided reply into its reserved place; false when the place
+    /// is gone (series invalidated or given up meanwhile) — the caller then
+    /// uses the unreserved path.
+    private func fillRepeatSlot(_ slot: RepeatSlot, text: String) -> Bool {
+        switch slot {
+        case .capture:
+            guard let capture = Self.commandCapture, capture.isOpen else { return false }
+            return capture.append(text)
+        case .series(let series, let reservation):
+            return series.resolve(reservation, text: text)
+        }
     }
 
     /// The run's series for `target`: the open one (repeat replies join it),
