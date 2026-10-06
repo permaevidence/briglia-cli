@@ -1325,6 +1325,46 @@ class ConversationManager: ObservableObject {
     /// retries against an API that just failed. Cleared implicitly by time.
     private var archiveRetryBackoffUntil: Date = .distantPast
 
+    // MARK: Background archiving (BACKGROUND_ARCHIVE_PLAN v3) — in memory only
+
+    /// The one archive job (running, or finished and not yet committed).
+    /// Nothing about it is persisted: after a restart the committed chunk's
+    /// still-live messages are found by coverage instead (§6.5).
+    struct ArchiveJob {
+        enum Outcome: Equatable { case running, failed(Date), succeeded }
+        let id: UUID
+        let batch: [Message]
+        let generation: UInt64
+        let startedAt: Date
+        /// The view of the turn that started the job: every turn reuses it
+        /// until the commit (the new chunk and anything that absorbed it
+        /// stay out of automatic context meanwhile).
+        let frozenView: ArchivePromptView
+        var receipt: PruneArchiveReference?
+        var outcome: Outcome = .running
+        var task: Task<Void, Never>?
+    }
+    private var archiveJob: ArchiveJob?
+    /// Bumped by /deleteuserdata and Mind import: a job of an older
+    /// generation is discarded before any commit side effect.
+    private var archiveGeneration: UInt64 = 0
+    /// Set by /restart and /upgrade after their guards; blocks a new job
+    /// across their awaits; reset on every path that does not exec (§9).
+    private var archiveExitPending = false
+    /// Lease of the view the current (or last) main turn adopted.
+    private var turnViewLeaseId: UUID?
+    /// Last adopted view, for read-only diagnostics (§4.6).
+    private var lastTurnArchiveView: ArchivePromptView?
+
+    /// Test seam: runs right after each fresh view capture's await.
+    nonisolated(unsafe) static var viewCaptureHookForTesting: (@MainActor (ConversationManager) -> Void)?
+    /// Test seam: awaited by the background job before its body runs.
+    nonisolated(unsafe) static var backgroundArchiveHoldForTesting: (@Sendable () async -> Void)?
+    static let archiveInlineDefaultsKey = "ada.archiveInline"
+    /// `/archiveinline on` keeps today's waiting archive; default off
+    /// (background for everyone, owner decision D3).
+    static var archiveInlineEnabled: Bool { UserDefaults.standard.bool(forKey: archiveInlineDefaultsKey) }
+
     /// Consecutive poll-tick failures (getUpdates). At the threshold (~5 min of
     /// solid failures at the 5s retry cadence) a maintenance alert fires.
     private var consecutivePollFailures = 0
@@ -1543,6 +1583,10 @@ class ConversationManager: ObservableObject {
         if !serperKey.isEmpty {
             await toolExecutor.configure(openRouterKey: apiKey, serperKey: serperKey, jinaKey: jinaKey)
         }
+
+        // Explicit archive reads use THIS archive service (live index,
+        // retained children) — background archiving §4.4.
+        await toolExecutor.setArchiveService(archiveService)
 
         // Wire the Agent (subagent) tool so it can drive its own LLM loop.
         await toolExecutor.configureOpenRouter(
@@ -4092,6 +4136,9 @@ class ConversationManager: ObservableObject {
         case "/websubagent":
             await handleWebSubagentCommand(argument: commandArgument(from: text))
             return true
+        case "/archiveinline":
+            await handleArchiveInlineCommand(argument: commandArgument(from: text))
+            return true
         case "/upgrade":
             await handleUpgradeCommand()
             return true
@@ -5122,6 +5169,14 @@ class ConversationManager: ObservableObject {
             try? await sendText("✖ Briglia can't persist state to disk right now (writes failing — check disk space); /restart is deferred until storage recovers.")
             return
         }
+        // Background archiving (§9): a restart would interrupt the archive
+        // (crash recovery skips fact extraction). Refused, not waited for.
+        guard !maintenanceActivities.contains(where: { $0.kind == .summarizingHistory }), archiveRecoveryTask == nil else {
+            try? await sendText("⏳ Memory archiving is in flight — send /restart again in a minute.")
+            return
+        }
+        archiveExitPending = true
+        defer { archiveExitPending = false }
         UpgradeService.writeRestartMarker(version: adaCLIVersion, kind: .restart)
         saveConversation()
         try? await sendText("🔄 Restarting now — I'll confirm when I'm back online.")
@@ -5163,6 +5218,14 @@ class ConversationManager: ObservableObject {
             try? await sendText("✖ Briglia can't persist state to disk right now (writes failing — check disk space); /upgrade is deferred until storage recovers.")
             return
         }
+        guard !maintenanceActivities.contains(where: { $0.kind == .summarizingHistory }), archiveRecoveryTask == nil else {
+            try? await sendText("⏳ Memory archiving is in flight — send /upgrade again in a minute.")
+            return
+        }
+        // Blocks a new archive across the check/download awaits; every path
+        // that returns without exec (up to date, refused, failed, …) resets it.
+        archiveExitPending = true
+        defer { archiveExitPending = false }
         var trustWarnings: [String] = []
         let checkResult = await UpgradeService.check(warn: { trustWarnings.append($0) })
         for warning in trustWarnings {
@@ -6214,6 +6277,7 @@ class ConversationManager: ObservableObject {
         // Mid-turn early wake (§3.11): background work and retained
         // obligations; the hidden test setting announces itself first.
         if let background = await backgroundStatusSection() { contextLine += "\n" + background }
+        contextLine += "\n" + (await archiveModeStatusLine())
         let testWarning = ForceDetach.active ? "⚠️ test setting: force-detach is ON\n" : ""
 
         if log.isEmpty {
@@ -6402,15 +6466,24 @@ class ConversationManager: ObservableObject {
             try? await sendText("Briglia is busy; retry /prune when idle.", to: address)
             return
         }
+        // A finished background archive commits at the next message; a prune
+        // in between would rewrite messages it already archived.
+        guard archiveJob?.outcome != .succeeded else {
+            try? await sendText("Archived messages are about to be removed at your next message; retry /prune after it.", to: address)
+            return
+        }
         let pruneActivityId = beginMaintenance(.pruning)
         defer { endMaintenance(pruneActivityId) }
         let targetTokens = configuredTargetContextTokens()
         let providerIsLMStudio = currentProviderIsLMStudio()
         let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""
         let frozenContext = await getFrozenSystemContext()
-        let chunkSummaries = await archiveService.getPromptSummaryItems(recentConsolidatedCount: 5)
-        let allChunks = await archiveService.getAllChunks()
-        let totalChunkCount = allChunks.count
+        // The same automatic-context rule as a turn (§4.1): rows whose
+        // sources are still live are left out of the prune-summary request.
+        let pruneView = await captureFreshArchiveView()
+        defer { let lease = pruneView.leaseId; Task { await archiveService.releaseLease(lease) } }
+        let chunkSummaries = pruneView.items
+        let totalChunkCount = pruneView.totalChunkCount
         await MCPAgentRouting.refreshFromRegistry()
         let allMcpTools = await MCPRegistry.shared.allToolDefinitions()
         let mainMcpTools = MCPAgentRouting.filterMcpTools(
@@ -7796,6 +7869,10 @@ class ConversationManager: ObservableObject {
         salvageRunId: UUID? = nil
     ) async throws -> ToolAwareResponse {
         try Task.checkCancellation()
+        // Background archiving (§3): a finished archive's new summary and
+        // the removal of its messages land here, at a turn boundary, before
+        // anything of this turn's context is built. Never mid-turn.
+        await commitArchiveIfReady()
         let snapshot = await openRouterService.executionContext(modelOverride: nil, providerOverride: nil,
             reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
         let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
@@ -7833,8 +7910,11 @@ class ConversationManager: ObservableObject {
         // instantly on cache hits, so awaiting it in parallel with the others is free.
         let contextStartTime = Date()
         async let frozenContextTask = getFrozenSystemContext()
-        async let chunkSummariesTask = archiveService.getPromptSummaryItems(recentConsolidatedCount: 5)
-        async let totalChunkCountTask = archiveService.getAllChunks()
+        // Background archiving (§4): the turn's archive view — the running
+        // job's frozen view, or a fresh one captured once (rows whose
+        // sources are still live left out). Items and count are today's
+        // whenever nothing overlaps.
+        async let archiveViewTask = adoptTurnArchiveView()
         async let contextResultTask = openRouterService.processContextWindow(messages)
 
         // Await all parallel operations.
@@ -7843,9 +7923,9 @@ class ConversationManager: ObservableObject {
         let frozenContext = await frozenContextTask
         var calendarContext = frozenContext.calendar
         var emailContext = frozenContext.email
-        var chunkSummaries = await chunkSummariesTask
-        let allChunks = await totalChunkCountTask
-        let totalChunkCount = allChunks.count
+        let turnArchiveView = await archiveViewTask
+        var chunkSummaries = turnArchiveView.items
+        let totalChunkCount = turnArchiveView.totalChunkCount
         let contextResult = await contextResultTask
         try Task.checkCancellation()
         print("[TIMING] Context fetch took: \(String(format: "%.2f", Date().timeIntervalSince(contextStartTime)))s")
@@ -7873,6 +7953,24 @@ class ConversationManager: ObservableObject {
         } else if contextResult.needsArchiving && !contextResult.messagesToArchive.isEmpty {
             if Date() < archiveRetryBackoffUntil {
                 print("[ConversationManager] Archive needed but in failure cooldown until \(archiveRetryBackoffUntil) — keeping raw messages in context")
+            } else if let refusal = archiveStartRefusal(view: turnArchiveView) {
+                // One archive at a time (§3): a running or uncommitted job,
+                // startup recovery, rows still awaiting their commit, or a
+                // pending /restart or /upgrade. The raw messages stay.
+                print("[ConversationManager] Archive needed but not started: \(refusal)")
+            } else if !Self.archiveInlineEnabled {
+                // Background mode (owner default): the same job body, not
+                // awaited. The conversation is sent unchanged; the new
+                // summary and the removal land at the start of a later turn.
+                await startBackgroundArchiveJob(
+                    batch: contextResult.messagesToArchive,
+                    summarizationContext: buildSummarizationContext(
+                        chunkSummaries: chunkSummaries,
+                        currentMessages: contextResult.messagesToSend
+                    ),
+                    snapshotSource: messages,
+                    view: turnArchiveView
+                )
             } else {
                 let archiveStartTime = Date()
                 let messagesToArchive = contextResult.messagesToArchive
@@ -7889,35 +7987,8 @@ class ConversationManager: ObservableObject {
                 defer { endMaintenance(summarizingActivityId) }
 
                 let archiveTask = Task.detached { () async -> (Bool, PruneArchiveReference?) in
-                    var lastError: Error? = nil
-                    let receipt: PruneArchiveReference?
-                    do {
-                        receipt = PruneArchiveStore.needsSnapshot(messagesToArchive)
-                            ? try PruneArchiveStore.write(messages: snapshotSource, trigger: "chunk-archive", removedIDs: messagesToArchive.map(\.id), pin: true) : nil
-                    } catch {
-                        await MaintenanceAlertCenter.shared.reportFailure(.conversationSummary, error: error.localizedDescription, deterministic: true)
-                        return (false, nil)
-                    }
-                    for attempt in 1...3 {
-                        do {
-                            _ = try await archiveSvc.archiveMessages(messagesToArchive, context: summarizationContext, snapshot: receipt)
-                            print("[ConversationManager] Archived \(messagesToArchive.count) messages successfully")
-                            return (true, receipt)
-                        } catch {
-                            lastError = error
-                            print("[ConversationManager] Archive failed (attempt \(attempt)): \(error)")
-                            if ArchiveError.isDeterministicFailure(error) { break }
-                            if attempt < 3 {
-                                try? await Task.sleep(nanoseconds: UInt64(5 * attempt) * 1_000_000_000)
-                            }
-                        }
-                    }
-                    await MaintenanceAlertCenter.shared.reportFailure(
-                        .conversationSummary,
-                        error: lastError.map { $0.localizedDescription } ?? "unknown error",
-                        deterministic: lastError.map { ArchiveError.isDeterministicFailure($0) } ?? false
-                    )
-                    return (false, receipt)
+                    await Self.runArchiveJobBody(messagesToArchive: messagesToArchive, summarizationContext: summarizationContext,
+                                                 snapshotSource: snapshotSource, archiveSvc: archiveSvc)
                 }
                 // Wait for the archive task. For Task<Bool, Never>, the await doesn't
                 // throw on parent cancellation — it just waits until the detached work
@@ -7955,8 +8026,10 @@ class ConversationManager: ObservableObject {
                     catch { showMaintenanceNotice("Snapshot retention: \(error.localizedDescription)") }
                     // Refresh the prompt-facing summaries so THIS turn sees the new
                     // chunk summary (and any consolidation/meta-summary changes)
-                    // instead of prompting with the pre-archive snapshot.
-                    chunkSummaries = await archiveService.getPromptSummaryItems(recentConsolidatedCount: 5)
+                    // instead of prompting with the pre-archive snapshot. The
+                    // count stays the one captured at turn start, exactly as
+                    // before (inline equivalence).
+                    chunkSummaries = await refreshTurnArchiveViewAfterInlineArchive().items
                 } else {
                     // Keep the raw messages in the live conversation — the agent
                     // retains full visibility of the un-archived content. Skip
@@ -10363,24 +10436,7 @@ class ConversationManager: ObservableObject {
         for i in 0..<stableEnd {
             let msg = messages[i]
             guard msg.role == .user else { continue }
-            guard Self.compressibleSyntheticKinds.contains(msg.kind) else { continue }
-            // Safety: never compress twice. Cheap prefix check matches the stub format.
-            if msg.content.hasPrefix("[Email archived]")
-                || msg.content.hasPrefix("[Subagent archived]")
-                || msg.content.hasPrefix("[Reminder archived]")
-                || msg.content.hasPrefix("[Bash archived]") {
-                continue
-            }
-
-            let stub: String
-            switch msg.kind {
-            case .emailArrived:     stub = Self.compactEmailStub(from: msg.content)
-            case .subagentComplete: stub = Self.compactSubagentStub(from: msg.content)
-            case .reminderFired:    stub = Self.compactReminderStub(from: msg.content)
-            case .bashComplete:     stub = Self.compactBashStub(from: msg.content)
-            case .userText:
-                continue // defensive — filtered above
-            }
+            guard let stub = Self.archivedStub(kind: msg.kind, content: msg.content) else { continue }
 
             messages[i].content = stub
             count += 1
@@ -10388,11 +10444,35 @@ class ConversationManager: ObservableObject {
         return count
     }
 
+    /// The deterministic stub pruning gives a compressible synthetic message
+    /// (nil: not compressible, or already a stub). Shared with background
+    /// archiving's commit check, so both always agree.
+    nonisolated static func archivedStub(kind: MessageKind, content: String) -> String? {
+        guard compressibleSyntheticKindsList.contains(kind) else { return nil }
+        // Safety: never compress twice. Cheap prefix check matches the stub format.
+        if content.hasPrefix("[Email archived]")
+            || content.hasPrefix("[Subagent archived]")
+            || content.hasPrefix("[Reminder archived]")
+            || content.hasPrefix("[Bash archived]") {
+            return nil
+        }
+        switch kind {
+        case .emailArrived:     return compactEmailStub(from: content)
+        case .subagentComplete: return compactSubagentStub(from: content)
+        case .reminderFired:    return compactReminderStub(from: content)
+        case .bashComplete:     return compactBashStub(from: content)
+        case .userText:         return nil
+        }
+    }
+    nonisolated private static let compressibleSyntheticKindsList: Set<MessageKind> = [
+        .emailArrived, .subagentComplete, .reminderFired, .bashComplete
+    ]
+
     // MARK: Stub builders (inline parsers for the three compressible kinds)
 
     /// Extract `from:`/`subject:` headers from the original email-arrival body and
     /// build a one-line stub. Falls back to a generic message if parsing fails.
-    private static func compactEmailStub(from body: String) -> String {
+    nonisolated private static func compactEmailStub(from body: String) -> String {
         let (from, subject, snippet) = parseEmailHeaders(body)
         if from == nil && subject == nil {
             return "[Email archived] (compressed; body no longer in context)"
@@ -10410,7 +10490,7 @@ class ConversationManager: ObservableObject {
     /// Parse the first `From:`/`Subject:` pair (and body snippet) from a
     /// `[SYSTEM: NEW EMAILS ARRIVED]` block. Headers are case-insensitive and
     /// may appear after a `---` separator line.
-    private static func parseEmailHeaders(_ body: String) -> (from: String?, subject: String?, snippet: String?) {
+    nonisolated private static func parseEmailHeaders(_ body: String) -> (from: String?, subject: String?, snippet: String?) {
         var from: String?
         var subject: String?
         var snippet: String?
@@ -10437,7 +10517,7 @@ class ConversationManager: ObservableObject {
 
     /// Parse the `[SUBAGENT COMPLETE]` block up to the `final_message:` line and
     /// emit a one-line stub. The final_message body is discarded.
-    private static func compactSubagentStub(from body: String) -> String {
+    nonisolated private static func compactSubagentStub(from body: String) -> String {
         var handle: String?
         var subagentType: String?
         var description: String?
@@ -10486,7 +10566,7 @@ class ConversationManager: ObservableObject {
     /// script-section boilerplate onward is dropped: the check output is
     /// external (attacker-influenced) data and must never survive into a stub,
     /// where the envelope context that marked it as data has been stripped.
-    private static func compactReminderStub(from body: String) -> String {
+    nonisolated private static func compactReminderStub(from body: String) -> String {
         var lines: [String] = []
         for rawLine in body.split(separator: "\n", omittingEmptySubsequences: false) {
             let t = String(rawLine).trimmingCharacters(in: .whitespaces)
@@ -10513,7 +10593,7 @@ class ConversationManager: ObservableObject {
 
     /// Extract `handle:`, `command:`, and `status:` from a `[BACKGROUND BASH COMPLETE]`
     /// or `[BASH WATCH MATCH]` block and build a one-line stub.
-    private static func compactBashStub(from body: String) -> String {
+    nonisolated private static func compactBashStub(from body: String) -> String {
         var handle: String?
         var command: String?
         var status: String?
@@ -10542,7 +10622,7 @@ class ConversationManager: ObservableObject {
 
     /// Parse a `key: value` line case-sensitively. Returns nil if the line does
     /// not match the requested key.
-    private static func keyValue(_ line: String, key: String) -> String? {
+    nonisolated private static func keyValue(_ line: String, key: String) -> String? {
         let prefix = "\(key):"
         guard line.hasPrefix(prefix) else { return nil }
         return String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
@@ -12737,7 +12817,9 @@ class ConversationManager: ObservableObject {
 
         if let failure = UserDataWipe.remove(PruneArchiveStore.root.path, label: "conversation snapshots") { failures.append(failure) }
 
-        // 2. Clear all archived chunks
+        // 2. Clear all archived chunks (a finished-but-uncommitted
+        //    background archive of the old history is discarded first).
+        await invalidateArchiveJobForReplacedHistory()
         failures += await archiveService.clearAllArchives()
 
         // 3. Clear all reminders (also clears the trigger spool, fire
@@ -12868,9 +12950,11 @@ class ConversationManager: ObservableObject {
     /// Build a human-readable text snapshot of the full context the LLM would see.
     func buildContextSnapshot() async -> String {
         let frozenContext = await getFrozenSystemContext()
-        let chunkSummaries = await archiveService.getPromptSummaryItems(recentConsolidatedCount: 5)
-        let allChunks = await archiveService.getAllChunks()
-        let totalChunkCount = allChunks.count
+        // Read-only (§4.6): the current turn's view when one exists, else a
+        // view without meta refresh or lease. Never starts or commits.
+        let diagnosticView = await diagnosticArchiveView()
+        let chunkSummaries = diagnosticView.items
+        let totalChunkCount = diagnosticView.totalChunkCount
 
         await MCPAgentRouting.refreshFromRegistry()
         let allMcpTools = await MCPRegistry.shared.allToolDefinitions()
@@ -13298,6 +13382,7 @@ class ConversationManager: ObservableObject {
     }
 
     func reloadAfterMindRestore() async {
+        await invalidateArchiveJobForReplacedHistory()
         loadConversation(clearWhenMissing: true)
         // The continuation buffer belongs to the replaced conversation; a
         // /continue after restore must not replay the old reply's tail.
@@ -13486,7 +13571,7 @@ class ConversationManager: ObservableObject {
     /// Get conversation context for the "Process & Save" feature in Settings.
     /// Returns recent messages and chunk summaries so Gemini has full awareness.
     func getContextForStructuring() async -> (recentMessages: [Message], chunkSummaries: [ArchivedSummaryItem]) {
-        let chunkSummaries = await archiveService.getPromptSummaryItems(recentConsolidatedCount: 5)
+        let chunkSummaries = await diagnosticArchiveView().items.filter { $0.kind != .liveOverlapDisclosure }
         // Return last 20 messages for recent context
         let recentMessages = Array(messages.suffix(20))
         return (recentMessages, chunkSummaries)
@@ -13497,6 +13582,326 @@ class ConversationManager: ObservableObject {
         try await archiveService.getChunkContent(chunkId: chunkId)
     }
     
+    // MARK: - Background archiving (BACKGROUND_ARCHIVE_PLAN v3)
+
+    /// The archive job body, identical in both modes (the code that used to
+    /// live inline in the detached task): the pinned chunk-archive snapshot
+    /// when detail is present, up to three attempts with 5 s / 10 s backoff,
+    /// the deterministic break and the same give-up alert.
+    nonisolated static func runArchiveJobBody(messagesToArchive: [Message],
+                                              summarizationContext: ConversationArchiveService.SummarizationContext,
+                                              snapshotSource: [Message],
+                                              archiveSvc: ConversationArchiveService) async -> (Bool, PruneArchiveReference?) {
+        var lastError: Error? = nil
+        let receipt: PruneArchiveReference?
+        do {
+            receipt = PruneArchiveStore.needsSnapshot(messagesToArchive)
+                ? try PruneArchiveStore.write(messages: snapshotSource, trigger: "chunk-archive", removedIDs: messagesToArchive.map(\.id), pin: true) : nil
+        } catch {
+            await MaintenanceAlertCenter.shared.reportFailure(.conversationSummary, error: error.localizedDescription, deterministic: true)
+            return (false, nil)
+        }
+        for attempt in 1...3 {
+            do {
+                _ = try await archiveSvc.archiveMessages(messagesToArchive, context: summarizationContext, snapshot: receipt)
+                print("[ConversationManager] Archived \(messagesToArchive.count) messages successfully")
+                return (true, receipt)
+            } catch {
+                lastError = error
+                print("[ConversationManager] Archive failed (attempt \(attempt)): \(error)")
+                if ArchiveError.isDeterministicFailure(error) { break }
+                if attempt < 3 {
+                    try? await Task.sleep(nanoseconds: UInt64(5 * attempt) * 1_000_000_000)
+                }
+            }
+        }
+        await MaintenanceAlertCenter.shared.reportFailure(
+            .conversationSummary,
+            error: lastError.map { $0.localizedDescription } ?? "unknown error",
+            deterministic: lastError.map { ArchiveError.isDeterministicFailure($0) } ?? false
+        )
+        return (false, receipt)
+    }
+
+    /// Why no archive may start now (nil: it may). One job at a time; no
+    /// new batch while published rows still overlap live messages (they
+    /// would select an overlapping or superset batch) or while /restart or
+    /// /upgrade is on its way out. Background mode also waits for startup
+    /// recovery, which holds the chunk writer for its whole pass.
+    private func archiveStartRefusal(view: ArchivePromptView) -> String? {
+        if archiveJob != nil { return "an archive job is still running or awaiting its commit" }
+        if archiveExitPending { return "a restart or upgrade is in progress" }
+        if view.hasHiddenRows { return "archived rows still await their commit" }
+        if !Self.archiveInlineEnabled, archiveRecoveryTask != nil { return "startup archive recovery is still running" }
+        return nil
+    }
+
+    /// Starts the background job: registered with its activity BEFORE the
+    /// first suspension; the activity ends only after the outcome is
+    /// installed. No 🧠 notice (owner decision D1); /status shows it.
+    private func startBackgroundArchiveJob(batch: [Message],
+                                           summarizationContext: ConversationArchiveService.SummarizationContext,
+                                           snapshotSource: [Message], view: ArchivePromptView) async {
+        let id = UUID()
+        let generation = archiveGeneration
+        let activityId = beginMaintenance(.summarizingHistory)
+        archiveJob = ArchiveJob(id: id, batch: batch, generation: generation, startedAt: Date(), frozenView: view)
+        let archiveSvc = archiveService
+        // The job owns its own reference on the frozen view's lease (the
+        // turn's reference keeps it alive across this await).
+        await archiveSvc.retainLease(view.leaseId)
+        guard archiveJob?.id == id else { endMaintenance(activityId); return }
+        archiveJob?.task = Task.detached { [weak self] in
+            if let hold = Self.backgroundArchiveHoldForTesting { await hold() }
+            let (archived, receipt) = await Self.runArchiveJobBody(
+                messagesToArchive: batch, summarizationContext: summarizationContext,
+                snapshotSource: snapshotSource, archiveSvc: archiveSvc)
+            if archived { await MaintenanceAlertCenter.shared.reportSuccess(.conversationSummary) }
+            await MainActor.run {
+                guard let self else { PruneArchiveStore.release(receipt); return }
+                self.installArchiveOutcome(jobId: id, archived: archived, receipt: receipt)
+                self.endMaintenance(activityId)
+            }
+        }
+    }
+
+    private func installArchiveOutcome(jobId: UUID, archived: Bool, receipt: PruneArchiveReference?) {
+        guard var job = archiveJob, job.id == jobId, job.generation == archiveGeneration else {
+            // Discarded meanwhile (wipe / import): nothing of it may land.
+            PruneArchiveStore.release(receipt)
+            if let stale = archiveJob, stale.id == jobId {
+                archiveJob = nil
+                let lease = stale.frozenView.leaseId
+                Task { await archiveService.releaseLease(lease) }
+            }
+            return
+        }
+        job.receipt = receipt
+        job.outcome = archived ? .succeeded : .failed(Date())
+        job.task = nil
+        archiveJob = job
+        print("[ConversationManager] Background archive \(archived ? "finished — committing at the next turn" : "gave up — raw messages stay; cooldown from now")")
+    }
+
+    /// Drops the job: its snapshot pin and its own lease reference.
+    private func disposeArchiveJob() async {
+        guard let job = archiveJob else { return }
+        archiveJob = nil
+        PruneArchiveStore.release(job.receipt)
+        await archiveService.releaseLease(job.frozenView.leaseId)
+    }
+
+    /// Wipe / Mind import (§9): invalidate the job of the replaced history.
+    /// A running job cannot exist here (those commands refuse while its
+    /// activity is listed); a finished one is discarded before any commit.
+    private func invalidateArchiveJobForReplacedHistory() async {
+        archiveGeneration &+= 1
+        if let job = archiveJob, job.outcome != .running {
+            archiveJob = nil
+            PruneArchiveStore.release(job.receipt)
+        }
+        turnViewLeaseId = nil
+        lastTurnArchiveView = nil
+        await archiveService.releaseAllLeases()
+        // A commit failure of the replaced history is moot; the imported
+        // state's own overlap (if any) re-opens it at the next turn.
+        await MaintenanceAlertCenter.shared.discardEpisode(.archiveCommit)
+    }
+
+    /// §4.3: the view this turn uses. Registers the new lease before
+    /// releasing the previous turn's.
+    private func adoptTurnArchiveView() async -> ArchivePromptView {
+        let previous = turnViewLeaseId
+        var view: ArchivePromptView
+        if let job = archiveJob, job.generation == archiveGeneration,
+           await archiveService.retainLease(job.frozenView.leaseId) {
+            view = job.frozenView
+        } else {
+            view = await captureFreshArchiveView()
+        }
+        turnViewLeaseId = view.leaseId
+        lastTurnArchiveView = view
+        await archiveService.releaseLease(previous)
+        await archiveService.setMainTurnVisibleChunkIds(view.visibleChunkIds)
+        return view
+    }
+
+    /// Diagnostics (§4.6): the adopted turn view, else a read-only one.
+    private func diagnosticArchiveView() async -> ArchivePromptView {
+        if let lastTurnArchiveView { return lastTurnArchiveView }
+        return await archiveService.readOnlyPromptView(recentConsolidatedCount: 5, liveIDs: Set(messages.map(\.id)))
+    }
+
+    /// A fresh view, adopted only if the generation and the live id set
+    /// did not change across its await (the meta refresh may call the
+    /// model); otherwise released and captured again.
+    private func captureFreshArchiveView() async -> ArchivePromptView {
+        var attempt = 0
+        while true {
+            attempt += 1
+            let generation = archiveGeneration
+            let liveIDs = messages.map(\.id)
+            let view = await archiveService.promptView(recentConsolidatedCount: 5, liveIDs: Set(liveIDs))
+            Self.viewCaptureHookForTesting?(self)
+            if (generation == archiveGeneration && messages.map(\.id) == liveIDs) || attempt >= 5 { return view }
+            await archiveService.releaseLease(view.leaseId)
+        }
+    }
+
+    /// Inline mode after a successful archive: today's refresh, as a view
+    /// of the now-shorter conversation (no overlap → today's items).
+    private func refreshTurnArchiveViewAfterInlineArchive() async -> ArchivePromptView {
+        let previous = turnViewLeaseId
+        let view = await captureFreshArchiveView()
+        turnViewLeaseId = view.leaseId
+        lastTurnArchiveView = view
+        await archiveService.releaseLease(previous)
+        await archiveService.setMainTurnVisibleChunkIds(view.visibleChunkIds)
+        return view
+    }
+
+    private enum ArchiveCommitStep: Equatable { case committed, deferred, failed }
+
+    /// §3 commit: the first step of every turn. A running job: nothing.
+    /// A failed job: cooldown from its completion, job dropped. A finished
+    /// job, or (no job) published chunks whose messages are still the
+    /// oldest live ones after a restart: checked reconciliation, then
+    /// removal. Never calls the model.
+    private func commitArchiveIfReady() async {
+        guard !isRestoringMind else { return }
+        if let job = archiveJob {
+            guard job.generation == archiveGeneration else { await disposeArchiveJob(); return }
+            switch job.outcome {
+            case .running:
+                return
+            case .failed(let at):
+                archiveRetryBackoffUntil = at.addingTimeInterval(600)
+                print("[ConversationManager] Background archive gave up — next attempt after \(archiveRetryBackoffUntil)")
+                await disposeArchiveJob()
+            case .succeeded:
+                let step = await commitArchivedPart(ids: job.batch.map(\.id), baseline: .batchStart(job.batch),
+                                                    receipt: job.receipt, generation: job.generation)
+                guard step == .committed else { return }
+                await disposeArchiveJob()
+                await MaintenanceAlertCenter.shared.reportSuccess(.archiveCommit)
+            }
+            return
+        }
+        // Restart (§6.5): the contiguous oldest prefix covered by published
+        // chunks, never across a gap, one covering chunk's part at a time.
+        let owners = await archiveService.coveringChunkIds(for: messages.map(\.id))
+        guard !owners.isEmpty else { return }
+        var parts: [(chunk: UUID, ids: [UUID])] = []
+        for message in messages {
+            guard let chunk = owners[message.id] else { break }
+            if parts.last?.chunk == chunk { parts[parts.count - 1].ids.append(message.id) }
+            else { parts.append((chunk, [message.id])) }
+        }
+        guard !parts.isEmpty else { return }
+        let generation = archiveGeneration
+        for part in parts {
+            let step = await commitArchivedPart(ids: part.ids, baseline: .archivedRaw, receipt: nil, generation: generation)
+            guard step == .committed else { return }
+        }
+        // Only when every part is settled: an unresolved remainder keeps
+        // its alert open.
+        await MaintenanceAlertCenter.shared.reportSuccess(.archiveCommit)
+    }
+
+    /// One covering part: checked reconciliation (always, even for equal
+    /// bytes), then — after re-reading the exact live versions — removal.
+    private func commitArchivedPart(ids: [UUID], baseline: ArchiveCommitBaseline,
+                                    receipt: PruneArchiveReference?, generation: UInt64) async -> ArchiveCommitStep {
+        let wanted = Set(ids)
+        let live = messages.filter { wanted.contains($0.id) }
+        guard !live.isEmpty else { return .committed }   // already settled
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        guard let liveBytes = try? encoder.encode(live) else { return .deferred }
+        let owner = activeRunId
+        let result: ArchiveReconcileResult
+        do {
+            result = try await archiveService.reconcileCommittedBatch(live: live, baseline: baseline, jobReceipt: receipt)
+        } catch {
+            print("[ConversationManager] Archive commit refused: \(error.localizedDescription)")
+            await MaintenanceAlertCenter.shared.reportFailure(.archiveCommit, error: error.localizedDescription, deterministic: false)
+            return .failed
+        }
+        guard result == .reconciled else {
+            print("[ConversationManager] Archive commit deferred: the archive writer is busy")
+            return .deferred
+        }
+        // Revalidate after every await (§6.4).
+        guard generation == archiveGeneration, !isRestoringMind, activeRunId == owner else { return .deferred }
+        let now = messages.filter { wanted.contains($0.id) }
+        guard let nowBytes = try? encoder.encode(now), nowBytes == liveBytes else {
+            // Changed in between (a prune): reconcile again next turn.
+            return .deferred
+        }
+        do { try settleJobEvidenceBeforeRemoval(of: now) } catch {
+            print("[ConversationManager] Archive commit postponed — crash-record evidence not settled: \(error.localizedDescription)")
+            return .deferred
+        }
+        let candidate = messages.filter { !wanted.contains($0.id) }
+        do {
+            try writeHistoryFile(try encoder.encode(candidate))
+        } catch {
+            await MaintenanceAlertCenter.shared.reportFailure(.archiveCommit,
+                error: "could not save the conversation without the archived messages: \(error.localizedDescription)", deterministic: false)
+            return .failed
+        }
+        messages = candidate
+        committedMessages = candidate
+        lastPromptTokens = nil
+        lastCompletionTokens = nil
+        cleanupOrphanedToolAttachmentSnapshots()
+        do { try PruneArchiveStore.retainLatest() }
+        catch { showMaintenanceNotice("Snapshot retention: \(error.localizedDescription)") }
+        print("[ConversationManager] Committed archived batch: removed \(now.count) message(s)")
+        return .committed
+    }
+
+    /// /status line (§10).
+    private func archiveModeStatusLine() async -> String {
+        var line = "🧠 Memory archiving: " + (Self.archiveInlineEnabled ? "waits before replying" : "in the background")
+        if let job = archiveJob, job.generation == archiveGeneration {
+            line += job.outcome == .running ? " (a background archive is still finishing)"
+                : job.outcome == .succeeded ? " (archived messages waiting to be removed)" : ""
+        } else if !(await archiveService.coveringChunkIds(for: messages.map(\.id))).isEmpty {
+            line += " (archived messages waiting to be removed)"
+        }
+        return line
+    }
+
+    /// `/archiveinline on|off` (§10): persisted, default off. Affects the
+    /// next job only; a job already running stays in the background.
+    private func handleArchiveInlineCommand(argument: String) async {
+        guard replyAddress != nil else { return }
+        let enabled = Self.archiveInlineEnabled
+        let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty {
+            try? await sendText("""
+                Memory archiving waits before replying: \(enabled ? "ON" : "OFF") (default: off).
+                Off: when the conversation gets long, its oldest part is summarized in the background while I keep working; the summary replaces those messages at the start of a later message.
+                On: I wait for the summary before replying (for local servers that can't run two requests at once). Switch with /archiveinline on or /archiveinline off.
+                """)
+            return
+        }
+        guard normalized == "on" || normalized == "off" else {
+            try? await sendText("Usage: /archiveinline on|off (currently \(enabled ? "on" : "off")).")
+            return
+        }
+        let target = normalized == "on"
+        guard target != enabled else {
+            try? await sendText("Memory archiving already \(target ? "waits before replying" : "runs in the background").")
+            return
+        }
+        switchDefaults.set(target, forKey: Self.archiveInlineDefaultsKey)
+        let running = archiveJob?.outcome == .running ? " An archive already running in the background finishes there." : ""
+        try? await sendText(target
+            ? "✅ Memory archiving now waits before replying, from the next archive.\(running)"
+            : "✅ Memory archiving now runs in the background, from the next archive.")
+    }
+
     // MARK: - Summarization Context Builder
     
     /// Build full context for summarization so the LLM can properly understand
@@ -13512,7 +13917,8 @@ class ConversationManager: ObservableObject {
         let userName = KeychainHelper.load(key: KeychainHelper.userNameKey)
         
         // Format previous summaries chronologically
-        let previousSummaries = chunkSummaries.sorted { $0.startDate < $1.startDate }.map { $0.summary }
+        let previousSummaries = chunkSummaries.filter { $0.kind != .liveOverlapDisclosure }
+            .sorted { $0.startDate < $1.startDate }.map { $0.summary }
         
         // Preserve only the immediate continuation after the archived chunk.
         // It is appended after the source segment in archive prompts, so it can
@@ -14493,6 +14899,7 @@ extension ConversationManager {
         frozenEmailContext = ""
         frozenContextDay = Calendar.current.startOfDay(for: Date())
         await openRouterService.configure(apiKey: apiKey)
+        await toolExecutor.setArchiveService(archiveService)
         await toolExecutor.configureOpenRouter(openRouterService, imagesDirectory: imagesDirectory,
                                                documentsDirectory: documentsDirectory)
     }
@@ -14640,3 +15047,49 @@ extension ConversationManager {
         noteDurabilityStallRecovered()
     }
 }
+
+// MARK: - Background archiving selftest seams
+//
+// Test-only entry points for `__background-archive-selftest` (private
+// scratch roots). They read state or call production paths; none replaces
+// an implementation.
+extension ConversationManager {
+    var _baJobOutcome: String? {
+        guard let job = archiveJob else { return nil }
+        switch job.outcome {
+        case .running: return "running"
+        case .succeeded: return "succeeded"
+        case .failed: return "failed"
+        }
+    }
+    var _baJobStartedAt: Date? { archiveJob?.startedAt }
+    var _baJobBatchIds: [UUID] { archiveJob?.batch.map(\.id) ?? [] }
+    var _baJobReceipt: PruneArchiveReference? { archiveJob?.receipt }
+    var _baJobFrozenLease: UUID? { archiveJob?.frozenView.leaseId }
+    var _baBackoffUntil: Date { archiveRetryBackoffUntil }
+    var _baExitPending: Bool { archiveExitPending }
+    var _baTurnLeaseId: UUID? { turnViewLeaseId }
+    var _baGeneration: UInt64 { archiveGeneration }
+    var _baMaintenanceKinds: [MaintenanceActivity.Kind] { maintenanceActivities.map(\.kind) }
+    var _baRecoveryRunning: Bool { archiveRecoveryTask != nil }
+    func _baExecuteMainTool(_ name: String, _ arguments: String) async -> String {
+        let call = ToolCall(id: "ba-\(UUID().uuidString.prefix(8))", type: "function", function: FunctionCall(name: name, arguments: arguments))
+        return (try? await toolExecutor.execute(call))?.content ?? "<tool threw>"
+    }
+    func _baCommand(_ text: String) async -> String {
+        await handleTerminalCommand(text)?.joined(separator: "\n") ?? ""
+    }
+    /// `_testStartTurn` with a hook that runs after the user message is
+    /// saved and before the turn starts (arms one-shot faults).
+    func _baStartTurn(for message: Message, afterSave: () -> Void) {
+        messages.append(message)
+        _ = saveConversation()
+        afterSave()
+        startActiveProcessing(for: message)
+    }
+    func _baScheduleRecovery() {
+        scheduleArchiveRecovery(defaultContext: .empty)
+    }
+    func _baAwaitRecovery() async { await archiveRecoveryTask?.value }
+}
+

@@ -45,7 +45,15 @@ actor ToolExecutor {
     }
 
     let webOrchestrator = WebOrchestrator()
-    private let archiveService = ConversationArchiveService()
+    /// The manager injects ITS archive service (setArchiveService), so
+    /// explicit archive reads see the live index, chunks published since
+    /// startup, and children retained for a live prompt view (background
+    /// archiving §4.4). A standalone executor (selftests) keeps its own.
+    private var archiveService = ConversationArchiveService()
+
+    func setArchiveService(_ service: ConversationArchiveService) {
+        archiveService = service
+    }
 
     /// The Web researcher's evidence ledger, set by SubagentRunner on the
     /// child executor of a Web run before its first tool batch and read
@@ -295,6 +303,7 @@ actor ToolExecutor {
     /// with the parent agent's tool execution.
     func makeChildExecutor() async -> ToolExecutor {
         let child = ToolExecutor(outputMode: .subagent, depth: depth + 1)
+        await child.setArchiveService(archiveService)
         await child.configure(
             openRouterKey: configuredOpenRouterKey,
             serperKey: configuredSerperKey,
@@ -2213,18 +2222,25 @@ actor ToolExecutor {
             }
         }
 
+        // Explicit reads are never filtered by a prompt view (§4.4): dates
+        // select from the current index; ids also resolve children retained
+        // for a live view.
         let allChunks = await archiveService.getAllChunks()
-        if allChunks.isEmpty {
+        let idCatalogue = await archiveService.explicitReadChunks()
+        if idCatalogue.isEmpty {
             return "{\"success\": true, \"message\": \"No archived conversation chunks yet. Chunks are created as conversations grow.\"}"
         }
 
-        let visibleIds = await archiveService.individuallyVisibleChunkIds()
+        // "Already an individual row" only for rows the CALLER's prompt
+        // shows: the main agent's adopted turn view; subagents get no
+        // archive table, so nothing is skipped for them.
+        let visibleIds: Set<UUID> = isSubagentExecutor ? [] : await archiveService.mainAgentVisibleChunkIds()
         var notes: [String] = []
 
         var selectedById: [ConversationChunk] = []
         for rawId in requestedIds {
             let needle = rawId.uppercased()
-            let matches = allChunks.filter { $0.id.uuidString.hasPrefix(needle) }
+            let matches = idCatalogue.filter { $0.id.uuidString.hasPrefix(needle) }
             if matches.isEmpty {
                 notes.append("Id '\(rawId)': no archived chunk matches.")
             } else if matches.count > 1 {

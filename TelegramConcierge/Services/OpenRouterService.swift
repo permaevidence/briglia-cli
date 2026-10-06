@@ -1331,8 +1331,20 @@ actor OpenRouterService {
     /// wire and lifecycle migrations cover exactly this string.
     static let findTaskReplyPolicyLine = "When the user asked you to find something concrete (a product, a place, a service, a document, an offer), give each item's link or location next to its name when available — the one bare URL or address that lets the user act on it, not a list of sources — and say when it could not be established; never guess a URL or an address. Don't add unnecessary links, and keep the message short."
 
-    func formatChunkSummaries(_ items: [ArchivedSummaryItem], totalChunkCount: Int) -> String {
-        guard !items.isEmpty else { return "" }
+    func formatChunkSummaries(_ allItems: [ArchivedSummaryItem], totalChunkCount: Int) -> String {
+        // Background archiving (§4.3): a disclosure item is not a row. With
+        // none present, `items` is the caller's array and the output is
+        // byte-identical to before.
+        let hiddenRowNotes = allItems.compactMap(\.hiddenRowNote)
+        let items = hiddenRowNotes.isEmpty ? allItems : allItems.filter { $0.kind != .liveOverlapDisclosure }
+        guard !items.isEmpty || !hiddenRowNotes.isEmpty else { return "" }
+        let disclosureLines = hiddenRowNotes.map { "\n- " + $0 }.joined()
+        let transcriptLine = "- Original messages are plaintext transcript files in `~/.local/share/briglia/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = \"*.txt\" (or \"<chunk-id>*.txt\" for one chunk), case_insensitive = true, context = 5; use output_mode = \"files_with_matches\" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path"
+        if items.isEmpty {
+            // Every row overlaps live messages: the section still says so,
+            // so the omission never looks like missing history.
+            return "\n\n## ARCHIVED CONVERSATION HISTORY\n" + disclosureLines + "\n" + transcriptLine
+        }
         
         let dateFormatter = DateFormatter()
         // Full year, matching the YYYY-MM-DD format read_chunk_summaries expects —
@@ -1360,7 +1372,7 @@ actor OpenRouterService {
             Showing a chronological history timeline with \(items.count) summary item(s), covering \(representedChunkCount) archived chunk(s). **\(hiddenCount) older chunk(s) predate this table and are not shown.**
             - Chunk rows carry a chunk id in the ID column. Meta-summary rows compress several chunks: their chunk ids are listed as [Chunks: …] at the end of the Summary cell (the row's own ID is a summary id, not a chunk id)
             - `read_chunk_summaries` retrieves full per-chunk summaries not visible here: pass chunk_ids (e.g. from a [Chunks: …] list) and/or a from/to date range. The \(hiddenCount) unshown chunk(s) all predate the oldest row — reach them with a date range (a to-only query returns the newest matches before that date). Summaries already shown as individual rows below are never re-sent
-            - Original messages are plaintext transcript files in `~/.local/share/briglia/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = "*.txt" (or "<chunk-id>*.txt" for one chunk), case_insensitive = true, context = 5; use output_mode = "files_with_matches" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path\(snapshotHeader)\(retiredFactsLine)
+            - Original messages are plaintext transcript files in `~/.local/share/briglia/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = "*.txt" (or "<chunk-id>*.txt" for one chunk), case_insensitive = true, context = 5; use output_mode = "files_with_matches" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path\(snapshotHeader)\(retiredFactsLine)\(disclosureLines)
 
             | # | Type | ID | Size | Date Range | Summary |
             |---|------|-----|------|------------|---------|
@@ -1373,7 +1385,7 @@ actor OpenRouterService {
             
             Showing all \(totalChunkCount) archived chunk(s) via \(items.count) chronological summary item(s).
             - Chunk rows carry a chunk id in the ID column. Meta-summary rows compress several chunks: their chunk ids are listed as [Chunks: …] at the end of the Summary cell (the row's own ID is a summary id, not a chunk id). Use `read_chunk_summaries` with those chunk_ids (or a from/to date range) to expand a meta row into full per-chunk summaries; summaries already shown as individual rows are never re-sent
-            - Original messages are plaintext transcript files in `~/.local/share/briglia/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = "*.txt" (or "<chunk-id>*.txt" for one chunk), case_insensitive = true, context = 5; use output_mode = "files_with_matches" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path\(snapshotHeader)\(retiredFactsLine)
+            - Original messages are plaintext transcript files in `~/.local/share/briglia/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = "*.txt" (or "<chunk-id>*.txt" for one chunk), case_insensitive = true, context = 5; use output_mode = "files_with_matches" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path\(snapshotHeader)\(retiredFactsLine)\(disclosureLines)
             
             | # | Type | ID | Size | Date Range | Summary |
             |---|------|-----|------|------------|---------|

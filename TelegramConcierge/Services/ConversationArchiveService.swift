@@ -37,6 +37,10 @@ actor MaintenanceAlertCenter {
         /// pending_midturn.json (acknowledged, not yet answered messages)
         /// exists but cannot be read (mid-turn wake 1a round 6).
         case heldMessageQueue
+        /// Background archiving's local commit (reconciliation and removal of
+        /// an archived batch). Its own episode: job success and startup
+        /// recovery report `.conversationSummary` and can never clear it.
+        case archiveCommit
 
         var displayName: String {
             switch self {
@@ -55,6 +59,7 @@ actor MaintenanceAlertCenter {
             case .transcription: return MediaRouting.transcription.viaOpenRouter ? "audio transcription (OpenRouter)" : "audio transcription (OpenAI)"
             case .conversationHistory: return "conversation history loading"
             case .heldMessageQueue: return "held-message file loading"
+            case .archiveCommit: return "removing archived messages from the live conversation"
             }
         }
 
@@ -64,6 +69,8 @@ actor MaintenanceAlertCenter {
             case .conversationSummary, .chunkConsolidation, .userContextExtraction,
                  .userContextRestructure, .metaSummary:
                 return "No data has been lost — the raw content stays available and I'll keep retrying in the background."
+            case .archiveCommit:
+                return "No data has been lost — the summary is saved and the original messages stay in the conversation; I'll retry at the next message, without another summary."
             case .channelPolling:
                 return "I can't fetch incoming Telegram messages until this recovers, so I may seem unresponsive there."
             case .whatsappBridge:
@@ -134,6 +141,21 @@ actor MaintenanceAlertCenter {
 
     func setDeliveryHandler(_ handler: @escaping @Sendable (String) async -> Bool) {
         deliver = handler
+    }
+
+    /// Drop an episode without a recovery message: its subject no longer
+    /// exists (background archiving's commit episode after a wipe or a Mind
+    /// import replaced the history it was about).
+    func discardEpisode(_ subsystem: Subsystem) {
+        guard store.episodes.removeValue(forKey: subsystem.rawValue) != nil else { return }
+        save()
+    }
+
+    /// Test seam: forget every episode and undelivered alert (selftests run
+    /// many scenarios against this process-wide singleton).
+    func _testReset() {
+        store = Store()
+        save()
     }
 
     /// Report a maintenance failure AFTER bounded in-turn retries were exhausted.
@@ -617,6 +639,108 @@ actor ConversationArchiveService {
         if chunkWriterWaiters.isEmpty { chunkWriterBusy = false }
         else { chunkWriterWaiters.removeFirst().resume() }
     }
+    /// Background archiving's commit takes the writer WITHOUT waiting
+    /// (§6.3): busy means deferred, never a queue behind recovery.
+    private func tryAcquireChunkWriter() -> Bool {
+        guard !chunkWriterBusy else { return false }
+        chunkWriterBusy = true
+        return true
+    }
+    var isChunkWriterBusy: Bool { chunkWriterBusy }
+    /// Test seam: runs after consolidation published its index and decided
+    /// which children to delete or retain (background-archive selftest).
+    nonisolated(unsafe) static var afterConsolidationPublishForTesting: (@Sendable () async -> Void)?
+
+    // MARK: Prompt-view leases (BACKGROUND_ARCHIVE_PLAN §5) — in memory only
+
+    /// Chunk ids each live prompt view names, with a reference count per
+    /// lease (a turn reusing a job's frozen view takes its own reference).
+    private var leases: [UUID: (chunkIds: Set<UUID>, references: Int)] = [:]
+    /// Children retired by consolidation while a live view still names them:
+    /// their raw file and sidecar stay until the last naming lease goes.
+    /// Never consulted for coverage, overlap or "already archived" checks.
+    private var retainedForViews: [UUID: ConversationChunk] = [:]
+    /// The main agent's current turn view rows (read_chunk_summaries'
+    /// "already an individual row" note, §4.4). nil until a turn adopts one.
+    private var mainTurnVisibleChunkIds: Set<UUID>?
+
+    private func chunkIdsNamedByLeases() -> Set<UUID> {
+        leases.values.reduce(into: Set<UUID>()) { $0.formUnion($1.chunkIds) }
+    }
+
+    func registerLease(chunkIds: Set<UUID>) -> UUID {
+        let id = UUID()
+        leases[id] = (chunkIds, 1)
+        return id
+    }
+
+    /// Another owner of an existing lease (a turn reusing a frozen view).
+    /// False when the lease is gone (e.g. released by a wipe).
+    @discardableResult
+    func retainLease(_ id: UUID) -> Bool {
+        guard var lease = leases[id] else { return false }
+        lease.references += 1
+        leases[id] = lease
+        return true
+    }
+
+    func releaseLease(_ id: UUID?) {
+        guard let id, var lease = leases[id] else { return }
+        lease.references -= 1
+        if lease.references > 0 { leases[id] = lease; return }
+        leases.removeValue(forKey: id)
+        sweepRetainedChildren()
+    }
+
+    func releaseAllLeases() {
+        leases.removeAll()
+        sweepRetainedChildren()
+    }
+
+    /// Deletes retained children no live lease names, with today's code
+    /// (raw file, then sidecar).
+    private func sweepRetainedChildren() {
+        let named = chunkIdsNamedByLeases()
+        for (id, chunk) in retainedForViews where !named.contains(id) {
+            if !chunkIndex.chunks.contains(where: { $0.rawContentFileName == chunk.rawContentFileName }) {
+                try? FileManager.default.removeItem(at: archiveFolder.appendingPathComponent(chunk.rawContentFileName))
+                removeSidecar(forRawFileName: chunk.rawContentFileName)
+            }
+            retainedForViews.removeValue(forKey: id)
+        }
+    }
+
+    var _testLeaseCount: Int { leases.count }
+    func _testLeaseReferences(_ id: UUID) -> Int { leases[id]?.references ?? 0 }
+    var _testRetainedChildIds: Set<UUID> { Set(retainedForViews.keys) }
+
+    func setMainTurnVisibleChunkIds(_ ids: Set<UUID>?) { mainTurnVisibleChunkIds = ids }
+    /// The set read_chunk_summaries uses for its "already an individual row"
+    /// note: the main agent's adopted turn view, or today's computation
+    /// before any turn adopted one.
+    func mainAgentVisibleChunkIds() -> Set<UUID> {
+        mainTurnVisibleChunkIds ?? individuallyVisibleChunkIds()
+    }
+
+    /// Explicit reads (§4.4): the current index plus children retained for
+    /// a live view. Never filtered by a prompt view.
+    func explicitReadChunks() -> [ConversationChunk] {
+        let indexed = chunkIndex.orderedChunks
+        let indexedIds = Set(indexed.map(\.id))
+        let retained = retainedForViews.values.filter { !indexedIds.contains($0.id) }
+        return (indexed + retained).sorted(by: archiveChunkIsOrderedBefore)
+    }
+
+    /// Published chunk (index only) covering each id.
+    func coveringChunkIds(for ids: [UUID]) -> [UUID: UUID] {
+        var owner: [UUID: UUID] = [:]
+        for chunk in chunkIndex.chunks {
+            for id in chunk.sourceMessageIDs ?? [] where owner[id] == nil { owner[id] = chunk.id }
+        }
+        var result: [UUID: UUID] = [:]
+        for id in ids { if let chunk = owner[id] { result[id] = chunk } }
+        return result
+    }
 
     // MARK: - Initialization
     
@@ -845,6 +969,11 @@ actor ConversationArchiveService {
     /// Reload chunk index and pending index from disk
     /// Call this after Mind restore to pick up the restored data
     func reloadFromDisk() {
+        // Mind import: retained files become untracked raw files, removed by
+        // the next recovery's reconciliation after its grace period (§5).
+        leases.removeAll()
+        retainedForViews.removeAll()
+        mainTurnVisibleChunkIds = nil
         loadIndex()
         loadPendingIndex()
         loadPendingMetaIndex()
@@ -868,6 +997,15 @@ actor ConversationArchiveService {
             try? FileManager.default.removeItem(at: fileURL)
             removeSidecar(forRawFileName: chunk.rawContentFileName)
         }
+
+        // Children retained for live prompt views (§5).
+        for chunk in retainedForViews.values {
+            try? FileManager.default.removeItem(at: archiveFolder.appendingPathComponent(chunk.rawContentFileName))
+            removeSidecar(forRawFileName: chunk.rawContentFileName)
+        }
+        retainedForViews.removeAll()
+        leases.removeAll()
+        mainTurnVisibleChunkIds = nil
 
         // Delete pending chunk files
         for pending in pendingIndex.pendingChunks {
@@ -932,46 +1070,8 @@ actor ConversationArchiveService {
         
         let sourceIDs = Set(messages.map(\.id))
         if let index = chunkIndex.chunks.firstIndex(where: { sourceIDs.isSubset(of: Set($0.sourceMessageIDs ?? [])) }) {
-            // A prior chunk committed but the live removal save failed. Preserve
-            // later pruning references as well, without duplicating visible
-            // messages or running another summary/fact extraction.
-            var completed = chunkIndex.chunks[index]
-            let rawURL = archiveFolder.appendingPathComponent(completed.rawContentFileName)
-            var raw = try JSONDecoder().decode([Message].self, from: Data(contentsOf: rawURL))
-            let incoming = messages.flatMap(\.pruneArchiveReferences) + [snapshot].compactMap { $0 }
-            var refs = completed.pruneArchiveReferences ?? []
-            var seen = Set(refs.map(\.id))
-            for ref in incoming where seen.insert(ref.id).inserted { refs.append(ref) }
-            if !refs.isEmpty, let anchor = raw.firstIndex(where: { sourceIDs.contains($0.id) }) {
-                var rawSeen = Set(raw[anchor].pruneArchiveReferences.map(\.id))
-                for ref in incoming where rawSeen.insert(ref.id).inserted { raw[anchor].pruneArchiveReferences.append(ref) }
-                try PrivateStorage.writeAtomically(try JSONEncoder().encode(raw), to: rawURL)
-            }
-            completed.pruneArchiveReferences = refs.isEmpty ? nil : refs
-            chunkIndex.chunks[index] = completed
-            try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL)
-            // The prior attempt may have committed the chunk and then failed to
-            // clear its recovery record (the pending-index write follows the
-            // index write). Settle that receipt here, or a later consolidation
-            // deletes the raw file underneath it and startup recovery wedges on
-            // a record whose content is already archived.
-            let stale = pendingIndex.pendingChunks.filter { $0.id == completed.id || Set($0.sourceMessageIDs ?? []) == sourceIDs }
-            if !stale.isEmpty {
-                // Candidate index: memory adopts the removal only after the
-                // checked write, so a failed write leaves memory and disk in
-                // agreement and the next retry settles the record again.
-                var settled = pendingIndex
-                settled.pendingChunks.removeAll { record in stale.contains { $0.id == record.id } }
-                try PrivateStorage.writeAtomically(try JSONEncoder().encode(settled), to: pendingIndexFileURL)
-                pendingIndex = settled
-                for record in stale where record.rawContentFileName != completed.rawContentFileName
-                    && !chunkIndex.chunks.contains(where: { $0.rawContentFileName == record.rawContentFileName }) {
-                    try? FileManager.default.removeItem(at: archiveFolder.appendingPathComponent(record.rawContentFileName))
-                    removeSidecar(forRawFileName: record.rawContentFileName)
-                }
-            }
-            await writeSidecar(forRawFileName: completed.rawContentFileName, messages: raw)
-            return completed
+            return try await mergeCommittedBatch(index: index, sourceIDs: sourceIDs,
+                                                 incoming: messages.flatMap(\.pruneArchiveReferences) + [snapshot].compactMap { $0 })
         }
         if PruneArchiveStore.needsSnapshot(messages) && snapshot == nil {
             throw PruneArchiveStore.Failure("Detail-bearing chunk archiving requires a durable conversation snapshot")
@@ -1096,6 +1196,224 @@ actor ConversationArchiveService {
         return chunk
     }
     
+
+    /// The committed-batch branch (unchanged behavior, shared with the
+    /// background commit's reconciliation): merge incoming snapshot
+    /// references onto the raw anchor and the index entry with checked
+    /// writes, settle stale pending records, rewrite the sidecar. Caller
+    /// holds the chunk writer. Never calls the model.
+    private func mergeCommittedBatch(index: Int, sourceIDs: Set<UUID>, incoming: [PruneArchiveReference]) async throws -> ConversationChunk {
+        // A prior chunk committed but the live removal save failed. Preserve
+        // later pruning references as well, without duplicating visible
+        // messages or running another summary/fact extraction.
+        var completed = chunkIndex.chunks[index]
+        let rawURL = archiveFolder.appendingPathComponent(completed.rawContentFileName)
+        var raw = try JSONDecoder().decode([Message].self, from: Data(contentsOf: rawURL))
+        var refs = completed.pruneArchiveReferences ?? []
+        var seen = Set(refs.map(\.id))
+        for ref in incoming where seen.insert(ref.id).inserted { refs.append(ref) }
+        if !refs.isEmpty, let anchor = raw.firstIndex(where: { sourceIDs.contains($0.id) }) {
+            var rawSeen = Set(raw[anchor].pruneArchiveReferences.map(\.id))
+            for ref in incoming where rawSeen.insert(ref.id).inserted { raw[anchor].pruneArchiveReferences.append(ref) }
+            try PrivateStorage.writeAtomically(try JSONEncoder().encode(raw), to: rawURL)
+        }
+        completed.pruneArchiveReferences = refs.isEmpty ? nil : refs
+        chunkIndex.chunks[index] = completed
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL)
+        // The prior attempt may have committed the chunk and then failed to
+        // clear its recovery record (the pending-index write follows the
+        // index write). Settle that receipt here, or a later consolidation
+        // deletes the raw file underneath it and startup recovery wedges on
+        // a record whose content is already archived.
+        let stale = pendingIndex.pendingChunks.filter { $0.id == completed.id || Set($0.sourceMessageIDs ?? []) == sourceIDs }
+        if !stale.isEmpty {
+            // Candidate index: memory adopts the removal only after the
+            // checked write, so a failed write leaves memory and disk in
+            // agreement and the next retry settles the record again.
+            var settled = pendingIndex
+            settled.pendingChunks.removeAll { record in stale.contains { $0.id == record.id } }
+            try PrivateStorage.writeAtomically(try JSONEncoder().encode(settled), to: pendingIndexFileURL)
+            pendingIndex = settled
+            for record in stale where record.rawContentFileName != completed.rawContentFileName
+                && !chunkIndex.chunks.contains(where: { $0.rawContentFileName == record.rawContentFileName }) {
+                try? FileManager.default.removeItem(at: archiveFolder.appendingPathComponent(record.rawContentFileName))
+                removeSidecar(forRawFileName: record.rawContentFileName)
+            }
+        }
+        await writeSidecar(forRawFileName: completed.rawContentFileName, messages: raw)
+        return completed
+    }
+
+    /// Background archiving's commit step (§6.3, §6.5 and the Codex round-3
+    /// receipt correction). Requires every live message to be covered by a
+    /// published chunk (index only), checks each covering chunk's part
+    /// against `baseline`, makes sure the part's live detail is preserved by
+    /// a snapshot that actually COVERS those messages, then merges
+    /// references with the committed-batch code. Returns only after its
+    /// checked writes succeed. Never calls the model and never falls through
+    /// to ordinary archiving; takes the chunk writer without waiting.
+    func reconcileCommittedBatch(live: [Message], baseline: ArchiveCommitBaseline,
+                                 jobReceipt: PruneArchiveReference?) async throws -> ArchiveReconcileResult {
+        guard tryAcquireChunkWriter() else { return .writerBusy }
+        defer { releaseChunkWriter() }
+        lastReconcileEvidence = []
+        guard !live.isEmpty else { return .reconciled }
+        let owners = coveringChunkIds(for: live.map(\.id))
+        guard owners.count == live.count else {
+            throw ArchiveCommitRefusal("\(live.count - owners.count) message(s) are not covered by a published chunk")
+        }
+        var groups: [(chunkId: UUID, part: [Message])] = []
+        for message in live {
+            let owner = owners[message.id]!
+            if let i = groups.firstIndex(where: { $0.chunkId == owner }) { groups[i].part.append(message) }
+            else { groups.append((owner, [message])) }
+        }
+        var startById: [UUID: Message] = [:]
+        if case .batchStart(let batch) = baseline {
+            for message in batch where startById[message.id] == nil { startById[message.id] = message }
+        }
+        let stub: (MessageKind, String) -> String? = { ConversationManager.archivedStub(kind: $0, content: $1) }
+        let sanitize: (Message) -> Message = { Self.sanitizedForArchive($0) }
+        for (chunkId, part) in groups {
+            guard let index = chunkIndex.chunks.firstIndex(where: { $0.id == chunkId }) else {
+                throw ArchiveCommitRefusal("covering chunk \(chunkId.uuidString.prefix(8)) disappeared")
+            }
+            let chunk = chunkIndex.chunks[index]
+            let raw: [Message]
+            do {
+                raw = try JSONDecoder().decode([Message].self, from: Data(contentsOf: archiveFolder.appendingPathComponent(chunk.rawContentFileName)))
+            } catch {
+                throw ArchiveCommitRefusal("archived copy of chunk \(chunkId.uuidString.prefix(8)) unreadable: \(error.localizedDescription)")
+            }
+            var rawById: [UUID: Message] = [:]
+            for message in raw where rawById[message.id] == nil { rawById[message.id] = message }
+            let partIds = Set(part.map(\.id))
+            var detailChanged = false
+            for live in part {
+                switch baseline {
+                case .batchStart:
+                    guard let start = startById[live.id] else {
+                        throw ArchiveCommitRefusal("message \(live.id.uuidString.prefix(8)) is not in the archived batch")
+                    }
+                    if let reason = ArchiveCommitCheck.baselineADelta(start: start, live: live, sanitize: sanitize, stub: stub) {
+                        throw ArchiveCommitRefusal("unexplained change in archived message \(live.id.uuidString.prefix(8)): \(reason)")
+                    }
+                    if ArchiveCommitCheck.detailDiffers(start: start, live: live) { detailChanged = true }
+                case .archivedRaw:
+                    if let archived = rawById[live.id] {
+                        if let reason = ArchiveCommitCheck.baselineBDelta(raw: archived, live: live, sanitize: sanitize, stub: stub) {
+                            throw ArchiveCommitRefusal("unexplained change in archived message \(live.id.uuidString.prefix(8)): \(reason)")
+                        }
+                    } else if !Self.isStandaloneToolRunLogMessage(live) {
+                        // Only standalone compact tool-run logs are left out
+                        // of a raw copy; anything else missing is ambiguous.
+                        throw ArchiveCommitRefusal("message \(live.id.uuidString.prefix(8)) is missing from the archived copy")
+                    }
+                }
+            }
+            // Detail the sanitized raw copy drops must be preserved by a
+            // snapshot that covers THESE messages (Codex round 3): search
+            // every reference retained across the raw chunk and its record,
+            // not only the first message; completeness alone is not coverage.
+            let detailIds = Set(part.filter { PruneArchiveStore.needsSnapshot([$0]) }.map(\.id))
+            var coveringId: UUID?
+            var incoming = part.flatMap(\.pruneArchiveReferences)
+            var fresh: PruneArchiveReference?
+            defer { PruneArchiveStore.release(fresh) }
+            if !detailIds.isEmpty {
+                var candidates: [PruneArchiveReference] = []
+                var seen: Set<UUID> = []
+                for ref in [jobReceipt].compactMap({ $0 }) + raw.flatMap(\.pruneArchiveReferences) + (chunk.pruneArchiveReferences ?? [])
+                where seen.insert(ref.id).inserted { candidates.append(ref) }
+                let covering = candidates.first { PruneArchiveStore.chunkArchiveSnapshotCovers($0, ids: detailIds) }
+                var preserveLiveDetail = false
+                switch baseline {
+                case .batchStart:
+                    if let receipt = jobReceipt {
+                        // The job's own receipt (pinned since job start) must
+                        // still be complete and cover these messages.
+                        guard PruneArchiveStore.chunkArchiveSnapshotCovers(receipt, ids: detailIds) else {
+                            throw ArchiveCommitRefusal("the job's chunk-archive snapshot is missing or does not cover the archived messages")
+                        }
+                        preserveLiveDetail = detailChanged
+                    } else {
+                        // Detail without a receipt: save what is live now.
+                        preserveLiveDetail = true
+                    }
+                    _ = covering
+                case .archivedRaw:
+                    if let covering {
+                        // After a restart the live detail may postdate the
+                        // receipt (a prune between job start and the crash):
+                        // preserve it unless the receipt already holds it.
+                        let texts = part.flatMap { message -> [String] in
+                            [message.prunedContextSummary, message.compactToolLog, message.activeTurnCompaction?.summaryText].compactMap { $0 }
+                                + message.demotedPruneSummaries.map(\.line)
+                        }
+                        preserveLiveDetail = !PruneArchiveStore.snapshot(covering, containsAll: texts)
+                    } else {
+                        // An unreadable reference on these messages that
+                        // retention did not record as expired is unexplained:
+                        // it may have been the covering receipt. Refuse.
+                        let partRefs = raw.filter { partIds.contains($0.id) }.flatMap(\.pruneArchiveReferences)
+                            + part.flatMap(\.pruneArchiveReferences)
+                        let unreadable = partRefs.filter { !PruneArchiveStore.isCompleteSnapshot($0) }
+                        if !unreadable.isEmpty {
+                            let expired: Set<UUID>
+                            switch SettlementEvidence.expiredIds() {
+                            case .ids(let ids): expired = ids
+                            case .missing: expired = []
+                            case .unreadable: throw ArchiveCommitRefusal("the expired-snapshot list is unreadable")
+                            }
+                            if let unexplained = unreadable.first(where: { !expired.contains($0.id) }) {
+                                throw ArchiveCommitRefusal("snapshot \(unexplained.basename) for the archived messages is missing or unreadable and was not expired by retention")
+                            }
+                        }
+                        // No surviving evidence covers the live detail (expired,
+                        // or only unrelated receipts): preserve it now.
+                        preserveLiveDetail = true
+                    }
+                }
+                coveringId = covering.map(\.id)
+                if case .batchStart = baseline { coveringId = jobReceipt?.id }
+                if preserveLiveDetail {
+                    // The existing snapshot mechanism, no model call and no
+                    // new persistent format: a chunk-archive snapshot of
+                    // exactly the live messages being removed.
+                    do {
+                        try Self.beforeFreshSnapshotForTesting?()
+                        fresh = try PruneArchiveStore.write(messages: part, trigger: "chunk-archive",
+                                                            removedIDs: part.map(\.id), pin: true)
+                    } catch {
+                        throw ArchiveCommitRefusal("could not preserve the live detail before removal: \(error.localizedDescription)")
+                    }
+                    incoming.append(fresh!)
+                }
+            }
+            lastReconcileEvidence.append(ReconcileEvidence(chunkId: chunkId, covering: coveringId, fresh: fresh?.id))
+            do {
+                try Self.reconcileWriteFaultForTesting?()
+                _ = try await mergeCommittedBatch(index: index, sourceIDs: partIds, incoming: incoming)
+            } catch {
+                throw ArchiveCommitRefusal("could not save the archive reconciliation: \(error.localizedDescription)")
+            }
+        }
+        return .reconciled
+    }
+
+    /// Which snapshot each part's removal relied on (diagnostics/tests).
+    struct ReconcileEvidence: Equatable {
+        let chunkId: UUID
+        /// The complete chunk-archive snapshot found to cover the part.
+        let covering: UUID?
+        /// The snapshot written at commit to preserve the live detail.
+        let fresh: UUID?
+    }
+    private(set) var lastReconcileEvidence: [ReconcileEvidence] = []
+
+    nonisolated(unsafe) static var reconcileWriteFaultForTesting: (() throws -> Void)?
+    nonisolated(unsafe) static var beforeFreshSnapshotForTesting: (() throws -> Void)?
+
     /// Get summaries of recent chunks for system prompt injection
     /// Returns: last 5 consolidated (100k) chunks + ALL temporary (25k) chunks, chronologically ordered
     func getRecentChunkSummaries(count: Int = 5) -> [ConversationChunk] {
@@ -1140,13 +1458,17 @@ actor ConversationArchiveService {
     /// while the most recent consolidated and temporary chunks remain visible individually.
     func getPromptSummaryItems(recentConsolidatedCount count: Int = 5) async -> [ArchivedSummaryItem] {
         await refreshHistoricalMetaSummariesIfNeeded(recentConsolidatedCount: count)
+        return computePromptSummaryItems(recentConsolidatedCount: count, backfill: true)
+    }
 
+    /// Today's prompt-item computation, synchronous (one actor step).
+    private func computePromptSummaryItems(recentConsolidatedCount count: Int, backfill: Bool) -> [ArchivedSummaryItem] {
         // Audit sidecar presence for every indexed chunk (stat calls only —
         // microseconds each). The table this feeds is the agent's map of its
         // memory; a chunk whose sidecar is missing must be marked, or grep
         // misses read as "never discussed". Self-heals via backfill.
         let missingSidecarIds = chunkIdsMissingSidecars()
-        if !missingSidecarIds.isEmpty {
+        if backfill, !missingSidecarIds.isEmpty {
             Task { await self.backfillSidecars() }
         }
 
@@ -1244,12 +1566,71 @@ actor ConversationArchiveService {
     func getAllChunks() -> [ConversationChunk] {
         return chunkIndex.orderedChunks
     }
+
+    /// One turn's automatic-context view (§4.2). Awaits the existing meta
+    /// refresh (which may call the model, as getPromptSummaryItems does),
+    /// then in ONE synchronous step computes today's items, the chunk count
+    /// and the rows whose source coverage overlaps `liveIDs`. With no
+    /// overlap the items and count are exactly today's. Never takes the
+    /// chunk writer. Registers a lease on every chunk the view names.
+    func promptView(recentConsolidatedCount count: Int = 5, liveIDs: Set<UUID>) async -> ArchivePromptView {
+        await refreshHistoricalMetaSummariesIfNeeded(recentConsolidatedCount: count)
+        return assembleView(count: count, liveIDs: liveIDs, backfill: true, lease: true)
+    }
+
+    /// Diagnostics (§4.6): no meta refresh, no lease, no backfill.
+    func readOnlyPromptView(recentConsolidatedCount count: Int = 5, liveIDs: Set<UUID>) -> ArchivePromptView {
+        assembleView(count: count, liveIDs: liveIDs, backfill: false, lease: false)
+    }
+
+    private func assembleView(count: Int, liveIDs: Set<UUID>, backfill: Bool, lease: Bool) -> ArchivePromptView {
+        let all = computePromptSummaryItems(recentConsolidatedCount: count, backfill: backfill)
+        let total = chunkIndex.chunks.count
+        let chunksById = Dictionary(uniqueKeysWithValues: chunkIndex.chunks.map { ($0.id, $0) })
+        func coverage(_ item: ArchivedSummaryItem) -> Set<UUID> {
+            switch item.kind {
+            case .temporaryChunk, .consolidatedChunk:
+                return Set(chunksById[item.id]?.sourceMessageIDs ?? [])
+            case .rollingMetaSummary, .sealedMetaSummary:
+                return item.childChunkIds.reduce(into: Set<UUID>()) { $0.formUnion(chunksById[$1]?.sourceMessageIDs ?? []) }
+            case .liveOverlapDisclosure:
+                return []
+            }
+        }
+        var visible: [ArchivedSummaryItem] = []
+        var hidden: [ArchivedSummaryItem] = []
+        for item in all {
+            if !liveIDs.isEmpty, !coverage(item).isDisjoint(with: liveIDs) { hidden.append(item) } else { visible.append(item) }
+        }
+        var named: Set<UUID> = []
+        for item in all {
+            if item.kind == .temporaryChunk || item.kind == .consolidatedChunk { named.insert(item.id) }
+            named.formUnion(item.childChunkIds)
+        }
+        let hiddenIds = Set(hidden.map(\.id))
+        let visibleRows = individuallyVisibleChunkIds(recentConsolidatedCount: count).subtracting(hiddenIds)
+        var items = visible
+        var viewTotal = total
+        if !hidden.isEmpty {
+            viewTotal = max(0, total - hidden.reduce(0) { $0 + max($1.sourceChunkCount, 1) })
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            let listed = hidden.map { "\(String($0.id.uuidString.prefix(8))) \(formatter.string(from: $0.startDate)) → \(formatter.string(from: $0.endDate))" }
+                .joined(separator: "; ")
+            let note = "\(hidden.count) archived chunk(s) are left out of this table for now because some of their source messages are still in the live conversation (\(listed)). Older history inside them is still available: read_chunk_summaries by chunk id or date, and their transcript files."
+            items.append(ArchivedSummaryItem(id: UUID(), kind: .liveOverlapDisclosure, startDate: .distantFuture, endDate: .distantFuture,
+                                             tokenCount: 0, messageCount: 0, summary: note, sourceChunkCount: 0))
+        }
+        let leaseId = lease ? registerLease(chunkIds: named) : UUID()
+        return ArchivePromptView(items: items, totalChunkCount: viewTotal, hiddenRowIds: hidden.map(\.id),
+                                 visibleChunkIds: visibleRows, leaseId: leaseId)
+    }
     
     /// Get the full content of a specific chunk (for direct viewing)
     func getChunkContent(chunkId: UUID) async throws -> String {
         print("[ArchiveService] getChunkContent called for ID: \(chunkId.uuidString)")
         
-        guard let chunk = chunkIndex.chunks.first(where: { $0.id == chunkId }) else {
+        guard let chunk = chunkIndex.chunks.first(where: { $0.id == chunkId }) ?? retainedForViews[chunkId] else {
             print("[ArchiveService] Chunk not found in index. Total chunks: \(chunkIndex.chunks.count)")
             throw ArchiveError.chunkNotFound
         }
@@ -1461,11 +1842,20 @@ actor ConversationArchiveService {
         chunkIndex.chunks.append(consolidatedChunk)
         do { try PrivateStorage.writeAtomically(try JSONEncoder().encode(chunkIndex), to: indexFileURL) }
         catch { chunkIndex = previousIndex; throw error }
+        // A child a live prompt view still names keeps its raw file and
+        // sidecar until that view retires (§5); the index is published
+        // exactly as before.
+        let namedByViews = chunkIdsNamedByLeases()
         for chunk in chunks {
+            if namedByViews.contains(chunk.id) {
+                retainedForViews[chunk.id] = chunk
+                continue
+            }
             let oldFileURL = archiveFolder.appendingPathComponent(chunk.rawContentFileName)
             try? FileManager.default.removeItem(at: oldFileURL)
             removeSidecar(forRawFileName: chunk.rawContentFileName)
         }
+        if let hook = Self.afterConsolidationPublishForTesting { await hook() }
 
         // Sidecar only after the index transaction commits — same crash
         // discipline as archiveMessages; backfill covers a crash before this.
@@ -2615,6 +3005,16 @@ actor ConversationArchiveService {
     }
 
     private func sanitizeMessageForArchive(_ message: Message) -> Message {
+        Self.sanitizedForArchive(message)
+    }
+
+    static func isStandaloneToolRunLogMessage(_ message: Message) -> Bool {
+        message.role == .assistant && message.content.hasPrefix(toolRunLogPrefix)
+    }
+
+    /// The archive's sanitized copy of one message (static so background
+    /// archiving's commit check compares exactly what the raw file holds).
+    static func sanitizedForArchive(_ message: Message) -> Message {
         var sanitized = Message(
             id: message.id,
             role: message.role,
@@ -2978,6 +3378,8 @@ actor ConversationArchiveService {
         referenced.formUnion(pendingIndex.pendingChunks.map(\.rawContentFileName))
         referenced.formUnion(diskPending.pendingChunks.map(\.rawContentFileName))
         referenced.formUnion(pendingExtractions.map(\.rawContentFileName))
+        // Children retained for live prompt views stay while leased (§5).
+        referenced.formUnion(retainedForViews.values.map(\.rawContentFileName))
 
         let fileManager = FileManager.default
         guard let names = try? fileManager.contentsOfDirectory(atPath: archiveFolder.path) else { return }
@@ -3159,3 +3561,16 @@ extension ConversationArchiveService {
     func _testSanitizeForArchive(_ message: Message) -> Message { sanitizeMessageForArchive(message) }
     func _testNeedsArchiveSanitization(_ message: Message) -> Bool { messageNeedsArchiveSanitization(message) }
 }
+
+// Background-archive selftest seams: hold the chunk writer like startup
+// recovery or a consolidation does (a writer-busy commit must defer).
+extension ConversationArchiveService {
+    func _testAcquireWriter() async { await acquireChunkWriter() }
+    func _testReleaseWriter() { releaseChunkWriter() }
+    func _testRawMessages(chunkId: UUID) -> [Message]? {
+        guard let chunk = getAllChunks().first(where: { $0.id == chunkId }) else { return nil }
+        return try? JSONDecoder().decode([Message].self, from: Data(contentsOf: archiveFolderURLForTesting.appendingPathComponent(chunk.rawContentFileName)))
+    }
+    nonisolated var archiveFolderURLForTesting: URL { StoragePaths.dataRoot.appendingPathComponent("archive", isDirectory: true) }
+}
+

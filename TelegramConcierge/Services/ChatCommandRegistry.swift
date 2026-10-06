@@ -47,6 +47,8 @@ enum ChatCommandRegistry {
                     usage: "[on|off]", inMenu: false, category: "Models"),
         ChatCommand(name: "websubagent", description: "Turn the resumable Web research subagent on or off (trial)",
                     usage: "[on|off]", inMenu: false, category: "Models"),
+        ChatCommand(name: "archiveinline", description: "Wait for memory archiving before replying (on), or archive in the background (off, default)",
+                    usage: "[on|off]", inMenu: false, category: "System"),
         ChatCommand(name: "orprovider", description: "Pin OpenRouter to one upstream host for the main model, or release it",
                     usage: "[slug|off]", inMenu: false, category: "Models"),
         ChatCommand(name: "upgrade", description: "Update Briglia to the latest release",

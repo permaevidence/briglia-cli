@@ -98,7 +98,16 @@ struct ArchivedSummaryItem: Identifiable {
         case consolidatedChunk
         case rollingMetaSummary
         case sealedMetaSummary
+        /// Not a row: background archiving's one-line disclosure that
+        /// archive rows overlapping still-live messages were left out of an
+        /// automatically assembled prompt (BACKGROUND_ARCHIVE_PLAN §4.3).
+        /// Rendered by `formatChunkSummaries` only; `hiddenRowNote` carries
+        /// the text and `sourceChunkCount` is zero.
+        case liveOverlapDisclosure
     }
+
+    /// The disclosure line of a `.liveOverlapDisclosure` item.
+    var hiddenRowNote: String? { kind == .liveOverlapDisclosure ? summary : nil }
 
     var sizeLabel: String {
         switch kind {
@@ -112,6 +121,8 @@ struct ArchivedSummaryItem: Identifiable {
             return "rolling-\(sourceChunkCount)"
         case .sealedMetaSummary:
             return "meta-\(sourceChunkCount)"
+        case .liveOverlapDisclosure:
+            return ""
         }
     }
 
@@ -125,6 +136,8 @@ struct ArchivedSummaryItem: Identifiable {
             return "Rolling history summary"
         case .sealedMetaSummary:
             return "Historical meta-summary"
+        case .liveOverlapDisclosure:
+            return ""
         }
     }
 }
