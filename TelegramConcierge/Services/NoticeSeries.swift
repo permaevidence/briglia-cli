@@ -117,6 +117,11 @@ final class NoticeSeries {
     private var pumpTask: Task<Void, Never>?
     private var waitTask: Task<Void, Never>?
     private var settledReported = false
+    /// A long-lived series with no terminal notice (the disk-saving
+    /// pause/recovery notices, Codex impl review R2): it finishes as soon as
+    /// it has nothing queued and nothing in flight; a finished series
+    /// accepts nothing more (its owner then starts a new one).
+    var finishesWhenDrained = false
     /// Called once when the series has nothing left to do (registry release).
     var onFinished: (@MainActor (NoticeSeries) -> Void)?
     /// Diagnostics hook (log lines).
@@ -158,7 +163,7 @@ final class NoticeSeries {
     /// actor.
     @discardableResult
     func append(_ text: String, terminal: Bool = false) -> Bool {
-        guard !isClosed, !terminalQueued else { return false }
+        guard !isClosed, !terminalQueued, !settledReported else { return false }
         pending.append(Slot(text: text))
         if terminal { terminalQueued = true }
         pump()
@@ -184,6 +189,19 @@ final class NoticeSeries {
         guard !isClosed, let index = pending.firstIndex(where: { $0.id == reservation && $0.text == nil }) else { return false }
         if let text { pending[index].text = text } else { pending.remove(at: index) }
         pump()
+        return true
+    }
+
+    /// Withdraws the LAST queued notice if it is `text` and no attempt to
+    /// send it has begun (a superseded state transition, Codex impl review
+    /// R2). A notice on the wire, or one already attempted (a failed attempt
+    /// may still have reached the chat), is never withdrawn.
+    @discardableResult
+    func retractUnsentTail(_ text: String) -> Bool {
+        guard !isClosed, let last = pending.last, last.text == text else { return false }
+        if pending.count == 1 && (inFlight || headFirstAttemptNanos != nil) { return false }
+        pending.removeLast()
+        reportFinishedIfDone()
         return true
     }
 
@@ -286,7 +304,7 @@ final class NoticeSeries {
 
     private func reportFinishedIfDone() {
         guard !settledReported, pumpTask == nil, !inFlight else { return }
-        let done = isClosed || (terminalQueued && pending.isEmpty)
+        let done = isClosed || ((terminalQueued || finishesWhenDrained) && pending.isEmpty)
         guard done else { return }
         settledReported = true
         onFinished?(self)

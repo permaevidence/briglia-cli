@@ -1061,9 +1061,13 @@ class ConversationManager: ObservableObject {
     /// polling resumes. Cleared by restart implicitly (in-memory).
     private var stalledConfirmUpdateId: Int? = nil
     private var durabilityStallAnnounced = false
-    /// The current disk-saving pause episode's notice series (/stop
-    /// visibility §9, A3): an entry notice and at most one recovery notice.
-    private var durabilityStallSeriesId: UUID?
+    /// The disk-saving pause/recovery notice series (/stop visibility §9,
+    /// A3): one ordered series per Telegram chat, reused by consecutive
+    /// episodes while it still has notices queued (Codex impl review R2).
+    private var durabilityStallSeries: NoticeSeries?
+    /// A pause notice of the current episode is queued or was sent and its
+    /// recovery notice is still owed.
+    private var durabilityStallPauseOwed = false
     /// The user message whose turn is currently running — lets the stall
     /// recovery recreate a failed active-turn marker for the LIVE turn
     /// before confirming its update.
@@ -4950,31 +4954,54 @@ class ConversationManager: ObservableObject {
     static let durabilityStallEntryText = "⚠️ I can't save to disk right now, so I've paused reading new Telegram messages. New Telegram messages and commands will wait until saving works again; the terminal and app still accept /stop. I'll tell you when saving works again."
     static let durabilityStallRecoveryText = "✅ Saving works again; I'm reading Telegram messages again."
 
-    /// A3 entry: one notice per stall episode, as an ordered series to the
-    /// Telegram chat captured NOW with the current channel generation (right
-    /// even when the last user channel was WhatsApp; never migrates to a
-    /// replacement bot). Not awaited.
+    /// A3 entry: one notice per stall episode, on ONE ordered series per
+    /// Telegram chat that spans consecutive episodes (Codex impl review R2):
+    /// a newer pause is never sent ahead of an older episode's notices. If
+    /// the previous episode's recovery is still queued and unsent, the two
+    /// cancel out (the earlier pause stands); a recovery already on the wire
+    /// or attempted is followed by this pause. The chat and channel
+    /// generation are captured when the series is created (right even when
+    /// the last user channel was WhatsApp; never migrates to a replacement
+    /// bot). Not awaited; polling, confirmations and write retries are
+    /// unchanged.
     private func noteDurabilityStallBegan() {
-        guard durabilityStallSeriesId == nil, let address = telegramAddress,
-              let series = makeNoticeSeries(target: .wire(address), awaitingCapture: false) else { return }
-        durabilityStallSeriesId = series.id
-        series.append(Self.durabilityStallEntryText)
+        guard let address = telegramAddress else { return }
+        if let series = durabilityStallSeries, !series.isClosed, series.target == .wire(address) {
+            if series.retractUnsentTail(Self.durabilityStallRecoveryText) {
+                durabilityStallPauseOwed = true      // the earlier pause stands
+                return
+            }
+            if series.append(Self.durabilityStallEntryText) {
+                durabilityStallPauseOwed = true
+                return
+            }
+            // Drained and released: nothing of it is queued or in flight.
+        }
+        guard let series = makeNoticeSeries(target: .wire(address), awaitingCapture: false) else { return }
+        series.finishesWhenDrained = true
+        durabilityStallSeries = series
+        durabilityStallPauseOwed = series.append(Self.durabilityStallEntryText)
     }
 
-    /// A3 recovery: if no entry send has begun yet, the episode coalesces
-    /// away and NEITHER notice is sent; otherwise the recovery is queued
-    /// behind the entry (sent only after the entry's send settled, so a
-    /// delayed entry or retry can never follow it). An invalidated or
-    /// given-up series sends nothing more.
+    /// A3 recovery: if this episode's entry is still queued and no send of
+    /// it has begun, the episode coalesces away and NEITHER notice is sent;
+    /// otherwise the recovery is queued behind it (sent only after the entry
+    /// settled). An invalidated or given-up series sends nothing more.
     private func noteDurabilityStallRecovered() {
-        guard let id = durabilityStallSeriesId else { return }
-        durabilityStallSeriesId = nil
-        guard let series = noticeSeriesRegistry[id], !series.isClosed else { return }
-        if !series.anySendBegun {
-            series.invalidate()
-            return
-        }
-        series.append(Self.durabilityStallRecoveryText, terminal: true)
+        guard durabilityStallPauseOwed, let series = durabilityStallSeries else { return }
+        durabilityStallPauseOwed = false
+        guard !series.isClosed else { return }
+        if series.retractUnsentTail(Self.durabilityStallEntryText) { return }
+        if series.append(Self.durabilityStallRecoveryText) { return }
+        // The series drained after delivering the pause: the recovery starts
+        // a new one (nothing earlier can still be queued or in flight) —
+        // only on the same bot identity, never through a replacement.
+        guard case .wire(let address) = series.target,
+              NoticeChannelGenerations.current(address.kind) == series.generation,
+              let next = makeNoticeSeries(target: .wire(address), awaitingCapture: false) else { return }
+        next.finishesWhenDrained = true
+        durabilityStallSeries = next
+        next.append(Self.durabilityStallRecoveryText)
     }
 
     /// Execute a confirmed /switchbot. Called ONLY from the poll loop's clean
@@ -7209,7 +7236,8 @@ class ConversationManager: ObservableObject {
     private func retireVisibilityNoticesForWipe() {
         for kind in ChannelKind.allCases { NoticeChannelGenerations.bump(kind) }
         invalidateAllNoticeSeries()
-        durabilityStallSeriesId = nil
+        durabilityStallSeries = nil
+        durabilityStallPauseOwed = false
     }
 
     /// /status lines (§4.3, R3): each stopped-but-finishing request, then —
