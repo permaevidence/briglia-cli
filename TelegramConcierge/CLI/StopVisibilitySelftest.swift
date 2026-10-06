@@ -321,6 +321,11 @@ final class StopVisibilityHarness {
         TelegramBotService.noticePreCaptureHookForTesting = nil
         TelegramBotService.noticeRequestInterceptForTesting = nil
         await SubagentBackgroundRegistry.shared._testReset()
+        // The accepted /stop visibility contracts (SV2, SV6, SV7, local
+        // stops) are those of the waiting archive: this battery pins
+        // `/archiveinline on`. Background mode's /stop behavior is covered
+        // by __background-archive-selftest.
+        UserDefaults.standard.set(true, forKey: ConversationManager.archiveInlineDefaultsKey)
         server.router = nil
         server.concurrent = false
         server.requestObserver = nil

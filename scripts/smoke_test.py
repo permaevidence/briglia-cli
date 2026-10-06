@@ -475,6 +475,19 @@ def main():
     check("stop-visibility-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-sexies. Background archiving: the turn does not wait for the
+    # archive job; the new summary and the removal land at the next turn
+    # boundary after checked, no-model reconciliation (in-process and
+    # restart baselines, snapshot coverage, fresh snapshots), frozen and
+    # fresh prompt views with the live-overlap disclosure, explicit reads,
+    # chunk-file leases, the .archiveCommit alert, cooldown, lifecycle
+    # commands and /archiveinline. Re-executes itself in a private scratch
+    # home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__background-archive-selftest"], capture_output=True,
+                          text=True, timeout=900)
+    check("background-archive-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     result = run_selftest([ADA, "__prune-archive-selftest"], capture_output=True, text=True, timeout=120)
     check("prune archive selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
