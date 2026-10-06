@@ -1363,7 +1363,8 @@ class ConversationManager: ObservableObject {
     static let archiveInlineDefaultsKey = "ada.archiveInline"
     /// `/archiveinline on` keeps today's waiting archive; default off
     /// (background for everyone, owner decision D3).
-    static var archiveInlineEnabled: Bool { UserDefaults.standard.bool(forKey: archiveInlineDefaultsKey) }
+    /// Read through `switchDefaults` like the other chat switches.
+    var archiveInlineEnabled: Bool { switchDefaults.bool(forKey: Self.archiveInlineDefaultsKey) }
 
     /// Consecutive poll-tick failures (getUpdates). At the threshold (~5 min of
     /// solid failures at the 5s retry cadence) a maintenance alert fires.
@@ -7958,7 +7959,7 @@ class ConversationManager: ObservableObject {
                 // startup recovery, rows still awaiting their commit, or a
                 // pending /restart or /upgrade. The raw messages stay.
                 print("[ConversationManager] Archive needed but not started: \(refusal)")
-            } else if !Self.archiveInlineEnabled {
+            } else if !archiveInlineEnabled {
                 // Background mode (owner default): the same job body, not
                 // awaited. The conversation is sent unchanged; the new
                 // summary and the removal land at the start of a later turn.
@@ -13632,7 +13633,7 @@ class ConversationManager: ObservableObject {
         if archiveJob != nil { return "an archive job is still running or awaiting its commit" }
         if archiveExitPending { return "a restart or upgrade is in progress" }
         if view.hasHiddenRows { return "archived rows still await their commit" }
-        if !Self.archiveInlineEnabled, archiveRecoveryTask != nil { return "startup archive recovery is still running" }
+        if !archiveInlineEnabled, archiveRecoveryTask != nil { return "startup archive recovery is still running" }
         return nil
     }
 
@@ -13862,7 +13863,7 @@ class ConversationManager: ObservableObject {
 
     /// /status line (§10).
     private func archiveModeStatusLine() async -> String {
-        var line = "🧠 Memory archiving: " + (Self.archiveInlineEnabled ? "waits before replying" : "in the background")
+        var line = "🧠 Memory archiving: " + (archiveInlineEnabled ? "waits before replying" : "in the background")
         if let job = archiveJob, job.generation == archiveGeneration {
             line += job.outcome == .running ? " (a background archive is still finishing)"
                 : job.outcome == .succeeded ? " (archived messages waiting to be removed)" : ""
@@ -13876,7 +13877,7 @@ class ConversationManager: ObservableObject {
     /// next job only; a job already running stays in the background.
     private func handleArchiveInlineCommand(argument: String) async {
         guard replyAddress != nil else { return }
-        let enabled = Self.archiveInlineEnabled
+        let enabled = archiveInlineEnabled
         let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if normalized.isEmpty {
             try? await sendText("""

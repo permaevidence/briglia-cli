@@ -156,7 +156,7 @@ extension BackgroundArchiveHarness {
         await turn(manager2, "turn after the switched job", reply: "ok")
         check("BM3 the switched job still commits at the next turn", containsNone(manager2, batch) && manager2._baJobOutcome == nil)
         let off = await manager2._baCommand("/archiveinline off")
-        check("BM4 /archiveinline off", off.contains("now runs in the background") && !ConversationManager.archiveInlineEnabled, off)
+        check("BM4 /archiveinline off", off.contains("now runs in the background") && !UserDefaults.standard.bool(forKey: ConversationManager.archiveInlineDefaultsKey), off)
         let usage = await manager2._baCommand("/archiveinline sometimes")
         check("BM4 /archiveinline with a bad argument shows usage", usage.contains("Usage: /archiveinline on|off"), usage)
         let listed = ChatCommandRegistry.commandsListText()
