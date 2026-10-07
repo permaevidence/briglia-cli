@@ -194,9 +194,9 @@ extension BackgroundArchiveHarness {
         let evidence = await archive.lastReconcileEvidence
         check("BV7 after the writer frees: committed after the prune (baseline B, no model call)",
               containsNone(manager, batch) && evidence.count == 1, "\(evidence)")
-        check("BV7 a prune summary left on the batch postdates the receipt → saved in a fresh snapshot; none left → none needed",
-              summaryInBatch ? (evidence.first?.covering != nil && evidence.first?.fresh != nil)
-                             : (batchDetail.isEmpty ? evidence.first?.fresh == nil : evidence.first?.covering != nil),
+        check("BV7 baseline B: live detail on the batch → covering receipt plus a fresh snapshot; no detail left → none needed",
+              batchDetail.isEmpty ? evidence.first?.fresh == nil
+                                  : (evidence.first?.covering != nil && evidence.first?.fresh != nil),
               "summary in batch \(summaryInBatch), detail msgs \(batchDetail.count), \(evidence)")
     }
 }

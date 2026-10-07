@@ -54,9 +54,12 @@ extension BackgroundArchiveHarness {
         let evidence = await p.manager._testArchiveService.lastReconcileEvidence
         check("BR1 the covered oldest prefix was committed at the first turn, without a model call",
               containsNone(p.manager, p.batch) && router.summaries == summaries, "summaries +\(router.summaries - summaries)")
-        check("BR1 baseline B accepted the archive-only receipt link; the receipt covers the batch (no fresh snapshot needed)",
-              evidence.first?.covering == p.receipt?.id && evidence.first?.fresh == nil, "\(evidence)")
+        check("BR1 baseline B accepted the archive-only receipt link; the receipt covers the batch",
+              evidence.first?.covering == p.receipt?.id, "\(evidence)")
         let refs = await rawAnchorRefs(p.manager._testArchiveService, batch: p.batch)
+        check("BR1 baseline B always saves the live detail in a fresh snapshot before removal (Codex impl review), linked from the archived copy",
+              evidence.first?.fresh != nil && snapshotText(evidence.first?.fresh).contains("TOOL-RESULT-tool-1")
+                && evidence.first?.fresh.map { refs.contains($0) } == true, "\(evidence)")
         check("BR1 the receipt stays reachable from the archived copy and is complete",
               p.receipt.map { refs.contains($0.id) && PruneArchiveStore.isCompleteSnapshot($0) } == true
                 && snapshotText(p.receipt?.id).contains("TOOL-RESULT-tool-1"))
@@ -75,8 +78,8 @@ extension BackgroundArchiveHarness {
                 && pa.receipt.map { r in !(raw.first?.pruneArchiveReferences.contains(r) ?? true) && raw.contains { $0.pruneArchiveReferences.contains(r) } } == true)
         await turn(pa.manager, "commit after consolidation", reply: "ok")
         let ea = await pa.manager._testArchiveService.lastReconcileEvidence
-        check("BR2 (a) the covering receipt is found on the later child and accepted",
-              containsNone(pa.manager, pa.batch) && ea.first?.covering == pa.receipt?.id && ea.first?.fresh == nil, "\(ea)")
+        check("BR2 (a) the covering receipt is found on the later child and accepted; the live detail is saved fresh",
+              containsNone(pa.manager, pa.batch) && ea.first?.covering == pa.receipt?.id && ea.first?.fresh != nil, "\(ea)")
 
         // R9: a prune AFTER job start leaves a summary on the batch; after a
         // restart the covering receipt cannot hold it → fresh snapshot.
@@ -98,6 +101,46 @@ extension BackgroundArchiveHarness {
         await failedWriteThenRestartSection()
         await contentChangeAfterRestartSection()
         await partialPrefixSection()
+        await liveDetailChangedAfterRestartSection()
+    }
+
+    /// Codex impl review: after a restart the live messages hold tool-result
+    /// text or readable reasoning that differs from the older covering
+    /// receipt (saved history changed between publication and restart). The
+    /// sanitized raw comparison cannot see those fields, so recovery must
+    /// keep the batch or save the exact live detail before removing it.
+    private func liveDetailChangedAfterRestartSection() async {
+        for mode in ["tool", "reasoning", "reasoning-details"] {
+            let label = "BR10 (\(mode))"
+            let sentinel = "CODEX-LIVE-DETAIL-AFTER-ARCHIVE-" + mode
+            let channel = SVRecordingChannel(kind: .telegram)
+            guard let p = await restartAfterPublish(channel, beforeRestart: { _, batch, _ in
+                let url = StoragePaths.dataRoot.appendingPathComponent("conversation.json")
+                guard var history = try? JSONDecoder().decode([Message].self, from: Data(contentsOf: url)),
+                      let i = history.firstIndex(where: { batch.contains($0.id) && !$0.toolInteractions.isEmpty }) else { return }
+                switch mode {
+                case "tool": history[i].toolInteractions = [self.toolRound(id: "tool-call-1", result: sentinel)]
+                case "reasoning": history[i].finalReasoning = .string(sentinel)
+                default: history[i].finalReasoningDetails = .string(sentinel)
+                }
+                try? JSONEncoder().encode(history).write(to: url)
+            }) else { check("\(label) setup", false); return }
+            check("\(label) setup: the changed detail is live after the restart and absent from the covering receipt",
+                  String(data: ArchiveCommitCheck.encoded(p.manager._testMessages), encoding: .utf8)?.contains(sentinel) == true
+                    && !snapshotText(p.receipt?.id).contains(sentinel))
+            let summaries = router.summaries
+            await turn(p.manager, "commit changed \(mode)", reply: "ok")
+            let evidence = await p.manager._testArchiveService.lastReconcileEvidence
+            let preserved = ((try? PruneArchiveStore.entries()) ?? []).contains { snapshotText($0.reference.id).contains(sentinel) }
+            check("\(label) restart retains or snapshots the changed detail (Codex reproduction)",
+                  contains(p.manager, p.batch) || preserved,
+                  "live batch retained=\(contains(p.manager, p.batch)), fresh=\(String(describing: evidence.first?.fresh)), preserved=\(preserved)")
+            let refs = await rawAnchorRefs(p.manager._testArchiveService, batch: p.batch)
+            check("\(label) removed after a fresh snapshot holding the changed detail, linked from the archived copy, no model call",
+                  containsNone(p.manager, p.batch) && evidence.first?.covering == p.receipt?.id
+                    && snapshotText(evidence.first?.fresh).contains(sentinel)
+                    && evidence.first?.fresh.map { refs.contains($0) } == true && router.summaries == summaries, "\(evidence)")
+        }
     }
 
     /// Codex (b): an unrelated complete receipt on the first child does not

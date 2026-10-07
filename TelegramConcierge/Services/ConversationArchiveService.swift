@@ -1342,15 +1342,15 @@ actor ConversationArchiveService {
                     }
                     _ = covering
                 case .archivedRaw:
-                    if let covering {
-                        // After a restart the live detail may postdate the
-                        // receipt (a prune between job start and the crash):
-                        // preserve it unless the receipt already holds it.
-                        let texts = part.flatMap { message -> [String] in
-                            [message.prunedContextSummary, message.compactToolLog, message.activeTurnCompaction?.summaryText].compactMap { $0 }
-                                + message.demotedPruneSummaries.map(\.line)
-                        }
-                        preserveLiveDetail = !PruneArchiveStore.snapshot(covering, containsAll: texts)
+                    if covering != nil {
+                        // After a restart nothing proves the live detail
+                        // still equals the covering receipt: a prune after
+                        // job start, or any other change to tool results,
+                        // reasoning or summaries, may postdate it, and the
+                        // sanitized raw comparison cannot see those fields
+                        // (Codex impl review). Always save the exact live
+                        // detail before removal; the receipt stays linked.
+                        preserveLiveDetail = true
                     } else {
                         // An unreadable reference on these messages that
                         // retention did not record as expired is unexplained:

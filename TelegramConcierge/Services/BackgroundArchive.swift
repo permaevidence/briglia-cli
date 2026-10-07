@@ -204,17 +204,6 @@ extension PruneArchiveStore {
         return (header.trigger, ids)
     }
 
-    /// True when the (complete) snapshot's text contains every string — used
-    /// to decide whether live summary detail postdates a covering receipt.
-    static func snapshot(_ reference: PruneArchiveReference, containsAll texts: [String], directory: URL = root) -> Bool {
-        let wanted = texts.filter { !$0.isEmpty }
-        guard !wanted.isEmpty else { return true }
-        guard isCompleteSnapshot(reference, directory: directory),
-              let data = FileManager.default.contents(atPath: directory.appendingPathComponent(reference.basename).path) else { return false }
-        let text = String(decoding: data, as: UTF8.self)
-        return wanted.allSatisfy { text.contains($0) }
-    }
-
     /// A complete chunk-archive snapshot whose removed-id list includes
     /// every id in `ids`.
     static func chunkArchiveSnapshotCovers(_ reference: PruneArchiveReference, ids: Set<UUID>, directory: URL = root) -> Bool {
