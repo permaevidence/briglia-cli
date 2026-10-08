@@ -138,6 +138,49 @@ final class StreamingRedactor {
         carry = ""
         return redactor.redact(rest)
     }
+
+    /// The held-back carry window, redacted, WITHOUT consuming it. A live
+    /// view (bash_manage output of a running job) shows it after the
+    /// emitted text so nothing the process wrote is hidden; a secret still
+    /// incomplete at the very end shows as its visible prefix, exactly as the
+    /// old wholesale re-redaction of the rolling buffer did.
+    func pendingRedacted() -> String {
+        guard !carry.isEmpty else { return "" }
+        return redactor.redact(carry)
+    }
+}
+
+// MARK: - Bounded string surgery
+
+/// UTF-8-byte-based helpers for bounded buffers. `String.suffix(n)` walks n
+/// grapheme clusters, so trimming a rolling buffer with it on EVERY chunk made
+/// per-chunk cost proportional to the buffer, not the chunk (bash flood fix,
+/// 2026-10-08). These cut on Unicode-scalar boundaries by byte count instead.
+enum BoundedText {
+    /// The last `maxBytes` UTF-8 bytes of `s`, advanced to the next scalar
+    /// boundary (never splits a multibyte character).
+    static func suffix(_ s: String, maxBytes: Int) -> String {
+        let u = s.utf8
+        guard u.count > maxBytes else { return s }
+        var i = u.index(u.endIndex, offsetBy: -max(0, maxBytes))
+        while i < u.endIndex, (u[i] & 0xC0) == 0x80 { i = u.index(after: i) }
+        return String(decoding: u[i...], as: UTF8.self)
+    }
+
+    /// The first `maxBytes` UTF-8 bytes of `s`, cut back to a scalar
+    /// boundary (never splits a multibyte character).
+    static func prefix(_ s: String, maxBytes: Int) -> String {
+        prefix(s[...], maxBytes: maxBytes)
+    }
+
+    static func prefix(_ s: Substring, maxBytes: Int) -> String {
+        let u = s.utf8
+        guard u.count > maxBytes else { return String(s) }
+        guard maxBytes > 0 else { return "" }
+        var i = u.index(u.startIndex, offsetBy: maxBytes)
+        while i > u.startIndex, (u[i] & 0xC0) == 0x80 { i = u.index(before: i) }
+        return String(decoding: u[u.startIndex..<i], as: UTF8.self)
+    }
 }
 
 // MARK: - Pipe stream reader
@@ -295,6 +338,10 @@ final class ForegroundStreamCollector: PipeByteSink, @unchecked Sendable {
 
     /// Keep twice the inline cap so the preview can always fill it.
     private static let tailCapBytes = TruncationService.maxBytes * 2
+    /// Byte budget that always holds `tailCapBytes` characters, and the
+    /// (larger) size at which the amortized trim kicks in.
+    private static let tailKeepBytes = tailCapBytes * 4
+    private static let tailTrimTriggerBytes = tailCapBytes * 6
 
     init(streamLabel: String, secrets: [String: String]) {
         self.streamLabel = streamLabel
@@ -357,6 +404,9 @@ final class ForegroundStreamCollector: PipeByteSink, @unchecked Sendable {
                                totalBytes: totalBytes, totalLines: totalLines)
         }
 
+        if tail.utf8.count > Self.tailCapBytes {
+            tail = String(tail.suffix(Self.tailCapBytes))
+        }
         let preview = TruncationService.streamedTailPreview(
             tail: tail, totalBytes: totalBytes, totalLines: totalLines, outputPath: spillPath
         )
@@ -412,8 +462,12 @@ final class ForegroundStreamCollector: PipeByteSink, @unchecked Sendable {
             }
         }
         tail += safe
-        if tail.utf8.count > Self.tailCapBytes {
-            tail = String(tail.suffix(Self.tailCapBytes))
+        // Amortized trim: keep at least `tailCapBytes` characters (≤4 bytes
+        // each) and cut only when well past that, so a flood costs O(chunk)
+        // per chunk instead of re-walking the whole tail every time.
+        // finalize() applies the exact character cap before rendering.
+        if tail.utf8.count > Self.tailTrimTriggerBytes {
+            tail = BoundedText.suffix(tail, maxBytes: Self.tailKeepBytes)
         }
     }
 

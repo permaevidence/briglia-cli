@@ -1261,6 +1261,23 @@ actor BackgroundProcessRegistry {
         /// String(data:encoding:) did exactly that). Touched only on ioQueue.
         var stdoutDecoder = IncrementalUTF8Decoder()
         var stderrDecoder = IncrementalUTF8Decoder()
+        /// Carry-window redactors feeding the rolling buffers (installed by
+        /// the sinks before the process starts). Each chunk is redacted in
+        /// O(chunk) with secrets split across chunks still caught; the held
+        /// back carry is shown redacted by `rollingText`. Replaces the
+        /// wholesale re-redaction of the whole ~120KB buffer on every chunk.
+        /// Touched only on ioQueue.
+        var stdoutRollRedactor: StreamingRedactor?
+        var stderrRollRedactor: StreamingRedactor?
+
+        /// Rolling buffer plus the redacted carry window — the complete
+        /// redacted view of what the stream has produced so far (minus
+        /// eviction). Call only on ioQueue.
+        func rollingText(stderr: Bool) -> String {
+            let pending = (stderr ? stderrRollRedactor : stdoutRollRedactor)?.pendingRedacted() ?? ""
+            let base = stderr ? self.stderr : self.stdout
+            return pending.isEmpty ? base : base + pending
+        }
         /// Bytes trimmed off the FRONT of the rolling buffers by the cap.
         /// `evicted + buffer.utf8.count` is the cumulative stream offset the
         /// `since` contract of bash_manage(output) is defined against —
@@ -1339,6 +1356,11 @@ actor BackgroundProcessRegistry {
         private let redactor: BashTools.SecretRedactor
         private let ioQueue: DispatchQueue
         private let collector: ForegroundStreamCollector
+        private let rollRedactor: StreamingRedactor
+        /// Raw bytes a pending (unterminated) watch line may hold: the line
+        /// cap plus room for the longest secret, so a secret straddling the
+        /// cap is still whole when the line is redacted, then cut to the cap.
+        private let lineRawCapBytes: Int
 
         init(entry: Entry, stderr: Bool, redactor: BashTools.SecretRedactor,
              secrets: [String: String], ioQueue: DispatchQueue) {
@@ -1352,6 +1374,11 @@ actor BackgroundProcessRegistry {
             self.redactor = redactor
             self.ioQueue = ioQueue
             self.collector = ForegroundStreamCollector(streamLabel: streamName, secrets: secrets)
+            let roll = StreamingRedactor(environment: secrets)
+            self.rollRedactor = roll
+            if stderr { entry.stderrRollRedactor = roll } else { entry.stdoutRollRedactor = roll }
+            let longestSecret = secrets.values.map { $0.utf8.count }.max() ?? 0
+            self.lineRawCapBytes = BackgroundProcessRegistry.watchLineCapBytes + max(4096, longestSecret)
         }
 
         /// Drain the collector's carries and close its spill file; returns
@@ -1363,34 +1390,43 @@ actor BackgroundProcessRegistry {
 
         func ingest(_ data: Data) {
             collector.ingest(data)
-            ioQueue.async { [self] in
+            // SYNC, not async: the pipe reader waits until this chunk is in
+            // the rolling buffer, so a flood back-pressures the writer through
+            // the kernel pipe instead of piling closures (each holding a raw
+            // chunk) onto ioQueue. With async, a 70MB newline-free flood
+            // queued work the snapshot in bash_manage(output) then waited
+            // behind — the 2026-10-08 field hang. Per-chunk work below is
+            // O(chunk), so the reader is held only briefly. Never called on
+            // ioQueue (the readers run on their own detached tasks).
+            ioQueue.sync { [self] in
                 // An empty Data is the reader's EOF marker — flush any
                 // pending partial character. Idempotent with the monitor's
                 // final flush.
                 let s = data.isEmpty
                     ? entry[keyPath: decoder].flush()
                     : entry[keyPath: decoder].decode(data)
-                guard !s.isEmpty else { return }
-                entry[keyPath: buf].append(redactor.redact(s))
-                entry[keyPath: buf] = redactor.redact(entry[keyPath: buf])
-                let cap = BashTools.outputCapBytes * 4
-                if entry[keyPath: buf].utf8.count > cap {
-                    let before = entry[keyPath: buf].utf8.count
-                    entry[keyPath: buf] = String(entry[keyPath: buf].suffix(cap))
-                    entry[keyPath: evicted] += before - entry[keyPath: buf].utf8.count
+                var safe = s.isEmpty ? "" : rollRedactor.process(s)
+                if data.isEmpty { safe += rollRedactor.flush() }
+                if !safe.isEmpty {
+                    entry[keyPath: buf].append(safe)
                 }
+                BackgroundProcessRegistry.trimRolling(entry, buf: buf, evicted: evicted)
+                guard !s.isEmpty else { return }
                 // Surface the spill path as soon as spilling starts so
                 // output() can point at it while the process still runs.
                 if entry[keyPath: spillPath] == nil {
                     entry[keyPath: spillPath] = collector.spillPathSnapshot
                 }
                 let lines = BackgroundProcessRegistry.extractCompleteLines(
-                    newChunk: s, buffer: &entry[keyPath: lineBuf])
+                    newChunk: s, buffer: &entry[keyPath: lineBuf], maxLineBytes: lineRawCapBytes)
                 if !lines.isEmpty {
+                    let redacted = lines.map {
+                        BackgroundProcessRegistry.capWatchLine(self.redactor.redact($0))
+                    }
                     Task {
                         await BackgroundProcessRegistry.shared.evaluateWatches(
                             handleId: self.entry.id, stream: self.streamName,
-                            lines: lines.map { self.redactor.redact($0) })
+                            lines: redacted)
                     }
                 }
             }
@@ -1455,6 +1491,21 @@ actor BackgroundProcessRegistry {
     func _testSetPruneOverrides(retentionSeconds: TimeInterval?, countCap: Int?) {
         retentionOverride = retentionSeconds
         countCapOverride = countCap
+    }
+
+    /// Test seam: bytes held in the pending (unterminated) watch-line
+    /// buffers — must stay bounded however long a newline-free line runs.
+    func _testPendingLineBytes(handleId: String) -> (stdout: Int, stderr: Int)? {
+        guard let e = entries[handleId] else { return nil }
+        var out = 0, err = 0
+        let sema = DispatchSemaphore(value: 0)
+        ioQueue.async {
+            out = e.stdoutLineBuf.utf8.count
+            err = e.stderrLineBuf.utf8.count
+            sema.signal()
+        }
+        sema.wait()
+        return (out, err)
     }
 
     func _testPruneNow() {
@@ -1692,16 +1743,18 @@ actor BackgroundProcessRegistry {
                 // (orphan holding the pipe) — a trailing split character
                 // still yields its replacement marker. Idempotent after a
                 // sink-side EOF flush.
+                // Then release the carry windows: after this the rolling
+                // buffers hold the complete redacted tail.
                 let s = entry.stdoutDecoder.flush()
-                if !s.isEmpty {
-                    entry.stdout.append(redactor.redact(s))
-                    entry.stdout = redactor.redact(entry.stdout)
-                }
+                var outRest = s.isEmpty ? "" : (entry.stdoutRollRedactor?.process(s) ?? redactor.redact(s))
+                outRest += entry.stdoutRollRedactor?.flush() ?? ""
+                if !outRest.isEmpty { entry.stdout.append(outRest) }
+                BackgroundProcessRegistry.trimRolling(entry, buf: \.stdout, evicted: \.stdoutEvicted)
                 let e2 = entry.stderrDecoder.flush()
-                if !e2.isEmpty {
-                    entry.stderr.append(redactor.redact(e2))
-                    entry.stderr = redactor.redact(entry.stderr)
-                }
+                var errRest = e2.isEmpty ? "" : (entry.stderrRollRedactor?.process(e2) ?? redactor.redact(e2))
+                errRest += entry.stderrRollRedactor?.flush() ?? ""
+                if !errRest.isEmpty { entry.stderr.append(errRest) }
+                BackgroundProcessRegistry.trimRolling(entry, buf: \.stderr, evicted: \.stderrEvicted)
                 // Close the complete-stream spill files and record their
                 // final paths (finalize may mint one for a stream that
                 // crossed the threshold only in its last carry flush).
@@ -1832,8 +1885,8 @@ actor BackgroundProcessRegistry {
         var errSpill: String?
         let sema = DispatchSemaphore(value: 0)
         ioQueue.async {
-            out = e.stdout
-            err = e.stderr
+            out = e.rollingText(stderr: false)
+            err = e.rollingText(stderr: true)
             outEvicted = e.stdoutEvicted
             errEvicted = e.stderrEvicted
             outSpill = e.stdoutSpillPath
@@ -1936,8 +1989,8 @@ actor BackgroundProcessRegistry {
                 var errBytes = 0
                 let sema = DispatchSemaphore(value: 0)
                 ioQueue.async {
-                    outBytes = e.stdoutEvicted + e.stdout.utf8.count
-                    errBytes = e.stderrEvicted + e.stderr.utf8.count
+                    outBytes = e.stdoutEvicted + e.rollingText(stderr: false).utf8.count
+                    errBytes = e.stderrEvicted + e.rollingText(stderr: true).utf8.count
                     sema.signal()
                 }
                 sema.wait()
@@ -2167,19 +2220,18 @@ actor BackgroundProcessRegistry {
         var err = ""
         let sema = DispatchSemaphore(value: 0)
         ioQueue.async {
-            out = entry.stdout
-            err = entry.stderr
+            out = entry.rollingText(stderr: false)
+            err = entry.rollingText(stderr: true)
             sema.signal()
         }
         sema.wait()
+        // Same byte-level splitter as the live path, so a replayed line is
+        // exactly what a live watch would have seen (CR-LF included).
         func completeLines(_ s: String) -> [String] {
-            guard s.contains("\n") else { return [] }
-            let parts = s.split(separator: "\n", omittingEmptySubsequences: false)
-            return parts.dropLast().map { part in
-                var line = String(part)
-                if line.hasSuffix("\r") { line.removeLast() }
-                return line
-            }
+            var partial = ""
+            return BackgroundProcessRegistry.extractCompleteLines(
+                newChunk: s, buffer: &partial, maxLineBytes: Self.watchLineCapBytes + 4096
+            ).map { BackgroundProcessRegistry.capWatchLine($0) }
         }
         return (completeLines(out), completeLines(err))
     }
@@ -2265,22 +2317,67 @@ actor BackgroundProcessRegistry {
 
     // MARK: Static helpers
 
+    /// Longest line (UTF-8 bytes, after redaction) a watch sees. Longer
+    /// lines are cut here and marked; the full text stays in the spill file.
+    static let watchLineCapBytes = 65_536
+    static let watchLineTruncationMarker = " …[line truncated for watch matching]"
+
+    /// Cap an already-redacted watch line to `watchLineCapBytes`.
+    static func capWatchLine(_ line: String) -> String {
+        guard line.utf8.count > watchLineCapBytes else { return line }
+        return BoundedText.prefix(line, maxBytes: watchLineCapBytes) + watchLineTruncationMarker
+    }
+
     /// Split the incoming chunk across any pending partial line and return all newly-complete
     /// lines (without the trailing \n). Updates `buffer` with the new trailing partial.
-    static func extractCompleteLines(newChunk: String, buffer: inout String) -> [String] {
-        buffer.append(newChunk)
-        guard buffer.contains("\n") else { return [] }
+    ///
+    /// O(chunk): only the NEW chunk is scanned for newlines, and the pending
+    /// partial line keeps at most `maxLineBytes` (the rest of an over-long
+    /// line is dropped — watches see its head). v0.2.50 appended every chunk
+    /// to an unbounded partial line and re-searched the WHOLE partial for a
+    /// newline per chunk: quadratic on one huge newline-free line (a 70MB
+    /// line pinned a core for over an hour, 2026-10-08).
+    static func extractCompleteLines(newChunk: String, buffer: inout String,
+                                     maxLineBytes: Int = Int.max) -> [String] {
         var out: [String] = []
-        // Normalize CR-LF to LF for matching purposes without losing content.
-        let parts = buffer.split(separator: "\n", omittingEmptySubsequences: false)
-        // All but the last are complete lines; the last is either "" (trailing \n) or a partial.
-        for i in 0..<(parts.count - 1) {
-            var line = String(parts[i])
-            if line.hasSuffix("\r") { line.removeLast() }
-            out.append(line)
+        var rest = Substring(newChunk)
+        func appendCapped(_ piece: Substring) {
+            let room = maxLineBytes - buffer.utf8.count
+            guard room > 0, !piece.isEmpty else { return }
+            if piece.utf8.count <= room {
+                buffer.append(contentsOf: piece)
+            } else {
+                buffer.append(BoundedText.prefix(piece, maxBytes: room))
+            }
         }
-        buffer = String(parts[parts.count - 1])
+        while let nl = rest.utf8.firstIndex(of: 0x0A) {
+            appendCapped(rest[rest.startIndex..<nl])
+            var line = buffer
+            buffer = ""
+            // Normalize CR-LF to LF for matching purposes without losing content.
+            if line.utf8.last == 0x0D { line.removeLast() }
+            out.append(line)
+            rest = rest[rest.utf8.index(after: nl)...]
+        }
+        appendCapped(rest)
         return out
+    }
+
+    /// Byte-based rolling-buffer cap with hysteresis: trim to
+    /// `rollingKeepBytes` only once the buffer passes `rollingTrimBytes`, so
+    /// the copy is amortized over many chunks (v0.2.50 re-walked the whole
+    /// buffer by characters on every chunk past the cap). The cumulative
+    /// offset contract is unchanged: `evicted + buffer.utf8.count` is the
+    /// stream position. Call only on ioQueue.
+    static let rollingKeepBytes = BashTools.outputCapBytes * 4
+    static let rollingTrimBytes = rollingKeepBytes + rollingKeepBytes / 4
+    fileprivate static func trimRolling(_ entry: Entry,
+                                        buf: ReferenceWritableKeyPath<Entry, String>,
+                                        evicted: ReferenceWritableKeyPath<Entry, Int>) {
+        let before = entry[keyPath: buf].utf8.count
+        guard before > rollingTrimBytes else { return }
+        entry[keyPath: buf] = BoundedText.suffix(entry[keyPath: buf], maxBytes: rollingKeepBytes)
+        entry[keyPath: evicted] += before - entry[keyPath: buf].utf8.count
     }
 
     enum RegexMatchOutcome {

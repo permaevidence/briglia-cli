@@ -323,6 +323,20 @@ def main():
         check("bash-pipeline-selftest", False,
               "TIMEOUT after 300s; partial output:\n" + partial[-1500:])
 
+    # 3b1. background output floods (2026-10-08 field hang): a 70MB
+    # newline-free line made v0.2.50's line splitter quadratic and wedged
+    # bash_manage(output) for over an hour. Each row must settle and answer
+    # within seconds; the selftest's own watchdog names a wedged row.
+    try:
+        result = run_selftest([ADA, "__bash-flood-selftest"], capture_output=True, text=True, timeout=600)
+        check("bash-flood-selftest", result.returncode == 0,
+              (result.stdout + result.stderr)[-1500:])
+    except subprocess.TimeoutExpired as e:
+        partial = ((e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")) + \
+                  ((e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or ""))
+        check("bash-flood-selftest", False,
+              "TIMEOUT after 600s; partial output:\n" + partial[-1500:])
+
     # 3b2. bash payload goldens (BASH_V2_PLAN Phase 0): the exact JSON
     # contract of every bash/bash_manage response — key sets, sorted order,
     # static values — frozen before the managed-jobs lifecycle refactor.

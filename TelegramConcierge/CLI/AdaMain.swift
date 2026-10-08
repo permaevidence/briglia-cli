@@ -27,7 +27,7 @@ struct AdaCLI: AsyncParsableCommand {
         subcommands: [CacheStatsCommand.self, SubscriptionCommand.self, Chat.self, Setup.self, MenuCommand.self, QuickSetup.self, SetupAPI.self, Daemon.self, Doctor.self, Upgrade.self,
                       AdaService.self, Trigger.self, MediaSelftest.self, BundleCheck.self,
                       ToolchainCommand.self, ToolchainPrefixSelftest.self,
-                      SetsidExec.self, GateExec.self, TTYHandoffSelftest.self, GateTTYSelftest.self, BashPipelineSelftest.self,
+                      SetsidExec.self, GateExec.self, TTYHandoffSelftest.self, GateTTYSelftest.self, BashPipelineSelftest.self, BashFloodSelftest.self,
                       BashGoldenSelftest.self, BashJobsSelftest.self,
                       TriggerSelftest.self, WatcherTriageSelftest.self, LaneSelftest.self,
                       AffinitySelftest.self, ChatWireSelftest.self, ChatAdapterSelftest.self, ChatRetrySelftest.self, ResponsesSelftest.self, ResponsesCacheSelftest.self, SubscriptionSelftest.self,
