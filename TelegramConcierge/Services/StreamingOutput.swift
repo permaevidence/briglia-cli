@@ -338,8 +338,8 @@ final class ForegroundStreamCollector: PipeByteSink, @unchecked Sendable {
 
     /// Keep twice the inline cap so the preview can always fill it.
     private static let tailCapBytes = TruncationService.maxBytes * 2
-    /// Byte budget that always holds `tailCapBytes` characters, and the
-    /// (larger) size at which the amortized trim kicks in.
+    /// Byte budget kept by the amortized trim (≥ `tailCapBytes` characters
+    /// unless they average over 4 bytes), and the size that triggers it.
     private static let tailKeepBytes = tailCapBytes * 4
     private static let tailTrimTriggerBytes = tailCapBytes * 6
 
@@ -462,10 +462,13 @@ final class ForegroundStreamCollector: PipeByteSink, @unchecked Sendable {
             }
         }
         tail += safe
-        // Amortized trim: keep at least `tailCapBytes` characters (≤4 bytes
-        // each) and cut only when well past that, so a flood costs O(chunk)
-        // per chunk instead of re-walking the whole tail every time.
-        // finalize() applies the exact character cap before rendering.
+        // Amortized trim: keep 4× the cap in bytes and cut only when well
+        // past that, so a flood costs O(chunk) per chunk instead of
+        // re-walking the whole tail every time. finalize() applies the old
+        // character cap before rendering. The preview equals the old one
+        // whenever the kept bytes hold at least `tailCapBytes` characters,
+        // i.e. unless characters average over 4 UTF-8 bytes (long combining
+        // sequences, joined emoji); then the preview may start later.
         if tail.utf8.count > Self.tailTrimTriggerBytes {
             tail = BoundedText.suffix(tail, maxBytes: Self.tailKeepBytes)
         }
@@ -510,5 +513,97 @@ final class ForegroundStreamCollector: PipeByteSink, @unchecked Sendable {
             tail = String((buffered + tail).suffix(Self.tailCapBytes))
             buffered = ""
         }
+    }
+}
+
+// MARK: - Watch line accumulation
+
+/// Splits a stream into complete lines for bash watches with bounded memory
+/// and O(chunk) work, REDACTING BEFORE ANY CUT (Codex R1, 2026-10-08).
+///
+/// Raw text of the current line passes through a carry-window
+/// `StreamingRedactor` (flushed at every newline, so each line is redacted
+/// exactly as a whole-line `SecretRedactor.redact` would), and only the
+/// redacted output enters the bounded head. Once the head reaches `capBytes`
+/// the rest of the line is dropped and `truncated` is set, so the marker is
+/// appended whenever anything was cut, however much redaction shortened the
+/// kept part. A cut never lands inside a redaction placeholder: placeholders
+/// are produced whole within one redactor emission, and the cut backs off to
+/// the start of a placeholder it would otherwise split.
+///
+/// Newlines are found by a byte scan of the NEW chunk only (CR-LF lines
+/// split and lose the CR). An unterminated tail at EOF is not a line and is
+/// never delivered — same as before.
+struct WatchLineAccumulator {
+    static let truncationMarker = " …[line truncated for watch matching]"
+    private static let placeholderStart = "[REDACTED:"
+
+    let capBytes: Int
+    /// nil when the input is already redacted (watch replay from the rolling buffer).
+    private let redactor: StreamingRedactor?
+    private var head = ""
+    private(set) var truncated = false
+
+    init(capBytes: Int, redactionEnvironment: [String: String]?) {
+        self.capBytes = capBytes
+        self.redactor = redactionEnvironment.map { StreamingRedactor(environment: $0) }
+    }
+
+    /// Redacted bytes held for the current unterminated line (test seam).
+    var pendingBytes: Int { head.utf8.count }
+
+    /// Feed raw (or, without a redactor, already-redacted) text; returns the
+    /// lines completed by it, redacted and capped.
+    mutating func feed(_ chunk: String) -> [String] {
+        var out: [String] = []
+        var rest = Substring(chunk)
+        while let nl = rest.utf8.firstIndex(of: 0x0A) {
+            ingest(rest[rest.startIndex..<nl])
+            if let redactor {
+                let tail = redactor.flush()
+                if !truncated { append(Substring(tail)) }
+            }
+            var line = head
+            if !truncated, line.utf8.last == 0x0D { line.removeLast() }
+            if truncated { line += Self.truncationMarker }
+            out.append(line)
+            head = ""
+            truncated = false
+            rest = rest[rest.utf8.index(after: nl)...]
+        }
+        ingest(rest)
+        return out
+    }
+
+    private mutating func ingest(_ piece: Substring) {
+        guard !piece.isEmpty else { return }
+        if let redactor {
+            // After truncation the rest of the line is dropped; the carry is
+            // discarded by the flush at the next newline.
+            guard !truncated else { return }
+            append(Substring(redactor.process(String(piece))))
+        } else {
+            guard !truncated else { return }
+            append(piece)
+        }
+    }
+
+    private mutating func append(_ text: Substring) {
+        guard !text.isEmpty, !truncated else { return }
+        let room = capBytes - head.utf8.count
+        if text.utf8.count <= room {
+            head.append(contentsOf: text)
+            return
+        }
+        truncated = true
+        guard room > 0 else { return }
+        var kept = BoundedText.prefix(text, maxBytes: room)
+        // Never split a placeholder: if the kept part ends inside one, cut
+        // before it. (An unclosed "[REDACTED:" whose "]" lies past the cut.)
+        if let r = kept.range(of: Self.placeholderStart, options: .backwards),
+           !kept[r.upperBound...].contains("]") {
+            kept = String(kept[..<r.lowerBound])
+        }
+        head.append(kept)
     }
 }

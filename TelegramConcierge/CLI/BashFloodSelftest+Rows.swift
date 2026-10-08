@@ -136,39 +136,39 @@ extension FloodRow {
         var failed = 0
         func c(_ l: String, _ ok: Bool, _ d: String = "") { check(l, ok, d); if !ok { failed += 1 } }
 
-        var buf = ""
-        var lines = BackgroundProcessRegistry.extractCompleteLines(newChunk: "ab", buffer: &buf)
-        lines += BackgroundProcessRegistry.extractCompleteLines(newChunk: "c\nde\n\nf", buffer: &buf)
-        c("U1 lines split across chunks", lines == ["abc", "de", ""] && buf == "f", "\(lines) buf=\(buf)")
-
-        var crlf = ""
-        let cl = BackgroundProcessRegistry.extractCompleteLines(newChunk: "one\r\ntwo\r\nthr", buffer: &crlf)
-        c("U2 CRLF lines split and stripped", cl == ["one", "two"] && crlf == "thr", "\(cl) buf=\(crlf)")
-
-        var capped = ""
-        for _ in 0..<100 {
-            _ = BackgroundProcessRegistry.extractCompleteLines(
-                newChunk: String(repeating: "é", count: 1000), buffer: &capped, maxLineBytes: 10_001)
+        func plain() -> WatchLineAccumulator {
+            WatchLineAccumulator(capBytes: BackgroundProcessRegistry.watchLineCapBytes, redactionEnvironment: [:])
         }
-        let done = BackgroundProcessRegistry.extractCompleteLines(newChunk: "TAIL\nnext", buffer: &capped,
-                                                                  maxLineBytes: 10_001)
-        c("U3 partial line capped on a scalar boundary",
-          done.count == 1 && done[0].utf8.count == 10_001 && !done[0].contains("\u{FFFD}")
-          && done[0].hasSuffix("éT") && capped == "next",
-          "bytes=\(done.first?.utf8.count ?? -1) buf=\(capped)")
+        var a1 = plain()
+        var lines = a1.feed("ab")
+        lines += a1.feed("c\nde\n\nf")
+        c("U1 lines split across chunks", lines == ["abc", "de", ""] && a1.pendingBytes == 1, "\(lines)")
+
+        var a2 = plain()
+        let cl = a2.feed("one\r\ntwo\r") + a2.feed("\nthr")
+        c("U2 CRLF lines split and stripped (also across chunks)", cl == ["one", "two"] && a2.pendingBytes == 3, "\(cl)")
+
+        var a3 = WatchLineAccumulator(capBytes: 10_001, redactionEnvironment: [:])
+        for _ in 0..<100 { _ = a3.feed(String(repeating: "é", count: 1000)) }
+        let done = a3.feed("TAIL\nnext")
+        let marker = WatchLineAccumulator.truncationMarker
+        c("U3 multibyte line capped on a scalar boundary, marked",
+          done.count == 1 && done[0].hasSuffix(marker)
+          && done[0].utf8.count == 10_000 + marker.utf8.count
+          && !done[0].contains("\u{FFFD}") && !done[0].contains("TAIL") && a3.pendingBytes == 4,
+          "bytes=\(done.first?.utf8.count ?? -1)")
 
         // Time bound: 32MB in 4KB chunks without a newline must be linear.
-        var big = ""
+        var a4 = plain()
         let chunk = String(repeating: "z", count: 4096)
         let t0 = Date()
-        for _ in 0..<8192 {
-            _ = BackgroundProcessRegistry.extractCompleteLines(newChunk: chunk, buffer: &big,
-                                                               maxLineBytes: 70_000)
-        }
+        for _ in 0..<8192 { _ = a4.feed(chunk) }
         let dt = Date().timeIntervalSince(t0)
-        c("U4 32MB newline-free line splits in bounded time", dt < 5 && big.utf8.count == 70_000,
-          String(format: "%.2fs buf=%d", dt, big.utf8.count))
+        c("U4 32MB newline-free line in bounded time and memory",
+          dt < 5 && a4.pendingBytes == BackgroundProcessRegistry.watchLineCapBytes,
+          String(format: "%.2fs pending=%d", dt, a4.pendingBytes))
 
+        failed += codexR1Rows(check: check)
         c("U5 BoundedText.suffix keeps scalars whole",
           BoundedText.suffix("aé€🐕", maxBytes: 5) == "🐕" && BoundedText.suffix("aé€🐕", maxBytes: 7) == "€🐕"
           && BoundedText.suffix("abc", maxBytes: 9) == "abc")
@@ -186,6 +186,78 @@ extension FloodRow {
           view == "head [REDACTED:K] mid " + String(secret.prefix(6))
           && emitted + rest == "head [REDACTED:K] mid [REDACTED:K] end",
           "view='\(view)' final='\(emitted + rest)'")
+        return failed
+    }
+
+    /// Codex R1 (review of 97aa924): dense secrets before a token crossing
+    /// the old raw cutoff. Redaction must happen BEFORE any cut, so no token
+    /// fragment can reach a watch, and every cut must be disclosed.
+    static func codexR1Rows(check: (String, Bool, String) -> Void) -> Int {
+        var failed = 0
+        func c(_ l: String, _ ok: Bool, _ d: String = "") { check(l, ok, d); if !ok { failed += 1 } }
+        let token = "123456789:AAFloodSelftestSyntheticTokenValue_0123456"
+        let env = ["telegram_bot_token": token]
+        let full = BashTools.SecretRedactor(environment: env)
+        let cap = BackgroundProcessRegistry.watchLineCapBytes
+        let marker = WatchLineAccumulator.truncationMarker
+        let fragment = String(token.prefix(20))
+
+        // Codex's exact shape: 69,632 raw bytes of dense tokens + padding,
+        // then a token crossing the old raw cutoff, then " ACTUAL_END".
+        let rawCap = cap + 4096
+        let repeats = rawCap / token.utf8.count
+        let padding = rawCap - repeats * token.utf8.count - 30
+        let body = String(repeating: token, count: repeats - 1)
+            + String(repeating: "x", count: padding + token.utf8.count) + token + " ACTUAL_END"
+        let expected = full.redact(body)
+        for (label, size) in [("one piece", Int.max), ("4 KiB chunks", 4096), ("7-byte chunks", 7)] {
+            var acc = WatchLineAccumulator(capBytes: cap, redactionEnvironment: env)
+            var got: [String] = []
+            let bytes = Array((body + "\n").utf8)
+            var off = 0
+            while off < bytes.count {
+                let end = size == Int.max ? bytes.count : min(off + size, bytes.count)
+                got += acc.feed(String(decoding: bytes[off..<end], as: UTF8.self))
+                off = end
+            }
+            c("U8 Codex R1 (\(label)): watch line == whole-line redaction, no fragment, nothing cut",
+              got.count == 1 && got[0] == expected && !got[0].contains(fragment) && !got[0].hasSuffix(marker),
+              "len=\(got.first?.utf8.count ?? -1) expected=\(expected.utf8.count) fragment=\(got.first?.contains(fragment) ?? false)")
+        }
+
+        // A REAL cut: redacted line longer than the cap with a token crossing
+        // the cut point — marker present, no fragment, placeholder whole.
+        for shift in [0, 5, 17, 28, 40, 51] {
+            let lead = String(repeating: "y", count: cap - 10 - shift)
+            let line = lead + token + String(repeating: "z", count: 5000)
+            var acc = WatchLineAccumulator(capBytes: cap, redactionEnvironment: env)
+            var got: [String] = []
+            for piece in stride(from: 0, to: line.utf8.count, by: 4093) {
+                let b = Array(line.utf8)
+                got += acc.feed(String(decoding: b[piece..<min(piece + 4093, b.count)], as: UTF8.self))
+            }
+            got += acc.feed("\n")
+            let w = got.first ?? ""
+            let kept = w.hasSuffix(marker) ? String(w.dropLast(marker.count)) : w
+            let opened = kept.components(separatedBy: "[REDACTED:").count - 1
+            let closed = kept.components(separatedBy: "telegram_bot_token]").count - 1
+            c("U9 cut through a token region (shift \(shift)): marked, no fragment, placeholder never split",
+              got.count == 1 && w.hasSuffix(marker) && !w.contains(fragment) && !w.contains("123456789:")
+              && opened == closed && kept.utf8.count <= cap,
+              "len=\(w.utf8.count) opened=\(opened) closed=\(closed)")
+        }
+
+        // Replay path (input already redacted): cut is still marked.
+        var replay = WatchLineAccumulator(capBytes: 100, redactionEnvironment: nil)
+        let r = replay.feed(String(repeating: "q", count: 300) + "\nok\n")
+        c("U10 replay accumulator marks a cut and keeps later lines",
+          r.count == 2 && r[0] == String(repeating: "q", count: 100) + marker && r[1] == "ok", "\(r.map { $0.count })")
+
+        // EOF: an unterminated tail is never delivered, and holds no raw token.
+        var eof = WatchLineAccumulator(capBytes: cap, redactionEnvironment: env)
+        let none = eof.feed("partial " + token)
+        c("U11 unterminated tail not delivered; pending stays bounded",
+          none.isEmpty && eof.pendingBytes <= "partial ".utf8.count + token.utf8.count, "pending=\(eof.pendingBytes)")
         return failed
     }
 }

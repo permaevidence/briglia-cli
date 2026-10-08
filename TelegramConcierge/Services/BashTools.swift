@@ -1254,8 +1254,12 @@ actor BackgroundProcessRegistry {
         var stderr: String = ""
         /// Trailing partial line not yet terminated by \n — held until a newline arrives
         /// so we only run watches against complete lines. Kept per-stream.
-        var stdoutLineBuf: String = ""
-        var stderrLineBuf: String = ""
+        /// Redacting, bounded watch-line splitters (the sinks install the
+        /// redacting versions before the process starts).
+        var stdoutLines = WatchLineAccumulator(capBytes: BackgroundProcessRegistry.watchLineCapBytes,
+                                               redactionEnvironment: nil)
+        var stderrLines = WatchLineAccumulator(capBytes: BackgroundProcessRegistry.watchLineCapBytes,
+                                               redactionEnvironment: nil)
         /// Stateful decoders: a multibyte character split across two pipe
         /// chunks must not discard the chunk (the old per-chunk
         /// String(data:encoding:) did exactly that). Touched only on ioQueue.
@@ -1349,7 +1353,7 @@ actor BackgroundProcessRegistry {
         private let entry: Entry
         private let streamName: String
         private let buf: ReferenceWritableKeyPath<Entry, String>
-        private let lineBuf: ReferenceWritableKeyPath<Entry, String>
+        private let lineBuf: ReferenceWritableKeyPath<Entry, WatchLineAccumulator>
         private let decoder: ReferenceWritableKeyPath<Entry, IncrementalUTF8Decoder>
         private let evicted: ReferenceWritableKeyPath<Entry, Int>
         private let spillPath: ReferenceWritableKeyPath<Entry, String?>
@@ -1357,17 +1361,13 @@ actor BackgroundProcessRegistry {
         private let ioQueue: DispatchQueue
         private let collector: ForegroundStreamCollector
         private let rollRedactor: StreamingRedactor
-        /// Raw bytes a pending (unterminated) watch line may hold: the line
-        /// cap plus room for the longest secret, so a secret straddling the
-        /// cap is still whole when the line is redacted, then cut to the cap.
-        private let lineRawCapBytes: Int
 
         init(entry: Entry, stderr: Bool, redactor: BashTools.SecretRedactor,
              secrets: [String: String], ioQueue: DispatchQueue) {
             self.entry = entry
             self.streamName = stderr ? "stderr" : "stdout"
             self.buf = stderr ? \Entry.stderr : \Entry.stdout
-            self.lineBuf = stderr ? \Entry.stderrLineBuf : \Entry.stdoutLineBuf
+            self.lineBuf = stderr ? \Entry.stderrLines : \Entry.stdoutLines
             self.decoder = stderr ? \Entry.stderrDecoder : \Entry.stdoutDecoder
             self.evicted = stderr ? \Entry.stderrEvicted : \Entry.stdoutEvicted
             self.spillPath = stderr ? \Entry.stderrSpillPath : \Entry.stdoutSpillPath
@@ -1377,8 +1377,9 @@ actor BackgroundProcessRegistry {
             let roll = StreamingRedactor(environment: secrets)
             self.rollRedactor = roll
             if stderr { entry.stderrRollRedactor = roll } else { entry.stdoutRollRedactor = roll }
-            let longestSecret = secrets.values.map { $0.utf8.count }.max() ?? 0
-            self.lineRawCapBytes = BackgroundProcessRegistry.watchLineCapBytes + max(4096, longestSecret)
+            let lines = WatchLineAccumulator(capBytes: BackgroundProcessRegistry.watchLineCapBytes,
+                                             redactionEnvironment: secrets)
+            if stderr { entry.stderrLines = lines } else { entry.stdoutLines = lines }
         }
 
         /// Drain the collector's carries and close its spill file; returns
@@ -1417,12 +1418,9 @@ actor BackgroundProcessRegistry {
                 if entry[keyPath: spillPath] == nil {
                     entry[keyPath: spillPath] = collector.spillPathSnapshot
                 }
-                let lines = BackgroundProcessRegistry.extractCompleteLines(
-                    newChunk: s, buffer: &entry[keyPath: lineBuf], maxLineBytes: lineRawCapBytes)
-                if !lines.isEmpty {
-                    let redacted = lines.map {
-                        BackgroundProcessRegistry.capWatchLine(self.redactor.redact($0))
-                    }
+                // Redacted before any cut, capped, truncation always marked.
+                let redacted = entry[keyPath: lineBuf].feed(s)
+                if !redacted.isEmpty {
                     Task {
                         await BackgroundProcessRegistry.shared.evaluateWatches(
                             handleId: self.entry.id, stream: self.streamName,
@@ -1500,8 +1498,8 @@ actor BackgroundProcessRegistry {
         var out = 0, err = 0
         let sema = DispatchSemaphore(value: 0)
         ioQueue.async {
-            out = e.stdoutLineBuf.utf8.count
-            err = e.stderrLineBuf.utf8.count
+            out = e.stdoutLines.pendingBytes
+            err = e.stderrLines.pendingBytes
             sema.signal()
         }
         sema.wait()
@@ -2228,10 +2226,8 @@ actor BackgroundProcessRegistry {
         // Same byte-level splitter as the live path, so a replayed line is
         // exactly what a live watch would have seen (CR-LF included).
         func completeLines(_ s: String) -> [String] {
-            var partial = ""
-            return BackgroundProcessRegistry.extractCompleteLines(
-                newChunk: s, buffer: &partial, maxLineBytes: Self.watchLineCapBytes + 4096
-            ).map { BackgroundProcessRegistry.capWatchLine($0) }
+            var acc = WatchLineAccumulator(capBytes: Self.watchLineCapBytes, redactionEnvironment: nil)
+            return acc.feed(s)
         }
         return (completeLines(out), completeLines(err))
     }
@@ -2318,50 +2314,10 @@ actor BackgroundProcessRegistry {
     // MARK: Static helpers
 
     /// Longest line (UTF-8 bytes, after redaction) a watch sees. Longer
-    /// lines are cut here and marked; the full text stays in the spill file.
+    /// lines are cut and marked by `WatchLineAccumulator`; the full text
+    /// stays in the spill file.
     static let watchLineCapBytes = 65_536
-    static let watchLineTruncationMarker = " …[line truncated for watch matching]"
-
-    /// Cap an already-redacted watch line to `watchLineCapBytes`.
-    static func capWatchLine(_ line: String) -> String {
-        guard line.utf8.count > watchLineCapBytes else { return line }
-        return BoundedText.prefix(line, maxBytes: watchLineCapBytes) + watchLineTruncationMarker
-    }
-
-    /// Split the incoming chunk across any pending partial line and return all newly-complete
-    /// lines (without the trailing \n). Updates `buffer` with the new trailing partial.
-    ///
-    /// O(chunk): only the NEW chunk is scanned for newlines, and the pending
-    /// partial line keeps at most `maxLineBytes` (the rest of an over-long
-    /// line is dropped — watches see its head). v0.2.50 appended every chunk
-    /// to an unbounded partial line and re-searched the WHOLE partial for a
-    /// newline per chunk: quadratic on one huge newline-free line (a 70MB
-    /// line pinned a core for over an hour, 2026-10-08).
-    static func extractCompleteLines(newChunk: String, buffer: inout String,
-                                     maxLineBytes: Int = Int.max) -> [String] {
-        var out: [String] = []
-        var rest = Substring(newChunk)
-        func appendCapped(_ piece: Substring) {
-            let room = maxLineBytes - buffer.utf8.count
-            guard room > 0, !piece.isEmpty else { return }
-            if piece.utf8.count <= room {
-                buffer.append(contentsOf: piece)
-            } else {
-                buffer.append(BoundedText.prefix(piece, maxBytes: room))
-            }
-        }
-        while let nl = rest.utf8.firstIndex(of: 0x0A) {
-            appendCapped(rest[rest.startIndex..<nl])
-            var line = buffer
-            buffer = ""
-            // Normalize CR-LF to LF for matching purposes without losing content.
-            if line.utf8.last == 0x0D { line.removeLast() }
-            out.append(line)
-            rest = rest[rest.utf8.index(after: nl)...]
-        }
-        appendCapped(rest)
-        return out
-    }
+    static let watchLineTruncationMarker = WatchLineAccumulator.truncationMarker
 
     /// Byte-based rolling-buffer cap with hysteresis: trim to
     /// `rollingKeepBytes` only once the buffer passes `rollingTrimBytes`, so
