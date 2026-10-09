@@ -162,7 +162,11 @@ extension MidturnHarness {
                       bodies.count == 4 && agentResult != nil && manager._testMessages.last?.content == "\(tag) main done"
                         && !sessionText.contains("providerRejected"), "requests \(bodies.count)")
             } else {
-                check("R8 subagent: marked and saved in its session before the resend; retry without the image; no tool re-run",
+                // The session is inspected after the run: chat-mode current-run
+                // rounds (and their marks) reach it at commitRun, not before
+                // the resend; previously persisted session content is saved
+                // before the resend (applyImageRejectionMarks).
+                check("R8 subagent: retry without the image, no tool re-run; the saved session carries the mark after the run",
                       bodies.count == 5 && bodies[2].contains(image) && !bodies[3].contains(image)
                         && sessionText.contains("providerRejected") && manager._testMessages.last?.content == "\(tag) main done",
                       "requests \(bodies.count)")
