@@ -489,6 +489,17 @@ def main():
     check("image-rejection-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-quater-ter. Telegram audio files and video notes arrive as files
+    # (never auto-transcribed; 20 MB Bot API limit), malformed fields and
+    # unreadable kinds get a visible reply (deduplicated), and the voice-note
+    # path is the v0.2.51 one (download, transcription request, saved
+    # message, failure texts). Hermetic: Bot API and transcription answered
+    # in process. Private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__telegram-audio-selftest"], capture_output=True,
+                          text=True, timeout=600)
+    check("telegram-audio-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     # 3c5-quinquies. /stop visibility: an honest reply when the stopped
     # request is still finishing (archive wait, hung helper), run-scoped
     # attribution, one ordered completion notice per stopped request (own

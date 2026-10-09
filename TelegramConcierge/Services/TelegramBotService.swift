@@ -785,7 +785,13 @@ actor TelegramBotService {
     /// description (token-scrubbed as a belt-and-braces measure). Cancellation
     /// is preserved as a bare `URLError(.cancelled)` so the caller's
     /// cancellation predicate still recognises it.
+    /// Selftest seam: answer every Bot API and file-download request in
+    /// process (hermetic media tests; file downloads use a fixed host the
+    /// BRIGLIA_TELEGRAM_API_BASE override does not cover). nil = network.
+    nonisolated(unsafe) static var transportOverrideForTesting: (@Sendable (URLRequest) async throws -> (Data, URLResponse))?
+
     private func transportData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        if let override = Self.transportOverrideForTesting { return try await override(request) }
         do {
             return try await URLSession.shared.data(for: request)
         } catch let urlError as URLError {

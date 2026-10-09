@@ -2019,6 +2019,94 @@ class ConversationManager: ObservableObject {
         await noteUnavailableAttachment(name: name, detail: detail, notifyUser: notice)
     }
 
+    /// Items the Telegram path buffers for the next turn (files and
+    /// attachment notes), for the per-update outcome.
+    private var telegramBufferedItemCount: Int {
+        pendingImages.count + pendingDocuments.count + pendingReferencedImages.count
+            + pendingReferencedDocuments.count + pendingAttachmentNotes.count
+    }
+
+    /// Handled unreadable-message keys (update id, chat+message id, chat+album
+    /// id): a redelivered update or a second album item gets no second reply.
+    /// Bounded; only consulted by the unreadable-message reply, so it can
+    /// never suppress any other processing.
+    private var unreadableReplyKeys: [String] = []
+    private static let unreadableReplyKeyLimit = 512
+
+    private func replyUnreadableTelegramMessage(_ message: TelegramMessage, updateId: Int) async {
+        var keys = ["u:\(updateId)", "m:\(message.chat.id):\(message.messageId)"]
+        if let group = message.mediaGroupId { keys.append("g:\(message.chat.id):\(group)") }
+        guard !keys.contains(where: unreadableReplyKeys.contains) else { return }
+        let kind = TelegramMessage.UnreadableKind(rawValue: message.unreadableKinds[0])?.displayName ?? "this kind of"
+        // Recorded when the reply is handled (sent, or parked by sendText for
+        // redelivery), not before the attempt.
+        do { try await sendText("⚠️ I can't read \(kind) messages yet. Send it as a file, a photo or text.") }
+        catch { print("[ConversationManager] Unreadable-message reply not sent now: \(error.localizedDescription)") }
+        unreadableReplyKeys.append(contentsOf: keys)
+        if unreadableReplyKeys.count > Self.unreadableReplyKeyLimit {
+            unreadableReplyKeys.removeFirst(unreadableReplyKeys.count - Self.unreadableReplyKeyLimit)
+        }
+    }
+
+    /// Download an audio file / video note as a document (≤ 20 MB, the Bot
+    /// API limit; larger → the existing oversize notice). Never transcribed.
+    private func bufferTelegramAudioFile(fileId: String, fileSize: Int?, displayName: String, ext: String,
+                                         referenced: Bool, details: String? = nil) async {
+        if let declared = fileSize, declared > Self.telegramBotDownloadLimitBytes {
+            await noteOversizedAttachment(name: displayName, sizeBytes: declared, referenced: referenced)
+            return
+        }
+        statusMessage = referenced ? "Downloading referenced audio..." : "Downloading audio file..."
+        do {
+            let data = try await telegramService.downloadDocument(fileId: fileId)
+            let fileName = "\(referenced ? "ref_" : "")\(UUID().uuidString.prefix(8)).\(ext)"
+            let fileURL = documentsDirectory.appendingPathComponent(fileName)
+            try PrivateStorage.writeAtomically(data, to: fileURL)
+            if referenced {
+                pendingReferencedDocuments.append((fileName: fileName, fileSize: data.count))
+            } else {
+                pendingDocuments.append((fileName: fileName, fileSize: data.count))
+                let about = details.map { ", \(MarkerNeutralizer.escape($0))" } ?? ""
+                pendingAttachmentNotes.append("[Audio file '\(MarkerNeutralizer.escape(displayName))'\(about) received as a file: \(fileURL.path) — not transcribed; use transcribe_media if the user asks about its content]")
+            }
+            print("[ConversationManager] Buffered audio file: \(fileName) (\(displayName), \(data.count) bytes)")
+        } catch {
+            await noteFailedAttachmentDownload(name: displayName, error: error, referenced: referenced)
+        }
+    }
+
+    static func audioDisplayName(_ audio: TelegramAudio) -> String {
+        if let name = audio.fileName, !name.isEmpty { return name }
+        let title = [audio.performer, audio.title].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " – ")
+        return title.isEmpty ? "audio file" : title
+    }
+
+    static func audioDetails(_ audio: TelegramAudio) -> String {
+        var parts = [clockDuration(audio.duration)]
+        let title = [audio.performer, audio.title].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " – ")
+        if !title.isEmpty, title != audio.fileName { parts.append(title) }
+        return parts.joined(separator: ", ")
+    }
+
+    static func clockDuration(_ seconds: Int) -> String {
+        let s = max(0, seconds)
+        return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    /// File extension from the original name, else the MIME type, else m4a.
+    static func audioExtension(fileName: String?, mimeType: String?) -> String {
+        let fromName = URL(fileURLWithPath: fileName ?? "").pathExtension.lowercased()
+        if !fromName.isEmpty, fromName.count <= 5, fromName.allSatisfy({ $0.isLetter || $0.isNumber }) { return fromName }
+        switch mimeType?.lowercased() {
+        case "audio/mp4", "audio/x-m4a", "audio/m4a": return "m4a"
+        case "audio/mpeg", "audio/mp3": return "mp3"
+        case "audio/ogg", "audio/opus": return "ogg"
+        case "audio/x-wav", "audio/wav", "audio/wave": return "wav"
+        case "audio/flac", "audio/x-flac": return "flac"
+        default: return "m4a"
+        }
+    }
+
     private func processUpdate(_ update: TelegramUpdate) async {
         // Clear any previous error when starting to process a new message
         error = nil
@@ -2064,6 +2152,11 @@ class ConversationManager: ObservableObject {
         // here. They flow through the normal media/voice pipeline below and
         // dispatchUserTurn() queues them for mid-turn delivery to the model.
 
+        // Per-update outcome (plan v2 §3.3 step 3): did THIS update add
+        // anything (a buffered file, an attachment note, a trigger)? Counted
+        // as a delta, never by looking at buffers an earlier update filled.
+        let bufferedBefore = telegramBufferedItemCount
+
         // Extract forward context if this is a forwarded message (accumulate with pending)
         if telegramMessage.isForwarded {
             var forwardSource = "unknown"
@@ -2102,6 +2195,14 @@ class ConversationManager: ObservableObject {
                 replyContent = "[Voice message]"
             } else if let video = replyToMsg.video {
                 replyContent = "[Video: \(video.duration)s]"
+            } else if let audio = replyToMsg.audio {
+                replyContent = "[Audio: \(MarkerNeutralizer.escape(Self.audioDisplayName(audio))), \(Self.clockDuration(audio.duration))]"
+            } else if replyToMsg.audioState == .presentUndecodable {
+                replyContent = "[Audio: unavailable]"
+            } else if let note = replyToMsg.videoNote {
+                replyContent = "[Video note: \(note.duration)s]"
+            } else if replyToMsg.videoNoteState == .presentUndecodable {
+                replyContent = "[Video note: unavailable]"
             }
             
             if !replyContent.isEmpty {
@@ -2193,6 +2294,17 @@ class ConversationManager: ObservableObject {
                         await noteFailedAttachmentDownload(name: displayName, error: error, referenced: true)
                     }
                 }
+            }
+
+            // Referenced audio file / video note: a file, never transcribed.
+            if let audio = replyToMsg.audio {
+                await bufferTelegramAudioFile(fileId: audio.fileId, fileSize: audio.fileSize,
+                                              displayName: Self.audioDisplayName(audio),
+                                              ext: Self.audioExtension(fileName: audio.fileName, mimeType: audio.mimeType),
+                                              referenced: true)
+            } else if let note = replyToMsg.videoNote {
+                await bufferTelegramAudioFile(fileId: note.fileId, fileSize: note.fileSize, displayName: "video note",
+                                              ext: "mp4", referenced: true)
             }
         }
         
@@ -2325,6 +2437,36 @@ class ConversationManager: ObservableObject {
                 triggerText = caption
             }
         }
+        // Audio file (.m4a/.mp3 from Files) or round video note: a FILE, like
+        // a document — never transcribed automatically (owner rule: only
+        // voice notes are). The agent transcribes it with transcribe_media
+        // when asked. A malformed field still gets a visible outcome.
+        else if let audio = telegramMessage.audio {
+            await bufferTelegramAudioFile(fileId: audio.fileId, fileSize: audio.fileSize,
+                                          displayName: Self.audioDisplayName(audio),
+                                          ext: Self.audioExtension(fileName: audio.fileName, mimeType: audio.mimeType),
+                                          referenced: false, details: Self.audioDetails(audio))
+            if let caption = telegramMessage.caption, !caption.isEmpty { triggerText = caption }
+        }
+        else if telegramMessage.audioState == .presentUndecodable {
+            await noteUnavailableAttachment(
+                name: "audio file",
+                detail: "Telegram sent it in a form Briglia could not read.",
+                notifyUser: "⚠️ I couldn't read the audio file you sent (Telegram delivered it in an unexpected form). Please send it again as a file (📎 → File).")
+            if let caption = telegramMessage.caption, !caption.isEmpty { triggerText = caption }
+        }
+        else if let note = telegramMessage.videoNote {
+            await bufferTelegramAudioFile(fileId: note.fileId, fileSize: note.fileSize, displayName: "video note",
+                                          ext: "mp4", referenced: false, details: "\(note.duration)s round video")
+            if let caption = telegramMessage.caption, !caption.isEmpty { triggerText = caption }
+        }
+        else if telegramMessage.videoNoteState == .presentUndecodable {
+            await noteUnavailableAttachment(
+                name: "video note",
+                detail: "Telegram sent it in a form Briglia could not read.",
+                notifyUser: "⚠️ I couldn't read the video note you sent (Telegram delivered it in an unexpected form). Please send it again as a file (📎 → File).")
+            if let caption = telegramMessage.caption, !caption.isEmpty { triggerText = caption }
+        }
         // Video message - treated as a document for storage and email purposes
         else if let video = telegramMessage.video {
             let displayName = video.fileName ?? "video"
@@ -2373,6 +2515,12 @@ class ConversationManager: ObservableObject {
         
         // If no trigger text, just show status and return (media is buffered)
         guard let promptText = triggerText else {
+            // Safety net (plan v2 §3.3 step 5): THIS update produced nothing
+            // and carried a user-content kind Briglia cannot read → one
+            // visible reply instead of silence.
+            if telegramBufferedItemCount == bufferedBefore, !telegramMessage.unreadableKinds.isEmpty {
+                await replyUnreadableTelegramMessage(telegramMessage, updateId: update.updateId)
+            }
             let imageCount = pendingImages.count
             let docCount = pendingDocuments.count
             if imageCount > 0 || docCount > 0 {
@@ -15037,6 +15185,10 @@ extension ConversationManager {
         await toolExecutor.configureOpenRouter(openRouterService, imagesDirectory: imagesDirectory,
                                                documentsDirectory: documentsDirectory)
     }
+    /// The production Telegram update handler (media, voice, safety net).
+    func _testProcessUpdate(_ update: TelegramUpdate) async { await processUpdate(update) }
+    var _testPendingDocumentCount: Int { pendingDocuments.count }
+    var _testPendingAttachmentNotes: [String] { pendingAttachmentNotes }
     func _testSeedHistory(_ history: [Message]) {
         messages = history
         _ = saveConversation()
