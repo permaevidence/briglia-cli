@@ -73,8 +73,56 @@ extension MidturnHarness {
             check("\(tag) conversation write failed: no resend, today's error, no notice",
                   irRequestBodies().count == 2 && error.contains(responses ? "Responses HTTP 400" : "API error: HTTP 400")
                     && irNotices(channel).isEmpty, "requests \(irRequestBodies().count) \(error)")
+            try await irMarkSurvives(tag, manager: manager, responses: responses)
             restore?()
         }
+        // Post-replacement fsync failure: the history file was replaced (the
+        // marks are on disk) but the save reports failure; a later save must
+        // not roll the exclusion back. User image (historical message).
+        for responses in [false, true] {
+            let restore: (() -> Void)? = responses ? try useResponses() : nil
+            let tag = responses ? "R3cr" : "R3c"
+            let name = irUserImage("\(tag)-old.png", IRFixtures.png)
+            let old = Message(role: .user, content: "\(tag) earlier", imageFileNames: [name])
+            let (manager, _) = await irFresh(history: [old, Message(role: .assistant, content: "ok")])
+            server.script([Self.irRejection(responses: responses), text("never", responses: responses)], statuses: [400, 200])
+            ConversationManager.imageRejectionBoundaryForTesting = { stage in
+                guard stage == "afterCheckpoint" else { return }
+                ConversationManager.historyPostWriteFaultForTesting = {
+                    ConversationManager.historyPostWriteFaultForTesting = nil
+                    throw IRInjected()
+                }
+            }
+            manager._testStartTurn(for: user("\(tag) new"))
+            _ = await manager._testAwaitIdle(timeout: 30)
+            ConversationManager.imageRejectionBoundaryForTesting = nil
+            ConversationManager.historyPostWriteFaultForTesting = nil
+            check("\(tag) post-replacement fsync failure: no resend", irRequestBodies().count == 1, "requests \(irRequestBodies().count)")
+            try await irMarkSurvives(tag, manager: manager, responses: responses, field: "providerRejectedImageFileNames")
+            restore?()
+        }
+    }
+
+    /// After a failed conversation write that followed a durable checkpoint
+    /// (or post-rename) publication: the saved history keeps the exclusion,
+    /// the next request in the same process and after a restart omit the
+    /// image (Codex implementation review R1 reproduction, permanent).
+    func irMarkSurvives(_ tag: String, manager: ConversationManager, responses: Bool,
+                                field: String = "\"providerRejected\":true") async throws {
+        let image = irBase64(IRFixtures.png)
+        check("\(tag) the durable exclusion survives the failed write (conversation.json keeps the mark)",
+              irSavedConversation().contains(field), "salvage exists: \(FileManager.default.fileExists(atPath: manager._testSalvageURL.path))")
+        server.clear(); server.script([text("after failed commit", responses: responses)])
+        manager._testStartTurn(for: user("\(tag) next turn"))
+        _ = await manager._testAwaitIdle(timeout: 30)
+        let next = irRequestBodies().first ?? image
+        let restarted = await restart()
+        server.clear(); server.script([text("after restart", responses: responses)])
+        restarted._testStartTurn(for: user("\(tag) after restart"))
+        _ = await restarted._testAwaitIdle(timeout: 30)
+        let after = irRequestBodies().first ?? image
+        check("\(tag) the next request and the first one after a restart omit the rejected image",
+              !next.contains(image) && !after.contains(image), "next has image \(next.contains(image)) after restart \(after.contains(image))")
     }
 
     /// The files a crash at a save boundary leaves behind.

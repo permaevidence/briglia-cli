@@ -3126,17 +3126,24 @@ class ConversationManager: ObservableObject {
                 guard persistTurnSalvage(current, runId: runId) else { return false }
             }
         }
+        // The checkpoint (when any) now holds the marked rounds: every live
+        // copy follows it from here on, even if the conversation write below
+        // fails, so ordinary failure handling (error salvage, a later save)
+        // never republishes an unmarked copy over the durable one (Codex
+        // implementation review R1). A failed write still means no resend.
+        rounds = current
+        if let runId { activeTurnCheckpoints[runId]?.retainedInteractions = current }
+        messagesForLLM = copy
         Self.imageRejectionBoundaryForTesting?("afterCheckpoint")
-        let previous = messages
+        // History marks stay in memory even if this save fails: a failure
+        // after the file was replaced (post-rename fsync) has published them,
+        // and a later save must not roll them back.
         messages = history
         guard saveConversation() else {
-            messages = previous
             print("[ImageRejection] conversation write failed; not resending")
             return false
         }
         Self.imageRejectionBoundaryForTesting?("afterConversation")
-        messagesForLLM = copy
-        rounds = current
         CacheDiagnostics.noteTransition("image-rejection", lane: .main)
         return true
     }
@@ -8539,9 +8546,10 @@ class ConversationManager: ObservableObject {
                     },
                     commit: { scope in
                         var rounds = toolInteractions
-                        guard try commitImageRejectionMarks(scope, runId: salvageRunId, responses: responsesExecution != nil,
-                                                            messagesForLLM: &messagesForLLM, rounds: &rounds) else { return false }
+                        let committed = try commitImageRejectionMarks(scope, runId: salvageRunId, responses: responsesExecution != nil,
+                                                                      messagesForLLM: &messagesForLLM, rounds: &rounds)
                         toolInteractions = rounds
+                        guard committed else { return false }
                         requestHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
                         requestRounds = toolInteractions
                         return true
@@ -9050,10 +9058,11 @@ class ConversationManager: ObservableObject {
                     },
                     commit: { scope in
                         var rounds = toolInteractions
-                        guard try commitImageRejectionMarks(scope, runId: salvageRunId, responses: responsesExecution != nil,
-                                                            messagesForLLM: &messagesForLLM, rounds: &rounds) else { return false }
+                        let committed = try commitImageRejectionMarks(scope, runId: salvageRunId, responses: responsesExecution != nil,
+                                                                      messagesForLLM: &messagesForLLM, rounds: &rounds)
                         toolInteractions = rounds
                         _ = ImageRejectionMarks.apply(scope, toCurrent: &finalForceInteractions)
+                        guard committed else { return false }
                         finalHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
                         return true
                     }

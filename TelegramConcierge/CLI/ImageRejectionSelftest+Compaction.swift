@@ -72,6 +72,37 @@ extension MidturnHarness {
         let restore = try useResponses()
         do { try await irCompacted(responses: true, large: large) }
         restore()
+        try await irCompactedWriteFailure(responses: false, large: large)
+        let restore2 = try useResponses()
+        do { try await irCompactedWriteFailure(responses: true, large: large) }
+        restore2()
+    }
+
+    /// R1 (implementation review) with an envelope checkpoint: the marked
+    /// retained round was written; the conversation write then fails once.
+    private func irCompactedWriteFailure(responses: Bool, large: String) async throws {
+        let tag = responses ? "R5wr" : "R5w"
+        let (manager, channel) = await irFresh()
+        let image = irFile("\(tag).png", IRFixtures.png)
+        let script = IRCompactionScript(responses: responses, large: large, image: image, imageBase64: irBase64(IRFixtures.png))
+        server.router = { script.route($0) }
+        server.routedStatus = { script.routedStatus($0) }
+        ConversationManager.imageRejectionBoundaryForTesting = { stage in
+            guard stage == "afterCheckpoint" else { return }
+            ConversationManager.historyWriteFaultForTesting = {
+                ConversationManager.historyWriteFaultForTesting = nil
+                throw IRInjected()
+            }
+        }
+        manager._testStartTurn(for: user("\(tag) read the file many times, then the image"))
+        _ = await manager._testAwaitIdle(timeout: 240)
+        ConversationManager.imageRejectionBoundaryForTesting = nil
+        ConversationManager.historyWriteFaultForTesting = nil
+        server.router = nil; server.routedStatus = nil
+        let error = channel.delivered.first { $0.hasPrefix("❌ Something went wrong") } ?? ""
+        check("\(tag) compacted turn, conversation write fails after the envelope write: no resend, today's error",
+              script.currentPhase == "rejected" && script.retryBody.isEmpty && !error.isEmpty, "phase \(script.currentPhase)")
+        try await irMarkSurvives(tag, manager: manager, responses: responses)
     }
 
     private func irCompacted(responses: Bool, large: String) async throws {
