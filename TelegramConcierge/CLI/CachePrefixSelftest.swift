@@ -158,6 +158,7 @@ extension MidturnHarness {
         if section("steady") { try await cpSteadySection() }
         if section("transitions") { try await cpTransitionSection() }
         if section("log") { try await cpLogSection() }
+        if section("tail") { cpTailSection() }
     }
 
     /// Captured main-lane requests while `body` runs.

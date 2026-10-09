@@ -244,7 +244,7 @@ enum CacheDiagnostics {
         for key in Set(previous.settings.keys).union(current.settings.keys).sorted() where previous.settings[key] != current.settings[key] {
             result.append(Difference(component: .settings, position: key, kind: "change", byteOffset: nil)); break
         }
-        let stable = previous.items.count - previous.tailCount
+        let stable = max(0, previous.items.count - min(max(0, previous.tailCount), previous.items.count))
         for index in 0..<stable {
             guard index < current.items.count else {
                 result.append(Difference(component: .input, position: "item \(index)", kind: "removal", byteOffset: nil)); break
@@ -260,6 +260,20 @@ enum CacheDiagnostics {
             break
         }
         return result
+    }
+
+    /// The retained prefix of a request: at most `items` input items and
+    /// `tools` tools. The tail count is the part of the original trailing
+    /// region that survives in the prefix (implementation review R4): none
+    /// when the prefix ends before the tail, part of it when it ends inside.
+    static func retainedPrefix(_ p: Parsed, items: Int?, tools: Int?) -> Parsed {
+        var copy = p
+        if let items, items < p.items.count {
+            copy.items = Array(p.items.prefix(max(0, items)))
+            copy.tailCount = max(0, min(p.tailCount, p.items.count) - (p.items.count - copy.items.count))
+        }
+        if let tools { copy.tools = Array(p.tools.prefix(max(0, tools))) }
+        return copy
     }
 
     static func firstByteDifference(_ a: Data, _ b: Data) -> Int? {
@@ -385,12 +399,7 @@ enum CacheDiagnostics {
             copy.settings = p.settings.mapValues(full)
             return copy
         }
-        func limited(_ p: Parsed, items: Int?, tools: Int?) -> Parsed {
-            var copy = p
-            if let items { copy.items = Array(p.items.prefix(items)) }
-            if let tools { copy.tools = Array(p.tools.prefix(tools)) }
-            return copy
-        }
+        func limited(_ p: Parsed, items: Int?, tools: Int?) -> Parsed { retainedPrefix(p, items: items, tools: tools) }
         if let previous = state.previous[request.lane], previous.dropped {
             line["first_difference"] = NSNull()
             line["comparison"] = "unavailable: previous request beyond the retained bound"
