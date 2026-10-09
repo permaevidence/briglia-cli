@@ -500,6 +500,14 @@ def main():
     check("telegram-audio-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-quater-quater. /status never lists unknown-charge incidents; one
+    # "Paid work paused" line only with a spending limit while paid work is
+    # paused; /spend keeps the full list. Private scratch home.
+    result = run_selftest([os.path.abspath(ADA), "__status-spend-selftest"], capture_output=True,
+                          text=True, timeout=300)
+    check("status-spend-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     # 3c5-quinquies. /stop visibility: an honest reply when the stopped
     # request is still finishing (archive wait, hung helper), run-scoped
     # attribution, one ordered completion notice per stopped request (own

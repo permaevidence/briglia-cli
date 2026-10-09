@@ -6514,6 +6514,7 @@ class ConversationManager: ObservableObject {
         // Mid-turn early wake (§3.11): background work and retained
         // obligations; the hidden test setting announces itself first.
         if let background = await backgroundStatusSection() { contextLine += "\n" + background }
+        if let paused = statusSpendPauseLine() { contextLine += "\n" + paused }
         contextLine += "\n" + (await archiveModeStatusLine())
         let testWarning = ForceDetach.active ? "⚠️ test setting: force-detach is ON\n" : ""
 
@@ -6579,7 +6580,9 @@ class ConversationManager: ObservableObject {
                 lines.append("  ⚠️ result of \(record.handle) could not be verified after a restart (\(record.unverifiableReason ?? "")) — kept for inspection")
             }
         }
-        for line in spendIncidentLines(currentSpendLimitStatus(referenceDate: Date())) { lines.append("  " + line) }
+        // Spend incidents are not listed here (owner decision, plan v2 §4):
+        // /spend and `briglia doctor` keep the detail; /status shows only
+        // the one paused line (statusSpendPauseLine).
         guard !lines.isEmpty else { return nil }
         return "Running in the background:\n" + lines.joined(separator: "\n")
     }
@@ -6990,6 +6993,14 @@ class ConversationManager: ObservableObject {
     }
 
     /// Open spend incidents (§3.6.3) for /spend and /status.
+    /// The only spend line /status ever shows (owner decision, plan v2 §4):
+    /// a spending limit is set AND unknown charges are pausing paid work.
+    /// Without a limit, unknown charges never appear in /status; /spend and
+    /// `briglia doctor` keep every incident.
+    private func statusSpendPauseLine() -> String? {
+        currentSpendLimitStatus(referenceDate: Date()).unverifiable ? "⏸ Paid work paused — see /spend" : nil
+    }
+
     private func spendIncidentLines(_ status: SpendLimitStatus) -> [String] {
         let problems = status.accounting.incidents.map(ToolChargeLedger.describe) + status.accounting.unidentified
         guard !problems.isEmpty else { return [] }
