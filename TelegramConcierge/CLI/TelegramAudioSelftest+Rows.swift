@@ -52,7 +52,9 @@ extension MidturnHarness {
             return ["audio": a]
         }
         let mb = 1024 * 1024
-        for (i, size) in [Int(1.3 * Double(mb)), Int(4.4 * Double(mb)), Int(15.2 * Double(mb)), Int(29.4 * Double(mb))].enumerated() {
+        let megabytes: [Double] = [1.3, 4.4, 15.2, 29.4]
+        let sizes: [Int] = megabytes.map { (value: Double) -> Int in Int(value * Double(mb)) }
+        for (i, size) in sizes.enumerated() {
             api.files["rec\(i)"] = Data(repeating: UInt8(i), count: 2048)
             await manager._testProcessUpdate(Self.tgUpdate(100 + i, audio("rec\(i)", name: "Nuova registrazione \(i + 3).m4a", size: size)))
         }

@@ -204,11 +204,13 @@ extension MidturnHarness {
         let api = TGFakeBotAPI(), transcription = TGFakeTranscription()
         let manager = await tgManager(api: api, transcription: transcription)
         let mb = 1024 * 1024
-        for (i, size) in [Int(1.3 * Double(mb)), Int(4.4 * Double(mb)), Int(15.2 * Double(mb)), Int(29.4 * Double(mb))].enumerated() {
+        let megabytes: [Double] = [1.3, 4.4, 15.2, 29.4]
+        let sizes: [Int] = megabytes.map { (value: Double) -> Int in Int(value * Double(mb)) }
+        for (i, size) in sizes.enumerated() {
             api.files["field\(i)"] = Data(repeating: UInt8(i), count: 1024)
-            await manager._testProcessUpdate(Self.tgUpdate(500 + i, ["audio": [
-                "file_id": "field\(i)", "file_unique_id": "uf\(i)", "duration": 600 + i, "file_name": "Nuova registrazione \(i + 3).m4a",
-                "mime_type": "audio/mp4", "file_size": size]]))
+            let fields: [String: Any] = ["file_id": "field\(i)", "file_unique_id": "uf\(i)", "duration": 600 + i,
+                                         "file_name": "Nuova registrazione \(i + 3).m4a", "mime_type": "audio/mp4", "file_size": size]
+            await manager._testProcessUpdate(Self.tgUpdate(500 + i, ["audio": fields]))
         }
         server.script([Self.chatText("ok")])
         await manager._testProcessUpdate(Self.tgUpdate(504, ["text": "Puoi trasformare in testo queste registrazioni?"]))
