@@ -6,7 +6,9 @@
 //   stdout (bridge → host), one JSON object per line:
 //     {type:"status", state:"connecting"|"qr"|"connected"|"disconnected"|"logged_out", qr?, me?, detail?}
 //     {type:"message", from, fromPhone, timestamp, text?, caption?, quoted?,
-//      media?: {kind:"image"|"video"|"document"|"voice", path, filename, mimeType, sizeBytes}}
+//      media?: {kind:"image"|"video"|"document"|"voice"|"audio", path, filename, mimeType, sizeBytes}}
+//     (a recorded voice note — ptt — is "voice" and is transcribed; any other
+//     audio file is "audio" and is handled as a file, never transcribed)
 //     {type:"result", id, ok, error?}
 //     {type:"log", level, msg}
 //
@@ -117,7 +119,7 @@ function quotedSummary(msg) {
   if (!q) return null
   const text = q.conversation || q.extendedTextMessage?.text || q.imageMessage?.caption
     || q.videoMessage?.caption || q.documentMessage?.caption
-    || (q.imageMessage ? '[image]' : q.videoMessage ? '[video]' : q.documentMessage ? `[document: ${q.documentMessage.fileName || 'file'}]` : q.audioMessage ? '[voice message]' : null)
+    || (q.imageMessage ? '[image]' : q.videoMessage ? '[video]' : q.documentMessage ? `[document: ${q.documentMessage.fileName || 'file'}]` : q.audioMessage ? (q.audioMessage.ptt === true ? '[voice message]' : '[audio file]') : null)
   if (!text) return null
   const fromMe = jidDigits(ctx?.participant) !== ownerDigits
   return { text: String(text).slice(0, 1000), fromMe }
@@ -214,7 +216,10 @@ async function handleInbound(m) {
   } else if (msg.documentMessage) {
     mediaSource = { kind: 'document', node: msg.documentMessage, defaultExt: 'bin' }
   } else if (msg.audioMessage) {
-    mediaSource = { kind: 'voice', node: msg.audioMessage, defaultExt: 'ogg' }
+    // Recorded voice notes (ptt) keep the voice path; ordinary audio files
+    // arrive as files (owner rule, plan v2 §3.4).
+    const ptt = msg.audioMessage.ptt === true
+    mediaSource = { kind: ptt ? 'voice' : 'audio', node: msg.audioMessage, defaultExt: ptt ? 'ogg' : 'm4a' }
   } else {
     return // unsupported message type (location, contact, poll, sticker...)
   }

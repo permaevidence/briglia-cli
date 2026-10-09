@@ -2683,6 +2683,11 @@ class ConversationManager: ObservableObject {
                     let fileName = "\(UUID().uuidString.prefix(8)).\(ext)"
                     try PrivateStorage.writeAtomically(documentData, to: documentsDirectory.appendingPathComponent(fileName))
                     pendingDocuments.append((fileName: fileName, fileSize: documentData.count))
+                    if media.kind == "audio" {
+                        // An ordinary audio file (not a recorded voice note):
+                        // a file, never transcribed automatically.
+                        pendingAttachmentNotes.append("[Audio file '\(MarkerNeutralizer.escape(media.filename))' received as a file: \(documentsDirectory.appendingPathComponent(fileName).path) — not transcribed; use transcribe_media if the user asks about its content]")
+                    }
                     print("[ConversationManager] Buffered WhatsApp \(media.kind): \(fileName) (\(media.filename), \(documentData.count) bytes)")
                 } catch {
                     await noteFailedAttachmentDownload(name: media.filename, error: error, referenced: false)
@@ -15187,6 +15192,8 @@ extension ConversationManager {
     }
     /// The production Telegram update handler (media, voice, safety net).
     func _testProcessUpdate(_ update: TelegramUpdate) async { await processUpdate(update) }
+    /// The production WhatsApp inbound handler.
+    func _testProcessWhatsApp(_ inbound: WhatsAppInboundMessage) async { await processWhatsAppInbound(inbound) }
     var _testPendingDocumentCount: Int { pendingDocuments.count }
     var _testPendingAttachmentNotes: [String] { pendingAttachmentNotes }
     func _testSeedHistory(_ history: [Message]) {

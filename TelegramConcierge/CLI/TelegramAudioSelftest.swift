@@ -166,6 +166,7 @@ extension MidturnHarness {
         if section("audio") { try await tgAudioSection() }
         if section("malformed") { try await tgMalformedSection() }
         if section("safety") { try await tgSafetyNetSection() }
+        if section("whatsapp") { try await tgWhatsAppSection() }
     }
 
     /// A manager with the REAL Telegram channel, answered in process.

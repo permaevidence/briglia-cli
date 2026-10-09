@@ -12,7 +12,7 @@ struct WhatsAppInboundMessage: Decodable {
         let fromMe: Bool
     }
     struct Media: Decodable {
-        let kind: String        // image | video | document | voice
+        let kind: String        // image | video | document | voice | audio (a non-PTT audio file: a file, never transcribed)
         let path: String        // absolute path in the bridge's media spool
         let filename: String
         let mimeType: String?
