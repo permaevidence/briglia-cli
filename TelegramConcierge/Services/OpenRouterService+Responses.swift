@@ -36,6 +36,7 @@ extension OpenRouterService {
         if nativeHistory.count < historical.count {
             print("[Responses] Native replay cache bound: older complete rounds use canonical semantic replay")
         }
+        CacheDiagnostics.noteNativeReplayEviction(historical.count - nativeHistory.count, context: context)
 
         func appendRound(_ interaction: ToolInteraction, identity: String, owner: UUID?) async throws {
             let assistant = interaction.assistantMessage
@@ -206,7 +207,10 @@ extension OpenRouterService {
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
         let receipt = PreparedRequestReceipt(requestID: UUID(),
             historyFingerprint: ResponsesReplayEnvelope.hash(try encoder.encode(input)), deliveryNonces: nonces)
-        return try await ResponsesAdapter(context: context).send(input: input, tools: conversation.tools, receipt: receipt)
+        var adapter = ResponsesAdapter(context: context)
+        adapter.diagnosticsTailCount = (conversation.tailSystemMessage?.isEmpty == false ? 1 : 0)
+            + (conversation.tailUserMessage?.isEmpty == false ? 1 : 0) + (ambient.isEmpty ? 0 : 1)
+        return try await adapter.send(input: input, tools: conversation.tools, receipt: receipt)
     }
 
     /// Only readable Chat Completions reasoning crosses protocols. Never dump

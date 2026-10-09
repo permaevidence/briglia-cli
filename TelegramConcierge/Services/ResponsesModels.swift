@@ -28,7 +28,10 @@ enum ResponsesFailure: Error, LocalizedError {
 enum ResponsesLimits {
     static let recordBytes = 8 * 1024 * 1024
     static let roundBytes = 64 * 1024 * 1024
-    static let replayBytes = 64 * 1024 * 1024
+    static var replayBytes: Int { replayBytesOverrideForTesting ?? 64 * 1024 * 1024 }
+    /// Selftest seam (cache prefix checks): a small native-replay bound so
+    /// eviction at the bound can be exercised. nil = 64 MiB.
+    nonisolated(unsafe) static var replayBytesOverrideForTesting: Int?
     static let argumentBytes = 1024 * 1024
     static let items = 4096
 }

@@ -17,4 +17,5 @@ regexes = [
     '''^jina-test-key-1234$''',
     '''^am-test-key-123456$''',
     '''^12345:test-token-abcdef$''',
+    '''^sk-proj-SYNTHETICcanaryKEY0123456789abcdefABCDEF$''',
 ]

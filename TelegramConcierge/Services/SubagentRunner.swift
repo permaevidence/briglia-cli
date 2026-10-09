@@ -730,6 +730,7 @@ actor SubagentRunner {
         var webNudgePending = false
         var webNudgeUsed = false
 
+        CacheDiagnostics.noteTransition("turn-start", lane: .subagent(resolvedSessionId))
         loop: for round in 1...maxTurns {
             turnsUsed = round
             do {
@@ -768,6 +769,7 @@ actor SubagentRunner {
                         toolInteractions: compacted.interactions,
                         webEvidence: webLedger?.allRecords
                     )
+                    CacheDiagnostics.noteTransition("compaction", lane: .subagent(resolvedSessionId))
                     print("[SubagentRunner] Compacted context mid-run (\(compactionsUsed)): ~\(pt) → ~\(compacted.estimatedTokens) tokens")
                 }
 
@@ -816,6 +818,7 @@ actor SubagentRunner {
                         guard await registry.applyImageRejectionMarks(sessionId: resolvedSessionId, scope: scope) else { return false }
                         _ = ImageRejectionMarks.apply(scope, to: &messagesForLLM)
                         _ = ImageRejectionMarks.apply(scope, toCurrent: &toolInteractions)
+                        CacheDiagnostics.noteTransition("image-rejection", lane: .subagent(resolvedSessionId))
                         return true
                     }
                 )

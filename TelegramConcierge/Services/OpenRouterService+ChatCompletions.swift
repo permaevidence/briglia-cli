@@ -371,6 +371,10 @@ extension OpenRouterService {
 
         let adapter = ChatCompletionsAdapter(context: context)
         let request = try adapter.makeRequest(messages: apiMessages, tools: conversation.tools)
+        // Cache diagnosis (off by default): reads the final body, never changes it.
+        CacheDiagnostics.observe(context: context, protocolName: "chat", body: request.httpBody,
+            tailCount: (tailSystemMessage?.isEmpty == false ? 1 : 0) + (tailUserMessage?.isEmpty == false ? 1 : 0)
+                + (ambientLines.isEmpty ? 0 : 1))
         print("[OpenRouterService] Sending request to \(context.providerLabel) (\(context.model)) with \(apiMessages.count) messages")
         let (data, _) = try await sendChatRequestWithRetry(
             request, providerLabel: context.providerLabel, model: context.model

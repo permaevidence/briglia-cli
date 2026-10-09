@@ -508,6 +508,18 @@ def main():
     check("status-spend-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-quater-quinquies. Cache diagnosis Step 0: real main-agent request
+    # bodies of long scripted sessions (both protocols) keep their prefix
+    # (system text, tools in order, settings, items by position) between
+    # transitions, and change only within the scope of a recorded
+    # transition (turn start, archive commit, prune, compaction, tool
+    # exposure, native replay eviction); the opt-in request log holds no
+    # raw content. Private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__cache-prefix-selftest"], capture_output=True,
+                          text=True, timeout=900)
+    check("cache-prefix-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     # 3c5-quinquies. /stop visibility: an honest reply when the stopped
     # request is still finishing (archive wait, hung helper), run-scoped
     # attribution, one ordered completion notice per stopped request (own

@@ -5,6 +5,11 @@ import FoundationNetworking
 
 struct ResponsesAdapter {
     let context: ProviderExecutionContext
+    /// Documented tail items at the end of `input` (tail system/user
+    /// message, ambient status), for CacheDiagnostics only.
+    var diagnosticsTailCount = 0
+
+    init(context: ProviderExecutionContext) { self.context = context }
 
     /// The subscription models Briglia documents (owner list, 2026-09-06;
     /// GPT-6 Sol/Luna added 2026-09-23, verified live on the subscription
@@ -156,6 +161,8 @@ struct ResponsesAdapter {
               maxOutputTokens: Int? = nil) async throws -> LLMResponse {
         defer { if Task.isCancelled { context.responsesTurn.close() } }
         var request = try request(input: input, tools: tools, maxOutputTokens: maxOutputTokens)
+        // Cache diagnosis (off by default): reads the final body, never changes it.
+        CacheDiagnostics.observe(context: context, protocolName: "responses", body: request.httpBody, tailCount: diagnosticsTailCount)
         let allowed = Set((tools ?? []).map { $0.function.name })
         var usedAccess: String?
         var didRefreshAfter401 = false

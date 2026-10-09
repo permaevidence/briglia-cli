@@ -3137,8 +3137,14 @@ class ConversationManager: ObservableObject {
         Self.imageRejectionBoundaryForTesting?("afterConversation")
         messagesForLLM = copy
         rounds = current
+        CacheDiagnostics.noteTransition("image-rejection", lane: .main)
         return true
     }
+
+    /// Cache diagnosis bookkeeping (main lane): the previous request's tool
+    /// signature and frozen system-prompt date.
+    private var cacheDiagnosticsToolSignature: String?
+    private var cacheDiagnosticsSystemDate: Date?
 
     /// Selftest seam: observe the commit's save boundaries ("afterCheckpoint",
     /// "afterConversation") to capture the on-disk state a crash would leave.
@@ -6843,6 +6849,7 @@ class ConversationManager: ObservableObject {
         let prunedToolCount = plan.toolActionCount
         let prunedMediaCount = plan.mediaActionCount
         refreshSystemPromptTimestamp()
+        CacheDiagnostics.noteTransition("prune", lane: .main)
         var msg = (prunedToolCount > 0 || prunedMediaCount > 0 || !compressedIndices.isEmpty)
             ? "✂️ Memory freed: I summarized the details of \(prunedToolCount) task\(prunedToolCount == 1 ? "" : "s") and \(prunedMediaCount) media item\(prunedMediaCount == 1 ? "" : "s"). Working memory: from ~\(beforeTokens / 1000)k down to ~\(totalTokens / 1000)k tokens."
             : "Working memory is already tidy (~\(totalTokens / 1000)k tokens, under the \(targetTokens / 1000)k target): nothing to free."
@@ -8117,10 +8124,15 @@ class ConversationManager: ObservableObject {
         salvageRunId: UUID? = nil
     ) async throws -> ToolAwareResponse {
         try Task.checkCancellation()
+        // Cache diagnosis (plan v2 §1.4, off unless enabled): the intended
+        // prefix transitions of this turn are recorded for the main lane.
+        CacheDiagnostics.noteTransition("turn-start", lane: .main)
         // Background archiving (§3): a finished archive's new summary and
         // the removal of its messages land here, at a turn boundary, before
         // anything of this turn's context is built. Never mid-turn.
+        let messageCountBeforeArchiveCommit = messages.count
         await commitArchiveIfReady()
+        if messages.count != messageCountBeforeArchiveCommit { CacheDiagnostics.noteTransition("archive-commit", lane: .main) }
         let snapshot = await openRouterService.executionContext(modelOverride: nil, providerOverride: nil,
             reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
         let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
@@ -8267,6 +8279,7 @@ class ConversationManager: ObservableObject {
                     try writeHistoryFile(try encoder.encode(candidate))
                     messages = candidate
                     committedMessages = candidate
+                    CacheDiagnostics.noteTransition("archive-commit", lane: .main)
                     lastPromptTokens = nil
                     lastCompletionTokens = nil
                     cleanupOrphanedToolAttachmentSnapshots()
@@ -8324,6 +8337,7 @@ class ConversationManager: ObservableObject {
             deferredMCPSummaries: initialDeferredSummaries, execution: responsesExecution
         )
         if didPrune {
+            CacheDiagnostics.noteTransition("prune", lane: .main)
             refreshSystemPromptTimestamp()
             // Cache is already invalidated by the prune — take the opportunity to
             // refresh stale calendar/email context with current data for free.
@@ -8457,6 +8471,23 @@ class ConversationManager: ObservableObject {
             lastToolsForRound = toolsForRound
             lastDeferredSummaries = deferredSummaries
             let allowedToolNames = Set(toolsForRound.map { $0.function.name })
+            if CacheDiagnostics.active {
+                // Tool exposure and the frozen system-prompt date are
+                // intended prefix transitions when they change.
+                // Order-insensitive: an exposure change is a different SET of
+                // definitions; a mere reordering is not one (Class A catches it).
+                let sortedEncoder = JSONEncoder(); sortedEncoder.outputFormatting = .sortedKeys
+                let signature = toolsForRound.map { ((try? sortedEncoder.encode($0)).map(SHA256Hex.digest) ?? $0.function.name) }.sorted().joined(separator: ",")
+                    + deferredSummaries.map { "\($0.name)|\($0.description)|\($0.toolCount)" }.joined(separator: "\n")
+                if let previous = cacheDiagnosticsToolSignature, previous != signature {
+                    CacheDiagnostics.noteTransition("tool-exposure", lane: .main)
+                }
+                cacheDiagnosticsToolSignature = signature
+                if let previousDate = cacheDiagnosticsSystemDate, previousDate != systemPromptDate {
+                    CacheDiagnostics.noteTransition("system-refresh", lane: .main)
+                }
+                cacheDiagnosticsSystemDate = systemPromptDate
+            }
             if let failure = checkpointWriteFailure { throw PruneArchiveStore.Failure(failure) }
             let projected = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
             let estimate = try await openRouterService.activeTurnRequestEstimate(messages: projected, rounds: toolInteractions,
@@ -8885,6 +8916,7 @@ class ConversationManager: ObservableObject {
                     prevRoundPromptTokens = nil; lastPromptTokens = nil; previousPromptScope = nil
                 }
                 if midLoopResult == .pruned {
+                    CacheDiagnostics.noteTransition("prune", lane: .main)
                     // Cache is already invalidated by the prune — take the opportunity
                     // to refresh stale calendar/email context with current data for free.
                     let refreshed = await getFrozenSystemContext(forceRefresh: true)
@@ -8901,6 +8933,7 @@ class ConversationManager: ObservableObject {
                         tools: toolsForRound, calendar: calendarContext, email: emailContext,
                         summaries: chunkSummaries, totalChunks: totalChunkCount, date: systemPromptDate,
                         deferred: deferredSummaries, execution: responsesExecution)
+                    CacheDiagnostics.noteTransition("compaction", lane: .main)
                     let maintenanceSpend = max(0, (activeTurnCheckpoints[runID]?.maintenanceSpendUSD ?? 0) - priorMaintenanceSpend)
                     cumulativeToolSpendUSD += maintenanceSpend; todaySpentUSD += maintenanceSpend; monthSpentUSD += maintenanceSpend
                     prevRoundPromptTokens = nil; lastPromptTokens = nil; previousPromptScope = nil
@@ -13078,6 +13111,7 @@ class ConversationManager: ObservableObject {
         // Rendered pages of user PDFs must not outlive the wipe in memory.
         RenderedPDFPageCache.shared.removeAll()
         ModelImageCache.shared.removeAll()
+        CacheDiagnostics.reset()
 
         // Quiescence passed: an explicit wipe also discards unpublished
         // recovery held in memory, so no later retry can resurrect old work.
@@ -13696,6 +13730,7 @@ class ConversationManager: ObservableObject {
         // into the restored one.
         RenderedPDFPageCache.shared.removeAll()
         ModelImageCache.shared.removeAll()
+        CacheDiagnostics.reset()
         // Registry reload re-hydrates pins from the restored reminders.json
         // itself (ordering above matters: reminders restored first); the
         // publish afterwards keeps ReminderService as the ongoing source of
