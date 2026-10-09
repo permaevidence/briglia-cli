@@ -86,9 +86,48 @@ extension MidturnHarness {
         await cpTurn(manager, "fill the log")
         let size = ((try? FileManager.default.attributesOfItem(atPath: log.path))?[.size] as? Int) ?? 0
         let rotated = log.deletingLastPathComponent().appendingPathComponent("cache-diagnostics.log.1")
-        check("L7 size cap: the log rotates (current ≤ cap + one line, one older file)",
-              FileManager.default.fileExists(atPath: rotated.path) && size <= 2_048 + 4_096, "size \(size)")
+        check("L7 size cap: the log rotates and the current file never exceeds the cap",
+              FileManager.default.fileExists(atPath: rotated.path) && size <= 2_048, "size \(size)")
+        // One very long request: the line is cut to fit (explicit omitted
+        // count), the current log stays under the cap.
+        do {
+            let ctx = ProviderExecutionContext(provider: .openAICompatible, model: "m", endpoint: "http://127.0.0.1/v1", authorization: "",
+                affinityKey: "", lane: .ephemeral(UUID()), provenance: "m", providerPreferences: nil, reasoning: nil, reasoningEffort: nil,
+                thinkingType: nil, useReasoningContent: false, textOnly: false, anthropicCacheControl: false, renderPDFAsImages: true)
+            let items: [[String: Any]] = (0..<1_000).map { ["role": "user", "content": "item \($0)"] }
+            let big = try JSONSerialization.data(withJSONObject: ["model": "m", "messages": [["role": "system", "content": "s"]] + items])
+            try? FileManager.default.removeItem(at: log)
+            CacheDiagnostics.observe(context: ctx, protocolName: "chat", body: big, tailCount: 0)
+            let longText = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
+            let longSize = ((try? FileManager.default.attributesOfItem(atPath: log.path))?[.size] as? Int) ?? 0
+            check("L7b a 1,000-item request writes a bounded line with an omitted count; the log stays ≤ the cap",
+                  longSize > 0 && longSize <= 2_048 && longText.contains("\"item_hashes_omitted\""), "size \(longSize)")
+        }
         CacheDiagnostics.maxLogBytesForTesting = nil
+        // Retained state: every component counts toward the per-stream
+        // bound, and all stream dictionaries share the stream limit.
+        do {
+            CacheDiagnostics.reset()
+            CacheDiagnostics.maxRetainedBytesOverrideForTesting = 1_024
+            let system = String(repeating: "x", count: 100_000)
+            for lane in 0..<20 {
+                let ctx = ProviderExecutionContext(provider: .openAICompatible, model: "m", endpoint: "http://127.0.0.1/v1", authorization: "",
+                    affinityKey: "", lane: .ephemeral(UUID()), provenance: "m", providerPreferences: nil, reasoning: nil, reasoningEffort: nil,
+                    thinkingType: nil, useReasoningContent: false, textOnly: false, anthropicCacheControl: false, renderPDFAsImages: true)
+                var responsesCtx = ctx; responsesCtx.wireProtocol = .responses
+                CacheDiagnostics.noteNativeReplayEviction(lane + 1, context: responsesCtx)
+                CacheDiagnostics.noteTransition("turn-start", lane: .ephemeral(UUID()))
+                let body = try JSONSerialization.data(withJSONObject: ["model": "m", "messages": [["role": "system", "content": system],
+                                                                                                 ["role": "user", "content": "u\(lane)"]]])
+                CacheDiagnostics.observe(context: ctx, protocolName: "chat", body: body, tailCount: 0)
+            }
+            let stats = CacheDiagnostics.retainedStats
+            CacheDiagnostics.maxRetainedBytesOverrideForTesting = nil
+            check("L10 retained state bounded: ≤ \(CacheDiagnostics.maxLanes) streams × 1,024 bytes in total, every dictionary ≤ \(CacheDiagnostics.maxLanes) streams",
+                  stats.bytes <= CacheDiagnostics.maxLanes * 1_024 && stats.previous <= CacheDiagnostics.maxLanes
+                    && stats.pending <= CacheDiagnostics.maxLanes && stats.evicted <= CacheDiagnostics.maxLanes,
+                  "bytes \(stats.bytes) previous \(stats.previous) pending \(stats.pending) evicted \(stats.evicted)")
+        }
         // Byte offsets: exact within the retention bound; beyond it the lane
         // keeps hashes only and the offset is "unavailable", never invented.
         func lastDifference(retain: Int?) -> Any? {
@@ -98,7 +137,8 @@ extension MidturnHarness {
                 thinkingType: nil, useReasoningContent: false, textOnly: false, anthropicCacheControl: false, renderPDFAsImages: true)
             func body(_ second: String) -> Data {
                 try! JSONSerialization.data(withJSONObject: ["model": "m", "messages": [["role": "system", "content": "s"],
-                    ["role": "user", "content": "first"], ["role": "user", "content": second]]], options: [.sortedKeys])
+                    ["role": "user", "content": "first" + String(repeating: "p", count: 200)],
+                    ["role": "user", "content": second + String(repeating: "q", count: 200)]]], options: [.sortedKeys])
             }
             CacheDiagnostics.observe(context: lane, protocolName: "chat", body: body("abcdef"), tailCount: 0)
             CacheDiagnostics.observe(context: lane, protocolName: "chat", body: body("abcXef"), tailCount: 0)
@@ -108,7 +148,7 @@ extension MidturnHarness {
             return (object?["first_difference"] as? [String: Any])?["byte_offset"]
         }
         let exact = lastDifference(retain: nil) as? Int
-        let unavailable = lastDifference(retain: 10) as? String
+        let unavailable = lastDifference(retain: 200) as? String
         check("L8 byte offset: exact within the bound (\(exact.map(String.init) ?? "nil")), 'unavailable' beyond it",
               exact != nil && exact! > 0 && unavailable == "unavailable", "\(String(describing: unavailable))")
         // Write failures change nothing for the turn.

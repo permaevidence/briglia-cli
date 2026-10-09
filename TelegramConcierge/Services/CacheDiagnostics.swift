@@ -72,7 +72,10 @@ enum CacheDiagnostics {
         var pending: [String: [String]] = [:]
         /// The lane's previous request; items are full HMACs (not the raw
         /// items) when it was too large to keep, then offsets are unknown.
-        var previous: [String: (parsed: Parsed, hashed: Bool)] = [:]
+        var previous: [String: Retained] = [:]
+        /// Every stream with any state (previous request, pending reasons,
+        /// eviction count), least recently used first; all three
+        /// dictionaries are trimmed together to `maxLanes` streams.
         var laneOrder: [String] = []
         var evicted: [String: Int] = [:]
         var key: SymmetricKey?
@@ -88,7 +91,28 @@ enum CacheDiagnostics {
     static func noteTransition(_ reason: String, lane: AffinityLane) {
         guard active else { return }
         state.lock.lock(); defer { state.lock.unlock() }
+        touchLocked(lane.laneId)
         if state.pending[lane.laneId]?.contains(reason) != true { state.pending[lane.laneId, default: []].append(reason) }
+    }
+
+    /// Mark `label` most recently used; drop every kind of state of the
+    /// least recently used streams beyond `maxLanes` (caller holds the lock).
+    private static func touchLocked(_ label: String) {
+        state.laneOrder.removeAll { $0 == label }
+        state.laneOrder.append(label)
+        while state.laneOrder.count > maxLanes {
+            let oldest = state.laneOrder.removeFirst()
+            state.previous.removeValue(forKey: oldest)
+            state.pending.removeValue(forKey: oldest)
+            state.evicted.removeValue(forKey: oldest)
+        }
+    }
+
+    /// Retained-state size (tests): bytes kept for comparisons and the
+    /// number of streams in each dictionary.
+    static var retainedStats: (bytes: Int, previous: Int, pending: Int, evicted: Int) {
+        state.lock.lock(); defer { state.lock.unlock() }
+        return (state.previous.values.reduce(0) { $0 + $1.bytes }, state.previous.count, state.pending.count, state.evicted.count)
     }
 
     /// Responses native-replay bound (Codex round 2, answer 5): eviction of
@@ -98,6 +122,7 @@ enum CacheDiagnostics {
         guard active else { return }
         let label = streamLabel(context)
         state.lock.lock(); defer { state.lock.unlock() }
+        touchLocked(label)
         let previous = state.evicted[label] ?? 0
         state.evicted[label] = evictedRounds
         if evictedRounds > previous, state.pending[label]?.contains("native-replay-eviction") != true {
@@ -119,6 +144,7 @@ enum CacheDiagnostics {
         let label = streamLabel(context)
         state.lock.lock()
         let transitions = state.pending.removeValue(forKey: label) ?? []
+        touchLocked(label)
         state.lock.unlock()
         let request = Request(lane: label, protocolName: protocolName, body: body, tailCount: tailCount, transitions: transitions)
         captureForTesting?(request)
@@ -165,6 +191,28 @@ enum CacheDiagnostics {
         }
         return Parsed(system: system, items: items.map(canonical), tools: ((root["tools"] as? [Any]) ?? []).map(canonical),
                       settings: settings, tailCount: min(request.tailCount, items.count), totalBytes: request.body.count)
+    }
+
+    /// What a stream keeps of its previous request, within
+    /// `maxRetainedBytesPerLane` counting EVERY component (system, tools,
+    /// settings, items). Raw when it fits; otherwise all components as
+    /// 32-byte HMACs (offsets then unavailable); when even the hashes do
+    /// not fit, only a prefix of the tool and item hashes is kept and a
+    /// comparison past it is reported as partial, never guessed.
+    struct Retained {
+        var parsed: Parsed
+        var hashed: Bool
+        var itemLimit: Int?
+        var toolLimit: Int?
+        /// Even the hashed system text and settings did not fit: nothing
+        /// is compared against this request.
+        var dropped = false
+        var bytes: Int { CacheDiagnostics.retainedBytes(parsed) }
+    }
+
+    static func retainedBytes(_ p: Parsed) -> Int {
+        p.system.count + p.tools.reduce(0) { $0 + $1.count } + p.settings.reduce(0) { $0 + $1.key.utf8.count + $1.value.count }
+            + p.items.reduce(0) { $0 + $1.count }
     }
 
     struct Difference: Equatable {
@@ -319,42 +367,95 @@ enum CacheDiagnostics {
                 settings[name] = "hmac:" + hmac(value, key: key)
             }
         }
+        let itemHashes = parsed.items.map { hmac($0, key: key) }
+        let toolHashes = parsed.tools.map { hmac($0, key: key) }
         var line: [String: Any] = [
             "t": ISO8601DateFormatter().string(from: Date()),
             "lane": request.lane, "protocol": request.protocolName,
             "items": parsed.items.count, "bytes": parsed.totalBytes, "tools": parsed.tools.count, "tail": parsed.tailCount,
             "transitions": request.transitions, "settings": settings,
             "system": hmac(parsed.system, key: key),
-            "item_hashes": parsed.items.map { hmac($0, key: key) },
-            "tool_hashes": parsed.tools.map { hmac($0, key: key) },
         ]
-        func hashed(_ p: Parsed) -> Parsed {
+        func full(_ data: Data) -> Data { Data(HMAC<SHA256>.authenticationCode(for: data, using: key)) }
+        func hashedAll(_ p: Parsed) -> Parsed {
             var copy = p
-            copy.items = p.items.map { Data(HMAC<SHA256>.authenticationCode(for: $0, using: key)) }
+            copy.system = full(p.system)
+            copy.tools = p.tools.map(full)
+            copy.items = p.items.map(full)
+            copy.settings = p.settings.mapValues(full)
             return copy
         }
-        if let (previous, previousHashed) = state.previous[request.lane] {
-            let current = previousHashed ? hashed(parsed) : parsed
-            if let first = differences(previous: previous, current: current).first {
+        func limited(_ p: Parsed, items: Int?, tools: Int?) -> Parsed {
+            var copy = p
+            if let items { copy.items = Array(p.items.prefix(items)) }
+            if let tools { copy.tools = Array(p.tools.prefix(tools)) }
+            return copy
+        }
+        if let previous = state.previous[request.lane], previous.dropped {
+            line["first_difference"] = NSNull()
+            line["comparison"] = "unavailable: previous request beyond the retained bound"
+        } else if let previous = state.previous[request.lane] {
+            var current = previous.hashed ? hashedAll(parsed) : parsed
+            current = limited(current, items: previous.itemLimit, tools: previous.toolLimit)
+            let partial = (previous.itemLimit.map { parsed.items.count > $0 } ?? false) || (previous.toolLimit.map { parsed.tools.count > $0 } ?? false)
+            if let first = differences(previous: previous.parsed, current: current).first {
                 var diff: [String: Any] = ["component": first.component.rawValue, "position": first.position, "kind": first.kind]
-                if first.component == .input && previousHashed { diff["byte_offset"] = "unavailable" }
+                if previous.hashed && first.component != .tools && first.component != .settings { diff["byte_offset"] = "unavailable" }
                 else { diff["byte_offset"] = first.byteOffset.map { $0 as Any } ?? NSNull() }
                 line["first_difference"] = diff
             } else {
                 line["first_difference"] = NSNull()
             }
+            if partial { line["comparison"] = "partial: beyond the retained bound" }
         }
-        // Keep this request for the next comparison, within the bound; a
-        // request too large to keep is kept as hashes only (the next byte
-        // offset is then reported as unavailable, never invented).
-        let tooLarge = parsed.items.reduce(0, { $0 + $1.count }) > maxRetainedBytesPerLane
-        state.previous[request.lane] = (tooLarge ? hashed(parsed) : parsed, tooLarge)
-        state.laneOrder.removeAll { $0 == request.lane }; state.laneOrder.append(request.lane)
-        while state.laneOrder.count > maxLanes { state.previous.removeValue(forKey: state.laneOrder.removeFirst()) }
-        var data = try JSONSerialization.data(withJSONObject: line, options: [.sortedKeys])
-        data.append(0x0A)
+        // Keep this request within the per-stream bound, every component
+        // counted (implementation review R2).
+        let bound = maxRetainedBytesPerLane
+        var kept = Retained(parsed: parsed, hashed: false, itemLimit: nil, toolLimit: nil)
+        if retainedBytes(parsed) > bound {
+            kept = Retained(parsed: hashedAll(parsed), hashed: true, itemLimit: nil, toolLimit: nil)
+            if kept.bytes > bound {
+                let fixed = kept.parsed.system.count + kept.parsed.settings.reduce(0) { $0 + $1.key.utf8.count + $1.value.count }
+                let toolRoom = max(0, (bound - fixed) / 2 / 32)
+                let toolLimit = min(kept.parsed.tools.count, toolRoom)
+                let itemRoom = max(0, (bound - fixed - toolLimit * 32) / 32)
+                kept.toolLimit = toolLimit
+                kept.itemLimit = min(kept.parsed.items.count, itemRoom)
+                kept.parsed = limited(kept.parsed, items: kept.itemLimit, tools: kept.toolLimit)
+                if kept.bytes > bound {   // system/settings alone exceed the bound
+                    kept.parsed.settings = [:]; kept.parsed.system = Data(); kept.toolLimit = 0; kept.itemLimit = 0
+                    kept.parsed.tools = []; kept.parsed.items = []; kept.dropped = true
+                }
+            }
+        }
+        state.previous[request.lane] = kept
+        touchLocked(request.lane)
+        // Bounded line: hash lists are cut to fit `maxLineBytes` with an
+        // explicit omitted count; the request itself is never touched.
+        let lineCap = maxLineBytes
+        func encoded(items: Int, tools: Int) throws -> Data {
+            var copy = line
+            copy["item_hashes"] = Array(itemHashes.prefix(items))
+            copy["tool_hashes"] = Array(toolHashes.prefix(tools))
+            if items < itemHashes.count { copy["item_hashes_omitted"] = itemHashes.count - items }
+            if tools < toolHashes.count { copy["tool_hashes_omitted"] = toolHashes.count - tools }
+            var data = try JSONSerialization.data(withJSONObject: copy, options: [.sortedKeys])
+            data.append(0x0A)
+            return data
+        }
+        var itemCount = itemHashes.count, toolCount = toolHashes.count
+        var data = try encoded(items: itemCount, tools: toolCount)
+        while data.count > lineCap && (itemCount > 0 || toolCount > 0) {
+            if itemCount > 0 { itemCount /= 2 } else { toolCount /= 2 }
+            data = try encoded(items: itemCount, tools: toolCount)
+        }
+        guard data.count <= lineCap else { return }   // even the fixed fields do not fit: skip the line
         try append(data)
     }
+
+    /// One log line never exceeds this, so the current log never exceeds
+    /// the rotation limit.
+    static var maxLineBytes: Int { min(64 * 1024, max(1024, (maxLogBytesForTesting ?? maxLogBytes) / 2)) }
 
     private static func append(_ data: Data) throws {
         let url = logURL
