@@ -18,6 +18,9 @@ struct PreparedConversation {
     /// Agent, so the block is useless to it and would leak what the main
     /// agent is running elsewhere. Every other request keeps it.
     var omitAmbientStatus: Bool = false
+    /// Filled by the request builders with the images this request actually
+    /// transmitted (ImageRejectionRecovery). nil = not recorded.
+    var imageLog: TransmittedImageLog? = nil
 }
 
 /// Immutable configuration for one existing generateResponse invocation and all

@@ -847,7 +847,7 @@ actor OpenRouterService {
         return ["ogg", "oga"].contains(ext)
     }
     
-    private func normalizeMimeType(_ mimeType: String) -> String {
+    func normalizeMimeType(_ mimeType: String) -> String {
         mimeType
             .lowercased()
             .split(separator: ";")
@@ -978,7 +978,7 @@ actor OpenRouterService {
         return (contentParts, visibleFiles, missingFiles, nonInlineFiles)
     }
 
-    private func dataForAttachmentReference(_ reference: FileAttachmentReference, url: URL) -> Data? {
+    func dataForAttachmentReference(_ reference: FileAttachmentReference, url: URL) -> Data? {
         if let snapshotPath = reference.snapshotPath, url.path == snapshotPath {
             return try? Data(contentsOf: url)
         }
@@ -1442,7 +1442,8 @@ actor OpenRouterService {
         textOnlyOverride: Bool? = nil,
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]? = nil,
         execution: ProviderExecutionContext? = nil,
-        lane: AffinityLane
+        lane: AffinityLane,
+        imageLog: TransmittedImageLog? = nil
     ) async throws -> LLMResponse {
         guard execution != nil || isCustomEndpoint || !apiKey.isEmpty else {
             throw OpenRouterError.notConfigured
@@ -1457,7 +1458,7 @@ actor OpenRouterService {
             reasoningEffortOverride: reasoningEffortOverride,
             textOnlyOverride: textOnlyOverride, lane: lane
         )
-        let conversation = prepareConversation(
+        var conversation = prepareConversation(
             messages: messages, imagesDirectory: imagesDirectory,
             documentsDirectory: documentsDirectory, tools: tools,
             toolResultMessages: toolResultMessages, calendarContext: calendarContext,
@@ -1467,6 +1468,7 @@ actor OpenRouterService {
             tailSystemMessage: tailSystemMessage, tailUserMessage: tailUserMessage,
             deferredMCPSummaries: deferredMCPSummaries, promptStyle: promptStyle
         )
+        conversation.imageLog = imageLog
         if context.wireProtocol == .responses { return try await generateResponses(conversation, context: context) }
         return try await generateChatCompletion(conversation, context: context)
     }
@@ -2626,6 +2628,14 @@ actor OpenRouterService {
            case let renderedPages = renderPDFPagesToImages(data, filename: filename),
            !renderedPages.isEmpty {
             contentParts.append(contentsOf: renderedPages)
+        } else if normalizedMime.hasPrefix("image/") {
+            // Same classifier as read_file: a refused image fails here with
+            // its reason, without a request.
+            let outcome = ModelImage.classifyCached(data: data, declaredMime: mimeType)
+            guard let attachable = outcome.attachable else {
+                throw OpenRouterError.apiError(ModelImage.refusalText(outcome, path: filename))
+            }
+            contentParts.append(.image(ImageURL(url: "data:\(attachable.mime);base64,\(attachable.data.base64EncodedString())")))
         } else {
             let base64String = data.base64EncodedString()
             let dataURL = "data:\(mimeType);base64,\(base64String)"

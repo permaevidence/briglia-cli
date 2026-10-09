@@ -241,6 +241,22 @@ enum PlatformImage {
         return jpegData
     }
 
+    /// First frame decoded with ImageIO and re-encoded as PNG (or JPEG at
+    /// `quality`). Used to convert formats model providers refuse (BMP,
+    /// TIFF, HEIC, ICO, animated GIF); nil when the decoder cannot read it.
+    static func convertFirstFrame(data: Data, toJPEG: Bool, quality: Double) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        let output = NSMutableData()
+        let type = (toJPEG ? "public.jpeg" : "public.png") as CFString
+        guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, type, 1, nil) else { return nil }
+        let properties: [CFString: Any] = toJPEG ? [kCGImageDestinationLossyCompressionQuality: quality] : [:]
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination), output.length > 0 else { return nil }
+        return output as Data
+    }
+
     #else
 
     /// ImageMagick entry point: v7 ships a single `magick` binary, v6 (still
@@ -280,6 +296,25 @@ enum PlatformImage {
         guard PlatformBinary.run(bin, prefix + [src.path + "[0]", "-resize", geometry,
                                                 "-quality", q, dst.path]) != nil else { return nil }
         return try? Data(contentsOf: dst)
+    }
+
+    /// First frame converted by ImageMagick to PNG (or JPEG at `quality`).
+    /// nil when ImageMagick is missing, lacks the format delegate, or fails:
+    /// callers report that as "conversion not available", never as corrupt.
+    static func convertFirstFrame(data: Data, toJPEG: Bool, quality: Double) -> Data? {
+        guard let (bin, prefix) = magick("convert") else { return nil }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ada-img-\(UUID().uuidString)", isDirectory: true)
+        do { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) } catch { return nil }
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let src = dir.appendingPathComponent("src")
+        let dst = dir.appendingPathComponent(toJPEG ? "dst.jpg" : "dst.png")
+        do { try data.write(to: src) } catch { return nil }
+        var arguments = prefix + [src.path + "[0]"]
+        if toJPEG { arguments += ["-quality", String(max(1, min(100, Int(quality * 100))))] }
+        guard PlatformBinary.run(bin, arguments + [dst.path]) != nil,
+              let out = try? Data(contentsOf: dst), !out.isEmpty else { return nil }
+        return out
     }
 
     #endif

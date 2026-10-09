@@ -33,7 +33,7 @@ struct AdaCLI: AsyncParsableCommand {
                       AffinitySelftest.self, ChatWireSelftest.self, ChatAdapterSelftest.self, ChatRetrySelftest.self, ResponsesSelftest.self, ResponsesCacheSelftest.self, SubscriptionSelftest.self,
                       WebAgentSelftest.self, ProviderSelftest.self, ServiceSelftest.self,
                       FsToolsSelftest.self, DeleteUserDataSelftest.self,
-                      PruneArchiveSelftest.self, PruneRetentionSelftest.self, SummaryBoundsSelftest.self, ArchiveFullChunkSelftest.self, UserContextMaintenanceSelftest.self, DiffPipeSelftest.self, ProcessPipeSelftest.self, URLSessionTeardownSelftest.self, SubagentCompactionSelftest.self, ChronologySelftest.self, WebSubagentSelftest.self, MidturnAnnotationSelftest.self, MidturnWakeSelftest.self, MidturnRoundDeliverySelftest.self, StopVisibilitySelftest.self, BackgroundArchiveSelftest.self, MCPSurfaceSelftest.self, MCPLifecycleSelftest.self, StorageSelftest.self,
+                      PruneArchiveSelftest.self, PruneRetentionSelftest.self, SummaryBoundsSelftest.self, ArchiveFullChunkSelftest.self, UserContextMaintenanceSelftest.self, DiffPipeSelftest.self, ProcessPipeSelftest.self, URLSessionTeardownSelftest.self, SubagentCompactionSelftest.self, ChronologySelftest.self, WebSubagentSelftest.self, MidturnAnnotationSelftest.self, MidturnWakeSelftest.self, MidturnRoundDeliverySelftest.self, ImageRejectionSelftest.self, StopVisibilitySelftest.self, BackgroundArchiveSelftest.self, MCPSurfaceSelftest.self, MCPLifecycleSelftest.self, StorageSelftest.self,
                       PlaywrightSelftest.self,
                       SecretStoreSelftest.self, ReleaseSigningSelftest.self,
                       VerifyEnvelopeCommand.self, TestSignEnvelopeCommand.self,

@@ -96,6 +96,12 @@ struct Message: Identifiable, Codable, Equatable {
     var prunedContextSummaryCoverage: PruneSummaryCoverage? = nil
     /// Older summary anchors demoted to one-line snapshot pointers.
     var demotedPruneSummaries: [DemotedPruneSummary] = []
+    /// Images of this message (names from `imageFileNames` /
+    /// `referencedImageFileNames`) excluded during image-rejection recovery
+    /// (ImageRejectionMarks): every later request sends a note in their
+    /// place. Additive, encoded only when non-empty (every other message
+    /// encodes byte-identically), decoded leniently. The files stay on disk.
+    var providerRejectedImageFileNames: [String] = []
 
     /// Snapshot links rendered through their generic text: a demoted line's
     /// own snapshot is shown once, inside that line.
@@ -275,7 +281,7 @@ struct Message: Identifiable, Codable, Equatable {
         case imageFileNames, documentFileNames, imageFileSizes, documentFileSizes
         case referencedImageFileNames, referencedDocumentFileNames
         case referencedDocumentFileSizes
-        case downloadedDocumentFileNames, editedFilePaths, generatedFilePaths, accessedProjectIds, subagentSessionEvents, toolInteractions, compactToolLog, finalReasoning, finalReasoningDetails, finalReasoningModel, prunedContextSummary, prunedContextSummaryCoverage, demotedPruneSummaries, mediaPruned, measuredToolTokens, measuredTokens, kind, originChannel
+        case downloadedDocumentFileNames, editedFilePaths, generatedFilePaths, accessedProjectIds, subagentSessionEvents, toolInteractions, compactToolLog, finalReasoning, finalReasoningDetails, finalReasoningModel, prunedContextSummary, prunedContextSummaryCoverage, demotedPruneSummaries, providerRejectedImageFileNames, mediaPruned, measuredToolTokens, measuredTokens, kind, originChannel
         // Legacy single-value fields (for decoding old data)
         case imageFileName, documentFileName, imageFileSize, documentFileSize
         case referencedImageFileName, referencedDocumentFileName
@@ -387,6 +393,7 @@ struct Message: Identifiable, Codable, Equatable {
         prunedContextSummary = try? container.decodeIfPresent(String.self, forKey: .prunedContextSummary)
         prunedContextSummaryCoverage = (try? container.decodeIfPresent(PruneSummaryCoverage.self, forKey: .prunedContextSummaryCoverage)) ?? nil
         demotedPruneSummaries = DemotedPruneSummary.decodeLeniently(from: container, forKey: .demotedPruneSummaries)
+        providerRejectedImageFileNames = (try? container.decodeIfPresent([String].self, forKey: .providerRejectedImageFileNames)) ?? []
 
         // Media pruned flag (new field, default false for old messages)
         mediaPruned = (try? container.decodeIfPresent(Bool.self, forKey: .mediaPruned)) ?? false
@@ -446,6 +453,7 @@ struct Message: Identifiable, Codable, Equatable {
         try container.encodeIfPresent(prunedContextSummary, forKey: .prunedContextSummary)
         try container.encodeIfPresent(prunedContextSummaryCoverage, forKey: .prunedContextSummaryCoverage)
         if !demotedPruneSummaries.isEmpty { try container.encode(demotedPruneSummaries, forKey: .demotedPruneSummaries) }
+        if !providerRejectedImageFileNames.isEmpty { try container.encode(providerRejectedImageFileNames, forKey: .providerRejectedImageFileNames) }
         // Only encode mediaPruned when true (non-default)
         if mediaPruned {
             try container.encode(mediaPruned, forKey: .mediaPruned)
@@ -481,6 +489,7 @@ struct Message: Identifiable, Codable, Equatable {
         lhs.prunedContextSummaryCoverage == rhs.prunedContextSummaryCoverage &&
         lhs.demotedPruneSummaries == rhs.demotedPruneSummaries &&
         lhs.activeTurnCompaction == rhs.activeTurnCompaction &&
+        lhs.providerRejectedImageFileNames == rhs.providerRejectedImageFileNames &&
         lhs.kind == rhs.kind
     }
 }

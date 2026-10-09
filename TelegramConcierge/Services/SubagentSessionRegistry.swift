@@ -220,6 +220,25 @@ actor SubagentSessionRegistry {
         return next
     }
 
+    /// Image-rejection recovery for a subagent (plan v2 §2.4): apply the
+    /// marks to the stored session (its messages and its pending/prior
+    /// rounds) and persist BEFORE the resend. False when the session is gone
+    /// or the write failed: the caller does not resend and the run fails as
+    /// today.
+    func applyImageRejectionMarks(sessionId: String, scope: Set<ImageSlot>) -> Bool {
+        guard var session = sessions[sessionId] else { return false }
+        _ = ImageRejectionMarks.apply(scope, to: &session.messages)
+        _ = ImageRejectionMarks.apply(scope, toCurrent: &session.toolInteractions)
+        if let fault = Self.imageRejectionPersistFaultForTesting, (try? fault()) == nil { return false }
+        guard persist(session) else { return false }
+        sessions[sessionId] = session
+        return true
+    }
+
+    /// Selftest seam: throw to simulate a failed session write during
+    /// image-rejection recovery.
+    nonisolated(unsafe) static var imageRejectionPersistFaultForTesting: (() throws -> Void)?
+
     /// Persist the full canonical interaction list before dispatch/continuation.
     /// The intent has explicit uncertain results so crash recovery never reruns it.
     func checkpointResponses(sessionId: String, interactions: [ToolInteraction]) -> Bool {

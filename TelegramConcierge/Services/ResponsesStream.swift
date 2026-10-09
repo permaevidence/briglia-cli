@@ -238,6 +238,9 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
     private var response: HTTPURLResponse?
     private var streamed = false
     private var data = Data()
+    /// The serialized request, kept only to tell whether a 400 answered a
+    /// request that carried an image (ProviderImageRejection).
+    private var requestBody: Data?
     private var assembler = ResponsesStreamAssembler()
     private var overallTimer: DispatchWorkItem?
     private var phaseTimer: DispatchWorkItem?
@@ -269,6 +272,7 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
                 lock.lock()
                 if completed { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
                 self.assembler.subscription = subscription
+                self.requestBody = request.httpBody
                 self.continuation = continuation
                 let task: URLSessionDataTask
                 if let shared = SharedDataTaskSession.active {
@@ -365,7 +369,12 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
                     throw failure
                 }
                 let seconds = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
-                throw ResponsesFailure.http(response.statusCode, seconds.map { $0.isFinite ? min(30, max(0, $0)) : 1 })
+                let failure = ResponsesFailure.http(response.statusCode, seconds.map { $0.isFinite ? min(30, max(0, $0)) : 1 })
+                // A recognised invalid-image 400 (bounded body, image-carrying
+                // request) keeps its description; every other status, and its
+                // 401 refresh / retry / Retry-After handling, is unchanged.
+                throw ProviderImageRejection.classify(status: response.statusCode, rawBody: data,
+                                                      requestBody: requestBody, underlying: failure)
             }
             result = .success(streamed ? try assembler.finish() : data)
         } catch { result = .failure(error) }

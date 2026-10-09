@@ -770,6 +770,13 @@ final class CaptureServer: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return _router }
         set { lock.lock(); _router = newValue; lock.unlock() }
     }
+    // Opt-in status for a routed reply (image-rejection rows answer a routed
+    // request with HTTP 400). nil = 200, as before.
+    private var _routedStatus: (@Sendable (CapturedHTTPRequest) -> Int?)?
+    var routedStatus: (@Sendable (CapturedHTTPRequest) -> Int?)? {
+        get { lock.lock(); defer { lock.unlock() }; return _routedStatus }
+        set { lock.lock(); _routedStatus = newValue; lock.unlock() }
+    }
     // Opt-in: serve each connection on its own thread, so a delayed routed
     // reply (a slow subagent) never holds back another client's request.
     private var _concurrent = false
@@ -845,6 +852,7 @@ final class CaptureServer: @unchecked Sendable {
         var parser = CaptureRequestParser()
         var chunk = [UInt8](repeating: 0, count: 65536)
         var routed: (body: String, delay: TimeInterval)? = nil
+        var routedStatusCode: Int? = nil
         var target = ""
         do {
             while true {
@@ -853,9 +861,10 @@ final class CaptureServer: @unchecked Sendable {
                 guard n > 0 else { throw CaptureRequestParser.Invalid("EOF or timeout before complete request") }
                 if let request = try parser.append(Data(chunk[0..<n])) {
                     target = request.target
-                    lock.lock(); recorded.append(request); let observer = _requestObserver; let route = _router; lock.unlock()
+                    lock.lock(); recorded.append(request); let observer = _requestObserver; let route = _router; let statusRoute = _routedStatus; lock.unlock()
                     observer?(request)
                     routed = route?(request)
+                    if routed != nil { routedStatusCode = statusRoute?(request) }
                     break
                 }
             }
@@ -869,7 +878,7 @@ final class CaptureServer: @unchecked Sendable {
         let encodedContent = String(data: try! JSONEncoder().encode(content), encoding: .utf8)!
         lock.lock()
         let scripted = routed?.body ?? (responseQueue.isEmpty ? nil : responseQueue.removeFirst())
-        let status = routed != nil ? 200 : (statusQueue.isEmpty ? fallbackStatus : statusQueue.removeFirst())
+        let status = routed != nil ? (routedStatusCode ?? 200) : (statusQueue.isEmpty ? fallbackStatus : statusQueue.removeFirst())
         lock.unlock()
         // OpenCode Go's page stages use Responses since v0.2.44 (GPT-6 Luna).
         let responsesOK = "{\"id\":\"resp_cap\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_cap\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\(encodedContent),\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"

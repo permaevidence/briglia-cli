@@ -726,7 +726,14 @@ class ConversationManager: ObservableObject {
                         allowEmpty: policy.allowEmpty)
                     copiedURLs.append(destination)
                     if isImage {
-                        images.append((fileName, size))
+                        // Provider-refused formats (HEIC/TIFF/BMP/…) are not
+                        // filed as images (plan v2 §2.3): converted copy as
+                        // the image, original kept as a document.
+                        let filed = fileIngestedImage(at: destination, fileName: fileName, size: size)
+                        copiedURLs.removeLast()
+                        copiedURLs.append(contentsOf: filed.created)
+                        images.append(contentsOf: filed.images)
+                        documents.append(contentsOf: filed.documents)
                     } else {
                         documents.append((fileName, size))
                     }
@@ -1018,6 +1025,34 @@ class ConversationManager: ObservableObject {
     /// First free filename in `directory` for a proposed name: keeps the
     /// original name, appending "-2", "-3", … before the extension on clashes
     /// so attachments never overwrite one another.
+    /// An image copied into the images directory, filed by what providers
+    /// accept (ModelImage): a supported image stays as it is; a convertible
+    /// one becomes a converted image plus the original as a document; a
+    /// refused one (malformed, or no converter here) becomes a document only,
+    /// where read_file explains why it cannot be attached. Any file-system
+    /// failure keeps the original as an image (the request guard still
+    /// converts or notes it at send time).
+    private func fileIngestedImage(at url: URL, fileName: String, size: Int)
+        -> (images: [(fileName: String, fileSize: Int)], documents: [(fileName: String, fileSize: Int)], created: [URL]) {
+        let unchanged = ([(fileName: fileName, fileSize: size)], [(fileName: String, fileSize: Int)](), [url])
+        guard let data = try? Data(contentsOf: url) else { return unchanged }
+        let outcome = ModelImage.classifyCached(data: data)
+        if case .supported = outcome { return unchanged }
+        let documentName = uniqueFileName(fileName, in: documentsDirectory)
+        let documentURL = documentsDirectory.appendingPathComponent(documentName)
+        do { try FileManager.default.moveItem(at: url, to: documentURL) } catch { return unchanged }
+        guard case .converted(let converted, let mime, _) = outcome else {
+            return ([], [(documentName, size)], [documentURL])
+        }
+        let base = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
+        let imageName = uniqueFileName(base + (mime == "image/png" ? ".png" : ".jpg"), in: imagesDirectory)
+        let imageURL = imagesDirectory.appendingPathComponent(imageName)
+        do { try PrivateStorage.writeAtomically(converted, to: imageURL) } catch {
+            return ([], [(documentName, size)], [documentURL])
+        }
+        return ([(imageName, converted.count)], [(documentName, size)], [imageURL, documentURL])
+    }
+
     private func uniqueFileName(_ proposed: String, in directory: URL) -> String {
         let proposedURL = URL(fileURLWithPath: proposed)
         let base = proposedURL.deletingPathExtension().lastPathComponent
@@ -2907,6 +2942,54 @@ class ConversationManager: ObservableObject {
             inFlightMidTurnBatch = nil
         }
     }
+
+    /// Image-rejection recovery, main agent (plan v2 §2.4 steps 3–4, Codex
+    /// round 2 persistence requirement): check stop and run ownership BEFORE
+    /// writing anything, apply the marks to every live copy (canonical
+    /// history, the request copy, the current rounds — in-memory bytes and
+    /// persisted references alike), then persist: the turn checkpoint first
+    /// (it carries the current rounds' reference marks; an ordinary
+    /// checkpoint write is enough because the marks live inside the rounds),
+    /// then conversation.json (user and historical marks). Returns false when
+    /// a write failed: the caller does not resend and the turn fails as
+    /// today. A crash between the two writes repeats at most one free 400.
+    private func commitImageRejectionMarks(_ scope: Set<ImageSlot>, runId: UUID?, responses: Bool,
+                                           messagesForLLM: inout [Message], rounds: inout [ToolInteraction]) throws -> Bool {
+        try Task.checkCancellation()
+        try requireSalvageOwnership(runId)
+        var history = messages
+        _ = ImageRejectionMarks.apply(scope, to: &history)
+        var copy = messagesForLLM
+        _ = ImageRejectionMarks.apply(scope, to: &copy)
+        var current = rounds
+        _ = ImageRejectionMarks.apply(scope, toCurrent: &current)
+        if let runId, activeTurnCheckpoints[runId] != nil {
+            if responses {
+                do { try persistResponsesSalvage(current) } catch {
+                    print("[ImageRejection] checkpoint write failed: \(error.localizedDescription)")
+                    return false
+                }
+            } else {
+                guard persistTurnSalvage(current, runId: runId) else { return false }
+            }
+        }
+        Self.imageRejectionBoundaryForTesting?("afterCheckpoint")
+        let previous = messages
+        messages = history
+        guard saveConversation() else {
+            messages = previous
+            print("[ImageRejection] conversation write failed; not resending")
+            return false
+        }
+        Self.imageRejectionBoundaryForTesting?("afterConversation")
+        messagesForLLM = copy
+        rounds = current
+        return true
+    }
+
+    /// Selftest seam: observe the commit's save boundaries ("afterCheckpoint",
+    /// "afterConversation") to capture the on-disk state a crash would leave.
+    nonisolated(unsafe) static var imageRejectionBoundaryForTesting: ((String) -> Void)?
 
     /// Selftest seam: throw to simulate a failed Responses salvage write —
     /// stage "placeholder" (before the batch runs) or "completed" (after).
@@ -8231,21 +8314,48 @@ class ConversationManager: ObservableObject {
             // the request succeeds.
             let requestGeneration = appendedMidTurnGeneration
             do {
-                response = try await openRouterService.generateResponse(
-                    messages: projected,
-                    imagesDirectory: imagesDirectory,
-                    documentsDirectory: documentsDirectory,
-                    tools: toolsForRound,  // Always pass tools so LLM can chain calls
-                    toolResultMessages: toolInteractions.isEmpty ? nil : toolInteractions,
-                    calendarContext: calendarContext,
-                    emailContext: emailContext,
-                    chunkSummaries: chunkSummaries.isEmpty ? nil : chunkSummaries,
-                    totalChunkCount: totalChunkCount,
-                    currentUserMessageId: currentUserMessageId,
-                    turnStartDate: systemPromptDate,
-                    deferredMCPSummaries: deferredSummaries.isEmpty ? nil : deferredSummaries,
-                    execution: responsesExecution, lane: .main
+                // Image-rejection recovery (plan v2 §2.4): a recognised
+                // invalid-image 400 marks the transmitted images of the
+                // request's newest unit (then, once, all of them), persists
+                // the marks and resends the request rebuilt from that state;
+                // tools are not re-run. Any other outcome is exactly today's.
+                var requestHistory = projected
+                var requestRounds = toolInteractions
+                let recovered = try await ImageRejectionRecovery.run(
+                    send: { log in
+                        try await openRouterService.generateResponse(
+                            messages: requestHistory,
+                            imagesDirectory: imagesDirectory,
+                            documentsDirectory: documentsDirectory,
+                            tools: toolsForRound,  // Always pass tools so LLM can chain calls
+                            toolResultMessages: requestRounds.isEmpty ? nil : requestRounds,
+                            calendarContext: calendarContext,
+                            emailContext: emailContext,
+                            chunkSummaries: chunkSummaries.isEmpty ? nil : chunkSummaries,
+                            totalChunkCount: totalChunkCount,
+                            currentUserMessageId: currentUserMessageId,
+                            turnStartDate: systemPromptDate,
+                            deferredMCPSummaries: deferredSummaries.isEmpty ? nil : deferredSummaries,
+                            execution: responsesExecution, lane: .main, imageLog: log
+                        )
+                    },
+                    newestUnit: { transmitted in
+                        ImageRejectionMarks.newestUnit(transmitted: transmitted, requestMessages: requestHistory, requestRounds: requestRounds)
+                    },
+                    commit: { scope in
+                        var rounds = toolInteractions
+                        guard try commitImageRejectionMarks(scope, runId: salvageRunId, responses: responsesExecution != nil,
+                                                            messagesForLLM: &messagesForLLM, rounds: &rounds) else { return false }
+                        toolInteractions = rounds
+                        requestHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+                        requestRounds = toolInteractions
+                        return true
+                    }
                 )
+                response = recovered.response
+                if !recovered.excluded.isEmpty {
+                    try? await sendText(ImageRejectionRecovery.notice(recovered.excluded))
+                }
                 // The request was sent — but the guard stands down only if it
                 // actually carried the in-flight annotation (nonce-checked).
                 if responsesExecution != nil { clearResponsesMidTurnBatch(response) }
@@ -8702,7 +8812,7 @@ class ConversationManager: ObservableObject {
         // an active-turn compaction the summary note and the carried verbatim
         // user messages live only in the checkpoint projection, not in
         // messagesForLLM. Computed once so every retry replays the same history.
-        let finalHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+        var finalHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
         var finalResponse: LLMResponse?
         var finalForceInteractions = toolInteractions
         var finalForceSpendUSD: Double = 0
@@ -8718,22 +8828,43 @@ class ConversationManager: ObservableObject {
                 """
             let response: LLMResponse
             do {
-                response = try await openRouterService.generateResponse(
-                    messages: finalHistory,
-                    imagesDirectory: imagesDirectory,
-                    documentsDirectory: documentsDirectory,
-                    tools: lastToolsForRound,
-                    toolResultMessages: finalForceInteractions,
-                    calendarContext: calendarContext,
-                    emailContext: emailContext,
-                    chunkSummaries: chunkSummaries.isEmpty ? nil : chunkSummaries,
-                    totalChunkCount: totalChunkCount,
-                    currentUserMessageId: currentUserMessageId,
-                    turnStartDate: systemPromptDate,
-                    tailSystemMessage: tail,
-                    deferredMCPSummaries: lastDeferredSummaries.isEmpty ? nil : lastDeferredSummaries,
-                    execution: responsesExecution, lane: .main
+                // Same image-rejection recovery as the tool loop (plan v2 §2.4).
+                let recovered = try await ImageRejectionRecovery.run(
+                    send: { log in
+                        try await openRouterService.generateResponse(
+                            messages: finalHistory,
+                            imagesDirectory: imagesDirectory,
+                            documentsDirectory: documentsDirectory,
+                            tools: lastToolsForRound,
+                            toolResultMessages: finalForceInteractions,
+                            calendarContext: calendarContext,
+                            emailContext: emailContext,
+                            chunkSummaries: chunkSummaries.isEmpty ? nil : chunkSummaries,
+                            totalChunkCount: totalChunkCount,
+                            currentUserMessageId: currentUserMessageId,
+                            turnStartDate: systemPromptDate,
+                            tailSystemMessage: tail,
+                            deferredMCPSummaries: lastDeferredSummaries.isEmpty ? nil : lastDeferredSummaries,
+                            execution: responsesExecution, lane: .main, imageLog: log
+                        )
+                    },
+                    newestUnit: { transmitted in
+                        ImageRejectionMarks.newestUnit(transmitted: transmitted, requestMessages: finalHistory, requestRounds: finalForceInteractions)
+                    },
+                    commit: { scope in
+                        var rounds = toolInteractions
+                        guard try commitImageRejectionMarks(scope, runId: salvageRunId, responses: responsesExecution != nil,
+                                                            messagesForLLM: &messagesForLLM, rounds: &rounds) else { return false }
+                        toolInteractions = rounds
+                        _ = ImageRejectionMarks.apply(scope, toCurrent: &finalForceInteractions)
+                        finalHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+                        return true
+                    }
                 )
+                response = recovered.response
+                if !recovered.excluded.isEmpty {
+                    try? await sendText(ImageRejectionRecovery.notice(recovered.excluded))
+                }
                 // Carried-check matters most here: an exhaustion path that
                 // discarded the annotation's interaction reaches this
                 // force-finish with finalForceInteractions lacking the
@@ -12782,6 +12913,7 @@ class ConversationManager: ObservableObject {
         ToolExecutor.clearPendingToolOutputs()
         // Rendered pages of user PDFs must not outlive the wipe in memory.
         RenderedPDFPageCache.shared.removeAll()
+        ModelImageCache.shared.removeAll()
 
         // Quiescence passed: an explicit wipe also discards unpublished
         // recovery held in memory, so no later retry can resurrect old work.
@@ -13399,6 +13531,7 @@ class ConversationManager: ObservableObject {
         // Rendered pages of the replaced Mind's documents must not survive
         // into the restored one.
         RenderedPDFPageCache.shared.removeAll()
+        ModelImageCache.shared.removeAll()
         // Registry reload re-hydrates pins from the restored reminders.json
         // itself (ordering above matters: reminders restored first); the
         // publish afterwards keeps ReminderService as the ongoing source of

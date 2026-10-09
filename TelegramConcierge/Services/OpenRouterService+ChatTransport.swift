@@ -88,7 +88,12 @@ extension OpenRouterService {
                             bodyBytes: bodyBytes, attempts: attempt, upstream: failure.message))
                     }
                     print("[OpenRouterService] HTTP \(failure.statusCode) error. Raw response: \(failure.message)")
-                    throw OpenRouterError.apiError("HTTP \(failure.statusCode): \(failure.message)")
+                    // Only a recognised invalid-image 400 on an image-carrying
+                    // request changes type (same description); everything
+                    // else is thrown exactly as before.
+                    throw ProviderImageRejection.classify(status: failure.statusCode, rawBody: data,
+                        requestBody: request.httpBody,
+                        underlying: OpenRouterError.apiError("HTTP \(failure.statusCode): \(failure.message)"))
                 }
 
                 if attempt > 1 {
@@ -106,6 +111,8 @@ extension OpenRouterService {
                 // them.
                 throw CancellationError()
             } catch let error as OpenRouterError {
+                throw error
+            } catch let error as ProviderImageRejection.Rejected {
                 throw error
             } catch {
                 lastError = error

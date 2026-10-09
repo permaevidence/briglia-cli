@@ -60,7 +60,7 @@ extension OpenRouterService {
                         reasoningDetails: interaction.assistantMessage.reasoningDetails,
                         producedByModel: interaction.assistantMessage.producedByModel
                     ))
-                    var currentInteractionReferences: [FileAttachmentReference] = []
+                    var rehydrated = ToolMedia()
                     for result in interaction.results {
                         // Single provider boundary for tool text: re-neutralize
                         // ordinary content, render typed annotations
@@ -70,26 +70,25 @@ extension OpenRouterService {
                             content: .text(try ProviderToolResultRenderer.wireText(for: result, chronology: &chronology)),
                             toolCallId: result.toolCallId
                         ))
-                        currentInteractionReferences.append(contentsOf: result.fileAttachmentReferences)
+                        // Rejection marks and the image classifier apply here
+                        // (OpenRouterService+ImageGuard); unmarked supported
+                        // images produce exactly the previous parts.
+                        rehydrated.merge(toolReferenceMedia(result, owner: message.id, log: conversation.imageLog,
+                            imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
+                            renderPDFAsImages: context.renderPDFAsImages))
                     }
 
-                    if !currentInteractionReferences.isEmpty {
-                        let rehydrated = rehydrateAttachmentReferences(
-                            currentInteractionReferences,
-                            imagesDirectory: imagesDirectory,
-                            documentsDirectory: documentsDirectory,
-                            renderPDFAsImages: context.renderPDFAsImages
-                        )
-
-                        if !rehydrated.contentParts.isEmpty || !rehydrated.missingFiles.isEmpty || !rehydrated.nonInlineFiles.isEmpty {
-                            var parts = rehydrated.contentParts
-                            parts.append(.text(toolAttachmentText(
-                                visibleFiles: rehydrated.visibleFiles,
-                                nonInlineFiles: rehydrated.nonInlineFiles,
-                                missingFiles: rehydrated.missingFiles
-                            )))
-                            apiMessages.append(OpenRouterAPIMessage(role: "user", content: .parts(parts)))
-                        }
+                    if !rehydrated.parts.isEmpty || !rehydrated.missing.isEmpty || !rehydrated.nonInline.isEmpty {
+                        var parts = rehydrated.parts
+                        parts.append(.text(toolAttachmentText(
+                            visibleFiles: rehydrated.visible,
+                            nonInlineFiles: rehydrated.nonInline,
+                            missingFiles: rehydrated.missing
+                        )))
+                        if let notes = rehydrated.notesPart { parts.append(notes) }
+                        apiMessages.append(OpenRouterAPIMessage(role: "user", content: .parts(parts)))
+                    } else if let notes = rehydrated.notesPart {
+                        apiMessages.append(OpenRouterAPIMessage(role: "user", content: .parts([notes])))
                     }
                 }
             } else if message.role == .assistant && !isToolRunLog && message.toolInteractions.isEmpty,
@@ -126,12 +125,12 @@ extension OpenRouterService {
                 // Referenced images (context from replied-to messages)
                 for refImageFileName in message.referencedImageFileNames {
                     let imageURL = imagesDirectory.appendingPathComponent(refImageFileName)
-                    if shouldInline, let imageData = try? Data(contentsOf: imageURL) {
-                        let base64String = imageData.base64EncodedString()
-                        let resolvedMime = FilesystemTools.mimeType(forPath: imageURL.path)
-                        let mimeType = resolvedMime.hasPrefix("image/") ? resolvedMime : "image/jpeg"
-                        let dataURL = "data:\(mimeType);base64,\(base64String)"
-                        contentParts.append(.image(ImageURL(url: dataURL)))
+                    let guarded = guardedUserImage(message: message, name: refImageFileName,
+                        data: shouldInline ? try? Data(contentsOf: imageURL) : nil, path: imageURL.path, log: conversation.imageLog)
+                    if let refusal = guarded.refusal {
+                        textHints.append(refusal)
+                    } else if let part = guarded.part {
+                        contentParts.append(part)
                         textHints.append("[Referenced image: \(imageURL.path)]")
                     } else {
                         let desc = await FileDescriptionService.shared.get(filename: refImageFileName)
@@ -150,12 +149,12 @@ extension OpenRouterService {
                 // Primary images
                 for imageFileName in message.imageFileNames {
                     let imageURL = imagesDirectory.appendingPathComponent(imageFileName)
-                    if shouldInline, let imageData = try? Data(contentsOf: imageURL) {
-                        let base64String = imageData.base64EncodedString()
-                        let resolvedMime = FilesystemTools.mimeType(forPath: imageURL.path)
-                        let mimeType = resolvedMime.hasPrefix("image/") ? resolvedMime : "image/jpeg"
-                        let dataURL = "data:\(mimeType);base64,\(base64String)"
-                        contentParts.append(.image(ImageURL(url: dataURL)))
+                    let guarded = guardedUserImage(message: message, name: imageFileName,
+                        data: shouldInline ? try? Data(contentsOf: imageURL) : nil, path: imageURL.path, log: conversation.imageLog)
+                    if let refusal = guarded.refusal {
+                        textHints.append(refusal)
+                    } else if let part = guarded.part {
+                        contentParts.append(part)
                         textHints.append("[Image: \(imageURL.path)]")
                     } else {
                         let desc = await FileDescriptionService.shared.get(filename: imageFileName)
@@ -273,6 +272,7 @@ extension OpenRouterService {
                 ))
 
                 var currentInteractionFiles: [FileAttachment] = []
+                var currentMedia = ToolMedia()
 
                 // Add tool results (text only - files will be added separately)
                 for result in interaction.results {
@@ -280,6 +280,8 @@ extension OpenRouterService {
                     if !result.fileAttachments.isEmpty {
                         print("[OpenRouterService] Collecting \(result.fileAttachments.count) file attachment(s) from tool result for user-role injection")
                         currentInteractionFiles.append(contentsOf: result.fileAttachments)
+                        currentMedia.merge(toolAttachmentMedia(result, owner: nil, log: conversation.imageLog,
+                                                               renderPDFAsImages: context.renderPDFAsImages))
                     }
 
                     // Tool result is always text-only. Same single provider
@@ -297,24 +299,14 @@ extension OpenRouterService {
                 // This ensures chronological order and prevents cache-busting from re-appending the same attachments at the end of every turn
                 if !currentInteractionFiles.isEmpty {
                     print("[OpenRouterService] Injecting \(currentInteractionFiles.count) file attachment(s) as user-role multimodal message")
-                    var contentParts: [ContentPart] = []
-
-                    // Build descriptive text about the files
-                    var visibleFiles: [String] = []
-                    var nonInlineFiles: [String] = []
-                    for attachment in currentInteractionFiles {
-                        appendInlineAttachment(
-                            filename: attachment.filename,
-                            data: attachment.data,
-                            mimeType: attachment.mimeType,
-                            contentParts: &contentParts,
-                            visibleFiles: &visibleFiles,
-                            nonInlineFiles: &nonInlineFiles,
-                            renderPDFAsImages: context.renderPDFAsImages
-                        )
+                    // Rejection marks and the image classifier applied per
+                    // result above (OpenRouterService+ImageGuard); unmarked
+                    // supported files produce exactly the previous parts.
+                    var contentParts = currentMedia.parts
+                    if !currentMedia.visible.isEmpty || !currentMedia.nonInline.isEmpty {
+                        contentParts.append(.text(toolAttachmentText(visibleFiles: currentMedia.visible, nonInlineFiles: currentMedia.nonInline)))
                     }
-
-                    contentParts.append(.text(toolAttachmentText(visibleFiles: visibleFiles, nonInlineFiles: nonInlineFiles)))
+                    if let notes = currentMedia.notesPart { contentParts.append(notes) }
 
                     apiMessages.append(OpenRouterAPIMessage(
                         role: "user",

@@ -777,29 +777,52 @@ actor SubagentRunner {
                 // stop instruction goes in a tail system message instead.
                 try Task.checkCancellation()
                 let forceFinish = lastPromptTokens.map { $0 >= turnTokenBudget } ?? false
-                let response = try await openRouterService.generateResponse(
-                    messages: messagesForLLM,
-                    imagesDirectory: imagesDirectory,
-                    documentsDirectory: documentsDirectory,
-                    tools: filteredTools,
-                    toolResultMessages: toolInteractions.isEmpty ? nil : toolInteractions,
-                    calendarContext: nil,
-                    emailContext: nil,
-                    chunkSummaries: nil,
-                    totalChunkCount: 0,
-                    currentUserMessageId: syntheticUser.id,
-                    turnStartDate: turnStartDate,
-                    finalResponseInstruction: subagentType.systemPromptSuffix,
-                    promptStyle: subagentType.promptStyle,
-                    tailSystemMessage: withRunClock(forceFinish
-                        ? "[CONTEXT LIMIT] This turn has reached the maximum allowed context window and automatic history compaction is unavailable or exhausted. Do NOT call any more tools. Provide your final answer NOW — summarize everything you accomplished, what files were touched, what you discovered, and what remains to be done."
-                        : (needsEmergencyContinuationNote ? Self.emergencyContinuationNote : (webNudgePending ? Self.webZeroRetrievalNudge : nil))),
-                    modelOverride: effectiveModelOverride,
-                    providerOverride: effectiveProviderOverride,
-                    reasoningEffortOverride: effectiveReasoningOverride,
-                    textOnlyOverride: effectiveTextOnlyOverride,
-                    execution: runExecution, lane: .subagent(resolvedSessionId)
+                let roundTail = withRunClock(forceFinish
+                    ? "[CONTEXT LIMIT] This turn has reached the maximum allowed context window and automatic history compaction is unavailable or exhausted. Do NOT call any more tools. Provide your final answer NOW — summarize everything you accomplished, what files were touched, what you discovered, and what remains to be done."
+                    : (needsEmergencyContinuationNote ? Self.emergencyContinuationNote : (webNudgePending ? Self.webZeroRetrievalNudge : nil)))
+                // Image-rejection recovery (plan v2 §2.4): the same bounded
+                // driver as the main agent; marks are written to the stored
+                // session before the resend, tools are not re-run.
+                let recovered = try await ImageRejectionRecovery.run(
+                    send: { log in
+                        try await openRouterService.generateResponse(
+                            messages: messagesForLLM,
+                            imagesDirectory: imagesDirectory,
+                            documentsDirectory: documentsDirectory,
+                            tools: filteredTools,
+                            toolResultMessages: toolInteractions.isEmpty ? nil : toolInteractions,
+                            calendarContext: nil,
+                            emailContext: nil,
+                            chunkSummaries: nil,
+                            totalChunkCount: 0,
+                            currentUserMessageId: syntheticUser.id,
+                            turnStartDate: turnStartDate,
+                            finalResponseInstruction: subagentType.systemPromptSuffix,
+                            promptStyle: subagentType.promptStyle,
+                            tailSystemMessage: roundTail,
+                            modelOverride: effectiveModelOverride,
+                            providerOverride: effectiveProviderOverride,
+                            reasoningEffortOverride: effectiveReasoningOverride,
+                            textOnlyOverride: effectiveTextOnlyOverride,
+                            execution: runExecution, lane: .subagent(resolvedSessionId), imageLog: log
+                        )
+                    },
+                    newestUnit: { transmitted in
+                        ImageRejectionMarks.newestUnit(transmitted: transmitted, requestMessages: messagesForLLM, requestRounds: toolInteractions)
+                    },
+                    commit: { scope in
+                        try Task.checkCancellation()
+                        try checkStaleness()
+                        guard await registry.applyImageRejectionMarks(sessionId: resolvedSessionId, scope: scope) else { return false }
+                        _ = ImageRejectionMarks.apply(scope, to: &messagesForLLM)
+                        _ = ImageRejectionMarks.apply(scope, toCurrent: &toolInteractions)
+                        return true
+                    }
                 )
+                let response = recovered.response
+                if !recovered.excluded.isEmpty {
+                    print("[SubagentRunner] provider rejected image(s) \(recovered.excluded); replaced with notes and continued")
+                }
                 needsEmergencyContinuationNote = false
                 webNudgePending = false
                 markProgress()  // LLM responded — subagent is alive

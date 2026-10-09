@@ -291,7 +291,7 @@ enum UserContextMaintenance {
             default: return .transient
             }
         }
-        if case ResponsesFailure.http(let status, _) = error {
+        if case ResponsesFailure.http(let status, _) = ProviderImageRejection.unwrap(error) {
             return deterministicStatuses.contains(status) ? .deterministic : .transient
         }
         if error is SubscriptionError || error is ConfigurationError { return .deterministic }

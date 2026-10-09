@@ -200,6 +200,9 @@ struct FileAttachment {
     let filename: String
     let sourcePath: String?
     let pageRange: String?
+    /// In-memory rejection mark (ImageRejectionMarks): this attachment was
+    /// excluded during image-rejection recovery and is serialized as a note.
+    var providerRejected = false
 
     init(data: Data, mimeType: String, filename: String, sourcePath: String? = nil, pageRange: String? = nil) {
         self.data = data
@@ -223,10 +226,18 @@ struct FileAttachmentReference: Codable {
     let imageWidth: Int?
     let imageHeight: Int?
     let pdfPageCount: Int?
+    /// Persisted rejection mark (ImageRejectionMarks): excluded during
+    /// image-rejection recovery, so every later request (and every restart)
+    /// sends a note instead of the attachment. Additive optional field,
+    /// omitted when nil (every unmarked reference encodes byte-identically),
+    /// decoded leniently (a malformed value is absent, never a load failure).
+    /// For a PDF it excludes the whole attachment, all pages.
+    var providerRejected: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case filename, mimeType, snapshotPath, sourcePath, pageRange
         case byteSize, imageWidth, imageHeight, pdfPageCount
+        case providerRejected
     }
 
     init(
@@ -262,6 +273,7 @@ struct FileAttachmentReference: Codable {
         imageWidth = try c.decodeIfPresent(Int.self, forKey: .imageWidth)
         imageHeight = try c.decodeIfPresent(Int.self, forKey: .imageHeight)
         pdfPageCount = try c.decodeIfPresent(Int.self, forKey: .pdfPageCount)
+        providerRejected = (try? c.decodeIfPresent(Bool.self, forKey: .providerRejected)) ?? nil
     }
 
     func resolvedURL(imagesDirectory: URL, documentsDirectory: URL) -> URL? {

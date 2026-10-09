@@ -37,7 +37,7 @@ extension OpenRouterService {
             print("[Responses] Native replay cache bound: older complete rounds use canonical semantic replay")
         }
 
-        func appendRound(_ interaction: ToolInteraction, identity: String) async throws {
+        func appendRound(_ interaction: ToolInteraction, identity: String, owner: UUID?) async throws {
             let assistant = interaction.assistantMessage
             let calls = assistant.toolCalls
             guard Set(calls.map(\.id)).count == calls.count,
@@ -83,24 +83,29 @@ extension OpenRouterService {
                 // Render succeeded from typed state. Never infer receipt membership
                 // by looking for marker-like text in tool/media/model content.
                 for annotation in result.harnessAnnotations { nonces.insert(annotation.deliveryNonce) }
+                // In-memory bytes are preferred over persisted references, so
+                // both branches consult the rejection marks and the image
+                // classifier (OpenRouterService+ImageGuard); unmarked
+                // supported attachments produce exactly the previous parts.
                 var parts: [ContentPart] = []
                 if !result.fileAttachments.isEmpty {
-                    var visible: [String] = [], nonInline: [String] = []
-                    for attachment in result.fileAttachments {
-                        appendInlineAttachment(filename: attachment.filename, data: attachment.data,
-                            mimeType: attachment.mimeType, contentParts: &parts, visibleFiles: &visible,
-                            nonInlineFiles: &nonInline, renderPDFAsImages: true)
+                    let media = toolAttachmentMedia(result, owner: owner, log: conversation.imageLog, renderPDFAsImages: true)
+                    parts = media.parts
+                    if !media.visible.isEmpty || !media.nonInline.isEmpty {
+                        parts.append(.text(toolAttachmentText(visibleFiles: media.visible, nonInlineFiles: media.nonInline)))
                     }
-                    if !visible.isEmpty || !nonInline.isEmpty {
-                        parts.append(.text(toolAttachmentText(visibleFiles: visible, nonInlineFiles: nonInline)))
-                    }
+                    if let notes = media.notesPart { parts.append(notes) }
                 } else if !result.fileAttachmentReferences.isEmpty {
-                    let restored = rehydrateAttachmentReferences(result.fileAttachmentReferences,
+                    let restored = toolReferenceMedia(result, owner: owner, log: conversation.imageLog,
                         imagesDirectory: conversation.imagesDirectory, documentsDirectory: conversation.documentsDirectory,
                         renderPDFAsImages: true)
-                    parts = restored.contentParts
-                    parts.append(.text(toolAttachmentText(visibleFiles: restored.visibleFiles,
-                        nonInlineFiles: restored.nonInlineFiles, missingFiles: restored.missingFiles)))
+                    parts = restored.parts
+                    if !restored.parts.isEmpty || !restored.visible.isEmpty || !restored.nonInline.isEmpty
+                        || !restored.missing.isEmpty || restored.notes.isEmpty {
+                        parts.append(.text(toolAttachmentText(visibleFiles: restored.visible,
+                            nonInlineFiles: restored.nonInline, missingFiles: restored.missing)))
+                    }
+                    if let notes = restored.notesPart { parts.append(notes) }
                 }
                 let media = try await responsesMedia(parts, textOnly: context.textOnly)
                 var output: [JSONValue] = [.object(["type": .string("input_text"), "text": .string(text)])]
@@ -121,7 +126,7 @@ extension OpenRouterService {
                     input.append(ResponsesAdapter.message(role: "assistant", text: summary.promptText))
                 }
                 for (index, interaction) in message.toolInteractions.enumerated() {
-                    try await appendRound(interaction, identity: "\(message.id):\(index)")
+                    try await appendRound(interaction, identity: "\(message.id):\(index)", owner: message.id)
                 }
                 if message.toolInteractions.isEmpty, let log = message.compactToolLog, !log.isEmpty {
                     input.append(ResponsesAdapter.message(role: "assistant", text: MarkerNeutralizer.escape(log)))
@@ -151,13 +156,16 @@ extension OpenRouterService {
                 var media: [ContentPart] = [], hints: [String] = []
                 for name in message.imageFileNames + message.referencedImageFileNames {
                     let url = conversation.imagesDirectory.appendingPathComponent(name)
+                    var data: Data? = nil
                     if !message.mediaPruned,
                        let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                       size <= ResponsesLimits.recordBytes, let data = try? Data(contentsOf: url) {
-                        let mime = FilesystemTools.mimeType(forPath: url.path)
-                        media.append(.image(.init(url: "data:\(mime.hasPrefix("image/") ? mime : "image/jpeg");base64,\(data.base64EncodedString())")))
-                    }
-                    hints.append("[Image: \(url.path) — use read_file if not visible]")
+                       size <= ResponsesLimits.recordBytes { data = try? Data(contentsOf: url) }
+                    // Rejection marks and the image classifier
+                    // (OpenRouterService+ImageGuard); a valid image is sent
+                    // with exactly the previous bytes.
+                    let guarded = guardedUserImage(message: message, name: name, data: data, path: url.path, log: conversation.imageLog)
+                    if let part = guarded.part { media.append(part) }
+                    hints.append(guarded.refusal ?? "[Image: \(url.path) — use read_file if not visible]")
                 }
                 for name in message.documentFileNames + message.referencedDocumentFileNames {
                     hints.append(await documentPathHint(url: conversation.documentsDirectory.appendingPathComponent(name),
@@ -179,7 +187,7 @@ extension OpenRouterService {
             }
         }
         for (index, interaction) in (conversation.toolResultMessages ?? []).enumerated() {
-            try await appendRound(interaction, identity: "current:\(index)")
+            try await appendRound(interaction, identity: "current:\(index)", owner: nil)
         }
         guard replayBytes <= ResponsesLimits.replayBytes else { throw ResponsesFailure.overflow }
         if let tail = conversation.tailSystemMessage, !tail.isEmpty {

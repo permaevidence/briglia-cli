@@ -2484,9 +2484,17 @@ actor ToolExecutor {
         let maxAttached = 5
         var attachments: [FileAttachment] = []
         var savedNames: [String] = []
+        var refused: [String] = []
         for (idx, image) in result.images.prefix(maxAttached).enumerated() {
-            var data = image.data
-            var mime = image.mimeType
+            // Same classifier as read_file: only provider-accepted images are
+            // attached (converted when needed); a refused one becomes a note.
+            let outcome = ModelImage.classifyCached(data: image.data, declaredMime: image.mimeType)
+            guard let attachable = outcome.attachable else {
+                refused.append("[image \(idx + 1) not attached: \(outcome.refusalReason ?? "not a usable image")]")
+                continue
+            }
+            var data = attachable.data
+            var mime = attachable.mime
             if let downscaled = FilesystemTools.downscaledForModelBudget(data) {
                 data = downscaled.data
                 mime = downscaled.mimeType
@@ -2506,7 +2514,9 @@ actor ToolExecutor {
             savedNames.append(fileName)
         }
 
-        var note = "[\(attachments.count) image(s) attached as \(savedNames.joined(separator: ", ")) — visible on the next turn as a user-role multimodal message]"
+        var note = attachments.isEmpty ? ""
+            : "[\(attachments.count) image(s) attached as \(savedNames.joined(separator: ", ")) — visible on the next turn as a user-role multimodal message]"
+        if !refused.isEmpty { note += (note.isEmpty ? "" : " ") + refused.joined(separator: " ") }
         if result.images.count > maxAttached {
             note += " [\(result.images.count - maxAttached) additional image(s) not attached to limit context size]"
         }
@@ -3391,8 +3401,13 @@ extension ToolExecutor {
             // state that outlives the tool call (MIDTURN_EARLY_WAKE_PLAN_V2 D5).
             let isEdit = sourceImageData != nil
             
-            // Create file attachment for multimodal injection (LLM can see the generated image)
-            let attachment = FileAttachment(data: imageData, mimeType: mimeType, filename: fileName, sourcePath: documentsURL.path)
+            // Create file attachment for multimodal injection (LLM can see the generated image).
+            // Same classifier as read_file: the saved file keeps the provider's
+            // bytes; the model sees them only in a format providers accept.
+            let imageOutcome = ModelImage.classifyCached(data: imageData, declaredMime: mimeType)
+            let attachment = imageOutcome.attachable.map {
+                FileAttachment(data: $0.data, mimeType: $0.mime, filename: fileName, sourcePath: documentsURL.path)
+            }
             print("[ToolExecutor] Created FileAttachment for generated image: \(fileName) (\(mimeType), \(imageData.count) bytes)")
             
             // Result text (image will be injected as multimodal content)
@@ -3404,6 +3419,7 @@ extension ToolExecutor {
                                                       canSendToChat: allowsUserVisibleToolOutputs)
             ]
             if let savedPath { object["path"] = savedPath }
+            if attachment == nil { object["image_not_shown"] = imageOutcome.refusalReason ?? "not a usable image" }
             object.merge(imageMetadata) { _, new in new }
             let result = jsonObjectString(object)
 
@@ -3748,7 +3764,10 @@ extension ToolExecutor {
                 let imagePath = imagesDirectory.appendingPathComponent(savedFilename)
                 try? PrivateStorage.writeAtomically(data, to: savedPath)
                 try? PrivateStorage.writeAtomically(data, to: imagePath)
-                return FileAttachment(data: data, mimeType: mimeType, filename: savedFilename, sourcePath: savedPath.path)
+                // The saved file keeps the shortcut's bytes; the model sees
+                // them only in a provider-accepted format (ModelImage).
+                guard let attachable = ModelImage.classifyCached(data: data, declaredMime: mimeType).attachable else { return nil }
+                return FileAttachment(data: attachable.data, mimeType: attachable.mime, filename: savedFilename, sourcePath: savedPath.path)
             }
         )
         return ToolResultMessage(toolCallId: call.id, content: built.content, fileAttachment: built.attachment)

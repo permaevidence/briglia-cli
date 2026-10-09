@@ -89,6 +89,25 @@ actor FilesystemTools {
                 let originalBytes = data.count
                 var finalMime = mime
                 var wasResized = false
+                var convertedFrom: String? = nil
+
+                // Only formats model providers accept are attached (CACHE_KEY_
+                // AND_IMAGE_REJECTION_PLAN v2 §2.3): supported bytes unchanged
+                // with their real MIME, other formats converted, anything else
+                // refused here with an honest reason instead of poisoning the
+                // conversation. The file on disk is never modified.
+                let outcome = ModelImage.classifyCached(data: data, declaredMime: mime)
+                switch outcome {
+                case .supported(_, let sniffed, _):
+                    finalMime = sniffed
+                case .converted(let converted, let convertedMime, let from):
+                    data = converted
+                    finalMime = convertedMime
+                    convertedFrom = from
+                case .malformed, .needsConversionUnavailable:
+                    return ReadResult(content: jsonString(["success": false, "error": ModelImage.refusalText(outcome, path: path),
+                                                           "format": outcome.formatLabel]), attachments: [])
+                }
 
                 if let downscaled = Self.downscaledForModelBudget(data) {
                     data = downscaled.data
@@ -105,6 +124,10 @@ actor FilesystemTools {
                     "size_bytes": data.count,
                     "message": "Image attached. It will be visible to you on the next turn as a user-role multimodal message."
                 ]
+                if let convertedFrom {
+                    summary["converted"] = "\(convertedFrom) → \(finalMime)"
+                    summary["original_size_bytes"] = originalBytes
+                }
                 if wasResized {
                     summary["resized"] = true
                     summary["original_size_bytes"] = originalBytes

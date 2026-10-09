@@ -477,6 +477,18 @@ def main():
     check("midturn-roundresult-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-quater-bis. Rejected/unsupported images: the image classifier
+    # (supported formats pass byte-identical without any toolchain, other
+    # formats are converted or refused with an honest reason), the provider
+    # invalid-image recogniser, and the bounded mark-persist-resend recovery
+    # (both protocols, restarts at each save boundary, compaction, stop
+    # races, subagents, Mind transfer). Re-executes itself in a private
+    # scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__image-rejection-selftest"], capture_output=True,
+                          text=True, timeout=900)
+    check("image-rejection-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     # 3c5-quinquies. /stop visibility: an honest reply when the stopped
     # request is still finishing (archive wait, hung helper), run-scoped
     # attribution, one ordered completion notice per stopped request (own
