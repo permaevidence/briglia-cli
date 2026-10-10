@@ -489,6 +489,16 @@ def main():
     check("image-rejection-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-quater-bis-bis. EXIF orientation: converted (HEIC/TIFF, …) and
+    # resized images come out upright and untagged for orientations 2–8
+    # (rotations and mirrors), absent/1 keep the v0.2.52 bytes exactly,
+    # conversion-then-resize rotates once, and a host without ImageMagick
+    # behaves as before. Private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__image-orientation-selftest"], capture_output=True,
+                          text=True, timeout=600)
+    check("image-orientation-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     # 3c5-quater-ter. Telegram audio files and video notes arrive as files
     # (never auto-transcribed; 20 MB Bot API limit), malformed fields and
     # unreadable kinds get a visible reply (deduplicated), and the voice-note

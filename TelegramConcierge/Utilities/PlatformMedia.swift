@@ -206,6 +206,39 @@ final class AdaPDF {
 /// existing "use the original data" fallbacks.
 enum PlatformImage {
 
+    /// Selftest seam: the orientation probe reports "unknown" (nil), so every
+    /// image takes the pre-0.2.53 path (as on a Linux host without ImageMagick).
+    nonisolated(unsafe) static var orientationProbeDisabledForTesting = false
+
+    /// Selftest seam (Linux): behave as if ImageMagick were not installed.
+    nonisolated(unsafe) static var simulateNoImageMagickForTesting = false
+
+    /// EXIF/TIFF orientation code for an ImageMagick `%[orientation]` name.
+    /// `Undefined`, `TopLeft` and anything unrecognised are 1 (upright).
+    static func orientationCode(forImageMagickName name: String) -> Int {
+        switch name.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "TopRight": return 2
+        case "BottomRight": return 3
+        case "BottomLeft": return 4
+        case "LeftTop": return 5
+        case "RightTop": return 6
+        case "RightBottom": return 7
+        case "LeftBottom": return 8
+        default: return 1
+        }
+    }
+
+    /// Display dimensions: the stored ones, swapped when the orientation tag
+    /// (5–8) turns the image a quarter turn. Resize targets use these so a
+    /// portrait photo stored landscape keeps its proportions.
+    static func orientedDimensions(data: Data) -> (width: Int, height: Int)? {
+        guard let stored = dimensions(data: data) else { return nil }
+        if let code = orientation(data: data), (5...8).contains(code) {
+            return (stored.height, stored.width)
+        }
+        return stored
+    }
+
     #if canImport(AppKit)
 
     static func dimensions(data: Data) -> (width: Int, height: Int)? {
@@ -216,9 +249,66 @@ enum PlatformImage {
         return (w, h)
     }
 
+    /// Orientation of the first frame (1…8): 1 when the tag is absent or out
+    /// of range, nil when ImageIO cannot read the image.
+    static func orientation(data: Data) -> Int? {
+        if orientationProbeDisabledForTesting { return nil }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0,
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return nil }
+        guard let code = (props[kCGImagePropertyOrientation] as? NSNumber)?.intValue,
+              (2...8).contains(code) else { return 1 }
+        return code
+    }
+
+    /// First frame with its orientation applied to the pixels (ImageIO
+    /// thumbnail with transform; long side at most `maxPixelSize`, the full
+    /// size when nil), re-encoded with no orientation property: the output
+    /// is upright and untagged, so it is never rotated a second time.
+    private static func orientedReencode(data: Data, maxPixelSize: Int?, exactSize: CGSize? = nil,
+                                         toJPEG: Bool, quality: Double) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0,
+              let stored = dimensions(data: data) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize ?? max(stored.width, stored.height),
+        ]
+        guard var image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        // resizeToJPEG promises exactly `targetSize`: the thumbnail keeps the
+        // aspect ratio, so redraw only when it is off (rounding).
+        if let exactSize {
+            let w = max(1, Int(exactSize.width)), h = max(1, Int(exactSize.height))
+            if image.width != w || image.height != h {
+                guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+                      let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                          space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+                ctx.interpolationQuality = .high
+                ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+                guard let exact = ctx.makeImage() else { return nil }
+                image = exact
+            }
+        }
+        let output = NSMutableData()
+        let type = (toJPEG ? "public.jpeg" : "public.png") as CFString
+        guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, type, 1, nil) else { return nil }
+        let properties: [CFString: Any] = toJPEG ? [kCGImageDestinationLossyCompressionQuality: quality] : [:]
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination), output.length > 0 else { return nil }
+        return output as Data
+    }
+
     /// Resize to exactly `targetSize` (matching NSImage draw-into-rect
-    /// semantics) and encode as JPEG at `quality` (0–1).
+    /// semantics) and encode as JPEG at `quality` (0–1). An image tagged
+    /// with orientation 2–8 is rotated/mirrored upright first (`targetSize`
+    /// is then in display orientation, see `orientedDimensions`).
     static func resizeToJPEG(data: Data, targetSize: CGSize, quality: Double) -> Data? {
+        if let code = orientation(data: data), code != 1 {
+            let longSide = Int(max(targetSize.width, targetSize.height).rounded())
+            return orientedReencode(data: data, maxPixelSize: max(1, longSide), exactSize: targetSize,
+                                    toJPEG: true, quality: quality)
+        }
         guard let image = NSImage(data: data) else { return nil }
         let newImage = NSImage(size: targetSize)
         newImage.lockFocus()
@@ -244,7 +334,12 @@ enum PlatformImage {
     /// First frame decoded with ImageIO and re-encoded as PNG (or JPEG at
     /// `quality`). Used to convert formats model providers refuse (BMP,
     /// TIFF, HEIC, ICO, animated GIF); nil when the decoder cannot read it.
+    /// Tagged with orientation 2–8: rotated/mirrored upright, untagged.
+    /// Absent/1: today's path, unchanged.
     static func convertFirstFrame(data: Data, toJPEG: Bool, quality: Double) -> Data? {
+        if let code = orientation(data: data), code != 1 {
+            return orientedReencode(data: data, maxPixelSize: nil, toJPEG: toJPEG, quality: quality)
+        }
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetCount(source) > 0,
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
@@ -263,6 +358,7 @@ enum PlatformImage {
     /// the Ubuntu default) ships `identify`/`convert`. Returns (binary,
     /// argument prefix) for the requested classic tool name.
     private static func magick(_ tool: String) -> (path: String, prefix: [String])? {
+        if simulateNoImageMagickForTesting { return nil }
         if let magick = PlatformBinary.find("magick") { return (magick, [tool]) }
         if let direct = PlatformBinary.find(tool) { return (direct, []) }
         return nil
@@ -282,6 +378,24 @@ enum PlatformImage {
         return (parts[0], parts[1])
     }
 
+    /// Orientation of the first frame (1…8) from `identify %[orientation]`:
+    /// 1 when undefined or unrecognised, nil without ImageMagick or when it
+    /// cannot read the image.
+    static func orientation(data: Data) -> Int? {
+        if orientationProbeDisabledForTesting { return nil }
+        guard let (bin, prefix) = magick("identify") else { return nil }
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ada-img-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        do { try data.write(to: tmp) } catch { return nil }
+        guard let output = PlatformBinary.run(bin, prefix + ["-format", "%[orientation]", tmp.path + "[0]"]),
+              let text = String(data: output, encoding: .utf8) else { return nil }
+        return orientationCode(forImageMagickName: text)
+    }
+
+    /// An image tagged with orientation 2–8 is rotated/mirrored upright
+    /// (`-auto-orient`, which also resets the tag) before resizing;
+    /// `targetSize` is then in display orientation (`orientedDimensions`).
     static func resizeToJPEG(data: Data, targetSize: CGSize, quality: Double) -> Data? {
         guard let (bin, prefix) = magick("convert") else { return nil }
         let dir = FileManager.default.temporaryDirectory
@@ -293,13 +407,15 @@ enum PlatformImage {
         do { try data.write(to: src) } catch { return nil }
         let geometry = "\(Int(targetSize.width))x\(Int(targetSize.height))!"
         let q = String(max(1, min(100, Int(quality * 100))))
-        guard PlatformBinary.run(bin, prefix + [src.path + "[0]", "-resize", geometry,
-                                                "-quality", q, dst.path]) != nil else { return nil }
+        var arguments = prefix + [src.path + "[0]"]
+        if let code = orientation(data: data), code != 1 { arguments.append("-auto-orient") }
+        guard PlatformBinary.run(bin, arguments + ["-resize", geometry,
+                                                   "-quality", q, dst.path]) != nil else { return nil }
         return try? Data(contentsOf: dst)
     }
 
-    /// First frame converted by ImageMagick to PNG (or JPEG at `quality`).
-    /// nil when ImageMagick is missing, lacks the format delegate, or fails:
+    /// First frame converted by ImageMagick to PNG (or JPEG at `quality`),
+    /// rotated/mirrored upright when tagged with orientation 2–8. nil when ImageMagick is missing, lacks the format delegate, or fails:
     /// callers report that as "conversion not available", never as corrupt.
     static func convertFirstFrame(data: Data, toJPEG: Bool, quality: Double) -> Data? {
         guard let (bin, prefix) = magick("convert") else { return nil }
@@ -311,6 +427,7 @@ enum PlatformImage {
         let dst = dir.appendingPathComponent(toJPEG ? "dst.jpg" : "dst.png")
         do { try data.write(to: src) } catch { return nil }
         var arguments = prefix + [src.path + "[0]"]
+        if let code = orientation(data: data), code != 1 { arguments.append("-auto-orient") }
         if toJPEG { arguments += ["-quality", String(max(1, min(100, Int(quality * 100))))] }
         guard PlatformBinary.run(bin, arguments + [dst.path]) != nil,
               let out = try? Data(contentsOf: dst), !out.isEmpty else { return nil }

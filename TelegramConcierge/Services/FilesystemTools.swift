@@ -846,8 +846,10 @@ actor FilesystemTools {
     /// Downscale an image to the model ingestion budget (imageMaxLongSide /
     /// imageMaxTokens), re-encoding as JPEG. Returns nil when the image is
     /// already within budget or can't be decoded (caller keeps the original).
+    /// Targets are in display orientation (an EXIF 5–8 portrait stored
+    /// landscape stays portrait); the budget check is symmetric in w/h.
     static func downscaledForModelBudget(_ data: Data) -> (data: Data, mimeType: String)? {
-        guard let dims = PlatformImage.dimensions(data: data) else { return nil }
+        guard let dims = PlatformImage.orientedDimensions(data: data) else { return nil }
         let (w, h) = dims
 
         let estimatedTokens = (w * h) / 750
