@@ -11,7 +11,8 @@ extension OpenRouterService {
         turnStartDate: Date?, finalResponseInstruction: String?,
         tailSystemMessage: String?, tailUserMessage: String?,
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]?,
-        promptStyle: SubagentPromptStyle = .messaging
+        promptStyle: SubagentPromptStyle = .messaging,
+        persona: PromptPersona? = nil
     ) -> PreparedConversation {
         // Add system message with date context (date-only for prompt cache stability)
         let dateFormatter = DateFormatter()
@@ -24,26 +25,27 @@ extension OpenRouterService {
         if promptStyle == .research {
             return PreparedConversation(
                 systemPrompt: researchSystemPrompt(currentDate: currentDate, timezone: timezone,
-                                                  finalResponseInstruction: finalResponseInstruction),
+                                                  finalResponseInstruction: finalResponseInstruction,
+                                                  assistantName: persona.map(\.assistantName)
+                                                      ?? KeychainHelper.load(key: KeychainHelper.assistantNameKey)),
                 messages: messages, imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
                 tools: tools, toolResultMessages: toolResultMessages,
                 tailSystemMessage: tailSystemMessage, tailUserMessage: tailUserMessage,
                 omitAmbientStatus: true)
         }
 
-        // Load persona settings
-        let assistantName = KeychainHelper.load(key: KeychainHelper.assistantNameKey)
-        let userName = KeychainHelper.load(key: KeychainHelper.userNameKey)
-        let structuredUserContext = KeychainHelper.load(key: KeychainHelper.structuredUserContextKey)
+        // Persona: the caller's per-turn / per-run snapshot, or (nil) the
+        // live stores exactly as before snapshots existed.
+        let persona = persona ?? .live()
 
         // Build persona intro (shared helper — explicit /setname name wins
         // over a stale name embedded in structured context).
         let personaIntro = Self.buildRuntimeIntro(
-            assistantName: assistantName,
-            userName: userName,
-            structuredUserContext: structuredUserContext,
+            assistantName: persona.assistantName,
+            userName: persona.userName,
+            structuredUserContext: persona.structuredUserContext,
             bareFallback: Self.bareIntroFallback,
-            previousName: IdentityMigration.priorPersonaName()
+            previousName: persona.previousName
         )
 
         let systemPrompt: String

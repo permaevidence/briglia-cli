@@ -530,6 +530,19 @@ def main():
     check("cache-prefix-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-quater-sexies. Persona snapshot: one persona (names + profile) per
+    # main turn and per subagent run. Mid-turn profile writes (background
+    # archive fact extraction, profile maintenance, a direct store write)
+    # reach neither the requests nor the local estimates of that turn —
+    # prune summaries, active-turn compaction and the forced final included
+    # — nor the subagent run's five request sites; the next turn or run
+    # adopts them. Inline archiving keeps same-turn visibility; the snapshot
+    # is never persisted. Private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__persona-snapshot-selftest"], capture_output=True,
+                          text=True, timeout=900)
+    check("persona-snapshot-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     # 3c5-quinquies. /stop visibility: an honest reply when the stopped
     # request is still finishing (archive wait, hung helper), run-scoped
     # attribution, one ordered completion notice per stopped request (own

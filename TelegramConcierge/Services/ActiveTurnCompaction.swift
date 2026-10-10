@@ -199,18 +199,30 @@ struct ActiveTurnBudget {
 }
 
 extension OpenRouterService {
+    /// Development seam (persona-snapshot selftest): observes the system
+    /// prompt every local estimate was built from. nil in production.
+    nonisolated(unsafe) static var estimateSystemPromptObserverForTesting: ((String) -> Void)?
+
     /// Uses the actual prepared instructions and schemas. Media and opaque
     /// reasoning use conservative allowances; no network token-count request.
     func activeTurnRequestEstimate(messages: [Message], rounds: [ToolInteraction],
         images: URL, documents: URL, tools: [ToolDefinition], calendar: String?, email: String?,
         summaries: [ArchivedSummaryItem], totalChunks: Int, date: Date,
-        deferred: [(name: String, description: String, toolCount: Int)]) throws -> (tokens: Int, fixedTextTokens: Int, scope: String) {
+        deferred: [(name: String, description: String, toolCount: Int)],
+        persona: PromptPersona? = nil) throws -> (tokens: Int, fixedTextTokens: Int, scope: String) {
         let prepared = prepareConversation(messages: messages, imagesDirectory: images,
             documentsDirectory: documents, tools: tools, toolResultMessages: rounds,
             calendarContext: calendar, emailContext: email, chunkSummaries: summaries,
             totalChunkCount: totalChunks, turnStartDate: date, finalResponseInstruction: nil,
-            tailSystemMessage: nil, tailUserMessage: nil, deferredMCPSummaries: deferred)
-        let schemas = try JSONEncoder().encode(tools)
+            tailSystemMessage: nil, tailUserMessage: nil, deferredMCPSummaries: deferred,
+            persona: persona)
+        Self.estimateSystemPromptObserverForTesting?(prepared.systemPrompt)
+        // Sorted keys: tool definitions are rebuilt every round and their
+        // dictionaries iterate in a per-instance order, so unsorted bytes
+        // made the scope hash differ on every estimate (the measured prompt
+        // tokens were discarded each round). Same byte count as before.
+        let schemaEncoder = JSONEncoder(); schemaEncoder.outputFormatting = .sortedKeys
+        let schemas = try schemaEncoder.encode(tools)
         let fixed = ActiveTurnBudget.text(prepared.systemPrompt) + (schemas.count + 2) / 3 + 2048
         let scope = ResponsesReplayEnvelope.hash(Data(((activeModelIdentifier() ?? "") + prepared.systemPrompt).utf8) + schemas)
         // Only irreducible input may refuse a first request locally. Media,

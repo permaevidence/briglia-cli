@@ -14,8 +14,9 @@ extension OpenRouterService {
     /// per-call deliverable is NOT here (it would invalidate the cached
     /// prefix across resumes): the runner renders it into the task message.
     /// Constant for a session, so the prefix stays cacheable.
-    func researchSystemPrompt(currentDate: String, timezone: String, finalResponseInstruction: String?) -> String {
-        let identity = Self.researchIdentityLine(assistantName: KeychainHelper.load(key: KeychainHelper.assistantNameKey))
+    func researchSystemPrompt(currentDate: String, timezone: String, finalResponseInstruction: String?,
+                              assistantName: String?) -> String {
+        let identity = Self.researchIdentityLine(assistantName: assistantName)
 
         var prompt = """
         \(identity)

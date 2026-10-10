@@ -8310,6 +8310,16 @@ class ConversationManager: ObservableObject {
             }
         }
 
+        // Persona snapshot (one per turn): captured after the complete archive
+        // branch, so an inline archive's profile write is visible this turn,
+        // and before the initial prune. Every main-lane send and estimate of
+        // this run uses it — the prune summary, the tool loop, mid-loop
+        // pruning, active-turn compaction and the forced final — so a profile
+        // written mid-turn by background archive work changes neither the
+        // system prompt nor the active-turn scope until the next turn.
+        // Memory-only; a restarted turn captures a fresh one.
+        let turnPersona = PromptPersona.live()
+
         // Build the same tool schema that the next agent request would use so
         // the prune-summary request can reuse the intact pre-prune prompt prefix.
         await MCPAgentRouting.refreshFromRegistry()
@@ -8341,7 +8351,8 @@ class ConversationManager: ObservableObject {
             totalChunkCount: totalChunkCount,
             turnStartDate: prePruneSystemPromptDate,
             tools: initialToolsForRound,
-            deferredMCPSummaries: initialDeferredSummaries, execution: responsesExecution
+            deferredMCPSummaries: initialDeferredSummaries, execution: responsesExecution,
+            persona: turnPersona
         )
         if didPrune {
             CacheDiagnostics.noteTransition("prune", lane: .main)
@@ -8500,10 +8511,14 @@ class ConversationManager: ObservableObject {
             let estimate = try await openRouterService.activeTurnRequestEstimate(messages: projected, rounds: toolInteractions,
                 images: imagesDirectory, documents: documentsDirectory, tools: toolsForRound,
                 calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
-                totalChunks: totalChunkCount, date: systemPromptDate, deferred: deferredSummaries)
+                totalChunks: totalChunkCount, date: systemPromptDate, deferred: deferredSummaries,
+                persona: turnPersona)
             let scope = estimate.scope + ":" + String(activeTurnCheckpoints[salvageRunId ?? UUID()]?.generation ?? 0)
                 + ":" + String(messagesForLLM.count)
-            if let previousPromptScope, previousPromptScope != scope { prevRoundPromptTokens = nil; lastPromptTokens = nil }
+            if let previousPromptScope, previousPromptScope != scope {
+                Self.promptScopeResetForTesting?()
+                prevRoundPromptTokens = nil; lastPromptTokens = nil
+            }
             previousPromptScope = scope
             expectedPromptEstimate = estimate.tokens
             if lastPromptTokens == nil, toolInteractions.isEmpty,
@@ -8538,7 +8553,8 @@ class ConversationManager: ObservableObject {
                             currentUserMessageId: currentUserMessageId,
                             turnStartDate: systemPromptDate,
                             deferredMCPSummaries: deferredSummaries.isEmpty ? nil : deferredSummaries,
-                            execution: responsesExecution, lane: .main, imageLog: log
+                            execution: responsesExecution, lane: .main, imageLog: log,
+                            persona: turnPersona
                         )
                     },
                     newestUnit: { transmitted in
@@ -8918,7 +8934,8 @@ class ConversationManager: ObservableObject {
                     currentUserMessageId: currentUserMessageId,
                     turnStartDate: systemPromptDate,
                     tools: toolsForRound,
-                    deferredMCPSummaries: deferredSummaries, execution: responsesExecution
+                    deferredMCPSummaries: deferredSummaries, execution: responsesExecution,
+                    persona: turnPersona
                 )
                 if midLoopResult != .underBudget {
                     prevRoundPromptTokens = nil; lastPromptTokens = nil; previousPromptScope = nil
@@ -8940,7 +8957,7 @@ class ConversationManager: ObservableObject {
                     try await compactActiveTurn(runID: runID, history: messagesForLLM,
                         tools: toolsForRound, calendar: calendarContext, email: emailContext,
                         summaries: chunkSummaries, totalChunks: totalChunkCount, date: systemPromptDate,
-                        deferred: deferredSummaries, execution: responsesExecution)
+                        deferred: deferredSummaries, execution: responsesExecution, persona: turnPersona)
                     CacheDiagnostics.noteTransition("compaction", lane: .main)
                     let maintenanceSpend = max(0, (activeTurnCheckpoints[runID]?.maintenanceSpendUSD ?? 0) - priorMaintenanceSpend)
                     cumulativeToolSpendUSD += maintenanceSpend; todaySpentUSD += maintenanceSpend; monthSpentUSD += maintenanceSpend
@@ -9050,7 +9067,8 @@ class ConversationManager: ObservableObject {
                             turnStartDate: systemPromptDate,
                             tailSystemMessage: tail,
                             deferredMCPSummaries: lastDeferredSummaries.isEmpty ? nil : lastDeferredSummaries,
-                            execution: responsesExecution, lane: .main, imageLog: log
+                            execution: responsesExecution, lane: .main, imageLog: log,
+                            persona: turnPersona
                         )
                     },
                     newestUnit: { transmitted in
@@ -10144,7 +10162,8 @@ class ConversationManager: ObservableObject {
         currentUserMessageId: UUID?,
         turnStartDate: Date,
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)],
-        execution: ProviderExecutionContext? = nil
+        execution: ProviderExecutionContext? = nil,
+        persona: PromptPersona? = nil
     ) async -> String? {
         guard !plan.isEmpty || !compressedIndices.isEmpty else { return nil }
 
@@ -10159,7 +10178,7 @@ class ConversationManager: ObservableObject {
             }
             do {
                 return try await summarizeActivePrefix(affected.flatMap { sourceMessages[$0].toolInteractions }, previous: nil,
-                    execution: execution, date: turnStartDate, contextMessages: sourceMessages)
+                    execution: execution, date: turnStartDate, contextMessages: sourceMessages, persona: persona)
             } catch {
                 print("[ActiveCompaction] Oversized historical summary unavailable: \(error.localizedDescription)")
                 return fallbackPrunedContextSummary(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
@@ -10268,7 +10287,7 @@ class ConversationManager: ObservableObject {
                         turnStartDate: turnStartDate,
                         tailUserMessage: tail,
                         deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
-                        execution: summaryExecution, lane: .main
+                        execution: summaryExecution, lane: .main, persona: persona
                     )
                 } catch {
                     guard rejectThrownReply(error, "attempt \(attempt)") else { throw error }
@@ -10322,7 +10341,7 @@ class ConversationManager: ObservableObject {
                                 turnStartDate: turnStartDate,
                                 tailUserMessage: retryTail,
                                 deferredMCPSummaries: deferredMCPSummaries.isEmpty ? nil : deferredMCPSummaries,
-                                execution: summaryExecution, lane: .main
+                                execution: summaryExecution, lane: .main, persona: persona
                             )
                             recordPruneSummarySpend(spendUSD(from: retryResponse))
                             switch retryResponse {
@@ -10444,14 +10463,16 @@ class ConversationManager: ObservableObject {
         turnStartDate: Date,
         tools: [ToolDefinition],
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)],
-        execution: ProviderExecutionContext? = nil
+        execution: ProviderExecutionContext? = nil,
+        persona: PromptPersona? = nil
     ) async throws -> Bool {
         let maxTokens = configuredMaxContextTokens()
         let targetTokens = configuredTargetContextTokens()
         let mandatoryEstimate = try await openRouterService.activeTurnRequestEstimate(messages: [], rounds: [],
             images: imagesDirectory, documents: documentsDirectory, tools: tools,
             calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
-            totalChunks: totalChunkCount, date: turnStartDate, deferred: deferredMCPSummaries)
+            totalChunks: totalChunkCount, date: turnStartDate, deferred: deferredMCPSummaries,
+            persona: persona)
         let providerIsLMStudio = currentProviderIsLMStudio()
 
         // Use real prompt_tokens from API when available, fall back to estimation
@@ -10536,7 +10557,8 @@ class ConversationManager: ObservableObject {
             totalChunkCount: totalChunkCount,
             currentUserMessageId: currentUserMessageId,
             turnStartDate: turnStartDate,
-            deferredMCPSummaries: deferredMCPSummaries, execution: execution
+            deferredMCPSummaries: deferredMCPSummaries, execution: execution,
+            persona: persona
         )
             }
         return !plan.actions.isEmpty || !compressedIndices.isEmpty
@@ -10568,14 +10590,16 @@ class ConversationManager: ObservableObject {
         turnStartDate: Date,
         tools: [ToolDefinition],
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)],
-        execution: ProviderExecutionContext? = nil
+        execution: ProviderExecutionContext? = nil,
+        persona: PromptPersona? = nil
     ) async throws -> MidLoopPruneResult {
         let maxTokens = configuredMaxContextTokens()
         let targetTokens = configuredTargetContextTokens()
         let mandatoryEstimate = try await openRouterService.activeTurnRequestEstimate(messages: [], rounds: [],
             images: imagesDirectory, documents: documentsDirectory, tools: tools,
             calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
-            totalChunks: totalChunkCount, date: turnStartDate, deferred: deferredMCPSummaries)
+            totalChunks: totalChunkCount, date: turnStartDate, deferred: deferredMCPSummaries,
+            persona: persona)
         let providerIsLMStudio = currentProviderIsLMStudio()
 
         // Use real prompt_tokens when available, fall back to estimation
@@ -10654,7 +10678,8 @@ class ConversationManager: ObservableObject {
             totalChunkCount: totalChunkCount,
             currentUserMessageId: currentUserMessageId,
             turnStartDate: turnStartDate,
-            deferredMCPSummaries: deferredMCPSummaries, execution: execution
+            deferredMCPSummaries: deferredMCPSummaries, execution: execution,
+            persona: persona
         )
             }
         totalTokens -= plan.savedTokens
@@ -14641,12 +14666,13 @@ extension ConversationManager {
 
     private func activeEstimate(_ checkpoint: TurnCheckpoint, history: [Message], tools: [ToolDefinition],
         calendar: String?, email: String?, summaries: [ArchivedSummaryItem], totalChunks: Int,
-        date: Date, deferred: [(name: String, description: String, toolCount: Int)]) async throws -> Int {
+        date: Date, deferred: [(name: String, description: String, toolCount: Int)],
+        persona: PromptPersona?) async throws -> Int {
         let projection = try checkpoint.projectedHistory(history, canonical: messages)
         let estimate = try await openRouterService.activeTurnRequestEstimate(messages: projection,
             rounds: checkpoint.retainedInteractions, images: imagesDirectory, documents: documentsDirectory,
             tools: tools, calendar: calendar, email: email, summaries: summaries,
-            totalChunks: totalChunks, date: date, deferred: deferred)
+            totalChunks: totalChunks, date: date, deferred: deferred, persona: persona)
         latestEstimateScope = estimate.scope
         return Int(ceil(Double(estimate.tokens) * (promptEstimateCorrections[estimate.scope] ?? 1)))
     }
@@ -14672,7 +14698,7 @@ extension ConversationManager {
     private func compactActiveTurn(runID: UUID, history: [Message], tools: [ToolDefinition],
         calendar: String?, email: String?, summaries: [ArchivedSummaryItem], totalChunks: Int,
         date: Date, deferred: [(name: String, description: String, toolCount: Int)],
-        execution: ProviderExecutionContext?) async throws {
+        execution: ProviderExecutionContext?, persona: PromptPersona?) async throws {
         guard let original = activeTurnCheckpoints[runID], activeRunId == runID else {
             throw PruneArchiveStore.Failure("Compaction owner unavailable")
         }
@@ -14689,7 +14715,7 @@ extension ConversationManager {
         defer { endMaintenance(activity) }
         let budget = ActiveTurnBudget(maximum: configuredMaxContextTokens())
         let before = try await activeEstimate(original, history: history, tools: tools, calendar: calendar,
-            email: email, summaries: summaries, totalChunks: totalChunks, date: date, deferred: deferred)
+            email: email, summaries: summaries, totalChunks: totalChunks, date: date, deferred: deferred, persona: persona)
         try Task.checkCancellation()
         guard activeRunId == runID else { throw CancellationError() }
         let fixed = before - original.retainedInteractions.reduce(0) { $0 + ActiveTurnBudget.round($1) } + ActiveTurnBudget.summaryAllowance
@@ -14733,7 +14759,7 @@ extension ConversationManager {
         activeTurnCheckpoints[runID] = pending
         let contextIDs = Set([original.taskMessageID] + original.deliveredUserMessageIDs)
         let summary = try await summarizeActivePrefix(prefix, previous: original.activeTurnCompaction?.summaryText,
-            execution: execution, date: date, contextMessages: messages.filter { contextIDs.contains($0.id) })
+            execution: execution, date: date, contextMessages: messages.filter { contextIDs.contains($0.id) }, persona: persona)
         try Task.checkCancellation()
         guard activeRunId == runID,
               activeTurnCheckpoints[runID]?.generation == original.generation,
@@ -14748,7 +14774,7 @@ extension ConversationManager {
         candidate.generation += 1; candidate.pendingRecovery = false
         candidate.overflowReference = nil; candidate.overflowLog = nil
         let after = try await activeEstimate(candidate, history: history, tools: tools, calendar: calendar,
-            email: email, summaries: summaries, totalChunks: totalChunks, date: date, deferred: deferred)
+            email: email, summaries: summaries, totalChunks: totalChunks, date: date, deferred: deferred, persona: persona)
         // Same yardstick as the trigger: the configured budget. The 90% input
         // ceiling steers selection only. Refusing a shrunken context that the
         // pessimistic estimator still placed above the ceiling ended real turns
@@ -14789,7 +14815,8 @@ extension ConversationManager {
     /// Always bounded, including apparently small prefixes. Long single tool
     /// outputs are covered in consecutive fragments; no head/tail omission.
     private func summarizeActivePrefix(_ rounds: [ToolInteraction], previous: String?,
-        execution: ProviderExecutionContext?, date: Date, contextMessages: [Message] = []) async throws -> String {
+        execution: ProviderExecutionContext?, date: Date, contextMessages: [Message] = [],
+        persona: PromptPersona? = nil) async throws -> String {
         let selected: ProviderExecutionContext
         if let execution { selected = execution }
         else { selected = await openRouterService.executionContext(modelOverride: nil, providerOverride: nil,
@@ -14821,7 +14848,7 @@ extension ConversationManager {
                 let maintenanceMessages = [Message(role: .assistant, content: body)]
                 let estimate = try await openRouterService.activeTurnRequestEstimate(messages: maintenanceMessages, rounds: [],
                     images: imagesDirectory, documents: documentsDirectory, tools: [], calendar: nil, email: nil,
-                    summaries: [], totalChunks: 0, date: date, deferred: [])
+                    summaries: [], totalChunks: 0, date: date, deferred: [], persona: persona)
                 guard estimate.tokens + ActiveTurnBudget.text(instruction) <= maintenanceInputCeiling else {
                     throw PruneArchiveStore.Failure("Compaction summary context exceeds the bounded maintenance input budget")
                 }
@@ -14840,7 +14867,7 @@ extension ConversationManager {
                         let response = try await openRouterService.generateResponse(
                             messages: maintenanceMessages, imagesDirectory: imagesDirectory,
                             documentsDirectory: documentsDirectory, tools: [], turnStartDate: date,
-                            tailSystemMessage: instruction, execution: maintenance, lane: .main)
+                            tailSystemMessage: instruction, execution: maintenance, lane: .main, persona: persona)
                         recordMaintenanceSpend(spendUSD(from: response))
                         switch CompactionSummaryPolicy.validate(response) {
                         case .success(let text): accepted = text
@@ -15236,6 +15263,10 @@ extension ConversationManager {
 // in private scratch roots). They call the production paths; none replaces
 // an implementation, a branch or a durability rule.
 extension ConversationManager {
+    /// Persona-snapshot selftest seam: fires when the tool loop's
+    /// active-turn scope changed between two rounds (measured prompt tokens
+    /// are then discarded). nil in production.
+    nonisolated(unsafe) static var promptScopeResetForTesting: (() -> Void)?
     func _testPrepareScriptedProvider(apiKey: String) async {
         frozenCalendarContext = ""
         frozenEmailContext = ""

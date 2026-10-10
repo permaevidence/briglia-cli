@@ -632,6 +632,13 @@ actor SubagentRunner {
         var compactionAttempts = CompactionAttempts()
         var needsEmergencyContinuationNote = false
 
+        // Persona snapshot (one per run): every request of this run — rounds,
+        // retries, forced final and both compaction summarizers, including the
+        // eager resume compaction below — uses it, so a profile or name write
+        // during the run reaches only the next run (a resume recaptures).
+        // Memory-only; never saved with the session.
+        let runPersona = PromptPersona.live()
+
         // Eager compaction on resume. Sessions normally stay under the budget
         let snapshot = await openRouterService.executionContext(modelOverride: effectiveModelOverride,
             providerOverride: effectiveProviderOverride, reasoningEffortOverride: effectiveReasoningOverride,
@@ -672,7 +679,8 @@ actor SubagentRunner {
                providerOverride: effectiveProviderOverride,
                reasoningEffortOverride: effectiveReasoningOverride,
                textOnlyOverride: effectiveTextOnlyOverride,
-           execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle
+           execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle,
+           persona: runPersona
 ) {
             messagesForLLM = compacted.messages
             priorToolInteractions = compacted.interactions
@@ -753,7 +761,8 @@ actor SubagentRunner {
                        providerOverride: effectiveProviderOverride,
                        reasoningEffortOverride: effectiveReasoningOverride,
                        textOnlyOverride: effectiveTextOnlyOverride,
-                   execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle
+                   execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle,
+           persona: runPersona
 ) {
                     let markersBefore = InjectedContextMarkers(messages: messagesForLLM, interactions: toolInteractions)
                     messagesForLLM = compacted.messages
@@ -806,7 +815,8 @@ actor SubagentRunner {
                             providerOverride: effectiveProviderOverride,
                             reasoningEffortOverride: effectiveReasoningOverride,
                             textOnlyOverride: effectiveTextOnlyOverride,
-                            execution: runExecution, lane: .subagent(resolvedSessionId), imageLog: log
+                            execution: runExecution, lane: .subagent(resolvedSessionId), imageLog: log,
+                            persona: runPersona
                         )
                     },
                     newestUnit: { transmitted in
@@ -888,7 +898,7 @@ actor SubagentRunner {
                                 providerOverride: effectiveProviderOverride,
                                 reasoningEffortOverride: effectiveReasoningOverride,
                                 textOnlyOverride: effectiveTextOnlyOverride,
-                                execution: runExecution, lane: .subagent(resolvedSessionId)
+                                execution: runExecution, lane: .subagent(resolvedSessionId), persona: runPersona
                             )
                             markProgress()
 
@@ -1006,7 +1016,8 @@ actor SubagentRunner {
                                    providerOverride: effectiveProviderOverride,
                                    reasoningEffortOverride: effectiveReasoningOverride,
                                    textOnlyOverride: effectiveTextOnlyOverride,
-                               execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle
+                               execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle,
+                               persona: runPersona
 ),
                                compacted.estimatedTokens < turnTokenBudget {
                                 let markersBefore = InjectedContextMarkers(messages: messagesForLLM, interactions: toolInteractions)
@@ -1049,7 +1060,8 @@ actor SubagentRunner {
                                        imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
                                        modelOverride: effectiveModelOverride, providerOverride: effectiveProviderOverride,
                                        reasoningEffortOverride: effectiveReasoningOverride, textOnlyOverride: effectiveTextOnlyOverride,
-                                       execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle),
+                                       execution: runExecution, lane: .subagent(resolvedSessionId), promptStyle: subagentType.promptStyle,
+                                       persona: runPersona),
                                    compacted.estimatedTokens + requestOverhead < turnTokenBudget {
                                     let markersBefore = InjectedContextMarkers(messages: messagesForLLM, interactions: toolInteractions)
                                     messagesForLLM = compacted.messages
@@ -1142,7 +1154,7 @@ actor SubagentRunner {
                         providerOverride: effectiveProviderOverride,
                         reasoningEffortOverride: effectiveReasoningOverride,
                         textOnlyOverride: effectiveTextOnlyOverride,
-                        execution: runExecution, lane: .subagent(resolvedSessionId)
+                        execution: runExecution, lane: .subagent(resolvedSessionId), persona: runPersona
                     )
                     markProgress()
 
@@ -1640,7 +1652,8 @@ actor SubagentRunner {
         textOnlyOverride: Bool?,
         execution: ProviderExecutionContext? = nil,
         lane: AffinityLane,
-        promptStyle: SubagentPromptStyle = .messaging
+        promptStyle: SubagentPromptStyle = .messaging,
+        persona: PromptPersona? = nil
     ) async -> CompactionOutcome? {
         let plan = Self.planCompaction(
             messages: messages,
@@ -1688,7 +1701,7 @@ actor SubagentRunner {
             providerOverride: providerOverride,
             reasoningEffortOverride: reasoningEffortOverride,
             textOnlyOverride: textOnlyOverride,
-            execution: execution, lane: lane, promptStyle: promptStyle
+            execution: execution, lane: lane, promptStyle: promptStyle, persona: persona
         ), !Task.isCancelled else { return nil }
 
         var keptMessages = plan.keptMessages
@@ -1821,7 +1834,8 @@ actor SubagentRunner {
         textOnlyOverride: Bool?,
         execution: ProviderExecutionContext? = nil,
         lane: AffinityLane,
-        promptStyle: SubagentPromptStyle = .messaging
+        promptStyle: SubagentPromptStyle = .messaging,
+        persona: PromptPersona? = nil
     ) async -> String? {
         let execution = execution?.forOperation(.subagentCompaction)
         defer { execution?.responsesTurn.close() }
@@ -1835,7 +1849,8 @@ actor SubagentRunner {
                 "=== RETAINED DIALOGUE (reference for interpreting the work; remains verbatim) ===\n" + reference + "\n" + transcript,
                 openRouterService: openRouterService, imagesDirectory: imagesDirectory, documentsDirectory: documentsDirectory,
                 modelOverride: modelOverride, providerOverride: providerOverride, reasoningEffortOverride: reasoningEffortOverride,
-                textOnlyOverride: textOnlyOverride, execution: execution, lane: lane, promptStyle: promptStyle)
+                textOnlyOverride: textOnlyOverride, execution: execution, lane: lane, promptStyle: promptStyle,
+                persona: persona)
         }
 
         let summaryPrompt = """
@@ -1891,7 +1906,7 @@ actor SubagentRunner {
                     providerOverride: providerOverride,
                     reasoningEffortOverride: reasoningEffortOverride,
                     textOnlyOverride: textOnlyOverride,
-                    execution: execution, lane: lane
+                    execution: execution, lane: lane, persona: persona
                 )
 
                 switch response {
@@ -1952,7 +1967,8 @@ actor SubagentRunner {
         imagesDirectory: URL, documentsDirectory: URL,
         modelOverride: String?, providerOverride: [String]?, reasoningEffortOverride: String?,
         textOnlyOverride: Bool?, execution: ProviderExecutionContext?, lane: AffinityLane,
-        promptStyle: SubagentPromptStyle = .messaging
+        promptStyle: SubagentPromptStyle = .messaging,
+        persona: PromptPersona? = nil
     ) async -> String? {
         guard let fragments = Self.oversizedTranscriptFragments(transcript) else { return nil }
         var summary = ""
@@ -1998,7 +2014,7 @@ actor SubagentRunner {
                     tools: [], promptStyle: promptStyle,
                     modelOverride: modelOverride, providerOverride: providerOverride,
                     reasoningEffortOverride: reasoningEffortOverride, textOnlyOverride: textOnlyOverride,
-                    execution: execution, lane: lane)
+                    execution: execution, lane: lane, persona: persona)
                 guard case .text(let content, _, _, _, _, _, _, _) = response,
                       !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       content.utf8.count <= Self.oversizedSummaryBytes else { return nil }

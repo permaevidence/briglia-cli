@@ -1443,7 +1443,8 @@ actor OpenRouterService {
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)]? = nil,
         execution: ProviderExecutionContext? = nil,
         lane: AffinityLane,
-        imageLog: TransmittedImageLog? = nil
+        imageLog: TransmittedImageLog? = nil,
+        persona: PromptPersona? = nil
     ) async throws -> LLMResponse {
         guard execution != nil || isCustomEndpoint || !apiKey.isEmpty else {
             throw OpenRouterError.notConfigured
@@ -1466,7 +1467,8 @@ actor OpenRouterService {
             totalChunkCount: totalChunkCount, turnStartDate: turnStartDate,
             finalResponseInstruction: finalResponseInstruction,
             tailSystemMessage: tailSystemMessage, tailUserMessage: tailUserMessage,
-            deferredMCPSummaries: deferredMCPSummaries, promptStyle: promptStyle
+            deferredMCPSummaries: deferredMCPSummaries, promptStyle: promptStyle,
+            persona: persona
         )
         conversation.imageLog = imageLog
         if context.wireProtocol == .responses { return try await generateResponses(conversation, context: context) }
