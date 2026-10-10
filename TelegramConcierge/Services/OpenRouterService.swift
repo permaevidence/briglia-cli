@@ -1842,11 +1842,9 @@ actor OpenRouterService {
         }
 
         // --- Ambient status ---
-        if let bashLive = await BackgroundProcessRegistry.shared.liveSummaryText() {
-            out += "\n=== AMBIENT STATUS ===\n\(bashLive)\n"
-        }
-        if let subagentLive = await SubagentBackgroundRegistry.shared.liveSummary() {
-            out += (out.contains("AMBIENT STATUS") ? "" : "\n=== AMBIENT STATUS ===\n") + "\(subagentLive)\n"
+        // The same rendered text the next request would carry (display only).
+        if let ambient = await AmbientStatus.currentText(omit: false) {
+            out += "\n=== AMBIENT STATUS ===\n\(ambient)\n"
         }
 
         // --- Token estimate ---

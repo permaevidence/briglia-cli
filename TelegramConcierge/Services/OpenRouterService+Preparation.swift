@@ -97,9 +97,10 @@ extension OpenRouterService {
             }
 
             // Background bash/subagent live status is NOT injected here — durations
-            // like "running 12s" drift every turn and invalidate the prompt-cache
-            // suffix. Instead it's appended as a trailing user-role note after the
-            // Anthropic cache breakpoint, where drift has no caching cost.
+            // like "running 12s" drift every request. It is the last request item
+            // instead (AmbientStatus), after the Anthropic cache breakpoint, as a
+            // system item on OpenAI-family routes (a replaced trailing user item
+            // froze OpenAI's prompt cache) and a user item elsewhere.
 
             // When subagents are disabled (fully-local mode), the Agent-tool
             // bullet is omitted so the model isn't told to call a tool it

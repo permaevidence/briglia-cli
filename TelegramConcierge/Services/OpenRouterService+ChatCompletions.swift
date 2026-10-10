@@ -340,21 +340,17 @@ extension OpenRouterService {
             ))
         }
 
-        // Ambient status tail — background bash + subagents currently running.
-        // Appended AFTER the Anthropic cache breakpoint (placed above), so per-turn
-        // drift in "running 12s / 35s / 1m 02s" does not invalidate any cached prefix.
-        // Omitted entirely when nothing is running to avoid noise.
-        var ambientLines: [String] = []
-        if !conversation.omitAmbientStatus, let bashLive = await BackgroundProcessRegistry.shared.liveSummaryText() {
-            ambientLines.append(bashLive)
-        }
-        if !conversation.omitAmbientStatus, let subagentLive = await SubagentBackgroundRegistry.shared.liveSummary() {
-            ambientLines.append(subagentLive)
-        }
-        if !ambientLines.isEmpty {
-            let ambientText = MarkerNeutralizer.escape("[Ambient status — not a user message]\n" + ambientLines.joined(separator: "\n"))
+        // Ambient status tail — background bash + subagents currently running,
+        // last message, never persisted, omitted when nothing runs. Its role
+        // follows the route (AmbientStatus.role): system on OpenAI-family
+        // routes (api.openai.com, OpenRouter openai/*), where a trailing user
+        // message replaced on the next request froze OpenAI's prompt cache;
+        // user everywhere else (BRIGLIA_0253_PLAN v3 §3.3). It stays after the
+        // Anthropic cache breakpoint placed above.
+        let ambientText = await AmbientStatus.wireText(omit: conversation.omitAmbientStatus)
+        if let ambientText {
             apiMessages.append(OpenRouterAPIMessage(
-                role: "user",
+                role: AmbientStatus.role(for: context),
                 content: .text(ambientText)
             ))
         }
@@ -374,7 +370,8 @@ extension OpenRouterService {
         // Cache diagnosis (off by default): reads the final body, never changes it.
         CacheDiagnostics.observe(context: context, protocolName: "chat", body: request.httpBody,
             tailCount: (tailSystemMessage?.isEmpty == false ? 1 : 0) + (tailUserMessage?.isEmpty == false ? 1 : 0)
-                + (ambientLines.isEmpty ? 0 : 1))
+                + (ambientText == nil ? 0 : 1))
+        try WireInterceptForTesting.check("chat", request.httpBody)
         print("[OpenRouterService] Sending request to \(context.providerLabel) (\(context.model)) with \(apiMessages.count) messages")
         let (data, _) = try await sendChatRequestWithRetry(
             request, providerLabel: context.providerLabel, model: context.model

@@ -2005,48 +2005,12 @@ actor BackgroundProcessRegistry {
             }
     }
 
-    /// Compact summary of running processes, used by the system prompt.
-    func liveSummary() -> [(id: String, command: String, description: String?, runningFor: Int)] {
+    /// Running main-owner background jobs for the `[Ambient status]` request
+    /// tail (rendered by `AmbientStatus`, which orders, caps and quotes).
+    func ambientRows() -> [AmbientStatus.BashRow] {
         entries.values
             .filter { $0.status == .running && $0.kind == .background && $0.owner == Self.mainOwner }
-            .sorted { $0.startedAt < $1.startedAt }
-            .map { e in
-                (id: e.id,
-                 command: e.command,
-                 description: e.description,
-                 runningFor: Int(Date().timeIntervalSince(e.startedAt)))
-            }
-    }
-
-    /// Pre-formatted multi-line string summary suitable for direct injection
-    /// into the system prompt. Returns `nil` when there are no running bash
-    /// processes so the section can be skipped entirely.
-    func liveSummaryText() -> String? {
-        let rows = liveSummary()
-        guard !rows.isEmpty else { return nil }
-        let redactor = BashTools.SecretRedactor()
-        var lines: [String] = ["Running background bash:"]
-        for r in rows {
-            let secs = r.runningFor
-            let dur: String
-            if secs < 60 {
-                dur = "\(secs)s"
-            } else {
-                let m = secs / 60
-                let s = secs % 60
-                dur = "\(m)m \(s)s"
-            }
-            let safeCommand = redactor.redact(r.command)
-            let cmd = safeCommand.count > 60
-                ? String(safeCommand.prefix(60)) + "…"
-                : safeCommand
-            if let desc = r.description, !desc.isEmpty {
-                lines.append("- \(r.id) [\"\(cmd)\", \(redactor.redact(desc)), running \(dur)]")
-            } else {
-                lines.append("- \(r.id) [\"\(cmd)\", running \(dur)]")
-            }
-        }
-        return lines.joined(separator: "\n")
+            .map { AmbientStatus.BashRow(id: $0.id, command: $0.command, description: $0.description, startedAt: $0.startedAt) }
     }
 
     func kill(handleId: String, owner: String = BackgroundProcessRegistry.mainOwner) async -> Bool {

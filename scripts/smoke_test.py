@@ -543,6 +543,26 @@ def main():
     check("persona-snapshot-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-quater-septies. Ambient status tail: hardened rendering (quoted,
+    # redacted, control/bidi/zero-width stripped, character and byte caps,
+    # 20 rows per section), system role only on known OpenAI-family routes
+    # (exact hosts, from the immutable execution context), real Chat and
+    # Responses bodies captured before any transport: same text on every
+    # route, last item, nothing else changes. Private scratch home.
+    result = run_selftest([os.path.abspath(ADA), "__ambient-status-selftest"], capture_output=True,
+                          text=True, timeout=600)
+    check("ambient-status-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
+    # 3c5-quater-octies. Cache-boundary continuity of consecutive real
+    # requests per route class: only trailing system items are replaced on
+    # OpenAI-family routes while background work runs; other routes keep
+    # the user-role tail. Private scratch home.
+    result = run_selftest([os.path.abspath(ADA), "__cache-boundary-selftest"], capture_output=True,
+                          text=True, timeout=600)
+    check("cache-boundary-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+
     # 3c5-quinquies. /stop visibility: an honest reply when the stopped
     # request is still finishing (archive wait, hung helper), run-scoped
     # attribution, one ordered completion notice per stopped request (own

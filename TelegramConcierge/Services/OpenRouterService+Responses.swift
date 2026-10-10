@@ -197,19 +197,19 @@ extension OpenRouterService {
         if let tail = conversation.tailUserMessage, !tail.isEmpty {
             input.append(ResponsesAdapter.message(role: "user", text: MarkerNeutralizer.escape(tail)))
         }
-        var ambient: [String] = []
-        if !conversation.omitAmbientStatus, let bash = await BackgroundProcessRegistry.shared.liveSummaryText() { ambient.append(bash) }
-        if !conversation.omitAmbientStatus, let subagents = await SubagentBackgroundRegistry.shared.liveSummary() { ambient.append(subagents) }
-        if !ambient.isEmpty {
-            input.append(ResponsesAdapter.message(role: "user", text: MarkerNeutralizer.escape(
-                "[Ambient status — not a user message]\n" + ambient.joined(separator: "\n"))))
+        // Ambient status, last item, never persisted. Role per route
+        // (AmbientStatus.role: system on OpenAI-family routes, where a
+        // replaced trailing user item froze the prompt cache; user elsewhere).
+        let ambient = await AmbientStatus.wireText(omit: conversation.omitAmbientStatus)
+        if let ambient {
+            input.append(ResponsesAdapter.message(role: AmbientStatus.role(for: context), text: ambient))
         }
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
         let receipt = PreparedRequestReceipt(requestID: UUID(),
             historyFingerprint: ResponsesReplayEnvelope.hash(try encoder.encode(input)), deliveryNonces: nonces)
         var adapter = ResponsesAdapter(context: context)
         adapter.diagnosticsTailCount = (conversation.tailSystemMessage?.isEmpty == false ? 1 : 0)
-            + (conversation.tailUserMessage?.isEmpty == false ? 1 : 0) + (ambient.isEmpty ? 0 : 1)
+            + (conversation.tailUserMessage?.isEmpty == false ? 1 : 0) + (ambient == nil ? 0 : 1)
         return try await adapter.send(input: input, tools: conversation.tools, receipt: receipt)
     }
 

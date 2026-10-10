@@ -163,6 +163,7 @@ struct ResponsesAdapter {
         var request = try request(input: input, tools: tools, maxOutputTokens: maxOutputTokens)
         // Cache diagnosis (off by default): reads the final body, never changes it.
         CacheDiagnostics.observe(context: context, protocolName: "responses", body: request.httpBody, tailCount: diagnosticsTailCount)
+        try WireInterceptForTesting.check("responses", request.httpBody)
         let allowed = Set((tools ?? []).map { $0.function.name })
         var usedAccess: String?
         var didRefreshAfter401 = false

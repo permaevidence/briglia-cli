@@ -435,32 +435,11 @@ actor SubagentBackgroundRegistry {
         running.values.sorted { $0.startedAt < $1.startedAt }
     }
 
-    /// Compact one-line-per-agent summary of running subagents, used by the
-    /// system prompt so the parent knows what's in flight this turn. Returns
-    /// `nil` when there are none (skip the section entirely). Foreground
-    /// runs are excluded (byte stability).
-    func liveSummary() -> String? {
-        let handles = running.values.sorted { $0.startedAt < $1.startedAt }
-        guard !handles.isEmpty else { return nil }
-        let now = Date()
-        var lines: [String] = ["Running subagents:"]
-        for h in handles {
-            let secs = Int(now.timeIntervalSince(h.startedAt))
-            let dur: String
-            if secs < 60 {
-                dur = "\(secs)s"
-            } else {
-                let m = secs / 60
-                let s = secs % 60
-                dur = "\(m)m \(s)s"
-            }
-            // Trim description to keep the line tight.
-            let desc = h.description.count > 60
-                ? String(h.description.prefix(60)) + "…"
-                : h.description
-            lines.append("- \(h.id) [\(h.subagentType), \"\(desc)\", running \(dur)]")
-        }
-        return lines.joined(separator: "\n")
+    /// Running background (and wake-detached) subagents for the
+    /// `[Ambient status]` request tail (rendered by `AmbientStatus`).
+    /// Foreground runs are excluded (byte stability).
+    func ambientRows() -> [AmbientStatus.SubagentRow] {
+        running.values.map { AmbientStatus.SubagentRow(id: $0.id, type: $0.subagentType, description: $0.description, startedAt: $0.startedAt) }
     }
 
     /// Cancels a running subagent. Sets the cooperative cancellation flag AND
