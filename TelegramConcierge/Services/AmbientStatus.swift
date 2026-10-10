@@ -180,9 +180,7 @@ enum AmbientStatus {
     /// capped by characters and by UTF-8 bytes (escapes counted), never cut
     /// inside a `[REDACTED:…]` placeholder.
     static func field(_ raw: String, characters: Int, redactor: BashTools.SecretRedactor) -> String {
-        // Normalize first so a secret split by invisible characters is
-        // joined before the exact-match redactor sees it.
-        let text = redactor.redact(normalize(raw))
+        let text = redactedNormalized(raw, redactor: redactor)
         var kept = Array(text)
         var truncated = false
         if kept.count > characters {
@@ -200,6 +198,24 @@ enum AmbientStatus {
             result = literal(kept, truncated)
         }
         return result
+    }
+
+    /// Redaction is never weaker than the exact-match redactor on the raw
+    /// value (Codex 0.2.53 impl review R1):
+    /// 1. redact the raw value first, so a stored secret that itself
+    ///    contains whitespace runs, controls or invisible characters is
+    ///    replaced before normalization could change it;
+    /// 2. normalize;
+    /// 3. redact again with the stored secrets, so an ordinary key split by
+    ///    an inserted invisible character (joined by step 2) is caught;
+    /// 4. redact with the normalized form of each stored secret (same
+    ///    placeholder), so a normalization-sensitive secret that reached
+    ///    the text in a differently spaced/joined form is caught too.
+    /// Placeholders are plain ASCII and survive normalization unchanged.
+    static func redactedNormalized(_ raw: String, redactor: BashTools.SecretRedactor) -> String {
+        let normalized = normalize(redactor.redact(raw))
+        let second = redactor.redact(normalized)
+        return redactor.transformingSecrets(normalize).redact(second)
     }
 
     /// Controls (C0, DEL, C1) and Unicode line/paragraph separators become

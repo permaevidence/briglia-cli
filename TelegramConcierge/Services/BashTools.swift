@@ -1036,6 +1036,22 @@ enum BashTools {
                 .map { (secret: $0.value, placeholder: "[REDACTED:\($0.key)]") }
         }
 
+        private init(replacements: [(secret: String, placeholder: String)]) {
+            self.replacements = replacements
+        }
+
+        /// The same placeholders for transformed secret values (e.g. the
+        /// ambient renderer's normalization). Values that the transform
+        /// leaves unchanged or empties are dropped; longest first, as above.
+        func transformingSecrets(_ transform: (String) -> String) -> SecretRedactor {
+            SecretRedactor(replacements: replacements
+                .compactMap { pair -> (secret: String, placeholder: String)? in
+                    let value = transform(pair.secret)
+                    return value.isEmpty || value == pair.secret ? nil : (secret: value, placeholder: pair.placeholder)
+                }
+                .sorted { $0.secret.count > $1.secret.count })
+        }
+
         func redact(_ text: String) -> String {
             guard !replacements.isEmpty, !text.isEmpty else { return text }
             var redacted = text

@@ -112,6 +112,48 @@ extension ASHarness {
         check("A3 a placeholder that fits is kept whole",
               field("cmd", in: fits.split(separator: "\n").map(String.init).last ?? "") == "x" + placeholder)
 
+        // A3r — redaction is never weaker than the exact-match redactor on the
+        // raw value (Codex 0.2.53 impl review R1, reproduction kept verbatim):
+        // a stored secret that itself contains whitespace runs, a control
+        // character or an invisible character is replaced before
+        // normalization could change it, in every field of the shared renderer.
+        let sensitive: [(name: String, value: String)] = [
+            ("SYNTH_SERVICE_PASSWORD", "alpha  beta-sensitive"),          // two spaces
+            ("SYNTH_SERVICE_TOKEN", "abc\u{200B}def-secret"),             // zero-width space
+            ("SYNTH_SERVICE_TABBED", "tab\tsep-secret-value"),            // control character
+            ("SYNTH_SERVICE_BIDI", "rtl\u{202E}mark-secret-value"),       // bidi override
+        ]
+        for (name, value) in sensitive {
+            let env = [name: value]
+            let redactor = BashTools.SecretRedactor(environment: env)
+            let ph = "[REDACTED:\(name)]"
+            let raw = "run --password=\"" + value + "\""
+            let fieldOut = AmbientStatus.field(raw, characters: 80, redactor: redactor)
+            let normalizedSecret = AmbientStatus.normalize(value)
+            check("A3r stored secret with normalization-sensitive characters stays redacted (\(name)): field",
+                  fieldOut.contains(ph) && !fieldOut.contains(normalizedSecret)
+                    && !fieldOut.contains(String(normalizedSecret.suffix(10))), fieldOut)
+            let bare = AmbientStatus.field(value, characters: 80, redactor: redactor)
+            check("A3r the secret alone renders as just its placeholder (\(name))", bare == "\"" + ph + "\"", bare)
+            AmbientStatus.redactionEnvironmentForTesting = env
+            let rendered = AmbientStatus.render(bash: [b("bash_1", raw, "desc " + value)],
+                                                subagents: [s("subagent_1", "t-" + value, "uses " + value)]) ?? ""
+            check("A3r renderer: command, Bash description, subagent type and description all redacted (\(name))",
+                  rendered.components(separatedBy: ph).count - 1 == 4 && !rendered.contains(normalizedSecret), rendered)
+            // The same secret reaching the text already normalized (spaces
+            // collapsed / invisible character stripped) is caught too.
+            let preNormalized = AmbientStatus.field("x " + normalizedSecret, characters: 80, redactor: redactor)
+            check("A3r normalized form of a stored secret is redacted with the same placeholder (\(name))",
+                  preNormalized.contains(ph) && !preNormalized.contains(normalizedSecret), preNormalized)
+        }
+        AmbientStatus.redactionEnvironmentForTesting = ASFixtures.redaction
+        let plainRedactor = BashTools.SecretRedactor(environment: ASFixtures.redaction)
+        let splitPlain = String(secret.prefix(10)) + "\u{200B}" + String(secret.dropFirst(10))
+        check("A3r an ordinary key split by an inserted invisible character is still joined and redacted (second pass)",
+              AmbientStatus.field("echo " + splitPlain, characters: 80, redactor: plainRedactor) == "\"echo " + placeholder + "\"")
+        check("A3r a value without secrets is unchanged by the extra passes",
+              AmbientStatus.field("ls  -la\u{200B} /tmp", characters: 80, redactor: plainRedactor) == "\"ls -la /tmp\"")
+
         // A3b — byte bounds (Codex v3 correction 3).
         let combining = "a" + String(repeating: "\u{0301}", count: 100_000)
         let a3d = AmbientStatus.render(bash: [b("bash_1", combining, combining)], subagents: [s("subagent_1", combining, combining)]) ?? ""
