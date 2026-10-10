@@ -1331,7 +1331,8 @@ actor OpenRouterService {
     /// wire and lifecycle migrations cover exactly this string.
     static let findTaskReplyPolicyLine = "When the user asked you to find something concrete (a product, a place, a service, a document, an offer), give each item's link or location next to its name when available — the one bare URL or address that lets the user act on it, not a list of sources — and say when it could not be established; never guess a URL or an address. Don't add unnecessary links, and keep the message short."
 
-    func formatChunkSummaries(_ allItems: [ArchivedSummaryItem], totalChunkCount: Int) -> String {
+    func formatChunkSummaries(_ allItems: [ArchivedSummaryItem], totalChunkCount: Int,
+                              retiredFactsPresent: Bool? = nil) -> String {
         // Background archiving (§4.3): a disclosure item is not a row. With
         // none present, `items` is the caller's array and the output is
         // byte-identical to before.
@@ -1359,7 +1360,9 @@ actor OpenRouterService {
             : ""
         // User-profile maintenance keeps every removed fact word for word;
         // the line appears only once that file exists and is non-empty.
-        let retiredFactsLine = RetiredUserFacts.hasRecords()
+        // The caller's per-turn/per-run snapshot decides it when given, so a
+        // first retirement mid-turn appears from the next turn.
+        let retiredFactsLine = (retiredFactsPresent ?? RetiredUserFacts.hasRecords())
             ? "\n- Facts removed from your user profile during maintenance are kept word for word in ~/.local/share/briglia/archive/retired_user_facts.jsonl (one JSON record per line, newest last; the original text is in \"line\"); grep it like the transcripts (include = \"retired_user_facts.jsonl\")."
             : ""
         var output: String

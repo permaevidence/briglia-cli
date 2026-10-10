@@ -160,6 +160,84 @@ extension MidturnHarness {
         }
     }
 
+    /// P2f (Codex 0.2.53 impl review R2): the FIRST retired-facts record,
+    /// written by real profile maintenance between tool rounds, does not
+    /// change the archived-history section of the running turn: the pointer
+    /// line is decided by the turn's snapshot. Not pre-seeded (unlike P2m).
+    /// Every system prompt and estimate of the turn stays byte-stable, the
+    /// active-turn scope is not reset by the file appearing, and the next
+    /// turn includes the pointer. Chat and Responses.
+    func ppFirstRetirementSection() async throws {
+        let pointer = "retired_user_facts.jsonl"
+        for responses in [false, true] {
+            let tag = responses ? "P2fr" : "P2f"
+            let a = Self.ppSentinel("A"), c = Self.ppSentinel("C")
+            let (manager, router, capture, done) = try await ppStart(responses: responses)
+            try? FileManager.default.removeItem(at: UserContextMaintenance.stateURL)
+            try? FileManager.default.removeItem(at: RetiredUserFacts.url)
+            // Turn 0: a small profile (no maintenance) and an archive-sized
+            // history, so the background archive gives turn 1 an archived-
+            // history section (where the pointer line lives).
+            try ppSetProfile(Self.ppProfile(a))
+            manager._testSeedHistory(Self.ppArchiveHistory())
+            router.pushText("turn zero done")
+            await ppTurn(manager, "\(tag) turn zero")
+            let archived = await waitUntil(timeout: 60) { manager._baJobOutcome == "succeeded" }
+            // Turn 1: a profile over the maintenance threshold; real
+            // maintenance runs between round 1 and round 2 and drops facts,
+            // creating the retired-facts file for the first time.
+            let profile = Self.ppProfile(a, facts: 420)
+            try ppSetProfile(profile)
+            try? FileManager.default.removeItem(at: UserContextMaintenance.stateURL)
+            router.maintenanceReply = "{\"drop\":[\((1...380).map(String.init).joined(separator: ","))],\"add\":[{\"text\":\"\(c) kept by maintenance\"}]}"
+            let retiredMidTurn = PPBox(false)
+            let firstOfTurn = router.mainRequests + 1   // turn zero already counted
+            router.onMain = { n, _ in
+                guard n == firstOfTurn else { return }
+                let finished = DispatchSemaphore(value: 0)
+                Task.detached {
+                    await ConversationArchiveService().maintainUserContextIfNeeded(event: .archive)
+                    finished.signal()
+                }
+                _ = finished.wait(timeout: .now() + 60)
+                retiredMidTurn.value = RetiredUserFacts.hasRecords()
+            }
+            router.push([(id: "\(tag)-1", name: "bash", args: ["command": "echo one"])])
+            router.push([(id: "\(tag)-2", name: "bash", args: ["command": "echo two"])])
+            router.pushText("turn one done")
+            let hadRecordsBefore = RetiredUserFacts.hasRecords()
+            let mark = capture.mark()
+            let resetsBefore = capture.scopeResets
+            await ppTurn(manager, "\(tag) turn one")
+            check("\(tag)0 setup: archive succeeded, no retired facts before the turn, maintenance created the first record during round 1",
+                  archived && !hadRecordsBefore && retiredMidTurn.value && router.maintenanceRequests >= 1,
+                  "archived \(archived), before \(hadRecordsBefore), mid-turn \(retiredMidTurn.value), maintenance \(router.maintenanceRequests)")
+            let main = capture.main(since: mark.requests)
+            let systems = main.map(Self.ppSystem)
+            check("\(tag)1 the turn's requests carry the archived-history section (\(main.count) requests)",
+                  main.count >= 3 && systems.allSatisfy { $0.contains("## ARCHIVED CONVERSATION HISTORY") },
+                  "without section \(systems.filter { !$0.contains("## ARCHIVED CONVERSATION HISTORY") }.count)")
+            check("\(tag)2 no request of the turn gains the retired-facts pointer after the first record appears",
+                  systems.allSatisfy { !$0.contains(pointer) }, "with pointer \(systems.filter { $0.contains(pointer) }.count)")
+            ppAssertTurnFrozen(tag, capture, since: mark, old: a, new: c, minRequests: 3)
+            let estimates = Array(capture.estimates.dropFirst(mark.estimates))
+            check("\(tag)3 every local estimate of the turn is without the pointer and identical (\(estimates.count) estimates)",
+                  !estimates.isEmpty && estimates.allSatisfy { !$0.contains(pointer) },
+                  "with pointer \(estimates.filter { $0.contains(pointer) }.count)")
+            check("\(tag)4 the first retired record does not reset the active-turn scope (measured prompt tokens kept)",
+                  capture.scopeResets == resetsBefore, "resets \(capture.scopeResets - resetsBefore)")
+            router.onMain = nil
+            router.pushText("turn two done")
+            let next = capture.mark()
+            await ppTurn(manager, "\(tag) turn two")
+            let first = capture.main(since: next.requests).first.map(Self.ppSystem) ?? ""
+            check("\(tag)d the next turn includes the retired-facts pointer", first.contains(pointer), String(first.suffix(400)))
+            try? FileManager.default.removeItem(at: UserContextMaintenance.stateURL)
+            try? FileManager.default.removeItem(at: RetiredUserFacts.url)
+            done()
+        }
+    }
+
     /// P4: `/archiveinline on` — the inline archive's profile write lands
     /// before the capture, so the same turn's first request already has it
     /// (0.2.52 parity).

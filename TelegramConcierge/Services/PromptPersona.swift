@@ -15,13 +15,20 @@ struct PromptPersona: Equatable, Sendable {
     let userName: String?
     let structuredUserContext: String?
     let previousName: String?
+    /// Whether `retired_user_facts.jsonl` had records when the snapshot was
+    /// taken: it decides the archive section's retired-facts pointer line,
+    /// which profile maintenance would otherwise add mid-turn on its first
+    /// retirement (Codex 0.2.53 impl review R2). nil = read live at render
+    /// time (callers that build a value without capturing it).
+    var retiredFactsPresent: Bool? = nil
 
-    /// Exactly the four sources the prompt read per request before snapshots.
+    /// Exactly the sources the prompt read per request before snapshots.
     static func live() -> PromptPersona {
         PromptPersona(
             assistantName: KeychainHelper.load(key: KeychainHelper.assistantNameKey),
             userName: KeychainHelper.load(key: KeychainHelper.userNameKey),
             structuredUserContext: KeychainHelper.load(key: KeychainHelper.structuredUserContextKey),
-            previousName: IdentityMigration.priorPersonaName())
+            previousName: IdentityMigration.priorPersonaName(),
+            retiredFactsPresent: RetiredUserFacts.hasRecords())
     }
 }

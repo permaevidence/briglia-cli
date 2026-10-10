@@ -93,7 +93,8 @@ extension OpenRouterService {
 
             // Inject conversation history chunks if available
             if let chunks = chunkSummaries, !chunks.isEmpty {
-                prompt += formatChunkSummaries(chunks, totalChunkCount: totalChunkCount)
+                prompt += formatChunkSummaries(chunks, totalChunkCount: totalChunkCount,
+                                               retiredFactsPresent: persona.retiredFactsPresent)
             }
 
             // Background bash/subagent live status is NOT injected here — durations
@@ -251,7 +252,8 @@ extension OpenRouterService {
 
             // Inject conversation history chunks if available
             if let chunks = chunkSummaries, !chunks.isEmpty {
-                prompt += formatChunkSummaries(chunks, totalChunkCount: totalChunkCount)
+                prompt += formatChunkSummaries(chunks, totalChunkCount: totalChunkCount,
+                                               retiredFactsPresent: persona.retiredFactsPresent)
             }
 
             prompt += "\n\n🕐 **Today is \(currentDate). Check conversation timestamps for the current time.**"

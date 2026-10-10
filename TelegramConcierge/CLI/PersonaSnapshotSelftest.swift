@@ -202,6 +202,7 @@ extension MidturnHarness {
         if section("unit") { await ppUnitSection() }
         if section("background") { try await ppBackgroundSection() }
         if section("writers") { try await ppWritersSection() }
+        if section("writers") { try await ppFirstRetirementSection() }
         if section("inline") { try await ppInlineSection() }
         if section("compaction") { try await ppCompactionSection() }
         if section("compaction") { try await ppInitialPruneSection() }
