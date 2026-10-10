@@ -54,6 +54,7 @@ struct CBRequest {
     let roles: [String]
     let envelope: Data
     let tailCount: Int
+    let body: Data
 
     init?(_ body: Data?, tailCount: Int) {
         guard let body, let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }
@@ -65,6 +66,19 @@ struct CBRequest {
         roles = raw.map(ASFixtures.role)
         envelope = ASHarness.envelope(body)
         self.tailCount = tailCount
+        self.body = body
+    }
+
+    /// The shipped diagnostics verdict (CacheDiagnostics.continuity) for
+    /// this request followed by `next`, with the whole request retained.
+    func production(_ next: CBRequest) -> CacheDiagnostics.Continuity? {
+        func parsed(_ r: CBRequest) -> CacheDiagnostics.Parsed? {
+            CacheDiagnostics.parse(CacheDiagnostics.Request(lane: "x", protocolName: "x", body: r.body, tailCount: r.tailCount, transitions: []))
+        }
+        guard let previous = parsed(self), let current = parsed(next) else { return nil }
+        let retained = CacheDiagnostics.Retained(parsed: previous, hashed: false, itemLimit: nil, toolLimit: nil,
+                                                 originalItems: previous.items.count, originalTools: previous.tools.count)
+        return CacheDiagnostics.continuity(previous: retained, current: current)
     }
 
     /// Previous non-tail items are an index-aligned prefix of `next`.
@@ -156,6 +170,10 @@ extension ASHarness {
                 if !name.hasPrefix("S10"), !name.hasPrefix("S11") {
                     check("\(name) · \(route.name): stable history holds", n.stableHistory(next))
                 }
+                let shipped = n.production(next)
+                check("\(name) · \(route.name): the log's continuity function agrees (boundary, whole input, no unknowns)",
+                      shipped?.boundaryPreserved == n.boundary(next) && shipped?.previousInputPreserved == n.wholeInput(next)
+                        && shipped?.unknown == [], "\(String(describing: shipped))")
                 if name.hasPrefix("S9"), family {
                     let kept = Array(n.items.dropLast())
                     check("S9 · \(route.name): N's whole input minus its trailing system ambient item is a prefix of N+1, which adds only new items",

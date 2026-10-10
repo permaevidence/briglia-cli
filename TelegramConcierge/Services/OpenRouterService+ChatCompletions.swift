@@ -370,7 +370,8 @@ extension OpenRouterService {
         // Cache diagnosis (off by default): reads the final body, never changes it.
         CacheDiagnostics.observe(context: context, protocolName: "chat", body: request.httpBody,
             tailCount: (tailSystemMessage?.isEmpty == false ? 1 : 0) + (tailUserMessage?.isEmpty == false ? 1 : 0)
-                + (ambientText == nil ? 0 : 1))
+                + (ambientText == nil ? 0 : 1),
+            ambientRole: ambientText == nil ? nil : AmbientStatus.role(for: context))
         try WireInterceptForTesting.check("chat", request.httpBody)
         print("[OpenRouterService] Sending request to \(context.providerLabel) (\(context.model)) with \(apiMessages.count) messages")
         let (data, _) = try await sendChatRequestWithRetry(

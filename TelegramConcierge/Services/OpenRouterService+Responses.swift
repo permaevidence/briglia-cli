@@ -210,6 +210,7 @@ extension OpenRouterService {
         var adapter = ResponsesAdapter(context: context)
         adapter.diagnosticsTailCount = (conversation.tailSystemMessage?.isEmpty == false ? 1 : 0)
             + (conversation.tailUserMessage?.isEmpty == false ? 1 : 0) + (ambient == nil ? 0 : 1)
+        adapter.diagnosticsAmbientRole = ambient == nil ? nil : AmbientStatus.role(for: context)
         return try await adapter.send(input: input, tools: conversation.tools, receipt: receipt)
     }
 

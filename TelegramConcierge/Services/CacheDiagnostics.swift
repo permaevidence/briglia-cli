@@ -38,6 +38,9 @@ enum CacheDiagnostics {
         let body: Data
         let tailCount: Int
         let transitions: [String]
+        /// Role of the ambient-status item when the request carries one
+        /// (BRIGLIA_0253_PLAN v3 §4), nil otherwise.
+        var ambientRole: String? = nil
     }
 
     // Test seams (selftests run in private scratch roots).
@@ -139,14 +142,16 @@ enum CacheDiagnostics {
     }
 
     /// Offer one serialized request. Never throws, never changes `body`.
-    static func observe(context: ProviderExecutionContext, protocolName: String, body: Data?, tailCount: Int) {
+    static func observe(context: ProviderExecutionContext, protocolName: String, body: Data?, tailCount: Int,
+                        ambientRole: String? = nil) {
         guard active, let body else { return }
         let label = streamLabel(context)
         state.lock.lock()
         let transitions = state.pending.removeValue(forKey: label) ?? []
         touchLocked(label)
         state.lock.unlock()
-        let request = Request(lane: label, protocolName: protocolName, body: body, tailCount: tailCount, transitions: transitions)
+        let request = Request(lane: label, protocolName: protocolName, body: body, tailCount: tailCount, transitions: transitions,
+                              ambientRole: ambientRole)
         captureForTesting?(request)
         guard enabled else { return }
         do { try writeLine(for: request) } catch {
@@ -169,6 +174,26 @@ enum CacheDiagnostics {
         var settings: [String: Data]
         var tailCount: Int
         var totalBytes: Int
+        /// Role of EVERY input item of the original request (allowlisted
+        /// codes, `Role`), kept whole when retained items are cut to a
+        /// prefix: the cache boundary is defined on the original request.
+        var roles: [Role] = []
+    }
+
+    /// Item roles from a fixed allowlist (never raw input in the log).
+    enum Role: UInt8 {
+        case other, system, developer, user, assistant, tool
+        init(item: Any) {
+            switch (item as? [String: Any])?["role"] as? String {
+            case "system": self = .system
+            case "developer": self = .developer
+            case "user": self = .user
+            case "assistant": self = .assistant
+            case "tool": self = .tool
+            default: self = .other   // Responses function calls/outputs, reasoning, unknown
+            }
+        }
+        var name: String { ["other", "system", "developer", "user", "assistant", "tool"][Int(rawValue)] }
     }
 
     static func canonical(_ value: Any) -> Data {
@@ -190,7 +215,8 @@ enum CacheDiagnostics {
             settings[key] = canonical(value)
         }
         return Parsed(system: system, items: items.map(canonical), tools: ((root["tools"] as? [Any]) ?? []).map(canonical),
-                      settings: settings, tailCount: min(request.tailCount, items.count), totalBytes: request.body.count)
+                      settings: settings, tailCount: min(request.tailCount, items.count), totalBytes: request.body.count,
+                      roles: items.map(Role.init(item:)))
     }
 
     /// What a stream keeps of its previous request, within
@@ -207,12 +233,76 @@ enum CacheDiagnostics {
         /// Even the hashed system text and settings did not fit: nothing
         /// is compared against this request.
         var dropped = false
+        /// The original request's item and tool counts: truncating what is
+        /// retained never redefines the previous request's boundary.
+        var originalItems = 0
+        var originalTools = 0
         var bytes: Int { CacheDiagnostics.retainedBytes(parsed) }
     }
 
     static func retainedBytes(_ p: Parsed) -> Int {
         p.system.count + p.tools.reduce(0) { $0 + $1.count } + p.settings.reduce(0) { $0 + $1.key.utf8.count + $1.value.count }
-            + p.items.reduce(0) { $0 + $1.count }
+            + p.items.reduce(0) { $0 + $1.count } + p.roles.count
+    }
+
+    /// Request-to-request continuity (BRIGLIA_0253_PLAN v3 §4 with Codex v3
+    /// correction 2). `previousInputPreserved` describes INPUT ITEMS ONLY:
+    /// the previous request's whole input is an index-aligned prefix of this
+    /// one. `boundaryPreserved` is a local, conservative continuity check
+    /// (not proof of a cache hit): system text/instructions, ordered tools
+    /// and settings identical, and every previous item up to and including
+    /// its last non-system item an index-aligned, identical prefix. Either is
+    /// nil (unknown, with a reason) when the evidence needed was not fully
+    /// compared; a fully observed mismatch is false even when other evidence
+    /// is missing.
+    struct Continuity: Equatable {
+        var previousInputPreserved: Bool?
+        var boundaryPreserved: Bool?
+        var unknown: [String] = []
+    }
+
+    static let unknownNoPrevious = "no previous request retained for this stream (first request or evicted)"
+    static let unknownDropped = "previous request beyond the retained bound"
+    static let unknownItems = "previous input items beyond the retained prefix"
+    static let unknownRoles = "previous item roles not retained"
+    static let unknownTools = "previous tools beyond the retained prefix"
+
+    /// `current` must be in the previous request's form (hashed when it was).
+    static func continuity(previous: Retained?, current: Parsed) -> Continuity {
+        guard let previous else { return Continuity(previousInputPreserved: nil, boundaryPreserved: nil, unknown: [unknownNoPrevious]) }
+        guard !previous.dropped else { return Continuity(previousInputPreserved: nil, boundaryPreserved: nil, unknown: [unknownDropped]) }
+        let kept = previous.parsed
+        var unknown: [String] = []
+        func inputPrefix(_ count: Int) -> Bool? {
+            let checkable = min(count, kept.items.count, current.items.count)
+            for index in 0..<checkable where kept.items[index] != current.items[index] { return false }
+            if current.items.count < count { return false }
+            return kept.items.count < count ? nil : true
+        }
+        let whole = inputPrefix(previous.originalItems)
+        if whole == nil { unknown.append(unknownItems) }
+        var input: Bool?
+        if kept.roles.count != previous.originalItems {
+            input = nil
+            if !unknown.contains(unknownRoles) { unknown.append(unknownRoles) }
+        } else if let last = kept.roles.lastIndex(where: { $0 != .system }) {
+            input = inputPrefix(last + 1)
+            if input == nil, !unknown.contains(unknownItems) { unknown.append(unknownItems) }
+        } else {
+            input = true
+        }
+        var tools: Bool?
+        if zip(kept.tools, current.tools).contains(where: { $0 != $1 }) || current.tools.count < kept.tools.count {
+            tools = false
+        } else if kept.tools.count < previous.originalTools {
+            tools = nil; unknown.append(unknownTools)
+        } else {
+            tools = current.tools.count == previous.originalTools
+        }
+        let parts: [Bool?] = [kept.system == current.system, kept.settings == current.settings, tools, input]
+        let boundary: Bool? = parts.contains(false) ? false : parts.contains(where: { $0 == nil }) ? nil : true
+        return Continuity(previousInputPreserved: whole, boundaryPreserved: boundary,
+                          unknown: (whole == nil || boundary == nil) ? unknown : [])
     }
 
     struct Difference: Equatable {
@@ -400,6 +490,14 @@ enum CacheDiagnostics {
             return copy
         }
         func limited(_ p: Parsed, items: Int?, tools: Int?) -> Parsed { retainedPrefix(p, items: items, tools: tools) }
+        let prior = state.previous[request.lane]
+        let flow = continuity(previous: prior, current: prior?.hashed == true ? hashedAll(parsed) : parsed)
+        line["prev_input_preserved"] = flow.previousInputPreserved.map { $0 as Any } ?? NSNull()
+        line["boundary_preserved"] = flow.boundaryPreserved.map { $0 as Any } ?? NSNull()
+        if !flow.unknown.isEmpty { line["continuity_unknown"] = flow.unknown }
+        line["tail_roles"] = parsed.roles.suffix(parsed.tailCount).map(\.name)
+        line["ambient"] = request.ambientRole != nil
+        line["ambient_role"] = request.ambientRole.map { ["system", "user"].contains($0) ? $0 : "other" } ?? NSNull()
         if let previous = state.previous[request.lane], previous.dropped {
             line["first_difference"] = NSNull()
             line["comparison"] = "unavailable: previous request beyond the retained bound"
@@ -420,11 +518,14 @@ enum CacheDiagnostics {
         // Keep this request within the per-stream bound, every component
         // counted (implementation review R2).
         let bound = maxRetainedBytesPerLane
-        var kept = Retained(parsed: parsed, hashed: false, itemLimit: nil, toolLimit: nil)
+        var kept = Retained(parsed: parsed, hashed: false, itemLimit: nil, toolLimit: nil,
+                            originalItems: parsed.items.count, originalTools: parsed.tools.count)
         if retainedBytes(parsed) > bound {
-            kept = Retained(parsed: hashedAll(parsed), hashed: true, itemLimit: nil, toolLimit: nil)
+            kept = Retained(parsed: hashedAll(parsed), hashed: true, itemLimit: nil, toolLimit: nil,
+                            originalItems: parsed.items.count, originalTools: parsed.tools.count)
             if kept.bytes > bound {
                 let fixed = kept.parsed.system.count + kept.parsed.settings.reduce(0) { $0 + $1.key.utf8.count + $1.value.count }
+                    + kept.parsed.roles.count
                 let toolRoom = max(0, (bound - fixed) / 2 / 32)
                 let toolLimit = min(kept.parsed.tools.count, toolRoom)
                 let itemRoom = max(0, (bound - fixed - toolLimit * 32) / 32)
@@ -433,7 +534,7 @@ enum CacheDiagnostics {
                 kept.parsed = limited(kept.parsed, items: kept.itemLimit, tools: kept.toolLimit)
                 if kept.bytes > bound {   // system/settings alone exceed the bound
                     kept.parsed.settings = [:]; kept.parsed.system = Data(); kept.toolLimit = 0; kept.itemLimit = 0
-                    kept.parsed.tools = []; kept.parsed.items = []; kept.dropped = true
+                    kept.parsed.tools = []; kept.parsed.items = []; kept.parsed.roles = []; kept.dropped = true
                 }
             }
         }

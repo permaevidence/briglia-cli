@@ -8,6 +8,8 @@ struct ResponsesAdapter {
     /// Documented tail items at the end of `input` (tail system/user
     /// message, ambient status), for CacheDiagnostics only.
     var diagnosticsTailCount = 0
+    /// Role of the ambient-status item, when the request carries one (diagnostics only).
+    var diagnosticsAmbientRole: String?
 
     init(context: ProviderExecutionContext) { self.context = context }
 
@@ -162,7 +164,8 @@ struct ResponsesAdapter {
         defer { if Task.isCancelled { context.responsesTurn.close() } }
         var request = try request(input: input, tools: tools, maxOutputTokens: maxOutputTokens)
         // Cache diagnosis (off by default): reads the final body, never changes it.
-        CacheDiagnostics.observe(context: context, protocolName: "responses", body: request.httpBody, tailCount: diagnosticsTailCount)
+        CacheDiagnostics.observe(context: context, protocolName: "responses", body: request.httpBody, tailCount: diagnosticsTailCount,
+                                ambientRole: diagnosticsAmbientRole)
         try WireInterceptForTesting.check("responses", request.httpBody)
         let allowed = Set((tools ?? []).map { $0.function.name })
         var usedAccess: String?
