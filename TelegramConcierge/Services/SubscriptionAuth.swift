@@ -7,6 +7,11 @@ import Glibc
 #else
 import Darwin
 #endif
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 
 struct SubscriptionError: Error, LocalizedError {
     let message: String
@@ -15,6 +20,10 @@ struct SubscriptionError: Error, LocalizedError {
     /// moved to API billing: the main agent is on the same allowance, so web
     /// research fails with this message like every other subscription request.
     var usageExhausted = false
+    /// A refresh request that the token endpoint answered with a non-200,
+    /// non-terminal status (429, 5xx): the server replied, so the old refresh
+    /// token was not consumed by an unknown outcome (§7.1 "ambiguous").
+    var refreshAnswered = false
     init(_ message: String, requiresLogin: Bool = false) { self.message = message; self.requiresLogin = requiresLogin }
     var errorDescription: String? { message }
 }
@@ -91,6 +100,65 @@ struct SubscriptionCredential: Codable {
     }
 }
 
+/// Refresh settlement records (SIWC plan §7, §7.1). All three live in the
+/// same atomic credential file, so every write is all-or-nothing and the lock
+/// that serializes refresh, login and logout also serializes them. Older
+/// binaries ignore the extra keys (and drop them on their next write).
+///
+/// `pendingRotation`: a token set received with HTTP 200 and not yet
+/// validated/committed. Unusable for inference; promoted under the lock by
+/// the next refresh-and-settle only while its generation is current, the
+/// login isn't blocked, it replaces the current refresh token and it
+/// re-validates (same account and residency). Otherwise it is discarded.
+struct SubscriptionPendingRotation: Codable {
+    var generation: String
+    /// Fingerprint of the refresh token this rotation replaces.
+    var replaces: String
+    var credential: SubscriptionCredential
+    var valid: Bool { UUID(uuidString: generation) != nil && SubscriptionRefreshFingerprint.wellFormed(replaces) && credential.valid }
+}
+
+/// Written durably before every refresh send. `sending` left on disk means
+/// the process died (or the outcome was lost) after the request may have
+/// left; `ambiguous` means the send ended without a usable outcome. Either
+/// one, for the current generation and refresh token, makes the next refresh
+/// a recovery attempt (§7.1).
+struct SubscriptionRefreshOp: Codable {
+    var opId: String
+    var tokenFingerprint: String
+    var generation: String
+    var startedAt: Date
+    var state: String
+    static let states: Set<String> = ["sending", "ambiguous"]
+    var valid: Bool {
+        UUID(uuidString: opId) != nil && UUID(uuidString: generation) != nil
+            && SubscriptionRefreshFingerprint.wellFormed(tokenFingerprint) && Self.states.contains(state)
+            && startedAt.timeIntervalSince1970.isFinite
+    }
+}
+
+/// The one recovery retry for (generation, refresh token), reserved durably
+/// before it is sent. Once present, no process and no later call gets
+/// another attempt for that token; only a new sign-in clears it.
+struct SubscriptionRefreshRecovery: Codable {
+    var tokenFingerprint: String
+    var generation: String
+    var state: String
+    static let states: Set<String> = ["reserved", "exhausted"]
+    var valid: Bool {
+        UUID(uuidString: generation) != nil && SubscriptionRefreshFingerprint.wellFormed(tokenFingerprint) && Self.states.contains(state)
+    }
+}
+
+enum SubscriptionRefreshFingerprint {
+    static func of(_ refreshToken: String) -> String {
+        SHA256.hash(data: Data(("briglia-refresh-op\u{0}" + refreshToken).utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    static func wellFormed(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+}
+
 struct SubscriptionAuthState: Codable {
     var version = 1
     var generation: String
@@ -98,11 +166,54 @@ struct SubscriptionAuthState: Codable {
     var credential: SubscriptionCredential?
     var requiresLogin: Bool? = nil
     var deviceChallenge: SubscriptionDeviceChallenge? = nil
+    var pendingRotation: SubscriptionPendingRotation? = nil
+    var refreshOp: SubscriptionRefreshOp? = nil
+    var refreshRecovery: SubscriptionRefreshRecovery? = nil
     var valid: Bool {
         version == 1 && UUID(uuidString: generation) != nil
             && (pendingLogin == nil || UUID(uuidString: pendingLogin!) != nil)
             && (credential == nil || credential!.valid)
             && (deviceChallenge == nil || (pendingLogin != nil && deviceChallenge!.valid))
+            && (pendingRotation == nil || pendingRotation!.valid)
+            && (refreshOp == nil || refreshOp!.valid)
+            && (refreshRecovery == nil || refreshRecovery!.valid)
+    }
+    /// Every refresh-settlement record cleared (new login, logout).
+    mutating func clearRefreshRecords() { pendingRotation = nil; refreshOp = nil; refreshRecovery = nil }
+}
+
+/// What the caller of a refresh-and-settle sees. The settle runs detached;
+/// a cancelled caller stops waiting at once and never receives the result,
+/// while the settle itself finishes (or, if nothing was sent yet, stops
+/// before sending).
+final class SubscriptionRefreshCaller: @unchecked Sendable {
+    typealias Outcome = Result<SubscriptionCredential, Error>
+    private let lock = NSLock()
+    private var isCancelled = false
+    private var outcome: Outcome?
+    private var continuation: CheckedContinuation<Outcome, Never>?
+    var cancelled: Bool { lock.lock(); defer { lock.unlock() }; return isCancelled }
+    func cancel() {
+        lock.lock(); isCancelled = true
+        if outcome == nil { outcome = .failure(CancellationError()) }
+        let waiting = continuation; continuation = nil; let result = outcome!
+        lock.unlock()
+        waiting?.resume(returning: result)
+    }
+    func finish(_ result: Outcome) {
+        lock.lock()
+        if outcome == nil { outcome = result }
+        let waiting = continuation; continuation = nil; let delivered = outcome!
+        lock.unlock()
+        waiting?.resume(returning: delivered)
+    }
+    func wait() async -> Outcome {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let outcome { lock.unlock(); continuation.resume(returning: outcome); return }
+            self.continuation = continuation
+            lock.unlock()
+        }
     }
 }
 
@@ -203,6 +314,7 @@ struct SubscriptionAuthStore {
             state.deviceChallenge = nil
             state.credential = credential
             state.requiresLogin = nil
+            state.clearRefreshRecords()
             try Task.checkCancellation()
             try write(state)
             return state.generation
@@ -234,29 +346,131 @@ struct SubscriptionAuthStore {
         }
     }
 
+    static let refreshExhaustedMessage = "ChatGPT sign-in may need to be repeated: the login refresh did not complete and its one recovery attempt is used up. Use subscription login. No API fallback was attempted."
+    static let refreshNotSavedMessage = "ChatGPT sign-in may need to be repeated: the refreshed login could not be saved. Briglia will try to recover it on the next request; if that fails, use subscription login."
+
+    /// Refresh-and-settle (SIWC plan §7, §7.1). Returns the stored credential
+    /// when it is still fresh; otherwise refreshes it under the cross-process
+    /// lock in a detached task that does not inherit the caller's
+    /// cancellation. Once a refresh request may have left, the response is
+    /// validated and persisted even when the caller was cancelled (`/stop`);
+    /// cancellation is honoured by the caller only, which stops waiting and
+    /// never uses the result.
     func credential(generation: String, rejectedAccess: String? = nil,
-                    refresh: (String) async throws -> SubscriptionCredential) async throws -> SubscriptionCredential {
+                    refresh: @escaping (String) async throws -> SubscriptionCredential) async throws -> SubscriptionCredential {
+        try Task.checkCancellation()
+        let caller = SubscriptionRefreshCaller()
+        let store = self
+        Task.detached {
+            do { caller.finish(.success(try await store.settle(generation: generation, rejectedAccess: rejectedAccess, caller: caller, refresh: refresh))) }
+            catch { caller.finish(.failure(error)) }
+        }
+        let outcome = await withTaskCancellationHandler { await caller.wait() } onCancel: { caller.cancel() }
+        try Task.checkCancellation()
+        return try outcome.get()
+    }
+
+    enum RefreshDisposition { case terminal, answered, notSent, ambiguous }
+    /// Only errors that prove what happened are anything but ambiguous:
+    /// an explicit refusal (terminal), an answered non-terminal status, or
+    /// a budget refusal raised before the request was built.
+    static func disposition(_ error: Error) -> RefreshDisposition {
+        if let failure = error as? SubscriptionError {
+            if failure.requiresLogin { return .terminal }
+            if failure.refreshAnswered { return .answered }
+        }
+        if error is AuthBudgetExhausted || error is SendBudgetExhausted { return .notSent }
+        return .ambiguous
+    }
+
+    private func settle(generation: String, rejectedAccess: String?, caller: SubscriptionRefreshCaller,
+                        refresh: (String) async throws -> SubscriptionCredential) async throws -> SubscriptionCredential {
         try await locked {
-            guard var state = try read(), state.generation == generation, let old = state.credential else {
+            guard var state = try read(), state.generation == generation, var old = state.credential else {
                 throw SubscriptionError("ChatGPT login changed or ended. Select the profile again after login.")
             }
             guard state.requiresLogin != true else { throw SubscriptionError("ChatGPT requires a new login; use subscription login") }
+            // §7 step 4 / §7.1 step 3: disk first. A checkpoint left by an
+            // earlier settle (crash, failed final write) is promoted before
+            // anything is sent; one that no longer fits is discarded.
+            if let pending = state.pendingRotation {
+                state.pendingRotation = nil
+                if pending.generation == generation, pending.replaces == SubscriptionRefreshFingerprint.of(old.refresh),
+                   pending.credential.account == old.account, pending.credential.residency == old.residency {
+                    state.credential = pending.credential
+                    state.refreshOp = nil
+                    state.refreshRecovery = nil
+                    old = pending.credential
+                }
+                try write(state)
+            }
             if old.expires > Date().addingTimeInterval(60), rejectedAccess == nil || rejectedAccess != old.access { return old }
+            let fingerprint = SubscriptionRefreshFingerprint.of(old.refresh)
+            if let recovery = state.refreshRecovery, recovery.generation == generation, recovery.tokenFingerprint == fingerprint {
+                throw SubscriptionError(Self.refreshExhaustedMessage)
+            }
+            let recovering = state.refreshOp.map { $0.generation == generation && $0.tokenFingerprint == fingerprint } ?? false
+            // Nothing has been sent yet: a cancelled caller still stops it here.
+            if caller.cancelled { throw CancellationError() }
+            // §7.1 steps 1 and 4: the operation record (and, for a recovery,
+            // the reservation) is durable before the send, or nothing is sent.
+            if recovering { state.refreshRecovery = SubscriptionRefreshRecovery(tokenFingerprint: fingerprint, generation: generation, state: "reserved") }
+            state.refreshOp = SubscriptionRefreshOp(opId: UUID().uuidString, tokenFingerprint: fingerprint, generation: generation,
+                                                    startedAt: Date(), state: "sending")
+            try write(state)
             let updated: SubscriptionCredential
             do { updated = try await refresh(old.refresh) }
             catch {
-                if (error as? SubscriptionError)?.requiresLogin == true {
+                switch Self.disposition(error) {
+                case .terminal:
                     state.requiresLogin = true
+                    state.refreshOp = nil
                     try write(state)
+                    throw error
+                case .answered:
+                    state.refreshOp = nil
+                    try? write(state)
+                    throw error
+                case .notSent:
+                    state.refreshOp = nil
+                    if recovering { state.refreshRecovery = nil }
+                    try? write(state)
+                    throw error
+                case .ambiguous:
+                    // Credentials are kept; the record says the outcome is
+                    // unknown. A failed write leaves `sending`, which means
+                    // the same to the next settle.
+                    state.refreshOp?.state = "ambiguous"
+                    if recovering { state.refreshRecovery?.state = "exhausted" }
+                    try? write(state)
+                    if recovering { throw SubscriptionError(Self.refreshExhaustedMessage) }
+                    throw error
                 }
-                throw error
             }
-            try Task.checkCancellation()
+            // HTTP 200: §7 step 3. Checkpoint first (unusable, bound to this
+            // generation and the replaced token), then validate, then one
+            // atomic write commits it. A failed checkpoint still tries the
+            // commit; neither failure ever hands out an unsaved token.
+            state.pendingRotation = SubscriptionPendingRotation(generation: generation, replaces: fingerprint, credential: updated)
+            try? write(state)
             guard updated.account == old.account, updated.residency == old.residency else {
-                throw SubscriptionError("Refresh changed the ChatGPT account/workspace; sign in again explicitly")
+                // The server already rotated the old refresh token away, so it
+                // is not offered again: the login is blocked until an
+                // explicit sign-in, and the other account's tokens are dropped.
+                state.pendingRotation = nil
+                state.refreshOp = nil
+                state.requiresLogin = true
+                try? write(state)
+                throw SubscriptionError("Refresh changed the ChatGPT account/workspace; sign in again explicitly", requiresLogin: true)
             }
             state.credential = updated
-            try write(state)
+            state.clearRefreshRecords()
+            do { try write(state) } catch {
+                // A final-write or fsync error doesn't prove the replacement
+                // is absent: the next settle re-reads disk and promotes it
+                // (or the checkpoint) before considering any retry.
+                throw SubscriptionError(Self.refreshNotSavedMessage)
+            }
             return updated
         }
     }
@@ -410,7 +624,14 @@ struct SubscriptionLogin {
     func refresh(_ token: String) async throws -> SubscriptionCredential {
         let (data, status) = try await post("/oauth/token", ["grant_type": "refresh_token", "refresh_token": token,
             "client_id": SubscriptionEndpoint.clientID], true)
-        guard status == 200 else { throw SubscriptionError("ChatGPT refresh failed (HTTP \(status)); sign in again. No API fallback was attempted.", requiresLogin: [400, 401, 403].contains(status)) }
+        guard status == 200 else {
+            var failure = SubscriptionError("ChatGPT refresh failed (HTTP \(status)); sign in again. No API fallback was attempted.", requiresLogin: [400, 401, 403].contains(status))
+            // The token endpoint answered: not an ambiguous send (§7.1).
+            // A gateway 502/504 may come after the server already rotated,
+            // so those stay ambiguous, like a dropped connection.
+            failure.refreshAnswered = !failure.requiresLogin && ![0, 502, 504].contains(status)
+            throw failure
+        }
         return try Self.token(data)
     }
     func device(show: (String, String) async throws -> Void) async throws -> String {

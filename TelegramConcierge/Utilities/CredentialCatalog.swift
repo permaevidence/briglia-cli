@@ -43,9 +43,18 @@ enum CredentialCatalog {
 
     static let subscriptionTokensTreatment: Treatment = .redact
     static func subscriptionRedactionValues() -> [String: String] {
-        guard subscriptionTokensTreatment == .redact,
-              let credential = (try? SubscriptionAuthStore().read())?.credential else { return [:] }
-        return ["subscription_access": credential.access, "subscription_refresh": credential.refresh]
+        guard subscriptionTokensTreatment == .redact, let state = try? SubscriptionAuthStore().read() else { return [:] }
+        var values: [String: String] = [:]
+        if let credential = state.credential {
+            values["subscription_access"] = credential.access
+            values["subscription_refresh"] = credential.refresh
+        }
+        // A refresh checkpoint (not yet committed) holds the next token set.
+        if let pending = state.pendingRotation?.credential {
+            values["subscription_pending_access"] = pending.access
+            values["subscription_pending_refresh"] = pending.refresh
+        }
+        return values
     }
 
     static let entries: [Entry] = [
