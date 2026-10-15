@@ -234,16 +234,52 @@ extension MenuSelftestContext {
             var chatNoOpenAI = noOpenAI; chatNoOpenAI["chatgpt"] = ["model": "gpt-6.1-sol", "effort": "high", "generation": UUID().uuidString]
             check("or-default quick: with ChatGPT chosen the OpenAI key stays required", (try? QuickSetupRequest.parse(chatNoOpenAI)) == nil)
             // The final check requires what the running provider needs (Codex round 2 P1).
-            let orKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "openrouter")
+            let orKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "openrouter") ?? []
             check("or-default quick: the final check on OpenRouter needs its key and model, not OpenCode or OpenAI",
                   orKeys.contains(KeychainHelper.openRouterApiKeyKey) && orKeys.contains(KeychainHelper.openRouterModelKey)
                   && !orKeys.contains(ProviderProfiles.opencodeApiKeyKey) && !orKeys.contains(KeychainHelper.openAITranscriptionApiKeyKey))
-            let ocKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "opencode")
+            let ocKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "opencode") ?? []
             check("or-default quick: the final check on OpenCode still needs the OpenCode and OpenAI keys",
                   ocKeys.contains(ProviderProfiles.opencodeApiKeyKey) && ocKeys.contains(KeychainHelper.openAITranscriptionApiKeyKey))
-            let gptKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "chatgpt")
+            let gptKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "chatgpt") ?? []
             check("or-default quick: the final check on ChatGPT keeps its model and the OpenAI key",
                   gptKeys.contains(ProviderProfiles.subscriptionModelKey) && gptKeys.contains(KeychainHelper.openAITranscriptionApiKeyKey) && !gptKeys.contains(ProviderProfiles.opencodeApiKeyKey))
+            // Round 4 R1: every non-OpenRouter/OpenCode/ChatGPT provider is
+            // checked against its own configuration, never against OpenCode;
+            // no stored provider is refused.
+            let customKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "custom") ?? []
+            check("or-default quick: the final check on a custom endpoint needs its URL, key and model plus OpenAI, not OpenCode",
+                  customKeys.contains(ProviderProfiles.customBaseURLKey) && customKeys.contains(ProviderProfiles.customApiKeyKey)
+                  && customKeys.contains(ProviderProfiles.customModelKey) && customKeys.contains(KeychainHelper.openAITranscriptionApiKeyKey)
+                  && !customKeys.contains(ProviderProfiles.opencodeApiKeyKey))
+            let localKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "local") ?? []
+            check("or-default quick: the final check on a local server needs its URL and model plus OpenAI, no key and no OpenCode",
+                  localKeys.contains(KeychainHelper.lmStudioBaseURLKey) && localKeys.contains(KeychainHelper.lmStudioModelKey)
+                  && localKeys.contains(KeychainHelper.openAITranscriptionApiKeyKey)
+                  && !localKeys.contains(ProviderProfiles.opencodeApiKeyKey) && !localKeys.contains(ProviderProfiles.customApiKeyKey))
+            let platformKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "openai") ?? []
+            check("or-default quick: the final check on the OpenAI API profile needs its key and model, not OpenCode",
+                  platformKeys.contains(ProviderProfiles.openaiApiKeyKey) && platformKeys.contains(ProviderProfiles.openaiModelKey)
+                  && !platformKeys.contains(ProviderProfiles.opencodeApiKeyKey))
+            check("or-default quick: no stored provider (or an unknown one) is refused, not treated as OpenCode",
+                  QuickSetupWorkflow.requiredStoredKeys(activeProfile: nil) == nil
+                  && QuickSetupWorkflow.requiredStoredKeys(activeProfile: "") == nil
+                  && QuickSetupWorkflow.requiredStoredKeys(activeProfile: "bogus") == nil)
+            check("or-default quick: every profile has its own explicit requirement list",
+                  ProviderProfiles.Profile.allCases.allSatisfy { p in
+                      let k = QuickSetupWorkflow.providerRequiredKeys(p)
+                      return !k.isEmpty && (p == .opencode || !k.contains(ProviderProfiles.opencodeApiKeyKey))
+                  })
+            let incompleteCustom: [String: String] = [ProviderProfiles.customBaseURLKey: "http://127.0.0.1:9/v1", ProviderProfiles.customApiKeyKey: "k"]
+            check("or-default quick: an incomplete custom endpoint reports its missing model",
+                  QuickSetupWorkflow.missingProviderValue(.custom, stored: { incompleteCustom[$0] }) == ProviderProfiles.customModelKey)
+            var completeCustom = incompleteCustom; completeCustom[ProviderProfiles.customModelKey] = "m"
+            check("or-default quick: a complete custom endpoint needs nothing more",
+                  QuickSetupWorkflow.missingProviderValue(.custom, stored: { completeCustom[$0] }) == nil)
+            check("or-default quick: the OpenAI key is optional only with OpenRouter",
+                  !QuickSetupWorkflow.openAIRequired(main: .openrouter)
+                  && ProviderProfiles.Profile.allCases.filter { $0 != .openrouter }.allSatisfy { QuickSetupWorkflow.openAIRequired(main: $0) }
+                  && QuickSetupWorkflow.openAIRequired(main: nil))
             var keptOR = base; keptOR["openrouter"] = ["kept": true]
             if let parsedKept = try? QuickSetupRequest.parse(keptOR) {
                 check("or-default quick: a kept (already stored) OpenRouter key is not a new setup", !QuickSetupWorkflow.prefersOpenRouter(parsedKept, activeProfile: nil))

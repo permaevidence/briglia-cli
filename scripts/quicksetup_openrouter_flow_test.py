@@ -7,6 +7,11 @@ system rows (dev stubs) → finish → done, then checks the completion marker,
 the stored provider, model and Together host pin, the save notices, and that
 a rerun opens settings without changing anything. A second run makes the
 host list unreadable: setup still completes, with no pin and a notice.
+Later scenarios cover existing installs: switching between OpenRouter and
+OpenCode (Codex round 3), and "Keep current" on a custom endpoint, local
+server, named server or the OpenAI API profile (Codex round 4), each
+through to done, plus the refusals for an incomplete current provider and
+a missing OpenAI key.
 
 Loopback only (mock provider server), throwaway HOME/XDG roots.
 
@@ -348,6 +353,102 @@ def transition_scenario(label, main):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def keep_current_scenario(label, seed_for, expect_refusal=None, with_openai=True):
+    """Codex round 4 R1: an incomplete install that already runs a provider
+    outside the selector (custom endpoint, local server, named server, the
+    OpenAI API profile) keeps it with main="current". The save must leave
+    that provider running and the final check must require only what it
+    needs, never an OpenCode key. An incomplete current provider is refused
+    at save, before anything is written (expect_refusal)."""
+    LISTING["ok"] = True
+    home = tempfile.mkdtemp(prefix="briglia-qs-keep-")
+    os.makedirs(home + "/tmp", exist_ok=True)
+    cfg = home + "/.config/briglia"
+    os.makedirs(cfg, mode=0o700)
+    secrets_path = cfg + "/secrets.json"
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ProviderMock)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+    seed = seed_for(base)
+    with open(secrets_path, "w") as f:
+        json.dump(seed, f)
+    os.chmod(secrets_path, 0o600)
+    env = make_env(home, base)
+    s = Session(env)
+    try:
+        check(label + ": link and cookie", s.connect(), s.text()[-500:])
+        _, st0 = s.call("GET", "/api/status")
+        check(label + ": status reports the running provider", st0.get("active_provider") == seed["active_provider_profile"],
+              str(st0.get("active_provider")))
+        req = {"name": "Offline test", "main": "current", "serper": {"value": GOOD["serper"]}, "jina": {"value": GOOD["jina"]},
+               "telegram": {"token": GOOD["telegram"], "chat_id": CHAT_ID}}
+        if with_openai:
+            req["openai"] = {"value": GOOD["openai"]}
+        st, js = s.call("POST", "/api/verify", req)
+        check(label + ": verifies", st == 200 and js.get("phase") == "verified", "%s %s" % (st, str(js)[:300]))
+        before = open(secrets_path, "rb").read()
+        st, js = s.call("POST", "/api/save", req)
+        if expect_refusal:
+            check(label + ": save refused " + expect_refusal, st == 409 and js.get("error") == expect_refusal, "%s %s" % (st, str(js)[:300]))
+            check(label + ": refusal wrote nothing", open(secrets_path, "rb").read() == before)
+            store = json.load(open(secrets_path))
+            check(label + ": setup not marked complete", store.get("cli_setup_complete") != "true")
+            return
+        check(label + ": save → system phase", st == 200 and js.get("phase") == "system", "%s %s" % (st, str(js)[:300]))
+        store = json.load(open(secrets_path))
+        provider_keys = [k for k in seed if k != "active_provider_profile"]
+        check(label + ": the running provider is unchanged, no OpenCode key stored",
+              store.get("active_provider_profile") == seed["active_provider_profile"] and not store.get("opencode_api_key"),
+              str(store.get("active_provider_profile")))
+        check(label + ": the provider's own settings are unchanged",
+              all(store.get(k) == seed[k] for k in provider_keys if k != "provider_servers"),
+              json.dumps({k: (store.get(k), seed[k]) for k in provider_keys if store.get(k) != seed[k]})[:300])
+        if run_system_rows(s, label):
+            finish(s, label)
+        store = json.load(open(secrets_path))
+        check(label + ": setup complete and progress cleared", store.get("cli_setup_complete") == "true"
+              and "cli_setup_step_in_progress" not in store, json.dumps({k: store.get(k) for k in ("cli_setup_complete", "cli_setup_step_in_progress")}))
+        check(label + ": still running " + seed["active_provider_profile"] + " after done, no OpenCode key",
+              store.get("active_provider_profile") == seed["active_provider_profile"] and not store.get("opencode_api_key"))
+        check(label + ": process exited 0", s.proc.returncode == 0, "rc=%s tail=%r" % (s.proc.returncode, s.text()[-400:]))
+        check(label + ": no key in terminal output", not any(v in s.text() for v in (GOOD["openai"], GOOD["serper"], GOOD["jina"], GOOD["telegram"])))
+    except Exception as e:
+        check(label + ": driver raised %r" % (e,), False, s.text()[-1500:])
+    finally:
+        s.stop()
+        server.shutdown()
+        server.server_close()
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def seed_custom(base):
+    return {"active_provider_profile": "custom", "custom_endpoint_api_key": "fake-flow-custom-key",
+            "custom_endpoint_base_url": base + "/custom", "custom_endpoint_model": "fake-custom-model"}
+
+
+def seed_custom_no_model(base):
+    seed = seed_custom(base)
+    del seed["custom_endpoint_model"]
+    return seed
+
+
+def seed_local(base):
+    return {"active_provider_profile": "local", "lmstudio_base_url": base + "/local", "lmstudio_model": "fake-local-model"}
+
+
+def seed_named_server(base):
+    server = {"id": "srv-flowtest01", "name": "Home GPU", "base_url": base + "/home", "api_key": "fake-flow-named-key",
+              "model": "fake-named-model", "effort": "high", "text_only": False}
+    return {"active_provider_profile": "custom", "provider_servers": json.dumps([server]),
+            "custom_endpoint_server_id": "srv-flowtest01", "custom_endpoint_base_url": base + "/home",
+            "custom_endpoint_api_key": "fake-flow-named-key", "custom_endpoint_model": "fake-named-model",
+            "custom_endpoint_reasoning_effort": "high", "custom_endpoint_text_only": "false"}
+
+
+def seed_openai_platform(base):
+    return {"active_provider_profile": "openai", "openai_platform_api_key": "sk-fake-flow-platform-key",
+            "openai_platform_model": "gpt-6-luna"}
+
 if __name__ == "__main__":
     # Codex round-2 reproduction: OpenRouter + OpenAI, no OpenCode key.
     scenario("or+openai", listing_ok=True, restart=False, with_openai=True)
@@ -356,5 +457,13 @@ if __name__ == "__main__":
     # Codex round-3 R1 reproduction, then the page's explicit choice.
     transition_scenario("existing OR + new OpenCode, no main", None)
     transition_scenario("existing OR + new OpenCode, main=openrouter", "openrouter")
+    # Codex round-4 R1 reproduction: "Keep current" on providers outside the
+    # selector, through to done; an incomplete one is refused at save.
+    keep_current_scenario("keep current: custom endpoint", seed_custom)
+    keep_current_scenario("keep current: local server", seed_local)
+    keep_current_scenario("keep current: named keyed server", seed_named_server)
+    keep_current_scenario("keep current: OpenAI API profile", seed_openai_platform)
+    keep_current_scenario("keep current: incomplete custom endpoint", seed_custom_no_model, expect_refusal="main_incomplete")
+    keep_current_scenario("keep current: custom endpoint without OpenAI key", seed_custom, expect_refusal="openai_required", with_openai=False)
     print("\nquicksetup openrouter flow: %s" % ("all checks passed" if FAILS == 0 else "%d FAILED" % FAILS))
     sys.exit(1 if FAILS else 0)

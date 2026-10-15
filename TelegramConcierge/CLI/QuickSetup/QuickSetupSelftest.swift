@@ -140,7 +140,7 @@ final class SelftestContext: @unchecked Sendable {
             for (k, v) in req {
                 guard let section = v as? [String: Any] else { continue }
                 store.applied.append(k == "provider" ? (section["profile"] as? String ?? "provider") : k)
-                if k == "provider", section["profile"] as? String == "opencode" { store.values[ProviderProfiles.opencodeApiKeyKey] = section["api_key"] as? String }
+                if k == "provider", section["profile"] as? String == "opencode" { store.values[ProviderProfiles.opencodeApiKeyKey] = section["api_key"] as? String; store.values[ProviderProfiles.opencodeModelKey] = section["model"] as? String }
                 if k == "provider", section["profile"] as? String == "openrouter" { store.values[KeychainHelper.openRouterApiKeyKey] = section["api_key"] as? String; store.activations.append(section["activate"] as? Bool ?? true) }
                 if k == "provider", section["profile"] as? String == "custom" { store.values[ProviderProfiles.customApiKeyKey] = section["api_key"] as? String; store.values[ProviderProfiles.customBaseURLKey] = section["base_url"] as? String; store.values[ProviderProfiles.customModelKey] = section["model"] as? String; store.activations.append(section["activate"] as? Bool ?? true) }
                 if k == "openai" { store.values[KeychainHelper.openAITranscriptionApiKeyKey] = section["api_key"] as? String }
@@ -197,6 +197,10 @@ final class SelftestContext: @unchecked Sendable {
                         KeychainHelper.jinaApiKeyKey, KeychainHelper.telegramBotTokenKey, KeychainHelper.telegramChatIdKey, KeychainHelper.userNameKey] {
                 values[key] = "configured"
             }
+            // The final check follows the stored main provider (Codex round 4
+            // R1): a saved OpenCode setup has its profile marker and model.
+            values[ProviderProfiles.activeProfileKey] = ProviderProfiles.Profile.opencode.rawValue
+            values[ProviderProfiles.opencodeModelKey] = OpenCodeGo.defaultModel
         }
         var applied: [String] = []
         var activations: [Bool] = []
@@ -812,6 +816,54 @@ final class SelftestContext: @unchecked Sendable {
             check("R4 plan: main=current on a fresh install is refused", plan(c, nil) == nil)
             var oc = r; oc.main = .opencode
             check("R4 plan: main=opencode without an OpenCode key is refused", plan(oc, nil) == nil)
+        }
+        // Round 5 (Codex round 4 R1): "Keep current" on a provider outside the
+        // selector saves only when that provider is complete, and the final
+        // check then asks for that provider's own values, never OpenCode's.
+        do {
+            func keepCurrent(_ seed: [String: String]) async throws -> ((Int, [String: Any]), StoreBox, QuickSetupWorkflow) {
+                let (envC, storeC) = stubEnv()
+                for (k, v) in seed { storeC.values[k] = v }
+                var req = goodRequest(agentmail: false); req.values[.opencode] = nil; req.main = .current
+                let (wfC, _) = try makeWorkflow(envC)
+                let gC = await wfC.generation
+                _ = try await wfC.verify(req, generation: gC)
+                return (try await wfC.save(req, generation: gC), storeC, wfC)
+            }
+            let custom: [String: String] = [ProviderProfiles.activeProfileKey: "custom", ProviderProfiles.customBaseURLKey: "http://127.0.0.1:9/v1",
+                                            ProviderProfiles.customApiKeyKey: "ck", ProviderProfiles.customModelKey: "m"]
+            let (savedC, storeC, _) = try await keepCurrent(custom)
+            check("R5 main=current on a complete custom endpoint: saved, nothing activated, no OpenCode key written",
+                  savedC.0 == 200 && storeC.activations.isEmpty && !storeC.applied.contains("opencode")
+                  && (storeC.values[ProviderProfiles.opencodeApiKeyKey] ?? nil) == nil, "\(savedC.1) \(storeC.applied)")
+            let finalKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: storeC.values[ProviderProfiles.activeProfileKey] ?? nil) ?? []
+            check("R5 … and every value the final check asks for is stored",
+                  !finalKeys.isEmpty && finalKeys.allSatisfy { !((storeC.values[$0] ?? nil) ?? "").isEmpty },
+                  "\(finalKeys.filter { ((storeC.values[$0] ?? nil) ?? "").isEmpty })")
+            var noModel = custom; noModel.removeValue(forKey: ProviderProfiles.customModelKey)
+            let (savedI, storeI, _) = try await keepCurrent(noModel)
+            check("R5 main=current on an incomplete custom endpoint: refused main_incomplete before any write",
+                  savedI.0 == 409 && savedI.1["error"] as? String == "main_incomplete" && storeI.applied.isEmpty, "\(savedI.1) \(storeI.applied)")
+            let local: [String: String] = [ProviderProfiles.activeProfileKey: "local", KeychainHelper.lmStudioBaseURLKey: "http://127.0.0.1:9/v1",
+                                           KeychainHelper.lmStudioModelKey: "m"]
+            let (savedL, storeL, _) = try await keepCurrent(local)
+            check("R5 main=current on a keyless local server: saved, nothing activated", savedL.0 == 200 && storeL.activations.isEmpty, "\(savedL.1)")
+            let platform: [String: String] = [ProviderProfiles.activeProfileKey: "openai", ProviderProfiles.openaiApiKeyKey: "pk"]
+            let (savedP, storeP, _) = try await keepCurrent(platform)
+            check("R5 main=current on an OpenAI API profile without its model: refused main_incomplete",
+                  savedP.0 == 409 && savedP.1["error"] as? String == "main_incomplete" && storeP.applied.isEmpty, "\(savedP.1)")
+            // No main, a kept OpenCode key on an install with no provider: no
+            // main provider can result, so the save is refused, not completed
+            // as if OpenCode ran.
+            let (envZ, storeZ) = stubEnv()
+            storeZ.values[ProviderProfiles.opencodeApiKeyKey] = "oc-good"   // stored, but no profile marker
+            var keptOnly = goodRequest(agentmail: false); keptOnly.values[.opencode] = .kept
+            let (wfZ, _) = try makeWorkflow(envZ)
+            let gZ = await wfZ.generation
+            _ = try await wfZ.verify(keptOnly, generation: gZ)
+            let savedZ = try await wfZ.save(keptOnly, generation: gZ)
+            check("R5 no main, nothing running, only a kept OpenCode key: refused main_missing before any write",
+                  savedZ.0 == 409 && savedZ.1["error"] as? String == "main_missing" && storeZ.applied.isEmpty, "\(savedZ.1) \(storeZ.applied)")
         }
         // Parser: `main` is validated and decides which provider entry is required.
         do {

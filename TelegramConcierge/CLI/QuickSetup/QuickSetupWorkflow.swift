@@ -863,8 +863,20 @@ actor QuickSetupWorkflow {
         }
         // Without an OpenAI key the main provider must be OpenRouter: every
         // other route reads web pages (and voice, images) with OpenAI.
-        if request.values[.openai] == nil, plan.main != .openrouter {
+        if request.values[.openai] == nil, Self.openAIRequired(main: plan.main) {
             return (409, ["error": "openai_required", "message": "An OpenAI key is needed unless OpenRouter runs Briglia (then voice, images and web pages go through your OpenRouter key)."])
+        }
+        // A plan that activates nothing keeps the stored provider: it must
+        // be complete now (Codex round 4 R1), or the final check would fail
+        // after everything else was saved. ChatGPT's login is checked by
+        // its own path.
+        if plan.activation == .none {
+            guard let main = plan.main else {
+                return (409, ["error": "main_missing", "message": "No main provider is set up yet: choose one."])
+            }
+            if main != .chatgpt, let missing = Self.missingProviderValue(main, stored: { env.storedValue($0) }) {
+                return (409, ["error": "main_incomplete", "message": "\(main.displayName) is not fully set up (missing \(missing)). Finish it in briglia menu, or choose another main provider here."])
+            }
         }
         savePlanCache = plan
         phase = .saving
@@ -919,21 +931,50 @@ actor QuickSetupWorkflow {
         return (200, reply)
     }
 
-    /// What the final check requires for the provider that actually runs
-    /// (Codex round 2: an OpenRouter-only setup used to fail here asking for
-    /// an OpenCode key). OpenRouter needs no OpenAI key (it covers voice,
-    /// images and page reading); every other route keeps requiring it.
-    static func requiredStoredKeys(activeProfile raw: String?) -> [String] {
-        let active = raw.flatMap { ProviderProfiles.Profile(rawValue: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-        var keys: [String]
-        switch active {
-        case .chatgpt?: keys = [ProviderProfiles.subscriptionModelKey]
-        case .openrouter?: keys = [KeychainHelper.openRouterApiKeyKey, KeychainHelper.openRouterModelKey]
-        default: keys = [ProviderProfiles.opencodeApiKeyKey]
+    /// The stored values a provider needs to run, by the same criteria as
+    /// `ProviderProfiles.isConfigured` (what activation itself demands).
+    /// Every profile is listed explicitly (Codex round 4 R1: "Keep current:
+    /// Custom endpoint" used to fall through to OpenCode and fail the final
+    /// check on `opencode_api_key`). Named servers ride the custom (keyed)
+    /// or local (keyless) carrier slots, so they are covered by those two.
+    /// The ChatGPT login itself is checked separately (subscription status).
+    static func providerRequiredKeys(_ profile: ProviderProfiles.Profile) -> [String] {
+        switch profile {
+        case .chatgpt: return [ProviderProfiles.subscriptionModelKey]
+        case .openrouter: return [KeychainHelper.openRouterApiKeyKey, KeychainHelper.openRouterModelKey]
+        case .opencode: return [ProviderProfiles.opencodeApiKeyKey, ProviderProfiles.opencodeModelKey]
+        case .custom: return [ProviderProfiles.customBaseURLKey, ProviderProfiles.customApiKeyKey, ProviderProfiles.customModelKey]
+        case .local: return [KeychainHelper.lmStudioBaseURLKey, KeychainHelper.lmStudioModelKey]
+        case .openai: return [ProviderProfiles.openaiApiKeyKey, ProviderProfiles.openaiModelKey]
         }
-        if active != .openrouter { keys.append(KeychainHelper.openAITranscriptionApiKeyKey) }
+    }
+
+    /// Whether the OpenAI key (voice, images, web pages) is required with
+    /// this main provider. Optional only with OpenRouter, whose key covers
+    /// those (owner 2026-09-25; the menu's `MenuLane.needsOpenAI` and its
+    /// "other provider" rule require it for OpenCode, servers, custom,
+    /// local and the OpenAI API profile). ChatGPT keeps Quick Setup's
+    /// existing requirement (unchanged on this branch).
+    static func openAIRequired(main: ProviderProfiles.Profile?) -> Bool { main != .openrouter }
+
+    /// What the final check requires for the provider that actually runs,
+    /// nil when no known provider is stored (refused, never treated as
+    /// OpenCode).
+    static func requiredStoredKeys(activeProfile raw: String?) -> [String]? {
+        guard let active = raw.flatMap({ ProviderProfiles.Profile(rawValue: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }) else { return nil }
+        var keys = providerRequiredKeys(active)
+        if openAIRequired(main: active) { keys.append(KeychainHelper.openAITranscriptionApiKeyKey) }
         return keys + [KeychainHelper.serperApiKeyKey, KeychainHelper.jinaApiKeyKey, KeychainHelper.telegramBotTokenKey,
                        KeychainHelper.telegramChatIdKey, KeychainHelper.userNameKey]
+    }
+
+    /// The first provider value the stored setup lacks for `profile`, nil
+    /// when it is complete. Used by save for a plan that activates nothing
+    /// ("Keep current" or a kept provider), so an incomplete current
+    /// provider is refused before anything is written instead of failing
+    /// the final check after the system phase.
+    static func missingProviderValue(_ profile: ProviderProfiles.Profile, stored: (String) -> String?) -> String? {
+        providerRequiredKeys(profile).first { (stored($0) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     /// Fresh-install preference for OpenRouter (the inference used when a
@@ -1364,8 +1405,10 @@ actor QuickSetupWorkflow {
                         fail(id, "ChatGPT login changed or ended; sign in and select it again before finishing setup"); return
                     }
                 }
-                for key in Self.requiredStoredKeys(activeProfile: env.storedValue(ProviderProfiles.activeProfileKey))
-                    where (env.storedValue(key) ?? "").isEmpty {
+                guard let required = Self.requiredStoredKeys(activeProfile: env.storedValue(ProviderProfiles.activeProfileKey)) else {
+                    fail(id, "no main provider is set up"); return
+                }
+                for key in required where (env.storedValue(key) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     fail(id, "stored value missing: \(key)"); return
                 }
                 setStep(id, "ok")
