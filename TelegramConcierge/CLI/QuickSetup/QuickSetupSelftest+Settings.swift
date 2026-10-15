@@ -75,12 +75,18 @@ extension SelftestContext {
             return OpenRouterProviderPin.HostListing(model: model, result: .success([OpenRouterProviderPin.Endpoint(providerName: "Novita", tag: "novita/fp8", promptUSDPerM: nil,
                                                      completionUSDPerM: nil, cacheReadUSDPerM: nil, contextLength: nil, uptimeLast30m: nil, status: 0)]))
         }
+        var appliedRequests: [[String: Any]] = []
+        let realApply = settings.env.apply
+        settings.env.apply = { req, cp in appliedRequests.append(req); return await realApply(req, cp) }
         let orBody: [String: Any] = ["section": "provider", "values": ["profile": "openrouter", "model": "review-model-not-on-together", "effort": "high", "text_only": false, "activate": false]]
         _ = await settings.handle("verify", body: orBody, generation: g)
         let orSaved = await settings.handle("save", body: orBody, generation: g)
         check("settings: an OpenRouter model change the pinned host doesn't serve releases the pin and says so",
               orSaved.0 == 200 && OpenRouterProviderPin.pinnedSlugs().isEmpty && (orSaved.1["message"] as? String ?? "").contains("released")
               && listedBeforeGate == ["review-model-not-on-together|gates=0"], "\(orSaved) \(listedBeforeGate)")
+        check("settings: the OpenRouter save hands setup-api its host list (no fetch inside the gate)",
+              ((appliedRequests.last?["provider"] as? [String: Any])?["host_listing"] as? [String: Any])?["model"] as? String == "review-model-not-on-together")
+        settings.env.apply = realApply
         let status = settings.status()
         let text = String(data: try JSONSerialization.data(withJSONObject: status), encoding: .utf8)!
         check("settings: status includes all six providers but no keys", (status["profiles"] as? [[String: Any]])?.count == 6 && !text.contains("externally-replaced-key") && !text.contains("kept-bot"))

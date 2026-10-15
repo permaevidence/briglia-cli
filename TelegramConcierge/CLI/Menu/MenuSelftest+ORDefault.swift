@@ -134,6 +134,36 @@ extension MenuSelftestContext {
                   ok(r) && msg(r).contains("Non è stato possibile scegliere Together") && msg(r).contains("lo sceglie OpenRouter"))
         }
 
+        // Round 3 (Codex answer 1): every OpenRouter save the menu makes hands
+        // setup-api a host list or an explicit skip, so setup-api never
+        // fetches inside the menu's barrier.
+        do {
+            let w = world()
+            let wf = await make(w)
+            _ = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]!])
+            _ = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "anthropic/claude-haiku-5.5"])
+            _ = await act(wf, ["action": "effort", "effort": "medium"])
+            _ = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]! + "-alt"])
+            let sections = w.applied.compactMap { $0["provider"] as? [String: Any] }.filter { $0["profile"] as? String == "openrouter" }
+            check("or-default: every menu OpenRouter save (key, model, effort) carries host_listing (list or skip)",
+                  sections.count == 4 && sections.allSatisfy { $0["host_listing"] is [String: Any] }, "\(sections.map { $0["host_listing"] != nil })")
+        }
+
+        do {
+            // Switching to a saved OpenRouter lane (no model change) also hands over a skip.
+            let w = world()
+            w.snap.providers["openrouter"] = MenuSnapshot.Provider(configured: true, model: MenuWorkflow.openRouterDefaultModel, effort: "high", keyMasked: "sk-or…cdef")
+            w.snap.providers["opencode"] = MenuSnapshot.Provider(configured: true, model: OpenCodeGo.defaultModel, effort: "high", keyMasked: "oc…cdef")
+            w.snap.activeProfile = "opencode"
+            w.snap.openAIMasked = "sk-…ghij"
+            w.snap.openRouterPin = ["together"]
+            let wf = await make(w)
+            let r = await act(wf, ["action": "provider_use", "profile": "openrouter"])
+            let sec = lastOpenRouterSection(w)
+            check("or-default: switching to the saved OpenRouter lane hands setup-api an explicit skip, pin kept",
+                  ok(r) && (sec["host_listing"] as? [String: Any])?["skip"] as? Bool == true && w.snap.openRouterPin == ["together"] && w.orHostAsks.isEmpty, "\(sec)")
+        }
+
         // 7. The decision helpers.
         let together = OpenRouterProviderPin.Endpoint(providerName: "Together", tag: "together", promptUSDPerM: nil, completionUSDPerM: nil,
                                                       cacheReadUSDPerM: nil, contextLength: nil, uptimeLast30m: nil, status: 0)
@@ -146,6 +176,13 @@ extension MenuSelftestContext {
             check("or-default: a cancelled host check doesn't pin", true)
         } else { check("or-default: a cancelled host check doesn't pin", false) }
         do {
+            var fetched = 0
+            OpenRouterProviderPin.fetchOverride = { _, _ in fetched += 1; throw OpenRouterProviderPin.FetchError(description: "must not be called") }
+            var probeStore: [String: String] = [OpenRouterProviderPin.storageKey: "together"]
+            _ = OpenRouterProviderPin.reconcile(&probeStore, keyBefore: "", modelBefore: "", newModel: MenuWorkflow.openRouterDefaultModel, listing: nil, newSetupDefault: true)
+            _ = OpenRouterProviderPin.reconcile(&probeStore, keyBefore: "k", modelBefore: "a/b", newModel: "c/d", listing: nil, newSetupDefault: false)
+            OpenRouterProviderPin.fetchOverride = nil
+            check("or-default rule: reconcile performs no I/O (never fetches a host list)", fetched == 0)
             var store: [String: String] = [OpenRouterProviderPin.storageKey: "together"]
             let out = OpenRouterProviderPin.reconcile(&store, keyBefore: "k", modelBefore: MenuWorkflow.openRouterDefaultModel,
                                                       newModel: "x/y", listing: nil, newSetupDefault: false)
@@ -187,6 +224,24 @@ extension MenuSelftestContext {
                 check("or-default quick: on an existing setup OpenCode stays the main provider",
                       keepMain?["profile"] as? String == "opencode" && keepMain?["activate"] as? Bool == true)
             } else { check("or-default quick: both keys parse", false) }
+            // Round 3: the OpenAI key is optional when OpenRouter may run Briglia.
+            var noOpenAI = orOnly; noOpenAI.removeValue(forKey: "openai")
+            check("or-default quick: an OpenRouter form without an OpenAI key parses", (try? QuickSetupRequest.parse(noOpenAI)) != nil)
+            var ocNoOpenAI = base; ocNoOpenAI.removeValue(forKey: "openai"); ocNoOpenAI["opencode"] = ["value": "oc-key"]
+            check("or-default quick: an OpenCode form without an OpenAI key is still refused", (try? QuickSetupRequest.parse(ocNoOpenAI)) == nil)
+            var chatNoOpenAI = noOpenAI; chatNoOpenAI["chatgpt"] = ["model": "gpt-6.1-sol", "effort": "high", "generation": UUID().uuidString]
+            check("or-default quick: with ChatGPT chosen the OpenAI key stays required", (try? QuickSetupRequest.parse(chatNoOpenAI)) == nil)
+            // The final check requires what the running provider needs (Codex round 2 P1).
+            let orKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "openrouter")
+            check("or-default quick: the final check on OpenRouter needs its key and model, not OpenCode or OpenAI",
+                  orKeys.contains(KeychainHelper.openRouterApiKeyKey) && orKeys.contains(KeychainHelper.openRouterModelKey)
+                  && !orKeys.contains(ProviderProfiles.opencodeApiKeyKey) && !orKeys.contains(KeychainHelper.openAITranscriptionApiKeyKey))
+            let ocKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "opencode")
+            check("or-default quick: the final check on OpenCode still needs the OpenCode and OpenAI keys",
+                  ocKeys.contains(ProviderProfiles.opencodeApiKeyKey) && ocKeys.contains(KeychainHelper.openAITranscriptionApiKeyKey))
+            let gptKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: "chatgpt")
+            check("or-default quick: the final check on ChatGPT keeps its model and the OpenAI key",
+                  gptKeys.contains(ProviderProfiles.subscriptionModelKey) && gptKeys.contains(KeychainHelper.openAITranscriptionApiKeyKey) && !gptKeys.contains(ProviderProfiles.opencodeApiKeyKey))
             var keptOR = base; keptOR["openrouter"] = ["kept": true]
             if let parsedKept = try? QuickSetupRequest.parse(keptOR) {
                 check("or-default quick: a kept (already stored) OpenRouter key is not a new setup", !QuickSetupWorkflow.prefersOpenRouter(parsedKept, activeProfile: nil))

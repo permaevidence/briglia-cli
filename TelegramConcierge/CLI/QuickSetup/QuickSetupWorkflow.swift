@@ -82,7 +82,13 @@ struct QuickSetupRequest: Equatable {
                 if partial { continue }
                 // The main provider: ChatGPT, OpenCode Go or (owner 2026-10-15)
                 // an OpenRouter key alone.
-                if [.openai, .serper, .jina, .telegram].contains(field) || (field == .opencode && object["chatgpt"] == nil && object["openrouter"] == nil) {
+                // The OpenAI key is optional when OpenRouter may be the main
+                // provider (it then covers voice, images and page reading,
+                // as in briglia menu); `save` enforces the exact rule once
+                // the main provider is known.
+                if [.serper, .jina, .telegram].contains(field)
+                    || (field == .openai && !(object["openrouter"] != nil && object["chatgpt"] == nil))
+                    || (field == .opencode && object["chatgpt"] == nil && object["openrouter"] == nil) {
                     throw BadRequest(description: "\(field.rawValue) is required")
                 }
                 continue
@@ -809,7 +815,18 @@ actor QuickSetupWorkflow {
             preferOpenRouterPlan = Self.prefersOpenRouter(request, activeProfile: env.storedValue(ProviderProfiles.activeProfileKey))
         }
         let preferOpenRouter = preferOpenRouterPlan ?? false
+        // Without an OpenAI key the main provider must be OpenRouter (this
+        // save makes it so, or it already runs): every other route reads
+        // web pages with OpenAI.
+        let openRouterMain = preferOpenRouter || env.storedValue(ProviderProfiles.activeProfileKey) == ProviderProfiles.Profile.openrouter.rawValue
+        if request.values[.openai] == nil, !openRouterMain {
+            phase = .verified
+            return (409, ["error": "openai_required", "message": "An OpenAI key is needed unless OpenRouter runs Briglia (then voice, images and web pages go through your OpenRouter key)."])
+        }
         var notices: [String] = []
+        if request.values[.openai] == nil {
+            notices.append("No OpenAI key: voice messages, images and reading web pages go through your OpenRouter key. You can add an OpenAI key later in briglia menu.")
+        }
         for section in Self.sectionOrder where !savedSections.contains(section) {
             if section == "provider", case .subscription(let model, let effort, let expected) = request.values[.chatgpt] {
                 try checkpoint(g)
@@ -855,6 +872,23 @@ actor QuickSetupWorkflow {
         var reply: [String: Any] = ["phase": phase.rawValue, "saved_sections": savedSections.sorted(), "system_rows": systemRows.map(rowDict)]
         if !notices.isEmpty { reply["notices"] = notices }
         return (200, reply)
+    }
+
+    /// What the final check requires for the provider that actually runs
+    /// (Codex round 2: an OpenRouter-only setup used to fail here asking for
+    /// an OpenCode key). OpenRouter needs no OpenAI key (it covers voice,
+    /// images and page reading); every other route keeps requiring it.
+    static func requiredStoredKeys(activeProfile raw: String?) -> [String] {
+        let active = raw.flatMap { ProviderProfiles.Profile(rawValue: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        var keys: [String]
+        switch active {
+        case .chatgpt?: keys = [ProviderProfiles.subscriptionModelKey]
+        case .openrouter?: keys = [KeychainHelper.openRouterApiKeyKey, KeychainHelper.openRouterModelKey]
+        default: keys = [ProviderProfiles.opencodeApiKeyKey]
+        }
+        if active != .openrouter { keys.append(KeychainHelper.openAITranscriptionApiKeyKey) }
+        return keys + [KeychainHelper.serperApiKeyKey, KeychainHelper.jinaApiKeyKey, KeychainHelper.telegramBotTokenKey,
+                       KeychainHelper.telegramChatIdKey, KeychainHelper.userNameKey]
     }
 
     /// Fresh-install preference for OpenRouter (see `save`).
@@ -1210,8 +1244,7 @@ actor QuickSetupWorkflow {
                         fail(id, "ChatGPT login changed or ended; sign in and select it again before finishing setup"); return
                     }
                 }
-                for key in [(subscriptionActive ? ProviderProfiles.subscriptionModelKey : ProviderProfiles.opencodeApiKeyKey), KeychainHelper.openAITranscriptionApiKeyKey, KeychainHelper.serperApiKeyKey,
-                            KeychainHelper.jinaApiKeyKey, KeychainHelper.telegramBotTokenKey, KeychainHelper.telegramChatIdKey, KeychainHelper.userNameKey]
+                for key in Self.requiredStoredKeys(activeProfile: env.storedValue(ProviderProfiles.activeProfileKey))
                     where (env.storedValue(key) ?? "").isEmpty {
                     fail(id, "stored value missing: \(key)"); return
                 }

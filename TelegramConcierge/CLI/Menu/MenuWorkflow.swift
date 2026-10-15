@@ -1495,6 +1495,10 @@ final class MenuWorkflow {
         if let textOnly { section["text_only"] = textOnly }
         if profile != .local { section["effort"] = effort ?? "high" }
         section.merge(extra) { _, new in new }
+        // Every OpenRouter save hands setup-api a host list or an explicit
+        // skip (same model: nothing to check), so setup-api never fetches
+        // inside the settings barrier (Codex round 2, answer 1).
+        if profile == .openrouter, section["host_listing"] == nil { section["host_listing"] = ["skip": true] }
         var payload: [String: Any] = ["provider": section]
         if snapshot.openAIMasked != nil { payload["web_search_backend"] = WebSearchBackend.openai.rawValue }
         try checkpoint()
@@ -1762,8 +1766,11 @@ final class MenuWorkflow {
                                   "text_only": s.textOnly, "effort": effort] as [String: Any]]
         } else {
             let p = stored(active)
-            request = ["provider": ["profile": profile(for: active).rawValue, "model": p.model, "effort": effort,
-                                    "text_only": p.textOnly, "activate": true] as [String: Any]]
+            var section: [String: Any] = ["profile": profile(for: active).rawValue, "model": p.model, "effort": effort,
+                                          "text_only": p.textOnly, "activate": true]
+            // Same model: no host list to check; never fetched inside the barrier.
+            if active == .openrouter { section["host_listing"] = ["skip": true] }
+            request = ["provider": section]
         }
         // Rebuilt from the snapshot above, so only written while the saved
         // model/provider are still the ones the page showed: an effort

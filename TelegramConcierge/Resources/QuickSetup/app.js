@@ -7,7 +7,7 @@
   var FIELDS = {
     required: [
       { id: 'opencode', label: 'OpenCode Go key', purpose: 'Runs the main agent (GLM 5.3 Flash by default). Not needed when you give an OpenRouter key below.', url: 'https://opencode.ai/zen', urlText: 'opencode.ai/zen' },
-      { id: 'openai', label: 'OpenAI key', purpose: 'Web research, voice notes, image generation and OCR.', url: 'https://platform.openai.com/api-keys', urlText: 'platform.openai.com' },
+      { id: 'openai', label: 'OpenAI key', purpose: 'Web research, voice notes, image generation and OCR. Optional when OpenRouter runs Briglia: your OpenRouter key then covers them.', url: 'https://platform.openai.com/api-keys', urlText: 'platform.openai.com' },
       { id: 'serper', label: 'Serper key', purpose: 'Web search.', url: 'https://serper.dev', urlText: 'serper.dev' },
       { id: 'jina', label: 'Jina key', purpose: 'Reading web pages.', url: 'https://jina.ai', urlText: 'jina.ai' },
       { id: 'telegram_token', label: 'Telegram bot token', purpose: 'Create a bot with @BotFather and paste its token.', url: 'https://t.me/BotFather', urlText: '@BotFather' },
@@ -178,7 +178,7 @@
     var n = 0;
     FIELDS.required.forEach(function (f) {
       var k = keptFor(f.id);
-      if ((k && !state.replace[k]) || (state.values[f.id] || '').length > 0 || (f.id === 'opencode' && hasOpenRouter())) n += 1;
+      if ((k && !state.replace[k]) || (state.values[f.id] || '').length > 0 || ((f.id === 'opencode' || (f.id === 'openai' && !usesSubscription())) && hasOpenRouter())) n += 1;
     });
     $('req-count').textContent = (usesSubscription() ? Math.max(0, n - ((keptFor('opencode') || state.values.opencode) ? 1 : 0)) : n) + ' of ' + (usesSubscription() ? 5 : 6) + ' filled';
   }
@@ -216,7 +216,9 @@
       else missing.push('ChatGPT sign-in');
       if (req.chatgpt && !req.chatgpt.model) { delete req.chatgpt; missing.push('ChatGPT model'); }
     } else keyField('opencode', 'opencode', !hasOpenRouter());
-    keyField('openai', 'openai', true);
+    // Optional with OpenRouter (the server checks that OpenRouter really
+    // runs Briglia after the save; otherwise it asks for the key).
+    keyField('openai', 'openai', usesSubscription() || !hasOpenRouter());
     keyField('serper', 'serper', true);
     keyField('jina', 'jina', true);
     if (keptFor('telegram_token') && !state.replace.telegram) req.telegram = { kept: true };

@@ -959,6 +959,12 @@ def main():
                             capture_output=True, text=True, timeout=600)
     check("quicksetup headless end-to-end (mock providers, dev stubs)", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
+    # Fresh OpenRouter-only Quick Setup driven to completion (owner
+    # 2026-10-15; Codex round 2: the final check demanded an OpenCode key).
+    result = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "quicksetup_openrouter_flow_test.py"), os.path.abspath(ADA)],
+                            capture_output=True, text=True, timeout=600)
+    check("quicksetup OpenRouter-only flow to completion (mock providers, dev stubs)", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
 
     # 3f3. `briglia menu`: the offline battery (Telegram detection, every
     # page action of the real MenuWorkflow with fake services, the router in

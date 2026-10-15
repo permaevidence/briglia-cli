@@ -680,6 +680,25 @@ final class SelftestContext: @unchecked Sendable {
         let savedN = try await wfN.save(full, generation: gN)
         check("fresh OpenRouter setup whose default host couldn't be confirmed: the save reply says Together couldn't be selected",
               savedN.0 == 200 && ((savedN.1["notices"] as? [String]) ?? []).contains { $0.contains("Together couldn't be selected") && $0.contains("OpenRouter chooses the host") }, "\(savedN.1)")
+        // Round 3: no OpenAI key is fine only when OpenRouter runs Briglia.
+        var orNoOpenAI = goodRequest(agentmail: false)
+        orNoOpenAI.values[.opencode] = nil; orNoOpenAI.values[.openai] = nil; orNoOpenAI.values[.openrouter] = .key("or-good")
+        let (envF, storeF) = stubEnv()
+        let (wfF, _) = try makeWorkflow(envF)
+        let gF = await wfF.generation
+        _ = try await wfF.verify(orNoOpenAI, generation: gF)
+        let savedF = try await wfF.save(orNoOpenAI, generation: gF)
+        check("fresh OpenRouter setup without an OpenAI key saves, says voice/images go through OpenRouter, saves no OpenAI section",
+              savedF.0 == 200 && !storeF.applied.contains("openai") && storeF.applied.first == "openrouter"
+              && ((savedF.1["notices"] as? [String]) ?? []).contains { $0.contains("No OpenAI key") }, "\(savedF.1) \(storeF.applied)")
+        let (envX, storeX) = stubEnv()
+        storeX.values[ProviderProfiles.activeProfileKey] = "opencode"
+        let (wfX, _) = try makeWorkflow(envX)
+        let gX = await wfX.generation
+        _ = try await wfX.verify(orNoOpenAI, generation: gX)
+        let savedX = try await wfX.save(orNoOpenAI, generation: gX)
+        check("existing OpenCode install without an OpenAI key: save refused (openai_required), nothing written",
+              savedX.0 == 409 && savedX.1["error"] as? String == "openai_required" && storeX.applied.isEmpty, "\(savedX.1) \(storeX.applied)")
         check("existing install with both keys: OpenCode stays main, OpenRouter saved inactive",
               storeE.applied.first == "opencode" && storeE.applied.contains("openrouter") && storeE.activations.first == false, "\(storeE.applied) \(storeE.activations)")
         check("progress marker quick:system written", store.values[SetupWizard.progressKey] == "quick:system")
