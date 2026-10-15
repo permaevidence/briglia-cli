@@ -873,7 +873,7 @@
     // One inline span: .notice is a flex row, so loose text/bold children would become columns.
     if (!p.configured && !(S.ai.openrouter_pin || []).length) out.push(h('div', { class: 'notice info', id: 'or-default' }, [h('span', {}, [
       T('Briglia will use ', 'Briglia userà '), h('b', { text: orDefaultLabel() }), T(', running on ', ', in esecuzione su '), h('b', { text: orDefaultHost() }),
-      T(' (currently the fastest). You can change it later.', ' (al momento il più veloce). Puoi cambiarlo più tardi.')])]));
+      T(' (currently the fastest, with Zero Data Retention: your messages aren’t stored). You can change it later.', ' (al momento il più veloce, con Zero Data Retention: i tuoi messaggi non vengono conservati). Puoi cambiarlo più tardi.')])]));
     out.push(field('ai', { secret: true, label: T('Your OpenRouter key', 'La tua chiave OpenRouter'), placeholder: 'sk-or-…', checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
       return act('provider_key', { profile: 'openrouter', key: v }, 'ai', current).then(afterSave);
     } }));
