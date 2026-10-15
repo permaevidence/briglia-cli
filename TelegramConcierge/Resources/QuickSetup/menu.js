@@ -1,6 +1,6 @@
 /* briglia menu — setup and settings for everyone: pick how Briglia thinks
-   (ChatGPT subscription by default, OpenCode Go, OpenRouter or a local
-   model), then Telegram, keys, this computer and tools; start or stop it.
+   (OpenRouter recommended for new users, ChatGPT subscription, OpenCode
+   Go or a local model), then Telegram, keys, this computer and tools; start or stop it.
    State lives on the server (GET /api/menu/status); every change is one
    POST /api/menu {action, ...} that checks and saves in one go and answers
    with the fresh status. No inline script/style (CSP), no storage. */
@@ -16,7 +16,7 @@
   var inflight = 0;
   var langPicked = false;       // first run: the language question comes first
   var lanePicked = false;       // first run: then how Briglia thinks
-  var laneChoice = 'chatgpt';   // the highlighted card on that screen
+  var laneChoice = '';          // the highlighted card on that screen (server's recommended lane until touched)
   var laneTouched = false;
   var edit = null;              // the lane being edited from the home page: {lane, id}
   var confirmRemove = null;     // the lane card asking "Remove?"
@@ -565,12 +565,16 @@
     local: ['your own server', 'il tuo server'],
   }; }
   function LANES() { return [
-    { id: 'chatgpt', name: 'ChatGPT', badge: T('Easiest', 'Il più semplice'),
+    { id: 'openrouter', name: 'OpenRouter', badge: T('Recommended', 'Consigliato'),
+      text: T('Pay as you go, with one key for everything. Briglia starts with ' + orDefaultLabel() + ', hosted on ' + orDefaultHost() + '.', 'Paghi a consumo, con una sola chiave per tutto. Briglia parte con ' + orDefaultLabel() + ', ospitato su ' + orDefaultHost() + '.') },
+    { id: 'chatgpt', name: 'ChatGPT',
       text: T('Use your ChatGPT Plus or Pro subscription. Nothing extra to pay per message — just sign in.', 'Usa il tuo abbonamento ChatGPT Plus o Pro. Nessun costo extra a messaggio: basta accedere.') },
     { id: 'opencode', name: 'OpenCode Go', text: T('A low-cost monthly plan with many AI models: GLM, Kimi, Qwen, MiMo and more.', 'Un abbonamento mensile economico con tanti modelli AI: GLM, Kimi, Qwen, MiMo e altri.') },
-    { id: 'openrouter', name: 'OpenRouter', text: T('Pay as you go, with hundreds of models from every AI company.', 'Paghi a consumo, con centinaia di modelli di tutte le aziende AI.') },
     { id: 'local', name: T('Server (local or online)', 'Server (locale o online)'), text: T('A model on your own computer or network (LM Studio, Ollama, vLLM), or any other OpenAI-compatible provider with its API key. Give each one a name; add as many as you like. For advanced users.', 'Un modello sul tuo computer o nella tua rete (LM Studio, Ollama, vLLM), oppure un altro fornitore compatibile con OpenAI con la sua chiave API. Dai un nome a ciascuno e aggiungine quanti vuoi. Per utenti esperti.') },
   ]; }
+  // The OpenRouter setup default, as the server names it.
+  function orDefaultLabel() { return (S && S.ai && S.ai.openrouter_default_label) || 'DeepSeek V4.1 Flash'; }
+  function orDefaultHost() { return (S && S.ai && S.ai.openrouter_default_host) || 'Together'; }
   function laneName(id) { return (LANES().filter(function (l) { return l.id === id; })[0] || { name: id }).name; }
   function needList(ln) {
     var first = {
@@ -597,11 +601,11 @@
        opts.status && p.configured && p.model_label ? h('div', { class: 'm', text: p.model_label }) : null]);
   }
   function lanePickView() {
-    if (!laneTouched && S.ai && S.ai.planned) laneChoice = S.ai.planned;
+    if (!laneTouched) laneChoice = (S.ai && (S.ai.planned || S.ai.recommended_lane)) || 'openrouter';
     return [
       h('div', { class: 'eyebrow', text: T('Welcome', 'Benvenuto') }),
       h('h1', { text: T('How should Briglia think?', 'Come deve ragionare Briglia?') }),
-      h('p', { class: 'lead', text: T('Briglia needs an AI to think with. If you have ChatGPT Plus or Pro, that’s the easiest way. You can change this any time.', 'Briglia ha bisogno di un’AI con cui ragionare. Se hai ChatGPT Plus o Pro, è il modo più semplice. Puoi cambiarlo quando vuoi.') }),
+      h('p', { class: 'lead', text: T('Briglia needs an AI to think with. We recommend OpenRouter: one key covers thinking, web pages, voice and images. You can change this any time.', 'Briglia ha bisogno di un’AI con cui ragionare. Consigliamo OpenRouter: una sola chiave copre ragionamento, pagine web, vocali e immagini. Puoi cambiarlo quando vuoi.') }),
       h('div', { class: 'lanes' }, LANES().map(function (l) {
         return laneCard(l, { selected: laneChoice === l.id, onclick: function () { laneChoice = l.id; laneTouched = true; render(); } });
       })),
@@ -850,6 +854,10 @@
         return act('provider_model', { profile: 'openrouter', model: v, text_only: !!ms.textOnly }, 'ai', current);
       } }));
       out.push(h('p', { class: 'small' }, [T('In use: ', 'In uso: '), h('b', { text: p.model }), ' · ', link('https://openrouter.ai/models', T('browse models', 'sfoglia i modelli'))]));
+      var pins = S.ai.openrouter_pin || [];
+      out.push(h('p', { class: 'small', id: 'or-host' }, pins.length
+        ? [T('Host: ', 'Host: '), h('b', { text: pins.join(', ') }), T(' (pinned). Change it with /orprovider on Telegram.', ' (fissato). Lo cambi con /orprovider su Telegram.')]
+        : [T('Host: chosen by OpenRouter. Pin one with /orprovider on Telegram.', 'Host: lo sceglie OpenRouter. Puoi fissarne uno con /orprovider su Telegram.')]));
       out.push(visionToggle('or-model'));
       if (p.active) out.push(effortRow('openrouter'));
       out.push(newKeyButton(st));
@@ -860,8 +868,11 @@
     out.push(h('ol', { class: 'howto' }, [
       h('li', {}, [T('Open ', 'Apri '), link('https://openrouter.ai/settings/credits', 'openrouter.ai'), T(', sign in and add a little credit.', ', accedi e aggiungi un po’ di credito.')]),
       h('li', {}, [T('Open ', 'Apri '), link('https://openrouter.ai/keys', 'openrouter.ai/keys'), T(', create a key and copy it.', ', crea una chiave e copiala.')]),
-      h('li', {}, [T('Paste it below. Briglia starts with ', 'Incollala qui sotto. Briglia parte con '), h('b', { text: S.ai.openrouter_default }), T(' — you can pick any other model right after.', ': subito dopo puoi scegliere qualsiasi altro modello.')]),
+      h('li', {}, [T('Paste it below.', 'Incollala qui sotto.')]),
     ]));
+    if (!p.configured && !(S.ai.openrouter_pin || []).length) out.push(h('div', { class: 'notice info', id: 'or-default' }, [
+      T('Briglia starts with ', 'Briglia parte con '), h('b', { text: orDefaultLabel() }), T(', hosted on ', ', ospitato su '), h('b', { text: orDefaultHost() }),
+      T(' (Briglia pins this host for you). You can change the model later here or with /model, and the host with /orprovider on Telegram.', ' (Briglia fissa questo host per te). Puoi cambiare il modello più tardi qui o con /model, e l’host con /orprovider su Telegram.')]));
     out.push(field('ai', { secret: true, label: T('Your OpenRouter key', 'La tua chiave OpenRouter'), placeholder: 'sk-or-…', checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
       return act('provider_key', { profile: 'openrouter', key: v }, 'ai', current).then(afterSave);
     } }));

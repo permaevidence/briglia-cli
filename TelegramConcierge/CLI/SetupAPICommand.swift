@@ -548,11 +548,19 @@ enum SetupAPICore {
         ProviderProfiles.ensureMigrated()
         var applied: [String] = []
         var warnings: [String] = []
+        var pinWritten: Bool?
         do {
             try checkpoint()
             if let section = request["provider"] as? [String: Any] {
                 try applyProvider(section, ownsLease: ownsLease, checkpoint: checkpoint)
                 applied.append("provider")
+            }
+            if let section = request["openrouter_pin"] as? [String: Any] {
+                try checkpoint()
+                let wrote = try applyOpenRouterPin(section)
+                pinWritten = wrote
+                applied.append("openrouter_pin")
+                if !wrote { warnings.append("openrouter_pin: unchanged (the stored pin didn't match the condition)") }
             }
             if let section = request["server"] as? [String: Any] {
                 try applyServer(section, ownsLease: ownsLease, checkpoint: checkpoint)
@@ -647,7 +655,7 @@ enum SetupAPICore {
                 throw APIError(code: "empty_request",
                                message: "no recognized sections — expected any of: provider, server, openai, "
                                + "serper, jina, identity, telegram, email_calendar, "
-                               + "web_search_backend, toolchain, mark_complete")
+                               + "web_search_backend, toolchain, mark_complete, openrouter_pin")
             }
         } catch let error as APIError {
             var payload = errorResponse(code: error.code, message: error.message)
@@ -664,6 +672,7 @@ enum SetupAPICore {
         }
         var payload = base(ok: true)
         payload["applied"] = applied
+        if let pinWritten { payload["openrouter_pin_written"] = pinWritten }
         if !warnings.isEmpty { payload["warnings"] = warnings }
         let running = daemonRunning()
         payload["daemon_running"] = running
@@ -805,6 +814,35 @@ enum SetupAPICore {
                                message: ProviderProfiles.describeActivationError(error))
             }
         }
+    }
+
+    /// The OpenRouter host pin as a conditional write (the menu's new-setup
+    /// default and its model-change revalidation; `/orprovider` itself
+    /// writes in-process). `{set_if_unset: [slug]}` stores the pin only
+    /// when none is stored; `{release_if: [slug]}` clears it only while it
+    /// still equals those slugs. Slugs go through the `/orprovider`
+    /// normalizer; the caller validated them against the host list.
+    /// Returns whether it wrote.
+    private static func applyOpenRouterPin(_ section: [String: Any]) throws -> Bool {
+        func slugs(_ value: Any?) throws -> [String] {
+            guard let list = value as? [String], !list.isEmpty, list.count <= 8 else {
+                throw APIError(code: "invalid_value", message: "openrouter_pin slugs must be a non-empty list of strings")
+            }
+            return try list.map { item in
+                guard let slug = OpenRouterProviderPin.normalizedSlug(item) else {
+                    throw APIError(code: "invalid_value", message: "\"\(item)\" is not an OpenRouter provider slug")
+                }
+                return slug
+            }
+        }
+        let set = section["set_if_unset"], release = section["release_if"]
+        guard (set == nil) != (release == nil), section.count == 1 else {
+            throw APIError(code: "invalid_value", message: "openrouter_pin takes exactly one of set_if_unset or release_if")
+        }
+        do {
+            if set != nil { return try OpenRouterProviderPin.setPinIfUnset(try slugs(set)) }
+            return try OpenRouterProviderPin.releasePin(ifStill: try slugs(release))
+        } catch let error as APIError { throw error } catch { throw saveFailed(error) }
     }
 
     /// Named servers (ProviderServers): `{action: save|use|remove, id?, name,

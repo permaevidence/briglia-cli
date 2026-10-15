@@ -257,14 +257,15 @@ struct SetupWizard {
 
             Briglia's main brain. You can configure SEVERAL providers and hop
             between them anytime with the /provider command. Recommended:
-            OpenCode Go — one subscription key, generous limits.
+            OpenRouter — pay as you go, one key for everything; it starts on
+            DeepSeek V4.1 Flash, hosted on Together.
             """)
             let profiles = ProviderProfiles.Profile.allCases
             for (index, profile) in profiles.enumerated() {
                 let hint: String
                 switch profile {
-                case .opencode: hint = "OpenCode Go (recommended)"
-                case .openrouter: hint = "OpenRouter (pay-per-token, any model)"
+                case .opencode: hint = "OpenCode Go (subscription, many models)"
+                case .openrouter: hint = "OpenRouter (recommended: pay-per-token, any model)"
                 case .custom: hint = "Custom OpenAI-compatible endpoint (with API key)"
                 case .chatgpt: hint = "ChatGPT subscription — sign in with your account"
                 case .openai: hint = "OpenAI Platform API — Responses (separate API billing)"
@@ -280,7 +281,8 @@ struct SetupWizard {
                 }
                 print("  \(index + 1). \(hint)\(status)")
             }
-            let choice = WizardIO.ask("Configure which? [1]", default: "1")
+            let recommended = String((profiles.firstIndex(of: .openrouter) ?? 0) + 1)
+            let choice = WizardIO.ask("Configure which? [\(recommended)]", default: recommended)
             guard let number = Int(choice), profiles.indices.contains(number - 1) else {
                 print("  Please enter a number from 1 to \(profiles.count).")
                 continue
@@ -381,6 +383,12 @@ struct SetupWizard {
         let currentModel = KeychainHelper.load(key: KeychainHelper.openRouterModelKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let defaultModel = currentModel.isEmpty ? ProviderProfiles.openRouterSetupDefaultModel : currentModel
+        // A new OpenRouter setup (no saved model, no stored pin) gets the
+        // owner's default host on the default model, as in briglia menu.
+        let newSetup = currentModel.isEmpty && OpenRouterProviderPin.pinnedSlugs().isEmpty
+        if newSetup {
+            print("  Default: DeepSeek V4.1 Flash (\(ProviderProfiles.openRouterSetupDefaultModel)), hosted on \(OpenRouterProviderPin.setupDefaultHostName) — Briglia pins that host for you. Change the model later with /model, the host with /orprovider.")
+        }
         let model = WizardIO.ask("Model ID (e.g. moonshotai/kimi-k3) [\(defaultModel)]", default: defaultModel)
         let key = await WizardIO.askSecretValidated(
             "OpenRouter API key",
@@ -398,6 +406,19 @@ struct SetupWizard {
         saveProfile(.openrouter, apiKey: key, baseURL: nil, model: model,
                     effort: "high", textOnly: textOnly)
         print("  ✔ OpenRouter: \(model)")
+        if newSetup, !key.isEmpty {
+            let listing = await OpenRouterProviderPin.listing(model: model, apiKey: key)
+            switch OpenRouterProviderPin.newSetupDecision(model: model, listing: listing) {
+            case .pin(let slug):
+                do {
+                    if try OpenRouterProviderPin.setPinIfUnset([slug]) { print("  ✔ Host pinned: \(OpenRouterProviderPin.setupDefaultHostName) (/orprovider off releases it)") }
+                } catch {
+                    print("  ⚠ Could not save the host pin (\(error.localizedDescription)); OpenRouter picks the host.")
+                }
+            case .skip(let reason):
+                if model == ProviderProfiles.openRouterSetupDefaultModel { print("  ⚠ Host not pinned: \(reason). OpenRouter picks the host.") }
+            }
+        }
         return true
     }
 

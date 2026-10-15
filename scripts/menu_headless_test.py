@@ -214,7 +214,9 @@ def main():
         replies = json.dumps(j) + json.dumps(cl.status())
         check("no key or token ever appears in the page state", not any(v in replies for v in GOOD.values()))
         s, j = cl.act("finish", what="start")
-        check("Start is refused while ChatGPT is not set up (named in Italian)", not j.get("ok") and "ChatGPT" in j.get("message", "") and j["message"].startswith("Prima completa"))
+        # A fresh install is steered to OpenRouter (owner, 2026-10-15), so the
+        # missing AI step is named after it.
+        check("Start is refused while the AI (OpenRouter, the fresh-install lane) is not set up (named in Italian)", not j.get("ok") and "OpenRouter" in j.get("message", "") and j["message"].startswith("Prima completa"))
         s, j = cl.act("finish", what="quit")
         check("Close is accepted", j.get("ok") and j["status"]["closing"] == "quit")
         try:

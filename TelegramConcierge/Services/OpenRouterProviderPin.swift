@@ -286,4 +286,79 @@ enum OpenRouterProviderPin {
         }
         return .served(hits)
     }
+
+    // MARK: New-setup default host (owner request 2026-10-15)
+
+    /// A NEW OpenRouter setup on the setup default model
+    /// (`ProviderProfiles.openRouterSetupDefaultModel`, DeepSeek V4.1 Flash)
+    /// is pinned to this host, so a non-technical user gets the host the
+    /// owner chose without running `/orprovider together`. Existing setups
+    /// and any stored pin are never touched; `/orprovider off` or another
+    /// slug changes it later like any pin.
+    static let setupDefaultHost = "together"
+    static let setupDefaultHostName = "Together"
+
+    /// The default pin for a new OpenRouter setup, decided against the
+    /// model's live host list with the same check `/orprovider <slug>` runs
+    /// (`normalizedSlug` + `validate`). Pins only the setup default model,
+    /// only when the listing was read and serves the host: an unreadable
+    /// listing or a host that stopped serving the model leaves routing
+    /// automatic (a hard pin there could fail every request).
+    enum NewSetupDecision: Equatable {
+        case pin(String)
+        case skip(String)
+    }
+
+    static func newSetupDecision(model: String, listing: Result<[Endpoint], Error>) -> NewSetupDecision {
+        guard model == ProviderProfiles.openRouterSetupDefaultModel else {
+            return .skip("not the setup default model")
+        }
+        guard let slug = normalizedSlug(setupDefaultHost) else { return .skip("invalid default host") }
+        switch listing {
+        case .failure(let error):
+            if isCancellation(error) { return .skip("the host check was cancelled") }
+            return .skip("couldn't read OpenRouter's host list (\(error))")
+        case .success(let endpoints):
+            switch validate(pin: slug, endpoints: endpoints) {
+            case .served: return .pin(slug)
+            case .notServed(let available):
+                return .skip("\(setupDefaultHostName) doesn't serve \(model) (hosts: \(available.joined(separator: ", ")))")
+            }
+        }
+    }
+
+    /// Live listing as a Result (for `newSetupDecision`).
+    static func listing(model: String, apiKey: String) async -> Result<[Endpoint], Error> {
+        do { return .success(try await fetchEndpoints(model: model, apiKey: apiKey)) }
+        catch { return .failure(error) }
+    }
+
+    /// The write for a new-setup default: stores `slugs` only when no pin
+    /// is stored at that moment (an explicit pin set meanwhile, from
+    /// Telegram or by hand, always wins). Returns whether it wrote.
+    @discardableResult
+    static func setPinIfUnset(_ slugs: [String]) throws -> Bool {
+        guard pinnedSlugs().isEmpty else { return false }
+        try setPin(slugs)
+        return true
+    }
+
+    /// Release the stored pin only while it still equals `expected` (a
+    /// decision taken before a network await must not delete a pin stored
+    /// meanwhile — the /model revalidation rule). Returns whether it wrote.
+    @discardableResult
+    static func releasePin(ifStill expected: [String]) throws -> Bool {
+        guard !expected.isEmpty, pinnedSlugs() == expected else { return false }
+        try setPin(nil)
+        return true
+    }
+
+    /// Pins a model change would break: the stored pins the new model's
+    /// host list doesn't serve (empty = keep the pin).
+    static func unservedPins(_ pins: [String], endpoints: [Endpoint]) -> [String] {
+        pins.filter { pin in
+            if case .notServed = validate(pin: pin, endpoints: endpoints) { return true }
+            return false
+        }
+    }
 }

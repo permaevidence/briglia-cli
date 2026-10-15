@@ -58,6 +58,7 @@ struct MenuSelftest: AsyncParsableCommand {
         await t.router()
         await t.namedServers()
         await t.round5()
+        await t.openRouterDefault()
         print(t.failures == 0 ? "\nmenu selftest: all \(t.checks) checks passed"
                               : "\nmenu selftest: \(t.failures) of \(t.checks) FAILED")
         return t.failures
@@ -107,8 +108,21 @@ final class MenuFakeWorld: @unchecked Sendable {
     /// ChatGPT credentials written by a sign-in's commit.
     var loginCommits = 0
     var loginBlock: MenuLoginBlock?
+    /// OpenRouter host lists by model (tags); a model not listed here is
+    /// served by these two only. `orHostsFail` makes every listing fail.
+    var orHosts: [String: [String]] = [MenuWorkflow.openRouterDefaultModel: ["novita/fp8", "together", "deepinfra/fp8"]]
+    var orHostsFail = false
+    var orHostAsks: [String] = []
 
     init(toolMarker: URL) { self.toolMarker = toolMarker }
+
+    func openRouterHosts(_ model: String) -> Result<[OpenRouterProviderPin.Endpoint], Error> {
+        orHostAsks.append(model)
+        if orHostsFail { return .failure(OpenRouterProviderPin.FetchError(description: "OpenRouter answered HTTP 503")) }
+        let tags = orHosts[model] ?? ["novita/fp8", "deepinfra/fp8"]
+        return .success(tags.map { OpenRouterProviderPin.Endpoint(providerName: $0, tag: $0, promptUSDPerM: nil, completionUSDPerM: nil,
+                                                                   cacheReadUSDPerM: nil, contextLength: nil, uptimeLast30m: nil, status: 0) })
+    }
 
     func toolchain() -> ToolchainService.DesktopStatus {
         toolchainChecks += 1
@@ -183,6 +197,13 @@ final class MenuFakeWorld: @unchecked Sendable {
         if let em = req["email_calendar"] as? [String: Any] {
             snap.emailProvider = em["provider"] as? String ?? "none"
             if let k = em["api_key"] as? String { snap.agentMailMasked = WizardIO.masked(k); snap.agentMailInbox = "bree@agentmail.to" }
+        }
+        // setup-api's conditional pin write (SetupAPICore.applyOpenRouterPin).
+        if let pin = req["openrouter_pin"] as? [String: Any] {
+            var wrote = false
+            if let set = pin["set_if_unset"] as? [String], snap.openRouterPin.isEmpty { snap.openRouterPin = set; wrote = true }
+            if let release = pin["release_if"] as? [String], snap.openRouterPin == release { snap.openRouterPin = []; wrote = true }
+            return ["ok": true, "applied": ["openrouter_pin"], "openrouter_pin_written": wrote]
         }
         return ["ok": true]
     }
@@ -315,6 +336,7 @@ final class MenuSelftestContext {
         }
         env.loginBlock = { world.loginBlock }
         env.telegramScan = { _, _ in world.scanCount += 1; return world.scan }
+        env.openRouterHosts = { model, _ in world.openRouterHosts(model) }
         env.localModels = { base, key in
             world.localModelAsks.append(base); world.localModelKeys.append(key)
             if let need = world.localNeedsKey, key != need { return .failure(.http(401)) }
@@ -595,11 +617,12 @@ final class MenuSelftestContext {
     func aiProvider(_ wf: MenuWorkflow, _ id: String) -> [String: Any] { (ai(wf)["providers"] as? [String: Any])?[id] as? [String: Any] ?? [:] }
 
     func providerLanes() async {
-        // First run: ChatGPT is the default lane and the OpenAI key optional.
+        // First run: OpenRouter is the default lane (owner 2026-10-15) and
+        // the OpenAI key optional.
         var w = world()
         var wf = await make(w)
-        check("a fresh install shows the ChatGPT lane with the OpenAI key optional",
-              ai(wf)["lane"] as? String == "chatgpt" && ai(wf)["openai_required"] as? Bool == false && step(wf, "openai")["required"] as? Bool == false && step(wf, "ai")["title"] as? String == "ChatGPT")
+        check("a fresh install shows the OpenRouter lane with the OpenAI key optional",
+              ai(wf)["lane"] as? String == "openrouter" && ai(wf)["openai_required"] as? Bool == false && step(wf, "openai")["required"] as? Bool == false && step(wf, "ai")["title"] as? String == "OpenRouter")
         var r = await act(wf, ["action": "lane", "lane": "opencode"])
         check("choosing OpenCode makes the OpenAI key required and renames the steps",
               ok(r) && ai(wf)["planned"] as? String == "opencode" && wf.missingRequired.contains(.openai)
@@ -894,7 +917,7 @@ final class MenuSelftestContext {
         let w = world()
         let wf = await make(w)
         var r = await act(wf, ["action": "finish", "what": "start"])
-        check("Start is refused while required steps are missing, naming them", !ok(r) && msg(r).contains("Finish these first: Your name, ChatGPT, Telegram") && wf.closing == nil)
+        check("Start is refused while required steps are missing, naming them", !ok(r) && msg(r).contains("Finish these first: Your name, OpenRouter, Telegram") && wf.closing == nil)
         r = await act(wf, ["action": "finish", "what": "maybe"])
         check("an unknown finish choice is refused", !ok(r))
         r = await act(wf, ["action": "nonsense"])
@@ -904,7 +927,7 @@ final class MenuSelftestContext {
         r = await act(wf, ["action": "key", "kind": "serper", "key": "srp-wrong-0123456789"])
         check("server messages follow the language", msg(r) == "Serper ha rifiutato questa chiave. Controlla di averla copiata tutta, poi incollala di nuovo.")
         r = await act(wf, ["action": "finish", "what": "start"])
-        check("“finish these first” in Italian names the steps in Italian", msg(r).hasPrefix("Prima completa: Il tuo nome, ChatGPT"))
+        check("“finish these first” in Italian names the steps in Italian", msg(r).hasPrefix("Prima completa: Il tuo nome, OpenRouter"))
         r = await act(wf, ["action": "lang", "lang": "fr"])
         check("an unsupported language is refused, Italian stays", !ok(r) && wf.lang == "it")
         r = await act(wf, ["action": "finish", "what": "quit"])

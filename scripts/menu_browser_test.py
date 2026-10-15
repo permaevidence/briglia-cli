@@ -88,7 +88,10 @@ class Fake:
         return k not in ("opencode", "local") or bool(self.keys["openai"])
 
     def lane(self):
-        return self.planned or self.active() or "chatgpt"
+        # Fresh install (nothing in use, never signed in to ChatGPT): the
+        # recommended OpenRouter lane (owner, 2026-10-15); else ChatGPT.
+        fresh = self.active() is None and self.chatgpt["state"] == "signed_out"
+        return self.planned or self.active() or ("openrouter" if fresh else "chatgpt")
 
     def openai_required(self):
         # OpenCode Go and local/other need the OpenAI key; ChatGPT and
@@ -131,6 +134,7 @@ class Fake:
                             "efforts": ["low", "medium", "high", "xhigh"]}
         ai = {"lane": self.lane(), "active": self.active(), "planned": self.planned, "ready": self.active() is not None, "openai_required": req, "media_via": self.media_via(),
               "providers": provs, "opencode_models": OC_MODELS, "openrouter_default": "deepseek/deepseek-v4.1-flash",
+              "openrouter_default_label": "DeepSeek V4.1 Flash", "openrouter_default_host": "Together", "openrouter_pin": [], "recommended_lane": "openrouter",
               "servers": [dict(x, model_label=x["model"], active=(x["id"] == self.active_server),
                                efforts=(["low", "medium", "high"] if x["keyed"] and x["id"] == self.active_server else [])) for x in self.servers],
               "active_server": self.active_server, "max_servers": 20, "servers_damaged": False,
@@ -347,13 +351,18 @@ def main():
         shot(page, "00-language")
         page.click(".langcard:has-text('English')")
         page.wait_for_selector("text=How should Briglia think?")
-        check("then it asks how Briglia should think, ChatGPT pre-selected as the easiest",
-              page.locator(".lanecard").count() == 4 and "sel" in page.get_attribute(".lanecard[data-lane=chatgpt]", "class")
-              and page.is_visible(".lanecard[data-lane=chatgpt] >> text=Easiest"))
+        check("then it asks how Briglia should think, OpenRouter first, pre-selected and recommended",
+              page.locator(".lanecard").count() == 4 and "sel" in page.get_attribute(".lanecard[data-lane=openrouter]", "class")
+              and page.get_attribute(".lanecard >> nth=0", "data-lane") == "openrouter"
+              and page.is_visible(".lanecard[data-lane=openrouter] >> text=Recommended")
+              and "DeepSeek V4.1 Flash" in page.inner_text(".lanecard[data-lane=openrouter]") and "Together" in page.inner_text(".lanecard[data-lane=openrouter]")
+              and not page.is_visible(".lanecard[data-lane=chatgpt] >> text=Easiest") and "sel" not in page.get_attribute(".lanecard[data-lane=chatgpt]", "class"))
         shot(page, "00b-lanes")
+        # ChatGPT stays available: pick it for the rest of this walk-through.
+        page.click(".lanecard[data-lane=chatgpt]")
         page.click("#lane-continue")
         page.wait_for_selector("text=Let’s set up Briglia")
-        check("first run shows the welcome screen", page.is_visible("text=Let’s start") and f.planned == "chatgpt" or f.planned is None)
+        check("first run shows the welcome screen", page.is_visible("text=Let’s start") and f.planned == "chatgpt")
         shot(page, "01-welcome")
         page.click("text=Let’s start")
         page.wait_for_selector("text=What should Bree call you?")
@@ -500,7 +509,9 @@ def main():
         page.wait_for_selector("text=Choose your language")
         page.click(".langcard:has-text('Italiano')")
         page.wait_for_selector("text=Come deve ragionare Briglia?")
-        check("the AI choice is in Italian too", page.is_visible("text=Il più semplice"))
+        check("the AI choice is in Italian too, OpenRouter marked Consigliato",
+              page.is_visible(".lanecard[data-lane=openrouter] >> text=Consigliato") and "ospitato su Together" in page.inner_text(".lanecard[data-lane=openrouter]"))
+        page.click(".lanecard[data-lane=chatgpt]")
         page.click("#lane-continue")
         page.wait_for_selector("text=Configuriamo Briglia")
         check("choosing Italiano switches the page and tells the server", it.lang == "it" and page.is_visible("text=Iniziamo"))
@@ -527,6 +538,7 @@ def main():
         overflow = page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")
         check("no horizontal scrolling on the AI choice at phone width", not overflow)
         shot(page, "29b-phone-lanes")
+        page.click(".lanecard[data-lane=chatgpt]")
         page.click("#lane-continue")
         page.wait_for_selector("text=Let’s set up Briglia")
         overflow = page.evaluate("document.documentElement.scrollWidth > window.innerWidth + 1")
@@ -589,6 +601,10 @@ def main():
         page.click("text=Let’s start")
         page.wait_for_selector("#f-name"); page.fill("#f-name", "Sofia"); page.click("button:has-text('Save')")
         page.wait_for_selector("text=Connect OpenRouter")
+        check("or: the OpenRouter setup says the default model and the pinned Together host",
+              page.is_visible("#or-default") and "DeepSeek V4.1 Flash" in page.inner_text("#or-default")
+              and "Together" in page.inner_text("#or-default") and "/orprovider" in page.inner_text("#or-default"))
+        shot(page, "65-openrouter-default")
         page.fill("#f-ai", GOOD["openrouter"])
         page.wait_for_selector("text=Connect Telegram", timeout=6000)
         page.click("#steps button:has-text('Voice & images')")

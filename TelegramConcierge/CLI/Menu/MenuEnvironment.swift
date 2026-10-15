@@ -54,6 +54,8 @@ struct MenuSnapshot: Equatable {
     /// them), in saved order; `activeServer` is the one Briglia runs on.
     var servers: [Server] = []
     var activeServer: String?
+    /// The stored OpenRouter host pin (`/orprovider`), empty = automatic.
+    var openRouterPin: [String] = []
     /// The saved server list doesn't decode (every server action refuses).
     var serversDamaged = false
     var telegramConfigured = false
@@ -229,6 +231,12 @@ struct MenuEnvironment {
         guard let v = KeychainHelper.load(key: name)?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty else { return nil }
         return v
     }
+    /// OpenRouter's host list for a model (`GET /models/{id}/endpoints`,
+    /// the listing `/orprovider` validates against). Used for the new-setup
+    /// default host and to re-check a stored pin when the model changes.
+    var openRouterHosts: (_ model: String, _ apiKey: String) async -> Result<[OpenRouterProviderPin.Endpoint], Error> = {
+        await OpenRouterProviderPin.listing(model: $0, apiKey: $1)
+    }
     var telegramScan: (_ token: String, _ since: Date) async -> MenuTelegramScan = { await MenuEnvironment.scanTelegram(token: $0, since: $1) }
     var telegramChatProbe: (_ token: String, _ chatId: String) async -> SetupAPICore.TelegramChatProbe = {
         await SetupAPICore.telegramChatProbe(token: $0, chatId: $1)
@@ -304,6 +312,7 @@ struct MenuEnvironment {
         } else {
             s.serversDamaged = true
         }
+        s.openRouterPin = OpenRouterProviderPin.pinnedSlugs()
         s.telegramConfigured = TelegramConfig.isConfigured
         s.telegramChatId = KeychainHelper.load(key: KeychainHelper.telegramChatIdKey) ?? ""
         func masked(_ key: String) -> String? {
