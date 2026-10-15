@@ -60,6 +60,18 @@ struct QuickSetupRequest: Equatable {
 
     var name: String
     var values: [QuickSetupField: Value]
+    /// The main provider the page shows as selected (Codex round 3 R2:
+    /// what the page shows is what the save activates). nil = an API
+    /// client that doesn't say; `QuickSetupWorkflow.mainPlan` then applies
+    /// the older inference.
+    var main: MainChoice? = nil
+
+    enum MainChoice: String, Equatable, CaseIterable {
+        case openrouter, opencode, chatgpt
+        /// Keep the provider that already runs (an existing install whose
+        /// main provider isn't one of the three above).
+        case current
+    }
 
     /// `partial` (verify only, never save): the page verifies each key as
     /// soon as it is filled in, so the name and required fields may still be
@@ -68,7 +80,7 @@ struct QuickSetupRequest: Equatable {
     /// a digest-equal verification of every field it carries.
     static func parse(_ json: Any, partial: Bool = false) throws -> QuickSetupRequest {
         guard let object = json as? [String: Any] else { throw BadRequest(description: "body must be a JSON object") }
-        let allowed: Set<String> = Set(["name"] + QuickSetupField.allCases.map(\.rawValue))
+        let allowed: Set<String> = Set(["name", "main"] + QuickSetupField.allCases.map(\.rawValue))
         let unknown = Set(object.keys).subtracting(allowed)
         guard unknown.isEmpty else { throw BadRequest(description: "unknown field(s): \(unknown.sorted().joined(separator: ", "))") }
         let trimmedName = (object["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -76,23 +88,39 @@ struct QuickSetupRequest: Equatable {
             throw BadRequest(description: "name is required")
         }
         let name = trimmedName
+        var main: MainChoice?
+        if let raw = object["main"] {
+            guard let text = raw as? String, let parsed = MainChoice(rawValue: text) else {
+                throw BadRequest(description: "main must be openrouter|opencode|chatgpt|current")
+            }
+            main = parsed
+        }
+        for field in QuickSetupField.allCases where object[field.rawValue] == nil && !partial {
+            // The main provider: ChatGPT, OpenCode Go or (owner 2026-10-15)
+            // an OpenRouter key alone. With an explicit `main`, the chosen
+            // provider's own entry is the one required.
+            // The OpenAI key is optional when OpenRouter may be the main
+            // provider (it then covers voice, images and page reading,
+            // as in briglia menu); `save` enforces the exact rule against
+            // the provider the save will actually leave running.
+            let required: Bool
+            switch field {
+            case .serper, .jina, .telegram: required = true
+            case .openai:
+                if let main { required = main == .opencode || main == .chatgpt }
+                else { required = !(object["openrouter"] != nil && object["chatgpt"] == nil) }
+            case .opencode:
+                if let main { required = main == .opencode }
+                else { required = object["chatgpt"] == nil && object["openrouter"] == nil }
+            case .openrouter: required = main == .openrouter
+            case .chatgpt: required = main == .chatgpt
+            default: required = false
+            }
+            if required { throw BadRequest(description: "\(field.rawValue) is required") }
+        }
         var values: [QuickSetupField: Value] = [:]
         for field in QuickSetupField.allCases {
-            guard let raw = object[field.rawValue] else {
-                if partial { continue }
-                // The main provider: ChatGPT, OpenCode Go or (owner 2026-10-15)
-                // an OpenRouter key alone.
-                // The OpenAI key is optional when OpenRouter may be the main
-                // provider (it then covers voice, images and page reading,
-                // as in briglia menu); `save` enforces the exact rule once
-                // the main provider is known.
-                if [.serper, .jina, .telegram].contains(field)
-                    || (field == .openai && !(object["openrouter"] != nil && object["chatgpt"] == nil))
-                    || (field == .opencode && object["chatgpt"] == nil && object["openrouter"] == nil) {
-                    throw BadRequest(description: "\(field.rawValue) is required")
-                }
-                continue
-            }
+            guard let raw = object[field.rawValue] else { continue }
             guard let entry = raw as? [String: Any] else { throw BadRequest(description: "\(field.rawValue) must be an object") }
             let keys = Set(entry.keys)
             if field == .chatgpt {
@@ -130,7 +158,9 @@ struct QuickSetupRequest: Equatable {
             }
         }
         guard !(values[.opencode] != nil && values[.chatgpt] != nil) else { throw BadRequest(description: "Choose one main provider") }
-        return QuickSetupRequest(name: name, values: values)
+        // A ChatGPT login is only ever the main provider.
+        if let main, values[.chatgpt] != nil, main != .chatgpt { throw BadRequest(description: "Choose one main provider") }
+        return QuickSetupRequest(name: name, values: values, main: main)
     }
 
     static func digest(_ input: Data) -> String {
@@ -375,7 +405,7 @@ actor QuickSetupWorkflow {
 
     static let progressSystem = "quick:system"
     static let progressHandoff = "quick:handoff"
-    static let sectionOrder = ["provider", "openai", "serper", "jina", "identity", "telegram", "email_calendar", "openrouter", "custom"]
+    static let sectionOrder = ["provider", "openai", "serper", "jina", "identity", "telegram", "email_calendar", "openrouter", "opencode", "custom"]
 
     let env: QuickSetupEnvironment
     let runner: SetupJobRunner
@@ -403,9 +433,10 @@ actor QuickSetupWorkflow {
     private(set) var kept: Set<QuickSetupField> = []
     private(set) var storedName: String
     private var savedSections: Set<String> = []
-    /// The fresh-install OpenRouter decision of the current save (nil until
-    /// the first save attempt; kept across a retried partial save).
-    private var preferOpenRouterPlan: Bool?
+    /// The main-provider plan of the current save (nil until a save attempt
+    /// passes validation; kept across a retried partial save, so the plan
+    /// doesn't drift once the first section changed the stored provider).
+    private var savePlanCache: MainPlan?
     private var lastRequest: QuickSetupRequest?
     private(set) var systemRows: [RowState] = []
     private var rowTask: Task<Void, Never>?
@@ -606,6 +637,9 @@ actor QuickSetupWorkflow {
             "platform": env.isLinux ? "linux" : "macos",
             "stored_name": storedName,
             "kept": kept.map(\.rawValue).sorted(),
+            // The provider that runs now (empty on a new setup): the page
+            // preselects it, or OpenRouter on a new setup (owner 2026-10-15).
+            "active_provider": (env.storedValue(ProviderProfiles.activeProfileKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
             "rows": QuickSetupField.allCases.compactMap { field -> [String: Any]? in
                 guard let row = verifyRows[field] else { return nil }
                 return rowDict(row)
@@ -804,25 +838,36 @@ actor QuickSetupWorkflow {
         guard let last = lastRequest, last.name == request.name else {
             return (409, ["error": "not_verified", "fields": ["name"]])
         }
-        phase = .saving
-        // A genuinely new setup (no main provider saved yet, no ChatGPT
-        // chosen) with a fresh OpenRouter key runs on OpenRouter: DeepSeek
-        // V4.1 Flash with the Together host pin when OpenRouter confirms it
-        // (owner 2026-10-15). An OpenCode key given too is saved, not active.
-        // Decided once per save attempt so a retry after a partial save
-        // keeps the same plan.
-        if preferOpenRouterPlan == nil {
-            preferOpenRouterPlan = Self.prefersOpenRouter(request, activeProfile: env.storedValue(ProviderProfiles.activeProfileKey))
+        // The provider this save leaves running, from the same plan that
+        // builds the provider payloads (Codex round 3 R1): every refusal
+        // below happens before anything is written. A retry after a
+        // partial save reuses the first plan; a different main choice then
+        // is refused rather than mixed.
+        let plan: MainPlan
+        switch Self.mainPlan(request, activeProfile: env.storedValue(ProviderProfiles.activeProfileKey)) {
+        case .failure(let refusal):
+            if let cached = savePlanCache, !savedSections.isEmpty, request.main == nil || request.main == cached.choice {
+                plan = cached
+            } else {
+                return (409, ["error": refusal.code, "message": refusal.message])
+            }
+        case .success(let fresh):
+            if let cached = savePlanCache, !savedSections.isEmpty {
+                guard request.main == nil || request.main == cached.choice else {
+                    return (409, ["error": "main_changed", "message": "Part of this setup is already saved with \(cached.main?.displayName ?? "the current provider") as the main provider; keep that choice to finish."])
+                }
+                plan = cached
+            } else {
+                plan = fresh
+            }
         }
-        let preferOpenRouter = preferOpenRouterPlan ?? false
-        // Without an OpenAI key the main provider must be OpenRouter (this
-        // save makes it so, or it already runs): every other route reads
-        // web pages with OpenAI.
-        let openRouterMain = preferOpenRouter || env.storedValue(ProviderProfiles.activeProfileKey) == ProviderProfiles.Profile.openrouter.rawValue
-        if request.values[.openai] == nil, !openRouterMain {
-            phase = .verified
+        // Without an OpenAI key the main provider must be OpenRouter: every
+        // other route reads web pages (and voice, images) with OpenAI.
+        if request.values[.openai] == nil, plan.main != .openrouter {
             return (409, ["error": "openai_required", "message": "An OpenAI key is needed unless OpenRouter runs Briglia (then voice, images and web pages go through your OpenRouter key)."])
         }
+        savePlanCache = plan
+        phase = .saving
         var notices: [String] = []
         if request.values[.openai] == nil {
             notices.append("No OpenAI key: voice messages, images and reading web pages go through your OpenRouter key. You can add an OpenAI key later in briglia menu.")
@@ -837,7 +882,7 @@ actor QuickSetupWorkflow {
                 guard result["ok"] as? Bool == true else { return (409, result) }
                 savedSections.insert(section); continue
             }
-            guard let payload = Self.applyPayload(section: section, request: request, preferOpenRouter: preferOpenRouter) else { continue }
+            guard let payload = Self.applyPayload(section: section, request: request, plan: plan) else { continue }
             try checkpoint(g)   // immediately before each apply
             let result = await env.apply(payload) { [weak self] in
                 guard let self else { throw Superseded() }
@@ -891,10 +936,71 @@ actor QuickSetupWorkflow {
                        KeychainHelper.telegramChatIdKey, KeychainHelper.userNameKey]
     }
 
-    /// Fresh-install preference for OpenRouter (see `save`).
+    /// Fresh-install preference for OpenRouter (the inference used when a
+    /// request carries no `main`).
     static func prefersOpenRouter(_ request: QuickSetupRequest, activeProfile: String?) -> Bool {
         guard request.values[.chatgpt] == nil, case .key? = request.values[.openrouter] else { return false }
         return (activeProfile ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Which provider a save activates, and with which new key.
+    enum Activation: Equatable { case none, chatgpt, openRouterKey, openCodeKey }
+
+    /// The save's main-provider plan: what the provider section writes and
+    /// which provider runs afterwards. Save validation (the OpenAI key),
+    /// the payloads and the final check all follow it, so they can't
+    /// disagree (Codex round 3 R1).
+    struct MainPlan: Equatable {
+        /// The main provider after the save (nil: none stored and none set).
+        let main: ProviderProfiles.Profile?
+        let activation: Activation
+        /// The request's explicit choice (nil for the inferred plan).
+        let choice: QuickSetupRequest.MainChoice?
+    }
+
+    struct PlanRefusal: Error, Equatable { let code: String; let message: String }
+
+    /// With `request.main` (the page): exactly the provider the user chose.
+    /// A new key for it activates it; a kept key only keeps it when it
+    /// already runs (switching to an inactive stored provider is the
+    /// menu's job: no model or effort is reset behind the user's back).
+    /// Without `main` (API clients): ChatGPT if signed in; a genuinely new
+    /// setup with a new OpenRouter key runs OpenRouter (owner 2026-10-15);
+    /// a new OpenCode key runs OpenCode; otherwise the stored provider stays.
+    static func mainPlan(_ request: QuickSetupRequest, activeProfile raw: String?) -> Result<MainPlan, PlanRefusal> {
+        let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let active = ProviderProfiles.Profile(rawValue: trimmed)
+        let fresh = trimmed.isEmpty
+        guard let choice = request.main else {
+            if case .subscription? = request.values[.chatgpt] { return .success(MainPlan(main: .chatgpt, activation: .chatgpt, choice: nil)) }
+            if prefersOpenRouter(request, activeProfile: raw) { return .success(MainPlan(main: .openrouter, activation: .openRouterKey, choice: nil)) }
+            if case .key? = request.values[.opencode] { return .success(MainPlan(main: .opencode, activation: .openCodeKey, choice: nil)) }
+            return .success(MainPlan(main: active, activation: .none, choice: nil))
+        }
+        func keyed(_ field: QuickSetupField, _ profile: ProviderProfiles.Profile, _ activation: Activation) -> Result<MainPlan, PlanRefusal> {
+            switch request.values[field] {
+            case .key?: return .success(MainPlan(main: profile, activation: activation, choice: choice))
+            case .kept? where active == profile: return .success(MainPlan(main: profile, activation: .none, choice: choice))
+            case .kept?:
+                return .failure(PlanRefusal(code: "main_inactive", message: "\(profile.displayName) is configured but not the running provider. Switch to it in briglia menu, or enter a new \(profile.displayName) key here."))
+            default:
+                return .failure(PlanRefusal(code: "main_missing", message: "The \(profile.displayName) key is needed to make it the main provider."))
+            }
+        }
+        switch choice {
+        case .openrouter: return keyed(.openrouter, .openrouter, .openRouterKey)
+        case .opencode: return keyed(.opencode, .opencode, .openCodeKey)
+        case .chatgpt:
+            guard case .subscription? = request.values[.chatgpt] else {
+                return .failure(PlanRefusal(code: "main_missing", message: "Sign in to ChatGPT to make it the main provider."))
+            }
+            return .success(MainPlan(main: .chatgpt, activation: .chatgpt, choice: choice))
+        case .current:
+            guard !fresh, request.values[.chatgpt] == nil else {
+                return .failure(PlanRefusal(code: "main_missing", message: "No provider is set up yet: choose a main provider."))
+            }
+            return .success(MainPlan(main: active, activation: .none, choice: choice))
+        }
     }
 
     /// Generation snapshot readable without actor hops (the apply seam's
@@ -910,20 +1016,35 @@ actor QuickSetupWorkflow {
         if generationBox.get() != g { throw SetupAPICore.CheckpointRevoked("this quick-setup session was replaced") }
     }
 
+    /// Older call shape (selftests): `preferOpenRouter` is the inferred
+    /// fresh-install plan.
     static func applyPayload(section: String, request: QuickSetupRequest, preferOpenRouter: Bool = false) -> [String: Any]? {
+        var opencodeKey = false
+        if case .key? = request.values[.opencode] { opencodeKey = true }
+        let activation: Activation = preferOpenRouter ? .openRouterKey : (opencodeKey ? .openCodeKey : .none)
+        return applyPayload(section: section, request: request,
+                            plan: MainPlan(main: preferOpenRouter ? .openrouter : (opencodeKey ? .opencode : nil), activation: activation, choice: nil))
+    }
+
+    static func applyPayload(section: String, request: QuickSetupRequest, plan: MainPlan) -> [String: Any]? {
         func key(_ f: QuickSetupField) -> String? {
             if case .key(let k)? = request.values[f] { return k }
             return nil
         }
         switch section {
         case "provider":
-            if preferOpenRouter, let k = key(.openrouter) {
+            // Only the plan's activation activates anything.
+            switch plan.activation {
+            case .openRouterKey:
+                guard let k = key(.openrouter) else { return nil }
                 return ["provider": ["profile": "openrouter", "api_key": k, "model": ProviderProfiles.openRouterSetupDefaultModel, "effort": "high",
                                      "text_only": false, "activate": true, "default_host_pin": true] as [String: Any]]
+            case .openCodeKey:
+                guard let k = key(.opencode) else { return nil }
+                let textOnly = OpenCodeGo.choices.first { $0.id == OpenCodeGo.defaultModel }?.textOnly ?? false
+                return ["provider": ["profile": "opencode", "api_key": k, "model": OpenCodeGo.defaultModel, "effort": "high", "text_only": textOnly, "activate": true] as [String: Any]]
+            case .none, .chatgpt: return nil
             }
-            guard let k = key(.opencode) else { return nil }
-            let textOnly = OpenCodeGo.choices.first { $0.id == OpenCodeGo.defaultModel }?.textOnly ?? false
-            return ["provider": ["profile": "opencode", "api_key": k, "model": OpenCodeGo.defaultModel, "effort": "high", "text_only": textOnly, "activate": true] as [String: Any]]
         case "openai": return key(.openai).map { ["openai": ["api_key": $0]] }
         case "serper": return key(.serper).map { ["serper": ["api_key": $0]] }
         case "jina": return key(.jina).map { ["jina": ["api_key": $0]] }
@@ -934,14 +1055,13 @@ actor QuickSetupWorkflow {
         case "email_calendar":
             guard let k = key(.agentmail) else { return nil }
             return ["email_calendar": ["provider": "agentmail", "api_key": k, "install_cli": false] as [String: Any]]
+        case "opencode":
+            // A new OpenCode key that isn't the main provider: saved, not active.
+            guard plan.activation != .openCodeKey, let k = key(.opencode) else { return nil }
+            let textOnly = OpenCodeGo.choices.first { $0.id == OpenCodeGo.defaultModel }?.textOnly ?? false
+            return ["provider": ["profile": "opencode", "api_key": k, "model": OpenCodeGo.defaultModel, "effort": "high", "text_only": textOnly, "activate": false] as [String: Any]]
         case "openrouter":
-            if preferOpenRouter {
-                // OpenRouter already runs; an OpenCode key given too is kept, not active.
-                guard let k = key(.opencode) else { return nil }
-                let textOnly = OpenCodeGo.choices.first { $0.id == OpenCodeGo.defaultModel }?.textOnly ?? false
-                return ["provider": ["profile": "opencode", "api_key": k, "model": OpenCodeGo.defaultModel, "effort": "high", "text_only": textOnly, "activate": false] as [String: Any]]
-            }
-            guard let k = key(.openrouter) else { return nil }
+            guard plan.activation != .openRouterKey, let k = key(.openrouter) else { return nil }
             // Saved as an alternative; a new OpenRouter setup still gets the
             // default host under the same rule (setup-api decides).
             return ["provider": ["profile": "openrouter", "api_key": k, "model": ProviderProfiles.openRouterSetupDefaultModel, "text_only": false, "activate": false,

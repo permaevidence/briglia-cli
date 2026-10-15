@@ -217,7 +217,9 @@ extension MenuSelftestContext {
             var both = base; both["openrouter"] = ["value": "or-key"]; both["opencode"] = ["value": "oc-key"]
             if let parsedBoth = try? QuickSetupRequest.parse(both) {
                 let main = QuickSetupWorkflow.applyPayload(section: "provider", request: parsedBoth, preferOpenRouter: true)?["provider"] as? [String: Any]
-                let alt = QuickSetupWorkflow.applyPayload(section: "openrouter", request: parsedBoth, preferOpenRouter: true)?["provider"] as? [String: Any]
+                let alt = QuickSetupWorkflow.applyPayload(section: "opencode", request: parsedBoth, preferOpenRouter: true)?["provider"] as? [String: Any]
+                check("or-default quick: on a fresh setup the OpenRouter key isn't also saved a second time as an alternative",
+                      QuickSetupWorkflow.applyPayload(section: "openrouter", request: parsedBoth, preferOpenRouter: true) == nil)
                 check("or-default quick: both keys on a fresh setup → OpenRouter runs, OpenCode is saved inactive",
                       main?["profile"] as? String == "openrouter" && alt?["profile"] as? String == "opencode" && alt?["activate"] as? Bool == false)
                 let keepMain = QuickSetupWorkflow.applyPayload(section: "provider", request: parsedBoth, preferOpenRouter: false)?["provider"] as? [String: Any]

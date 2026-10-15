@@ -181,6 +181,13 @@ def main():
 
             check("no manual Verify button on the page", page.query_selector("#btn-verify") is None)
             check("Save starts disabled", not save_enabled())
+            # A new setup preselects OpenRouter (owner 2026-10-15); this test
+            # drives the OpenCode Go route, so it picks it like a user would.
+            check("a new setup preselects OpenRouter as the main provider",
+                  wait_text(page, "#main-note", "run on OpenRouter") and page.input_value("#main-provider") == "openrouter",
+                  page.input_value("#main-provider"))
+            page.select_option("#main-provider", "opencode")
+            check("choosing OpenCode Go says so before Save", wait_text(page, "#main-note", "run on OpenCode Go"))
             page.fill("#f-name", "Sofia Bruni")
             # A key typed character by character is not probed mid-typing.
             page.type("#f-opencode", "sk-oc-WRONG", delay=60)
@@ -189,7 +196,8 @@ def main():
             check("the pause checks it automatically (no Verify click)", wait_state("opencode", "failed"), str(vstate("opencode")))
             check("the automatic check is a partial verify of the filled fields only",
                   len(verify_bodies) == 1 and verify_bodies[0].get("partial") is True
-                  and set(verify_bodies[0]) == {"partial", "name", "opencode"}, str([sorted(b) for b in verify_bodies]))
+                  and set(verify_bodies[0]) == {"partial", "name", "main", "opencode"} and verify_bodies[0].get("main") == "opencode",
+                  str([sorted(b) for b in verify_bodies]))
             page.fill("#f-openai", GOOD["openai"])
             page.fill("#f-serper", GOOD["serper"])
             page.fill("#f-jina", GOOD["jina"])

@@ -25,8 +25,9 @@
     </label>
 
     <label class="field"><span class="label">Main provider</span>
-      <select id="main-provider"><option value="opencode">OpenCode Go</option><option value="chatgpt">ChatGPT subscription</option></select>
+      <select id="main-provider"><option value="openrouter">OpenRouter (recommended)</option><option value="opencode">OpenCode Go</option><option value="chatgpt">ChatGPT subscription</option></select>
     </label>
+    <p id="main-note" class="hint" role="status" aria-live="polite"></p>
     <div id="subscription-panel" hidden>
       <p>Sign in with your ChatGPT account. Subscription limits apply; quota is currently unknown. The OpenAI API key below is still used for separate tools.</p>
       <label class="field">Model <select id="subscription-model-choice"><option value="gpt-6.1-sol">GPT-6.1 Sol</option><option value="gpt-6-sol">GPT-6 Sol</option><option value="gpt-6-luna">GPT-6 Luna</option><option value="gpt-6-astra">GPT-6 Astra</option><option value="gpt-5.6-luna">GPT-5.6 Luna</option><option value="gpt-5.6-terra">GPT-5.6 Terra</option><option value="gpt-5.6-sol">GPT-5.6 Sol</option><option value="custom">Custom model…</option></select></label>
@@ -49,7 +50,7 @@
     <div id="agentmail-fields"></div>
 
     <h2>3 · Additional providers <span class="muted">optional</span></h2>
-    <p class="hint">OpenRouter is saved as an alternative provider (your selected main provider stays active). A custom OpenAI-compatible endpoint needs its key, base URL and model.</p>
+    <p class="hint">Keys here are saved but not active: the main provider chosen above runs Briglia. A custom OpenAI-compatible endpoint needs its key, base URL and model.</p>
     <div id="extra-fields"></div>
 
     <div class="actions">

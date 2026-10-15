@@ -181,6 +181,14 @@ final class SelftestContext: @unchecked Sendable {
         return (env, store)
     }
 
+    /// Every setup-api payload a save sent, in order (round 4 checks).
+    final class PayloadLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [[String: Any]] = []
+        func append(_ p: [String: Any]) { lock.lock(); items.append(p); lock.unlock() }
+        var all: [[String: Any]] { lock.lock(); defer { lock.unlock() }; return items }
+    }
+
     final class StoreBox: @unchecked Sendable {
         var values: [String: String?] = [:]
         /// A saved configuration, as the recheck step expects it.
@@ -699,6 +707,126 @@ final class SelftestContext: @unchecked Sendable {
         let savedX = try await wfX.save(orNoOpenAI, generation: gX)
         check("existing OpenCode install without an OpenAI key: save refused (openai_required), nothing written",
               savedX.0 == 409 && savedX.1["error"] as? String == "openai_required" && storeX.applied.isEmpty, "\(savedX.1) \(storeX.applied)")
+        // Round 4 (Codex round 3 R1): the OpenAI rule follows the provider the
+        // save leaves running, not the one stored before it. An existing
+        // OpenRouter install given a new OpenCode key (no `main`: the older
+        // inference activates OpenCode) without an OpenAI key is refused
+        // before anything is written.
+        func seededOpenRouter() -> (QuickSetupEnvironment, StoreBox, () -> [[String: Any]]) {
+            let (env0, box) = stubEnv()
+            box.values[ProviderProfiles.activeProfileKey] = "openrouter"
+            box.values[KeychainHelper.openRouterApiKeyKey] = "or-good"
+            box.values[KeychainHelper.openRouterModelKey] = ProviderProfiles.openRouterSetupDefaultModel
+            var env1 = env0
+            let inner = env0.apply
+            let payloads = PayloadLog()
+            env1.apply = { req, checkpoint in payloads.append(req); return await inner(req, checkpoint) }
+            return (env1, box, { payloads.all })
+        }
+        var switchNoOpenAI = goodRequest(agentmail: false)
+        switchNoOpenAI.values[.openai] = nil; switchNoOpenAI.values[.openrouter] = .kept
+        do {
+            let (envS, storeS, _) = seededOpenRouter()
+            let before = storeS.values
+            let (wfS, _) = try makeWorkflow(envS)
+            let gS = await wfS.generation
+            _ = try await wfS.verify(switchNoOpenAI, generation: gS)
+            let savedS = try await wfS.save(switchNoOpenAI, generation: gS)
+            check("R4 existing OpenRouter + new OpenCode key (activates OpenCode) without OpenAI: refused openai_required, store untouched",
+                  savedS.0 == 409 && savedS.1["error"] as? String == "openai_required" && storeS.applied.isEmpty && storeS.values == before,
+                  "\(savedS.1) \(storeS.applied)")
+            // The same request with the OpenAI key added saves, and OpenCode runs.
+            var withKey = switchNoOpenAI; withKey.values[.openai] = .key("oa-good")
+            _ = try await wfS.verify(withKey, generation: gS)
+            let savedS2 = try await wfS.save(withKey, generation: gS)
+            check("R4 … then with the OpenAI key added: saved, OpenCode activated, OpenAI saved",
+                  savedS2.0 == 200 && storeS.applied.first == "opencode" && storeS.applied.contains("openai"), "\(savedS2.1) \(storeS.applied)")
+        }
+        // Explicit `main` (what the page sends): OpenRouter stays main, the new
+        // OpenCode key is saved inactive, no OpenAI key needed.
+        do {
+            let (envM, storeM, payloads) = seededOpenRouter()
+            var keepOR = switchNoOpenAI; keepOR.main = .openrouter
+            let (wfM, _) = try makeWorkflow(envM)
+            let gM = await wfM.generation
+            _ = try await wfM.verify(keepOR, generation: gM)
+            let savedM = try await wfM.save(keepOR, generation: gM)
+            let providerPayloads = payloads().compactMap { $0["provider"] as? [String: Any] }
+            check("R4 main=openrouter on an OpenRouter install + new OpenCode key, no OpenAI: saved; OpenCode saved inactive, nothing activated",
+                  savedM.0 == 200 && providerPayloads.count == 1 && providerPayloads[0]["profile"] as? String == "opencode"
+                  && providerPayloads[0]["activate"] as? Bool == false && storeM.values[ProviderProfiles.activeProfileKey] == "openrouter",
+                  "\(savedM.1) \(providerPayloads)")
+            // main=opencode with the same form: refused (OpenCode would run, no OpenAI key).
+            let (envO, storeO, _) = seededOpenRouter()
+            var toOC = switchNoOpenAI; toOC.main = .opencode
+            let (wfO, _) = try makeWorkflow(envO)
+            let gO = await wfO.generation
+            _ = try await wfO.verify(toOC, generation: gO)
+            let savedO = try await wfO.save(toOC, generation: gO)
+            check("R4 main=opencode without an OpenAI key: refused openai_required before any write",
+                  savedO.0 == 409 && savedO.1["error"] as? String == "openai_required" && storeO.applied.isEmpty, "\(savedO.1) \(storeO.applied)")
+        }
+        // R2: on a fresh install the explicit choice is obeyed exactly.
+        do {
+            var both = goodRequest(agentmail: false)
+            both.values[.openrouter] = .key("or-good")
+            for (choice, expected) in [(QuickSetupRequest.MainChoice.opencode, "opencode"), (.openrouter, "openrouter")] {
+                let (envB, _) = stubEnv()
+                var env2 = envB
+                let inner = envB.apply
+                let log = PayloadLog()
+                env2.apply = { req, cp in log.append(req); return await inner(req, cp) }
+                var req = both; req.main = choice
+                let (wfB, _) = try makeWorkflow(env2)
+                let gB = await wfB.generation
+                _ = try await wfB.verify(req, generation: gB)
+                let savedB = try await wfB.save(req, generation: gB)
+                let provs = log.all.compactMap { $0["provider"] as? [String: Any] }
+                let activated = provs.filter { $0["activate"] as? Bool == true }.map { $0["profile"] as? String ?? "" }
+                let inactive = provs.filter { $0["activate"] as? Bool == false }.map { $0["profile"] as? String ?? "" }
+                check("R4 fresh install, both keys, main=\(expected): only \(expected) activated, the other saved inactive",
+                      savedB.0 == 200 && activated == [expected] && inactive == [expected == "opencode" ? "openrouter" : "opencode"],
+                      "\(savedB.1) \(provs)")
+            }
+            // A kept key for a provider that isn't running is not silently switched to.
+            let (envK, storeK) = stubEnv()
+            storeK.values[ProviderProfiles.activeProfileKey] = "opencode"
+            storeK.values[KeychainHelper.openRouterApiKeyKey] = "or-good"
+            var keptInactive = goodRequest(agentmail: false)
+            keptInactive.values[.opencode] = nil; keptInactive.values[.openrouter] = .kept; keptInactive.main = .openrouter
+            let (wfK, _) = try makeWorkflow(envK)
+            let gK = await wfK.generation
+            _ = try await wfK.verify(keptInactive, generation: gK)
+            let savedK = try await wfK.save(keptInactive, generation: gK)
+            check("R4 main=openrouter with only a kept key while OpenCode runs: refused main_inactive, nothing written",
+                  savedK.0 == 409 && savedK.1["error"] as? String == "main_inactive" && storeK.applied.isEmpty, "\(savedK.1) \(storeK.applied)")
+        }
+        // The plan itself (pure).
+        do {
+            func plan(_ r: QuickSetupRequest, _ active: String?) -> QuickSetupWorkflow.MainPlan? { try? QuickSetupWorkflow.mainPlan(r, activeProfile: active).get() }
+            var r = goodRequest(agentmail: false); r.values[.opencode] = nil; r.values[.openrouter] = .key("k")
+            check("R4 plan: no main, fresh, new OpenRouter key → OpenRouter activated", plan(r, nil)?.main == .openrouter && plan(r, nil)?.activation == .openRouterKey)
+            check("R4 plan: no main, OpenCode install, new OpenRouter key → OpenCode stays, nothing activated", plan(r, "opencode")?.main == .opencode && plan(r, "opencode")?.activation == QuickSetupWorkflow.Activation.none)
+            var c = r; c.main = .current
+            check("R4 plan: main=current on a custom-endpoint install → custom stays", plan(c, "custom")?.main == .custom && plan(c, "custom")?.activation == QuickSetupWorkflow.Activation.none)
+            check("R4 plan: main=current on a fresh install is refused", plan(c, nil) == nil)
+            var oc = r; oc.main = .opencode
+            check("R4 plan: main=opencode without an OpenCode key is refused", plan(oc, nil) == nil)
+        }
+        // Parser: `main` is validated and decides which provider entry is required.
+        do {
+            let base: [String: Any] = ["name": "x", "serper": ["value": "a"], "jina": ["value": "a"], "telegram": ["token": "t", "chat_id": "1"]]
+            var a = base; a["main"] = "openrouter"; a["openrouter"] = ["value": "k"]
+            check("R4 parse: main=openrouter with its key and no OpenAI parses", (try? QuickSetupRequest.parse(a))?.main == .openrouter)
+            var b = base; b["main"] = "opencode"; b["opencode"] = ["value": "k"]; b["openrouter"] = ["value": "k"]
+            check("R4 parse: main=opencode without OpenAI is refused even with an OpenRouter key", (try? QuickSetupRequest.parse(b)) == nil)
+            var d = base; d["main"] = "openrouter"; d["opencode"] = ["value": "k"]; d["openai"] = ["value": "a"]
+            check("R4 parse: main=openrouter without an OpenRouter entry is refused", (try? QuickSetupRequest.parse(d)) == nil)
+            var e = a; e["main"] = "bogus"
+            check("R4 parse: an unknown main is refused", (try? QuickSetupRequest.parse(e)) == nil)
+            var f = a; f["chatgpt"] = ["model": "gpt-6.1-sol", "effort": "high", "generation": UUID().uuidString]; f["openai"] = ["value": "a"]
+            check("R4 parse: a ChatGPT login with main≠chatgpt is refused", (try? QuickSetupRequest.parse(f)) == nil)
+        }
         check("existing install with both keys: OpenCode stays main, OpenRouter saved inactive",
               storeE.applied.first == "opencode" && storeE.applied.contains("openrouter") && storeE.activations.first == false, "\(storeE.applied) \(storeE.activations)")
         check("progress marker quick:system written", store.values[SetupWizard.progressKey] == "quick:system")

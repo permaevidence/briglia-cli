@@ -267,10 +267,94 @@ def scenario(label, listing_ok, restart, with_openai=False):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def make_env(home, base):
+    env = dict(os.environ)
+    for k in list(env):
+        if k.startswith(("BRIGLIA_", "ADA_", "SM_")):
+            del env[k]
+    env.update({"HOME": home, "XDG_CONFIG_HOME": home + "/.config", "XDG_DATA_HOME": home + "/.local/share",
+                "XDG_CACHE_HOME": home + "/.cache", "TMPDIR": home + "/tmp/",
+                "BRIGLIA_IGNORE_LEGACY_SETUP_FLAG": "1", "BRIGLIA_DEV_QUICKSETUP_STUBS": "1",
+                "BRIGLIA_QUICKSETUP_NO_BROWSER": "1", "BRIGLIA_DEV_PROBE_BASE": base,
+                "BRIGLIA_OPENROUTER_API_BASE": base})
+    return env
+
+
+def transition_scenario(label, main):
+    """Codex round 3 R1: an incomplete setup that already runs OpenRouter
+    (no OpenAI key, valid under the new policy) is given a new OpenCode key.
+    main=None is the API shape without a choice (the older inference then
+    activates OpenCode); main="openrouter" is what the page sends when
+    OpenRouter stays selected. The save must validate the OpenAI key against
+    the provider it leaves running, refuse before any write, and complete
+    once consistent."""
+    LISTING["ok"] = True
+    home = tempfile.mkdtemp(prefix="briglia-qs-or-switch-")
+    os.makedirs(home + "/tmp", exist_ok=True)
+    cfg = home + "/.config/briglia"
+    os.makedirs(cfg, mode=0o700)
+    secrets_path = cfg + "/secrets.json"
+    with open(secrets_path, "w") as f:
+        json.dump({"active_provider_profile": "openrouter", "openrouter_api_key": OR_KEY,
+                   "openrouter_model": DEFAULT_MODEL, "openrouter_text_only": "false"}, f)
+    os.chmod(secrets_path, 0o600)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ProviderMock)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    env = make_env(home, "http://127.0.0.1:%d" % server.server_address[1])
+    s = Session(env)
+    try:
+        check(label + ": link and cookie", s.connect(), s.text()[-500:])
+        _, st0 = s.call("GET", "/api/status")
+        check(label + ": status reports the running provider", st0.get("active_provider") == "openrouter", str(st0.get("active_provider")))
+        req = {"name": "Offline test", "openrouter": {"kept": True}, "opencode": {"value": GOOD["opencode"]},
+               "serper": {"value": GOOD["serper"]}, "jina": {"value": GOOD["jina"]},
+               "telegram": {"token": GOOD["telegram"], "chat_id": CHAT_ID}}
+        if main:
+            req["main"] = main
+        st, js = s.call("POST", "/api/verify", req)
+        check(label + ": verifies", st == 200 and js.get("phase") == "verified", str(js)[:300])
+        before = open(secrets_path, "rb").read()
+        st, js = s.call("POST", "/api/save", req)
+        if main is None:
+            check(label + ": save refused openai_required (OpenCode would run without an OpenAI key)",
+                  st == 409 and js.get("error") == "openai_required", "%s %s" % (st, str(js)[:300]))
+            check(label + ": refusal wrote nothing", open(secrets_path, "rb").read() == before)
+            req["openai"] = {"value": GOOD["openai"]}
+            st, js = s.call("POST", "/api/verify", req)
+            check(label + ": with the OpenAI key added it verifies", st == 200 and js.get("phase") == "verified", str(js)[:300])
+            st, js = s.call("POST", "/api/save", req)
+        check(label + ": save → system phase", st == 200 and js.get("phase") == "system", "%s %s" % (st, str(js)[:300]))
+        store = json.load(open(secrets_path))
+        expected = "opencode" if main is None else "openrouter"
+        check(label + ": the running provider is " + expected + ", OpenCode key stored",
+              store.get("active_provider_profile") == expected and bool(store.get("opencode_api_key")),
+              str(store.get("active_provider_profile")))
+        check(label + ": OpenAI key " + ("stored" if main is None else "absent (OpenRouter runs)"),
+              bool(store.get("openai_transcription_api_key")) == (main is None))
+        notices = " ".join(js.get("notices", []))
+        check(label + ": the 'No OpenAI key' notice only when OpenRouter runs", ("No OpenAI key" in notices) == (main is not None), notices)
+        if run_system_rows(s, label):
+            finish(s, label)
+        store = json.load(open(secrets_path))
+        check(label + ": setup complete and progress cleared", store.get("cli_setup_complete") == "true"
+              and "cli_setup_step_in_progress" not in store, json.dumps({k: store.get(k) for k in ("cli_setup_complete", "cli_setup_step_in_progress")}))
+        check(label + ": process exited 0", s.proc.returncode == 0, "rc=%s tail=%r" % (s.proc.returncode, s.text()[-400:]))
+    except Exception as e:
+        check(label + ": driver raised %r" % (e,), False, s.text()[-1500:])
+    finally:
+        s.stop()
+        server.shutdown()
+        server.server_close()
+        shutil.rmtree(home, ignore_errors=True)
+
+
 if __name__ == "__main__":
     # Codex round-2 reproduction: OpenRouter + OpenAI, no OpenCode key.
     scenario("or+openai", listing_ok=True, restart=False, with_openai=True)
     scenario("or-only", listing_ok=True, restart=True)
     scenario("or-only, host list unreadable", listing_ok=False, restart=False)
+    # Codex round-3 R1 reproduction, then the page's explicit choice.
+    transition_scenario("existing OR + new OpenCode, no main", None)
+    transition_scenario("existing OR + new OpenCode, main=openrouter", "openrouter")
     print("\nquicksetup openrouter flow: %s" % ("all checks passed" if FAILS == 0 else "%d FAILED" % FAILS))
     sys.exit(1 if FAILS else 0)

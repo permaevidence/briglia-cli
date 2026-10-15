@@ -6,8 +6,7 @@
 
   var FIELDS = {
     required: [
-      { id: 'opencode', label: 'OpenCode Go key', purpose: 'Runs the main agent (GLM 5.3 Flash by default). Not needed when you give an OpenRouter key below.', url: 'https://opencode.ai/zen', urlText: 'opencode.ai/zen' },
-      { id: 'openai', label: 'OpenAI key', purpose: 'Web research, voice notes, image generation and OCR. Optional when OpenRouter runs Briglia: your OpenRouter key then covers them.', url: 'https://platform.openai.com/api-keys', urlText: 'platform.openai.com' },
+      { id: 'openai', label: 'OpenAI key', purpose: 'Web research, voice notes, image generation and OCR. Optional when OpenRouter is the main provider: your OpenRouter key then covers them.', url: 'https://platform.openai.com/api-keys', urlText: 'platform.openai.com' },
       { id: 'serper', label: 'Serper key', purpose: 'Web search.', url: 'https://serper.dev', urlText: 'serper.dev' },
       { id: 'jina', label: 'Jina key', purpose: 'Reading web pages.', url: 'https://jina.ai', urlText: 'jina.ai' },
       { id: 'telegram_token', label: 'Telegram bot token', purpose: 'Create a bot with @BotFather and paste its token.', url: 'https://t.me/BotFather', urlText: '@BotFather' },
@@ -17,7 +16,6 @@
       { id: 'agentmail', label: 'AgentMail key', purpose: 'Gives Briglia its own inbox and calendar.', url: 'https://agentmail.to', urlText: 'agentmail.to' }
     ],
     extra: [
-      { id: 'openrouter', label: 'OpenRouter key', purpose: 'Recommended on a new setup: Briglia then thinks with DeepSeek V4.1 Flash, hosted on Together (pinned when OpenRouter confirms it). On an existing setup it is saved, not active.', url: 'https://openrouter.ai/keys', urlText: 'openrouter.ai' },
       { id: 'custom_key', label: 'Custom endpoint key', purpose: 'Any OpenAI-compatible server. Needs the base URL and model below.' },
       { id: 'custom_base', label: 'Custom endpoint base URL', purpose: 'e.g. https://my-server.example/v1', plain: true },
       { id: 'custom_model', label: 'Custom endpoint model', purpose: 'The model id the server expects', plain: true },
@@ -25,7 +23,16 @@
     ]
   };
 
-  var state = { status: null, kept: [], values: {}, replace: {}, jobOffset: 0, lastPhase: null, polling: null, currentOffer: null };
+  // The main provider's key: first among the required fields when it is the
+  // chosen main provider, otherwise among the additional (saved, not
+  // active) providers. ChatGPT signs in instead of a key.
+  var MAIN_FIELDS = {
+    openrouter: { id: 'openrouter', label: 'OpenRouter key', purpose: 'Runs the main agent. A new OpenRouter key is set up with DeepSeek V4.1 Flash, hosted on Together (pinned when OpenRouter confirms it).', url: 'https://openrouter.ai/keys', urlText: 'openrouter.ai' },
+    opencode: { id: 'opencode', label: 'OpenCode Go key', purpose: 'Runs the main agent (GLM 5.3 Flash by default).', url: 'https://opencode.ai/zen', urlText: 'opencode.ai/zen' }
+  };
+  var PROVIDER_NAMES = { openrouter: 'OpenRouter', opencode: 'OpenCode Go', chatgpt: 'ChatGPT subscription', custom: 'Custom endpoint', local: 'Local server', openai: 'OpenAI API' };
+
+  var state = { status: null, mainInitialized: false, kept: [], values: {}, replace: {}, jobOffset: 0, lastPhase: null, polling: null, currentOffer: null };
 
   function $(id) { return document.getElementById(id); }
   function el(tag, cls, text) {
@@ -170,26 +177,71 @@
   $('subscription-effort').addEventListener('change', function () { renderStatuses(); scheduleVerify(DELAY_CHANGE); });
   renderSubscriptionEfforts();
 
-  function usesSubscription() { return $("main-provider").value === "chatgpt"; }
-  // An OpenRouter key (new or kept) can stand in for the OpenCode Go key.
-  function hasOpenRouter() { var k = keptFor('openrouter'); return !!((k && !state.replace[k]) || (state.values.openrouter || '').length); }
+  function mainChoice() { return $('main-provider').value; }
+  function usesSubscription() { return mainChoice() === 'chatgpt'; }
+  function activeProvider() { return (state.status && state.status.active_provider) || ''; }
+  // The key field that runs Briglia (null: ChatGPT sign-in or the current provider).
+  function mainField() { return MAIN_FIELDS[mainChoice()] || null; }
+  // Additional providers: saved, never activated by this page.
+  function extraMainFields() {
+    var c = mainChoice();
+    if (c === 'chatgpt') return [MAIN_FIELDS.openrouter];   // ChatGPT can't sit beside an OpenCode key here
+    return ['openrouter', 'opencode'].filter(function (id) { return id !== c; }).map(function (id) { return MAIN_FIELDS[id]; });
+  }
+  function isFilled(id) { var k = keptFor(id); return !!((k && !state.replace[k]) || (state.values[id] || '').length); }
+  // A configured key for a provider that isn't the one running: this page
+  // doesn't switch to it (no model or effort is reset); the menu does.
+  function keptButInactive(id) { var k = keptFor(id); return !!(k && !state.replace[k] && activeProvider() !== id); }
+
+  // The main-provider selector: OpenRouter on a new setup (owner
+  // 2026-10-15), the running provider on an existing one. What is selected
+  // here is exactly what the save activates.
+  function initMainChoice() {
+    if (state.mainInitialized || !state.status) return;
+    state.mainInitialized = true;
+    var active = activeProvider(), select = $('main-provider');
+    if (active && !MAIN_FIELDS[active] && active !== 'chatgpt') {
+      var keep = el('option', null, 'Keep current: ' + (PROVIDER_NAMES[active] || active));
+      keep.value = 'current'; select.appendChild(keep);
+      select.value = 'current';
+    } else {
+      select.value = active || 'openrouter';
+    }
+    $('subscription-panel').hidden = !usesSubscription();
+    if (usesSubscription()) subscriptionStatus().catch(subscriptionError);
+  }
+
+  function renderMainNote() {
+    var c = mainChoice(), active = activeProvider();
+    var name = c === 'current' ? (PROVIDER_NAMES[active] || active) : PROVIDER_NAMES[c];
+    var text = c === 'openrouter'
+      ? 'Briglia will run on OpenRouter. The OpenAI key is optional: your OpenRouter key covers voice notes, images and web pages.'
+      : 'Briglia will run on ' + name + '. The OpenAI key is required.';
+    if (active && c !== 'current' && active !== c) text += ' Saving switches the main provider from ' + (PROVIDER_NAMES[active] || active) + ' to ' + name + '.';
+    $('main-note').textContent = text;
+  }
 
   function updateCount() {
-    var n = 0;
+    var n = 0, total = FIELDS.required.length;
+    var mf = mainField();
+    if (mf) { total += 1; if (isFilled(mf.id)) n += 1; }
     FIELDS.required.forEach(function (f) {
-      var k = keptFor(f.id);
-      if ((k && !state.replace[k]) || (state.values[f.id] || '').length > 0 || ((f.id === 'opencode' || (f.id === 'openai' && !usesSubscription())) && hasOpenRouter())) n += 1;
+      if (isFilled(f.id) || (f.id === 'openai' && mainChoice() === 'openrouter')) n += 1;
     });
-    $('req-count').textContent = (usesSubscription() ? Math.max(0, n - ((keptFor('opencode') || state.values.opencode) ? 1 : 0)) : n) + ' of ' + (usesSubscription() ? 5 : 6) + ' filled';
+    $('req-count').textContent = n + ' of ' + total + ' filled';
   }
 
   function renderIntro() {
+    initMainChoice();
+    renderMainNote();
     var req = $('required-fields'); clear(req);
-    FIELDS.required.forEach(function (f, i) { if (!usesSubscription() || f.id !== "opencode") req.appendChild(fieldNode(f, i)); });
+    var mf = mainField(), offset = mf ? 1 : 0;
+    if (mf) req.appendChild(fieldNode(mf, 0));
+    FIELDS.required.forEach(function (f, i) { req.appendChild(fieldNode(f, i + offset)); });
     var am = $('agentmail-fields'); clear(am);
     FIELDS.agentmail.forEach(function (f) { am.appendChild(fieldNode(f)); });
     var ex = $('extra-fields'); clear(ex);
-    FIELDS.extra.forEach(function (f) { ex.appendChild(fieldNode(f)); });
+    extraMainFields().concat(FIELDS.extra).forEach(function (f) { ex.appendChild(fieldNode(f)); });
     if (state.status && state.status.stored_name && !$('f-name').value) $('f-name').value = state.status.stored_name;
     updateCount();
     renderStatuses();
@@ -202,7 +254,8 @@
      verified" and "what is saved" compare by value. */
   function collectRequest() {
     var missing = [], incomplete = {};
-    var req = { name: $('f-name').value.trim() };
+    var c = mainChoice();
+    var req = { name: $('f-name').value.trim(), main: c };
     if (!req.name) missing.push('your name');
     function keyField(id, apiName, required) {
       var k = keptFor(id);
@@ -215,10 +268,17 @@
       if (subscriptionGeneration) req.chatgpt = {model: $('subscription-model').value.trim(), effort: $('subscription-effort').value, generation: subscriptionGeneration};
       else missing.push('ChatGPT sign-in');
       if (req.chatgpt && !req.chatgpt.model) { delete req.chatgpt; missing.push('ChatGPT model'); }
-    } else keyField('opencode', 'opencode', !hasOpenRouter());
-    // Optional with OpenRouter (the server checks that OpenRouter really
-    // runs Briglia after the save; otherwise it asks for the key).
-    keyField('openai', 'openai', usesSubscription() || !hasOpenRouter());
+    }
+    // The chosen main provider's key is required; the others are optional
+    // extras. A configured but inactive one needs a new key to become main
+    // (the server refuses the same).
+    var mf = mainField();
+    if (mf && keptButInactive(mf.id)) missing.push('a new ' + mf.label + ' (' + PROVIDER_NAMES[mf.id] + ' is configured but not running; switch to it in briglia menu, or replace its key here)');
+    if (mf) keyField(mf.id, mf.id, true);
+    extraMainFields().forEach(function (f) { keyField(f.id, f.id, false); });
+    // Optional only when OpenRouter is the main provider (the server
+    // applies the same rule to the provider the save leaves running).
+    keyField('openai', 'openai', c !== 'openrouter');
     keyField('serper', 'serper', true);
     keyField('jina', 'jina', true);
     if (keptFor('telegram_token') && !state.replace.telegram) req.telegram = { kept: true };
@@ -231,7 +291,6 @@
       else if (t || c) incomplete.telegram = 'Fill in both the bot token and the chat ID.';
     }
     keyField('agentmail', 'agentmail', false);
-    keyField('openrouter', 'openrouter', false);
     if (keptFor('custom_key') && !state.replace.custom) req.custom = { kept: true };
     else {
       var ck = state.values.custom_key || '', cb = state.values.custom_base || '', cm = state.values.custom_model || '';
@@ -295,6 +354,7 @@
     });
   }
   $('main-provider').addEventListener('change', function() {
+    state.mainInitialized = true;
     $('subscription-panel').hidden = !usesSubscription(); renderIntro(); scheduleVerify(DELAY_CHANGE);
     if (usesSubscription()) subscriptionStatus().catch(subscriptionError);
   });
@@ -465,7 +525,7 @@
       // Drop keys from memory now that they are saved.
       state.values = {}; state.replace = {};
       auto.rows = {}; auto.sig = {}; auto.verifiedKey = null; auto.sentKey = null;
-      FIELDS.required.concat(FIELDS.agentmail, FIELDS.extra).forEach(function (f) { var i = $('f-' + f.id); if (i) i.value = ''; });
+      FIELDS.required.concat(FIELDS.agentmail, FIELDS.extra, [MAIN_FIELDS.openrouter, MAIN_FIELDS.opencode]).forEach(function (f) { var i = $('f-' + f.id); if (i) i.value = ''; });
       banner((r.json && r.json.notices && r.json.notices.length) ? r.json.notices.join(' ') : null, false);
       refresh();
     }).catch(function (e) { auto.saving = false; renderStatuses(); handleFetchError(e); });

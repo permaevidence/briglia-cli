@@ -103,6 +103,7 @@ jobs:
         run: |
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish
+          python3 scripts/quicksetup_main_provider_browser_test.py .build/debug/briglia
           python3 scripts/subscription_browser_test.py
           python3 scripts/menu_browser_test.py
           python3 scripts/browser_settings_test.py .build/debug/briglia
@@ -193,6 +194,7 @@ jobs:
           python3 -m playwright install chromium
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia
           python3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish
+          python3 scripts/quicksetup_main_provider_browser_test.py .build/debug/briglia
           python3 scripts/subscription_browser_test.py
           python3 scripts/menu_browser_test.py
       - name: Browser settings browser test
