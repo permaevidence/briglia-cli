@@ -931,8 +931,12 @@ actor QuickSetupWorkflow {
         return (200, reply)
     }
 
-    /// The stored values a provider needs to run, by the same criteria as
-    /// `ProviderProfiles.isConfigured` (what activation itself demands).
+    /// The stored values a provider needs to run, modelled on
+    /// `ProviderProfiles.isConfigured` (what activation itself demands) but
+    /// not identical to it: for OpenRouter, `isConfigured` accepts a key
+    /// without a stored model (the runtime has a model fallback), while
+    /// Quick Setup also requires the stored model, as its final check
+    /// always has.
     /// Every profile is listed explicitly (Codex round 4 R1: "Keep current:
     /// Custom endpoint" used to fall through to OpenCode and fail the final
     /// check on `opencode_api_key`). Named servers ride the custom (keyed)
