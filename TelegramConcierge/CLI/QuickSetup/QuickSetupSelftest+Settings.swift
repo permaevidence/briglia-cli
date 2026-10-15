@@ -64,6 +64,23 @@ extension SelftestContext {
         _ = await settings.handle("verify", body: req("gpt-5.6-sol", key: nil), generation: g)
         let keptSaved = await settings.handle("save", body: req("gpt-5.6-sol", key: nil), generation: g)
         check("settings: model-only edit retains existing key", keptSaved.0 == 200 && BrowserSettingsWorkflow.key(.openai) == "externally-replaced-key")
+        // OpenRouter model change re-checks the stored host pin: the host
+        // list is read through the seam before the mutation gate.
+        try KeychainHelper.saveBatch([KeychainHelper.openRouterApiKeyKey: "sk-or-fixture", KeychainHelper.openRouterModelKey: ProviderProfiles.openRouterSetupDefaultModel,
+                                      OpenRouterProviderPin.storageKey: "together"])
+        var listedBeforeGate: [String] = []
+        settings.env.openRouterListing = { store, model, _ in
+            listedBeforeGate.append("\(model)|gates=\(gates)")
+            guard OpenRouterProviderPin.listingNeeded(store: store, newModel: model, newSetupDefault: true) else { return nil }
+            return OpenRouterProviderPin.HostListing(model: model, result: .success([OpenRouterProviderPin.Endpoint(providerName: "Novita", tag: "novita/fp8", promptUSDPerM: nil,
+                                                     completionUSDPerM: nil, cacheReadUSDPerM: nil, contextLength: nil, uptimeLast30m: nil, status: 0)]))
+        }
+        let orBody: [String: Any] = ["section": "provider", "values": ["profile": "openrouter", "model": "review-model-not-on-together", "effort": "high", "text_only": false, "activate": false]]
+        _ = await settings.handle("verify", body: orBody, generation: g)
+        let orSaved = await settings.handle("save", body: orBody, generation: g)
+        check("settings: an OpenRouter model change the pinned host doesn't serve releases the pin and says so",
+              orSaved.0 == 200 && OpenRouterProviderPin.pinnedSlugs().isEmpty && (orSaved.1["message"] as? String ?? "").contains("released")
+              && listedBeforeGate == ["review-model-not-on-together|gates=0"], "\(orSaved) \(listedBeforeGate)")
         let status = settings.status()
         let text = String(data: try JSONSerialization.data(withJSONObject: status), encoding: .utf8)!
         check("settings: status includes all six providers but no keys", (status["profiles"] as? [[String: Any]])?.count == 6 && !text.contains("externally-replaced-key") && !text.contains("kept-bot"))

@@ -1367,33 +1367,65 @@ final class MenuWorkflow {
                                                       : ["kind": "openrouter", "api_key": key, "model": model])
         try checkpoint()
         guard probe["ok"] as? Bool == true else { return (false, keyError(service: lane.title(lang), Self.probeReason(probe))) }
-        // A NEW OpenRouter setup (no OpenRouter profile saved, no pin
-        // stored) on the default model is pinned to Together, checked
-        // against the host list like `/orprovider together`. The write is
-        // conditional (set only if still unset) and rides in the same
-        // guarded apply as the profile.
-        var pin: PinChange?
-        if lane == .openrouter, !stored.configured, snapshot.openRouterPin.isEmpty, model == Self.openRouterDefaultModel {
-            let listing = await env.openRouterHosts(model, key)
-            try checkpoint()
-            if case .pin(let slug) = OpenRouterProviderPin.newSetupDecision(model: model, listing: listing) {
-                pin = PinChange(section: ["set_if_unset": [slug]],
-                                note: L(" It runs on \(OpenRouterProviderPin.setupDefaultHostName) (host pinned; change it with /orprovider on Telegram).",
-                                        " Gira su \(OpenRouterProviderPin.setupDefaultHostName) (host fissato; lo cambi con /orprovider su Telegram)."))
-            }
+        // OpenRouter: the host pin is decided by setup-api's one model/pin
+        // rule (OpenRouterProviderPin.reconcile) inside the same locked
+        // write as the profile. A NEW setup on the default model asks for
+        // the default host (Together). The host list is read here, before
+        // the settings barrier, and handed over.
+        var extra: [String: Any] = [:]
+        if lane == .openrouter {
+            extra = try await openRouterPinFields(model: model, apiKey: key, newSetupDefault: true, checkpoint: checkpoint)
         }
         return try await saveProvider(lane, apiKey: key, model: model, baseURL: nil,
                                       textOnly: model == stored.model && stored.configured ? stored.textOnly : nil,
                                       effort: stored.effort.isEmpty ? nil : stored.effort,
-                                      activate: activatesOnSave(lane, isActive: activeLane == lane), pin: pin, basis: basis, checkpoint: checkpoint)
+                                      activate: activatesOnSave(lane, isActive: activeLane == lane), extra: extra, basis: basis, checkpoint: checkpoint)
     }
 
-    /// A conditional OpenRouter host-pin write that rides in a provider
-    /// save's apply (setup-api `openrouter_pin`), and the sentence added to
-    /// the confirmation when it was written.
-    struct PinChange {
-        var section: [String: Any]
-        var note: String
+    /// The provider-section fields for an OpenRouter save: whether to ask
+    /// for the new-setup default host, and the host list (or "skip" when the
+    /// page's snapshot says none is needed — setup-api then never fetches
+    /// inside the barrier; a state changed meanwhile is decided
+    /// conservatively under the lock).
+    private func openRouterPinFields(model: String, apiKey: String, newSetupDefault: Bool,
+                                     checkpoint: @escaping @Sendable () throws -> Void) async throws -> [String: Any] {
+        let stored = stored(.openrouter)
+        let needed = OpenRouterProviderPin.listingNeeded(keyBefore: stored.configured ? "configured" : "", modelBefore: stored.configured ? stored.model : "",
+                                                         pins: snapshot.openRouterPin, newModel: model, newSetupDefault: newSetupDefault)
+        var fields: [String: Any] = ["default_host_pin": newSetupDefault]
+        if needed {
+            let listing = OpenRouterProviderPin.HostListing(model: model, result: await env.openRouterHosts(model, apiKey))
+            try checkpoint()
+            fields["host_listing"] = listing.json
+        } else {
+            fields["host_listing"] = ["skip": true]
+        }
+        return fields
+    }
+
+    /// The sentence added to a save confirmation for what happened to the
+    /// OpenRouter host pin (setup-api `openrouter_host_pin`), "" for nothing.
+    func hostPinNote(_ reply: [String: Any]?) -> String {
+        guard let reply, let result = reply["result"] as? String else { return "" }
+        let host = OpenRouterProviderPin.setupDefaultHostName
+        let pins = (reply["pins"] as? [String] ?? []).joined(separator: ", ")
+        let reason = reply["reason"] as? String ?? ""
+        switch result {
+        case "pinned_default":
+            return L(" It runs on \(host) (host pinned; change it with /orprovider on Telegram).",
+                     " Gira su \(host) (host fissato; lo cambi con /orprovider su Telegram).")
+        case "default_skipped":
+            return L(" \(host) couldn\u{2019}t be selected (\(reason)), so no host is pinned and OpenRouter chooses the host. You can pin one later with /orprovider on Telegram.",
+                     " Non è stato possibile scegliere \(host) (\(reason)), quindi nessun host è fissato e l\u{2019}host lo sceglie OpenRouter. Puoi fissarne uno più tardi con /orprovider su Telegram.")
+        case "released":
+            return L(" The host pin (\(pins)) was released: that host doesn\u{2019}t serve this model, so OpenRouter now chooses the host.",
+                     " L\u{2019}host fissato (\(pins)) è stato tolto: quell\u{2019}host non offre questo modello, quindi ora l\u{2019}host lo sceglie OpenRouter.")
+        case "kept_unverified":
+            return L(" Couldn\u{2019}t check that your pinned host (\(pins)) serves this model (\(reason)); if replies fail, send /orprovider off on Telegram.",
+                     " Non ho potuto verificare che l\u{2019}host fissato (\(pins)) offra questo modello (\(reason)); se le risposte falliscono, invia /orprovider off su Telegram.")
+        default:
+            return ""
+        }
     }
 
     /// A different model (OpenCode Go catalog, an OpenRouter id, or a local
@@ -1434,32 +1466,16 @@ final class MenuWorkflow {
         // theirs unless the page says otherwise (a new id defaults to vision).
         let vision: Bool? = lane == .opencode ? nil : (textOnly ?? (model == stored.model ? stored.textOnly : false))
         // A stored host pin is model-scoped and HARD (provider.only, no
-        // fallbacks): a new model its host doesn't serve would fail every
-        // request. Re-check it like /model does; release it (only if it is
-        // still the same pin) when the new model isn't served there.
-        var pin: PinChange?
-        var pinWarning = ""
-        if let orKey, !snapshot.openRouterPin.isEmpty, model != stored.model {
-            let pins = snapshot.openRouterPin
-            let listing = await env.openRouterHosts(model, orKey)
-            try checkpoint()
-            switch listing {
-            case .success(let endpoints):
-                if !OpenRouterProviderPin.unservedPins(pins, endpoints: endpoints).isEmpty {
-                    let list = pins.joined(separator: ", ")
-                    pin = PinChange(section: ["release_if": pins],
-                                    note: L(" The host pin (\(list)) was released: that host doesn\u{2019}t serve \(model), so OpenRouter now picks the host.",
-                                            " L\u{2019}host fissato (\(list)) è stato tolto: quell\u{2019}host non offre \(model), quindi ora OpenRouter sceglie l\u{2019}host."))
-                }
-            case .failure:
-                pinWarning = L(" Couldn\u{2019}t check that your pinned host (\(pins.joined(separator: ", "))) serves this model; if replies fail, send /orprovider off on Telegram.",
-                               " Non ho potuto verificare che l\u{2019}host fissato (\(pins.joined(separator: ", "))) offra questo modello; se le risposte falliscono, invia /orprovider off su Telegram.")
-            }
+        // fallbacks): setup-api re-checks it against the new model's host
+        // list (read here) and keeps, releases or keeps-with-warning it in
+        // the same write as the model.
+        var extra: [String: Any] = [:]
+        if let orKey {
+            extra = try await openRouterPinFields(model: model, apiKey: orKey, newSetupDefault: false, checkpoint: checkpoint)
         }
-        let (saved, message) = try await saveProvider(lane, profile: lane.profile, apiKey: nil, model: model, baseURL: nil, textOnly: vision,
+        return try await saveProvider(lane, profile: lane.profile, apiKey: nil, model: model, baseURL: nil, textOnly: vision,
                                       effort: stored.effort.isEmpty ? nil : stored.effort,
-                                      activate: activatesOnSave(lane, isActive: activeLane == lane), pin: pin, basis: basis, checkpoint: checkpoint)
-        return (saved, saved && !pinWarning.isEmpty ? (message ?? "") + pinWarning : message)
+                                      activate: activatesOnSave(lane, isActive: activeLane == lane), extra: extra, basis: basis, checkpoint: checkpoint)
     }
 
     /// Saves one provider profile through setup-api and makes it the one
@@ -1467,7 +1483,7 @@ final class MenuWorkflow {
     /// rule for every lane but ChatGPT), so the stored research backend is
     /// set to OpenAI whenever that key is there.
     private func saveProvider(_ lane: MenuLane, profile: ProviderProfiles.Profile? = nil, apiKey: String?, model: String, baseURL: String?, textOnly: Bool?, effort: String?,
-                              activate: Bool = true, pin: PinChange? = nil, basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+                              activate: Bool = true, extra: [String: Any] = [:], basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         let profile = profile ?? lane.profile
         // Switching TO a lane that needs the OpenAI key needs it saved; the
         // lane already in use (an older install without the key) can still
@@ -1478,8 +1494,8 @@ final class MenuWorkflow {
         if let baseURL { section["base_url"] = baseURL }
         if let textOnly { section["text_only"] = textOnly }
         if profile != .local { section["effort"] = effort ?? "high" }
+        section.merge(extra) { _, new in new }
         var payload: [String: Any] = ["provider": section]
-        if let pin { payload["openrouter_pin"] = pin.section }
         if snapshot.openAIMasked != nil { payload["web_search_backend"] = WebSearchBackend.openai.rawValue }
         try checkpoint()
         let apply = env.apply
@@ -1487,7 +1503,7 @@ final class MenuWorkflow {
         try checkpoint()
         await reload()
         guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
-        let pinNote = pin != nil && result["openrouter_pin_written"] as? Bool == true ? pin!.note : ""
+        let pinNote = hostPinNote(result["openrouter_host_pin"] as? [String: Any])
         guard activate else { return (true, savedNotInUse(lane) + pinNote) }
         plannedLane = nil
         let label = Self.modelLabel(lane, model)

@@ -113,6 +113,8 @@ final class MenuFakeWorld: @unchecked Sendable {
     var orHosts: [String: [String]] = [MenuWorkflow.openRouterDefaultModel: ["novita/fp8", "together", "deepinfra/fp8"]]
     var orHostsFail = false
     var orHostAsks: [String] = []
+    /// Every host_listing the menu handed to setup-api.
+    var hostListings: [[String: Any]] = []
 
     init(toolMarker: URL) { self.toolMarker = toolMarker }
 
@@ -143,7 +145,9 @@ final class MenuFakeWorld: @unchecked Sendable {
             snap.telegramConfigured = true
             snap.telegramChatId = tg["chat_id"] as? String ?? ""
         }
+        var hostPin: OpenRouterProviderPin.PinOutcome?
         if let pr = req["provider"] as? [String: Any], let profile = pr["profile"] as? String {
+            let before = snap.providers[profile] ?? MenuSnapshot.Provider()
             var p = snap.providers[profile] ?? MenuSnapshot.Provider()
             p.configured = true
             p.model = pr["model"] as? String ?? p.model
@@ -153,6 +157,24 @@ final class MenuFakeWorld: @unchecked Sendable {
             if let b = pr["base_url"] as? String { p.endpoint = b }
             if let k = pr["api_key"] as? String { p.keyMasked = WizardIO.masked(k) }
             snap.providers[profile] = p
+            if profile == "openrouter", pr["remove"] as? Bool != true {
+                // setup-api's model/pin rule, run on a store built from the fake snapshot.
+                let keyBefore = before.configured ? "configured" : "", modelBefore = before.configured ? before.model : ""
+                let newDefault = pr["default_host_pin"] as? Bool == true
+                var listing: OpenRouterProviderPin.HostListing?
+                if let raw = pr["host_listing"] as? [String: Any] {
+                    hostListings.append(raw)
+                    if !(raw["skip"] as? Bool == true) { listing = OpenRouterProviderPin.HostListing(json: raw) }
+                } else if OpenRouterProviderPin.listingNeeded(keyBefore: keyBefore, modelBefore: modelBefore, pins: snap.openRouterPin,
+                                                             newModel: p.model, newSetupDefault: newDefault) {
+                    listing = OpenRouterProviderPin.HostListing(model: p.model, result: openRouterHosts(p.model))
+                }
+                var store: [String: String] = [:]
+                if !snap.openRouterPin.isEmpty { store[OpenRouterProviderPin.storageKey] = snap.openRouterPin.joined(separator: ",") }
+                hostPin = OpenRouterProviderPin.reconcile(&store, keyBefore: keyBefore, modelBefore: modelBefore, newModel: p.model,
+                                                          listing: listing, newSetupDefault: newDefault)
+                snap.openRouterPin = OpenRouterProviderPin.slugs(from: store[OpenRouterProviderPin.storageKey])
+            }
             if pr["activate"] as? Bool == true {
                 snap.activeProfile = profile
                 snap.otherProvider = ProviderProfiles.Profile(rawValue: profile)?.displayName
@@ -198,13 +220,7 @@ final class MenuFakeWorld: @unchecked Sendable {
             snap.emailProvider = em["provider"] as? String ?? "none"
             if let k = em["api_key"] as? String { snap.agentMailMasked = WizardIO.masked(k); snap.agentMailInbox = "bree@agentmail.to" }
         }
-        // setup-api's conditional pin write (SetupAPICore.applyOpenRouterPin).
-        if let pin = req["openrouter_pin"] as? [String: Any] {
-            var wrote = false
-            if let set = pin["set_if_unset"] as? [String], snap.openRouterPin.isEmpty { snap.openRouterPin = set; wrote = true }
-            if let release = pin["release_if"] as? [String], snap.openRouterPin == release { snap.openRouterPin = []; wrote = true }
-            return ["ok": true, "applied": ["openrouter_pin"], "openrouter_pin_written": wrote]
-        }
+        if let hostPin { return ["ok": true, "openrouter_host_pin": hostPin.json] }
         return ["ok": true]
     }
 

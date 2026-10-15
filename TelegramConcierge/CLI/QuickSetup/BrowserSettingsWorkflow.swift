@@ -17,6 +17,11 @@ final class BrowserSettingsWorkflow {
         var subscription: ([String: Any], () throws -> Void) async -> [String: Any] = {
             await SubscriptionSetup().perform($0, ownsLease: true, checkpoint: $1)
         }
+        /// The OpenRouter host list a provider save needs (nil = none); a
+        /// seam so selftests never reach the network.
+        var openRouterListing: ([String: String], String, String?) async -> OpenRouterProviderPin.HostListing? = { store, model, key in
+            await OpenRouterProviderPin.listingIfNeeded(store: store, newModel: model, apiKey: key, newSetupDefault: true)
+        }
         var beginMutation: () async -> Bool = { true }
         var endMutation: () -> Void = {}
         var reload: () async -> Void = {}
@@ -84,6 +89,23 @@ final class BrowserSettingsWorkflow {
               Date().timeIntervalSince(proof.time) < 300 else {
             return (409, failure("not_verified", "This value changed or verification expired. Verify it again before saving."))
         }
+        // An OpenRouter save: a new setup asks for the default host and a
+        // model change re-checks the stored host pin. The host
+        // list is read now, before the agent's mutation gate (never network
+        // inside it), and setup-api decides under the store lock.
+        var saveRequest = request
+        if var provider = saveRequest["provider"] as? [String: Any],
+           provider["profile"] as? String == ProviderProfiles.Profile.openrouter.rawValue,
+           let model = provider["model"] as? String, provider["host_listing"] == nil {
+            let store = KeychainHelper.loadSnapshot()
+            let key = (provider["api_key"] as? String) ?? store[KeychainHelper.openRouterApiKeyKey]
+            let listing = await env.openRouterListing(store, model, key)
+            try checkpoint()
+            provider["host_listing"] = listing?.json ?? ["skip": true]
+            // A new OpenRouter setup gets the default host (same rule as the menu).
+            provider["default_host_pin"] = true
+            saveRequest["provider"] = provider
+        }
         guard await env.beginMutation() else { return (409, failure("agent_busy", "Briglia is working. Retry Save when the current turn and background work finish.")) }
         defer { env.endMutation() }
         try checkpoint()
@@ -96,12 +118,13 @@ final class BrowserSettingsWorkflow {
         let result: [String: Any]
         if let provider = request["provider"] as? [String: Any], provider["profile"] as? String == "chatgpt" {
             result = await env.subscription(subscriptionRequest(provider, action: "select"), checkpoint)
-        } else { result = await env.apply(request, checkpoint) }
+        } else { result = await env.apply(saveRequest, checkpoint) }
         // A save can commit before revocation. Reload before lifting the gate.
         await env.reload()
         try checkpoint()
         guard result["ok"] as? Bool == true else { return (400, result) }
-        return (200, ["ok": true, "message": "Saved. Changes apply to the next message."])
+        let notice = OpenRouterProviderPin.noticeText(fromReply: result["openrouter_host_pin"] as? [String: Any]).map { " " + $0 } ?? ""
+        return (200, ["ok": true, "message": "Saved. Changes apply to the next message." + notice])
     }
     func cancelPendingLogin() async {
         if let pending {

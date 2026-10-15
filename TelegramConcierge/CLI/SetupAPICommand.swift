@@ -549,11 +549,25 @@ enum SetupAPICore {
         var applied: [String] = []
         var warnings: [String] = []
         var pinWritten: Bool?
+        var hostPin: OpenRouterProviderPin.PinOutcome?
         do {
             try checkpoint()
             if let section = request["provider"] as? [String: Any] {
-                try applyProvider(section, ownsLease: ownsLease, checkpoint: checkpoint)
+                // OpenRouter: the new model's host list is read HERE, before
+                // any write and outside the store lock (or taken from the
+                // caller, the menu, which reads it before its barrier).
+                let listing = try await openRouterListing(for: section)
+                hostPin = try applyProvider(section, ownsLease: ownsLease, checkpoint: checkpoint, listing: listing)
                 applied.append("provider")
+                switch hostPin {
+                case .defaultSkipped(let reason)?:
+                    warnings.append("openrouter host: \(OpenRouterProviderPin.setupDefaultHostName) couldn't be selected (\(reason)); no pin written, OpenRouter chooses the host")
+                case .keptUnverified(let pins, let reason)?:
+                    warnings.append("openrouter host: pin \(pins.joined(separator: ",")) kept but not verified for the new model (\(reason)); requests fail if that host doesn't serve it — /orprovider off releases it")
+                case .released(let pins, _)?:
+                    warnings.append("openrouter host: pin \(pins.joined(separator: ",")) released — that host doesn't serve the new model")
+                default: break
+                }
             }
             if let section = request["openrouter_pin"] as? [String: Any] {
                 try checkpoint()
@@ -673,6 +687,7 @@ enum SetupAPICore {
         var payload = base(ok: true)
         payload["applied"] = applied
         if let pinWritten { payload["openrouter_pin_written"] = pinWritten }
+        if let hostPin { payload["openrouter_host_pin"] = hostPin.json }
         if !warnings.isEmpty { payload["warnings"] = warnings }
         let running = daemonRunning()
         payload["daemon_running"] = running
@@ -680,7 +695,43 @@ enum SetupAPICore {
         return payload
     }
 
-    private static func applyProvider(_ section: [String: Any], ownsLease: Bool = false, checkpoint: () throws -> Void = {}) throws {
+    /// The host list an OpenRouter provider save needs (nil = none), read
+    /// before any write. `host_listing` supplied by the caller wins:
+    /// `{"model","hosts"}` / `{"model","error"}` / `{"skip": true}` (the
+    /// caller decided none is needed and nothing is fetched here).
+    /// `default_host_pin: true` asks for the new-setup default host.
+    static func openRouterListing(for section: [String: Any]) async throws -> OpenRouterProviderPin.HostListing? {
+        if let raw = section["default_host_pin"], !(raw is Bool) || !BashTools.isJSONBoolean(raw) {
+            throw APIError(code: "invalid_value", message: "provider.default_host_pin must be a boolean")
+        }
+        guard nonEmptyString(section["profile"])?.lowercased() == ProviderProfiles.Profile.openrouter.rawValue,
+              section["remove"] as? Bool != true, let model = nonEmptyString(section["model"]) else {
+            if section["host_listing"] != nil || section["default_host_pin"] != nil {
+                guard nonEmptyString(section["profile"])?.lowercased() == ProviderProfiles.Profile.openrouter.rawValue else {
+                    throw APIError(code: "invalid_value", message: "host_listing/default_host_pin apply to the openrouter profile only")
+                }
+            }
+            return nil
+        }
+        if let raw = section["host_listing"] {
+            guard let object = raw as? [String: Any] else {
+                throw APIError(code: "invalid_value", message: "provider.host_listing must be an object")
+            }
+            if object["skip"] as? Bool == true, object.count == 1 { return nil }
+            guard let listing = OpenRouterProviderPin.HostListing(json: object) else {
+                throw APIError(code: "invalid_value", message: "provider.host_listing must be {model, hosts} or {model, error}")
+            }
+            return listing
+        }
+        let store = KeychainHelper.loadSnapshot()
+        let key = nonEmptyString(section["api_key"]) ?? nonEmptyString(store[KeychainHelper.openRouterApiKeyKey])
+        return await OpenRouterProviderPin.listingIfNeeded(store: store, newModel: model, apiKey: key,
+                                                           newSetupDefault: section["default_host_pin"] as? Bool == true)
+    }
+
+    @discardableResult
+    private static func applyProvider(_ section: [String: Any], ownsLease: Bool = false, checkpoint: () throws -> Void = {},
+                                      listing: OpenRouterProviderPin.HostListing? = nil) throws -> OpenRouterProviderPin.PinOutcome? {
         guard let raw = nonEmptyString(section["profile"]),
               let profile = ProviderProfiles.Profile(rawValue: raw.lowercased()) else {
             throw APIError(code: "invalid_value",
@@ -706,7 +757,7 @@ enum SetupAPICore {
         if section["remove"] as? Bool == true {
             try checkpoint()
             try removeProvider(profile)
-            return
+            return nil
         }
         guard let model = nonEmptyString(section["model"]) else {
             throw APIError(code: "missing_field", message: "provider.model is required")
@@ -794,11 +845,18 @@ enum SetupAPICore {
         let effort: String? = profile == .local ? nil
             : (nonEmptyString(section["effort"]) ?? (protocolForSave == .responses && profile != .opencode ? nil : "high"))
         try checkpoint()
+        var hostPin: OpenRouterProviderPin.PinOutcome?
         do {
-            try ProviderProfiles.saveProfile(profile, apiKey: profile == .local ? nil : apiKey,
-                                             baseURL: baseURL, model: model,
-                                             effort: effort, textOnly: textOnly, wireProtocol: requestedProtocol,
-                                             nativeToolMedia: section["native_tool_media"] as? Bool)
+            if profile == .openrouter {
+                // Model and host pin commit together (one locked write).
+                hostPin = try OpenRouterProviderPin.saveOpenRouterProfile(apiKey: apiKey, model: model, effort: effort, textOnly: textOnly,
+                                                                         listing: listing, newSetupDefault: section["default_host_pin"] as? Bool == true)
+            } else {
+                try ProviderProfiles.saveProfile(profile, apiKey: profile == .local ? nil : apiKey,
+                                                 baseURL: baseURL, model: model,
+                                                 effort: effort, textOnly: textOnly, wireProtocol: requestedProtocol,
+                                                 nativeToolMedia: section["native_tool_media"] as? Bool)
+            }
         } catch { throw saveFailed(error) }
 
         // Default mirrors the wizard's activateAfterConfiguring: the first
@@ -814,6 +872,7 @@ enum SetupAPICore {
                                message: ProviderProfiles.describeActivationError(error))
             }
         }
+        return hostPin
     }
 
     /// The OpenRouter host pin as a conditional write (the menu's new-setup

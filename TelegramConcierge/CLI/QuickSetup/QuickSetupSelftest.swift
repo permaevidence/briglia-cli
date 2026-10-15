@@ -651,9 +651,37 @@ final class SelftestContext: @unchecked Sendable {
         let phaseP = await wfP.phase
         check("full save → system phase", st == 200 && phaseP == .system, "\(js)")
         check("AgentMail present ⇒ email_calendar section with install_cli false", store.applied.contains("email_calendar") && store.installCLI == false)
-        check("OpenRouter and custom saved activate: false", store.activations == [false, false], "\(store.activations)")
-        check("section order: provider first, identity/telegram before email, alternatives last",
-              store.applied.suffix(3) == ["email_calendar", "openrouter", "custom"] && store.applied.first == "opencode", "\(store.applied)")
+        // Owner 2026-10-15: a fresh setup with an OpenRouter key runs on
+        // OpenRouter (DeepSeek V4.1 Flash, default host asked for); the
+        // OpenCode key given too is saved, not active.
+        check("fresh setup with both keys: OpenRouter saved active, custom inactive", store.activations == [true, false], "\(store.activations)")
+        check("section order: OpenRouter (main) first, identity/telegram before email, OpenCode + custom as alternatives last",
+              store.applied.suffix(3) == ["email_calendar", "opencode", "custom"] && store.applied.first == "openrouter", "\(store.applied)")
+        // An existing install (a provider already active) keeps OpenCode as the main provider.
+        let (envE, storeE) = stubEnv()
+        storeE.values[ProviderProfiles.activeProfileKey] = "opencode"
+        let (wfE, _) = try makeWorkflow(envE)
+        let gE = await wfE.generation
+        _ = try await wfE.verify(full, generation: gE)
+        _ = try await wfE.save(full, generation: gE)
+        // When Together can't be confirmed, the save reply tells the page.
+        var (envN, _) = stubEnv()
+        let innerApply = envN.apply
+        envN.apply = { req, checkpoint in
+            var r = await innerApply(req, checkpoint)
+            if (req["provider"] as? [String: Any])?["profile"] as? String == "openrouter" {
+                r["openrouter_host_pin"] = ["result": "default_skipped", "reason": "couldn't read OpenRouter's host list (HTTP 503)"]
+            }
+            return r
+        }
+        let (wfN, _) = try makeWorkflow(envN)
+        let gN = await wfN.generation
+        _ = try await wfN.verify(full, generation: gN)
+        let savedN = try await wfN.save(full, generation: gN)
+        check("fresh OpenRouter setup whose default host couldn't be confirmed: the save reply says Together couldn't be selected",
+              savedN.0 == 200 && ((savedN.1["notices"] as? [String]) ?? []).contains { $0.contains("Together couldn't be selected") && $0.contains("OpenRouter chooses the host") }, "\(savedN.1)")
+        check("existing install with both keys: OpenCode stays main, OpenRouter saved inactive",
+              storeE.applied.first == "opencode" && storeE.applied.contains("openrouter") && storeE.activations.first == false, "\(storeE.applied) \(storeE.activations)")
         check("progress marker quick:system written", store.values[SetupWizard.progressKey] == "quick:system")
         let sys = (await wfP.status())["system_rows"] as? [[String: Any]] ?? []
         check("system rows: agentmail_cli, fda, keepawake, toolchain (macOS shape)", sys.map { $0["id"] as? String ?? "" } == ["agentmail_cli", "fda", "keepawake", "toolchain"], "\(sys)")

@@ -271,6 +271,23 @@ enum ProviderProfiles {
         wireProtocol: ProviderWireProtocol? = nil,
         nativeToolMedia: Bool? = nil
     ) throws {
+        try KeychainHelper.saveBatch(try profileChanges(profile, apiKey: apiKey, baseURL: baseURL, model: model, effort: effort,
+                                                        textOnly: textOnly, wireProtocol: wireProtocol, nativeToolMedia: nativeToolMedia))
+    }
+
+    /// The store changes `saveProfile` writes (nil value = delete), for a
+    /// caller that commits them inside a larger transaction (the OpenRouter
+    /// model/pin save).
+    static func profileChanges(
+        _ profile: Profile,
+        apiKey: String?,
+        baseURL: String?,
+        model: String,
+        effort: String?,
+        textOnly: Bool,
+        wireProtocol: ProviderWireProtocol? = nil,
+        nativeToolMedia: Bool? = nil
+    ) throws -> [String: String?] {
         // nil-valued EXPRESSIONS on the right store String?.none (= delete in
         // saveBatch); never assign a literal nil here — that removes the key
         // from the batch instead of recording a deletion.
@@ -314,7 +331,7 @@ enum ProviderProfiles {
             changes[KeychainHelper.lmStudioModelKey] = model
             changes[localTextOnlyKey] = textOnly ? "true" : "false"
         }
-        try KeychainHelper.saveBatch(changes)
+        return changes
     }
 
     /// Copy a profile into the runtime slots and mark it active. Pure

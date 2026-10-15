@@ -6100,7 +6100,11 @@ class ConversationManager: ObservableObject {
                 return " ⚠️ OpenRouter host pin \(list) doesn't serve \(model) (hosts: \(hosts)), but \(reason) — left as is; check /orprovider."
             }
             do {
-                try OpenRouterProviderPin.setPin(nil)
+                // Conditional under the store lock: a pin another process
+                // stored after the snapshot check is never deleted here.
+                guard try OpenRouterProviderPin.releasePin(ifStill: pinned) else {
+                    return " ⚠️ OpenRouter host pin changed while checking \(model) — left as is; check /orprovider."
+                }
                 modelRoutingGeneration += 1
                 return " OpenRouter host pin \(list) released: it doesn't serve \(model) (hosts: \(hosts)). Re-pin with /orprovider."
             } catch {

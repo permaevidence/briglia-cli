@@ -80,7 +80,9 @@ struct QuickSetupRequest: Equatable {
         for field in QuickSetupField.allCases {
             guard let raw = object[field.rawValue] else {
                 if partial { continue }
-                if [.openai, .serper, .jina, .telegram].contains(field) || (field == .opencode && object["chatgpt"] == nil) {
+                // The main provider: ChatGPT, OpenCode Go or (owner 2026-10-15)
+                // an OpenRouter key alone.
+                if [.openai, .serper, .jina, .telegram].contains(field) || (field == .opencode && object["chatgpt"] == nil && object["openrouter"] == nil) {
                     throw BadRequest(description: "\(field.rawValue) is required")
                 }
                 continue
@@ -395,6 +397,9 @@ actor QuickSetupWorkflow {
     private(set) var kept: Set<QuickSetupField> = []
     private(set) var storedName: String
     private var savedSections: Set<String> = []
+    /// The fresh-install OpenRouter decision of the current save (nil until
+    /// the first save attempt; kept across a retried partial save).
+    private var preferOpenRouterPlan: Bool?
     private var lastRequest: QuickSetupRequest?
     private(set) var systemRows: [RowState] = []
     private var rowTask: Task<Void, Never>?
@@ -794,6 +799,17 @@ actor QuickSetupWorkflow {
             return (409, ["error": "not_verified", "fields": ["name"]])
         }
         phase = .saving
+        // A genuinely new setup (no main provider saved yet, no ChatGPT
+        // chosen) with a fresh OpenRouter key runs on OpenRouter: DeepSeek
+        // V4.1 Flash with the Together host pin when OpenRouter confirms it
+        // (owner 2026-10-15). An OpenCode key given too is saved, not active.
+        // Decided once per save attempt so a retry after a partial save
+        // keeps the same plan.
+        if preferOpenRouterPlan == nil {
+            preferOpenRouterPlan = Self.prefersOpenRouter(request, activeProfile: env.storedValue(ProviderProfiles.activeProfileKey))
+        }
+        let preferOpenRouter = preferOpenRouterPlan ?? false
+        var notices: [String] = []
         for section in Self.sectionOrder where !savedSections.contains(section) {
             if section == "provider", case .subscription(let model, let effort, let expected) = request.values[.chatgpt] {
                 try checkpoint(g)
@@ -804,7 +820,7 @@ actor QuickSetupWorkflow {
                 guard result["ok"] as? Bool == true else { return (409, result) }
                 savedSections.insert(section); continue
             }
-            guard let payload = Self.applyPayload(section: section, request: request) else { continue }
+            guard let payload = Self.applyPayload(section: section, request: request, preferOpenRouter: preferOpenRouter) else { continue }
             try checkpoint(g)   // immediately before each apply
             let result = await env.apply(payload) { [weak self] in
                 guard let self else { throw Superseded() }
@@ -815,6 +831,7 @@ actor QuickSetupWorkflow {
             try checkpoint(g)
             if result["ok"] as? Bool == true {
                 savedSections.insert(section)
+                if let notice = OpenRouterProviderPin.noticeText(fromReply: result["openrouter_host_pin"] as? [String: Any]) { notices.append(notice) }
             } else {
                 let err = (result["error"] as? [String: Any])
                 let code = err?["code"] as? String ?? "save_failed"
@@ -835,7 +852,15 @@ actor QuickSetupWorkflow {
         kept = Self.computeKept(env)
         phase = .system
         systemRows = Self.buildSystemRows(env: env, agentMail: request.values[.agentmail] != nil)
-        return (200, ["phase": phase.rawValue, "saved_sections": savedSections.sorted(), "system_rows": systemRows.map(rowDict)])
+        var reply: [String: Any] = ["phase": phase.rawValue, "saved_sections": savedSections.sorted(), "system_rows": systemRows.map(rowDict)]
+        if !notices.isEmpty { reply["notices"] = notices }
+        return (200, reply)
+    }
+
+    /// Fresh-install preference for OpenRouter (see `save`).
+    static func prefersOpenRouter(_ request: QuickSetupRequest, activeProfile: String?) -> Bool {
+        guard request.values[.chatgpt] == nil, case .key? = request.values[.openrouter] else { return false }
+        return (activeProfile ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// Generation snapshot readable without actor hops (the apply seam's
@@ -851,13 +876,17 @@ actor QuickSetupWorkflow {
         if generationBox.get() != g { throw SetupAPICore.CheckpointRevoked("this quick-setup session was replaced") }
     }
 
-    static func applyPayload(section: String, request: QuickSetupRequest) -> [String: Any]? {
+    static func applyPayload(section: String, request: QuickSetupRequest, preferOpenRouter: Bool = false) -> [String: Any]? {
         func key(_ f: QuickSetupField) -> String? {
             if case .key(let k)? = request.values[f] { return k }
             return nil
         }
         switch section {
         case "provider":
+            if preferOpenRouter, let k = key(.openrouter) {
+                return ["provider": ["profile": "openrouter", "api_key": k, "model": ProviderProfiles.openRouterSetupDefaultModel, "effort": "high",
+                                     "text_only": false, "activate": true, "default_host_pin": true] as [String: Any]]
+            }
             guard let k = key(.opencode) else { return nil }
             let textOnly = OpenCodeGo.choices.first { $0.id == OpenCodeGo.defaultModel }?.textOnly ?? false
             return ["provider": ["profile": "opencode", "api_key": k, "model": OpenCodeGo.defaultModel, "effort": "high", "text_only": textOnly, "activate": true] as [String: Any]]
@@ -872,8 +901,17 @@ actor QuickSetupWorkflow {
             guard let k = key(.agentmail) else { return nil }
             return ["email_calendar": ["provider": "agentmail", "api_key": k, "install_cli": false] as [String: Any]]
         case "openrouter":
+            if preferOpenRouter {
+                // OpenRouter already runs; an OpenCode key given too is kept, not active.
+                guard let k = key(.opencode) else { return nil }
+                let textOnly = OpenCodeGo.choices.first { $0.id == OpenCodeGo.defaultModel }?.textOnly ?? false
+                return ["provider": ["profile": "opencode", "api_key": k, "model": OpenCodeGo.defaultModel, "effort": "high", "text_only": textOnly, "activate": false] as [String: Any]]
+            }
             guard let k = key(.openrouter) else { return nil }
-            return ["provider": ["profile": "openrouter", "api_key": k, "model": ProviderProfiles.openRouterSetupDefaultModel, "text_only": false, "activate": false] as [String: Any]]
+            // Saved as an alternative; a new OpenRouter setup still gets the
+            // default host under the same rule (setup-api decides).
+            return ["provider": ["profile": "openrouter", "api_key": k, "model": ProviderProfiles.openRouterSetupDefaultModel, "text_only": false, "activate": false,
+                                 "default_host_pin": true] as [String: Any]]
         case "custom":
             if case .custom(let k, let b, let m, let vision)? = request.values[.custom] {
                 return ["provider": ["profile": "custom", "api_key": k, "base_url": b, "model": m, "text_only": !vision, "activate": false] as [String: Any]]

@@ -333,24 +333,239 @@ enum OpenRouterProviderPin {
         catch { return .failure(error) }
     }
 
+    /// The stored pin value as slugs (same parsing as `pinnedSlugs`), for
+    /// decisions taken on a store dictionary inside a transaction.
+    static func slugs(from raw: String?) -> [String] {
+        (raw ?? "").split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
     /// The write for a new-setup default: stores `slugs` only when no pin
     /// is stored at that moment (an explicit pin set meanwhile, from
-    /// Telegram or by hand, always wins). Returns whether it wrote.
+    /// Telegram, another process or by hand, always wins). The condition is
+    /// read from the dictionary held under the secret store's lock, in the
+    /// same atomic write as the change (Codex round 1: a separate read then
+    /// write let another process's pin be overwritten). Returns whether it
+    /// wrote.
     @discardableResult
     static func setPinIfUnset(_ slugs: [String]) throws -> Bool {
-        guard pinnedSlugs().isEmpty else { return false }
-        try setPin(slugs)
-        return true
+        let cleaned = slugs.compactMap(normalizedSlug)
+        guard !cleaned.isEmpty else { return false }
+        var wrote = false
+        try KeychainHelper.transaction { store in
+            guard Self.slugs(from: store[storageKey]).isEmpty else { return }
+            store[storageKey] = cleaned.joined(separator: ",")
+            wrote = true
+        }
+        return wrote
     }
 
     /// Release the stored pin only while it still equals `expected` (a
     /// decision taken before a network await must not delete a pin stored
-    /// meanwhile — the /model revalidation rule). Returns whether it wrote.
+    /// meanwhile — the /model revalidation rule), checked and written under
+    /// one lock. Returns whether it wrote.
     @discardableResult
     static func releasePin(ifStill expected: [String]) throws -> Bool {
-        guard !expected.isEmpty, pinnedSlugs() == expected else { return false }
-        try setPin(nil)
-        return true
+        guard !expected.isEmpty else { return false }
+        var wrote = false
+        try KeychainHelper.transaction { store in
+            guard Self.slugs(from: store[storageKey]) == expected else { return }
+            store.removeValue(forKey: storageKey)
+            wrote = true
+        }
+        return wrote
+    }
+
+    // MARK: Model/pin coherence for every OpenRouter save (Codex round 1)
+
+    /// A model's host list as fetched BEFORE a save (network never runs
+    /// under the store lock). Crosses the setup-api JSON boundary as
+    /// `{"model": m, "hosts": [tag…]}` or `{"model": m, "error": "…"}`.
+    struct HostListing {
+        let model: String
+        let result: Result<[Endpoint], FetchError>
+
+        var json: [String: Any] {
+            switch result {
+            case .success(let endpoints): return ["model": model, "hosts": endpoints.map(\.tag)]
+            case .failure(let error): return ["model": model, "error": error.description]
+            }
+        }
+
+        /// nil for a malformed object (the caller refuses the request).
+        init?(json: [String: Any]) {
+            guard let model = json["model"] as? String, !model.isEmpty else { return nil }
+            self.model = model
+            if let hosts = json["hosts"] as? [String], json["error"] == nil, hosts.count <= 500 {
+                result = .success(hosts.map { Endpoint(providerName: $0, tag: $0.lowercased(), promptUSDPerM: nil, completionUSDPerM: nil,
+                                                        cacheReadUSDPerM: nil, contextLength: nil, uptimeLast30m: nil, status: nil) })
+            } else if let error = json["error"] as? String, json["hosts"] == nil {
+                result = .failure(FetchError(description: error))
+            } else {
+                return nil
+            }
+        }
+
+        init(model: String, result: Result<[Endpoint], Error>) {
+            self.model = model
+            switch result {
+            case .success(let endpoints): self.result = .success(endpoints)
+            case .failure(let error):
+                self.result = .failure(isCancellation(error) ? FetchError(description: "the host check was cancelled")
+                                                             : (error as? FetchError) ?? FetchError(description: "\(error)"))
+            }
+        }
+    }
+
+    /// What a save did to the host pin. `json` is the setup-api reply.
+    enum PinOutcome: Equatable {
+        /// No pin involved (no pin stored and no new-setup default).
+        case unchanged
+        /// A new setup was pinned to the default host.
+        case pinnedDefault(String)
+        /// A new setup could NOT be pinned: OpenRouter chooses the host.
+        case defaultSkipped(String)
+        /// A stored pin serves the new model.
+        case kept([String])
+        /// A stored pin doesn't serve the new model and was released.
+        case released([String], hosts: [String])
+        /// A stored pin was kept without proof that it serves the new model.
+        case keptUnverified([String], reason: String)
+
+        var json: [String: Any] {
+            switch self {
+            case .unchanged: return ["result": "unchanged"]
+            case .pinnedDefault(let slug): return ["result": "pinned_default", "pins": [slug]]
+            case .defaultSkipped(let reason): return ["result": "default_skipped", "reason": reason]
+            case .kept(let pins): return ["result": "kept", "pins": pins]
+            case .released(let pins, let hosts): return ["result": "released", "pins": pins, "hosts": hosts]
+            case .keptUnverified(let pins, let reason): return ["result": "kept_unverified", "pins": pins, "reason": reason]
+            }
+        }
+
+        /// One plain line for the terminal wizard (nil when nothing to say).
+        var terminalLine: String? {
+            switch self {
+            case .unchanged, .kept: return nil
+            case .pinnedDefault: return "  ✔ Host pinned: \(setupDefaultHostName) (/orprovider changes or releases it)"
+            case .defaultSkipped(let reason):
+                return "  ⚠ \(setupDefaultHostName) couldn't be selected (\(reason)) — no host pinned, OpenRouter chooses the host. Pin one later with /orprovider."
+            case .released(let pins, _):
+                return "  ⚠ Host pin \(pins.joined(separator: ", ")) released: that host doesn't serve the new model, so OpenRouter chooses the host."
+            case .keptUnverified(let pins, let reason):
+                return "  ⚠ Host pin \(pins.joined(separator: ", ")) kept but not verified for this model (\(reason)). If replies fail, send /orprovider off."
+            }
+        }
+    }
+
+    /// One plain English sentence for a setup-api `openrouter_host_pin`
+    /// reply worth telling the user (Quick Setup, browser settings); nil
+    /// when nothing happened worth saying.
+    static func noticeText(fromReply reply: [String: Any]?) -> String? {
+        guard let reply, let result = reply["result"] as? String else { return nil }
+        let pins = (reply["pins"] as? [String] ?? []).joined(separator: ", ")
+        let reason = reply["reason"] as? String ?? ""
+        switch result {
+        case "pinned_default": return "OpenRouter runs on \(setupDefaultHostName) (host pinned; /orprovider changes it)."
+        case "default_skipped": return "\(setupDefaultHostName) couldn't be selected (\(reason)), so no host is pinned and OpenRouter chooses the host. Pin one later with /orprovider."
+        case "released": return "The OpenRouter host pin (\(pins)) was released: that host doesn't serve the new model, so OpenRouter chooses the host."
+        case "kept_unverified": return "The OpenRouter host pin (\(pins)) was kept but not verified for the new model (\(reason)). If replies fail, send /orprovider off."
+        default: return nil
+        }
+    }
+
+    /// A new OpenRouter setup: no OpenRouter key, no OpenRouter model and no
+    /// pin stored before this save. Replacing the key of an existing lane or
+    /// editing an unpinned lane (pin off) is never a new setup.
+    static func isNewSetup(keyBefore: String, modelBefore: String, pins: [String]) -> Bool {
+        keyBefore.isEmpty && modelBefore.isEmpty && pins.isEmpty
+    }
+
+    /// Whether a save needs the new model's host list: a new setup on the
+    /// default model asking for the default host, or a stored pin with a
+    /// model change. Decided on a snapshot; `reconcile` re-decides under the
+    /// lock and treats a missing listing conservatively.
+    static func listingNeeded(keyBefore: String, modelBefore: String, pins: [String], newModel: String, newSetupDefault: Bool) -> Bool {
+        if newSetupDefault, newModel == ProviderProfiles.openRouterSetupDefaultModel,
+           isNewSetup(keyBefore: keyBefore, modelBefore: modelBefore, pins: pins) { return true }
+        return !pins.isEmpty && newModel != modelBefore
+    }
+
+    static func listingNeeded(store: [String: String], newModel: String, newSetupDefault: Bool) -> Bool {
+        listingNeeded(keyBefore: trimmed(store[KeychainHelper.openRouterApiKeyKey]), modelBefore: trimmed(store[KeychainHelper.openRouterModelKey]),
+                      pins: slugs(from: store[storageKey]), newModel: newModel, newSetupDefault: newSetupDefault)
+    }
+
+    private static func trimmed(_ value: String?) -> String { (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// The one model/pin decision, applied to the store dictionary INSIDE
+    /// the transaction that writes the new model (`keyBefore`/`modelBefore`
+    /// are the values in that same dictionary before the profile changes).
+    /// Pure: no I/O, so the menu selftest's fake store runs the same rule.
+    /// - new setup + default model + `newSetupDefault`: pin the default host
+    ///   when the listing shows it serves the model, else leave routing
+    ///   automatic and say why;
+    /// - stored pin + model change: keep it when served, release it when not
+    ///   (a hard pin on an unserved model fails every request), keep it with
+    ///   a warning when the listing is missing or unreadable.
+    static func reconcile(_ store: inout [String: String], keyBefore: String, modelBefore: String, newModel: String,
+                          listing: HostListing?, newSetupDefault: Bool) -> PinOutcome {
+        let pins = slugs(from: store[storageKey])
+        let usable = listing.flatMap { $0.model == newModel ? $0 : nil }
+        if newSetupDefault, newModel == ProviderProfiles.openRouterSetupDefaultModel,
+           isNewSetup(keyBefore: keyBefore, modelBefore: modelBefore, pins: pins) {
+            guard let usable else { return .defaultSkipped("the host list wasn't checked") }
+            switch newSetupDecision(model: newModel, listing: usable.result.mapError { $0 as Error }) {
+            case .pin(let slug):
+                store[storageKey] = slug
+                return .pinnedDefault(slug)
+            case .skip(let reason):
+                return .defaultSkipped(reason)
+            }
+        }
+        guard !pins.isEmpty, newModel != modelBefore else { return pins.isEmpty ? .unchanged : .kept(pins) }
+        guard let usable else { return .keptUnverified(pins, reason: "the host list wasn't checked") }
+        switch usable.result {
+        case .failure(let error):
+            return .keptUnverified(pins, reason: "couldn't read OpenRouter's host list (\(error.description))")
+        case .success(let endpoints):
+            guard !unservedPins(pins, endpoints: endpoints).isEmpty else { return .kept(pins) }
+            store.removeValue(forKey: storageKey)
+            return .released(pins, hosts: baseChoices(endpoints).map(\.baseSlug))
+        }
+    }
+
+    /// Fetch the listing a save needs (nil when it needs none), outside any
+    /// lock. `fetch` is a seam (the menu's env, a selftest).
+    static func listingIfNeeded(store: [String: String], newModel: String, apiKey: String?, newSetupDefault: Bool,
+                                fetch: (String, String) async -> Result<[Endpoint], Error> = { await listing(model: $0, apiKey: $1) }) async -> HostListing? {
+        guard listingNeeded(store: store, newModel: newModel, newSetupDefault: newSetupDefault) else { return nil }
+        guard let apiKey, !apiKey.isEmpty else {
+            return HostListing(model: newModel, result: .failure(FetchError(description: "no OpenRouter key to ask with")))
+        }
+        return HostListing(model: newModel, result: await fetch(newModel, apiKey))
+    }
+
+    /// Save the OpenRouter profile and reconcile the pin in ONE atomic
+    /// store write (setup-api, the terminal wizard). The condition and the
+    /// change read the same locked dictionary, so a pin or model written by
+    /// another process meanwhile is decided on, never overwritten blindly.
+    static func saveOpenRouterProfile(apiKey: String?, model: String, effort: String?, textOnly: Bool,
+                                      listing: HostListing?, newSetupDefault: Bool) throws -> PinOutcome {
+        let changes = try ProviderProfiles.profileChanges(.openrouter, apiKey: apiKey, baseURL: nil, model: model,
+                                                      effort: effort, textOnly: textOnly)
+        var outcome = PinOutcome.unchanged
+        try KeychainHelper.transaction { store in
+            let keyBefore = trimmed(store[KeychainHelper.openRouterApiKeyKey])
+            let modelBefore = trimmed(store[KeychainHelper.openRouterModelKey])
+            for (key, value) in changes {
+                if let value { store[key] = value } else { store.removeValue(forKey: key) }
+            }
+            outcome = reconcile(&store, keyBefore: keyBefore, modelBefore: modelBefore, newModel: model,
+                                listing: listing, newSetupDefault: newSetupDefault)
+        }
+        return outcome
     }
 
     /// Pins a model change would break: the stored pins the new model's

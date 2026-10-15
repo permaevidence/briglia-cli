@@ -872,7 +872,7 @@
     ]));
     if (!p.configured && !(S.ai.openrouter_pin || []).length) out.push(h('div', { class: 'notice info', id: 'or-default' }, [
       T('Briglia starts with ', 'Briglia parte con '), h('b', { text: orDefaultLabel() }), T(', hosted on ', ', ospitato su '), h('b', { text: orDefaultHost() }),
-      T(' (Briglia pins this host for you). You can change the model later here or with /model, and the host with /orprovider on Telegram.', ' (Briglia fissa questo host per te). Puoi cambiare il modello più tardi qui o con /model, e l’host con /orprovider su Telegram.')]));
+      T('. Briglia pins this host for you when OpenRouter confirms it serves the model; if it can’t, it tells you and OpenRouter chooses the host. You can change the model later here or with /model, and the host with /orprovider on Telegram.', '. Briglia fissa questo host per te quando OpenRouter conferma che offre il modello; se non può, te lo dice e l’host lo sceglie OpenRouter. Puoi cambiare il modello più tardi qui o con /model, e l’host con /orprovider su Telegram.')]));
     out.push(field('ai', { secret: true, label: T('Your OpenRouter key', 'La tua chiave OpenRouter'), placeholder: 'sk-or-…', checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
       return act('provider_key', { profile: 'openrouter', key: v }, 'ai', current).then(afterSave);
     } }));
