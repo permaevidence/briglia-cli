@@ -870,9 +870,10 @@
       h('li', {}, [T('Open ', 'Apri '), link('https://openrouter.ai/keys', 'openrouter.ai/keys'), T(', create a key and copy it.', ', crea una chiave e copiala.')]),
       h('li', {}, [T('Paste it below.', 'Incollala qui sotto.')]),
     ]));
-    if (!p.configured && !(S.ai.openrouter_pin || []).length) out.push(h('div', { class: 'notice info', id: 'or-default' }, [
-      T('Briglia starts with ', 'Briglia parte con '), h('b', { text: orDefaultLabel() }), T(', hosted on ', ', ospitato su '), h('b', { text: orDefaultHost() }),
-      T('. Briglia pins this host for you when OpenRouter confirms it serves the model; if it can’t, it tells you and OpenRouter chooses the host. You can change the model later here or with /model, and the host with /orprovider on Telegram.', '. Briglia fissa questo host per te quando OpenRouter conferma che offre il modello; se non può, te lo dice e l’host lo sceglie OpenRouter. Puoi cambiare il modello più tardi qui o con /model, e l’host con /orprovider su Telegram.')]));
+    // One inline span: .notice is a flex row, so loose text/bold children would become columns.
+    if (!p.configured && !(S.ai.openrouter_pin || []).length) out.push(h('div', { class: 'notice info', id: 'or-default' }, [h('span', {}, [
+      T('Briglia will use ', 'Briglia userà '), h('b', { text: orDefaultLabel() }), T(', running on ', ', in esecuzione su '), h('b', { text: orDefaultHost() }),
+      T(' (currently the fastest). You can change it later.', ' (al momento il più veloce). Puoi cambiarlo più tardi.')])]));
     out.push(field('ai', { secret: true, label: T('Your OpenRouter key', 'La tua chiave OpenRouter'), placeholder: 'sk-or-…', checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
       return act('provider_key', { profile: 'openrouter', key: v }, 'ai', current).then(afterSave);
     } }));

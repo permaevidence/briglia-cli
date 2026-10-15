@@ -603,7 +603,8 @@ def main():
         page.wait_for_selector("text=Connect OpenRouter")
         check("or: the OpenRouter setup says the default model and the pinned Together host",
               page.is_visible("#or-default") and "DeepSeek V4.1 Flash" in page.inner_text("#or-default")
-              and "Together" in page.inner_text("#or-default") and "/orprovider" in page.inner_text("#or-default"))
+              and "Together" in page.inner_text("#or-default")
+              and page.eval_on_selector("#or-default", "e => e.children.length") == 1)
         shot(page, "65-openrouter-default")
         page.fill("#f-ai", GOOD["openrouter"])
         page.wait_for_selector("text=Connect Telegram", timeout=6000)
