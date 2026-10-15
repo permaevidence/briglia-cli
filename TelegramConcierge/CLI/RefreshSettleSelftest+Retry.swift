@@ -76,14 +76,19 @@ extension RefreshSettleSelftest {
         c.check("invalid_grant during recovery: blocked after two sends", Self.diskBlocked(r.store) && r.server.sends() == 2)
     }
 
-    /// A 503 is an answer, not an ambiguous send: no recovery is spent.
+    /// A bare 503 (no rotation on the fake) is still not proof the token is
+    /// unrotated: it is ambiguous and bounded by the one recovery. Credentials
+    /// are kept; the user is told sign-in may be required.
     func answeredIsNotAmbiguous(_ h: Harness, _ c: Checks) async throws {
-        let s = try await h.scenario("answered-503", script: ["http503", "http503"])
-        _ = await Self.outcome(s)
-        c.check("503: no op or recovery record", Self.disk(s.store)["refreshOp"] == nil && Self.disk(s.store)["refreshRecovery"] == nil)
-        _ = await Self.outcome(s)
-        let third = await Self.outcome(s)
-        c.check("503: ordinary refreshes continue afterwards", third == "ok:" + s.server.current() && s.server.sends() == 3)
+        let s = try await h.scenario("unrotated-503", script: ["http503", "http503", "http503", "http503"])
+        var outcomes: [String] = []
+        for _ in 0..<4 { outcomes.append(await Self.outcome(s)) }
+        c.check("503: at most two sends across four calls", s.server.sends() == 2)
+        c.check("503: later calls say sign-in may be required, credentials kept",
+                outcomes[1...].allSatisfy { $0.contains("may need to be repeated") } && Self.diskRefresh(s.store) == "r0" && !Self.diskBlocked(s.store))
+        let r = try await h.scenario("unrotated-429", script: ["http429", "http429", "http429"])
+        for _ in 0..<3 { _ = await Self.outcome(r) }
+        c.check("429: bounded by the one recovery as well", r.server.sends() == 2)
     }
 
     /// A budget refusal happens before anything is built: not a send.

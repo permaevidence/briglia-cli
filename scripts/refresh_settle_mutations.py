@@ -28,12 +28,15 @@ MUTATIONS = {
     "M5 checkpoint promoted for any generation": (
         "                if pending.generation == generation, pending.replaces",
         "                if pending.generation == pending.generation, pending.replaces"),
-    "M6 stopped caller still sends": (
-        "            if caller.cancelled { throw CancellationError() }\n",
-        ""),
+    # The check before the op-record write only saves a write; the one after
+    # it (M13) is what admits the send. Removing both must be caught.
+    "M6 stopped caller still sends (no cancellation check before the send)": [
+        ("            if caller.cancelled { throw CancellationError() }\n", ""),
+        ("            if caller.cancelled {\n                state.refreshOp = priorOp",
+         "            if Bool(\"false\")!, caller.cancelled {\n                state.refreshOp = priorOp")],
     "M7 every failure treated as ambiguous": (
-        "        if let failure = error as? SubscriptionError {\n            if failure.requiresLogin",
-        "        if Bool(\"false\")!, let failure = error as? SubscriptionError {\n            if failure.requiresLogin"),
+        "        if let failure = error as? SubscriptionError, failure.requiresLogin { return .terminal }",
+        "        if Bool(\"false\")!, let failure = error as? SubscriptionError, failure.requiresLogin { return .terminal }"),
     "M8 no checkpoint before validation/commit": (
         "            state.pendingRotation = SubscriptionPendingRotation(generation: generation, replaces: fingerprint, credential: updated)\n            try? write(state)\n",
         ""),
@@ -41,11 +44,24 @@ MUTATIONS = {
         "            if recovering { state.refreshRecovery = SubscriptionRefreshRecovery(",
         "            if Bool(\"false\")!, recovering { state.refreshRecovery = SubscriptionRefreshRecovery("),
     "M10 account change leaves the login usable": (
-        "                state.refreshOp = nil\n                state.requiresLogin = true\n",
-        "                state.refreshOp = nil\n"),
-    "M11 gateway 504 treated as answered": (
-        "![0, 502, 504].contains(status)",
-        "![0].contains(status)"),
+        "                state.pendingRotation = nil\n                state.refreshOp = nil\n                state.requiresLogin = true\n",
+        "                state.pendingRotation = nil\n                state.refreshOp = nil\n"),
+    "M11 an answered 5xx counts as proof of no rotation (da414b2 shape)": (
+        "        if let failure = error as? SubscriptionError, failure.requiresLogin { return .terminal }",
+        "        if let failure = error as? SubscriptionError, failure.requiresLogin { return .terminal }\n"
+        "        if (error as? SubscriptionError)?.message.contains(\"(HTTP 5\") == true || (error as? SubscriptionError)?.message.contains(\"(HTTP 429\") == true { return .notSent }"),
+    "M12 an unsent recovery erases the earlier uncertain op (R1)": (
+        "                    state.refreshOp = priorOp; state.refreshRecovery = priorRecovery\n                    try? write(state)\n                    throw error",
+        "                    state.refreshOp = nil; state.refreshRecovery = nil\n                    try? write(state)\n                    throw error"),
+    "M13 no cancellation check after the pre-send write (R4)": (
+        "            if caller.cancelled {\n                state.refreshOp = priorOp",
+        "            if Bool(\"false\")!, caller.cancelled {\n                state.refreshOp = priorOp"),
+    "M14 a mismatched bound checkpoint is discarded, not blocking (R2)": (
+        "                if pending.generation == generation, pending.replaces == SubscriptionRefreshFingerprint.of(old.refresh) {",
+        "                if pending.generation == generation, pending.replaces == SubscriptionRefreshFingerprint.of(old.refresh), pending.credential.account == old.account {"),
+    "M15 no overall auth deadline on the shared session (R5)": (
+        "                DispatchQueue.global().asyncAfter(deadline: .now() + deadline, execute: timer)\n",
+        ""),
 }
 
 def run_selftest(binary):
@@ -61,10 +77,14 @@ def main():
     original = SRC.read_text()
     caught = 0
     try:
-        for name, (old, new) in MUTATIONS.items():
-            if original.count(old) != 1:
-                print(f"SETUP ERROR {name}: anchor found {original.count(old)} times"); sys.exit(2)
-            SRC.write_text(original.replace(old, new))
+        for name, spec in MUTATIONS.items():
+            pairs = spec if isinstance(spec, list) else [spec]
+            mutated = original
+            for old, new in pairs:
+                if original.count(old) != 1:
+                    print(f"SETUP ERROR {name}: anchor found {original.count(old)} times"); sys.exit(2)
+                mutated = mutated.replace(old, new)
+            SRC.write_text(mutated)
             b = subprocess.run(["swift", "build"], cwd=ROOT, capture_output=True, text=True)
             if b.returncode != 0:
                 print(f"BUILD ERROR {name}\n{b.stdout[-2000:]}"); sys.exit(2)

@@ -20,10 +20,6 @@ struct SubscriptionError: Error, LocalizedError {
     /// moved to API billing: the main agent is on the same allowance, so web
     /// research fails with this message like every other subscription request.
     var usageExhausted = false
-    /// A refresh request that the token endpoint answered with a non-200,
-    /// non-terminal status (429, 5xx): the server replied, so the old refresh
-    /// token was not consumed by an unknown outcome (§7.1 "ambiguous").
-    var refreshAnswered = false
     init(_ message: String, requiresLogin: Bool = false) { self.message = message; self.requiresLogin = requiresLogin }
     var errorDescription: String? { message }
 }
@@ -347,6 +343,7 @@ struct SubscriptionAuthStore {
     }
 
     static let refreshExhaustedMessage = "ChatGPT sign-in may need to be repeated: the login refresh did not complete and its one recovery attempt is used up. Use subscription login. No API fallback was attempted."
+    static let accountChangedMessage = "Refresh changed the ChatGPT account/workspace; sign in again explicitly"
     static let refreshNotSavedMessage = "ChatGPT sign-in may need to be repeated: the refreshed login could not be saved. Briglia will try to recover it on the next request; if that fails, use subscription login."
 
     /// Refresh-and-settle (SIWC plan §7, §7.1). Returns the stored credential
@@ -370,15 +367,14 @@ struct SubscriptionAuthStore {
         return try outcome.get()
     }
 
-    enum RefreshDisposition { case terminal, answered, notSent, ambiguous }
-    /// Only errors that prove what happened are anything but ambiguous:
-    /// an explicit refusal (terminal), an answered non-terminal status, or
-    /// a budget refusal raised before the request was built.
+    enum RefreshDisposition { case terminal, notSent, ambiguous }
+    /// Only errors that prove what happened are anything but ambiguous: an
+    /// explicit refusal (terminal) or a budget refusal raised before the
+    /// request was built. Any other reply — 429, 500, 503 or an unfamiliar
+    /// status — does not prove the token was left unrotated, so it is
+    /// ambiguous and bounded by the one recovery.
     static func disposition(_ error: Error) -> RefreshDisposition {
-        if let failure = error as? SubscriptionError {
-            if failure.requiresLogin { return .terminal }
-            if failure.refreshAnswered { return .answered }
-        }
+        if let failure = error as? SubscriptionError, failure.requiresLogin { return .terminal }
         if error is AuthBudgetExhausted || error is SendBudgetExhausted { return .notSent }
         return .ambiguous
     }
@@ -392,11 +388,22 @@ struct SubscriptionAuthStore {
             guard state.requiresLogin != true else { throw SubscriptionError("ChatGPT requires a new login; use subscription login") }
             // §7 step 4 / §7.1 step 3: disk first. A checkpoint left by an
             // earlier settle (crash, failed final write) is promoted before
-            // anything is sent; one that no longer fits is discarded.
+            // anything is sent. One bound to this login and this refresh
+            // token that fails revalidation (another account or residency) is
+            // evidence the rotation already happened for the wrong account:
+            // the login is blocked, and the old token is never sent again —
+            // even when saving the block fails, because the checkpoint stays
+            // on disk and refuses again next time. A checkpoint bound to
+            // another generation or token is unrelated and discarded.
             if let pending = state.pendingRotation {
                 state.pendingRotation = nil
-                if pending.generation == generation, pending.replaces == SubscriptionRefreshFingerprint.of(old.refresh),
-                   pending.credential.account == old.account, pending.credential.residency == old.residency {
+                if pending.generation == generation, pending.replaces == SubscriptionRefreshFingerprint.of(old.refresh) {
+                    guard pending.credential.account == old.account, pending.credential.residency == old.residency else {
+                        state.refreshOp = nil
+                        state.requiresLogin = true
+                        try? write(state)
+                        throw SubscriptionError(Self.accountChangedMessage, requiresLogin: true)
+                    }
                     state.credential = pending.credential
                     state.refreshOp = nil
                     state.refreshRecovery = nil
@@ -414,10 +421,22 @@ struct SubscriptionAuthStore {
             if caller.cancelled { throw CancellationError() }
             // §7.1 steps 1 and 4: the operation record (and, for a recovery,
             // the reservation) is durable before the send, or nothing is sent.
+            // The records they replace are kept aside: an attempt proven never
+            // sent puts them back, so the earlier uncertain send still makes
+            // the next attempt the (one) recovery.
+            let priorOp = state.refreshOp, priorRecovery = state.refreshRecovery
             if recovering { state.refreshRecovery = SubscriptionRefreshRecovery(tokenFingerprint: fingerprint, generation: generation, state: "reserved") }
             state.refreshOp = SubscriptionRefreshOp(opId: UUID().uuidString, tokenFingerprint: fingerprint, generation: generation,
                                                     startedAt: Date(), state: "sending")
             try write(state)
+            // The write may have blocked while the caller was stopped: admit
+            // the send only now. Undoing the records is best effort; if that
+            // write fails the reservation stays spent (conservative).
+            if caller.cancelled {
+                state.refreshOp = priorOp; state.refreshRecovery = priorRecovery
+                try? write(state)
+                throw CancellationError()
+            }
             let updated: SubscriptionCredential
             do { updated = try await refresh(old.refresh) }
             catch {
@@ -425,15 +444,10 @@ struct SubscriptionAuthStore {
                 case .terminal:
                     state.requiresLogin = true
                     state.refreshOp = nil
-                    try write(state)
-                    throw error
-                case .answered:
-                    state.refreshOp = nil
                     try? write(state)
                     throw error
                 case .notSent:
-                    state.refreshOp = nil
-                    if recovering { state.refreshRecovery = nil }
+                    state.refreshOp = priorOp; state.refreshRecovery = priorRecovery
                     try? write(state)
                     throw error
                 case .ambiguous:
@@ -461,7 +475,7 @@ struct SubscriptionAuthStore {
                 state.refreshOp = nil
                 state.requiresLogin = true
                 try? write(state)
-                throw SubscriptionError("Refresh changed the ChatGPT account/workspace; sign in again explicitly", requiresLogin: true)
+                throw SubscriptionError(Self.accountChangedMessage, requiresLogin: true)
             }
             state.credential = updated
             state.clearRefreshRecords()
@@ -503,12 +517,27 @@ final class SubscriptionAuthHTTP: NSObject, URLSessionDataDelegate, RoutedDataTa
     private var session: URLSession?
     private var task: URLSessionDataTask?
     private var cancelled = false
+    private var deadlineTimer: DispatchWorkItem?
+    /// Overall bound for one auth request, whichever session carries it.
+    /// The private macOS session also has a 30 s resource timeout, but the
+    /// process-wide shared session (Linux) only has a week-long backstop and
+    /// a per-chunk idle timeout, so a reply that keeps trickling would never
+    /// end. The timer cancels only this request's task; it is independent
+    /// of the caller (a detached refresh is never cancelled by `/stop`).
+    let deadline: TimeInterval
+    /// Selftests only: a loopback issuer. Production always uses the
+    /// reviewed `SubscriptionEndpoint.issuer`.
+    let issuer: String
+    init(deadline: TimeInterval = 30, issuer: String = SubscriptionEndpoint.issuer) {
+        self.deadline = deadline; self.issuer = issuer
+        super.init()
+    }
     func post(path: String, fields: [String: String], form: Bool = false) async throws -> Reply {
         guard ["/oauth/token", "/api/accounts/deviceauth/usercode", "/api/accounts/deviceauth/token"].contains(path) else {
             throw SubscriptionError("Unreviewed authentication endpoint")
         }
-        var request = URLRequest(url: URL(string: SubscriptionEndpoint.issuer + path)!)
-        request.httpMethod = "POST"; request.timeoutInterval = 30
+        var request = URLRequest(url: URL(string: issuer + path)!)
+        request.httpMethod = "POST"; request.timeoutInterval = deadline
         request.setValue(SessionAffinity.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("briglia", forHTTPHeaderField: "originator")
         if form {
@@ -528,13 +557,19 @@ final class SubscriptionAuthHTTP: NSObject, URLSessionDataDelegate, RoutedDataTa
                 self.continuation = continuation
                 if let shared = SharedDataTaskSession.active {
                     // Linux: never one session per request (see SharedDataTaskSession).
-                    task = shared.dataTask(with: request, delegate: self); task!.resume(); return
+                    task = shared.dataTask(with: request, delegate: self)
+                } else {
+                    let config = URLSessionConfiguration.ephemeral
+                    config.httpCookieStorage = nil; config.urlCache = nil; config.timeoutIntervalForResource = deadline
+                    let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+                    self.session = session
+                    task = session.dataTask(with: request)
                 }
-                let config = URLSessionConfiguration.ephemeral
-                config.httpCookieStorage = nil; config.urlCache = nil; config.timeoutIntervalForResource = 30
-                let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-                self.session = session
-                task = session.dataTask(with: request); task!.resume()
+                let running = task!
+                let timer = DispatchWorkItem { running.cancel() }
+                deadlineTimer = timer
+                DispatchQueue.global().asyncAfter(deadline: .now() + deadline, execute: timer)
+                running.resume()
             }
         } onCancel: {
             self.lock.lock(); self.cancelled = true; let task = self.task; self.lock.unlock()
@@ -553,7 +588,8 @@ final class SubscriptionAuthHTTP: NSObject, URLSessionDataDelegate, RoutedDataTa
         bytes.append(data)
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        lock.lock(); let continuation = self.continuation; self.continuation = nil; lock.unlock()
+        lock.lock(); let continuation = self.continuation; self.continuation = nil
+        deadlineTimer?.cancel(); deadlineTimer = nil; lock.unlock()
         if let error { continuation?.resume(throwing: error is CancellationError ? error : SubscriptionError("Authentication network request failed; retry login")) }
         else { continuation?.resume(returning: (bytes, status)) }
         // Only this request's own session; the shared one is never invalidated.
@@ -624,14 +660,7 @@ struct SubscriptionLogin {
     func refresh(_ token: String) async throws -> SubscriptionCredential {
         let (data, status) = try await post("/oauth/token", ["grant_type": "refresh_token", "refresh_token": token,
             "client_id": SubscriptionEndpoint.clientID], true)
-        guard status == 200 else {
-            var failure = SubscriptionError("ChatGPT refresh failed (HTTP \(status)); sign in again. No API fallback was attempted.", requiresLogin: [400, 401, 403].contains(status))
-            // The token endpoint answered: not an ambiguous send (§7.1).
-            // A gateway 502/504 may come after the server already rotated,
-            // so those stay ambiguous, like a dropped connection.
-            failure.refreshAnswered = !failure.requiresLogin && ![0, 502, 504].contains(status)
-            throw failure
-        }
+        guard status == 200 else { throw SubscriptionError("ChatGPT refresh failed (HTTP \(status)); sign in again. No API fallback was attempted.", requiresLogin: [400, 401, 403].contains(status)) }
         return try Self.token(data)
     }
     func device(show: (String, String) async throws -> Void) async throws -> String {

@@ -44,6 +44,11 @@ extension RefreshSettleSelftest {
         let promoted = Self.diskRefresh(s.store) == "pending-refresh"
         if variant == "blocked" {
             c.check("checkpoint on a blocked login: not promoted, nothing sent", !promoted && result.hasPrefix("error:") && s.server.sends() == 0)
+        } else if variant == "other-account" {
+            // Bound to this login and token but failing revalidation: the
+            // rotation happened for the wrong account → sign-in required.
+            c.check("checkpoint (other-account): never promoted, login blocked, nothing sent",
+                    !promoted && result.hasPrefix("error:") && Self.diskBlocked(s.store) && s.server.sends() == 0)
         } else {
             c.check("checkpoint (\(variant)): discarded, never promoted", !promoted && Self.disk(s.store)["pendingRotation"] == nil)
             c.check("checkpoint (\(variant)): ordinary refresh instead", result == "ok:" + s.server.current() && s.server.sends() == 1)

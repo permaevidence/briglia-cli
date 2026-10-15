@@ -45,6 +45,7 @@ struct RefreshSettleSelftest: AsyncParsableCommand {
         try await writeFailureTests(h, c)
         try await logoutTests(h, c)
         try await checkpointTests(h, c)
+        try await round2Tests(h, c)
         print("Refresh-settle selftest: \(c.total - c.failed)/\(c.total)")
         if c.failed > 0 { throw ExitCode.failure }
     }
@@ -214,14 +215,15 @@ struct FakeTokenServer {
     /// slow-cancellable (rotate, then a cancellable 400 ms) · lost (rotate,
     /// then the reply is lost: network error) · timeout (never reached the
     /// server: network error) · lost-slow (rotate, 300 ms, then lost) ·
-    /// http503 · rotated-504 (rotate, then a gateway 504) · other-account
+    /// http503 / http429 (no rotation, then that status) · rotated-500 /
+    /// rotated-503 / rotated-504 (rotate, then that status) · other-account
     /// (rotate, reply names another account) · invalid (explicit invalid_grant) · exit-sent (rotate, then the process dies) · exit-early (the
     /// process dies before the request reaches the server).
     func handle(_ token: String) async throws -> (Data, Int) {
         let (behaviour, reply): (String, (Data, Int)) = try exclusive { state in
             let behaviour = state.script.isEmpty ? "rotate" : state.script.removeFirst()
             state.sent.append(token)
-            if ["exit-early", "timeout", "http503", "invalid"].contains(behaviour) { return (behaviour, (Data(), 0)) }
+            if ["exit-early", "timeout", "http503", "http429", "invalid"].contains(behaviour) { return (behaviour, (Data(), 0)) }
             let accepted: Bool
             if token == state.current { accepted = true }
             else if state.lenient, state.retired.contains(token), !state.reused.contains(token) { state.reused.append(token); accepted = true }
@@ -239,6 +241,9 @@ struct FakeTokenServer {
         case "invalid": return (Data(#"{"error":"invalid_grant"}"#.utf8), 400)
         case "http503": return (Data(#"{"error":"temporarily_unavailable"}"#.utf8), 503)
         case "rotated-504": return (Data("gateway timeout".utf8), 504)
+        case "rotated-500": return (Data("internal error".utf8), 500)
+        case "rotated-503": return (Data("upstream unavailable after processing".utf8), 503)
+        case "http429": return (Data(#"{"error":"rate_limited"}"#.utf8), 429)
         case "lost": throw SubscriptionError("Authentication network request failed; retry login")
         case "lost-slow":
             usleep(300_000)
