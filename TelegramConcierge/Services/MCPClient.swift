@@ -39,7 +39,12 @@ actor MCPClient {
 
     // Subprocess
     private var process: Process?
-    private var stdinHandle: FileHandle?
+    /// The only writer of the server's stdin. Every outbound frame (request,
+    /// notification, reply) is queued here and written in order by its own
+    /// thread, so a server that stops reading can never block this actor
+    /// (Codex 0.2.55 R1: a blocked reply write stalled timeouts and shutdown).
+    private var outbound: MCPOutboundPipe?
+    private let outboundLimits: MCPOutboundPipe.Limits
 
     // Read state. Chunks from the stdout pipe are queued in arrival order and
     // consumed by ONE task: a reply larger than a pipe read (playwright's
@@ -84,11 +89,13 @@ actor MCPClient {
     private var logMessages: [String] = []
     private let logMessageCap = 200
 
-    init(config: MCPServerConfig, resolvedEnvironment: [String: String]) {
+    init(config: MCPServerConfig, resolvedEnvironment: [String: String],
+         outboundLimits: MCPOutboundPipe.Limits = .standard) {
         self.serverName = config.name
         self.executable = config.command
         self.arguments = config.arguments
         self.environment = resolvedEnvironment
+        self.outboundLimits = outboundLimits
     }
 
     // MARK: - Lifecycle
@@ -164,8 +171,20 @@ actor MCPClient {
         }
         StageMarkers.exit(spawnToken, .ok, detail: "\(serverName) pid \(proc.processIdentifier)")
 
+        // The writer owns a duplicate of the write end (set non-blocking)
+        // and closes it when it stops; the original is closed right away so
+        // the server sees EOF exactly when the writer is closed.
+        let writeEnd = stdin.fileHandleForWriting
+        let fd = dup(writeEnd.fileDescriptor)
+        try? writeEnd.close()
+        guard fd >= 0 else {
+            proc.terminate()
+            throw MCPClientError.spawnFailed("could not set up the server's input pipe")
+        }
+        self.outbound = MCPOutboundPipe(fd: fd, label: serverName, limits: outboundLimits) { [weak self] reason in
+            Task { await self?.outboundFailed(reason) }
+        }
         self.process = proc
-        self.stdinHandle = stdin.fileHandleForWriting
         self.stdoutPipe = stdout
         self.stderrPipe = stderr
         self.isAlive = true
@@ -299,8 +318,8 @@ actor MCPClient {
             // init before we could learn its pid (Codex R1). The table is read
             // through sysctl/procfs — no spawn, no delay.
             let tree = Self.captureTree(pid)
-            try? stdinHandle?.close()
-            stdinHandle = nil
+            outbound?.close()
+            outbound = nil
             if proc.isRunning { proc.terminate() }
             for g in tree.groups { _ = Darwin.kill(-g, SIGTERM) }
             for kid in tree.descendants { _ = Darwin.kill(kid, SIGTERM) }
@@ -321,8 +340,8 @@ actor MCPClient {
                     "[MCP] \(serverName): shutdown budget exhausted — shim \(pid) \(state.collected ? "collected" : "NOT collected"), descendants still alive: \(state.survivors)\n".utf8))
             }
         } else {
-            try? stdinHandle?.close()
-            stdinHandle = nil
+            outbound?.close()
+            outbound = nil
         }
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
@@ -479,7 +498,7 @@ actor MCPClient {
     /// turn-start bootstrap and `tools/call` inside turns, that meant one bad
     /// MCP server could silently freeze the whole agent.
     private func sendRequest(method: String, params: Any?, timeout: TimeInterval = 120) async throws -> [String: Any] {
-        guard isAlive, let stdin = stdinHandle else { throw MCPClientError.notStarted }
+        guard isAlive, let outbound else { throw MCPClientError.notStarted }
         let id = nextRequestId
         nextRequestId += 1
         var msg: [String: Any] = ["jsonrpc": "2.0", "id": id, "method": method]
@@ -496,10 +515,10 @@ actor MCPClient {
         return try await withCheckedThrowingContinuation { cont in
             pendingRequests[id] = cont
             do {
-                try stdin.write(contentsOf: data)
+                try outbound.enqueue(data)
             } catch {
                 pendingRequests.removeValue(forKey: id)
-                cont.resume(throwing: MCPClientError.writeFailed(error.localizedDescription))
+                cont.resume(throwing: MCPClientError.writeFailed("\(error)"))
             }
         }
     }
@@ -513,14 +532,14 @@ actor MCPClient {
     }
 
     private func sendNotification(method: String, params: Any?) throws {
-        guard isAlive, let stdin = stdinHandle else { throw MCPClientError.notStarted }
+        guard isAlive, let outbound else { throw MCPClientError.notStarted }
         var msg: [String: Any] = ["jsonrpc": "2.0", "method": method]
         if let params = params { msg["params"] = params }
         let data = try MCPFraming.encode(msg)
         do {
-            try stdin.write(contentsOf: data)
+            try outbound.enqueue(data)
         } catch {
-            throw MCPClientError.writeFailed(error.localizedDescription)
+            throw MCPClientError.writeFailed("\(error)")
         }
     }
 
@@ -587,19 +606,33 @@ actor MCPClient {
         }
     }
 
-    /// Write a JSON-RPC response to the server. A failed write is logged, not
-    /// thrown: the decoder must keep running, and a dead pipe is reported by
-    /// termination.
+    /// Queue a JSON-RPC response to the server (same ordered writer as
+    /// requests; never blocks the actor). A refused frame is logged: the
+    /// transport has failed and `outboundFailed` is ending the server.
     private func sendReply(_ message: [String: Any]) {
-        guard isAlive, let stdin = stdinHandle else { return }
+        guard isAlive, let outbound else { return }
         do {
-            try stdin.write(contentsOf: MCPFraming.encode(message))
+            try outbound.enqueue(MCPFraming.encode(message))
         } catch {
-            appendLog("[\(serverName)] could not answer a server request: \(error.localizedDescription)")
+            appendLog("[\(serverName)] could not answer a server request: \(error)")
         }
     }
 
+    /// The writer gave up: the server stopped reading its input for longer
+    /// than the stall limit, the queue passed its byte cap, or the pipe
+    /// broke. The transport is unusable, so every parked call fails now and
+    /// the server is ended (a dead client is reported, never respawned
+    /// silently). Called at most once per writer.
+    private func outboundFailed(_ reason: String) {
+        appendLog("[\(serverName)] input pipe failed: \(reason)")
+        for (_, cont) in pendingRequests { cont.resume(throwing: MCPClientError.writeFailed(reason)) }
+        pendingRequests.removeAll()
+        guard isAlive, shutdownTask == nil else { return }
+        Task { await self.shutdown() }
+    }
+
     private func handleTermination() {
+        outbound?.close()
         isAlive = false
         isInitialized = false
         for (_, cont) in pendingRequests {
@@ -627,4 +660,184 @@ actor MCPClient {
     // MARK: - Introspection
 
     func currentLogMessages() -> [String] { logMessages }
+}
+
+
+#if canImport(Glibc)
+private func mcpPosixWrite(_ fd: Int32, _ buf: UnsafeRawPointer, _ count: Int) -> Int { Glibc.write(fd, buf, count) }
+private func mcpPosixClose(_ fd: Int32) { _ = Glibc.close(fd) }
+#else
+private func mcpPosixWrite(_ fd: Int32, _ buf: UnsafeRawPointer, _ count: Int) -> Int { Darwin.write(fd, buf, count) }
+private func mcpPosixClose(_ fd: Int32) { _ = Darwin.close(fd) }
+#endif
+
+/// Ordered, bounded, non-blocking writer for one MCP server's stdin.
+///
+/// Frames are queued whole and written in order by a dedicated thread on a
+/// non-blocking descriptor, so frames never interleave and no caller ever
+/// blocks on the pipe. The thread waits for the pipe in short `poll` steps,
+/// so `close()` takes effect within one step even while the server is not
+/// reading. The transport fails (once, reported through `onFailure`) when:
+/// a queued frame makes no progress for `limits.stallSeconds`, the queue
+/// would exceed `limits.maxQueuedBytes`, or the write fails (EPIPE...).
+/// After failure or close every `enqueue` throws. The thread owns the
+/// descriptor and closes it when it stops.
+final class MCPOutboundPipe: @unchecked Sendable {
+
+    struct Limits: Sendable {
+        var maxQueuedBytes: Int
+        var stallSeconds: Double
+        /// One `poll` step; bounds how long `close()` waits to take effect.
+        var pollMillis: Int32
+        static let standard = Limits(maxQueuedBytes: 16 << 20, stallSeconds: 15, pollMillis: 50)
+    }
+
+    enum Refused: Error, CustomStringConvertible {
+        case closed
+        case failed(String)
+        var description: String {
+            switch self {
+            case .closed: return "the server's input pipe is closed"
+            case .failed(let reason): return "the server's input pipe failed: \(reason)"
+            }
+        }
+    }
+
+    private enum State { case open, failed(String), closed }
+
+    private let fd: Int32
+    private let limits: Limits
+    private let onFailure: @Sendable (String) -> Void
+    private let cond = NSCondition()
+    private var queue: [Data] = []
+    private var head = 0
+    private var queuedBytes = 0
+    private var state: State = .open
+    /// Test seam: count of writer threads still running (0 after they stop).
+    private static let liveLock = NSLock()
+    nonisolated(unsafe) private static var liveThreads = 0
+    static var liveWriterThreads: Int { liveLock.lock(); defer { liveLock.unlock() }; return liveThreads }
+
+    init(fd: Int32, label: String, limits: Limits, onFailure: @escaping @Sendable (String) -> Void) {
+        self.fd = fd
+        self.limits = limits
+        self.onFailure = onFailure
+        let flags = fcntl(fd, F_GETFL)
+        if flags >= 0 { _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK) }
+        Self.liveLock.lock(); Self.liveThreads += 1; Self.liveLock.unlock()
+        let thread = Thread { [self] in self.run() }
+        thread.name = "mcp-writer-\(label)"
+        thread.start()
+    }
+
+    /// Queue one whole frame. Throws when closed/failed, or when the frame
+    /// would push the queue past its cap (which fails the transport).
+    func enqueue(_ frame: Data) throws {
+        cond.lock()
+        switch state {
+        case .closed: cond.unlock(); throw Refused.closed
+        case .failed(let reason): cond.unlock(); throw Refused.failed(reason)
+        case .open: break
+        }
+        if queuedBytes + frame.count > limits.maxQueuedBytes {
+            let reason = "more than \(limits.maxQueuedBytes) bytes queued for a server that is not reading its input"
+            failLocked(reason)
+            cond.unlock()
+            onFailure(reason)
+            throw Refused.failed(reason)
+        }
+        queue.append(frame)
+        queuedBytes += frame.count
+        cond.signal()
+        cond.unlock()
+    }
+
+    /// Stop writing; unsent frames are dropped. Never blocks: the thread
+    /// notices within one poll step and closes the descriptor (the server
+    /// then sees EOF).
+    func close() {
+        cond.lock()
+        if case .open = state { state = .closed; dropQueueLocked() }
+        cond.broadcast()
+        cond.unlock()
+    }
+
+    private func failLocked(_ reason: String) {
+        state = .failed(reason)
+        dropQueueLocked()
+        cond.broadcast()
+    }
+
+    private func dropQueueLocked() {
+        queue.removeAll()
+        head = 0
+        queuedBytes = 0
+    }
+
+    private var isOpen: Bool {
+        cond.lock(); defer { cond.unlock() }
+        if case .open = state { return true }
+        return false
+    }
+
+    private func run() {
+        defer {
+            mcpPosixClose(fd)
+            Self.liveLock.lock(); Self.liveThreads -= 1; Self.liveLock.unlock()
+        }
+        while true {
+            cond.lock()
+            while head == queue.count, case .open = state { cond.wait() }
+            guard case .open = state else { cond.unlock(); return }
+            let frame = queue[head]
+            cond.unlock()
+            if let reason = writeFully(frame) {
+                cond.lock()
+                let report: Bool
+                if case .open = state { failLocked(reason); report = true } else { report = false }
+                cond.unlock()
+                if report { onFailure(reason) }
+                return
+            }
+            cond.lock()
+            if case .open = state, head < queue.count {
+                head += 1
+                queuedBytes -= frame.count
+                if head > 256 && head * 2 > queue.count { queue.removeFirst(head); head = 0 }
+            }
+            cond.unlock()
+        }
+    }
+
+    /// Write `frame` completely. Returns nil on success, a failure reason
+    /// otherwise; returns "closed" quietly if `close()` happened meanwhile.
+    private func writeFully(_ frame: Data) -> String? {
+        let stallNanos = UInt64(max(0, limits.stallSeconds) * 1_000_000_000)
+        var lastProgress = DispatchTime.now().uptimeNanoseconds
+        var offset = 0
+        return frame.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> String? in
+            guard let base = raw.baseAddress else { return nil }
+            while offset < raw.count {
+                guard isOpen else { return "closed" }
+                let n = mcpPosixWrite(fd, base + offset, raw.count - offset)
+                if n > 0 {
+                    offset += n
+                    lastProgress = DispatchTime.now().uptimeNanoseconds
+                    continue
+                }
+                let err = n < 0 ? errno : EAGAIN
+                if err == EINTR { continue }
+                if err == EAGAIN || err == EWOULDBLOCK {
+                    if DispatchTime.now().uptimeNanoseconds - lastProgress >= stallNanos {
+                        return "the server has not read its input for \(Int(limits.stallSeconds)) s"
+                    }
+                    var p = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                    _ = poll(&p, 1, limits.pollMillis)
+                    continue
+                }
+                return "write failed: \(String(cString: strerror(err)))"
+            }
+            return nil
+        }
+    }
 }
