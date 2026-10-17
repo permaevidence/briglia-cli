@@ -18,6 +18,9 @@ import Glibc
 ///   §3 Playwright-shaped servers: one asks `roots/list` only when the client
 ///      declared roots (the real Playwright logic), one asks it regardless.
 ///      Both must finish their first tool call in well under their 20 s wait.
+///   §4 a server that floods requests and stops reading its stdin (Codex
+///      0.2.55 R1): timeouts and shutdown stay responsive, the stall limit
+///      and byte cap fail the transport, ordering and framing hold.
 ///
 /// `--playwright-cli <cli.js>` instead times the first two
 /// `browser_navigate` calls against a REAL installed @playwright/mcp
@@ -45,6 +48,9 @@ struct MCPServerRequestSelftest: AsyncParsableCommand {
     static let firstCallCeiling: TimeInterval = 20
 
     func run() async throws {
+        // Like the chat/daemon entry points: line-buffered stdout and SIGPIPE
+        // ignored (a broken server pipe is an EPIPE error, not a kill).
+        AdaCLI.prepareIO()
         let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("briglia-mcp-server-request-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
@@ -65,6 +71,7 @@ struct MCPServerRequestSelftest: AsyncParsableCommand {
             Self.runReplyTable(check: check)
             try await Self.runServerRequests(tempRoot: tempRoot, check: check)
             try await Self.runPlaywrightShaped(tempRoot: tempRoot, check: check)
+            try await Self.runBackpressure(tempRoot: tempRoot, check: check)
         }
         print(failures == 0 ? "\nall checks passed" : "\n\(failures) check(s) FAILED")
         if failures > 0 { throw ExitCode(1) }
