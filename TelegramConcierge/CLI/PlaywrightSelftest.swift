@@ -820,6 +820,17 @@ struct PlaywrightSelftest: AsyncParsableCommand {
         check("live.3 nothing group/other-readable under mcp/", PrivateStorage.sweep(apply: false).tightened == 0)
         let again = await BrowserAutomationBootstrap.ensureConfigured(dependencies: deps)
         check("live.4 second start reuses without npm", again == .configured(token: hash, changed: false), "\(again)")
+        // v0.2.55: the first browser call of a fresh server must not wait out
+        // a roots/list the client never answers (60 s before the fix).
+        let cli = layout.versionDirectory(token: hash).appendingPathComponent(ManagedPlaywright.cliRelativePath)
+        let outputDir = tempRoot.appendingPathComponent("pw-output", isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+        let timing = try await MCPServerRequestSelftest.timeFirstBrowserCalls(
+            cli: cli.path, nodeDirectory: nodeDir, outputDir: outputDir)
+        print(String(format: "· live: initialize %.2fs, first browser_navigate %.2fs, second %.2fs (first %@)",
+                     timing.initialize, timing.first, timing.second, timing.firstSucceeded ? "succeeded" : "returned an error"))
+        check("live.5 first browser call of a fresh server in under \(Int(MCPServerRequestSelftest.firstCallCeiling)) s",
+              timing.first < MCPServerRequestSelftest.firstCallCeiling, timing.firstText)
     }
 
     final class SeamState: @unchecked Sendable {

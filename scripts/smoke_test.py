@@ -757,6 +757,15 @@ def main():
     check("mcp-surface-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    # Server-to-client requests (v0.2.55): every request a server sends is
+    # answered (ping → empty result, everything else → -32601), the client
+    # declares neither roots nor sampling, and a Playwright-shaped server's
+    # first tool call never waits out an unanswered roots/list.
+    result = run_selftest([os.path.abspath(ADA), "__mcp-server-request-selftest"], capture_output=True,
+                            text=True, timeout=180)
+    check("mcp-server-request-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
     # Child-process lifecycle across /restart and /upgrade (v0.2.21): the
     # pre-exec shutdown tears MCP servers down (shim gone AND reaped, server
     # in its private session gone, SIGTERM-ignoring server included) and the
