@@ -171,13 +171,49 @@ actor MCPClient {
         self.isAlive = true
     }
 
+    /// What this client declares in `initialize`: nothing beyond the
+    /// baseline. Briglia used to declare `roots` and `sampling` without
+    /// implementing either; a server that believed it (the pinned Playwright
+    /// MCP awaits `roots/list` before its first tool call) waited for the MCP
+    /// SDK's 60 s request timeout on the first browser call of every Browse
+    /// run. Briglia has no workspace concept to offer as roots: servers run
+    /// with the home directory as their working directory and their own
+    /// configured paths, which is exactly what Playwright fell back to after
+    /// the timeout (an empty roots answer means process.cwd()). Declaring
+    /// nothing keeps that behaviour without the wait, and does not invite a
+    /// roots-honouring server to replace its configured directories with
+    /// whatever Briglia would have had to invent. Sampling would need a model
+    /// call on the server's behalf, which Briglia does not do.
+    static let clientCapabilities: [String: Any] = [:]
+
+    /// JSON-RPC "method not found" (the code the spec requires for a request
+    /// the receiver does not implement).
+    static let methodNotFoundCode = -32601
+
+    /// The reply to a server-to-client REQUEST (a message with both `method`
+    /// and `id`). Every request gets an answer, so a server never waits out
+    /// its own timeout on Briglia: `ping` is answered with an empty result
+    /// (required by the MCP spec), everything else, including `roots/list`,
+    /// `sampling/createMessage` and `elicitation/create` (none declared), with
+    /// a -32601 error. The id is echoed verbatim (numbers and strings).
+    static func replyToServerRequest(method: String, id: Any) -> [String: Any] {
+        if method == "ping" {
+            return ["jsonrpc": "2.0", "id": id, "result": [String: Any]()]
+        }
+        return [
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": [
+                "code": methodNotFoundCode,
+                "message": "Method not found: \(method) is not supported by this client"
+            ] as [String: Any]
+        ]
+    }
+
     func initialize(timeout: TimeInterval = 30) async throws {
         let params: [String: Any] = [
             "protocolVersion": MCPProtocol.version,
-            "capabilities": [
-                "roots": ["listChanged": false],
-                "sampling": [String: Any]()
-            ],
+            "capabilities": Self.clientCapabilities,
             "clientInfo": [
                 "name": MCPProtocol.clientName,
                 "version": MCPProtocol.clientVersion
@@ -539,9 +575,27 @@ actor MCPClient {
             // be stale for one turn — acceptable for Phase 1.
             Task { try? await self.refreshTools() }
         default:
-            // $/progress, server→client sampling requests, etc. Accept-and-ignore.
-            _ = id
-            break
+            // A notification ($/progress, notifications/cancelled, ...) is
+            // ignored. A request is never ignored: an unanswered request
+            // leaves the server waiting until its own timeout (60 s in the
+            // MCP SDK), stalling whatever it was doing for us.
+            guard let id, !(id is NSNull) else { return }
+            if method != "ping" {
+                appendLog("[\(serverName)] server request '\(method)' is not supported; answered \(Self.methodNotFoundCode)")
+            }
+            sendReply(Self.replyToServerRequest(method: method, id: id))
+        }
+    }
+
+    /// Write a JSON-RPC response to the server. A failed write is logged, not
+    /// thrown: the decoder must keep running, and a dead pipe is reported by
+    /// termination.
+    private func sendReply(_ message: [String: Any]) {
+        guard isAlive, let stdin = stdinHandle else { return }
+        do {
+            try stdin.write(contentsOf: MCPFraming.encode(message))
+        } catch {
+            appendLog("[\(serverName)] could not answer a server request: \(error.localizedDescription)")
         }
     }
 
