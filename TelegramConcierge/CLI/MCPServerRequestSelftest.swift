@@ -72,6 +72,7 @@ struct MCPServerRequestSelftest: AsyncParsableCommand {
             try await Self.runServerRequests(tempRoot: tempRoot, check: check)
             try await Self.runPlaywrightShaped(tempRoot: tempRoot, check: check)
             try await Self.runBackpressure(tempRoot: tempRoot, check: check)
+            try await Self.runRetention(tempRoot: tempRoot, check: check)
         }
         print(failures == 0 ? "\nall checks passed" : "\n\(failures) check(s) FAILED")
         if failures > 0 { throw ExitCode(1) }
