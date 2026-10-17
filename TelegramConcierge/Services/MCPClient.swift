@@ -660,6 +660,9 @@ actor MCPClient {
     // MARK: - Introspection
 
     func currentLogMessages() -> [String] { logMessages }
+
+    /// Test seam: the stdin writer's (pending, retained) payload bytes.
+    func outboundAccountingForTesting() -> (pending: Int, retained: Int)? { outbound?.accountingForTesting }
 }
 
 
@@ -717,6 +720,13 @@ final class MCPOutboundPipe: @unchecked Sendable {
     private static let liveLock = NSLock()
     nonisolated(unsafe) private static var liveThreads = 0
     static var liveWriterThreads: Int { liveLock.lock(); defer { liveLock.unlock() }; return liveThreads }
+    /// Test seam: bytes still waiting to be written, and payload bytes the
+    /// queue array actually holds (every slot, delivered or not). After a
+    /// frame is delivered the two must match: nothing delivered is kept.
+    var accountingForTesting: (pending: Int, retained: Int) {
+        cond.lock(); defer { cond.unlock() }
+        return (queuedBytes, queue.reduce(0) { $0 + $1.count })
+    }
 
     init(fd: Int32, label: String, limits: Limits, onFailure: @escaping @Sendable (String) -> Void) {
         self.fd = fd
@@ -801,9 +811,19 @@ final class MCPOutboundPipe: @unchecked Sendable {
             }
             cond.lock()
             if case .open = state, head < queue.count {
+                // Release the delivered payload now: memory held by the
+                // queue must never exceed the bytes still waiting to be
+                // written. The slot itself is reclaimed below; index
+                // compaction is only bookkeeping, never what frees data.
+                queue[head] = Data()
                 head += 1
                 queuedBytes -= frame.count
-                if head > 256 && head * 2 > queue.count { queue.removeFirst(head); head = 0 }
+                if head == queue.count {
+                    queue.removeAll()
+                    head = 0
+                } else if head > 256 && head * 2 > queue.count {
+                    queue.removeFirst(head); head = 0
+                }
             }
             cond.unlock()
         }
