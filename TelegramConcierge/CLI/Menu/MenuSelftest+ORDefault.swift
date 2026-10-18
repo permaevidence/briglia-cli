@@ -21,108 +21,101 @@ extension MenuSelftestContext {
         (w.applied.last { ($0["provider"] as? [String: Any])?["profile"] as? String == "openrouter" }?["provider"] as? [String: Any]) ?? [:]
     }
 
+    func orEntry(_ w: MenuFakeWorld, _ model: String) -> OpenRouterPinMap.Entry? {
+        OpenRouterPinMap.state(w.snap.orStore).map?.models[model]
+    }
+
+    func presetRows(_ wf: MenuWorkflow) -> [[String: Any]] { ai(wf)["openrouter_presets"] as? [[String: Any]] ?? [] }
+
+    /// Seed a configured, active OpenRouter lane on `model`.
+    func orLane(_ w: MenuFakeWorld, model: String = MenuWorkflow.openRouterDefaultModel) {
+        w.snap.providers["openrouter"] = MenuSnapshot.Provider(configured: true, model: model, effort: "high", keyMasked: "sk-or…cdef")
+        w.snap.activeProfile = "openrouter"
+        w.syncOR()
+    }
+
     func openRouterDefault() async {
-        // 1. Fresh install: OpenRouter is the lane shown and recommended.
+        let haiku = "anthropic/claude-haiku-5.5", luna = "openai/gpt-6-luna", glm = "z-ai/glm-5.3-flash", ds1017 = "deepseek/deepseek-v4.1-flash-1017"
+        // 1. Fresh install: OpenRouter recommended; the picker lists the presets in order with their host state.
         do {
             let w = world()
             let wf = await make(w)
-            check("or-default: a fresh install recommends OpenRouter and names the default model and host",
+            let rows = presetRows(wf)
+            check("or-picker: a fresh install recommends OpenRouter and names the default model and host",
                   ai(wf)["lane"] as? String == "openrouter" && ai(wf)["recommended_lane"] as? String == "openrouter"
                   && ai(wf)["openrouter_default"] as? String == "deepseek/deepseek-v4.1-flash"
                   && ai(wf)["openrouter_default_label"] as? String == "DeepSeek V4.1 Flash"
                   && ai(wf)["openrouter_default_host"] as? String == "Together"
                   && (ai(wf)["openrouter_pin"] as? [String]) == [])
+            check("or-picker: five presets in the owner's order, each saying whether/which host is pinned automatically",
+                  rows.map { $0["id"] as? String ?? "" } == [MenuWorkflow.openRouterDefaultModel, ds1017, haiku, luna, glm]
+                  && rows.map { $0["host_state"] as? String ?? "" } == ["auto_will_pin", "none", "auto_will_pin", "auto_will_pin", "auto_will_pin"]
+                  && rows.map { ($0["hosts"] as? [String]) ?? [] } == [["Together"], [], ["Google Vertex"], ["OpenAI"], ["Together"]], "\(rows)")
 
-            // 2. Fresh OpenRouter setup → the host list rides with the profile, pinned to together.
+            // 2. First setup → the default preset's host, with the host list and the page's basis.
             let r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]!])
             let sec = lastOpenRouterSection(w)
-            check("or-default: the first OpenRouter setup asks for the default host and hands over the host list read before the save",
-                  ok(r) && sec["model"] as? String == MenuWorkflow.openRouterDefaultModel && sec["default_host_pin"] as? Bool == true
+            check("or-picker: the first setup asks for the preset host, hands over the host list and the expected basis",
+                  ok(r) && sec["model"] as? String == MenuWorkflow.openRouterDefaultModel && sec["preset_host_pin"] as? Bool == true
+                  && (sec["expected_basis"] as? [String: Any])?["map"] as? String == "absent"
                   && (sec["host_listing"] as? [String: Any])?["model"] as? String == MenuWorkflow.openRouterDefaultModel
-                  && ((sec["host_listing"] as? [String: Any])?["hosts"] as? [String])?.contains("together") == true
-                  && w.snap.openRouterPin == ["together"] && (ai(wf)["openrouter_pin"] as? [String]) == ["together"]
-                  && w.orHostAsks == [MenuWorkflow.openRouterDefaultModel])
-            check("or-default: the confirmation says where it runs", msg(r).contains("on Together") && msg(r).contains("/orprovider"))
+                  && orEntry(w, MenuWorkflow.openRouterDefaultModel) == .init(hosts: ["together"], by: .preset, at: orEntry(w, MenuWorkflow.openRouterDefaultModel)?.at ?? "")
+                  && (ai(wf)["openrouter_pin"] as? [String]) == ["together"], "\(sec) \(w.snap.orStore)")
+            check("or-picker: the confirmation says where it runs", msg(r).contains("on Together") && msg(r).contains("pinned automatically"))
+            let orEfforts = (((ai(wf)["providers"] as? [String: Any])?["openrouter"] as? [String: Any])?["efforts"] as? [String]) ?? []
+            check("or-picker D11: the menu offers max on OpenRouter", orEfforts == ["low", "medium", "high", "max"], "\(orEfforts)")
 
-            // 3. Model change on the pinned lane: served → kept; not served → released.
-            w.orHosts["z-ai/glm-5.3-flash"] = ["z-ai", "together"]
-            var r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "z-ai/glm-5.3-flash"])
-            check("or-default: a new model the pinned host serves keeps the pin",
-                  ok(r2) && w.snap.openRouterPin == ["together"] && !msg(r2).contains("released"))
-            r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "anthropic/claude-haiku-5.5"])
-            check("or-default: a new model the pinned host doesn't serve releases the pin and says so",
-                  ok(r2) && w.snap.openRouterPin.isEmpty && msg(r2).contains("released")
-                  && (lastOpenRouterSection(w)["host_listing"] as? [String: Any])?["model"] as? String == "anthropic/claude-haiku-5.5")
-        }
+            // 3. Haiku preset: Google Vertex (base slug covers the regions); presets are sent as vision.
+            w.orHosts[haiku] = ["google-vertex/global", "anthropic", "google-vertex/europe"]
+            var r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": haiku, "text_only": true])
+            check("or-picker: picking Claude Haiku 5.5 pins google-vertex automatically (all regions) and sends it as a vision model",
+                  ok(r2) && orEntry(w, haiku)?.hosts == ["google-vertex"] && orEntry(w, haiku)?.by == .preset
+                  && lastOpenRouterSection(w)["text_only"] as? Bool == false && msg(r2).contains("Google Vertex"), msg(r2))
 
-        // 4. Pinned lane, host list unreadable during a model change: kept + warning.
-        do {
-            let w = world()
-            w.snap.providers["openrouter"] = MenuSnapshot.Provider(configured: true, model: MenuWorkflow.openRouterDefaultModel, effort: "high", keyMasked: "sk-or…cdef")
-            w.snap.activeProfile = "openrouter"
-            w.snap.openRouterPin = ["together"]
-            let wf = await make(w)
-            w.orHostsFail = true
-            let r = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "anthropic/claude-haiku-5.5"])
-            check("or-default: an unreadable host list keeps the pin and warns", ok(r) && w.snap.openRouterPin == ["together"]
-                  && msg(r).contains("/orprovider off") && msg(r).contains("HTTP 503"))
-        }
-
-        // 5. Existing installs are untouched.
-        do {
-            let w = world()
-            w.snap.chatgpt = .signedIn(active: true, model: "gpt-6.1-sol", effort: "high", generation: "g1")
-            w.snap.activeProfile = "chatgpt"
-            let wf = await make(w)
-            check("or-default: an install on ChatGPT stays on ChatGPT, nothing written", ai(wf)["lane"] as? String == "chatgpt"
-                  && ai(wf)["active"] as? String == "chatgpt" && w.applied.isEmpty && w.orHostAsks.isEmpty)
-        }
-        do {
-            let w = world()
-            w.snap.activeProfile = "custom"
-            w.snap.otherProvider = "Custom endpoint"
-            let wf = await make(w)
-            check("or-default: an install on a setup-made provider keeps the ChatGPT fallback lane, nothing written",
-                  ai(wf)["lane"] as? String == "chatgpt" && w.applied.isEmpty)
-        }
-        do {
-            let w = world()
-            w.snap.chatgpt = .loginRequired
-            let wf = await make(w)
-            check("or-default: an expired ChatGPT login is not a fresh install", ai(wf)["lane"] as? String == "chatgpt")
-        }
-        do {
-            // OpenRouter already configured without a pin (never pinned, or /orprovider off).
-            let w = world()
-            w.snap.providers["openrouter"] = MenuSnapshot.Provider(configured: true, model: MenuWorkflow.openRouterDefaultModel, effort: "high", keyMasked: "sk-or…cdef")
-            w.snap.activeProfile = "openrouter"
-            let wf = await make(w)
-            let r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]! + "-alt"])
-            check("or-default: an existing OpenRouter setup (pin off) gets no pin on a new key, no host list read",
-                  ok(r) && w.snap.openRouterPin.isEmpty && w.orHostAsks.isEmpty
-                  && (lastOpenRouterSection(w)["host_listing"] as? [String: Any])?["skip"] as? Bool == true)
-        }
-        do {
-            // An explicit pin stored before OpenRouter is (re)added: never overwritten.
-            let w = world()
-            w.snap.openRouterPin = ["deepinfra"]
-            w.orHosts[MenuWorkflow.openRouterDefaultModel] = ["novita/fp8", "together", "deepinfra/fp8"]
-            let wf = await make(w)
-            let r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]!])
-            check("or-default: an explicit stored pin is never overwritten by a new setup",
-                  ok(r) && w.snap.openRouterPin == ["deepinfra"] && !msg(r).contains("on Together"))
+            // 4. Per-model memory: Haiku → automatic (toggle), switch to DeepSeek (Together kept), back → still automatic.
+            r2 = await act(wf, ["action": "provider_host", "model": haiku, "choice": "automatic"])
+            check("or-picker: the menu toggle records 'let OpenRouter choose' for Haiku",
+                  ok(r2) && orEntry(w, haiku)?.hosts == [] && orEntry(w, haiku)?.by == .user
+                  && (w.orPinRequests.last?["expected_basis"] as? [String: Any]) != nil, msg(r2))
+            w.orHostAsks = []
+            r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": MenuWorkflow.openRouterDefaultModel])
+            check("or-picker: back on DeepSeek V4.1 Flash its own host (Together) is restored",
+                  ok(r2) && (ai(wf)["openrouter_pin"] as? [String]) == ["together"], "\(w.snap.orStore)")
+            w.orHostAsks = []
+            r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": haiku])
+            check("or-picker: A→B→A — Haiku comes back with its remembered automatic choice, no host list read, no preset override",
+                  ok(r2) && orEntry(w, haiku)?.hosts == [] && (ai(wf)["openrouter_pin"] as? [String]) == [] && w.orHostAsks.isEmpty
+                  && (ai(wf)["openrouter_current_host"] as? [String: Any])?["host_state"] as? String == "user_automatic")
+            // 5. "Briglia's host" toggle = reset to the preset.
+            r2 = await act(wf, ["action": "provider_host", "model": haiku, "choice": "default"])
+            check("or-picker: the 'Briglia's host' toggle re-applies Google Vertex and shows the committed outcome",
+                  ok(r2) && orEntry(w, haiku)?.hosts == ["google-vertex"] && orEntry(w, haiku)?.by == .preset && msg(r2).contains("Google Vertex"), msg(r2))
+            // 6. Other model: no automatic host; the vision choice is kept.
+            r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "moonshotai/kimi-k3", "text_only": true])
+            check("or-picker: another model gets no automatic host and keeps the page's vision choice",
+                  ok(r2) && orEntry(w, "moonshotai/kimi-k3") == nil && (ai(wf)["openrouter_pin"] as? [String]) == []
+                  && lastOpenRouterSection(w)["text_only"] as? Bool == true)
+            // 7. Luna: OpenAI's standard endpoint, never the flex tier (listing tier-first, no metadata → suffix rule).
+            w.orHosts[luna] = ["openai/flex", "openai/fast", "azure", "openai"]
+            r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": luna])
+            check("or-picker: GPT-6 Luna pins openai (the base slug excludes openai/flex and openai/fast)",
+                  ok(r2) && orEntry(w, luna)?.hosts == ["openai"] && msg(r2).contains("OpenAI"), msg(r2))
+            w.orHosts[ds1017] = ["deepinfra/fp8", "deepseek"]
+            r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": ds1017])
+            check("or-picker: DeepSeek V4.1 Flash 1017 has no automatic host", ok(r2) && orEntry(w, ds1017) == nil && (ai(wf)["openrouter_pin"] as? [String]) == [])
         }
 
-        // 6. Fresh setup but Together can't be confirmed: routing automatic, and SAID (EN + IT).
+        // 8. A preset whose host can't be confirmed: automatic, SAID (EN + IT); unreadable list too.
         for (label, configure) in [("Together no longer serves the model", { (w: MenuFakeWorld) in w.orHosts[MenuWorkflow.openRouterDefaultModel] = ["novita/fp8"] }),
                                    ("the host list can't be read", { (w: MenuFakeWorld) in w.orHostsFail = true })] {
             let w = world()
             configure(w)
             let wf = await make(w)
             let r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]!])
-            check("or-default: no pin when \(label), and the confirmation says Together couldn't be selected",
+            check("or-picker: no pin when \(label), the confirmation says Together couldn't be selected, retry offered",
                   ok(r) && ai(wf)["active"] as? String == "openrouter" && w.snap.openRouterPin.isEmpty
-                  && msg(r).contains("Together couldn\u{2019}t be selected") && msg(r).contains("OpenRouter chooses the host"))
+                  && orEntry(w, MenuWorkflow.openRouterDefaultModel) == nil
+                  && msg(r).contains("Together couldn\u{2019}t be selected") && msg(r).contains("OpenRouter chooses the host"), msg(r))
         }
         do {
             let w = world()
@@ -130,70 +123,90 @@ extension MenuSelftestContext {
             let wf = await make(w)
             await act(wf, ["action": "lang", "lang": "it"])
             let r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]!])
-            check("or-default: the Italian confirmation says Together couldn't be chosen",
+            check("or-picker: the Italian confirmation says Together couldn't be chosen",
                   ok(r) && msg(r).contains("Non è stato possibile scegliere Together") && msg(r).contains("lo sceglie OpenRouter"))
         }
 
-        // Round 3 (Codex answer 1): every OpenRouter save the menu makes hands
-        // setup-api a host list or an explicit skip, so setup-api never
-        // fetches inside the menu's barrier.
+        // 9. Stale basis: another writer decides the destination's host while the page reads the list → refused, nothing written.
+        do {
+            let w = world()
+            orLane(w)
+            let wf = await make(w)
+            w.orHosts[haiku] = ["google-vertex/global"]
+            w.duringORListing = {
+                var store = w.snap.orStore
+                _ = try? OpenRouterProviderPin.applyHostChoice(&store, model: haiku, choice: .pin(["anthropic"]),
+                                                               listing: nil, expected: OpenRouterPinMap.RoutingBasis.of(store), now: Date())
+                w.snap.orStore = store
+            }
+            let before = w.snap.orStore
+            let r = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": haiku])
+            w.duringORListing = nil
+            check("or-picker: a host decision written elsewhere during the page's host check makes the save stale; the newer choice stays",
+                  !ok(r) && msg(r) == wf.staleMessage && orEntry(w, haiku)?.hosts == ["anthropic"]
+                  && w.snap.providers["openrouter"]?.model == MenuWorkflow.openRouterDefaultModel && before != w.snap.orStore, msg(r))
+        }
+
+        // 10. Unreadable map: model save works with the warning; with an old pin pending, a model change is refused.
+        do {
+            let w = world()
+            orLane(w)
+            w.snap.orStore[OpenRouterPinMap.storageKey] = "{broken"
+            let wf = await make(w)
+            check("or-picker: an unreadable map shows the 'corrupt' host state", (ai(wf)["openrouter_current_host"] as? [String: Any])?["host_state"] as? String == "corrupt")
+            let r = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": haiku])
+            check("or-picker: a model save with unreadable hosts still works and says routing is automatic",
+                  ok(r) && msg(r).contains("unreadable") && w.snap.orStore[OpenRouterPinMap.storageKey] == "{broken", msg(r))
+        }
+        do {
+            let w = world()
+            orLane(w)
+            w.snap.orStore[OpenRouterPinMap.storageKey] = "{broken"
+            w.snap.orStore[OpenRouterPinMap.legacyKey] = "together"
+            let wf = await make(w)
+            let r = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": haiku])
+            check("or-picker: with an old pin that couldn't be migrated, switching model is refused with guidance (EN)",
+                  !ok(r) && msg(r).contains("old host pin") && w.snap.providers["openrouter"]?.model == MenuWorkflow.openRouterDefaultModel, msg(r))
+        }
+
+        // 11. Every OpenRouter save carries host_listing (list or skip) and the expected basis.
         do {
             let w = world()
             let wf = await make(w)
             _ = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]!])
-            _ = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": "anthropic/claude-haiku-5.5"])
+            _ = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": haiku])
             _ = await act(wf, ["action": "effort", "effort": "medium"])
             _ = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]! + "-alt"])
             let sections = w.applied.compactMap { $0["provider"] as? [String: Any] }.filter { $0["profile"] as? String == "openrouter" }
-            check("or-default: every menu OpenRouter save (key, model, effort) carries host_listing (list or skip)",
-                  sections.count == 4 && sections.allSatisfy { $0["host_listing"] is [String: Any] }, "\(sections.map { $0["host_listing"] != nil })")
+            check("or-picker: every menu OpenRouter save (key, model, effort) carries host_listing and expected_basis",
+                  sections.count == 4 && sections.allSatisfy { $0["host_listing"] is [String: Any] && $0["expected_basis"] is [String: Any] },
+                  "\(sections.map { ($0["host_listing"] != nil, $0["expected_basis"] != nil) })")
         }
-
         do {
-            // Switching to a saved OpenRouter lane (no model change) also hands over a skip.
             let w = world()
-            w.snap.providers["openrouter"] = MenuSnapshot.Provider(configured: true, model: MenuWorkflow.openRouterDefaultModel, effort: "high", keyMasked: "sk-or…cdef")
+            orLane(w)
             w.snap.providers["opencode"] = MenuSnapshot.Provider(configured: true, model: OpenCodeGo.defaultModel, effort: "high", keyMasked: "oc…cdef")
             w.snap.activeProfile = "opencode"
             w.snap.openAIMasked = "sk-…ghij"
-            w.snap.openRouterPin = ["together"]
+            w.syncOR()
+            var store = w.snap.orStore
+            _ = try? OpenRouterProviderPin.applyHostChoice(&store, model: MenuWorkflow.openRouterDefaultModel, choice: .pin(["together"]), listing: nil,
+                                                           expected: OpenRouterPinMap.RoutingBasis.of(store), now: Date())
+            w.snap.orStore = store
             let wf = await make(w)
             let r = await act(wf, ["action": "provider_use", "profile": "openrouter"])
             let sec = lastOpenRouterSection(w)
-            check("or-default: switching to the saved OpenRouter lane hands setup-api an explicit skip, pin kept",
+            check("or-picker: switching to the saved OpenRouter lane hands setup-api an explicit skip, the model's host kept",
                   ok(r) && (sec["host_listing"] as? [String: Any])?["skip"] as? Bool == true && w.snap.openRouterPin == ["together"] && w.orHostAsks.isEmpty, "\(sec)")
         }
-
-        // 7. The decision helpers.
-        let together = OpenRouterProviderPin.Endpoint(providerName: "Together", tag: "together", promptUSDPerM: nil, completionUSDPerM: nil,
-                                                      cacheReadUSDPerM: nil, contextLength: nil, uptimeLast30m: nil, status: 0)
-        check("or-default: decision pins together for the default model when served",
-              OpenRouterProviderPin.newSetupDecision(model: ProviderProfiles.openRouterSetupDefaultModel, listing: .success([together])) == .pin("together"))
-        if case .skip = OpenRouterProviderPin.newSetupDecision(model: "moonshotai/kimi-k3", listing: .success([together])) {
-            check("or-default: decision never pins another model", true)
-        } else { check("or-default: decision never pins another model", false) }
-        if case .skip = OpenRouterProviderPin.newSetupDecision(model: ProviderProfiles.openRouterSetupDefaultModel, listing: .failure(CancellationError())) {
-            check("or-default: a cancelled host check doesn't pin", true)
-        } else { check("or-default: a cancelled host check doesn't pin", false) }
+        // Existing installs on other providers are untouched.
         do {
-            var fetched = 0
-            OpenRouterProviderPin.fetchOverride = { _, _ in fetched += 1; throw OpenRouterProviderPin.FetchError(description: "must not be called") }
-            var probeStore: [String: String] = [OpenRouterProviderPin.storageKey: "together"]
-            _ = OpenRouterProviderPin.reconcile(&probeStore, keyBefore: "", modelBefore: "", newModel: MenuWorkflow.openRouterDefaultModel, listing: nil, newSetupDefault: true)
-            _ = OpenRouterProviderPin.reconcile(&probeStore, keyBefore: "k", modelBefore: "a/b", newModel: "c/d", listing: nil, newSetupDefault: false)
-            OpenRouterProviderPin.fetchOverride = nil
-            check("or-default rule: reconcile performs no I/O (never fetches a host list)", fetched == 0)
-            var store: [String: String] = [OpenRouterProviderPin.storageKey: "together"]
-            let out = OpenRouterProviderPin.reconcile(&store, keyBefore: "k", modelBefore: MenuWorkflow.openRouterDefaultModel,
-                                                      newModel: "x/y", listing: nil, newSetupDefault: false)
-            check("or-default rule: a model change with no host list keeps the pin unverified",
-                  store[OpenRouterProviderPin.storageKey] == "together" && out == .keptUnverified(["together"], reason: "the host list wasn't checked"))
-            let stale = OpenRouterProviderPin.HostListing(model: "other/model", result: .success([]))
-            var store2: [String: String] = [OpenRouterProviderPin.storageKey: "together"]
-            let out2 = OpenRouterProviderPin.reconcile(&store2, keyBefore: "k", modelBefore: MenuWorkflow.openRouterDefaultModel,
-                                                       newModel: "x/y", listing: stale, newSetupDefault: false)
-            check("or-default rule: a host list for another model is never used to release a pin",
-                  store2[OpenRouterProviderPin.storageKey] == "together" && out2 == .keptUnverified(["together"], reason: "the host list wasn't checked"))
+            let w = world()
+            w.snap.chatgpt = .signedIn(active: true, model: "gpt-6.1-sol", effort: "high", generation: "g1")
+            w.snap.activeProfile = "chatgpt"
+            let wf = await make(w)
+            check("or-picker: an install on ChatGPT stays on ChatGPT, nothing written", ai(wf)["lane"] as? String == "chatgpt"
+                  && ai(wf)["active"] as? String == "chatgpt" && w.applied.isEmpty && w.orHostAsks.isEmpty)
         }
 
         // 8. Quick Setup: fresh + OpenRouter key → OpenRouter runs with the default host; OpenCode-only stays usable.
@@ -212,7 +225,7 @@ extension MenuSelftestContext {
                 let main = QuickSetupWorkflow.applyPayload(section: "provider", request: parsed, preferOpenRouter: true)?["provider"] as? [String: Any]
                 check("or-default quick: the main provider is OpenRouter on DeepSeek V4.1 Flash, active, asking for the default host",
                       main?["profile"] as? String == "openrouter" && main?["model"] as? String == ProviderProfiles.openRouterSetupDefaultModel
-                      && main?["activate"] as? Bool == true && main?["default_host_pin"] as? Bool == true)
+                      && main?["activate"] as? Bool == true && main?["default_host_pin"] as? Bool == true && main?["preset_host_pin"] as? Bool == true)
             }
             var both = base; both["openrouter"] = ["value": "or-key"]; both["opencode"] = ["value": "oc-key"]
             if let parsedBoth = try? QuickSetupRequest.parse(both) {
@@ -292,144 +305,99 @@ extension MenuSelftestContext {
 
     // MARK: setup-api, real store
 
-    private func storeURL() -> URL { StoragePaths.configRoot.appendingPathComponent("secrets.json") }
-
-    /// Replace one key in the store file the way another process would,
-    /// atomically, while the caller holds the sidecar lock.
-    private func externalWrite(_ key: String, _ value: String?) {
-        let url = storeURL()
-        var dict = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: String]) ?? [:]
-        if let value { dict[key] = value } else { dict.removeValue(forKey: key) }
-        let tmp = url.deletingLastPathComponent().appendingPathComponent("secrets.json.ext-\(UUID().uuidString)")
-        let data = try! JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
-        FileManager.default.createFile(atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600])
-        _ = rename(tmp.path, url.path)
-    }
-
-    /// Codex's interleaving: hold `secrets.lock`, start `operation`, let it
-    /// block on its write, change the store meanwhile, release.
-    private func whileStoreLocked(_ during: () -> Void, _ operation: @escaping @Sendable () async -> [String: Any]) async -> [String: Any] {
-        let lockPath = StoragePaths.configRoot.appendingPathComponent("secrets.lock").path
-        let fd = open(lockPath, O_CREAT | O_WRONLY, 0o600)
-        _ = flock(fd, LOCK_EX)
-        let task = Task.detached { await operation() }
-        try? await Task.sleep(nanoseconds: 700_000_000)
-        during()
-        _ = flock(fd, LOCK_UN)
-        close(fd)
-        return await task.value
-    }
-
     private func resetOpenRouter() {
         try? KeychainHelper.saveBatch([KeychainHelper.openRouterApiKeyKey: String?.none, KeychainHelper.openRouterModelKey: String?.none,
-                                       OpenRouterProviderPin.storageKey: String?.none])
+                                       OpenRouterProviderPin.storageKey: String?.none, OpenRouterPinMap.storageKey: String?.none,
+                                       OpenRouterPinMap.corruptBackupKey: String?.none, ProviderProfiles.openrouterTextOnlyKey: String?.none])
     }
 
     private func setupAPIPinChecks() async {
         let model = ProviderProfiles.openRouterSetupDefaultModel
+        let haiku = "anthropic/claude-haiku-5.5"
         func hostPin(_ r: [String: Any]) -> [String: Any] { r["openrouter_host_pin"] as? [String: Any] ?? [:] }
+        func code(_ r: [String: Any]) -> String? { (r["error"] as? [String: Any])?["code"] as? String }
         func provider(_ m: String, key: String? = "sk-or-fixture", extra: [String: Any] = [:]) -> [String: Any] {
             var p: [String: Any] = ["profile": "openrouter", "model": m, "activate": false]
             if let key { p["api_key"] = key }
             p.merge(extra) { _, n in n }
             return ["provider": p]
         }
-        let served: [String: Any] = ["model": model, "hosts": ["novita/fp8", "together", "deepinfra/fp8"]]
+        func basis() -> [String: Any] { SetupAPICore.basisJSON(OpenRouterPinMap.RoutingBasis.of(KeychainHelper.loadSnapshot())) }
+        func entry(_ m: String) -> OpenRouterPinMap.Entry? { OpenRouterPinMap.state(KeychainHelper.loadSnapshot()).map?.models[m] }
+        let served: [String: Any] = ["model": model, "endpoints": [["tag": "novita/fp8", "service_tier": NSNull()], ["tag": "together", "service_tier": NSNull()]]]
 
-        // Conditional pin section: sequential semantics.
+        // New setup through setup-api (UT app payload: legacy default_host_pin).
         resetOpenRouter()
-        var res = await SetupAPICore.apply(["openrouter_pin": ["set_if_unset": ["Together"]]])
-        check("or-default api: set_if_unset stores the normalized slug when no pin is stored",
-              res["ok"] as? Bool == true && res["openrouter_pin_written"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["together"])
-        try? OpenRouterProviderPin.setPin(["deepinfra"])
-        res = await SetupAPICore.apply(["openrouter_pin": ["set_if_unset": ["together"]]])
-        check("or-default api: set_if_unset never overwrites a stored pin",
-              res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["deepinfra"] && res["openrouter_pin_written"] as? Bool == false)
-        res = await SetupAPICore.apply(["openrouter_pin": ["release_if": ["together"]]])
-        check("or-default api: release_if leaves a different pin alone", res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["deepinfra"])
-        res = await SetupAPICore.apply(["openrouter_pin": ["release_if": ["deepinfra"]]])
-        check("or-default api: release_if clears the pin it names", res["ok"] as? Bool == true && res["openrouter_pin_written"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs().isEmpty)
-        res = await SetupAPICore.apply(["openrouter_pin": ["set_if_unset": ["two words"]]])
-        check("or-default api: a malformed slug is refused, nothing stored", res["ok"] as? Bool != true && OpenRouterProviderPin.pinnedSlugs().isEmpty)
-        res = await SetupAPICore.apply(["openrouter_pin": ["set_if_unset": ["together"], "release_if": ["together"]]])
-        check("or-default api: both operations at once are refused", res["ok"] as? Bool != true && OpenRouterProviderPin.pinnedSlugs().isEmpty)
-
-        // Codex round 1, P1: the interleavings (another writer stores
-        // `deepinfra` while the conditional write waits for the lock).
-        resetOpenRouter()
-        _ = await SetupAPICore.apply(provider(model))
-        res = await whileStoreLocked({ externalWrite(OpenRouterProviderPin.storageKey, "deepinfra") }) {
-            await SetupAPICore.apply(["openrouter_pin": ["set_if_unset": ["together"]]])
-        }
-        check("or-default race: set_if_unset racing another writer's pin keeps that pin and reports not written",
-              res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["deepinfra"] && res["openrouter_pin_written"] as? Bool == false, "\(res)")
-        try? OpenRouterProviderPin.setPin(["together"])
-        res = await whileStoreLocked({ externalWrite(OpenRouterProviderPin.storageKey, "deepinfra") }) {
-            await SetupAPICore.apply(["openrouter_pin": ["release_if": ["together"]]])
-        }
-        check("or-default race: release_if racing another writer's pin never deletes the newer pin",
-              res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["deepinfra"] && res["openrouter_pin_written"] as? Bool == false, "\(res)")
-        // The same interleaving on a whole new-setup save.
-        resetOpenRouter()
-        res = await whileStoreLocked({ externalWrite(OpenRouterProviderPin.storageKey, "deepinfra") }) {
-            await SetupAPICore.apply(provider(model, extra: ["default_host_pin": true, "host_listing": served]))
-        }
-        check("or-default race: a new-setup save racing another writer's pin keeps that pin (verified against the list)",
-              res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["deepinfra"] && hostPin(res)["result"] as? String == "kept", "\(res)")
-
-        // New setup through setup-api (UT app, Quick Setup).
-        resetOpenRouter()
-        res = await SetupAPICore.apply(provider(model, extra: ["default_host_pin": true, "host_listing": served]))
-        check("or-default api: a new OpenRouter setup asking for the default host is pinned to together with the profile",
+        var res = await SetupAPICore.apply(provider(model, extra: ["default_host_pin": true, "host_listing": served]))
+        check("or-picker api: the UT/Quick Setup payload (default_host_pin) pins Together on a new setup, legacy token kept",
               res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["together"] && hostPin(res)["result"] as? String == "pinned_default"
-              && KeychainHelper.load(key: KeychainHelper.openRouterModelKey) == model)
+              && entry(model)?.by == .preset && KeychainHelper.load(key: KeychainHelper.openRouterModelKey) == model, "\(res)")
         resetOpenRouter()
-        res = await SetupAPICore.apply(provider(model, extra: ["default_host_pin": true, "host_listing": ["model": model, "error": "OpenRouter answered HTTP 503"]]))
-        check("or-default api: an unreadable host list on a new setup writes no pin and warns that OpenRouter chooses the host",
+        res = await SetupAPICore.apply(provider(model, extra: ["preset_host_pin": true, "host_listing": ["model": model, "error": "OpenRouter answered HTTP 503"]]))
+        check("or-picker api: an unreadable host list on a new setup writes no pin and warns",
               res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs().isEmpty && hostPin(res)["result"] as? String == "default_skipped"
-              && ((res["warnings"] as? [String]) ?? []).contains { $0.contains("couldn't be selected") && $0.contains("OpenRouter chooses the host") })
-        // setup-api reads the list itself when the caller gives none (fetch seam, no network).
+              && entry(model) == nil && ((res["warnings"] as? [String]) ?? []).contains { $0.contains("couldn't be selected") })
+        res = await SetupAPICore.apply(provider(model, extra: ["preset_host_pin": true, "default_host_pin": false]))
+        check("or-picker api: preset_host_pin and default_host_pin disagreeing is refused", code(res) == "invalid_value")
+        res = await SetupAPICore.apply(provider(model, extra: ["preset_host_pin": "true"]))
+        check("or-picker api: a non-boolean preset_host_pin is refused", code(res) == "invalid_value")
+
+        // Per-model memory through setup-api, with the host list read by setup-api itself (seam).
         resetOpenRouter()
         var asked: [String] = []
         OpenRouterProviderPin.fetchOverride = { m, _ in
             asked.append(m)
-            let tags = m == model ? ["novita/fp8", "together"] : ["novita/fp8"]
-            return try JSONSerialization.data(withJSONObject: ["data": ["endpoints": tags.map { ["tag": $0, "provider_name": $0] }]])
+            let tags: [[String: Any]] = m == model ? [["tag": "novita/fp8"], ["tag": "together"]]
+                : m == haiku ? [["tag": "google-vertex/global", "service_tier": NSNull()], ["tag": "anthropic"]] : [["tag": "novita/fp8"]]
+            return try JSONSerialization.data(withJSONObject: ["data": ["endpoints": tags.map { $0.merging(["provider_name": $0["tag"]!]) { a, _ in a } }]])
         }
         defer { OpenRouterProviderPin.fetchOverride = nil }
-        res = await SetupAPICore.apply(provider(model, extra: ["default_host_pin": true]))
-        check("or-default api: without a host list setup-api reads it before saving and pins the new setup",
-              res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["together"] && asked == [model])
+        res = await SetupAPICore.apply(provider(model, extra: ["preset_host_pin": true]))
+        res = await SetupAPICore.apply(provider(haiku, key: nil, extra: ["preset_host_pin": true]))
+        check("or-picker api: a model change to a preset with no decision pins its own host (Vertex), the first model keeps Together",
+              res["ok"] as? Bool == true && entry(haiku)?.hosts == ["google-vertex"] && entry(model)?.hosts == ["together"], "\(res)")
+        res = await SetupAPICore.apply(["openrouter_pin": ["model": haiku, "choice": "automatic", "expected_basis": basis()]])
+        check("or-picker api: openrouter_pin automatic records the explicit choice for that model",
+              res["ok"] as? Bool == true && entry(haiku)?.hosts == [] && entry(haiku)?.by == .user && res["openrouter_pin_written"] as? Bool == true)
+        _ = await SetupAPICore.apply(provider(model, key: nil, extra: ["preset_host_pin": true]))
         asked = []
-        res = await SetupAPICore.apply(provider(model, key: nil, extra: ["default_host_pin": true]))
-        check("or-default api: re-saving the same lane (key kept, same model) reads no list and keeps the pin",
-              res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["together"] && asked.isEmpty)
-
-        // Codex round 1, P1: a model change through setup-api re-checks the hard pin.
-        asked = []
-        res = await SetupAPICore.apply(provider("review-model-not-on-together", key: nil))
-        check("or-default api: a model change the pinned host doesn't serve releases the pin with a notice (setup-api reads the list)",
-              res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs().isEmpty && hostPin(res)["result"] as? String == "released"
-              && asked == ["review-model-not-on-together"] && ((res["warnings"] as? [String]) ?? []).contains { $0.contains("released") }
-              && KeychainHelper.load(key: KeychainHelper.openRouterModelKey) == "review-model-not-on-together", "\(res)")
-        try? OpenRouterProviderPin.setPin(["together"])
-        res = await SetupAPICore.apply(provider("z-ai/glm-5.3-flash", key: nil, extra: ["host_listing": ["model": "z-ai/glm-5.3-flash", "hosts": ["z-ai", "together"]]]))
-        check("or-default api: a model change the pinned host serves keeps the pin", res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["together"]
-              && hostPin(res)["result"] as? String == "kept")
-        res = await SetupAPICore.apply(provider("x/unknown", key: nil, extra: ["host_listing": ["model": "x/unknown", "error": "OpenRouter answered HTTP 503"]]))
-        check("or-default api: a model change with an unreadable host list keeps the pin and warns",
-              res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["together"] && hostPin(res)["result"] as? String == "kept_unverified"
-              && ((res["warnings"] as? [String]) ?? []).contains { $0.contains("not verified") })
-        // A model change racing another writer's pin: the decision uses the pin under the lock.
-        res = await whileStoreLocked({ externalWrite(OpenRouterProviderPin.storageKey, "novita") }) {
-            await SetupAPICore.apply(provider("y/model", key: nil, extra: ["host_listing": ["model": "y/model", "hosts": ["novita/fp8"]]]))
-        }
-        check("or-default race: a model change racing another writer's pin decides on the newer pin (served → kept)",
-              res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["novita"] && hostPin(res)["result"] as? String == "kept", "\(res)")
-        res = await SetupAPICore.apply(provider("y/model", key: nil, extra: ["host_listing": "nope"]))
-        check("or-default api: a malformed host_listing is refused before anything is saved", res["ok"] as? Bool != true)
-        res = await SetupAPICore.apply(["provider": ["profile": "opencode", "api_key": "oc", "model": OpenCodeGo.defaultModel, "default_host_pin": true, "activate": false]])
-        check("or-default api: default_host_pin on another profile is refused", res["ok"] as? Bool != true)
+        res = await SetupAPICore.apply(provider(haiku, key: nil, extra: ["preset_host_pin": true]))
+        check("or-picker api: A→B→A keeps Haiku automatic (no list read, no preset override)",
+              res["ok"] as? Bool == true && entry(haiku)?.hosts == [] && OpenRouterProviderPin.pinnedSlugs().isEmpty && asked.isEmpty, "\(asked)")
+        // Stale basis on openrouter_pin: refused, nothing written.
+        let stale = basis()
+        try? OpenRouterProviderPin._testSetPin(["anthropic"])
+        let writes = KeychainHelper._testWriteCount
+        res = await SetupAPICore.apply(["openrouter_pin": ["model": haiku, "choice": "automatic", "expected_basis": stale]])
+        check("or-picker api: an openrouter_pin with an outdated basis is refused as stale; the newer pin stays; no store write",
+              code(res) == "stale" && entry(haiku)?.hosts == ["anthropic"] && KeychainHelper._testWriteCount == writes, "\(res)")
+        res = await SetupAPICore.apply(["openrouter_pin": ["set_if_unset": ["together"]]])
+        check("or-picker api: the old set_if_unset/release_if forms are refused", res["ok"] as? Bool != true)
+        res = await SetupAPICore.apply(["openrouter_pin": ["model": haiku, "choice": "pin", "hosts": ["two words"], "expected_basis": basis()]])
+        check("or-picker api: a malformed slug is refused", res["ok"] as? Bool != true)
+        res = await SetupAPICore.apply(["openrouter_pin": ["model": haiku, "choice": "automatic"]])
+        check("or-picker api: openrouter_pin without expected_basis is refused", code(res) == "missing_field")
+        // Stale provider save (menu basis) refused.
+        res = await SetupAPICore.apply(provider(model, key: nil, extra: ["expected_basis": stale]))
+        check("or-picker api: a provider save with an outdated expected_basis is refused as stale", code(res) == "stale")
+        // Removal clears map, legacy and backup in the same write.
+        try? KeychainHelper.saveBatch([OpenRouterPinMap.legacyKey: "novita", OpenRouterPinMap.corruptBackupKey: "{x"])
+        _ = try? ProviderProfiles.activate(.opencode)
+        res = await SetupAPICore.apply(["provider": ["profile": "openrouter", "remove": true]])
+        let after = KeychainHelper.loadSnapshot()
+        check("or-picker api: removing the OpenRouter profile clears the per-model hosts, the legacy pin and the backup",
+              res["ok"] as? Bool == true && after[OpenRouterPinMap.storageKey] == nil && after[OpenRouterPinMap.legacyKey] == nil
+              && after[OpenRouterPinMap.corruptBackupKey] == nil, "\(res)")
+        // Computed activation joins the save: first setup with activate omitted.
+        resetOpenRouter()
+        try? KeychainHelper.saveBatch([ProviderProfiles.activeProfileKey: String?.none, KeychainHelper.llmProviderKey: String?.none])
+        res = await SetupAPICore.apply(["provider": ["profile": "openrouter", "api_key": "sk-or-fixture", "model": model, "preset_host_pin": true,
+                                                     "host_listing": served]])
+        check("or-picker api: first setup with activate omitted activates OpenRouter in the same write as the model and the pin",
+              res["ok"] as? Bool == true && ProviderProfiles.activeProfile() == .openrouter
+              && KeychainHelper.load(key: KeychainHelper.llmProviderKey) == LLMProvider.openRouter.rawValue && OpenRouterProviderPin.pinnedSlugs() == ["together"], "\(res)")
+        res = await SetupAPICore.apply(["provider": ["profile": "opencode", "api_key": "oc", "model": OpenCodeGo.defaultModel, "preset_host_pin": true, "activate": false]])
+        check("or-picker api: preset_host_pin on another profile is refused", res["ok"] as? Bool != true)
         resetOpenRouter()
     }
 }

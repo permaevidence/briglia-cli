@@ -80,7 +80,11 @@ struct LaneSelftest: AsyncParsableCommand {
         //     there — lane hints resolve to inherit, the schema offers only
         //     inherit, the picks stay stored and return on release. Other
         //     providers' lanes are untouched.
-        try OpenRouterProviderPin.setPin(["deepinfra"])
+        // v0.2.56: pins are per OpenRouter model, so the profile needs a
+        // model (a key alone runs the implicit Gemini default).
+        let laneHadKey = KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey)
+        if laneHadKey == nil { try KeychainHelper.save(key: KeychainHelper.openRouterApiKeyKey, value: "sk-or-lane-fixture") }
+        try OpenRouterProviderPin._testSetPin(["deepinfra"])
         check("pinned: lane hint resolves to inherit, not to the lane and not to unconfigured",
               SubagentModelLanes.resolve(hint: "cheap-text") == .inherit
               && SubagentModelLanes.resolve(hint: "cheap-vision") == .inherit)
@@ -96,7 +100,8 @@ struct LaneSelftest: AsyncParsableCommand {
         check("pinned: other providers are not bypassed",
               !SubagentModelLanes.hostPinBypass(provider: .openAICompatible)
               && !SubagentModelLanes.hostPinBypass(provider: .lmStudio))
-        try OpenRouterProviderPin.setPin(nil)
+        try OpenRouterProviderPin._testSetPin(nil)
+        if laneHadKey == nil { try KeychainHelper.delete(key: KeychainHelper.openRouterApiKeyKey) }
         check("released: the lane is back exactly as configured",
               SubagentModelLanes.resolve(hint: "cheap-text") == .lane(.cheapText, model: "glm-5.3")
               && AvailableTools.agentTool.function.parameters.properties["model"]?.enumValues == ["inherit", "cheap-text"])

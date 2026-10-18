@@ -2967,14 +2967,16 @@ def main():
               f"{ {k: p13.get(k) for k in ('race_ack_started', 'race_hop', 'race_refused')} } edits={race_edits} "
               f"custom_model={after_r.get('custom_endpoint_model')!r}\n" + out13[-2500:])
 
-        # Phase 13b: /orprovider (owner request 2026-09-19). Menu of the hosts
-        # OpenRouter serves the current model from (mocked listing), tap to
-        # pin (stored in openrouter_providers), a typed host the model isn't
-        # served from is refused, /model onto a model the pinned host does
-        # not serve releases the pin, /status shows the pin, off releases.
+        # Phase 13b: /orprovider (owner request 2026-09-19), per model since
+        # v0.2.56 (openrouter_providers_by_model). Menu of the hosts OpenRouter
+        # serves the current model from (mocked listing), tap to pin, a typed
+        # host the model isn't served from is refused, /status shows the
+        # pin, /model to another model leaves A's host with A, back on A the
+        # host is restored (A->B->A), off records an explicit automatic choice.
         with open(secrets_path) as f:
             sec = json.load(f)
         sec.pop("openrouter_providers", None)
+        sec.pop("openrouter_providers_by_model", None)
         sec.update({"openrouter_api_key": "smoke-or-key", "openrouter_model": "or-model-a"})
         with open(secrets_path, "w") as f:
             json.dump(sec, f)
@@ -2985,6 +2987,14 @@ def main():
             tg_state["sent"].clear()
             tg_state["posts"].clear()
         p13b = {}
+
+        def or_hosts(secrets, model):
+            try:
+                m = json.loads(secrets.get("openrouter_providers_by_model") or "{}").get("models", {})
+            except ValueError:
+                return "corrupt"
+            e = m.get(model)
+            return None if e is None else e.get("hosts")
 
         def phase13b(pwait, push, pout, proc):
             push([tg_update(990, "/provider openrouter")])
@@ -2997,26 +3007,29 @@ def main():
             p13b["novita_button"] = novita
             p13b["off_button"] = menu_button(menu, "off") or ""
             push([tg_callback(992, novita or "bm1:o:00000000:novita", msg_id=91)])
-            p13b["pinned"] = wait_for(lambda: sent_contains("OpenRouter host pinned to novita"), 30)
+            p13b["pinned"] = wait_for(lambda: sent_contains("OpenRouter host for or-model-a pinned to novita"), 30)
             p13b["secrets_pinned"] = read_secrets()
             push([tg_update(993, "/orprovider deepseek")])
             p13b["refused"] = wait_for(lambda: sent_contains("does not serve or-model-a from \"deepseek\""), 30)
             p13b["secrets_after_refusal"] = read_secrets()
             push([tg_update(994, "/status")])
-            p13b["status"] = wait_for(lambda: sent_contains("OpenRouter host pin: novita"), 30)
+            p13b["status"] = wait_for(lambda: sent_contains("OpenRouter host for or-model-a: novita"), 30)
             push([tg_update(995, "/model or-model-b")])
-            p13b["released_on_model"] = wait_for(lambda: sent_contains("released: it doesn't serve or-model-b"), 30)
+            p13b["switched_b"] = wait_for(lambda: sent_contains("Model switched to or-model-b"), 30)
             p13b["secrets_after_model"] = read_secrets()
             push([tg_update(996, "/orprovider Z-AI")])
-            p13b["repinned"] = wait_for(lambda: sent_contains("OpenRouter host pinned to z-ai"), 30)
+            p13b["repinned"] = wait_for(lambda: sent_contains("OpenRouter host for or-model-b pinned to z-ai"), 30)
             p13b["secrets_repinned"] = read_secrets()
-            push([tg_update(997, "/orprovider off")])
-            p13b["off"] = wait_for(lambda: sent_contains("OpenRouter host pin released"), 30)
+            push([tg_update(997, "/model or-model-a")])
+            p13b["back_a"] = wait_for(lambda: sent_contains("your earlier choice for this model"), 30)
+            p13b["secrets_back_a"] = read_secrets()
+            push([tg_update(998, "/orprovider off")])
+            p13b["off"] = wait_for(lambda: sent_contains("OpenRouter chooses the host for or-model-a"), 30)
             p13b["secrets_off"] = read_secrets()
             # Leave the config as the later checks expect it.
-            push([tg_update(998, "/provider custom")])
+            push([tg_update(999, "/provider custom")])
             wait_for(lambda: sent_contains("Active provider: Custom endpoint"), 30)
-            push([tg_update(999, "/model mock-model")])
+            push([tg_update(1000, "/model mock-model")])
             wait_for(lambda: sent_contains("Model switched to mock-model"), 30)
 
         tg_mark("phase13b-start")
@@ -3027,20 +3040,23 @@ def main():
               and p13b.get("off_button", "").endswith(":off")
               and "Hosts serving or-model-a" in p13b.get("menu_text", ""),
               f"{ {k: p13b.get(k) for k in ('hop', 'menu', 'novita_button', 'off_button', 'menu_text')} }\n" + out13b[-2000:])
-        check("orprovider: tapping a host pins it in openrouter_providers",
-              p13b.get("pinned") and p13b.get("secrets_pinned", {}).get("openrouter_providers") == "novita",
-              f"pinned={p13b.get('pinned')} stored={p13b.get('secrets_pinned', {}).get('openrouter_providers')!r}\n" + out13b[-2000:])
+        check("orprovider: tapping a host pins it for the current model (per-model map)",
+              p13b.get("pinned") and or_hosts(p13b.get("secrets_pinned", {}), "or-model-a") == ["novita"],
+              f"pinned={p13b.get('pinned')} stored={p13b.get('secrets_pinned', {}).get('openrouter_providers_by_model')!r}\n" + out13b[-2000:])
         check("orprovider: a host that doesn't serve the model is refused and the pin is untouched",
-              p13b.get("refused") and p13b.get("secrets_after_refusal", {}).get("openrouter_providers") == "novita",
-              f"refused={p13b.get('refused')} stored={p13b.get('secrets_after_refusal', {}).get('openrouter_providers')!r}")
+              p13b.get("refused") and or_hosts(p13b.get("secrets_after_refusal", {}), "or-model-a") == ["novita"],
+              f"refused={p13b.get('refused')}")
         check("orprovider: /status shows the pin", bool(p13b.get("status")))
-        check("orprovider: /model onto a model the pinned host doesn't serve releases the pin",
-              p13b.get("released_on_model") and "openrouter_providers" not in p13b.get("secrets_after_model", {"openrouter_providers": "?"}),
-              f"released={p13b.get('released_on_model')} stored={p13b.get('secrets_after_model', {}).get('openrouter_providers')!r}\n" + out13b[-2000:])
-        check("orprovider: typed host is normalized, validated and stored; off releases it",
-              p13b.get("repinned") and p13b.get("secrets_repinned", {}).get("openrouter_providers") == "z-ai"
-              and p13b.get("off") and "openrouter_providers" not in p13b.get("secrets_off", {"openrouter_providers": "?"}),
-              f"repinned={p13b.get('repinned')} stored={p13b.get('secrets_repinned', {}).get('openrouter_providers')!r} off={p13b.get('off')}")
+        check("orprovider: /model to another model leaves A's host with A (no release, no transfer)",
+              p13b.get("switched_b") and or_hosts(p13b.get("secrets_after_model", {}), "or-model-a") == ["novita"]
+              and or_hosts(p13b.get("secrets_after_model", {}), "or-model-b") is None,
+              f"switched={p13b.get('switched_b')} stored={p13b.get('secrets_after_model', {}).get('openrouter_providers_by_model')!r}\n" + out13b[-2000:])
+        check("orprovider: typed host is normalized, validated and stored for B; A->B->A restores A's host; off records automatic",
+              p13b.get("repinned") and or_hosts(p13b.get("secrets_repinned", {}), "or-model-b") == ["z-ai"]
+              and p13b.get("back_a") and or_hosts(p13b.get("secrets_back_a", {}), "or-model-a") == ["novita"]
+              and p13b.get("off") and or_hosts(p13b.get("secrets_off", {}), "or-model-a") == []
+              and "openrouter_providers" not in p13b.get("secrets_off", {"openrouter_providers": "?"}),
+              f"repinned={p13b.get('repinned')} back={p13b.get('back_a')} off={p13b.get('off')} stored={p13b.get('secrets_off', {}).get('openrouter_providers_by_model')!r}")
 
         # H2 (b): after every phase ran, nothing under the roots (projects/
         # and toolchain/ excluded) may carry a group/other bit — this catches

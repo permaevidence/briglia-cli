@@ -210,9 +210,9 @@ extension WebSubagentSelftest {
             let calls = serverD.requests.count
             let f = try? await orchestrator.readUrlContentWithMetadata(url: extractURL, prompt: "what is on it", refresh: true).result.content
             let before = serverD.requests.count
-            try? OpenRouterProviderPin.setPin(["together"])
+            try? OpenRouterProviderPin._testSetPin(["together"])
             _ = try? await orchestrator.executeWebExtract(requests: [.init(url: extractURL, focus: "pinned")], mode: .webSearch)
-            try? OpenRouterProviderPin.setPin(nil)
+            try? OpenRouterProviderPin._testSetPin(nil)
             return (e, calls, f, Array(serverD.requests.dropFirst(before)))
         }
         let stagesD = pageStages(serverD)

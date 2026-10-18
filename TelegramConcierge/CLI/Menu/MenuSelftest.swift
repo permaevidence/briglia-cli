@@ -112,14 +112,37 @@ final class MenuFakeWorld: @unchecked Sendable {
     /// served by these two only. `orHostsFail` makes every listing fail.
     var orHosts: [String: [String]] = [MenuWorkflow.openRouterDefaultModel: ["novita/fp8", "together", "deepinfra/fp8"]]
     var orHostsFail = false
+    /// Delays the listing until released (stale-basis interleavings).
+    var orHostsHold: MenuGate?
+    /// Runs between the listing and the commit (another writer).
+    var duringORListing: (() -> Void)?
     var orHostAsks: [String] = []
     /// Every host_listing the menu handed to setup-api.
     var hostListings: [[String: Any]] = []
 
     init(toolMarker: URL) { self.toolMarker = toolMarker }
 
+    /// Mirror the snapshot's active provider into the OpenRouter rule store
+    /// (the real store holds both in one dictionary).
+    func syncOR() {
+        if let a = snap.activeProfile { snap.orStore[ProviderProfiles.activeProfileKey] = a } else { snap.orStore.removeValue(forKey: ProviderProfiles.activeProfileKey) }
+        let provider: String? = snap.activeProfile == "openrouter" ? LLMProvider.openRouter.rawValue
+            : snap.activeProfile == "local" ? LLMProvider.lmStudio.rawValue
+            : snap.activeProfile == nil ? nil : LLMProvider.openAICompatible.rawValue
+        if let provider { snap.orStore[KeychainHelper.llmProviderKey] = provider } else { snap.orStore.removeValue(forKey: KeychainHelper.llmProviderKey) }
+        let orp = snap.providers["openrouter"] ?? MenuSnapshot.Provider()
+        if orp.configured {
+            snap.orStore[KeychainHelper.openRouterApiKeyKey] = "set"
+            if !orp.model.isEmpty { snap.orStore[KeychainHelper.openRouterModelKey] = orp.model }
+        } else {
+            snap.orStore.removeValue(forKey: KeychainHelper.openRouterApiKeyKey)
+            snap.orStore.removeValue(forKey: KeychainHelper.openRouterModelKey)
+        }
+    }
+
     func openRouterHosts(_ model: String) -> Result<[OpenRouterProviderPin.Endpoint], Error> {
         orHostAsks.append(model)
+        duringORListing?()
         if orHostsFail { return .failure(OpenRouterProviderPin.FetchError(description: "OpenRouter answered HTTP 503")) }
         let tags = orHosts[model] ?? ["novita/fp8", "deepinfra/fp8"]
         return .success(tags.map { OpenRouterProviderPin.Endpoint(providerName: $0, tag: $0, promptUSDPerM: nil, completionUSDPerM: nil,
@@ -135,6 +158,7 @@ final class MenuFakeWorld: @unchecked Sendable {
 
     func apply(_ req: [String: Any]) -> [String: Any] {
         applied.append(req)
+        syncOR()
         if let id = req["identity"] as? [String: Any] { snap.userName = id["user_name"] as? String ?? "" }
         for (section, path) in [("serper", \MenuSnapshot.serperMasked), ("jina", \MenuSnapshot.jinaMasked), ("openai", \MenuSnapshot.openAIMasked)] {
             guard let body = req[section] as? [String: Any] else { continue }
@@ -158,22 +182,33 @@ final class MenuFakeWorld: @unchecked Sendable {
             if let k = pr["api_key"] as? String { p.keyMasked = WizardIO.masked(k) }
             snap.providers[profile] = p
             if profile == "openrouter", pr["remove"] as? Bool != true {
-                // setup-api's model/pin rule, run on a store built from the fake snapshot.
-                let keyBefore = before.configured ? "configured" : "", modelBefore = before.configured ? before.model : ""
-                let newDefault = pr["default_host_pin"] as? Bool == true
+                // setup-api's real per-model rule, run on the fake OpenRouter store.
+                var store = snap.orStore  // pre-change (synced at the top of apply)
                 var listing: OpenRouterProviderPin.HostListing?
                 if let raw = pr["host_listing"] as? [String: Any] {
                     hostListings.append(raw)
                     if !(raw["skip"] as? Bool == true) { listing = OpenRouterProviderPin.HostListing(json: raw) }
-                } else if OpenRouterProviderPin.listingNeeded(keyBefore: keyBefore, modelBefore: modelBefore, pins: snap.openRouterPin,
-                                                             newModel: p.model, newSetupDefault: newDefault) {
-                    listing = OpenRouterProviderPin.HostListing(model: p.model, result: openRouterHosts(p.model))
+                } else if OpenRouterProviderPin.listingNeeded(store: store, newModel: p.model, presetHostPin: (try? SetupAPICore.presetHostPinFlag(pr)) ?? false) {
+                    switch openRouterHosts(p.model) {
+                    case .success(let e): listing = OpenRouterProviderPin.HostListing(model: p.model, result: .success(e))
+                    case .failure(let e): listing = OpenRouterProviderPin.HostListing(model: p.model, result: .failure((e as? OpenRouterProviderPin.FetchError) ?? .init(description: "\(e)")))
+                    }
                 }
-                var store: [String: String] = [:]
-                if !snap.openRouterPin.isEmpty { store[OpenRouterProviderPin.storageKey] = snap.openRouterPin.joined(separator: ",") }
-                hostPin = OpenRouterProviderPin.reconcile(&store, keyBefore: keyBefore, modelBefore: modelBefore, newModel: p.model,
-                                                          listing: listing, newSetupDefault: newDefault)
-                snap.openRouterPin = OpenRouterProviderPin.slugs(from: store[OpenRouterProviderPin.storageKey])
+                let changes: [String: String?] = [KeychainHelper.openRouterModelKey: p.model, KeychainHelper.openRouterApiKeyKey: "set",
+                                                  ProviderProfiles.openrouterTextOnlyKey: p.textOnly ? "true" : "false"]
+                do {
+                    let r = try OpenRouterProviderPin.applyOpenRouterSave(&store, changes: changes, model: p.model, textOnly: p.textOnly, listing: listing,
+                                                                          presetHostPin: try SetupAPICore.presetHostPinFlag(pr), activate: false,
+                                                                          expected: try SetupAPICore.expectedBasis(pr["expected_basis"]), now: clock)
+                    hostPin = r.outcome
+                    snap.orStore = MenuSnapshot.orStore(from: store)
+                } catch let stale as OpenRouterProviderPin.StaleBasis {
+                    snap.providers[profile] = before
+                    return ["ok": false, "error": ["code": "stale", "message": stale.reason]]
+                } catch {
+                    snap.providers[profile] = before
+                    return ["ok": false, "error": ["code": "pending_legacy_pin", "message": error.localizedDescription]]
+                }
             }
             if pr["activate"] as? Bool == true {
                 snap.activeProfile = profile
@@ -183,6 +218,29 @@ final class MenuFakeWorld: @unchecked Sendable {
         }
         if let pr = req["provider"] as? [String: Any], pr["remove"] as? Bool == true, let profile = pr["profile"] as? String {
             snap.providers[profile] = MenuSnapshot.Provider()
+            if profile == "openrouter" { snap.orStore = [:] }
+        }
+        if let pin = req["openrouter_pin"] as? [String: Any] {
+            orPinRequests.append(pin)
+            syncOR()
+            var store = snap.orStore
+            let choice: OpenRouterProviderPin.HostChoice
+            switch pin["choice"] as? String {
+            case "automatic": choice = .automatic
+            case "reset_default": choice = .reset
+            case "forget": choice = .forget
+            default: choice = .pin(pin["hosts"] as? [String] ?? [])
+            }
+            let listing = (pin["host_listing"] as? [String: Any]).flatMap(OpenRouterProviderPin.HostListing.init(json:))
+            do {
+                guard let expected = try SetupAPICore.expectedBasis(pin["expected_basis"]) else { return ["ok": false, "error": ["code": "missing_field", "message": "expected_basis"]] }
+                _ = try OpenRouterProviderPin.applyHostChoice(&store, model: pin["model"] as? String ?? "", choice: choice, listing: listing, expected: expected, now: clock)
+                snap.orStore = MenuSnapshot.orStore(from: store)
+            } catch let stale as OpenRouterProviderPin.StaleBasis {
+                return ["ok": false, "error": ["code": "stale", "message": stale.reason]]
+            } catch {
+                return ["ok": false, "error": ["code": "invalid_value", "message": error.localizedDescription]]
+            }
         }
         if let sv = req["server"] as? [String: Any] {
             serverRequests.append(sv)
@@ -225,6 +283,7 @@ final class MenuFakeWorld: @unchecked Sendable {
     }
 
     var serverRequests: [[String: Any]] = []
+    var orPinRequests: [[String: Any]] = []
     var serverSeq = 0
     func activateServer(_ server: MenuSnapshot.Server) {
         snap.activeServer = server.id
@@ -318,7 +377,7 @@ final class MenuSelftestContext {
         env.isLinux = linux
         env.browserLikely = browserLikely
         env.language = "en"
-        env.snapshot = { world.snap }
+        env.snapshot = { world.syncOR(); return world.snap }
         env.toolchainStatus = { world.toolchain() }
         env.probe = { req in
             if let gate = world.holds[(req["api_key"] as? String) ?? (req["token"] as? String) ?? ""] { await gate.wait() }
@@ -352,7 +411,10 @@ final class MenuSelftestContext {
         }
         env.loginBlock = { world.loginBlock }
         env.telegramScan = { _, _ in world.scanCount += 1; return world.scan }
-        env.openRouterHosts = { model, _ in world.openRouterHosts(model) }
+        env.openRouterHosts = { model, _ in
+            if let hold = world.orHostsHold { await hold.wait() }
+            return world.openRouterHosts(model)
+        }
         env.localModels = { base, key in
             world.localModelAsks.append(base); world.localModelKeys.append(key)
             if let need = world.localNeedsKey, key != need { return .failure(.http(401)) }

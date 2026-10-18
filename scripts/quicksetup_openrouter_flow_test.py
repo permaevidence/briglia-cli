@@ -231,8 +231,14 @@ def scenario(label, listing_ok, restart, with_openai=False):
         check(label + ": OpenRouter is active on DeepSeek V4.1 Flash, no OpenCode key stored" + ("" if with_openai else ", no OpenAI key"),
               store.get("active_provider_profile") == "openrouter" and store.get("openrouter_model") == DEFAULT_MODEL
               and not store.get("opencode_api_key") and bool(store.get("openai_transcription_api_key")) == with_openai, json.dumps({k: store.get(k) for k in ("active_provider_profile", "openrouter_model")}))
-        check(label + ": host pin " + ("together" if listing_ok else "absent"),
-              store.get("openrouter_providers") == ("together" if listing_ok else None), str(store.get("openrouter_providers")))
+        # v0.2.56: hosts are per OpenRouter model (openrouter_providers_by_model).
+        try:
+            entry = json.loads(store.get("openrouter_providers_by_model") or "{}").get("models", {}).get(DEFAULT_MODEL)
+        except ValueError:
+            entry = "corrupt"
+        check(label + ": host pin " + ("together (preset, for the default model)" if listing_ok else "absent"),
+              (entry == {"hosts": ["together"], "by": "preset", "at": (entry or {}).get("at")} if listing_ok else entry is None)
+              and "openrouter_providers" not in store, str(store.get("openrouter_providers_by_model")))
         if restart:
             s.stop()
             s = Session(env)

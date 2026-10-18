@@ -64,28 +64,35 @@ extension SelftestContext {
         _ = await settings.handle("verify", body: req("gpt-5.6-sol", key: nil), generation: g)
         let keptSaved = await settings.handle("save", body: req("gpt-5.6-sol", key: nil), generation: g)
         check("settings: model-only edit retains existing key", keptSaved.0 == 200 && BrowserSettingsWorkflow.key(.openai) == "externally-replaced-key")
-        // OpenRouter model change re-checks the stored host pin: the host
-        // list is read through the seam before the mutation gate.
+        // OpenRouter model change: the destination's host is decided per
+        // model; the host list is read through the seam before the gate. A
+        // legacy pin equal to the old default host migrates as the default
+        // model's preset entry (D9) and doesn't follow the switch.
         try KeychainHelper.saveBatch([KeychainHelper.openRouterApiKeyKey: "sk-or-fixture", KeychainHelper.openRouterModelKey: ProviderProfiles.openRouterSetupDefaultModel,
                                       OpenRouterProviderPin.storageKey: "together"])
         var listedBeforeGate: [String] = []
         settings.env.openRouterListing = { store, model, _ in
             listedBeforeGate.append("\(model)|gates=\(gates)")
-            guard OpenRouterProviderPin.listingNeeded(store: store, newModel: model, newSetupDefault: true) else { return nil }
+            guard OpenRouterProviderPin.listingNeeded(store: store, newModel: model, presetHostPin: true) else { return nil }
             return OpenRouterProviderPin.HostListing(model: model, result: .success([OpenRouterProviderPin.Endpoint(providerName: "Novita", tag: "novita/fp8", promptUSDPerM: nil,
                                                      completionUSDPerM: nil, cacheReadUSDPerM: nil, contextLength: nil, uptimeLast30m: nil, status: 0)]))
         }
         var appliedRequests: [[String: Any]] = []
         let realApply = settings.env.apply
         settings.env.apply = { req, cp in appliedRequests.append(req); return await realApply(req, cp) }
-        let orBody: [String: Any] = ["section": "provider", "values": ["profile": "openrouter", "model": "review-model-not-on-together", "effort": "high", "text_only": false, "activate": false]]
+        let haiku = "anthropic/claude-haiku-5.5"
+        let orBody: [String: Any] = ["section": "provider", "values": ["profile": "openrouter", "model": haiku, "effort": "high", "text_only": false, "activate": false]]
         _ = await settings.handle("verify", body: orBody, generation: g)
         let orSaved = await settings.handle("save", body: orBody, generation: g)
-        check("settings: an OpenRouter model change the pinned host doesn't serve releases the pin and says so",
-              orSaved.0 == 200 && OpenRouterProviderPin.pinnedSlugs().isEmpty && (orSaved.1["message"] as? String ?? "").contains("released")
-              && listedBeforeGate == ["review-model-not-on-together|gates=0"], "\(orSaved) \(listedBeforeGate)")
+        let orMap = OpenRouterPinMap.state(KeychainHelper.loadSnapshot()).map
+        check("settings: an OpenRouter switch to a preset its host doesn't serve pins nothing, says so, and the old pin stays with the old model",
+              orSaved.0 == 200 && OpenRouterProviderPin.pinnedSlugs().isEmpty && (orSaved.1["message"] as? String ?? "").contains("couldn't be selected")
+              && orMap?.models[ProviderProfiles.openRouterSetupDefaultModel]?.hosts == ["together"]
+              && orMap?.models[ProviderProfiles.openRouterSetupDefaultModel]?.by == .preset
+              && listedBeforeGate == ["\(haiku)|gates=0"], "\(orSaved) \(listedBeforeGate) \(String(describing: orMap))")
         check("settings: the OpenRouter save hands setup-api its host list (no fetch inside the gate)",
-              ((appliedRequests.last?["provider"] as? [String: Any])?["host_listing"] as? [String: Any])?["model"] as? String == "review-model-not-on-together")
+              ((appliedRequests.last?["provider"] as? [String: Any])?["host_listing"] as? [String: Any])?["model"] as? String == haiku
+              && (appliedRequests.last?["provider"] as? [String: Any])?["preset_host_pin"] as? Bool == true)
         settings.env.apply = realApply
         let status = settings.status()
         let text = String(data: try JSONSerialization.data(withJSONObject: status), encoding: .utf8)!

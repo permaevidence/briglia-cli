@@ -31,7 +31,7 @@ struct AdaCLI: AsyncParsableCommand {
                       BashGoldenSelftest.self, BashJobsSelftest.self, AmbientStatusSelftest.self, CacheBoundarySelftest.self,
                       TriggerSelftest.self, WatcherTriageSelftest.self, LaneSelftest.self,
                       AffinitySelftest.self, ChatWireSelftest.self, ChatAdapterSelftest.self, ChatRetrySelftest.self, ResponsesSelftest.self, ResponsesCacheSelftest.self, SubscriptionSelftest.self, RefreshSettleSelftest.self,
-                      WebAgentSelftest.self, ProviderSelftest.self, ServiceSelftest.self,
+                      WebAgentSelftest.self, ProviderSelftest.self, OpenRouterPinSelftest.self, ServiceSelftest.self,
                       FsToolsSelftest.self, DeleteUserDataSelftest.self,
                       PruneArchiveSelftest.self, PruneRetentionSelftest.self, SummaryBoundsSelftest.self, ArchiveFullChunkSelftest.self, UserContextMaintenanceSelftest.self, DiffPipeSelftest.self, ProcessPipeSelftest.self, URLSessionTeardownSelftest.self, SubagentCompactionSelftest.self, ChronologySelftest.self, WebSubagentSelftest.self, MidturnAnnotationSelftest.self, MidturnWakeSelftest.self, MidturnRoundDeliverySelftest.self, ImageRejectionSelftest.self, ImageOrientationSelftest.self, TelegramAudioSelftest.self, StatusSpendSelftest.self, CachePrefixSelftest.self, PersonaSnapshotSelftest.self, StopVisibilitySelftest.self, BackgroundArchiveSelftest.self, MCPSurfaceSelftest.self, MCPLifecycleSelftest.self, MCPServerRequestSelftest.self, StorageSelftest.self,
                       PlaywrightSelftest.self,

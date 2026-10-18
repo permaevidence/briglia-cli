@@ -49,6 +49,11 @@ GOOD = {"serper": "srp-good-0123456789abcdef", "jina": "jina_good_0123456789abcd
         "opencode": "oc-good-0123456789abcdef", "openrouter": "sk-or-good-0123456789abcdef"}
 OC_MODELS = [{"id": "glm-5.3-flash", "label": "GLM 5.3 Flash", "recommended": True}, {"id": "kimi-k3", "label": "Kimi K3"},
              {"id": "qwen3.8-max", "label": "Qwen 3.8 Max"}]
+OR_PRESETS = [("default", "deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash", "Together"),
+              ("dsflash1017", "deepseek/deepseek-v4.1-flash-1017", "DeepSeek V4.1 Flash 1017", None),
+              ("haiku55", "anthropic/claude-haiku-5.5", "Claude Haiku 5.5", "Google Vertex"),
+              ("luna", "openai/gpt-6-luna", "GPT-6 Luna", "OpenAI"),
+              ("glm53flash", "z-ai/glm-5.3-flash", "GLM 5.3 Flash", "Together")]
 LANE_TITLES = {"chatgpt": "ChatGPT", "opencode": "OpenCode Go", "openrouter": "OpenRouter", "local": "Server (local or online)"}
 
 
@@ -68,6 +73,8 @@ class Fake:
         self.providers = {k: {"configured": False, "active": False, "model": "", "model_label": "", "effort": "high", "text_only": False,
                               "efforts": ["low", "medium", "high"]} for k in ("opencode", "openrouter")}
         self.servers = []          # named servers: {id, name, endpoint, model, keyed, key, text_only, effort}
+        # OpenRouter picker (v0.2.56): per-model host state, as the real menu words it.
+        self.or_states = {}
         self.active_server = None
         self.local = None
         self.lang = "en"
@@ -138,7 +145,14 @@ class Fake:
               "servers": [dict(x, model_label=x["model"], active=(x["id"] == self.active_server),
                                efforts=(["low", "medium", "high"] if x["keyed"] and x["id"] == self.active_server else [])) for x in self.servers],
               "active_server": self.active_server, "max_servers": 20, "servers_damaged": False,
-              "openai_key": bool(self.keys["openai"]), "needs_openai": ["opencode", "local"], "nothing_active": self.active() is None}
+              "openai_key": bool(self.keys["openai"]), "needs_openai": ["opencode", "local"], "nothing_active": self.active() is None,
+              "openrouter_presets": [dict(key=k, id=i, label=l, auto_host=h, host_state=self.or_states.get(i, ("auto_will_pin" if h else "none", [h] if h else []))[0],
+                                          hosts=self.or_states.get(i, ("", [h] if h else []))[1]) for k, i, l, h in OR_PRESETS]}
+        orm = self.providers["openrouter"]["model"]
+        if self.providers["openrouter"]["configured"] and orm:
+            ph = dict((i, h) for _, i, _, h in OR_PRESETS).get(orm)
+            st = self.or_states.get(orm, ("auto_will_pin" if ph else "none", [ph] if ph else []))
+            ai["openrouter_current_host"] = {"model": orm, "host_state": st[0], "hosts": st[1], "preset_host": ph, "label": orm}
         if self.local:
             ai["local"] = {k: v for k, v in self.local.items() if k != "key"}
         c = dict(self.chatgpt)
@@ -205,6 +219,11 @@ class Fake:
                       "text_only": bool(body.get("text_only"))})
             self.use(k)
             msg = "Briglia now thinks with %s on %s." % (p["model_label"], LANE_TITLES[k])
+        elif a == "provider_host":
+            m, choice = body["model"], body["choice"]
+            ph = dict((i, h) for _, i, _, h in OR_PRESETS).get(m)
+            self.or_states[m] = ("auto_pinned", [ph]) if choice == "default" else ("user_automatic", [])
+            msg = ("%s now runs on %s (Briglia’s host)." % (m, ph)) if choice == "default" else ("OpenRouter now chooses the host for %s." % m)
         elif a in ("provider_use", "lane_select"):
             k = "local" if body.get("lane") == "server" else (body.get("profile") or body.get("lane"))
             if not self.may_run(k):
@@ -681,6 +700,27 @@ def main():
         page.wait_for_selector("#lane-select >> text=OpenRouter")
         check("R4: the selector switches to it", o.active() == "openrouter")
         page.click("[data-edit=openrouter]")
+        page.wait_for_selector("#or-presets")
+        check("picker: the five OpenRouter presets in order, each with its host behaviour; the default is selected",
+              page.locator("#or-presets .choice[data-model]").count() == 5
+              and page.get_attribute("#or-presets .choice[data-model] >> nth=0", "data-model") == "deepseek/deepseek-v4.1-flash"
+              and "sel" in page.get_attribute("#or-presets .choice[data-model] >> nth=0", "class")
+              and "Together, pinned automatically" in page.inner_text("#or-presets .choice[data-model] >> nth=0")
+              and "nothing pinned automatically" in page.inner_text("#or-presets .choice[data-model] >> nth=1")
+              and page.is_visible("#or-other") and not page.is_visible("#f-or-model"))
+        check("picker: the per-model host toggle offers Briglia's host and Let OpenRouter choose",
+              page.is_visible("#or-host-briglia >> text=Briglia’s host (Together)") and page.is_visible("#or-host-auto"))
+        page.click("#or-presets .choice[data-model='anthropic/claude-haiku-5.5']")
+        page.wait_for_selector("text=Briglia now thinks with anthropic/claude-haiku-5.5 on OpenRouter.")
+        pm = [c for c in o.calls if c.get("action") == "provider_model"][-1]
+        check("picker: a preset tap saves that model as a vision model", pm.get("model") == "anthropic/claude-haiku-5.5" and pm.get("text_only") is False)
+        page.click("#or-host-auto")
+        page.wait_for_selector("text=OpenRouter now chooses the host for anthropic/claude-haiku-5.5.")
+        ph = [c for c in o.calls if c.get("action") == "provider_host"][-1]
+        check("picker: the toggle sends the explicit automatic choice for the model in use",
+              ph.get("model") == "anthropic/claude-haiku-5.5" and ph.get("choice") == "automatic" and "your choice" in page.inner_text("#or-host"), str(ph))
+        shot(page, "64a-openrouter-picker")
+        page.click("#or-other")
         page.wait_for_selector("#f-or-model")
         page.fill("#f-or-model", "moonshotai/kimi-k3")
         page.click("button:has-text('Use this model')")

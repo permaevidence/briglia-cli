@@ -150,9 +150,9 @@ extension WebSubagentSelftest {
                                               KeychainHelper.openRouterModelKey: "deepseek/deepseek-v4.1-flash", KeychainHelper.openRouterReasoningEffortKey: "medium",
                                               ProviderProfiles.runtimeProtocolKey: nil]
         let (pinned, unpinned) = await withMainSlots(routerSlots) { () -> (ProviderExecutionContext, ProviderExecutionContext) in
-            try? OpenRouterProviderPin.setPin(["together"])
+            try? OpenRouterProviderPin._testSetPin(["together"])
             let p = await service.researcherExecutionContext(modelOverride: nil, textOnlyOverride: nil, lane: .subagent("pin-web"))
-            try? OpenRouterProviderPin.setPin(nil)
+            try? OpenRouterProviderPin._testSetPin(nil)
             let u = await service.researcherExecutionContext(modelOverride: nil, textOnlyOverride: nil, lane: .subagent("pin-web"))
             return (p, u)
         }

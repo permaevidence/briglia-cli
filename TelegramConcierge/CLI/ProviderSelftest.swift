@@ -221,18 +221,24 @@ struct ProviderSelftest: AsyncParsableCommand {
               Pin.describe(pinEndpoints[1]) == "Novita (novita) · $0.132/$0.44 per M · cache $0.0264 · up 99.7%"
               && Pin.describe(pinEndpoints[2], pinned: true) == "📌 DeepInfra (deepinfra) · $0.2/$0.6 per M · up 92.1% · degraded",
               Pin.describe(pinEndpoints[1]))
-        try Pin.setPin(["Novita", "deepinfra/turbo"])
-        check("orprovider storage: normalized comma list in openrouter_providers, statusLine, isPinned",
-              load(KeychainHelper.openRouterProvidersKey) == "novita,deepinfra/turbo"
+        // v0.2.56: pins live per OpenRouter model in openrouter_providers_by_model.
+        let pinKeyBefore = load(KeychainHelper.openRouterApiKeyKey), pinModelBefore = load(KeychainHelper.openRouterModelKey)
+        try KeychainHelper.saveBatch([KeychainHelper.openRouterApiKeyKey: "sk-or-pin-fixture", KeychainHelper.openRouterModelKey: "vendor/pin-fixture-model"])
+        try Pin._testSetPin(["Novita", "deepinfra/turbo"])
+        check("orprovider storage: normalized list stored for the current model, statusLine, isPinned",
+              OpenRouterPinMap.state(KeychainHelper.loadSnapshot()).map?.models["vendor/pin-fixture-model"]?.hosts == ["novita", "deepinfra/turbo"]
+              && load(KeychainHelper.openRouterProvidersKey) == nil
               && Pin.pinnedSlugs() == ["novita", "deepinfra/turbo"] && Pin.isPinned
-              && Pin.statusLine()?.contains("novita, deepinfra/turbo") == true)
-        try Pin.setPin(nil)
+              && Pin.statusLine()?.contains("novita, deepinfra/turbo") == true, Pin.statusLine() ?? "nil")
+        try Pin._testSetPin(nil)
         check("orprovider storage: cleared → automatic",
-              load(KeychainHelper.openRouterProvidersKey) == nil && !Pin.isPinned && Pin.statusLine() == nil)
-        try Pin.setPin(["bad slug", "z-ai"])
+              !Pin.isPinned && Pin.statusLine() == nil)
+        try Pin._testSetPin(["bad slug", "z-ai"])
         check("orprovider storage: invalid items are dropped, valid ones kept",
               Pin.pinnedSlugs() == ["z-ai"])
-        try Pin.setPin(nil)
+        try Pin._testSetPin(nil)
+        try KeychainHelper.saveBatch([KeychainHelper.openRouterApiKeyKey: pinKeyBefore, KeychainHelper.openRouterModelKey: pinModelBefore,
+                                      OpenRouterPinMap.storageKey: String?.none])
         let seenArgs = SeamBox()
         Pin.fetchOverride = { model, key in
             seenArgs.value = "\(model)|\(key)"
@@ -680,12 +686,12 @@ struct ProviderSelftest: AsyncParsableCommand {
         defer {
             WebSearchBackend.processOverride = nil
             Pin.fetchOverride = nil
-            try? Pin.setPin(nil)
+            try? Pin._testSetPin(nil)
         }
         let mainModel = "deepseek/deepseek-chat"
         try ProviderProfiles.saveProfile(.openrouter, apiKey: "synthetic-review-key", baseURL: nil, model: mainModel, effort: "high", textOnly: false)
         try ProviderProfiles.activate(.openrouter)
-        try Pin.setPin(["deepinfra"])
+        try Pin._testSetPin(["deepinfra"])
         try KeychainHelper.save(key: KeychainHelper.openRouterWebSearchModelKey, value: "openai/gpt-5.6-luna")
         WebSearchBackend.processOverride = .openrouter
         let service = OpenRouterService()
@@ -728,7 +734,7 @@ struct ProviderSelftest: AsyncParsableCommand {
         let laneSet = (await manager.handleTerminalCommand("/subagentmodels text cheap/text-two") ?? []).joined(separator: "\n")
         check("R1 setting a lane while pinned stores it and says it is bypassed",
               SubagentModelLanes.storedModel(.cheapText, provider: .openRouter) == "cheap/text-two" && laneSet.contains("Bypassed"), laneSet)
-        try Pin.setPin(nil)
+        try Pin._testSetPin(nil)
         check("R1 releasing the pin restores the lanes without re-entry",
               SubagentModelLanes.configuredLanes(provider: .openRouter).map(\.model) == ["cheap/vision-model", "cheap/text-two"]
               && SubagentModelLanes.resolve(hint: "cheap-vision") == .lane(.cheapVision, model: "cheap/vision-model"))
@@ -737,11 +743,11 @@ struct ProviderSelftest: AsyncParsableCommand {
               unpinnedMain.providerPreferences == nil)
         // The OpenCode/custom provider's lanes are untouched by an OpenRouter pin.
         try SubagentModelLanes.setModel(.cheapText, model: "kimi-k2.6", provider: .openAICompatible)
-        try Pin.setPin(["deepinfra"])
+        try Pin._testSetPin(["deepinfra"])
         check("R1 a pin never bypasses another provider's lanes",
               !SubagentModelLanes.hostPinBypass(provider: .openAICompatible)
               && SubagentModelLanes.configuredModel(.cheapText, provider: .openAICompatible) == "kimi-k2.6")
-        try Pin.setPin(nil)
+        try Pin._testSetPin(nil)
         try SubagentModelLanes.setModel(.cheapText, model: nil, provider: .openAICompatible)
         try SubagentModelLanes.setModel(.cheapText, model: nil, provider: .openRouter)
         try SubagentModelLanes.setModel(.cheapVision, model: nil, provider: .openRouter)
@@ -784,7 +790,7 @@ struct ProviderSelftest: AsyncParsableCommand {
         // R3 — state re-check after the listing await; cancellation never writes.
         try ProviderProfiles.activate(.openrouter)
         try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
-        try Pin.setPin(nil)
+        try Pin._testSetPin(nil)
         let listed = Data(#"{"data":{"endpoints":[{"provider_name":"DeepInfra","tag":"deepinfra"}]}}"#.utf8)
         Pin.fetchOverride = { _, _ in listed }
         let plainPin = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
@@ -799,26 +805,26 @@ struct ProviderSelftest: AsyncParsableCommand {
         }
         let raceReply = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
         check("R3 model switch during the lookup → nothing pinned, reason given",
-              !Pin.isPinned && raceReply.contains("model changed to other/new-model"), raceReply)
+              !Pin.isPinned && Pin.pinnedSlugs(for: mainModel, store: KeychainHelper.loadSnapshot()).isEmpty && raceReply.contains("Not changed"), raceReply)
         try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
         // A newer explicit OFF arrives while an older pin lookup waits (key already absent).
-        try Pin.setPin(nil)
+        try Pin._testSetPin(nil)
         Pin.fetchOverride = { _, _ in
             _ = await manager.handleTerminalCommand("/orprovider off")
             return listed
         }
         let offReply = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
         check("R3 a newer /orprovider off wins over the older pending pin",
-              !Pin.isPinned && offReply.contains("Not pinned"), offReply)
+              !Pin.isPinned && offReply.contains("Not changed"), offReply)
         // A newer pin arrives from outside this process (direct store edit) during the lookup.
         Pin.fetchOverride = { _, _ in
-            try Pin.setPin(["novita"])
+            try Pin._testSetPin(["novita"])
             return listed
         }
         let externalReply = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
         check("R3 a pin written outside the manager during the lookup is not overwritten",
-              Pin.pinnedSlugs() == ["novita"] && externalReply.contains("Not pinned"), externalReply)
-        try Pin.setPin(nil)
+              Pin.pinnedSlugs() == ["novita"] && externalReply.contains("Not changed"), externalReply)
+        try Pin._testSetPin(nil)
         // Cancellation: task flag, and URLError.cancelled from the session.
         Pin.fetchOverride = { _, _ in throw CancellationError() }
         let cancelledReply = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
@@ -841,27 +847,40 @@ struct ProviderSelftest: AsyncParsableCommand {
         let failedReply = (await manager.handleTerminalCommand("/orprovider deepinfra") ?? []).joined()
         check("R3 an ordinary listing failure still saves the pin with the note",
               Pin.pinnedSlugs() == ["deepinfra"] && failedReply.contains("saved anyway"), failedReply)
-        // /model revalidation: a newer pin stored during the lookup survives.
-        try Pin.setPin(["old-host"])
+        // /model on OpenRouter (v0.2.56): the DESTINATION's remembered host
+        // is re-checked; a newer host stored during the lookup survives.
+        func setEntry(_ m: String, _ hosts: [String]?) throws {
+            try KeychainHelper.transaction { st in
+                try OpenRouterPinMap.migrate(&st)
+                var map = OpenRouterPinMap.state(st).map ?? { var x = OpenRouterPinMap.Map.fresh(iid: "fixture"); x.rev = 0; return x }()
+                map.models[m] = hosts.map { OpenRouterPinMap.Entry(hosts: $0, by: .user, at: "2026-10-18T00:00:00Z") }
+                try OpenRouterPinMap.store(map, into: &st)
+            }
+        }
+        func entryHosts(_ m: String) -> [String]? { OpenRouterPinMap.state(KeychainHelper.loadSnapshot()).map?.models[m]?.hosts }
+        try setEntry("other/model-three", ["old-host"])
         Pin.fetchOverride = { _, _ in
-            try Pin.setPin(["deepinfra"])
+            try setEntry("other/model-three", ["deepinfra-new"])
             return listed
         }
         let revalReply = (await manager.handleTerminalCommand("/model other/model-three") ?? []).joined()
-        check("R3 /model revalidation cannot delete a newer pin",
-              Pin.pinnedSlugs() == ["deepinfra"] && revalReply.contains("left as is"), revalReply)
-        // /model revalidation cancelled: pin kept, said so.
+        check("R3 /model: an older host list never releases a newer destination pin (kept, not verified)",
+              entryHosts("other/model-three") == ["deepinfra-new"] && Pin.pinnedSlugs() == ["deepinfra-new"]
+              && revalReply.contains("not verified"), revalReply)
+        // Cancelled lookup: nothing switched, the destination's pin kept.
         try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
-        try Pin.setPin(["old-host"])
+        try setEntry("other/model-four", ["old-host"])
         Pin.fetchOverride = { _, _ in throw CancellationError() }
         let revalCancelled = (await manager.handleTerminalCommand("/model other/model-four") ?? []).joined()
-        check("R3 a cancelled revalidation keeps the pin and says so",
-              Pin.pinnedSlugs() == ["old-host"] && revalCancelled.contains("cancelled"), revalCancelled)
-        // /model revalidation undisturbed: unserved pin released (unchanged behavior).
+        check("R3 a cancelled /model host check switches nothing and keeps the destination's pin",
+              entryHosts("other/model-four") == ["old-host"] && KeychainHelper.load(key: KeychainHelper.openRouterModelKey) == mainModel
+              && revalCancelled.contains("cancelled"), revalCancelled)
+        // Undisturbed: an unserved remembered user pin is released (durably, blocks presets).
+        try setEntry("other/model-five", ["old-host"])
         Pin.fetchOverride = { _, _ in listed }
         let revalReleased = (await manager.handleTerminalCommand("/model other/model-five") ?? []).joined()
-        check("R3 control: an undisturbed revalidation still releases an unserved pin",
-              !Pin.isPinned && revalReleased.contains("released: it doesn't serve"), revalReleased)
+        check("R3 control: an undisturbed switch releases an unserved remembered pin",
+              !Pin.isPinned && entryHosts("other/model-five") == [] && revalReleased.contains("released"), revalReleased)
         try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
 
         // Codex round 2: cooperative cancellation that lands while the
@@ -869,7 +888,7 @@ struct ProviderSelftest: AsyncParsableCommand {
         // seen by the task flag — not only by a thrown error. Each command
         // runs in its own task; the seam cancels that task from inside the
         // lookup, then returns valid JSON / throws an ordinary failure.
-        try Pin.setPin(nil)
+        try Pin._testSetPin(nil)
         Pin.fetchOverride = { _, _ in
             withUnsafeCurrentTask { $0?.cancel() }
             return listed
@@ -881,7 +900,7 @@ struct ProviderSelftest: AsyncParsableCommand {
         check("R3.2 task cancelled during a lookup that returns normally → nothing pinned, says cancelled",
               cancelledThenListed.0 && !Pin.isPinned && cancelledThenListed.1.contains("cancelled"),
               "taskCancelled=\(cancelledThenListed.0) stored=\(Pin.pinnedSlugs()) reply=\(cancelledThenListed.1)")
-        try Pin.setPin(nil)
+        try Pin._testSetPin(nil)
         Pin.fetchOverride = { _, _ in
             withUnsafeCurrentTask { $0?.cancel() }
             throw Pin.FetchError(description: "synthetic HTTP 503 after cancellation")
@@ -893,7 +912,7 @@ struct ProviderSelftest: AsyncParsableCommand {
         check("R3.2 task cancelled during a lookup that fails ordinarily → nothing pinned, never 'saved anyway'",
               cancelledThenFailed.0 && !Pin.isPinned && cancelledThenFailed.1.contains("cancelled") && !cancelledThenFailed.1.contains("saved anyway"),
               "taskCancelled=\(cancelledThenFailed.0) stored=\(Pin.pinnedSlugs()) reply=\(cancelledThenFailed.1)")
-        try Pin.setPin(["old-host"])
+        try setEntry("other/model-six", ["old-host"])
         Pin.fetchOverride = { _, _ in
             withUnsafeCurrentTask { $0?.cancel() }
             return listed
@@ -902,12 +921,13 @@ struct ProviderSelftest: AsyncParsableCommand {
             let reply = await manager.handleTerminalCommand("/model other/model-six")
             return (Task.isCancelled, (reply ?? []).joined())
         }.value
-        check("R3.2 task cancelled during a revalidation that returns normally → pin preserved, says cancelled",
-              cancelledRevalidation.0 && Pin.pinnedSlugs() == ["old-host"] && cancelledRevalidation.1.contains("cancelled"),
-              "taskCancelled=\(cancelledRevalidation.0) stored=\(Pin.pinnedSlugs()) reply=\(cancelledRevalidation.1)")
+        check("R3.2 task cancelled during a /model host check that returns normally → nothing switched, pin preserved, says cancelled",
+              cancelledRevalidation.0 && entryHosts("other/model-six") == ["old-host"] && KeychainHelper.load(key: KeychainHelper.openRouterModelKey) == mainModel
+              && cancelledRevalidation.1.contains("cancelled"),
+              "taskCancelled=\(cancelledRevalidation.0) stored=\(String(describing: entryHosts("other/model-six"))) reply=\(cancelledRevalidation.1)")
         try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: mainModel)
         // Pre-cancelled control: the flag is set before the command starts.
-        try Pin.setPin(nil)
+        try Pin._testSetPin(nil)
         var seamReached = false
         Pin.fetchOverride = { _, _ in seamReached = true; return listed }
         let preCancelled = await Task { @MainActor in
@@ -949,7 +969,7 @@ struct ProviderSelftest: AsyncParsableCommand {
         }.value
         check("R3.2 control: the same task shape without cancellation pins normally",
               !plainTask.0 && Pin.pinnedSlugs() == ["deepinfra"] && plainTask.1.contains("the Web researcher included"), plainTask.1)
-        try Pin.setPin(nil)
+        try Pin._testSetPin(nil)
         return failures
     }
 
