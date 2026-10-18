@@ -1083,7 +1083,7 @@ actor QuickSetupWorkflow {
             case .openRouterKey:
                 guard let k = key(.openrouter) else { return nil }
                 return ["provider": ["profile": "openrouter", "api_key": k, "model": ProviderProfiles.openRouterSetupDefaultModel, "effort": "high",
-                                     "text_only": false, "activate": true, "default_host_pin": true] as [String: Any]]
+                                     "text_only": false, "activate": true, "default_host_pin": true, "preset_host_pin": true] as [String: Any]]
             case .openCodeKey:
                 guard let k = key(.opencode) else { return nil }
                 let textOnly = OpenCodeGo.choices.first { $0.id == OpenCodeGo.defaultModel }?.textOnly ?? false
@@ -1110,7 +1110,7 @@ actor QuickSetupWorkflow {
             // Saved as an alternative; a new OpenRouter setup still gets the
             // default host under the same rule (setup-api decides).
             return ["provider": ["profile": "openrouter", "api_key": k, "model": ProviderProfiles.openRouterSetupDefaultModel, "text_only": false, "activate": false,
-                                 "default_host_pin": true] as [String: Any]]
+                                 "default_host_pin": true, "preset_host_pin": true] as [String: Any]]
         case "custom":
             if case .custom(let k, let b, let m, let vision)? = request.values[.custom] {
                 return ["provider": ["profile": "custom", "api_key": k, "base_url": b, "model": m, "text_only": !vision, "activate": false] as [String: Any]]

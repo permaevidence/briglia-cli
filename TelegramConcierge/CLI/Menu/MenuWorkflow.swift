@@ -434,7 +434,7 @@ final class MenuWorkflow {
             guard s.responses else { return base }
             let allowed = ResponsesAdapter.allowedEfforts(model: model)
             return (base + ["xhigh"]).filter(allowed.contains)
-        case .openrouter: return base
+        case .openrouter: return base + ["max"]  // D11: OpenRouter takes max
         case .chatgpt:
             let allowed = ResponsesAdapter.allowedEfforts(model: model)
             return (base + ["xhigh"]).filter(allowed.contains)
@@ -453,7 +453,8 @@ final class MenuWorkflow {
         switch lane {
         case .chatgpt: return modelLabel(id)
         case .opencode: return OpenCodeGo.catalogEntry(for: id)?.label ?? id
-        case .openrouter, .local: return id
+        case .openrouter: return OpenRouterPresets.preset(forModel: id)?.label ?? id
+        case .local: return id
         }
     }
 
@@ -638,6 +639,14 @@ final class MenuWorkflow {
             "openrouter_default_label": Self.openRouterDefaultLabel,
             "openrouter_default_host": OpenRouterProviderPin.setupDefaultHostName,
             "openrouter_pin": snapshot.openRouterPin,
+            // The picker (owner request 2026-10-18): presets in order, each
+            // with the host state the page words in EN/IT.
+            "openrouter_presets": OpenRouterPresets.all.map { preset -> [String: Any] in
+                let status = OpenRouterPresets.hostStatus(model: preset.id, store: snapshot.orStore)
+                return ["key": preset.key, "id": preset.id, "label": preset.label, "auto_host": preset.autoHostName ?? NSNull(),
+                        "host_state": status.state.rawValue, "hosts": status.hosts.map(OpenRouterPresets.hostName)]
+            },
+            "openrouter_current_host": currentORHost(),
             "recommended_lane": MenuLane.openrouter.rawValue,
         ]
         if activeLane == nil, let other = snapshot.otherProvider { out["other"] = other }
@@ -741,7 +750,7 @@ final class MenuWorkflow {
         // choice (another lane, a sign-out, a new key) voids an older one
         // still checking, so a late check can't switch the provider back.
         case "chatgpt_browser", "chatgpt_code", "chatgpt_cancel", "chatgpt_logout", "chatgpt_model", "chatgpt_use",
-             "lane", "provider_key", "provider_model", "provider_use", "effort",
+             "lane", "provider_key", "provider_model", "provider_host", "provider_use", "effort",
              "server_save", "server_use", "lane_remove", "lane_select": return "ai"
         case "telegram_token", "telegram_wait", "telegram_manual", "telegram_reset", "telegram_confirm": return "telegram"
         default: return nil
@@ -853,6 +862,9 @@ final class MenuWorkflow {
 
         case "provider_model":
             return try await changeProviderModel(body, basis: basis, checkpoint: checkpoint)
+
+        case "provider_host":
+            return try await setProviderHost(body, basis: basis, checkpoint: checkpoint)
 
         case "provider_use":
             return try await useLane(str(body, "profile"), basis: basis, checkpoint: checkpoint)
@@ -1302,8 +1314,11 @@ final class MenuWorkflow {
             providers["server:" + server.id] = "\(server.name)|\(server.endpoint)|\(server.model)|\(server.effort)|\(server.textOnly)|\(server.keyMasked ?? "")|\(server.responses)"
         }
         if s.serversDamaged { providers["servers"] = "damaged" }
-        // A pin set or released elsewhere (/orprovider) refuses a stale save.
-        if !s.openRouterPin.isEmpty { providers["openrouter_pin"] = s.openRouterPin.joined(separator: ",") }
+        // Any per-model host write elsewhere (/orprovider, another page, the
+        // upgrade pass) bumps the map revision, so a stale save is refused;
+        // absent / corrupt states and the legacy pin are part of it too.
+        let orBasis = s.openRouterBasis
+        providers["openrouter_map"] = orBasis.mapTag + "|" + (orBasis.legacyRaw ?? "")
         let active = s.activeProfile.map { raw in s.activeServer.map { raw + "#" + $0 } ?? raw }
         return MenuAIState(active: active, chatgpt: chatgpt, providers: providers, openAIKey: s.openAIMasked != nil)
     }
@@ -1374,7 +1389,7 @@ final class MenuWorkflow {
         // the settings barrier, and handed over.
         var extra: [String: Any] = [:]
         if lane == .openrouter {
-            extra = try await openRouterPinFields(model: model, apiKey: key, newSetupDefault: true, checkpoint: checkpoint)
+            extra = try await openRouterPinFields(model: model, apiKey: key, checkpoint: checkpoint)
         }
         return try await saveProvider(lane, apiKey: key, model: model, baseURL: nil,
                                       textOnly: model == stored.model && stored.configured ? stored.textOnly : nil,
@@ -1387,14 +1402,14 @@ final class MenuWorkflow {
     /// page's snapshot says none is needed — setup-api then never fetches
     /// inside the barrier; a state changed meanwhile is decided
     /// conservatively under the lock).
-    private func openRouterPinFields(model: String, apiKey: String, newSetupDefault: Bool,
+    private func openRouterPinFields(model: String, apiKey: String,
                                      checkpoint: @escaping @Sendable () throws -> Void) async throws -> [String: Any] {
-        let stored = stored(.openrouter)
-        let needed = OpenRouterProviderPin.listingNeeded(keyBefore: stored.configured ? "configured" : "", modelBefore: stored.configured ? stored.model : "",
-                                                         pins: snapshot.openRouterPin, newModel: model, newSetupDefault: newSetupDefault)
-        var fields: [String: Any] = ["default_host_pin": newSetupDefault]
-        if needed {
-            let listing = OpenRouterProviderPin.HostListing(model: model, result: await env.openRouterHosts(model, apiKey))
+        var fields: [String: Any] = ["preset_host_pin": true, "expected_basis": SetupAPICore.basisJSON(snapshot.openRouterBasis)]
+        if OpenRouterProviderPin.listingNeeded(store: snapshot.orStore, newModel: model, presetHostPin: true) {
+            // Cancellation propagates: the action aborts before any write.
+            let listing = try await OpenRouterProviderPin.hostListing(model: model, apiKey: apiKey, fetch: { m, k in
+                try await self.env.openRouterHosts(m, k).get()
+            })
             try checkpoint()
             fields["host_listing"] = listing.json
         } else {
@@ -1403,28 +1418,84 @@ final class MenuWorkflow {
         return fields
     }
 
+    /// The current OpenRouter model's host state for the page.
+    func currentORHost() -> [String: Any] {
+        guard let model = OpenRouterPinMap.effectiveORModel(snapshot.orStore) else { return [:] }
+        let status = OpenRouterPresets.hostStatus(model: model, store: snapshot.orStore)
+        let preset = OpenRouterPresets.preset(forModel: model)
+        return ["model": model, "host_state": status.state.rawValue, "hosts": status.hosts.map(OpenRouterPresets.hostName),
+                "preset_host": preset?.autoHostName ?? NSNull(), "label": preset?.label ?? model]
+    }
+
     /// The sentence added to a save confirmation for what happened to the
     /// OpenRouter host pin (setup-api `openrouter_host_pin`), "" for nothing.
     func hostPinNote(_ reply: [String: Any]?) -> String {
         guard let reply, let result = reply["result"] as? String else { return "" }
-        let host = OpenRouterProviderPin.setupDefaultHostName
+        let host = (reply["host_name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? OpenRouterProviderPin.setupDefaultHostName
         let pins = (reply["pins"] as? [String] ?? []).joined(separator: ", ")
         let reason = reply["reason"] as? String ?? ""
         switch result {
-        case "pinned_default":
-            return L(" It runs on \(host) (host pinned; change it with /orprovider on Telegram).",
-                     " Gira su \(host) (host fissato; lo cambi con /orprovider su Telegram).")
-        case "default_skipped":
-            return L(" \(host) couldn\u{2019}t be selected (\(reason)), so no host is pinned and OpenRouter chooses the host. You can pin one later with /orprovider on Telegram.",
-                     " Non è stato possibile scegliere \(host) (\(reason)), quindi nessun host è fissato e l\u{2019}host lo sceglie OpenRouter. Puoi fissarne uno più tardi con /orprovider su Telegram.")
+        case "pinned_default", "pinned_preset":
+            return L(" It runs on \(host) (host pinned automatically; change it below or with /orprovider on Telegram).",
+                     " Gira su \(host) (host fissato in automatico; lo cambi qui sotto o con /orprovider su Telegram).")
+        case "default_skipped", "preset_skipped":
+            return L(" \(host) couldn\u{2019}t be selected (\(reason)), so no host is pinned and OpenRouter chooses the host. \u{201C}Briglia\u{2019}s host\u{201D} below retries.",
+                     " Non è stato possibile scegliere \(host) (\(reason)), quindi nessun host è fissato e l\u{2019}host lo sceglie OpenRouter. \u{201C}Host di Briglia\u{201D} qui sotto riprova.")
         case "released":
             return L(" The host pin (\(pins)) was released: that host doesn\u{2019}t serve this model, so OpenRouter now chooses the host.",
                      " L\u{2019}host fissato (\(pins)) è stato tolto: quell\u{2019}host non offre questo modello, quindi ora l\u{2019}host lo sceglie OpenRouter.")
         case "kept_unverified":
-            return L(" Couldn\u{2019}t check that your pinned host (\(pins)) serves this model (\(reason)); if replies fail, send /orprovider off on Telegram.",
-                     " Non ho potuto verificare che l\u{2019}host fissato (\(pins)) offra questo modello (\(reason)); se le risposte falliscono, invia /orprovider off su Telegram.")
+            return L(" Couldn\u{2019}t check that your pinned host (\(pins)) serves this model (\(reason)); if replies fail, choose \u{201C}Let OpenRouter choose\u{201D} below.",
+                     " Non ho potuto verificare che l\u{2019}host fissato (\(pins)) offra questo modello (\(reason)); se le risposte falliscono, scegli \u{201C}Lascia scegliere a OpenRouter\u{201D} qui sotto.")
+        case "hosts_unreadable":
+            return L(" Saved OpenRouter hosts are unreadable, so routing is automatic until you choose a host again.",
+                     " Gli host salvati di OpenRouter non sono leggibili, quindi l\u{2019}instradamento è automatico finché non scegli di nuovo un host.")
         default:
             return ""
+        }
+    }
+
+    /// The per-model host toggle (D5): "Briglia's host" (= /orprovider
+    /// default) or "Let OpenRouter choose" (= /orprovider off) for the
+    /// OpenRouter model in use, one guarded write with the page's basis.
+    private func setProviderHost(_ body: [String: Any], basis: MenuAIState, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
+        let model = str(body, "model"), choice = str(body, "choice")
+        guard let current = OpenRouterPinMap.effectiveORModel(snapshot.orStore), current == model else {
+            return (false, staleMessage)
+        }
+        guard choice == "default" || choice == "automatic" else { return (false, L("Unknown choice.", "Scelta sconosciuta.")) }
+        let preset = OpenRouterPresets.preset(forModel: model)
+        if choice == "default", preset?.autoHost == nil { return (false, L("Unknown choice.", "Scelta sconosciuta.")) }
+        var section: [String: Any] = ["model": model, "choice": choice == "default" ? "reset_default" : "automatic",
+                                      "expected_basis": SetupAPICore.basisJSON(snapshot.openRouterBasis)]
+        if choice == "default" {
+            guard let key = env.providerKey(.openrouter) else { return (false, L("Paste your OpenRouter key first.", "Incolla prima la chiave OpenRouter.")) }
+            let listing = try await OpenRouterProviderPin.hostListing(model: model, apiKey: key, fetch: { m, k in
+                try await self.env.openRouterHosts(m, k).get()
+            })
+            try checkpoint()
+            section["host_listing"] = listing.json
+        }
+        let apply = env.apply
+        guard let result = try await guardedAIWrite(basis, { await apply(["openrouter_pin": section], checkpoint) }) else { return (false, staleMessage) }
+        try checkpoint()
+        await reload()
+        guard result["ok"] as? Bool == true else {
+            if (result["error"] as? [String: Any])?["code"] as? String == "stale" { return (false, staleMessage) }
+            return (false, applyError(result))
+        }
+        // Render the COMMITTED outcome, never the request.
+        let status = OpenRouterPresets.hostStatus(model: model, store: snapshot.orStore)
+        let names = status.hosts.map(OpenRouterPresets.hostName).joined(separator: ", ")
+        switch status.state {
+        case .autoPinned:
+            return (true, L("\(preset?.label ?? model) now runs on \(names) (Briglia\u{2019}s host).", "\(preset?.label ?? model) ora gira su \(names) (host di Briglia)."))
+        case .userAutomatic:
+            return (true, L("OpenRouter now chooses the host for \(preset?.label ?? model).", "Ora l\u{2019}host di \(preset?.label ?? model) lo sceglie OpenRouter."))
+        default:
+            let host = preset?.autoHostName ?? ""
+            return (true, L("\(host) couldn\u{2019}t be pinned right now (OpenRouter didn\u{2019}t confirm it), so OpenRouter chooses the host. Try again later.",
+                            "Non è stato possibile fissare \(host) adesso (OpenRouter non l\u{2019}ha confermato), quindi l\u{2019}host lo sceglie OpenRouter. Riprova più tardi."))
         }
     }
 
@@ -1464,14 +1535,16 @@ final class MenuWorkflow {
         }
         // OpenCode takes the vision state from its catalog; the others keep
         // theirs unless the page says otherwise (a new id defaults to vision).
-        let vision: Bool? = lane == .opencode ? nil : (textOnly ?? (model == stored.model ? stored.textOnly : false))
+        let vision: Bool? = lane == .opencode ? nil
+            : (lane == .openrouter && OpenRouterPresets.isCatalogModel(model)) ? false  // presets all accept images
+            : (textOnly ?? (model == stored.model ? stored.textOnly : false))
         // A stored host pin is model-scoped and HARD (provider.only, no
         // fallbacks): setup-api re-checks it against the new model's host
         // list (read here) and keeps, releases or keeps-with-warning it in
         // the same write as the model.
         var extra: [String: Any] = [:]
         if let orKey {
-            extra = try await openRouterPinFields(model: model, apiKey: orKey, newSetupDefault: false, checkpoint: checkpoint)
+            extra = try await openRouterPinFields(model: model, apiKey: orKey, checkpoint: checkpoint)
         }
         return try await saveProvider(lane, profile: lane.profile, apiKey: nil, model: model, baseURL: nil, textOnly: vision,
                                       effort: stored.effort.isEmpty ? nil : stored.effort,
@@ -1499,6 +1572,7 @@ final class MenuWorkflow {
         // skip (same model: nothing to check), so setup-api never fetches
         // inside the settings barrier (Codex round 2, answer 1).
         if profile == .openrouter, section["host_listing"] == nil { section["host_listing"] = ["skip": true] }
+        if profile == .openrouter, section["expected_basis"] == nil { section["expected_basis"] = SetupAPICore.basisJSON(snapshot.openRouterBasis) }
         var payload: [String: Any] = ["provider": section]
         if snapshot.openAIMasked != nil { payload["web_search_backend"] = WebSearchBackend.openai.rawValue }
         try checkpoint()
@@ -1769,7 +1843,10 @@ final class MenuWorkflow {
             var section: [String: Any] = ["profile": profile(for: active).rawValue, "model": p.model, "effort": effort,
                                           "text_only": p.textOnly, "activate": true]
             // Same model: no host list to check; never fetched inside the barrier.
-            if active == .openrouter { section["host_listing"] = ["skip": true] }
+            if active == .openrouter {
+                section["host_listing"] = ["skip": true]
+                section["expected_basis"] = SetupAPICore.basisJSON(snapshot.openRouterBasis)
+            }
             request = ["provider": section]
         }
         // Rebuilt from the snapshot above, so only written while the saved

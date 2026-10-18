@@ -54,8 +54,26 @@ struct MenuSnapshot: Equatable {
     /// them), in saved order; `activeServer` is the one Briglia runs on.
     var servers: [Server] = []
     var activeServer: String?
-    /// The stored OpenRouter host pin (`/orprovider`), empty = automatic.
-    var openRouterPin: [String] = []
+    /// The non-secret store keys the per-model OpenRouter host rules read
+    /// (model, key presence as "set", the per-model map, the legacy pin,
+    /// the active profile/provider). Every host display and the routing
+    /// basis are derived from it with the same pure functions setup-api uses.
+    var orStore: [String: String] = [:]
+    /// The current OpenRouter model's stored pin, empty = automatic.
+    var openRouterPin: [String] { OpenRouterProviderPin.pinnedSlugs(store: orStore) }
+    var openRouterBasis: OpenRouterPinMap.RoutingBasis { OpenRouterPinMap.RoutingBasis.of(orStore) }
+
+    static let orStoreKeys = [KeychainHelper.openRouterModelKey, OpenRouterPinMap.storageKey, OpenRouterPinMap.legacyKey,
+                              ProviderProfiles.activeProfileKey, KeychainHelper.llmProviderKey]
+
+    static func orStore(from store: [String: String]) -> [String: String] {
+        var out: [String: String] = [:]
+        for key in orStoreKeys { if let v = store[key] { out[key] = v } }
+        if !(store[KeychainHelper.openRouterApiKeyKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            out[KeychainHelper.openRouterApiKeyKey] = "set"
+        }
+        return out
+    }
     /// The saved server list doesn't decode (every server action refuses).
     var serversDamaged = false
     var telegramConfigured = false
@@ -312,7 +330,7 @@ struct MenuEnvironment {
         } else {
             s.serversDamaged = true
         }
-        s.openRouterPin = OpenRouterProviderPin.pinnedSlugs()
+        s.orStore = MenuSnapshot.orStore(from: store)
         s.telegramConfigured = TelegramConfig.isConfigured
         s.telegramChatId = KeychainHelper.load(key: KeychainHelper.telegramChatIdKey) ?? ""
         func masked(_ key: String) -> String? {

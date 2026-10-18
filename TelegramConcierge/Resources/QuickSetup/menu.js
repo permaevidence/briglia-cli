@@ -747,7 +747,7 @@
     return h('div', { class: 'links switch' }, [h('button', { class: 'btn ghost small', type: 'button', id: 'switch-provider', onclick: function () { cancelTimers(); lanePicked = false; edit = null; act('lane', { lane: '' }).then(function () { view = { kind: 'welcome' }; render(); }); } },
       [T('Choose a different AI', 'Scegli un’altra AI')])]);
   }
-  function EFFORT_LABELS() { return { low: T('Light', 'Leggero'), medium: T('Balanced', 'Bilanciato'), high: T('Deep', 'Approfondito'), xhigh: T('Deepest', 'Massimo') }; }
+  function EFFORT_LABELS() { return { low: T('Light', 'Leggero'), medium: T('Balanced', 'Bilanciato'), high: T('Deep', 'Approfondito'), xhigh: T('Deepest', 'Massimo'), max: T('Maximum', 'Al massimo') }; }
   function effortRow(id) {
     var p = typeof id === 'string' ? (S.ai.providers[id] || {}) : (id || {});
     var list = (p.efforts || []).slice();
@@ -840,6 +840,40 @@
     return out;
   }
 
+  // Host wording shared by the picker and the per-model toggle (EN/IT).
+  function orHostText(x) {
+    var hosts = (x.hosts || []).join(', ');
+    switch (x.host_state) {
+      case 'auto_will_pin': return T('Host: ' + hosts + ', pinned automatically', 'Host: ' + hosts + ', fissato in automatico');
+      case 'auto_pinned': return T('Host: ' + hosts + ' (pinned automatically)', 'Host: ' + hosts + ' (fissato in automatico)');
+      case 'auto_unavailable': return T('Host: chosen by OpenRouter (Briglia’s host ' + hosts + ' not pinned yet)', 'Host: lo sceglie OpenRouter (l’host di Briglia ' + hosts + ' non è ancora fissato)');
+      case 'upgrade_pending': return T('Host: ' + hosts + ' will be applied when OpenRouter confirms it', 'Host: ' + hosts + ' verrà applicato quando OpenRouter lo conferma');
+      case 'user_host': return T('Host: ' + hosts + ' (your choice)', 'Host: ' + hosts + ' (scelto da te)');
+      case 'user_automatic': return T('Host: chosen by OpenRouter (your choice)', 'Host: lo sceglie OpenRouter (scelto da te)');
+      case 'released': return T('Host: chosen by OpenRouter (' + hosts + ' stopped serving this model)', 'Host: lo sceglie OpenRouter (' + hosts + ' non offre più questo modello)');
+      case 'corrupt': case 'unsupported': return T('Saved OpenRouter hosts are unreadable, so routing is automatic until you choose a host again.', 'Gli host salvati di OpenRouter non sono leggibili, quindi l’instradamento è automatico finché non scegli di nuovo un host.');
+      case 'pending_legacy': return T('Old host pin ' + hosts + ' still in use: choose a host below before switching model.', 'Vecchio host fissato ' + hosts + ' ancora in uso: scegli un host qui sotto prima di cambiare modello.');
+      default: return T('Host: chosen by OpenRouter (nothing pinned automatically)', 'Host: lo sceglie OpenRouter (nessun host fissato in automatico)');
+    }
+  }
+  // D5: per-model host toggle for the model in use.
+  function orHostToggle() {
+    var c = S.ai.openrouter_current_host || {};
+    if (!c.model) return null;
+    var st = c.host_state, preset = c.preset_host;
+    var briglia = st === 'auto_pinned' || st === 'auto_will_pin' || st === 'upgrade_pending';
+    var auto = st === 'user_automatic' || st === 'released' || (!preset && st === 'none');
+    var opts = [];
+    if (preset) opts.push(h('button', { class: 'btn ' + (briglia ? 'primary' : 'secondary') + ' small', type: 'button', id: 'or-host-briglia', disabled: inflight > 0,
+      onclick: function () { act('provider_host', { model: c.model, choice: 'default' }, 'ai'); } }, [T('Briglia’s host (' + preset + ')', 'Host di Briglia (' + preset + ')')]));
+    if (preset || st === 'user_host' || st === 'pending_legacy' || st === 'corrupt' || st === 'unsupported') opts.push(h('button', { class: 'btn ' + (auto ? 'primary' : 'secondary') + ' small', type: 'button', id: 'or-host-auto', disabled: inflight > 0,
+      onclick: function () { act('provider_host', { model: c.model, choice: 'automatic' }, 'ai'); } }, [T('Let OpenRouter choose', 'Lascia scegliere a OpenRouter')]));
+    var lines = [h('p', { class: 'small', id: 'or-host' }, [orHostText(c)])];
+    if (st === 'user_host') lines.push(h('p', { class: 'small', text: T('Your host: ' + (c.hosts || []).join(', ') + ' (set with /orprovider)', 'Il tuo host: ' + (c.hosts || []).join(', ') + ' (impostato con /orprovider)') }));
+    if (opts.length) lines.push(h('div', { class: 'actions' }, opts));
+    return h('div', { id: 'or-host-toggle' }, lines);
+  }
+
   function openrouterView(st) {
     var p = S.ai.providers.openrouter || {};
     var out = stepHeader('ai', null, p.configured ? 'OpenRouter' : T('Connect OpenRouter', 'Collega OpenRouter'), T('OpenRouter gives Briglia access to hundreds of models. You pay only for what you use.', 'OpenRouter dà a Briglia accesso a centinaia di modelli. Paghi solo quello che usi.'));
@@ -849,16 +883,27 @@
       out.push(savedBox(p.active ? T('Connected', 'Collegato') : T('Saved, not in use', 'Salvato, non in uso'), p.key ? T('Key ', 'Chiave ') + p.key : ''));
       out.push(useButton('openrouter', 'OpenRouter'));
       var ms = local['or-model'] = local['or-model'] || {};
-      if (ms.value === undefined || ms.value === null) ms.value = p.model || '';
-      out.push(field('or-model', { label: T('Model', 'Modello'), placeholder: S.ai.openrouter_default, auto: false, button: T('Use this model', 'Usa questo modello'), onSubmit: function (v, current) {
-        return act('provider_model', { profile: 'openrouter', model: v, text_only: !!ms.textOnly }, 'ai', current);
-      } }));
-      out.push(h('p', { class: 'small' }, [T('In use: ', 'In uso: '), h('b', { text: p.model }), ' · ', link('https://openrouter.ai/models', T('browse models', 'sfoglia i modelli'))]));
-      var pins = S.ai.openrouter_pin || [];
-      out.push(h('p', { class: 'small', id: 'or-host' }, pins.length
-        ? [T('Host: ', 'Host: '), h('b', { text: pins.join(', ') }), T(' (pinned). Change it with /orprovider on Telegram.', ' (fissato). Lo cambi con /orprovider su Telegram.')]
-        : [T('Host: chosen by OpenRouter. Pin one with /orprovider on Telegram.', 'Host: lo sceglie OpenRouter. Puoi fissarne uno con /orprovider su Telegram.')]));
-      out.push(visionToggle('or-model'));
+      var presets = S.ai.openrouter_presets || [];
+      var isPreset = presets.some(function (pr) { return pr.id === p.model; });
+      if (ms.other === undefined) ms.other = !isPreset;
+      if (ms.value === undefined || ms.value === null) ms.value = isPreset ? '' : (p.model || '');
+      out.push(h('p', { class: 'small', id: 'or-picker-help', text: T('Model — each one remembers its own host. Change the host below, or with /orprovider on Telegram.', 'Modello: ognuno ricorda il proprio host. Lo cambi qui sotto, oppure con /orprovider su Telegram.') }));
+      out.push(h('div', { class: 'choices', id: 'or-presets' }, presets.map(function (pr, i) {
+        return h('button', { class: 'choice' + (pr.id === p.model ? ' sel' : ''), type: 'button', disabled: inflight > 0, 'data-model': pr.id,
+          onclick: function () { ms.other = false; if (pr.id !== p.model) act('provider_model', { profile: 'openrouter', model: pr.id, text_only: false }, 'ai'); else render(); } },
+          [h('div', { class: 'n', text: pr.label + (i === 0 ? T(' · default', ' · predefinito') : '') }), h('div', { class: 's', text: orHostText(pr) })]);
+      }).concat([h('button', { class: 'choice' + (!isPreset || ms.other ? ' sel' : ''), type: 'button', disabled: inflight > 0, id: 'or-other',
+        onclick: function () { ms.other = true; render(); } },
+        [h('div', { class: 'n', text: T('Other model…', 'Altro modello…') }), h('div', { class: 's', text: T('Any OpenRouter model id. No host is pinned automatically.', 'Qualsiasi ID di modello OpenRouter. Nessun host viene fissato in automatico.') })])])));
+      if (ms.other || !isPreset) {
+        out.push(field('or-model', { label: T('Model id', 'ID del modello'), placeholder: 'moonshotai/kimi-k3', auto: false, button: T('Use this model', 'Usa questo modello'), onSubmit: function (v, current) {
+          return act('provider_model', { profile: 'openrouter', model: v, text_only: !!ms.textOnly }, 'ai', current);
+        } }));
+        out.push(h('p', { class: 'small' }, [link('https://openrouter.ai/models', T('Browse models', 'Sfoglia i modelli'))]));
+      }
+      out.push(h('p', { class: 'small' }, [T('In use: ', 'In uso: '), h('b', { text: p.model })]));
+      out.push(orHostToggle());
+      if (ms.other || !isPreset) out.push(visionToggle('or-model'));
       if (p.active) out.push(effortRow('openrouter'));
       out.push(newKeyButton(st));
       out.push(switchRow());

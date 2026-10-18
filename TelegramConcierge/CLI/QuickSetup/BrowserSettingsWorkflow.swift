@@ -19,8 +19,8 @@ final class BrowserSettingsWorkflow {
         }
         /// The OpenRouter host list a provider save needs (nil = none); a
         /// seam so selftests never reach the network.
-        var openRouterListing: ([String: String], String, String?) async -> OpenRouterProviderPin.HostListing? = { store, model, key in
-            await OpenRouterProviderPin.listingIfNeeded(store: store, newModel: model, apiKey: key, newSetupDefault: true)
+        var openRouterListing: ([String: String], String, String?) async throws -> OpenRouterProviderPin.HostListing? = { store, model, key in
+            try await OpenRouterProviderPin.listingIfNeeded(store: store, newModel: model, apiKey: key, presetHostPin: true)
         }
         var beginMutation: () async -> Bool = { true }
         var endMutation: () -> Void = {}
@@ -89,8 +89,8 @@ final class BrowserSettingsWorkflow {
               Date().timeIntervalSince(proof.time) < 300 else {
             return (409, failure("not_verified", "This value changed or verification expired. Verify it again before saving."))
         }
-        // An OpenRouter save: a new setup asks for the default host and a
-        // model change re-checks the stored host pin. The host
+        // An OpenRouter save: the destination model's host is decided by the
+        // per-model rule (preset host or the model's remembered choice). The host
         // list is read now, before the agent's mutation gate (never network
         // inside it), and setup-api decides under the store lock.
         var saveRequest = request
@@ -99,11 +99,13 @@ final class BrowserSettingsWorkflow {
            let model = provider["model"] as? String, provider["host_listing"] == nil {
             let store = KeychainHelper.loadSnapshot()
             let key = (provider["api_key"] as? String) ?? store[KeychainHelper.openRouterApiKeyKey]
-            let listing = await env.openRouterListing(store, model, key)
+            // Cancellation propagates and aborts the save before any write.
+            let listing = try await env.openRouterListing(store, model, key)
             try checkpoint()
             provider["host_listing"] = listing?.json ?? ["skip": true]
-            // A new OpenRouter setup gets the default host (same rule as the menu).
-            provider["default_host_pin"] = true
+            // Presets get Briglia's host when the model has no host decision
+            // (same per-model rule as the menu and /model).
+            provider["preset_host_pin"] = true
             saveRequest["provider"] = provider
         }
         guard await env.beginMutation() else { return (409, failure("agent_busy", "Briglia is working. Retry Save when the current turn and background work finish.")) }

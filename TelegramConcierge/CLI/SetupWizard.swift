@@ -382,21 +382,42 @@ struct SetupWizard {
         """)
         let currentModel = KeychainHelper.load(key: KeychainHelper.openRouterModelKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let defaultModel = currentModel.isEmpty ? ProviderProfiles.openRouterSetupDefaultModel : currentModel
-        // A new OpenRouter setup (no saved key, model or pin) gets the
-        // owner's default host on the default model, as in briglia menu.
-        let before = KeychainHelper.loadSnapshot()
-        if OpenRouterProviderPin.isNewSetup(keyBefore: before[KeychainHelper.openRouterApiKeyKey] ?? "", modelBefore: currentModel,
-                                            pins: OpenRouterProviderPin.slugs(from: before[OpenRouterProviderPin.storageKey])) {
-            print("  Default: DeepSeek V4.1 Flash (\(ProviderProfiles.openRouterSetupDefaultModel)), hosted on \(OpenRouterProviderPin.setupDefaultHostName) — Briglia pins that host when OpenRouter confirms it serves the model. Change the model later with /model, the host with /orprovider.")
+        // The OpenRouter picker (owner request 2026-10-18): the presets in
+        // order, each saying whether a host is pinned automatically, plus
+        // "type any model id". The host is decided by the one per-model rule
+        // (OpenRouterPinMap.decide) inside the same locked write.
+        let snapshot = KeychainHelper.loadSnapshot()
+        let presets = OpenRouterPresets.all
+        print("  Model:")
+        for (index, preset) in presets.enumerated() {
+            let status = OpenRouterPresets.hostStatus(model: preset.id, store: snapshot)
+            let current = preset.id == currentModel ? "  ← current" : ""
+            print("   \(index + 1). \(preset.label)\(index == 0 ? " (default)" : "") — \(preset.id)\(current)\n      \(OpenRouterPresets.hostClause(status))")
         }
-        let model = WizardIO.ask("Model ID (e.g. moonshotai/kimi-k3) [\(defaultModel)]", default: defaultModel)
+        print("   \(presets.count + 1). Other model… (type any OpenRouter model id, e.g. moonshotai/kimi-k3; no host is pinned automatically)")
+        let currentIndex = presets.firstIndex { $0.id == currentModel }.map { $0 + 1 }
+        let defaultChoice = currentModel.isEmpty ? "1" : (currentIndex.map(String.init) ?? "\(presets.count + 1)")
+        var model = ""
+        var isPreset = false
+        while model.isEmpty {
+            let pick = WizardIO.ask("Choose 1–\(presets.count + 1)", default: defaultChoice).trimmingCharacters(in: .whitespaces)
+            if let n = Int(pick), n >= 1, n <= presets.count {
+                model = presets[n - 1].id; isPreset = true
+            } else if Int(pick) == presets.count + 1 {
+                let typed = WizardIO.ask("Model ID", default: currentModel.isEmpty || currentIndex != nil ? nil : currentModel)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if OpenRouterPinMap.isValidModelID(typed) { model = typed } else { print("  ✖ Type an OpenRouter model id such as vendor/model.") }
+            } else {
+                print("  ✖ Type a number from 1 to \(presets.count + 1).")
+            }
+        }
         let key = await WizardIO.askSecretValidated(
             "OpenRouter API key",
             current: KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey),
             probe: { await Probes.chatCompletion(baseURL: "https://openrouter.ai/api/v1", apiKey: $0, model: model) }
         )
-        let textOnly = !WizardIO.askYesNo("Can this model see images (vision)?", default: true)
+        // Presets all accept images; another model asks.
+        let textOnly = isPreset ? false : !WizardIO.askYesNo("Can this model see images (vision)?", default: true)
         if textOnly {
             print("""
               ⚠ Text-only model: images and scanned PDFs will need the OCR
@@ -404,16 +425,23 @@ struct SetupWizard {
                 on your OpenRouter key.
             """)
         }
-        // The one model/pin rule (OpenRouterProviderPin.reconcile): the host
-        // list is read now, outside any lock; the model and the pin then
-        // commit in one locked write — a new setup gets the default host, a
-        // model change re-checks a stored pin.
-        let listing = await OpenRouterProviderPin.listingIfNeeded(store: KeychainHelper.loadSnapshot(), newModel: model,
-                                                                  apiKey: key, newSetupDefault: true)
+        // The host list is read now, outside any lock; the model and the
+        // pin then commit in one locked write.
+        let listing: OpenRouterProviderPin.HostListing?
+        do {
+            listing = try await OpenRouterProviderPin.listingIfNeeded(store: KeychainHelper.loadSnapshot(), newModel: model,
+                                                                      apiKey: key, presetHostPin: true)
+        } catch {
+            print("  ✖ Cancelled — nothing saved.")
+            return false
+        }
         let outcome: OpenRouterProviderPin.PinOutcome
         do {
             outcome = try OpenRouterProviderPin.saveOpenRouterProfile(apiKey: key, model: model, effort: "high", textOnly: textOnly,
-                                                                     listing: listing, newSetupDefault: true)
+                                                                     listing: listing, presetHostPin: true, activate: false).outcome
+        } catch let refusal as OpenRouterProviderPin.PendingLegacyRefusal {
+            print("  ✖ \(refusal.localizedDescription)")
+            return false
         } catch {
             reportFatalSaveFailure(error)
         }
