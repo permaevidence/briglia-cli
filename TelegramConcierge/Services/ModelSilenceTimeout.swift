@@ -8,27 +8,42 @@ import FoundationNetworking
 ///
 /// The hang: in the Thread v5 timing trials a researcher round-2 request was
 /// accepted by the provider and never answered. Each researcher model request
-/// used the main-agent transport unchanged: the silence clock (360 s hosted,
-/// 1200 s custom endpoints) and up to three adapter retries after a timeout,
-/// so one dead provider response held the run for ~4 × 360 s.
+/// used the main-agent transport unchanged: its silence clock and up to three
+/// adapter retries after a timeout, so one dead provider response held the
+/// run for four silence windows. The 0.2.55 clocks (unchanged here), per
+/// main profile / protocol:
+///   - native OpenRouter, chat completions: 360 s request (inactivity) clock;
+///   - OpenAI API or ChatGPT, Responses: 360 s connect/idle, 1200 s overall;
+///   - OpenCode (an OpenAI-compatible profile, so "custom"), either protocol,
+///     and every other custom/local endpoint: 1200 s, idle = overall.
 ///
 /// The fix changes nothing but the retry COUNT for silence timeouts on the
-/// researcher's model rounds: the transport's clocks (connect, idle, overall),
-/// its attempt caps, its HTTP/transport retry schedule and every other caller
-/// are exactly as in 0.2.55. A request whose attempt ends on a silence
-/// timeout is retried once; a second silence timeout in the same request
-/// throws `WebModelSilenceTimeoutError`, which the runner reports as
-/// `web_model_timeout`. A call that keeps producing bytes is never cut by
-/// anything new.
+/// researcher's model rounds: the transport's clocks (connect, idle, overall,
+/// URLSession request/resource), its attempt caps, its HTTP/transport retry
+/// schedule and every other caller are exactly as in 0.2.55. A request whose
+/// attempt ends on a silence timeout is retried once; a second silence
+/// timeout in the same request throws `WebModelSilenceTimeoutError`, which the
+/// runner reports as `web_model_timeout`. A call that keeps producing bytes is
+/// never cut by anything new.
+///
+/// Silence is never inferred from a missing label (Codex round 3, R1): the
+/// Responses transport labels EVERY timeout it completes with, including
+/// URLSession's own completion errors, from that attempt's connect/idle
+/// state read under the transport lock at the completion decision; the chat
+/// path classifies its URLSession timeout at its own boundary
+/// (`isChatSilence`).
 enum ModelSilenceTimeout {
     /// Silence-timeout retries per researcher request: one retry, then stop.
     static let researcherRetryLimit = 1
 
-    /// userInfo flag set by the Responses transport on a timeout that ended
-    /// an attempt with no byte for the whole silence window.
+    /// userInfo flag (Bool) the Responses transport puts on every timeout it
+    /// completes with: true when the attempt's connect/idle clock had expired
+    /// (no byte for the whole silence window), false otherwise, e.g. an
+    /// overall or URLSession resource expiry during an active stream.
     static let silenceKey = "BrigliaSilence"
 
-    /// Development-build seam (selftests only): replaces the 360 s / 1200 s
+    /// Development-build seam (selftests only): replaces the 360 s (native
+    /// OpenRouter / OpenAI-API base) / 1200 s (custom profiles, incl. OpenCode)
     /// `URLRequest.timeoutInterval` the chat and Responses adapters set, so a
     /// silence timeout can be reproduced in seconds. Ignored in release
     /// builds; never part of the request body.
@@ -41,20 +56,31 @@ enum ModelSilenceTimeout {
         return customEndpoint ? 1200 : 360
     }
 
-    /// True when `error` is a timeout that ended an attempt on silence:
-    /// - a URLSession timeout (chat completions on URLSession.shared, or the
-    ///   URLSession clock behind the Responses transport): URLSession's
-    ///   request timeout is an inactivity clock, so it only fires on silence;
-    /// - a Responses transport timeout carrying `silenceKey` (its connect or
-    ///   idle clock, or its overall clock firing with no byte inside the idle
-    ///   window, e.g. OpenRouter/OpenCode where the two are both 360 s).
-    /// A Responses OVERALL expiry during an active stream is not silence and
-    /// keeps the standard retries.
+    /// Responses: true only for a timeout the transport labelled silent
+    /// (`silenceKey == true`). Anything unlabelled is not silence; the
+    /// transport labels all of its own timeouts, so an unlabelled one would be
+    /// a source this classifier knows nothing about and keeps the standard
+    /// retries.
     static func isSilence(_ error: Error) -> Bool {
         guard let urlError = error as? URLError, urlError.code == .timedOut else { return false }
-        let info = (urlError as NSError).userInfo
-        guard info["BrigliaResponsesDeadline"] != nil else { return true }
-        return info[silenceKey] as? Bool == true
+        return (urlError as NSError).userInfo[silenceKey] as? Bool == true
+    }
+
+    /// Chat completions (`URLSession.shared.data(for:)`, Darwin and
+    /// FoundationNetworking alike): the only clocks are the request's
+    /// `timeoutInterval` and the session's resource clock (URLSession.shared:
+    /// seven days). The request clock is an inactivity clock on both
+    /// platforms (Apple's timeoutIntervalForRequest documentation;
+    /// corelibs' _EasyHandle resets it on every header/body callback), so a
+    /// timeout before the resource clock could have fired means no byte for
+    /// the whole silence window. A timeout at or after the resource clock is
+    /// an overall expiry and is NOT silence. `elapsed`: that attempt's time
+    /// from send to failure.
+    static func isChatSilence(_ error: Error, elapsed: TimeInterval,
+                              resourceTimeout: TimeInterval = URLSession.shared.configuration.timeoutIntervalForResource) -> Bool {
+        guard let urlError = error as? URLError, urlError.code == .timedOut else { return false }
+        if let labelled = (urlError as NSError).userInfo[silenceKey] as? Bool { return labelled }
+        return elapsed < resourceTimeout - 1
     }
 
     /// The error a researcher request throws once its silence retries are

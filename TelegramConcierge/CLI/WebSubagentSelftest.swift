@@ -658,6 +658,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         try await Self.runExtractorLoopSettlementRows(harness)
         try await Self.runAllLaneDeadlineGroup(harness)
         try await Self.runSilenceTimeoutGroup(harness)
+        try await Self.runSilenceTimeoutRaceGroup(harness)
         let tally = WebFixtureServer.modelRequestTally
         check("22.17 whole-run guard: of every model request the fixture servers received in this selftest (main agent, Web researcher, legacy web loop rounds, all extractor stages, every backend), none carries a temperature",
               tally.total > 100 && tally.withTemperature.isEmpty, "\(tally.total) requests, with temperature: \(tally.withTemperature.prefix(5))")

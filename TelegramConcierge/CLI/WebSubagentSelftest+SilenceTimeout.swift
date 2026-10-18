@@ -6,8 +6,9 @@ import FoundationNetworking
 // Group 24 (WEB_OFFLINE_HANG, owner decision 2026-10-18): the Web
 // researcher's model rounds retry a SILENCE timeout once, then stop the run
 // with web_model_timeout. Transport timing is 0.2.55's; only the silence
-// retry count changes, only for the researcher. The adapters' 360/1200 s
-// request timeout is scaled by the dev seam
+// retry count changes, only for the researcher. The adapters' request
+// timeout (360 s native OpenRouter / OpenAI-API base, 1200 s custom profiles
+// incl. OpenCode; ModelSilenceTimeout's header has the full table) is scaled by the dev seam
 // (ModelSilenceTimeout.requestTimeoutOverrideForTesting) so a silence timeout
 // takes about a second. Reproduces the Thread v5 trial hang: round 2 (after
 // a web_query) is accepted but never answered (`silentFor`). Every row has
@@ -338,10 +339,10 @@ extension WebSubagentSelftest {
 
         // 24.13 Policy: production clocks unchanged, one silence retry.
         ModelSilenceTimeout.requestTimeoutOverrideForTesting = nil
-        check("24.13 policy: researcher silence retry limit 1; the adapters' request timeout is still 360 s hosted / 1200 s custom (0.2.55); other errors are not silence",
+        check("24.13 policy: researcher silence retry limit 1; the adapters' request timeout is still 360 s hosted / 1200 s custom (0.2.55); other errors and unlabelled timeouts are not Responses silence",
               ModelSilenceTimeout.researcherRetryLimit == 1
               && ModelSilenceTimeout.requestTimeout(customEndpoint: false) == 360 && ModelSilenceTimeout.requestTimeout(customEndpoint: true) == 1200
-              && ModelSilenceTimeout.isSilence(URLError(.timedOut))
+              && !ModelSilenceTimeout.isSilence(URLError(.timedOut))
               && !ModelSilenceTimeout.isSilence(URLError(.networkConnectionLost))
               && !ModelSilenceTimeout.isSilence(URLError(.timedOut, userInfo: ["BrigliaResponsesDeadline": "overall", ModelSilenceTimeout.silenceKey: false]))
               && ModelSilenceTimeout.isSilence(URLError(.timedOut, userInfo: ["BrigliaResponsesDeadline": "idle", ModelSilenceTimeout.silenceKey: true])))

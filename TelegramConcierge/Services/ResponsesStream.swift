@@ -250,6 +250,33 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
     /// only: tells whether an overall expiry also ended on silence).
     private var phaseDeadlineUptime: TimeInterval = 0
 
+    /// Development-build seam (selftests only, WEB_OFFLINE_HANG R1): schedules
+    /// the explicit overall timer this much LATER than its clock, so
+    /// URLSession's own resource expiry (configured to the same value) wins
+    /// the race deterministically. No clock duration changes; ignored in
+    /// release builds.
+    nonisolated(unsafe) static var overallTimerDelayForTesting: TimeInterval?
+    private static var overallTimerDelay: TimeInterval {
+        guard adaCLIVersion.hasSuffix("-dev"), let delay = overallTimerDelayForTesting else { return 0 }
+        return delay
+    }
+
+    /// Labels a timeout this transport completes with (caller holds the lock,
+    /// inside the completion decision): `ModelSilenceTimeout.silenceKey` is
+    /// true only when this attempt's connect/idle clock had expired, i.e. no
+    /// byte for the whole silence window. Covers the overall timer and
+    /// URLSession's completion errors (its request clock, or its resource
+    /// clock firing during an active stream); a connect/idle timer's own
+    /// error is already labelled true. Other userInfo (description,
+    /// underlying error) is kept.
+    private func labelTimeoutLocked(_ result: Result<Data, Error>) -> Result<Data, Error> {
+        guard case .failure(let error) = result, let urlError = error as? URLError, urlError.code == .timedOut else { return result }
+        var info = (urlError as NSError).userInfo
+        guard info[ModelSilenceTimeout.silenceKey] == nil else { return result }
+        info[ModelSilenceTimeout.silenceKey] = ProcessInfo.processInfo.systemUptime >= phaseDeadlineUptime - 0.001
+        return .failure(URLError(.timedOut, userInfo: info))
+    }
+
     // These are independent clocks even where provider defaults coincide. The
     // connect clock bounds request start through response headers; idle starts
     // at headers and resets on bytes (including SSE comments/heartbeats).
@@ -299,19 +326,13 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
                 self.idleTimeout = idleTimeout ?? request.timeoutInterval
                 armPhaseTimerLocked(connectTimeout ?? request.timeoutInterval, phase: "connect")
                 let timer = DispatchWorkItem { [weak self] in
-                    guard let self else { return }
-                    // Same clock, same moment as before; the extra flag only
-                    // records whether the attempt was also silent for its
-                    // whole silence window (the connect/idle clock had
-                    // expired too: equal clocks, e.g. 360/360, race here).
-                    self.lock.lock()
-                    let silent = ProcessInfo.processInfo.systemUptime >= self.phaseDeadlineUptime - 0.001
-                    self.lock.unlock()
-                    self.finish(.failure(URLError(.timedOut, userInfo: ["BrigliaResponsesDeadline": "overall",
-                                                                        ModelSilenceTimeout.silenceKey: silent])))
+                    // Same clock, same moment as before; `finish` labels it
+                    // (silent only if the connect/idle clock had expired too:
+                    // equal clocks, e.g. 1200/1200 on custom endpoints, race).
+                    self?.finish(.failure(URLError(.timedOut, userInfo: ["BrigliaResponsesDeadline": "overall"])))
                 }
                 overallTimer = timer
-                DispatchQueue.global().asyncAfter(deadline: .now() + overallTimeout, execute: timer)
+                DispatchQueue.global().asyncAfter(deadline: .now() + overallTimeout + Self.overallTimerDelay, execute: timer)
                 task.resume(); lock.unlock()
             }
         }, onCancel: { self.finish(.failure(CancellationError())) })
@@ -321,6 +342,7 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
         lock.lock()
         guard !completed, predicate() else { lock.unlock(); return }
         completed = true
+        let result = labelTimeoutLocked(result)
         let callback = continuation; continuation = nil
         let task = task; self.task = nil
         let session = session; self.session = nil

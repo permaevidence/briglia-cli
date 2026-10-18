@@ -61,6 +61,7 @@ extension OpenRouterService {
         // enforces its own cap inside `retryDelayForHTTPFailure`.
         while attempt <= Self.oversizedBodyMaxAttempts {
             try Task.checkCancellation()
+            let attemptStarted = ProcessInfo.processInfo.systemUptime
 
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
@@ -123,7 +124,10 @@ extension OpenRouterService {
                 lastError = error
                 // Researcher rounds only: a silence timeout is retried at most
                 // `silenceRetryLimit` times; the schedule below is untouched.
-                if let silenceRetryLimit, ModelSilenceTimeout.isSilence(error) {
+                // Classified here, at the chat boundary, from this attempt's
+                // elapsed time (ModelSilenceTimeout.isChatSilence).
+                if let silenceRetryLimit,
+                   ModelSilenceTimeout.isChatSilence(error, elapsed: ProcessInfo.processInfo.systemUptime - attemptStarted) {
                     silenceTimeouts += 1
                     if silenceTimeouts > silenceRetryLimit || attempt >= Self.chatRequestMaxAttempts {
                         print("[OpenRouterService] \(providerLabel) chat request for \(model) timed out on silence \(silenceTimeouts) time(s); research round stopped")
