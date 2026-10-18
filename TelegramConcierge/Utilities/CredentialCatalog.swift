@@ -122,6 +122,8 @@ enum CredentialCatalog {
         Entry(key: KeychainHelper.openRouterModelKey, treatment: .notSecret),
         Entry(key: KeychainHelper.openRouterWebSearchModelKey, treatment: .notSecret),
         Entry(key: KeychainHelper.openRouterProvidersKey, treatment: .notSecret),
+        Entry(key: OpenRouterPinMap.storageKey, treatment: .notSecret),
+        Entry(key: OpenRouterPinMap.corruptBackupKey, treatment: .notSecret),
         Entry(key: KeychainHelper.openRouterReasoningEffortKey, treatment: .notSecret),
         Entry(key: KeychainHelper.legacyReasoningMigrationDoneKey, treatment: .notSecret),
         Entry(key: KeychainHelper.openRouterToolSpendLimitPerTurnUSDKey, treatment: .notSecret),

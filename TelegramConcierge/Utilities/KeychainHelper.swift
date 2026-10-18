@@ -177,7 +177,87 @@ enum KeychainHelper {
         try mutate(change)
     }
 
+    /// Like `transaction`, but an unchanged dictionary is NOT written
+    /// (no serialization, no atomic replace): a stale/duplicate/no-op
+    /// decision really is "no write" at the storage boundary (Codex
+    /// round 4). Returns whether it wrote.
+    @discardableResult
+    static func conditionalTransaction(_ change: (inout [String: String]) throws -> Void) throws -> Bool {
+        var wrote = false
+        try mutate(change, skipUnchanged: true, wrote: &wrote)
+        return wrote
+    }
+
+    enum TryResult: Equatable {
+        case wrote
+        case unchanged
+        /// The in-process lock or the cross-process flock was held: nothing
+        /// read, nothing written; the caller retries later.
+        case busy
+    }
+
+    /// Non-blocking transaction for automatic background work (the D10
+    /// upgrade pass): one immediate attempt at the in-process lock and one
+    /// `LOCK_NB` attempt at the sidecar flock; on contention it returns
+    /// `.busy` without waiting, sleeping or holding anything (plan §13.7).
+    static func tryTransaction(_ change: (inout [String: String]) throws -> Void) throws -> TryResult {
+        guard lock.try() else { return .busy }
+        defer { lock.unlock() }
+        try? PrivateStorage.ensureDirectory(StoragePaths.configRoot)
+        let fd = open(lockURL.path, O_CREAT | O_WRONLY, 0o600)
+        guard fd >= 0 else { throw KeychainError.unexpectedStatus(errno) }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            if errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR { return .busy }
+            throw KeychainError.unexpectedStatus(errno)
+        }
+        var store = try readDiskStrict().store
+        let before = store
+        try change(&store)
+        guard store != before else { return .unchanged }
+        try writeLocked(store)
+        return .wrote
+    }
+
+    /// Non-blocking snapshot: nil when the in-process lock is held.
+    static func tryLoadSnapshot() -> [String: String]? {
+        guard lock.try() else { return nil }
+        defer { lock.unlock() }
+        return storeLocked()
+    }
+
+    /// Selftest seam: every committed store write.
+    nonisolated(unsafe) static var _testWriteCount = 0
+
+    /// Selftest seam: hold the in-process store lock (call from a
+    /// background thread) to exercise the non-blocking paths.
+    static func _testHoldInProcessLock(seconds: Double) {
+        lock.lock()
+        Thread.sleep(forTimeInterval: seconds)
+        lock.unlock()
+    }
+
+    /// Selftest seam: make the next committed writes fail (atomic-write
+    /// failure injection); nothing reaches disk or the cache.
+    nonisolated(unsafe) static var _testFailWrites = false
+
+    private static func writeLocked(_ store: [String: String]) throws {
+        if _testFailWrites { throw KeychainError.unexpectedStatus(EIO) }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(store)
+        try PrivateStorage.writeAtomically(data, to: storeURL, mode: 0o600)
+        cache = store
+        cacheStamp = statStore()
+        _testWriteCount += 1
+    }
+
     private static func mutate(_ change: (inout [String: String]) throws -> Void) throws {
+        var wrote = false
+        try mutate(change, skipUnchanged: false, wrote: &wrote)
+    }
+
+    private static func mutate(_ change: (inout [String: String]) throws -> Void, skipUnchanged: Bool, wrote: inout Bool) throws {
         lock.lock()
         defer { lock.unlock() }
         // Writes materialize the config root; reads never do (StoragePaths:
@@ -203,19 +283,18 @@ enum KeychainHelper {
         // must fail the mutation and keep its bytes, or this write would
         // replace every stored secret with empty-plus-delta and report ok.
         var store = try readDiskStrict().store
+        let before = store
         try change(&store)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(store)
+        if skipUnchanged && store == before { return }
         // Disk write FIRST, cache second: if the write throws (read-only
         // config dir, full disk), in-memory reads must not pretend the value
         // was saved — that made `briglia setup` look successful and break only
         // after restart.
         // 0600 is applied to the temp file BEFORE the rename, so the store
-        // never exists with a wider mode (PrivateStorage).
-        try PrivateStorage.writeAtomically(data, to: storeURL, mode: 0o600)
-        cache = store
-        cacheStamp = statStore()  // still under flock: the stamp is ours
+        // never exists with a wider mode (PrivateStorage). The stamp is
+        // taken still under flock, so it is ours.
+        try writeLocked(store)
+        wrote = true
     }
 
     private static func storeLocked() -> [String: String] {

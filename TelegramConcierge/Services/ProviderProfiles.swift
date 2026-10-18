@@ -469,6 +469,11 @@ enum ProviderProfiles {
         // Named servers (2026-09-25): fold the local-server / custom-endpoint
         // carriers into the server list (first run: one named server each).
         ProviderServers.reconcileStored()
+        // Per-model OpenRouter hosts (v0.2.56) are NOT migrated here: this
+        // runs from read-only diagnostics too (setup-api status, the menu
+        // snapshot), which must write nothing. Every pin/model mutation
+        // migrates inside its own transaction; the running agent migrates at
+        // startup (ConversationManager.configure).
     }
 
     private static func migrateActiveProfile() {

@@ -569,7 +569,8 @@ actor OpenRouterService {
     private func providers(for requestedModel: String) -> [String]? {
         guard !isCustomEndpoint else { return nil }
         if requestedModel == model {
-            let pinned = OpenRouterProviderPin.pinnedSlugs()
+            // v0.2.56: the main model's OWN per-model pin (one snapshot).
+            let pinned = OpenRouterProviderPin.pinnedSlugs(for: requestedModel, store: KeychainHelper.loadSnapshot())
             if !pinned.isEmpty { return pinned }
         }
         return defaultProviders(for: requestedModel)
