@@ -63,6 +63,12 @@ struct ProviderExecutionContext {
     var sendBudget: SendBudget? = nil
     var authBudget: SendBudget? = nil
     var adapterRetries: AdapterRetryPolicy = .standard
+    /// WEB_OFFLINE_HANG (2026-10-18): how many SILENCE timeouts (connect or
+    /// idle clock; ModelSilenceTimeout.isSilence) one request may retry
+    /// before it throws WebModelSilenceTimeoutError. Set only on the Web
+    /// researcher's model rounds (1). nil = the standard schedule, unchanged:
+    /// timing, attempt caps and every other retry are never affected.
+    var silenceTimeoutRetryLimit: Int? = nil
 
     var responsesScope: ResponsesScope {
         ResponsesScope(endpoint: (try? ResponsesAdapter.endpoint(endpoint)) ?? endpoint, profile: profileIdentity, model: model,

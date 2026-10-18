@@ -246,6 +246,9 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
     private var phaseTimer: DispatchWorkItem?
     private var phaseGeneration: UInt64 = 0
     private var idleTimeout: TimeInterval = 360
+    /// Uptime at which the current connect/idle clock expires (labelling
+    /// only: tells whether an overall expiry also ended on silence).
+    private var phaseDeadlineUptime: TimeInterval = 0
 
     // These are independent clocks even where provider defaults coincide. The
     // connect clock bounds request start through response headers; idle starts
@@ -255,9 +258,11 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
         phaseTimer?.cancel()
         phaseGeneration &+= 1
         let generation = phaseGeneration
+        phaseDeadlineUptime = ProcessInfo.processInfo.systemUptime + seconds
         let timer = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.finish(.failure(URLError(.timedOut, userInfo: ["BrigliaResponsesDeadline": phase])),
+            self.finish(.failure(URLError(.timedOut, userInfo: ["BrigliaResponsesDeadline": phase,
+                                                                ModelSilenceTimeout.silenceKey: true])),
                         ifLocked: { self.phaseGeneration == generation })
         }
         phaseTimer = timer
@@ -294,7 +299,16 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
                 self.idleTimeout = idleTimeout ?? request.timeoutInterval
                 armPhaseTimerLocked(connectTimeout ?? request.timeoutInterval, phase: "connect")
                 let timer = DispatchWorkItem { [weak self] in
-                    self?.finish(.failure(URLError(.timedOut, userInfo: ["BrigliaResponsesDeadline": "overall"])))
+                    guard let self else { return }
+                    // Same clock, same moment as before; the extra flag only
+                    // records whether the attempt was also silent for its
+                    // whole silence window (the connect/idle clock had
+                    // expired too: equal clocks, e.g. 360/360, race here).
+                    self.lock.lock()
+                    let silent = ProcessInfo.processInfo.systemUptime >= self.phaseDeadlineUptime - 0.001
+                    self.lock.unlock()
+                    self.finish(.failure(URLError(.timedOut, userInfo: ["BrigliaResponsesDeadline": "overall",
+                                                                        ModelSilenceTimeout.silenceKey: silent])))
                 }
                 overallTimer = timer
                 DispatchQueue.global().asyncAfter(deadline: .now() + overallTimeout, execute: timer)

@@ -43,13 +43,18 @@ extension OpenRouterService {
         let retryAfter: TimeInterval?
     }
 
+    /// `silenceRetryLimit` (Web researcher rounds only, WEB_OFFLINE_HANG):
+    /// silence timeouts this request may retry before it throws
+    /// WebModelSilenceTimeoutError. nil = the standard schedule, unchanged.
     func sendChatRequestWithRetry(
         _ request: URLRequest,
         providerLabel: String,
-        model: String
+        model: String,
+        silenceRetryLimit: Int? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         var attempt = 1
         var lastError: Error?
+        var silenceTimeouts = 0
         let bodyBytes = request.httpBody?.count ?? 0
 
         // The bound is the larger of the two schedules; each status class
@@ -116,6 +121,15 @@ extension OpenRouterService {
                 throw error
             } catch {
                 lastError = error
+                // Researcher rounds only: a silence timeout is retried at most
+                // `silenceRetryLimit` times; the schedule below is untouched.
+                if let silenceRetryLimit, ModelSilenceTimeout.isSilence(error) {
+                    silenceTimeouts += 1
+                    if silenceTimeouts > silenceRetryLimit || attempt >= Self.chatRequestMaxAttempts {
+                        print("[OpenRouterService] \(providerLabel) chat request for \(model) timed out on silence \(silenceTimeouts) time(s); research round stopped")
+                        throw ModelSilenceTimeout.exhausted(error, attempts: silenceTimeouts, timeout: request.timeoutInterval)
+                    }
+                }
                 if shouldRetryTransportError(error), attempt < Self.chatRequestMaxAttempts {
                     let delay = retryDelay(forAttempt: attempt, retryAfter: nil)
                     print("[OpenRouterService] \(providerLabel) chat transport error for \(model) (attempt \(attempt)/\(Self.chatRequestMaxAttempts)): \(error.localizedDescription). Retrying in \(String(format: "%.2f", delay))s")

@@ -38,7 +38,7 @@ struct ChatCompletionsAdapter {
         request.setValue(context.authorization, forHTTPHeaderField: "Authorization")
         try SessionAffinity.decorate(&request, apiKey: context.affinityKey, lane: context.lane)
         // Local inference and large reasoning models can legitimately take a long time.
-        request.timeoutInterval = context.usingCustomEndpoint ? 1200 : 360
+        request.timeoutInterval = ModelSilenceTimeout.requestTimeout(customEndpoint: context.usingCustomEndpoint)
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys

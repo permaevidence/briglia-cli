@@ -654,10 +654,18 @@ actor SubagentRunner {
                 textOnlyOverride: effectiveTextOnlyOverride, lane: .subagent(resolvedSessionId))
             : nil
         let runExecution: ProviderExecutionContext? = webExecution ?? (snapshot.wireProtocol == .responses ? snapshot : nil)
-        // Web researcher: every model request of the run is bounded by a
-        // per-round deadline (WebRoundDeadline). nil = unchanged behaviour.
-        let webRoundSeconds: TimeInterval? = subagentType.isWebResearcher ? WebRoundDeadline.seconds(for: webExecution) : nil
-        let webRoundTimeouts = WebRoundTimeoutTally()
+        // WEB_OFFLINE_HANG (owner decision 2026-10-18): the researcher's
+        // model ROUNDS (main round, in-loop force-finish, round-limit summary;
+        // nested Agent(Web) runs this same code) retry a SILENCE timeout once,
+        // then fail with WebModelSilenceTimeoutError (-> web_model_timeout).
+        // Transport timing and every other retry are unchanged
+        // (ModelSilenceTimeout). Same context otherwise (ResponsesTurn is a
+        // shared reference); compaction calls keep runExecution as before.
+        let roundExecution: ProviderExecutionContext? = {
+            guard subagentType.isWebResearcher, var context = runExecution else { return runExecution }
+            context.silenceTimeoutRetryLimit = ModelSilenceTimeout.researcherRetryLimit
+            return context
+        }()
         let responsesExecution: ProviderExecutionContext? = runExecution?.wireProtocol == .responses ? runExecution : nil
         defer { runExecution?.responsesTurn.close() }
         if responsesExecution != nil,
@@ -798,23 +806,14 @@ actor SubagentRunner {
                 // Image-rejection recovery (plan v2 §2.4): the same bounded
                 // driver as the main agent; marks are written to the stored
                 // session before the resend, tools are not re-run.
-                // A round whose request gets no answer before the Web round
-                // deadline is cancelled and sent again once (nothing was
-                // committed); the run's second expiry ends it (web_model_timeout).
-                var recoveredOutcome: ImageRejectionRecovery.Outcome?
-                while recoveredOutcome == nil {
-                do {
-                recoveredOutcome = try await ImageRejectionRecovery.run(
+                let recovered = try await ImageRejectionRecovery.run(
                     send: { log in
-                        let requestMessages = messagesForLLM
-                        let requestRounds = toolInteractions
-                        return try await WebRoundDeadline.bounded(webRoundSeconds) {
                         try await openRouterService.generateResponse(
-                            messages: requestMessages,
+                            messages: messagesForLLM,
                             imagesDirectory: imagesDirectory,
                             documentsDirectory: documentsDirectory,
                             tools: filteredTools,
-                            toolResultMessages: requestRounds.isEmpty ? nil : requestRounds,
+                            toolResultMessages: toolInteractions.isEmpty ? nil : toolInteractions,
                             calendarContext: nil,
                             emailContext: nil,
                             chunkSummaries: nil,
@@ -828,10 +827,9 @@ actor SubagentRunner {
                             providerOverride: effectiveProviderOverride,
                             reasoningEffortOverride: effectiveReasoningOverride,
                             textOnlyOverride: effectiveTextOnlyOverride,
-                            execution: runExecution, lane: .subagent(resolvedSessionId), imageLog: log,
+                            execution: roundExecution, lane: .subagent(resolvedSessionId), imageLog: log,
                             persona: runPersona
                         )
-                        }
                     },
                     newestUnit: { transmitted in
                         ImageRejectionMarks.newestUnit(transmitted: transmitted, requestMessages: messagesForLLM, requestRounds: toolInteractions)
@@ -846,11 +844,6 @@ actor SubagentRunner {
                         return true
                     }
                 )
-                } catch let expiry as WebRoundDeadline.Expired {
-                    try webRoundTimeouts.expired(expiry)
-                }
-                }
-                let recovered = recoveredOutcome!
                 let response = recovered.response
                 if !recovered.excluded.isEmpty {
                     print("[SubagentRunner] provider rejected image(s) \(recovered.excluded); replaced with notes and continued")
@@ -893,13 +886,12 @@ actor SubagentRunner {
                             )
                         ]
                         for attempt in 1...4 {
-                            let forceMessages = messagesForLLM, forceRounds = forceInteractions
-                            let retryResponse = try await WebRoundDeadline.bounded(webRoundSeconds) { try await openRouterService.generateResponse(
-                                messages: forceMessages,
+                            let retryResponse = try await openRouterService.generateResponse(
+                                messages: messagesForLLM,
                                 imagesDirectory: imagesDirectory,
                                 documentsDirectory: documentsDirectory,
                                 tools: filteredTools,
-                                toolResultMessages: forceRounds.isEmpty ? nil : forceRounds,
+                                toolResultMessages: forceInteractions.isEmpty ? nil : forceInteractions,
                                 calendarContext: nil,
                                 emailContext: nil,
                                 chunkSummaries: nil,
@@ -918,8 +910,8 @@ actor SubagentRunner {
                                 providerOverride: effectiveProviderOverride,
                                 reasoningEffortOverride: effectiveReasoningOverride,
                                 textOnlyOverride: effectiveTextOnlyOverride,
-                                execution: runExecution, lane: .subagent(resolvedSessionId), persona: runPersona
-                            ) }
+                                execution: roundExecution, lane: .subagent(resolvedSessionId), persona: runPersona
+                            )
                             markProgress()
 
                             switch retryResponse {
@@ -1136,10 +1128,7 @@ actor SubagentRunner {
             } catch let e as SubagentStalenessError {
                 runError = e.localizedDescription
                 break loop
-            } catch let e as WebModelRoundTimeoutError {
-                runError = "web_model_timeout: " + (e.errorDescription ?? "")
-                break loop
-            } catch let e as WebRoundDeadline.Expired {
+            } catch let e as WebModelSilenceTimeoutError {
                 runError = "web_model_timeout: " + (e.errorDescription ?? "")
                 break loop
             } catch {
@@ -1157,13 +1146,12 @@ actor SubagentRunner {
                 try Task.checkCancellation()
                 var forceInteractions = toolInteractions
                 for attempt in 0...4 {
-                    let forceMessages = messagesForLLM, forceRounds = forceInteractions
-                    let forceResponse = try await WebRoundDeadline.bounded(webRoundSeconds) { try await openRouterService.generateResponse(
-                        messages: forceMessages,
+                    let forceResponse = try await openRouterService.generateResponse(
+                        messages: messagesForLLM,
                         imagesDirectory: imagesDirectory,
                         documentsDirectory: documentsDirectory,
                         tools: filteredTools,
-                        toolResultMessages: forceRounds.isEmpty ? nil : forceRounds,
+                        toolResultMessages: forceInteractions.isEmpty ? nil : forceInteractions,
                         calendarContext: nil,
                         emailContext: nil,
                         chunkSummaries: nil,
@@ -1181,8 +1169,8 @@ actor SubagentRunner {
                         providerOverride: effectiveProviderOverride,
                         reasoningEffortOverride: effectiveReasoningOverride,
                         textOnlyOverride: effectiveTextOnlyOverride,
-                        execution: runExecution, lane: .subagent(resolvedSessionId), persona: runPersona
-                    ) }
+                        execution: roundExecution, lane: .subagent(resolvedSessionId), persona: runPersona
+                    )
                     markProgress()
 
                     switch forceResponse {
@@ -1209,7 +1197,7 @@ actor SubagentRunner {
                     }
                     if !finalText.isEmpty || runError != nil { break }
                 }
-            } catch let e as WebRoundDeadline.Expired {
+            } catch let e as WebModelSilenceTimeoutError {
                 runError = "web_model_timeout: Subagent exhausted maxTurns (\(maxTurns)) and the final summary got no answer: \(e.errorDescription ?? "")"
             } catch {
                 runError = "Subagent exhausted maxTurns (\(maxTurns)) and failed to produce final summary: \(error.localizedDescription)"
