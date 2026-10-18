@@ -61,9 +61,19 @@ extension WebSubagentSelftest {
                 return .init(body: "{}", silentFor: 4)
             }
             var active: [String] = [], silent: [String] = []
-            for shared in [false, true] {
-                SharedDataTaskSession.forceForTesting = shared
-                for budget in [0.6, 1.0] {
+            // FoundationNetworking truncates request timeouts to whole
+            // seconds, so Linux uses whole-second budgets.
+            #if canImport(FoundationNetworking)
+            let budgets: [TimeInterval] = [1.0, 2.0]
+            #else
+            let budgets: [TimeInterval] = [0.6, 1.0]
+            #endif
+            for force in [false, true] {
+                SharedDataTaskSession.forceForTesting = force
+                // Label by the transport actually selected: on Linux the
+                // shared session is always used, whatever the force flag.
+                let shared = SharedDataTaskSession.active != nil
+                for budget in budgets {
                     var request = URLRequest(url: URL(string: h.baseD + "/active")!)
                     request.httpMethod = "POST"; request.httpBody = Data("{}".utf8); request.timeoutInterval = budget
                     do { _ = try await ResponsesHTTPTransport().send(request, overallTimeout: budget, connectTimeout: budget, idleTimeout: budget) }
@@ -79,7 +89,14 @@ extension WebSubagentSelftest {
             // Darwin per-request sessions: URLSession's resource clock wins
             // (no Briglia deadline label). Shared session: its resource clock
             // is seven days, so the delayed overall timer ends it.
-            let darwinResourceWon = active.filter { $0.hasSuffix("shared=false") }.allSatisfy { $0.hasPrefix("URLSession") }
+            // Required wherever a per-request session ran (always on Darwin,
+            // never on Linux); proves the R1 race is actually exercised.
+            let perRequest = active.filter { $0.hasSuffix("shared=false") }
+            #if canImport(FoundationNetworking)
+            let darwinResourceWon = perRequest.isEmpty
+            #else
+            let darwinResourceWon = perRequest.count == 2 && perRequest.allSatisfy { $0.hasPrefix("URLSession") }
+            #endif
             check("24.14 Responses transport, overall timer scheduled late: URLSession's resource expiry during an active stream is labelled NOT silence; a silent attempt under the same scheduling IS silence (per-request and shared sessions)",
                   active.count == 4 && active.allSatisfy { $0.contains("silent=false") } && darwinResourceWon
                   && silent.count == 4 && silent.allSatisfy { $0.contains("silent=true") },
