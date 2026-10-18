@@ -102,6 +102,23 @@ struct Doctor: AsyncParsableCommand {
         if provider == .openRouter, let pin = OpenRouterProviderPin.statusLine() {
             note(pin)
         }
+        // Per-model OpenRouter hosts (v0.2.56): unreadable map, unresolved
+        // legacy pin, a kept corrupt backup.
+        let pinStore = KeychainHelper.loadSnapshot()
+        switch OpenRouterPinMap.state(pinStore) {
+        case .corrupt, .unsupported:
+            check("OpenRouter per-model hosts readable", ok: false,
+                  hint: "\(OpenRouterPinMap.storageKey) doesn't decode — routing is automatic for every model; choose a host with /orprovider <slug>|off|default to recover (the old value is backed up)")
+        case .absent, .valid: break
+        }
+        if let pending = OpenRouterPinMap.pendingLegacy(pinStore) {
+            note("OpenRouter legacy host pin \(pending.value) can't be migrated (\(pending.reason)) — it stays on \(pending.model); replace it with /orprovider <slug>, off or default before switching model")
+        } else if pinStore[OpenRouterPinMap.legacyKey] != nil, OpenRouterPinMap.effectiveORModel(pinStore) != nil {
+            note("OpenRouter host pin migration pending (applied on the next settings change or start)")
+        }
+        if let backup = pinStore[OpenRouterPinMap.corruptBackupKey] {
+            note("an unreadable earlier OpenRouter host map is backed up (\(backup.utf8.count) bytes, \(OpenRouterPinMap.corruptBackupKey))")
+        }
         let openAIKey = KeychainHelper.load(key: KeychainHelper.openAITranscriptionApiKeyKey) ?? ""
         let mediaSnapshot = KeychainHelper.loadSnapshot()
         let mediaFollowsOpenRouter = MediaRouting.followsOpenRouter(stored: mediaSnapshot)

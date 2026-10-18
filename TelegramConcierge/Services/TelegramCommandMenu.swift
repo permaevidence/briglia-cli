@@ -51,6 +51,9 @@ enum TelegramCommandMenu {
         /// or "off"; `context` binds the menu to the OpenRouter model it
         /// listed hosts for (same hash as effort).
         case orProvider(context: String, slug: String)
+        /// OpenRouter picker preset (v0.2.56): an allowlisted catalog key,
+        /// because OpenRouter ids contain "/" (refused by the `m` charset).
+        case openRouterPreset(key: String)
     }
 
     /// Versioned prefix: a keyboard left over from an older build decodes as
@@ -104,6 +107,9 @@ enum TelegramCommandMenu {
         case .orProvider(let context, let slug):
             guard isValidContext(context), isValidArgument(slug) else { return nil }
             data = "\(dataPrefix):o:\(context):\(slug)"
+        case .openRouterPreset(let key):
+            guard OpenRouterPresets.preset(forKey: key) != nil, isValidArgument(key) else { return nil }
+            data = "\(dataPrefix):r:\(key)"
         }
         guard data.utf8.count <= maxDataBytes else { return nil }
         return data
@@ -124,6 +130,9 @@ enum TelegramCommandMenu {
             return isValidContext(parts[2]) && isValidArgument(parts[3]) ? .effort(context: parts[2], level: parts[3]) : nil
         case ("o", 4):
             return isValidContext(parts[2]) && isValidArgument(parts[3]) ? .orProvider(context: parts[2], slug: parts[3]) : nil
+        case ("r", 3):
+            // Exactly three components and an allowlisted key.
+            return OpenRouterPresets.preset(forKey: parts[2]) != nil ? .openRouterPreset(key: parts[2]) : nil
         default:
             return nil
         }
@@ -137,6 +146,7 @@ enum TelegramCommandMenu {
         case .modelTyped: return nil
         case .effort(_, let level): return "/effort \(level)"
         case .orProvider(_, let slug): return "/orprovider \(slug)"
+        case .openRouterPreset(let key): return OpenRouterPresets.preset(forKey: key).map { "/model \($0.id)" }
         }
     }
 
@@ -172,6 +182,15 @@ enum TelegramCommandMenu {
     enum ModelCatalog: Equatable {
         case opencode([ModelChoice])
         case chatgpt
+        /// OpenRouter presets with their host clause (EN).
+        case openrouter([OpenRouterRow])
+    }
+
+    struct OpenRouterRow: Equatable {
+        let key: String
+        let id: String
+        let label: String
+        let hostClause: String
     }
 
     static var chatGPTChoices: [ModelChoice] {
@@ -189,6 +208,7 @@ enum TelegramCommandMenu {
         switch catalog {
         case .opencode(let list): choices = list; heading = "OpenCode Go catalog — tap a model:"
         case .chatgpt: choices = chatGPTChoices; heading = "ChatGPT subscription models — tap a model:"
+        case .openrouter(let rows): return openRouterModelMenu(rows: rows, current: current)
         }
         var lines = ["Current model: \(current.isEmpty ? "(not set)" : current)", heading]
         var rows: [[Button]] = []
@@ -203,6 +223,25 @@ enum TelegramCommandMenu {
         }
         lines.append("Or /model <model-id> — takes effect from the next message.")
         return Menu(text: lines.joined(separator: "\n"), rows: rows)
+    }
+
+    /// OpenRouter picker: one row per preset (label + whether/which host is
+    /// pinned automatically) plus "Other model…".
+    static func openRouterModelMenu(rows: [OpenRouterRow], current: String) -> Menu {
+        var lines = ["Current model: \(current.isEmpty ? "(not set)" : current)",
+                     "OpenRouter — tap a model (each remembers its own host):"]
+        var buttons: [[Button]] = []
+        for (index, row) in rows.enumerated() {
+            lines.append("• \(row.label)\(index == 0 ? " · default" : "") — \(row.id)\n  \(row.hostClause)")
+            guard let data = encode(.openRouterPreset(key: row.key)) else { continue }
+            let short = row.hostClause.replacingOccurrences(of: "Host: ", with: "")
+            buttons.append([Button(label: (row.id == current ? "✓ " : "") + row.label + (index == 0 ? " · default" : "") + " — " + short, data: data)])
+        }
+        if let typed = encode(.modelTyped) {
+            buttons.append([Button(label: "Other model… (type /model vendor/model-id)", data: typed)])
+        }
+        lines.append("Or /model <vendor/model-id> for any OpenRouter model (no host pinned automatically). Takes effect from the next message.")
+        return Menu(text: lines.joined(separator: "\n"), rows: buttons)
     }
 
     // MARK: - /effort
