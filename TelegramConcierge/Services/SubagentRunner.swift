@@ -1209,6 +1209,8 @@ actor SubagentRunner {
                     }
                     if !finalText.isEmpty || runError != nil { break }
                 }
+            } catch let e as WebRoundDeadline.Expired {
+                runError = "web_model_timeout: Subagent exhausted maxTurns (\(maxTurns)) and the final summary got no answer: \(e.errorDescription ?? "")"
             } catch {
                 runError = "Subagent exhausted maxTurns (\(maxTurns)) and failed to produce final summary: \(error.localizedDescription)"
             }

@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 
 /// Per-round wall-clock deadline for the Web researcher's own model requests
 /// (WEB_OFFLINE_HANG fix, 2026-10-18).
@@ -21,6 +26,10 @@ import Foundation
 /// caller decides whether to retry. The race uses an unstructured task and a
 /// resolve-once continuation, so the deadline returns even if the request
 /// ignores cancellation (same pattern as the tool-batch staleness race).
+///
+/// Scope: research rounds and final summaries (main round, force-finish,
+/// round-limit summary). Web-session compaction calls are NOT bounded yet
+/// (follow-up), so this is not a wall-clock bound on the whole run.
 enum WebRoundDeadline {
     /// Hosted APIs (OpenRouter, OpenAI, ChatGPT subscription, OpenCode, any
     /// remote OpenAI-compatible API). The trials' rounds took 1–8 s; 180 s is
@@ -54,17 +63,53 @@ enum WebRoundDeadline {
         }
     }
 
-    /// Loopback, link-local, private-LAN and mDNS hosts (a home inference
-    /// server reached through an OpenAI-compatible profile).
+    /// Loopback, link-local, private-LAN, CGNAT and mDNS hosts (a home
+    /// inference server reached through an OpenAI-compatible profile).
+    /// IP literals are parsed (`inet_pton`, no DNS resolution): IPv4 ranges
+    /// apply only to a complete dotted-quad literal, so a DNS name such as
+    /// `api.10.0.0.5.example.com` is hosted. IPv6: loopback `::1`,
+    /// link-local `fe80::/10`, unique-local `fc00::/7`, and IPv4-mapped
+    /// `::ffff:a.b.c.d` judged by its IPv4 address. Names: `localhost`,
+    /// `*.localhost`, `*.local`, `*.lan`, `*.home.arpa`.
     static func isLocalHost(_ endpoint: String) -> Bool {
-        guard let host = URL(string: endpoint)?.host?.lowercased(), !host.isEmpty else { return false }
-        if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") || host.hasSuffix(".lan")
-            || host.hasSuffix(".home.arpa") || host == "::1" || host.hasPrefix("fe80:") || host.hasPrefix("fd") && host.contains(":") {
+        guard let raw = URL(string: endpoint)?.host else { return false }
+        return isLocalHostName(raw)
+    }
+
+    /// `host` as a URL yields it: brackets, an IPv6 zone (`%en0`) and a
+    /// trailing dot are tolerated.
+    static func isLocalHostName(_ raw: String) -> Bool {
+        var host = raw.lowercased()
+        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        if let zone = host.firstIndex(of: "%") { host = String(host[..<zone]) }
+        while host.hasSuffix(".") { host.removeLast() }
+        guard !host.isEmpty else { return false }
+        if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local")
+            || host.hasSuffix(".lan") || host.hasSuffix(".home.arpa") {
             return true
         }
-        let parts = host.split(separator: ".").compactMap { Int($0) }
-        guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else { return false }
-        switch (parts[0], parts[1]) {
+        var v4 = in_addr()
+        if host.withCString({ inet_pton(AF_INET, $0, &v4) }) == 1 {
+            return isLocalIPv4(withUnsafeBytes(of: &v4) { Array($0) })
+        }
+        var v6 = in6_addr()
+        if host.withCString({ inet_pton(AF_INET6, $0, &v6) }) == 1 {
+            let b = withUnsafeBytes(of: &v6) { Array($0) }
+            if b[0..<15].allSatisfy({ $0 == 0 }) && b[15] == 1 { return true }          // ::1
+            if b[0] == 0xfe && (b[1] & 0xc0) == 0x80 { return true }                   // fe80::/10
+            if (b[0] & 0xfe) == 0xfc { return true }                                   // fc00::/7
+            if b[0..<10].allSatisfy({ $0 == 0 }) && b[10] == 0xff && b[11] == 0xff {   // ::ffff:a.b.c.d
+                return isLocalIPv4(Array(b[12..<16]))
+            }
+            return false
+        }
+        return false
+    }
+
+    /// Network-order IPv4 octets.
+    private static func isLocalIPv4(_ o: [UInt8]) -> Bool {
+        guard o.count == 4 else { return false }
+        switch (o[0], o[1]) {
         case (127, _), (10, _), (192, 168), (169, 254): return true
         case (172, let b) where (16...31).contains(b): return true
         case (100, let b) where (64...127).contains(b): return true  // CGNAT / Tailscale

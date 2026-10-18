@@ -224,6 +224,26 @@ extension WebSubagentSelftest {
               && WebRoundDeadline.isLocalHost("http://localhost:11434/v1")
               && !WebRoundDeadline.isLocalHost("https://api.openai.com/v1") && !WebRoundDeadline.isLocalHost("https://opencode.ai/zen/go/v1")
               && !WebRoundDeadline.isLocalHost("https://openrouter.ai/api/v1") && !WebRoundDeadline.isLocalHost("https://172.32.0.1/v1"))
+
+        // 24.9 Local-host classifier (Codex R1): parsed IP literals through
+        // the platform URL host, no DNS. (endpoint, expected local)
+        let hostCases: [(String, Bool)] = [
+            ("http://[::ffff:127.0.0.1]:1234/v1", true), ("http://[::ffff:192.168.1.9]:8080/v1", true),
+            ("http://[::ffff:8.8.8.8]/v1", false), ("http://[fe90::1]:1234/v1", true), ("http://[febf::1]/v1", true),
+            ("http://[fec0::1]/v1", false), ("http://[fe80::1%25en0]:1234/v1", true), ("http://[::1]:1234/v1", true),
+            ("http://[fd12::1]:1234/v1", true), ("http://[fc00::5]/v1", true), ("http://[2001:db8::1]/v1", false),
+            ("http://[::2]/v1", false), ("http://127.0.0.1:1234/v1", true), ("http://127.255.0.9/v1", true),
+            ("http://169.254.3.3/v1", true), ("http://100.127.0.1/v1", true), ("http://100.128.0.1/v1", false),
+            ("http://172.15.0.1/v1", false), ("http://GPU-Box.LOCAL:8000/v1", true), ("http://localhost./v1", true),
+            ("http://ollama.home.arpa/v1", true), ("http://box.lan/v1", true),
+            ("https://api.10.0.0.5.example.com/v1", false), ("https://10.0.0.5.example.com/v1", false),
+            ("https://127.0.0.1.nip.io/v1", false), ("https://api.openai.com/v1", false),
+            ("http://10.0.0/v1", false), ("http://10.0.0.5.6/v1", false), ("http://0x7f000001/v1", false),
+            ("not a url", false),
+        ]
+        let hostMisses = hostCases.filter { WebRoundDeadline.isLocalHost($0.0) != $0.1 }.map { "\($0.0)→\(!$0.1)" }
+        check("24.9 local-host classifier: IPv4 ranges only on a complete dotted-quad literal (DNS names with numeric labels are hosted), IPv6 loopback / fe80::/10 / fc00::/7 / IPv4-mapped judged by its IPv4, zone ids and brackets via the platform URL host, local DNS suffixes kept (\(hostCases.count) cases)",
+              hostMisses.isEmpty, hostMisses.joined(separator: ", "))
         serverA.clear(); serverB.clear()
     }
 }
