@@ -328,7 +328,7 @@ extension MenuSelftestContext {
 
         // New setup through setup-api (UT app payload: legacy default_host_pin).
         resetOpenRouter()
-        var res = await SetupAPICore.apply(provider(model, extra: ["default_host_pin": true, "host_listing": served]))
+        var res = await SetupAPICore.apply(provider(model, extra: ["default_host_pin": true, "host_listing": served, "listing_basis": basis()]))
         check("or-picker api: the UT/Quick Setup payload (default_host_pin) pins Together on a new setup, legacy token kept",
               res["ok"] as? Bool == true && OpenRouterProviderPin.pinnedSlugs() == ["together"] && hostPin(res)["result"] as? String == "pinned_default"
               && entry(model)?.by == .preset && KeychainHelper.load(key: KeychainHelper.openRouterModelKey) == model, "\(res)")
@@ -392,7 +392,7 @@ extension MenuSelftestContext {
         resetOpenRouter()
         try? KeychainHelper.saveBatch([ProviderProfiles.activeProfileKey: String?.none, KeychainHelper.llmProviderKey: String?.none])
         res = await SetupAPICore.apply(["provider": ["profile": "openrouter", "api_key": "sk-or-fixture", "model": model, "preset_host_pin": true,
-                                                     "host_listing": served]])
+                                                     "host_listing": served, "listing_basis": basis()]])
         check("or-picker api: first setup with activate omitted activates OpenRouter in the same write as the model and the pin",
               res["ok"] as? Bool == true && ProviderProfiles.activeProfile() == .openrouter
               && KeychainHelper.load(key: KeychainHelper.llmProviderKey) == LLMProvider.openRouter.rawValue && OpenRouterProviderPin.pinnedSlugs() == ["together"], "\(res)")

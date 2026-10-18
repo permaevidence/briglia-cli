@@ -93,6 +93,24 @@ extension SelftestContext {
         check("settings: the OpenRouter save hands setup-api its host list (no fetch inside the gate)",
               ((appliedRequests.last?["provider"] as? [String: Any])?["host_listing"] as? [String: Any])?["model"] as? String == haiku
               && (appliedRequests.last?["provider"] as? [String: Any])?["preset_host_pin"] as? Bool == true)
+        check("settings: the handed-over host list carries the basis read before it (Codex finding 1)",
+              ((appliedRequests.last?["provider"] as? [String: Any])?["listing_basis"] as? [String: Any])?["model"] as? String == ProviderProfiles.openRouterSetupDefaultModel)
+        // A newer explicit choice written while the list was being read is
+        // never released by that older list.
+        try KeychainHelper.saveBatch([KeychainHelper.openRouterModelKey: ProviderProfiles.openRouterSetupDefaultModel])
+        let glm = "z-ai/glm-5.3-flash"
+        settings.env.openRouterListing = { store, model, _ in
+            _ = try? OpenRouterProviderPin.commitHostChoice(model: glm, choice: .pin(["deepinfra"]), listing: nil,
+                                                            expected: OpenRouterPinMap.RoutingBasis.of(KeychainHelper.loadSnapshot()))
+            return OpenRouterProviderPin.HostListing(model: model, result: .success([OpenRouterProviderPin.Endpoint(providerName: "Together", tag: "together", promptUSDPerM: nil,
+                                                     completionUSDPerM: nil, cacheReadUSDPerM: nil, contextLength: nil, uptimeLast30m: nil, status: 0)]))
+        }
+        let glmBody: [String: Any] = ["section": "provider", "values": ["profile": "openrouter", "model": glm, "effort": "high", "text_only": false, "activate": false]]
+        _ = await settings.handle("verify", body: glmBody, generation: g)
+        let glmSaved = await settings.handle("save", body: glmBody, generation: g)
+        let glmEntry = OpenRouterPinMap.state(KeychainHelper.loadSnapshot()).map?.models[glm]
+        check("settings: an older host list never releases a newer user pin written during it",
+              glmEntry?.hosts == ["deepinfra"] && glmEntry?.by == .user, "\(glmSaved) \(String(describing: glmEntry))")
         settings.env.apply = realApply
         let status = settings.status()
         let text = String(data: try JSONSerialization.data(withJSONObject: status), encoding: .utf8)!

@@ -62,6 +62,12 @@ struct OpenRouterPinSelftest: AsyncParsableCommand {
             (27, "U17 a legacy pin arriving during the listing is never overwritten by the preset"),
             (28, "U16 a stale worker never recreates a removed map"),
             (31, "D11 OpenRouter offers max; other providers keep their lists"),
+            (29, "V1 setup-api: an older listing never releases a newer user pin"),
+            (30, "V2 menu: a concurrent effort edit after the barrier is refused, never overwritten"),
+            (32, "V4 setup-api: an already-cancelled same-model save writes nothing"),
+            (33, "V5 active OpenRouter, activate:false, text_only true: both vision slots agree"),
+            (34, "V3 a startup migration deferred by a busy lock is retried by the pass, which then pins"),
+            (35, "V6 a failed auto-pin on the model in use shows as not applied"),
         ]
         var caught = 0
         for (n, label) in breaks {
@@ -159,6 +165,7 @@ final class ORPinSuite {
         await maxEffort()
         removal()
         await upgradePass()
+        await reviewRound2()
         reset()
     }
 
@@ -283,7 +290,7 @@ final class ORPinSuite {
                                    ("failed", failed(glm), ["novita"])] {
             reset([PM.legacyKey: "novita"])
             PM.ensureMigrated()
-            let r = Result { try Pin.saveOpenRouterProfile(apiKey: "sk-or", model: glm, effort: "high", textOnly: false, listing: l, presetHostPin: true, activate: false, now: now) }
+            let r = Result { try Pin.saveOpenRouterProfile(apiKey: "sk-or", model: glm, effort: "high", textOnly: false, listing: l, presetHostPin: true, activate: false, listingBasis: basis(), now: now) }
             check("C m2 (\(label)): the legacy pin becomes the destination's entry, validated",
                   (try? r.get()) != nil && entry(glm)?.hosts == expect && snap()[PM.legacyKey] == nil, "\(r) \(snap())")
         }
@@ -294,7 +301,7 @@ final class ORPinSuite {
     func migrationInSave() {
         reset(orStore(model: glm, extra: [PM.legacyKey: "novita"]))
         let r = Result { try Pin.saveOpenRouterProfile(apiKey: "sk-or", model: haiku, effort: "high", textOnly: false,
-                                                       listing: listing(haiku, ["google-vertex/global"]), presetHostPin: true, activate: false, now: now) }
+                                                       listing: listing(haiku, ["google-vertex/global"]), presetHostPin: true, activate: false, listingBasis: basis(), now: now) }
         check("D migration attaches the legacy pin to the SOURCE model, never the destination",
               (try? r.get()) != nil && entry(glm)?.hosts == ["novita"] && entry(haiku)?.hosts == ["google-vertex"] && entry(haiku)?.by == .preset, "\(r) \(snap())")
         reset(orStore(model: glm, extra: [PM.legacyKey: "novita", ProviderProfiles.openrouterTextOnlyKey: "true", KeychainHelper.textOnlyModelEnabledKey: "true"]))
@@ -345,7 +352,7 @@ final class ORPinSuite {
         // Row 9 + reset through the public path.
         reset(orStore(model: dflt))
         PM.ensureMigrated()
-        _ = Result { try Pin.saveOpenRouterProfile(apiKey: nil, model: dflt, effort: "medium", textOnly: false, listing: listing(dflt, ["together"]), presetHostPin: true, activate: false, now: now) }
+        _ = Result { try Pin.saveOpenRouterProfile(apiKey: nil, model: dflt, effort: "medium", textOnly: false, listing: listing(dflt, ["together"]), presetHostPin: true, activate: false, listingBasis: basis(), now: now) }
         check("E row 9: a same-model save decides nothing (even with a listing)", entry(dflt) == nil)
         let reset1 = host(dflt, .reset, listing(dflt, ["together"]))
         check("E an explicit reset bypasses row 9 and applies the preset", (try? reset1.get())?.outcome == .pinnedPreset(model: dflt, slug: "together") && entry(dflt)?.by == .preset)
@@ -493,7 +500,7 @@ final class ORPinSuite {
         reset([:])
         let w = KeychainHelper._testWriteCount
         let first = Result { try Pin.saveOpenRouterProfile(apiKey: "sk-or", model: dflt, effort: "high", textOnly: false, listing: listing(dflt, ["together"]),
-                                                           presetHostPin: true, activate: nil, now: now) }
+                                                           presetHostPin: true, activate: nil, listingBasis: basis(), now: now) }
         check("K first setup with activate omitted activates in the same single write as model and pin",
               (try? first.get())?.activated == true && KeychainHelper._testWriteCount == w + 1 && ProviderProfiles.activeProfile() == .openrouter
               && entry(dflt)?.hosts == ["together"], "\(first)")
@@ -786,7 +793,6 @@ final class ORPinSuite {
         (p, _) = pass(fetch: { _, _ in try? KeychainHelper.save(key: PM.legacyKey, value: "deepinfra"); return [self.ep("together"), self.ep("deepinfra")] })
         r = await p.attemptOnce()
         let untouched = entry(dflt) == nil && map()?.upgrade != nil
-        PM.ensureMigrated()
         (p, _) = pass(fetch: together)
         let after = await p.attemptOnce()
         check("U17 a legacy pin arriving during the listing is never overwritten by the preset",
