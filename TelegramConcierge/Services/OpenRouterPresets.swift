@@ -71,7 +71,9 @@ enum OpenRouterPresets {
         case .corrupt: return HostStatus(state: .corrupt, hosts: [])
         case .unsupported: return HostStatus(state: .unsupported, hosts: [])
         case .absent:
-            return HostStatus(state: preset?.autoHost != nil ? .autoWillPin : .none, hosts: preset?.autoHost.map { [$0] } ?? [])
+            let inUse = OpenRouterPinMap.effectiveORModel(store) == model && !OpenRouterPinMap.broken(35)
+            return HostStatus(state: preset?.autoHost == nil ? .none : inUse ? .autoUnavailable : .autoWillPin,
+                              hosts: preset?.autoHost.map { [$0] } ?? [])
         case .valid(let map):
             if let entry = map.models[model] {
                 switch entry.by {
@@ -85,7 +87,12 @@ enum OpenRouterPresets {
                 return HostStatus(state: .upgradePending, hosts: [host])
             }
             if let host = preset?.autoHost {
-                return HostStatus(state: autoFailed ? .autoUnavailable : .autoWillPin, hosts: [host])
+                // The model IN USE with no entry and no pending operation:
+                // its auto-pin was attempted on the switch and didn't land
+                // (failed or unchecked listing), so it is not applied.
+                // Other models: it will be pinned when picked.
+                let inUse = OpenRouterPinMap.effectiveORModel(store) == model && !OpenRouterPinMap.broken(35)
+                return HostStatus(state: autoFailed || inUse ? .autoUnavailable : .autoWillPin, hosts: [host])
             }
             return HostStatus(state: .none, hosts: [])
         }
@@ -95,7 +102,7 @@ enum OpenRouterPresets {
     static func hostClause(_ status: HostStatus) -> String {
         let names = status.hosts.map(hostName).joined(separator: ", ")
         switch status.state {
-        case .autoWillPin: return "Host: \(names), pinned automatically"
+        case .autoWillPin: return "Host: \(names), pinned automatically when picked"
         case .autoPinned: return "Host: \(names) (pinned automatically)"
         case .autoUnavailable: return "Host: chosen by OpenRouter (Briglia's host \(names) not pinned yet; /orprovider default retries)"
         case .upgradePending: return "Host: \(names) will be applied when OpenRouter confirms it"

@@ -844,7 +844,7 @@
   function orHostText(x) {
     var hosts = (x.hosts || []).join(', ');
     switch (x.host_state) {
-      case 'auto_will_pin': return T('Host: ' + hosts + ', pinned automatically', 'Host: ' + hosts + ', fissato in automatico');
+      case 'auto_will_pin': return T('Host: ' + hosts + ', pinned automatically when picked', 'Host: ' + hosts + ', fissato in automatico quando lo scegli');
       case 'auto_pinned': return T('Host: ' + hosts + ' (pinned automatically)', 'Host: ' + hosts + ' (fissato in automatico)');
       case 'auto_unavailable': return T('Host: chosen by OpenRouter (Briglia’s host ' + hosts + ' not pinned yet)', 'Host: lo sceglie OpenRouter (l’host di Briglia ' + hosts + ' non è ancora fissato)');
       case 'upgrade_pending': return T('Host: ' + hosts + ' will be applied when OpenRouter confirms it', 'Host: ' + hosts + ' verrà applicato quando OpenRouter lo conferma');
@@ -861,7 +861,7 @@
     var c = S.ai.openrouter_current_host || {};
     if (!c.model) return null;
     var st = c.host_state, preset = c.preset_host;
-    var briglia = st === 'auto_pinned' || st === 'auto_will_pin' || st === 'upgrade_pending';
+    var briglia = st === 'auto_pinned';
     var auto = st === 'user_automatic' || st === 'released' || (!preset && st === 'none');
     var opts = [];
     if (preset) opts.push(h('button', { class: 'btn ' + (briglia ? 'primary' : 'secondary') + ' small', type: 'button', id: 'or-host-briglia', disabled: inflight > 0,

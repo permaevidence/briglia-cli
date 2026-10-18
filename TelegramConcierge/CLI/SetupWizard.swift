@@ -426,10 +426,14 @@ struct SetupWizard {
             """)
         }
         // The host list is read now, outside any lock; the model and the
-        // pin then commit in one locked write.
+        // pin then commit in one locked write, checked against the basis
+        // read BEFORE the listing (an older listing never releases a newer
+        // choice, §13.2).
         let listing: OpenRouterProviderPin.HostListing?
+        let before = KeychainHelper.loadSnapshot()
+        let listingBasis = OpenRouterPinMap.RoutingBasis.of(before)
         do {
-            listing = try await OpenRouterProviderPin.listingIfNeeded(store: KeychainHelper.loadSnapshot(), newModel: model,
+            listing = try await OpenRouterProviderPin.listingIfNeeded(store: before, newModel: model,
                                                                       apiKey: key, presetHostPin: true)
         } catch {
             print("  ✖ Cancelled — nothing saved.")
@@ -438,9 +442,16 @@ struct SetupWizard {
         let outcome: OpenRouterProviderPin.PinOutcome
         do {
             outcome = try OpenRouterProviderPin.saveOpenRouterProfile(apiKey: key, model: model, effort: "high", textOnly: textOnly,
-                                                                     listing: listing, presetHostPin: true, activate: false).outcome
+                                                                     listing: listing, presetHostPin: true, activate: false,
+                                                                     listingBasis: listingBasis).outcome
         } catch let refusal as OpenRouterProviderPin.PendingLegacyRefusal {
             print("  ✖ \(refusal.localizedDescription)")
+            return false
+        } catch let stale as OpenRouterProviderPin.StaleBasis {
+            print("  ✖ \(stale.reason) — nothing saved. Run setup again.")
+            return false
+        } catch is CancellationError {
+            print("  ✖ Cancelled — nothing saved.")
             return false
         } catch {
             reportFatalSaveFailure(error)

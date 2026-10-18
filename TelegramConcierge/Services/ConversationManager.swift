@@ -5994,7 +5994,7 @@ class ConversationManager: ObservableObject {
         let same = expected.effectiveModel == destination
         let lead = same ? "✅ \(destination) is already the model in use." : "✅ Model switched to \(destination) — takes effect from the next message."
         var tail = outcome.chatNote
-        if same, let host = preset?.autoHostName, OpenRouterPresets.hostStatus(model: destination, store: KeychainHelper.loadSnapshot()).state == .autoWillPin {
+        if same, let host = preset?.autoHostName, OpenRouterPresets.hostStatus(model: destination, store: KeychainHelper.loadSnapshot()).state == .autoUnavailable {
             tail += " \(host) isn't pinned for it yet: /orprovider default applies it."
         }
         try? await sendText(lead + visionNote + tail)
@@ -6189,6 +6189,9 @@ class ConversationManager: ObservableObject {
     private var pendingHostNotice: String?
 
     func startUpgradePresetPass() {
+        // A finished loop is restarted by a later call (start() is a no-op
+        // while one is in flight).
+        if let pass = upgradePresetPass, !OpenRouterPinMap.broken(34) { pass.start(); return }
         guard upgradePresetPass == nil else { return }
         let pass = OpenRouterUpgradePass(isIdle: { [weak self] in
             guard let self else { return false }
@@ -6204,6 +6207,8 @@ class ConversationManager: ObservableObject {
             default: break
             }
             if let notice = self.pendingHostNotice { print("[ConversationManager] \(notice)") }
+        }, onMigrated: { [weak self] in
+            self?.modelRoutingGeneration += 1
         })
         upgradePresetPass = pass
         pass.start()

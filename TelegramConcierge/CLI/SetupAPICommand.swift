@@ -543,21 +543,35 @@ enum SetupAPICore {
     /// authorization was revoked mid-section aborts with nothing further
     /// written. A throw surfaces as `superseded` with `applied` listing what
     /// committed before it. `setup-api` and the UT app pass nothing.
-    static func apply(_ request: [String: Any], ownsLease: Bool = false, checkpoint: () throws -> Void = {}) async -> [String: Any] {
+    static func apply(_ request: [String: Any], ownsLease: Bool = false, checkpoint generationCheckpoint: () throws -> Void = {}) async -> [String: Any] {
         if let refusal = migrationRefusal() { return refusal }
+        if Task.isCancelled && !OpenRouterPinMap.broken(32) {
+            var payload = errorResponse(code: "cancelled", message: "cancelled before anything was saved")
+            payload["applied"] = [String]()
+            return payload
+        }
         ProviderProfiles.ensureMigrated()
         var applied: [String] = []
         var warnings: [String] = []
         var pinWritten: Bool?
         var hostPin: OpenRouterProviderPin.PinOutcome?
+        // Cancellation is its own condition (separate from the caller's
+        // generation checkpoint): checked on entry and before every write.
+        func checkpoint() throws {
+            if !OpenRouterPinMap.broken(32) { try Task.checkCancellation() }
+            try generationCheckpoint()
+        }
         do {
             try checkpoint()
             if let section = request["provider"] as? [String: Any] {
                 // OpenRouter: the new model's host list is read HERE, before
                 // any write and outside the store lock (or taken from the
-                // caller, the menu, which reads it before its barrier).
-                let listing = try await openRouterListing(for: section)
-                hostPin = try applyProvider(section, ownsLease: ownsLease, checkpoint: checkpoint, listing: listing)
+                // caller, the menu, which reads it before its barrier). The
+                // basis is captured BEFORE that await and enforced in the
+                // save transaction (§13.2).
+                let (listing, listingBasis) = try await openRouterListing(for: section)
+                try checkpoint()
+                hostPin = try applyProvider(section, ownsLease: ownsLease, checkpoint: checkpoint, listing: listing, listingBasis: listingBasis)
                 applied.append("provider")
                 switch hostPin {
                 case .presetSkipped(let model, let reason)?:
@@ -681,6 +695,10 @@ enum SetupAPICore {
             var payload = errorResponse(code: "superseded", message: error.message)
             payload["applied"] = applied
             return payload
+        } catch is CancellationError {
+            var payload = errorResponse(code: "cancelled", message: "cancelled before anything further was saved")
+            payload["applied"] = applied
+            return payload
         } catch {
             var payload = errorResponse(code: "internal", message: error.localizedDescription)
             payload["applied"] = applied
@@ -702,31 +720,42 @@ enum SetupAPICore {
     /// `{"model","hosts"}` / `{"model","error"}` / `{"skip": true}` (the
     /// caller decided none is needed and nothing is fetched here).
     /// `default_host_pin: true` asks for the new-setup default host.
-    static func openRouterListing(for section: [String: Any]) async throws -> OpenRouterProviderPin.HostListing? {
+    /// Returns the listing and the routing basis it was obtained against:
+    /// captured here before the await when setup-api looks it up, or the
+    /// caller's `listing_basis` for a supplied listing (nil = unknown, which
+    /// the save treats as stale unless `expected_basis` pins everything).
+    static func openRouterListing(for section: [String: Any]) async throws -> (OpenRouterProviderPin.HostListing?, OpenRouterPinMap.RoutingBasis?) {
         let presetPin = try presetHostPinFlag(section)
         guard nonEmptyString(section["profile"])?.lowercased() == ProviderProfiles.Profile.openrouter.rawValue,
               section["remove"] as? Bool != true, let model = nonEmptyString(section["model"]) else {
-            if section["host_listing"] != nil || section["default_host_pin"] != nil || section["preset_host_pin"] != nil || section["expected_basis"] != nil {
+            if section["host_listing"] != nil || section["default_host_pin"] != nil || section["preset_host_pin"] != nil
+                || section["expected_basis"] != nil || section["listing_basis"] != nil {
                 guard nonEmptyString(section["profile"])?.lowercased() == ProviderProfiles.Profile.openrouter.rawValue else {
-                    throw APIError(code: "invalid_value", message: "host_listing/preset_host_pin/expected_basis apply to the openrouter profile only")
+                    throw APIError(code: "invalid_value", message: "host_listing/preset_host_pin/expected_basis/listing_basis apply to the openrouter profile only")
                 }
             }
-            return nil
+            return (nil, nil)
         }
+        guard OpenRouterPinMap.isValidModelID(model) else {
+            throw APIError(code: "invalid_value", message: "provider.model is not a valid OpenRouter model id")
+        }
+        let suppliedBasis = try routingBasis(section["listing_basis"], field: "listing_basis")
         if let raw = section["host_listing"] {
             guard let object = raw as? [String: Any] else {
                 throw APIError(code: "invalid_value", message: "provider.host_listing must be an object")
             }
-            if object["skip"] as? Bool == true, object.count == 1 { return nil }
+            if object["skip"] as? Bool == true, object.count == 1 { return (nil, suppliedBasis) }
             guard let listing = OpenRouterProviderPin.HostListing(json: object) else {
                 throw APIError(code: "invalid_value", message: "provider.host_listing must be {model, endpoints}, {model, hosts} or {model, error}")
             }
-            return listing
+            return (listing, suppliedBasis)
         }
         let store = KeychainHelper.loadSnapshot()
+        let basis = OpenRouterPinMap.broken(29) ? nil : OpenRouterPinMap.RoutingBasis.of(store)
         let key = nonEmptyString(section["api_key"]) ?? nonEmptyString(store[KeychainHelper.openRouterApiKeyKey])
         // Cancellation propagates: the whole apply aborts before any write.
-        return try await OpenRouterProviderPin.listingIfNeeded(store: store, newModel: model, apiKey: key, presetHostPin: presetPin)
+        let listing = try await OpenRouterProviderPin.listingIfNeeded(store: store, newModel: model, apiKey: key, presetHostPin: presetPin)
+        return (listing, basis)
     }
 
     /// `preset_host_pin` (new) and `default_host_pin` (legacy alias): JSON
@@ -748,19 +777,35 @@ enum SetupAPICore {
 
     /// The caller's expected routing basis (the menu), compared inside the
     /// locked write. `{active_profile, llm_provider, model, map, legacy}`.
+    /// `settings` (optional, profile saves only) is the menu's
+    /// `OpenRouterProviderPin.settingsDigest`: effort and both vision slots.
     static func expectedBasis(_ raw: Any?) throws -> OpenRouterPinMap.RoutingBasis? {
+        try routingBasis(raw, field: "expected_basis", allowSettings: true)
+    }
+
+    static func expectedSettings(_ raw: Any?) throws -> String? {
+        guard let obj = raw as? [String: Any], let value = obj["settings"] else { return nil }
+        guard let text = value as? String, !text.isEmpty else {
+            throw APIError(code: "invalid_value", message: "expected_basis.settings must be a non-empty string")
+        }
+        return text
+    }
+
+    static func routingBasis(_ raw: Any?, field: String, allowSettings: Bool = false) throws -> OpenRouterPinMap.RoutingBasis? {
         guard let raw else { return nil }
-        guard let obj = raw as? [String: Any], let map = obj["map"] as? String,
-              Set(obj.keys).isSubset(of: ["active_profile", "llm_provider", "model", "map", "legacy"]) else {
-            throw APIError(code: "invalid_value", message: "expected_basis must be {active_profile, llm_provider, model, map, legacy}")
+        let allowed: Set<String> = allowSettings ? ["active_profile", "llm_provider", "model", "map", "legacy", "settings"]
+                                                 : ["active_profile", "llm_provider", "model", "map", "legacy"]
+        guard let obj = raw as? [String: Any], let map = obj["map"] as? String, Set(obj.keys).isSubset(of: allowed) else {
+            throw APIError(code: "invalid_value", message: "\(field) must be {active_profile, llm_provider, model, map, legacy\(allowSettings ? ", settings" : "")}")
         }
         func opt(_ k: String) -> String? { obj[k] as? String }
         return OpenRouterPinMap.RoutingBasis(activeProfile: opt("active_profile"), llmProvider: opt("llm_provider"),
                                              effectiveModel: opt("model"), mapTag: map, legacyRaw: opt("legacy"))
     }
 
-    static func basisJSON(_ b: OpenRouterPinMap.RoutingBasis) -> [String: Any] {
+    static func basisJSON(_ b: OpenRouterPinMap.RoutingBasis, settings: String? = nil) -> [String: Any] {
         var out: [String: Any] = ["map": b.mapTag]
+        if let settings { out["settings"] = settings }
         if let v = b.activeProfile { out["active_profile"] = v }
         if let v = b.llmProvider { out["llm_provider"] = v }
         if let v = b.effectiveModel { out["model"] = v }
@@ -770,7 +815,8 @@ enum SetupAPICore {
 
     @discardableResult
     private static func applyProvider(_ section: [String: Any], ownsLease: Bool = false, checkpoint: () throws -> Void = {},
-                                      listing: OpenRouterProviderPin.HostListing? = nil) throws -> OpenRouterProviderPin.PinOutcome? {
+                                      listing: OpenRouterProviderPin.HostListing? = nil,
+                                      listingBasis: OpenRouterPinMap.RoutingBasis? = nil) throws -> OpenRouterProviderPin.PinOutcome? {
         guard let raw = nonEmptyString(section["profile"]),
               let profile = ProviderProfiles.Profile(rawValue: raw.lowercased()) else {
             throw APIError(code: "invalid_value",
@@ -891,7 +937,9 @@ enum SetupAPICore {
                 // in one locked write.
                 let saved = try OpenRouterProviderPin.saveOpenRouterProfile(apiKey: apiKey, model: model, effort: effort, textOnly: textOnly,
                                                                             listing: listing, presetHostPin: try presetHostPinFlag(section),
-                                                                            activate: section["activate"] as? Bool, expected: try expectedBasis(section["expected_basis"]))
+                                                                            activate: section["activate"] as? Bool, expected: try expectedBasis(section["expected_basis"]),
+                                                                            expectedSettings: try expectedSettings(section["expected_basis"]),
+                                                                            listingBasis: listingBasis)
                 hostPin = saved.outcome
                 return hostPin
             } else {
@@ -901,6 +949,7 @@ enum SetupAPICore {
                                                  nativeToolMedia: section["native_tool_media"] as? Bool)
             }
         } catch let error as APIError { throw error
+        } catch is CancellationError { throw CancellationError()
         } catch let refusal as OpenRouterProviderPin.PendingLegacyRefusal {
             throw APIError(code: "pending_legacy_pin", message: refusal.localizedDescription)
         } catch let stale as OpenRouterProviderPin.StaleBasis {
@@ -971,6 +1020,7 @@ enum SetupAPICore {
             throw APIError(code: "stale", message: stale.reason)
         } catch let e as OpenRouterPinMap.PinMapError {
             throw APIError(code: "invalid_value", message: e.localizedDescription)
+        } catch is CancellationError { throw CancellationError()
         } catch { throw saveFailed(error) }
         return KeychainHelper._testWriteCount != before
     }

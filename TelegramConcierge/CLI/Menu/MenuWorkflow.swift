@@ -1404,7 +1404,7 @@ final class MenuWorkflow {
     /// conservatively under the lock).
     private func openRouterPinFields(model: String, apiKey: String,
                                      checkpoint: @escaping @Sendable () throws -> Void) async throws -> [String: Any] {
-        var fields: [String: Any] = ["preset_host_pin": true, "expected_basis": SetupAPICore.basisJSON(snapshot.openRouterBasis)]
+        var fields: [String: Any] = ["preset_host_pin": true, "expected_basis": orSaveBasis()]
         if OpenRouterProviderPin.listingNeeded(store: snapshot.orStore, newModel: model, presetHostPin: true) {
             // Cancellation propagates: the action aborts before any write.
             let listing = try await OpenRouterProviderPin.hostListing(model: model, apiKey: apiKey, fetch: { m, k in
@@ -1416,6 +1416,14 @@ final class MenuWorkflow {
             fields["host_listing"] = ["skip": true]
         }
         return fields
+    }
+
+    /// The basis an OpenRouter PROFILE save carries (§13.4): the routing
+    /// basis plus the page's full applicable settings (effort, both vision
+    /// slots), all compared inside setup-api's locked write, so an edit made
+    /// elsewhere after the barrier is refused, never overwritten.
+    private func orSaveBasis() -> [String: Any] {
+        SetupAPICore.basisJSON(snapshot.openRouterBasis, settings: OpenRouterPinMap.broken(30) ? nil : snapshot.openRouterSettings)
     }
 
     /// The current OpenRouter model's host state for the page.
@@ -1572,7 +1580,7 @@ final class MenuWorkflow {
         // skip (same model: nothing to check), so setup-api never fetches
         // inside the settings barrier (Codex round 2, answer 1).
         if profile == .openrouter, section["host_listing"] == nil { section["host_listing"] = ["skip": true] }
-        if profile == .openrouter, section["expected_basis"] == nil { section["expected_basis"] = SetupAPICore.basisJSON(snapshot.openRouterBasis) }
+        if profile == .openrouter, section["expected_basis"] == nil { section["expected_basis"] = orSaveBasis() }
         var payload: [String: Any] = ["provider": section]
         if snapshot.openAIMasked != nil { payload["web_search_backend"] = WebSearchBackend.openai.rawValue }
         try checkpoint()
@@ -1845,7 +1853,7 @@ final class MenuWorkflow {
             // Same model: no host list to check; never fetched inside the barrier.
             if active == .openrouter {
                 section["host_listing"] = ["skip": true]
-                section["expected_basis"] = SetupAPICore.basisJSON(snapshot.openRouterBasis)
+                section["expected_basis"] = orSaveBasis()
             }
             request = ["provider": section]
         }

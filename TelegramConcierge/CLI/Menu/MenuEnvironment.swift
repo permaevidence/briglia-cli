@@ -62,17 +62,14 @@ struct MenuSnapshot: Equatable {
     /// The current OpenRouter model's stored pin, empty = automatic.
     var openRouterPin: [String] { OpenRouterProviderPin.pinnedSlugs(store: orStore) }
     var openRouterBasis: OpenRouterPinMap.RoutingBasis { OpenRouterPinMap.RoutingBasis.of(orStore) }
+    /// `settingsDigest` of this snapshot: the page's full applicable
+    /// OpenRouter settings basis, enforced inside setup-api's locked write.
+    var openRouterSettings: String { OpenRouterProviderPin.settingsDigest(orStore) }
 
-    static let orStoreKeys = [KeychainHelper.openRouterModelKey, OpenRouterPinMap.storageKey, OpenRouterPinMap.legacyKey,
-                              ProviderProfiles.activeProfileKey, KeychainHelper.llmProviderKey]
-
+    /// The same projection setup-api digests for `expected_basis.settings`
+    /// (effort and both vision slots included, the key only as "set").
     static func orStore(from store: [String: String]) -> [String: String] {
-        var out: [String: String] = [:]
-        for key in orStoreKeys { if let v = store[key] { out[key] = v } }
-        if !(store[KeychainHelper.openRouterApiKeyKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            out[KeychainHelper.openRouterApiKeyKey] = "set"
-        }
-        return out
+        OpenRouterProviderPin.settingsProjection(store)
     }
     /// The saved server list doesn't decode (every server action refuses).
     var serversDamaged = false

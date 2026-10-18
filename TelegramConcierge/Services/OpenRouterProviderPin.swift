@@ -486,6 +486,7 @@ enum OpenRouterProviderPin {
     /// whole operation on every caller).
     static func hostListing(model: String, apiKey: String?,
                             fetch: (String, String) async throws -> [Endpoint] = { try await fetchEndpoints(model: $0, apiKey: $1) }) async throws -> HostListing {
+        if !OpenRouterPinMap.broken(32) { try Task.checkCancellation() }
         guard let apiKey, !apiKey.isEmpty else {
             return HostListing(model: model, result: .failure(FetchError(description: "no OpenRouter key to ask with")))
         }
@@ -612,8 +613,41 @@ enum OpenRouterProviderPin {
 
     static func listingIfNeeded(store: [String: String], newModel: String, apiKey: String?, presetHostPin: Bool,
                                 fetch: (String, String) async throws -> [Endpoint] = { try await fetchEndpoints(model: $0, apiKey: $1) }) async throws -> HostListing? {
+        if !OpenRouterPinMap.broken(32) { try Task.checkCancellation() }
         guard listingNeeded(store: store, newModel: newModel, presetHostPin: presetHostPin) else { return nil }
         return try await hostListing(model: newModel, apiKey: apiKey, fetch: fetch)
+    }
+
+    // MARK: Settings basis (§13.4: the menu's full applicable basis)
+
+    /// The non-secret store keys an OpenRouter profile save reads or writes:
+    /// routing (profile, provider, model, per-model map, legacy pin), effort,
+    /// both vision slots and the runtime protocol slots. The key is reduced
+    /// to its presence ("set"), so the projection never holds a secret.
+    static let settingsBasisKeys = [KeychainHelper.openRouterModelKey, OpenRouterPinMap.storageKey, OpenRouterPinMap.legacyKey,
+                                    ProviderProfiles.activeProfileKey, KeychainHelper.llmProviderKey,
+                                    KeychainHelper.openRouterReasoningEffortKey, ProviderProfiles.openrouterTextOnlyKey,
+                                    KeychainHelper.textOnlyModelEnabledKey, ProviderProfiles.runtimeProtocolKey,
+                                    ProviderProfiles.runtimeNativeMediaKey]
+
+    static func settingsProjection(_ store: [String: String]) -> [String: String] {
+        var out: [String: String] = [:]
+        for key in settingsBasisKeys { if let v = store[key] { out[key] = v } }
+        if !OpenRouterPinMap.trimmed(store[KeychainHelper.openRouterApiKeyKey]).isEmpty {
+            out[KeychainHelper.openRouterApiKeyKey] = "set"
+        }
+        return out
+    }
+
+    /// A digest of `settingsProjection` (idempotent: a projection digests
+    /// like the store it came from). The menu sends it as
+    /// `expected_basis.settings`; the save compares it with the locked
+    /// pre-migration dictionary, so a concurrent effort/vision edit is
+    /// refused instead of overwritten.
+    static func settingsDigest(_ store: [String: String]) -> String {
+        let projection = settingsProjection(store)
+        let lines = projection.keys.sorted().map { "\($0)=\(projection[$0]!)" }
+        return OpenRouterPinMap.sha256(lines.joined(separator: "\n"))
     }
 
     // MARK: Errors
@@ -637,15 +671,30 @@ enum OpenRouterProviderPin {
     /// the locked pre-migration dictionary. `activate` nil = setup-api's
     /// default (`current == nil || current == openrouter`); activation joins
     /// the same transaction.
+    ///
+    /// `listingBasis` is the basis read BEFORE the caller's listing await
+    /// (setup-api's own lookup, the wizard, browser settings): the source
+    /// (profile, provider, effective model) must be unchanged, and a changed
+    /// map revision or legacy value makes the listing stale for destructive
+    /// use, exactly as `/model` (§13.2). A real listing with neither
+    /// `expected` nor `listingBasis` has an unknown basis and is treated as
+    /// stale. `expectedSettings` (the menu) is `settingsDigest` of the page's
+    /// snapshot. Cancellation is checked on entry and inside the lock.
     static func saveOpenRouterProfile(apiKey: String?, model: String, effort: String?, textOnly: Bool,
                                       listing: HostListing?, presetHostPin: Bool, activate: Bool? = false,
-                                      expected: OpenRouterPinMap.RoutingBasis? = nil, now: Date = Date()) throws -> (outcome: PinOutcome, activated: Bool) {
+                                      expected: OpenRouterPinMap.RoutingBasis? = nil, expectedSettings: String? = nil,
+                                      listingBasis: OpenRouterPinMap.RoutingBasis? = nil,
+                                      now: Date = Date()) throws -> (outcome: PinOutcome, activated: Bool) {
+        if !OpenRouterPinMap.broken(32) { try Task.checkCancellation() }
+        guard OpenRouterPinMap.isValidModelID(model) else { throw OpenRouterPinMap.PinMapError.invalidModel }
         let changes = try ProviderProfiles.profileChanges(.openrouter, apiKey: apiKey, baseURL: nil, model: model,
                                                       effort: effort, textOnly: textOnly)
         var result: (outcome: PinOutcome, activated: Bool) = (.unchanged, false)
         try KeychainHelper.conditionalTransaction { store in
+            if !OpenRouterPinMap.broken(32) { try Task.checkCancellation() }
             result = try applyOpenRouterSave(&store, changes: changes, model: model, textOnly: textOnly, listing: listing,
-                                             presetHostPin: presetHostPin, activate: activate, expected: expected, now: now)
+                                             presetHostPin: presetHostPin, activate: activate, expected: expected,
+                                             expectedSettings: expectedSettings, listingBasis: listingBasis, now: now)
         }
         return result
     }
@@ -656,9 +705,24 @@ enum OpenRouterProviderPin {
     /// per-model decision, activation.
     static func applyOpenRouterSave(_ store: inout [String: String], changes: [String: String?], model: String, textOnly: Bool,
                                     listing: HostListing?, presetHostPin: Bool, activate: Bool?,
-                                    expected: OpenRouterPinMap.RoutingBasis?, now: Date) throws -> (outcome: PinOutcome, activated: Bool) {
-        if let expected, OpenRouterPinMap.RoutingBasis.of(store) != expected {
+                                    expected: OpenRouterPinMap.RoutingBasis?, expectedSettings: String? = nil,
+                                    listingBasis: OpenRouterPinMap.RoutingBasis? = nil, now: Date) throws -> (outcome: PinOutcome, activated: Bool) {
+        let pre = OpenRouterPinMap.RoutingBasis.of(store)
+        if let expected, pre != expected {
             throw StaleBasis(reason: "the OpenRouter settings changed while this was being saved")
+        }
+        if let expectedSettings, settingsDigest(store) != expectedSettings, !OpenRouterPinMap.broken(30) {
+            throw StaleBasis(reason: "the OpenRouter settings changed while this was being saved")
+        }
+        var staleListing = false
+        if let listingBasis, !OpenRouterPinMap.broken(29) {
+            guard pre.activeProfile == listingBasis.activeProfile, pre.llmProvider == listingBasis.llmProvider,
+                  pre.effectiveModel == listingBasis.effectiveModel else {
+                throw StaleBasis(reason: "the provider or model changed while checking OpenRouter's host list")
+            }
+            staleListing = pre.mapTag != listingBasis.mapTag || pre.legacyRaw != listingBasis.legacyRaw
+        } else if expected == nil, listing != nil, !OpenRouterPinMap.broken(29) {
+            staleListing = true  // a listing whose basis is unknown never releases or pins
         }
         let source = OpenRouterPinMap.effectiveORModel(store)
         if source != nil, source != model, let pending = OpenRouterPinMap.pendingLegacy(store), !OpenRouterPinMap.broken(21) {
@@ -675,9 +739,16 @@ enum OpenRouterProviderPin {
         let outcome = try OpenRouterPinMap.decideSave(&store, source: source, destination: model,
                                                       listing: listing?.listingResult(for: model) ?? .notFetched,
                                                       flags: .init(presetHostPin: presetHostPin, explicitReset: false),
-                                                      staleListing: false, m2Legacy: legacyForDestination, now: now)
+                                                      staleListing: staleListing, m2Legacy: legacyForDestination, now: now)
         var activated = false
         let current = store[ProviderProfiles.activeProfileKey].flatMap(ProviderProfiles.Profile.init(rawValue:))
+        // Already running OpenRouter (locked dictionary): the runtime vision
+        // slot follows the saved profile in this same write, whatever
+        // `activate` says (activate:false only means "don't switch").
+        if !OpenRouterPinMap.broken(33),
+           current == .openrouter || (current == nil && LLMProvider.fromStoredValue(store[KeychainHelper.llmProviderKey]) == .openRouter) {
+            store[KeychainHelper.textOnlyModelEnabledKey] = textOnly ? "true" : "false"
+        }
         if activate ?? (current == nil || current == .openrouter) {
             store[KeychainHelper.llmProviderKey] = LLMProvider.openRouter.rawValue
             store[KeychainHelper.textOnlyModelEnabledKey] = textOnly ? "true" : "false"
@@ -699,8 +770,10 @@ enum OpenRouterProviderPin {
     /// listing stale for destructive use (§13.2).
     static func commitModelChange(destination: String, textOnly: Bool?, listing: HostListing?,
                                   expected: OpenRouterPinMap.RoutingBasis, now: Date = Date()) throws -> PinOutcome {
+        if !OpenRouterPinMap.broken(32) { try Task.checkCancellation() }
         var outcome = PinOutcome.unchanged
         try KeychainHelper.conditionalTransaction { store in
+            if !OpenRouterPinMap.broken(32) { try Task.checkCancellation() }
             let pre = OpenRouterPinMap.RoutingBasis.of(store)
             guard pre.activeProfile == expected.activeProfile, pre.llmProvider == expected.llmProvider,
                   pre.effectiveModel == expected.effectiveModel else {
@@ -754,8 +827,10 @@ enum OpenRouterProviderPin {
         if case .pin(let slugs) = choice, slugs.isEmpty || !OpenRouterPinMap.isValidHostList(slugs) {
             throw OpenRouterPinMap.PinMapError.invalidHosts
         }
+        if !OpenRouterPinMap.broken(32) { try Task.checkCancellation() }
         var result = HostCommit(outcome: .unchanged, recovered: false)
         try KeychainHelper.conditionalTransaction { store in
+            if !OpenRouterPinMap.broken(32) { try Task.checkCancellation() }
             result = try applyHostChoice(&store, model: model, choice: choice, listing: listing, expected: expected, now: now)
         }
         return result

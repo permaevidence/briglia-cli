@@ -22,6 +22,9 @@ final class BrowserSettingsWorkflow {
         var openRouterListing: ([String: String], String, String?) async throws -> OpenRouterProviderPin.HostListing? = { store, model, key in
             try await OpenRouterProviderPin.listingIfNeeded(store: store, newModel: model, apiKey: key, presetHostPin: true)
         }
+        /// The store the listing's basis is read from (a seam for the
+        /// selftest's interleavings).
+        var loadStore: () -> [String: String] = { KeychainHelper.loadSnapshot() }
         var beginMutation: () async -> Bool = { true }
         var endMutation: () -> Void = {}
         var reload: () async -> Void = {}
@@ -97,12 +100,18 @@ final class BrowserSettingsWorkflow {
         if var provider = saveRequest["provider"] as? [String: Any],
            provider["profile"] as? String == ProviderProfiles.Profile.openrouter.rawValue,
            let model = provider["model"] as? String, provider["host_listing"] == nil {
-            let store = KeychainHelper.loadSnapshot()
+            let store = env.loadStore()
             let key = (provider["api_key"] as? String) ?? store[KeychainHelper.openRouterApiKeyKey]
+            // The basis is read BEFORE the listing and handed over with it:
+            // setup-api enforces it under the store lock, so this older
+            // listing never releases a newer host choice (§13.2).
+            let listingBasis = OpenRouterPinMap.RoutingBasis.of(store)
             // Cancellation propagates and aborts the save before any write.
             let listing = try await env.openRouterListing(store, model, key)
+            try Task.checkCancellation()
             try checkpoint()
             provider["host_listing"] = listing?.json ?? ["skip": true]
+            if !OpenRouterPinMap.broken(29) { provider["listing_basis"] = SetupAPICore.basisJSON(listingBasis) }
             // Presets get Briglia's host when the model has no host decision
             // (same per-model rule as the menu and /model).
             provider["preset_host_pin"] = true

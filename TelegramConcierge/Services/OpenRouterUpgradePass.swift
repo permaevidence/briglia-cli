@@ -19,6 +19,8 @@ final class OpenRouterUpgradePass {
 
     private let isIdle: () -> Bool
     private let onCommitted: (OpenRouterProviderPin.UpgradeAttempt) -> Void
+    /// A deferred migration committed (routing may have changed).
+    private let onMigrated: () -> Void
     private let fetch: Fetch
     private var task: Task<Void, Never>?
     private(set) var attempts = 0
@@ -28,9 +30,11 @@ final class OpenRouterUpgradePass {
 
     init(isIdle: @escaping () -> Bool,
          onCommitted: @escaping (OpenRouterProviderPin.UpgradeAttempt) -> Void,
+         onMigrated: @escaping () -> Void = {},
          fetch: @escaping Fetch = { try await OpenRouterProviderPin.fetchEndpoints(model: $0, apiKey: $1) }) {
         self.isIdle = isIdle
         self.onCommitted = onCommitted
+        self.onMigrated = onMigrated
         self.fetch = fetch
     }
 
@@ -61,7 +65,27 @@ final class OpenRouterUpgradePass {
     /// One attempt (also the selftest entry point).
     func attemptOnce() async -> OpenRouterProviderPin.UpgradeAttempt {
         attempts += 1
-        guard let store = KeychainHelper.tryLoadSnapshot() else { return .retry("store busy") }
+        guard var store = KeychainHelper.tryLoadSnapshot() else { return .retry("store busy") }
+        // Settle pending migration first, through the same idle-admitted,
+        // non-blocking path: an initial migration deferred at startup (busy
+        // lock, failed write) creates the map and its marker here, and a
+        // legacy pin that arrived later is settled (m1 writes the model's
+        // entry and clears the marker in that write; m3 stays pending and
+        // the pass never pins). Plain `migrate` never recreates a removed or
+        // corrupt map (m5/m6/m7 write nothing).
+        if !OpenRouterPinMap.broken(34) {
+            var probe = store
+            if (try? OpenRouterPinMap.migrate(&probe, iid: { "probe" }))?.changed == true {
+                guard isIdle() else { return .retry("a turn is running") }
+                let migrated: KeychainHelper.TryResult
+                do { migrated = try KeychainHelper.tryTransaction { try OpenRouterPinMap.migrate(&$0) } }
+                catch { return .retry("migration write failed: \(error.localizedDescription)") }
+                if migrated == .busy { return .retry("store busy") }
+                if migrated == .wrote { onMigrated() }
+                guard let fresh = KeychainHelper.tryLoadSnapshot() else { return .retry("store busy") }
+                store = fresh
+            }
+        }
         guard let model = OpenRouterProviderPin.upgradeCandidate(store) else {
             // A marker that isn't applicable right now (no key yet, another
             // model current, a legacy pin pending) stays; no marker = done.
