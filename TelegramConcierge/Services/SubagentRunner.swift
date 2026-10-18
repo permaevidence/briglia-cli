@@ -654,6 +654,18 @@ actor SubagentRunner {
                 textOnlyOverride: effectiveTextOnlyOverride, lane: .subagent(resolvedSessionId))
             : nil
         let runExecution: ProviderExecutionContext? = webExecution ?? (snapshot.wireProtocol == .responses ? snapshot : nil)
+        // WEB_OFFLINE_HANG (owner decision 2026-10-18): the researcher's
+        // model ROUNDS (main round, in-loop force-finish, round-limit summary;
+        // nested Agent(Web) runs this same code) retry a SILENCE timeout once,
+        // then fail with WebModelSilenceTimeoutError (-> web_model_timeout).
+        // Transport timing and every other retry are unchanged
+        // (ModelSilenceTimeout). Same context otherwise (ResponsesTurn is a
+        // shared reference); compaction calls keep runExecution as before.
+        let roundExecution: ProviderExecutionContext? = {
+            guard subagentType.isWebResearcher, var context = runExecution else { return runExecution }
+            context.silenceTimeoutRetryLimit = ModelSilenceTimeout.researcherRetryLimit
+            return context
+        }()
         let responsesExecution: ProviderExecutionContext? = runExecution?.wireProtocol == .responses ? runExecution : nil
         defer { runExecution?.responsesTurn.close() }
         if responsesExecution != nil,
@@ -815,7 +827,7 @@ actor SubagentRunner {
                             providerOverride: effectiveProviderOverride,
                             reasoningEffortOverride: effectiveReasoningOverride,
                             textOnlyOverride: effectiveTextOnlyOverride,
-                            execution: runExecution, lane: .subagent(resolvedSessionId), imageLog: log,
+                            execution: roundExecution, lane: .subagent(resolvedSessionId), imageLog: log,
                             persona: runPersona
                         )
                     },
@@ -898,7 +910,7 @@ actor SubagentRunner {
                                 providerOverride: effectiveProviderOverride,
                                 reasoningEffortOverride: effectiveReasoningOverride,
                                 textOnlyOverride: effectiveTextOnlyOverride,
-                                execution: runExecution, lane: .subagent(resolvedSessionId), persona: runPersona
+                                execution: roundExecution, lane: .subagent(resolvedSessionId), persona: runPersona
                             )
                             markProgress()
 
@@ -1116,6 +1128,9 @@ actor SubagentRunner {
             } catch let e as SubagentStalenessError {
                 runError = e.localizedDescription
                 break loop
+            } catch let e as WebModelSilenceTimeoutError {
+                runError = "web_model_timeout: " + (e.errorDescription ?? "")
+                break loop
             } catch {
                 runError = "Subagent error: \(error.localizedDescription)"
                 break loop
@@ -1154,7 +1169,7 @@ actor SubagentRunner {
                         providerOverride: effectiveProviderOverride,
                         reasoningEffortOverride: effectiveReasoningOverride,
                         textOnlyOverride: effectiveTextOnlyOverride,
-                        execution: runExecution, lane: .subagent(resolvedSessionId), persona: runPersona
+                        execution: roundExecution, lane: .subagent(resolvedSessionId), persona: runPersona
                     )
                     markProgress()
 
@@ -1182,6 +1197,8 @@ actor SubagentRunner {
                     }
                     if !finalText.isEmpty || runError != nil { break }
                 }
+            } catch let e as WebModelSilenceTimeoutError {
+                runError = "web_model_timeout: Subagent exhausted maxTurns (\(maxTurns)) and the final summary got no answer: \(e.errorDescription ?? "")"
             } catch {
                 runError = "Subagent exhausted maxTurns (\(maxTurns)) and failed to produce final summary: \(error.localizedDescription)"
             }

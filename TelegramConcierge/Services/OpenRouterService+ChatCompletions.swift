@@ -375,7 +375,8 @@ extension OpenRouterService {
         try WireInterceptForTesting.check("chat", request.httpBody)
         print("[OpenRouterService] Sending request to \(context.providerLabel) (\(context.model)) with \(apiMessages.count) messages")
         let (data, _) = try await sendChatRequestWithRetry(
-            request, providerLabel: context.providerLabel, model: context.model
+            request, providerLabel: context.providerLabel, model: context.model,
+            silenceRetryLimit: context.silenceTimeoutRetryLimit
         )
         return try adapter.decodeResponse(data)
     }

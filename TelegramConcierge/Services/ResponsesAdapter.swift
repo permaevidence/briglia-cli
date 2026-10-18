@@ -143,7 +143,7 @@ struct ResponsesAdapter {
             request.setValue(body["prompt_cache_key"]?.responsesString, forHTTPHeaderField: "session_id")
         }
         try SessionAffinity.decorate(&request, apiKey: context.affinityKey, lane: context.lane)
-        request.timeoutInterval = context.usingCustomEndpoint ? 1200 : 360
+        request.timeoutInterval = ModelSilenceTimeout.requestTimeout(customEndpoint: context.usingCustomEndpoint)
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
         request.httpBody = try encoder.encode(JSONValue.object(body))
         guard request.httpBody!.count <= ResponsesLimits.roundBytes else { throw ResponsesFailure.overflow }
@@ -172,6 +172,7 @@ struct ResponsesAdapter {
         var didRefreshAfter401 = false
         var attempt = 0
         var dispatch = 0
+        var silenceTimeouts = 0
         while attempt < 4 {
             try Task.checkCancellation()
             do {
@@ -252,6 +253,16 @@ struct ResponsesAdapter {
                 } else if let e = error as? URLError {
                     retry = [.timedOut, .networkConnectionLost, .cannotConnectToHost, .notConnectedToInternet].contains(e.code)
                 } else { retry = false }
+                // Researcher rounds only (WEB_OFFLINE_HANG): a silence timeout
+                // is retried at most `silenceTimeoutRetryLimit` times; the
+                // schedule itself is untouched.
+                if let limit = context.silenceTimeoutRetryLimit, ModelSilenceTimeout.isSilence(error) {
+                    silenceTimeouts += 1
+                    if silenceTimeouts > limit || !(attempt < 3 && context.adapterRetries == .standard) {
+                        print("[ResponsesAdapter] \(context.providerLabel) request for \(context.model) timed out on silence \(silenceTimeouts) time(s); research round stopped")
+                        throw ModelSilenceTimeout.exhausted(error, attempts: silenceTimeouts, timeout: Self.hostedIdleTimeout(request) ?? request.timeoutInterval)
+                    }
+                }
                 guard retry, attempt < 3, context.adapterRetries == .standard else { throw error }
                 try await Task.sleep(nanoseconds: UInt64(min(30, max(0, delay)) * 1_000_000_000))
                 attempt += 1
