@@ -644,13 +644,24 @@ def check_ext(text, ctoks, anchor):
     d = 0
     pd = 0
     seen_lines = set()
+    first_on_line = set()
+    validated_lines = set()
     for i, t in enumerate(ctoks):
+        is_first = t.line not in first_on_line
+        first_on_line.add(t.line)
+        if not is_first:
+            if i > 0 and d == 1 and pd == 0 and (t.kind == "attr" or (t.kind == "word" and t.text in DECL_START)) \
+               and t.line not in validated_lines:
+                errs.append(f"{anchor}: declaration keyword {t.text!r} mid-line at member level (line {t.line})")
+            seen_lines.add(t.line)
         if i > 0 and d == 1 and pd == 0 and t.line not in seen_lines and \
            (t.kind == "attr" or (t.kind == "word" and t.text in DECL_START)):
             seen_lines.add(t.line)
             header = lines[t.line - 1].strip()
             if not any(r.match(header) for r in EXT_HEADER_RES):
                 errs.append(f"{anchor}: member header not allowed: {header!r}")
+            else:
+                validated_lines.add(t.line)
         elif i > 0 and d == 1 and pd == 0 and t.line not in seen_lines and t.kind == "word":
             seen_lines.add(t.line)
             errs.append(f"{anchor}: unexpected token at member level: {t.text!r} (line {t.line})")
