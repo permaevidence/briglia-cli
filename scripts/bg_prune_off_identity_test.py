@@ -950,7 +950,7 @@ def selftest_errors(rel, text):
     """Hidden and inert during command discovery: shouldDisplay: false and
     static properties limited to `configuration` and literal constants."""
     errs = []
-    if "shouldDisplay: false" not in text:
+    if ("ParsableCommand" in text or "CommandConfiguration" in text) and "shouldDisplay: false" not in text:
         errs.append(f"{rel}: selftest configuration must use shouldDisplay: false")
     for no, raw in enumerate(text.split("\n"), start=1):
         s = raw.strip()
@@ -959,7 +959,7 @@ def selftest_errors(rel, text):
             continue
         if m.group(2) == "configuration" and m.group(1) == "let":
             continue
-        if re.fullmatch(r'static let [A-Za-z0-9_]+(: [A-Za-z]+)? = ("[^"\\]*"|-?[0-9_.]+|true|false)', s):
+        if re.fullmatch(r'static let [A-Za-z0-9_]+(: [A-Za-z]+)? = ("(?:[^"\\]|\\[^(])*"|-?[0-9_.]+|true|false)', s):
             continue
         errs.append(f"{rel}:{no}: selftest static property must be `configuration` or a literal constant: {s!r}")
     return errs

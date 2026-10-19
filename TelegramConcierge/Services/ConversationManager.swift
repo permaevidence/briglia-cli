@@ -16662,6 +16662,7 @@ extension ConversationManager {
     func backgroundPrunePreRequest(runId: UUID?, inputs: BackgroundPruneSummaryInputs, execution: ProviderExecutionContext?,
                                    inline: () async throws -> Bool) async throws -> Bool {
         guard let runId else { return try await inline() }
+        await bgPruneHold("t1.entry")
         var did = false
         func estimate() async throws -> Int { try await bgPrunePreRequestEstimate(inputs).total }
         // 1. A ready job (became ready between T0 and T1).
@@ -16797,7 +16798,7 @@ extension ConversationManager {
         let identity = await bgPruneIdentity(execution)
         let limits = bgPruneLimits(identity: identity.identity, model: identity.model)
         guard estimate >= limits.ceiling else { return .noChange }
-        bgPruneLog("bgprune.admit.reduce", requestKey)
+        bgPruneLog("bgprune.admit.reduce", "\(requestKey): ~\(estimate) ≥ \(limits.ceiling)")
         return try await bgPruneReduce(runId: runId, requestKey: requestKey, appliedAlready: false, execution: execution,
             need: { $0 >= $2 }, admitted: admitted, liveRounds: liveRounds, afterApply: afterApply, inline: inline)
     }
@@ -17298,8 +17299,8 @@ extension ConversationManager {
                     reply += " The prune that was being applied finished first."
                 } else {
                     reply += " The prune being applied was stopped before it changed the conversation"
-                    reply += record.savedDescriptions > 0
-                        ? ", \(record.savedDescriptions) file description\(record.savedDescriptions == 1 ? "" : "s") it had already saved are kept." : "."
+                    let n = record.savedDescriptions
+                    reply += n > 0 ? ", \(n) file description\(n == 1 ? "" : "s") it had already saved \(n == 1 ? "is" : "are") kept." : "."
                 }
             } else {
                 reply += " Cancelling the prune being applied — it is still finishing; it will not change the conversation. Memory commands wait until it has stopped."
@@ -17354,8 +17355,9 @@ extension ConversationManager {
                 return "A background prune is still stopping."
             }
             if record.committed { return "The background prune had already been applied." }
-            return record.savedDescriptions > 0
-                ? "The background prune was not applied (\(record.savedDescriptions) file description\(record.savedDescriptions == 1 ? "" : "s") it had saved are kept)."
+            let n = record.savedDescriptions
+            return n > 0
+                ? "The background prune was not applied (\(n) file description\(n == 1 ? "" : "s") it had saved \(n == 1 ? "is" : "are") kept)."
                 : "The background prune was not applied."
         }
         return nil
@@ -17472,7 +17474,7 @@ extension ConversationManager {
         guard let job = backgroundPruneJob else { return "no-job" }
         return bgPruneGuardFailure(job)
     }
-    func bgPruneTestSummaryOutcome(affected: [Int], useFrozen: Bool, model: String?) async -> BackgroundPruneSummaryOutcome {
+    func bgPruneTestSummaryOutcome(affected: [Int], model: String?) async -> BackgroundPruneSummaryOutcome {
         let plan = PrunePlan(actions: affected.map { .toolInteractions(index: $0, savedTokens: 0) },
                              pruningBoundary: (affected.max() ?? -1) + 1)
         let execution = await openRouterService.executionContext(modelOverride: model, providerOverride: nil,
@@ -17503,6 +17505,31 @@ extension ConversationManager {
     }
     func bgPruneTestEligibleError(_ error: Error) -> Bool {
         BackgroundPruneErrors.isEligibleInBand(error)
+    }
+    var bgPruneTestBlocksExit: Bool {
+        backgroundPruneBlocksExit
+    }
+    func bgPruneTestDescription(_ filename: String) async -> String? {
+        await FileDescriptionService.shared.get(filename: filename)
+    }
+    func bgPruneTestSaveDescription(_ filename: String, _ text: String) async {
+        await FileDescriptionService.shared.saveMultiple([filename: text])
+    }
+    func bgPruneTestCancelledSummary(affected: [Int]) async -> BackgroundPruneSummaryOutcome {
+        let task = Task { @MainActor in
+            await self.bgPruneTestSummaryOutcome(affected: affected, model: nil)
+        }
+        task.cancel()
+        return await task.value
+    }
+    func bgPruneTestRawSendError() async -> Error? {
+        do {
+            _ = try await openRouterService.generateResponse(messages: messages, imagesDirectory: imagesDirectory,
+                documentsDirectory: documentsDirectory, tools: [], lane: .main)
+            return nil
+        } catch {
+            return error
+        }
     }
 }
 // }BGPRUNE
