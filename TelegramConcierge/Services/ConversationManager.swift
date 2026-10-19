@@ -9499,8 +9499,10 @@ class ConversationManager: ObservableObject {
                 func bgPruneFinalSend() async throws -> LLMResponse {
                     let recovered = try await ImageRejectionRecovery.run(
                         send: { log in
-                            try await openRouterService.generateResponse(
-                                messages: finalHistory,
+                            // The attempt's projection, read at send time (same value as today's).
+                            let bgPruneFinalHistory = finalHistory
+                            return try await openRouterService.generateResponse(
+                                messages: bgPruneFinalHistory,
                                 imagesDirectory: imagesDirectory,
                                 documentsDirectory: documentsDirectory,
                                 tools: lastToolsForRound,
