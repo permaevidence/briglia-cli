@@ -116,8 +116,19 @@ class ConversationManager: ObservableObject {
         case model(Date)
         case tools(callIds: [String], labels: [String], Date)
         case archiveWait(Date)
+        // BGPRUNE{ A-CASE
+        case pruneWait(Date)
+        // }BGPRUNE
     }
     private var runPhases: [UUID: RunPhase] = [:]
+    // BGPRUNE{ A-STORE
+    static let backgroundPruneDefaultsKey = "ada.pruneBackground"
+    private var backgroundPruneJob: BackgroundPruneJob? = nil
+    private var backgroundPruneFallbackDue: Bool = false
+    private var backgroundPruneGeneration: UInt64 = 0
+    private var backgroundPrunePendingOff: Bool = false
+    private var backgroundPruneObservedBounds: [String: Int] = [:]
+    // }BGPRUNE
 
     /// Undeduplicated local notices (terminal and app socket): ordinary /stop
     /// replies of local stops and the ordered follow-ups of local series.
@@ -4396,6 +4407,11 @@ class ConversationManager: ObservableObject {
         case "/websubagent":
             await handleWebSubagentCommand(argument: commandArgument(from: text))
             return true
+        // BGPRUNE{ A-CMD
+        case "/prunebackground":
+            await backgroundPruneCommand(argument: commandArgument(from: text))
+            return true
+        // }BGPRUNE
         case "/archiveinline":
             await handleArchiveInlineCommand(argument: commandArgument(from: text))
             return true
@@ -5435,6 +5451,10 @@ class ConversationManager: ObservableObject {
             try? await sendText("⏳ Memory archiving is in flight — send /restart again in a minute.")
             return
         }
+        // BGPRUNE{ A-RST
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         archiveExitPending = true
         defer { archiveExitPending = false }
         UpgradeService.writeRestartMarker(version: adaCLIVersion, kind: .restart)
@@ -5484,6 +5504,10 @@ class ConversationManager: ObservableObject {
         }
         // Blocks a new archive across the check/download awaits; every path
         // that returns without exec (up to date, refused, failed, …) resets it.
+        // BGPRUNE{ A-UPG
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         archiveExitPending = true
         defer { archiveExitPending = false }
         var trustWarnings: [String] = []
@@ -6635,6 +6659,10 @@ class ConversationManager: ObservableObject {
         if let background = await backgroundStatusSection() { contextLine += "\n" + background }
         if let paused = statusSpendPauseLine() { contextLine += "\n" + paused }
         contextLine += "\n" + (await archiveModeStatusLine())
+        // BGPRUNE{ A-STATUS
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         let testWarning = ForceDetach.active ? "⚠️ test setting: force-detach is ON\n" : ""
 
         if log.isEmpty {
@@ -6831,6 +6859,10 @@ class ConversationManager: ObservableObject {
             try? await sendText("Archived messages are about to be removed at your next message; retry /prune after it.", to: address)
             return
         }
+        // BGPRUNE{ A-PRUNE
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         let pruneActivityId = beginMaintenance(.pruning)
         defer { endMaintenance(pruneActivityId) }
         let targetTokens = configuredTargetContextTokens()
@@ -7300,6 +7332,10 @@ class ConversationManager: ObservableObject {
         // (In-flight archiving / user-context extraction are deliberately NOT
         // cancelled here; they run on detached tasks that continue to
         // completion so we don't lose summaries or fact extraction.)
+        // BGPRUNE{ A-STOP1
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         let cancelledSubagents = await SubagentBackgroundRegistry.shared.cancelAllReturningIds()
         stoppedSubagentHandles.formUnion(cancelledSubagents)
         let killedBackgroundSubagents = cancelledSubagents.count
@@ -7338,6 +7374,10 @@ class ConversationManager: ObservableObject {
                 : stoppedPendingTurn ? "⛔ I stopped the interrupted request; it won't resume."
                 : (stoppedBash.isEmpty ? "I'm not doing anything at the moment." : "⛔ Stopped.")
         }
+        // BGPRUNE{ A-STOP2
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         if killedBackgroundSubagents > 0 {
             text += " Also stopped \(killedBackgroundSubagents) background assistant\(killedBackgroundSubagents == 1 ? "" : "s")."
         }
@@ -7483,6 +7523,10 @@ class ConversationManager: ObservableObject {
     func describeStillFinishing(runId: UUID, now: Date = Date()) -> String {
         func running(_ since: Date) -> String { "(running \(Self.stopDuration(Int(now.timeIntervalSince(since)))))" }
         switch runPhases[runId] {
+        // BGPRUNE{ A-ARM
+        case .pruneWait(let since):
+            return "waiting for a background prune to finish \(running(since))"
+        // }BGPRUNE
         case .archiveWait(let since):
             return "memory archiving continues \(running(since))"
         case .tools(let callIds, let labels, let since):
@@ -8237,6 +8281,10 @@ class ConversationManager: ObservableObject {
         salvageRunId: UUID? = nil
     ) async throws -> ToolAwareResponse {
         try Task.checkCancellation()
+        // BGPRUNE{ A-T0
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         // Cache diagnosis (plan v2 §1.4, off unless enabled): the intended
         // prefix transitions of this turn are recorded for the main lane.
         CacheDiagnostics.noteTransition("turn-start", lane: .main)
@@ -8449,6 +8497,30 @@ class ConversationManager: ObservableObject {
         let prePruneSystemPromptDate = currentSystemPromptTimestamp()
 
         // Prune stored tool interactions if full context exceeds budget
+        // BGPRUNE{ A-T1/open
+        if backgroundPruneEngaged {
+            let didPrune = try await pruneToolInteractionsIfNeeded(
+                currentUserMessageId: currentUserMessageId,
+                calendarContext: calendarContext,
+                emailContext: emailContext,
+                chunkSummaries: chunkSummaries,
+                totalChunkCount: totalChunkCount,
+                turnStartDate: prePruneSystemPromptDate,
+                tools: initialToolsForRound,
+                deferredMCPSummaries: initialDeferredSummaries, execution: responsesExecution,
+                persona: turnPersona
+            )
+            if didPrune {
+                CacheDiagnostics.noteTransition("prune", lane: .main)
+                refreshSystemPromptTimestamp()
+                // Cache is already invalidated by the prune — take the opportunity to
+                // refresh stale calendar/email context with current data for free.
+                let refreshed = await getFrozenSystemContext(forceRefresh: true)
+                calendarContext = refreshed.calendar
+                emailContext = refreshed.email
+            }
+        } else {
+        // }BGPRUNE
         let didPrune = try await pruneToolInteractionsIfNeeded(
             currentUserMessageId: currentUserMessageId,
             calendarContext: calendarContext,
@@ -8469,6 +8541,9 @@ class ConversationManager: ObservableObject {
             calendarContext = refreshed.calendar
             emailContext = refreshed.email
         }
+        // BGPRUNE{ A-T1/close
+        }
+        // }BGPRUNE
 
         // Use the frozen system prompt timestamp (only refreshes on prune events or day change)
         let systemPromptDate = currentSystemPromptTimestamp()
@@ -8613,6 +8688,10 @@ class ConversationManager: ObservableObject {
                 cacheDiagnosticsSystemDate = systemPromptDate
             }
             if let failure = checkpointWriteFailure { throw PruneArchiveStore.Failure(failure) }
+            // BGPRUNE{ A-D1
+            if backgroundPruneEngaged {
+            }
+            // }BGPRUNE
             let projected = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
             let estimate = try await openRouterService.activeTurnRequestEstimate(messages: projected, rounds: toolInteractions,
                 images: imagesDirectory, documents: documentsDirectory, tools: toolsForRound,
@@ -8636,6 +8715,67 @@ class ConversationManager: ObservableObject {
             // body is frozen (§3.1): becomes the transmitted value only once
             // the request succeeds.
             let requestGeneration = appendedMidTurnGeneration
+            // BGPRUNE{ A-SEND/open
+            if backgroundPruneEngaged {
+                do {
+                    // Image-rejection recovery (plan v2 §2.4): a recognised
+                    // invalid-image 400 marks the transmitted images of the
+                    // request's newest unit (then, once, all of them), persists
+                    // the marks and resends the request rebuilt from that state;
+                    // tools are not re-run. Any other outcome is exactly today's.
+                    var requestHistory = projected
+                    var requestRounds = toolInteractions
+                    let recovered = try await ImageRejectionRecovery.run(
+                        send: { log in
+                            try await openRouterService.generateResponse(
+                                messages: requestHistory,
+                                imagesDirectory: imagesDirectory,
+                                documentsDirectory: documentsDirectory,
+                                tools: toolsForRound,  // Always pass tools so LLM can chain calls
+                                toolResultMessages: requestRounds.isEmpty ? nil : requestRounds,
+                                calendarContext: calendarContext,
+                                emailContext: emailContext,
+                                chunkSummaries: chunkSummaries.isEmpty ? nil : chunkSummaries,
+                                totalChunkCount: totalChunkCount,
+                                currentUserMessageId: currentUserMessageId,
+                                turnStartDate: systemPromptDate,
+                                deferredMCPSummaries: deferredSummaries.isEmpty ? nil : deferredSummaries,
+                                execution: responsesExecution, lane: .main, imageLog: log,
+                                persona: turnPersona
+                            )
+                        },
+                        newestUnit: { transmitted in
+                            ImageRejectionMarks.newestUnit(transmitted: transmitted, requestMessages: requestHistory, requestRounds: requestRounds)
+                        },
+                        commit: { scope in
+                            var rounds = toolInteractions
+                            let committed = try commitImageRejectionMarks(scope, runId: salvageRunId, responses: responsesExecution != nil,
+                                                                          messagesForLLM: &messagesForLLM, rounds: &rounds)
+                            toolInteractions = rounds
+                            guard committed else { return false }
+                            requestHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+                            requestRounds = toolInteractions
+                            return true
+                        }
+                    )
+                    response = recovered.response
+                    if !recovered.excluded.isEmpty {
+                        try? await sendText(ImageRejectionRecovery.notice(recovered.excluded))
+                    }
+                    // The request was sent — but the guard stands down only if it
+                    // actually carried the in-flight annotation (nonce-checked).
+                    if responsesExecution != nil { clearResponsesMidTurnBatch(response) }
+                    else { clearInFlightMidTurnBatchIfCarried(by: toolInteractions.isEmpty ? nil : toolInteractions) }
+                    seenGenerationAtRequest = requestGeneration
+                } catch let renderError as HarnessAnnotationRenderError {
+                    // Request construction aborted BEFORE network transmission
+                    // (MIDTURN_NONCE_PLAN §8 step 13): fail closed — requeue the
+                    // batch, strip the undeliverable annotation, surface the error.
+                    restoreInFlightMidTurnBatch(in: &toolInteractions)
+                    throw renderError
+                }
+            } else {
+            // }BGPRUNE
             do {
                 // Image-rejection recovery (plan v2 §2.4): a recognised
                 // invalid-image 400 marks the transmitted images of the
@@ -8693,6 +8833,9 @@ class ConversationManager: ObservableObject {
                 restoreInFlightMidTurnBatch(in: &toolInteractions)
                 throw renderError
             }
+            // BGPRUNE{ A-SEND/close
+            }
+            // }BGPRUNE
             recordCompactionCalibration(response)
             print("[TIMING] LLM API call took: \(String(format: "%.2f", Date().timeIntervalSince(llmStartTime)))s")
             let roundSpendUSD = spendUSD(from: response)
@@ -9030,6 +9173,49 @@ class ConversationManager: ObservableObject {
                     activeTurnCheckpoints[runID]?.accessedProjects = projects
                 }
                 // Mid-loop: prune stored tool interactions from older turns if context is growing too large
+                // BGPRUNE{ A-M/open
+                if backgroundPruneEngaged {
+                    let midLoopResult = try await pruneStoredToolInteractionsMidLoop(
+                        messagesForLLM: &messagesForLLM,
+                        currentTurnInteractions: toolInteractions,
+                        calendarContext: calendarContext,
+                        emailContext: emailContext,
+                        chunkSummaries: chunkSummaries,
+                        totalChunkCount: totalChunkCount,
+                        currentUserMessageId: currentUserMessageId,
+                        turnStartDate: systemPromptDate,
+                        tools: toolsForRound,
+                        deferredMCPSummaries: deferredSummaries, execution: responsesExecution,
+                        persona: turnPersona
+                    )
+                    if midLoopResult != .underBudget {
+                        prevRoundPromptTokens = nil; lastPromptTokens = nil; previousPromptScope = nil
+                    }
+                    if midLoopResult == .pruned {
+                        CacheDiagnostics.noteTransition("prune", lane: .main)
+                        // Cache is already invalidated by the prune — take the opportunity
+                        // to refresh stale calendar/email context with current data for free.
+                        let refreshed = await getFrozenSystemContext(forceRefresh: true)
+                        calendarContext = refreshed.calendar
+                        emailContext = refreshed.email
+                    }
+                    if midLoopResult == .exhausted {
+                        guard let runID = salvageRunId else { throw PruneArchiveStore.Failure("No active-turn checkpoint owner") }
+                        let compactionFiles = await computeLedgerDiff()
+                        activeTurnCheckpoints[runID]?.editedFilePaths = compactionFiles.edited
+                        activeTurnCheckpoints[runID]?.generatedFilePaths = compactionFiles.generated
+                        let priorMaintenanceSpend = activeTurnCheckpoints[runID]?.maintenanceSpendUSD ?? 0
+                        try await compactActiveTurn(runID: runID, history: messagesForLLM,
+                            tools: toolsForRound, calendar: calendarContext, email: emailContext,
+                            summaries: chunkSummaries, totalChunks: totalChunkCount, date: systemPromptDate,
+                            deferred: deferredSummaries, execution: responsesExecution, persona: turnPersona)
+                        CacheDiagnostics.noteTransition("compaction", lane: .main)
+                        let maintenanceSpend = max(0, (activeTurnCheckpoints[runID]?.maintenanceSpendUSD ?? 0) - priorMaintenanceSpend)
+                        cumulativeToolSpendUSD += maintenanceSpend; todaySpentUSD += maintenanceSpend; monthSpentUSD += maintenanceSpend
+                        prevRoundPromptTokens = nil; lastPromptTokens = nil; previousPromptScope = nil
+                    }
+                } else {
+                // }BGPRUNE
                 let midLoopResult = try await pruneStoredToolInteractionsMidLoop(
                     messagesForLLM: &messagesForLLM,
                     currentTurnInteractions: toolInteractions,
@@ -9069,6 +9255,9 @@ class ConversationManager: ObservableObject {
                     cumulativeToolSpendUSD += maintenanceSpend; todaySpentUSD += maintenanceSpend; monthSpentUSD += maintenanceSpend
                     prevRoundPromptTokens = nil; lastPromptTokens = nil; previousPromptScope = nil
                 }
+                // BGPRUNE{ A-M/close
+                }
+                // }BGPRUNE
 
                 if let perTurnCap = toolSpendLimitPerTurnUSD, cumulativeToolSpendUSD >= perTurnCap {
                     didHitToolSpendLimit = true
@@ -9144,6 +9333,14 @@ class ConversationManager: ObservableObject {
         var finalResponse: LLMResponse?
         var finalForceInteractions = toolInteractions
         var finalForceSpendUSD: Double = 0
+        // BGPRUNE{ A-FF1
+        var bgPruneFinalBase: Int = 0
+        // }BGPRUNE
+        // BGPRUNE{ A-FF2
+        if backgroundPruneEngaged {
+            bgPruneFinalBase = finalForceInteractions.count
+        }
+        // }BGPRUNE
         for attempt in 0...4 {
             let tail = attempt == 0
                 ? forceFinishTail
@@ -9154,7 +9351,70 @@ class ConversationManager: ObservableObject {
                 The tool call(s) you requested were not executed because this is a final-summary pass.
                 Tool use remains disabled for this pass. Return plain text only.
                 """
+            // BGPRUNE{ A-FFD
+            if backgroundPruneEngaged {
+            }
+            // }BGPRUNE
             let response: LLMResponse
+            // BGPRUNE{ A-FFSEND/open
+            if backgroundPruneEngaged {
+                do {
+                    // Same image-rejection recovery as the tool loop (plan v2 §2.4).
+                    let recovered = try await ImageRejectionRecovery.run(
+                        send: { log in
+                            try await openRouterService.generateResponse(
+                                messages: finalHistory,
+                                imagesDirectory: imagesDirectory,
+                                documentsDirectory: documentsDirectory,
+                                tools: lastToolsForRound,
+                                toolResultMessages: finalForceInteractions,
+                                calendarContext: calendarContext,
+                                emailContext: emailContext,
+                                chunkSummaries: chunkSummaries.isEmpty ? nil : chunkSummaries,
+                                totalChunkCount: totalChunkCount,
+                                currentUserMessageId: currentUserMessageId,
+                                turnStartDate: systemPromptDate,
+                                tailSystemMessage: tail,
+                                deferredMCPSummaries: lastDeferredSummaries.isEmpty ? nil : lastDeferredSummaries,
+                                execution: responsesExecution, lane: .main, imageLog: log,
+                                persona: turnPersona
+                            )
+                        },
+                        newestUnit: { transmitted in
+                            ImageRejectionMarks.newestUnit(transmitted: transmitted, requestMessages: finalHistory, requestRounds: finalForceInteractions)
+                        },
+                        commit: { scope in
+                            var rounds = toolInteractions
+                            let committed = try commitImageRejectionMarks(scope, runId: salvageRunId, responses: responsesExecution != nil,
+                                                                          messagesForLLM: &messagesForLLM, rounds: &rounds)
+                            toolInteractions = rounds
+                            _ = ImageRejectionMarks.apply(scope, toCurrent: &finalForceInteractions)
+                            guard committed else { return false }
+                            finalHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+                            return true
+                        }
+                    )
+                    response = recovered.response
+                    if !recovered.excluded.isEmpty {
+                        try? await sendText(ImageRejectionRecovery.notice(recovered.excluded))
+                    }
+                    // Carried-check matters most here: an exhaustion path that
+                    // discarded the annotation's interaction reaches this
+                    // force-finish with finalForceInteractions lacking the
+                    // annotation — the guard must stay armed for teardown
+                    // recovery instead of being cleared by this success.
+                    if responsesExecution != nil { clearResponsesMidTurnBatch(response) }
+                    else { clearInFlightMidTurnBatchIfCarried(by: finalForceInteractions) }
+                } catch let renderError as HarnessAnnotationRenderError {
+                    // Fail closed before network transmission: requeue the batch
+                    // and strip the undeliverable annotation from BOTH the retry
+                    // chain and the interactions that will be persisted.
+                    stripCurrentTurnAnnotations(in: &finalForceInteractions)
+                    restoreInFlightMidTurnBatch(in: &toolInteractions)
+                    throw renderError
+                }
+            } else {
+            // }BGPRUNE
             do {
                 // Same image-rejection recovery as the tool loop (plan v2 §2.4).
                 let recovered = try await ImageRejectionRecovery.run(
@@ -9210,6 +9470,9 @@ class ConversationManager: ObservableObject {
                 restoreInFlightMidTurnBatch(in: &toolInteractions)
                 throw renderError
             }
+            // BGPRUNE{ A-FFSEND/close
+            }
+            // }BGPRUNE
             if let spend = spendUSD(from: response), spend > 0 {
                 finalForceSpendUSD += spend
             }
@@ -13291,6 +13554,10 @@ class ConversationManager: ObservableObject {
         // 2. Clear all archived chunks (a finished-but-uncommitted
         //    background archive of the old history is discarded first).
         await invalidateArchiveJobForReplacedHistory()
+        // BGPRUNE{ A-GEN1
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         failures += await archiveService.clearAllArchives()
 
         // 3. Clear all reminders (also clears the trigger spool, fire
@@ -13854,6 +14121,10 @@ class ConversationManager: ObservableObject {
 
     func reloadAfterMindRestore() async {
         await invalidateArchiveJobForReplacedHistory()
+        // BGPRUNE{ A-GEN2
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         loadConversation(clearWhenMissing: true)
         // The continuation buffer belongs to the replaced conversation; a
         // /continue after restore must not replay the old reply's tail.
@@ -14102,6 +14373,10 @@ class ConversationManager: ObservableObject {
     /// /upgrade is on its way out. Background mode also waits for startup
     /// recovery, which holds the chunk writer for its whole pass.
     private func archiveStartRefusal(view: ArchivePromptView) -> String? {
+        // BGPRUNE{ A-ARCR
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         if archiveJob != nil { return "an archive job is still running or awaiting its commit" }
         if archiveExitPending { return "a restart or upgrade is in progress" }
         if view.hasHiddenRows { return "archived rows still await their commit" }
@@ -14242,6 +14517,10 @@ class ConversationManager: ObservableObject {
     /// removal. Never calls the model.
     private func commitArchiveIfReady() async {
         guard !isRestoringMind else { return }
+        // BGPRUNE{ A-ARCC
+        if backgroundPruneEngaged {
+        }
+        // }BGPRUNE
         if let job = archiveJob {
             guard job.generation == archiveGeneration else { await disposeArchiveJob(); return }
             switch job.outcome {
@@ -15578,3 +15857,13 @@ extension ConversationManager {
     func _baAwaitRecovery() async { await archiveRecoveryTask?.value }
 }
 
+// BGPRUNE{ A-EXT
+extension ConversationManager {
+    var backgroundPruneEngaged: Bool {
+        backgroundPruneJob != nil || switchDefaults.bool(forKey: Self.backgroundPruneDefaultsKey)
+    }
+    func backgroundPruneCommand(argument: String) async {
+        _ = argument
+    }
+}
+// }BGPRUNE
