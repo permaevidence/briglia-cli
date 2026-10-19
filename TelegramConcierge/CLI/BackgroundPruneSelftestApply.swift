@@ -46,9 +46,19 @@ enum BackgroundPruneSelftestApply {
         h.check("B15 manual /prune refused while a prune is ready", manual.contains("A background prune will apply at your next message"), manual)
         let trigger = manager._testMessages.first { $0.content == "freeze turn" }
         h.check("§8.2 the trigger's measuredTokens changed after the freeze (allow-listed field)", trigger?.measuredTokens != nil)
-        // Next turn: T0 applies.
+        // Next turn: T0 applies. A stale, large measured prompt from before
+        // the prune must not cause an immediate re-prune at T1 (B10).
         h.server.clear()
-        let applied = await h.turn(manager, "apply turn")
+        manager.bgPruneTestSetLastPromptTokens(60_000)
+        let t1 = BackgroundPruneSelftestGate()
+        ConversationManager.bgPruneHoldForTesting = { point in if point == "t1.entry" { await t1.awaitRelease() } }
+        h.startTurn(manager, "apply turn", replies: [BackgroundPruneSelftestHarness.chat("done", prompt: 100)])
+        _ = await h.waitUntil { t1.arrived == 1 }
+        h.check("B10 the T0 apply reset the measured prompt tokens before T1", manager.bgPruneTestLastPromptTokens == nil
+                && h.eventCount("bgprune.t0.applied") == 1, String(describing: manager.bgPruneTestLastPromptTokens))
+        t1.release()
+        let applied = await manager._testAwaitIdle(timeout: 40)
+        ConversationManager.bgPruneHoldForTesting = nil
         h.check("§8 T0 applies the ready job", applied && manager.bgPruneTestPhase == "none"
                 && h.eventCount("bgprune.t0.applied") == 1 && h.prunedIds(manager).count >= 6,
                 "phase \(manager.bgPruneTestPhase), pruned \(h.prunedIds(manager).count), events \(h.allEvents)")

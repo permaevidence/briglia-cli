@@ -9285,7 +9285,8 @@ class ConversationManager: ObservableObject {
                         emailContext: emailContext, chunkSummaries: chunkSummaries, totalChunkCount: totalChunkCount,
                         currentUserMessageId: currentUserMessageId, turnStartDate: systemPromptDate,
                         deferredMCPSummaries: deferredSummaries, persona: turnPersona)
-                    try await backgroundPruneMidLoop(runId: salvageRunId, inputs: bgPruneInputs, execution: responsesExecution,
+                    try await backgroundPruneMidLoop(runId: salvageRunId, nextRequestKey: "round\(round + 1)", inputs: bgPruneInputs,
+        execution: responsesExecution,
                         history: { messagesForLLM }, rounds: toolInteractions,
                         replace: { bgPruneReplacements in
                             for bgPruneIndex in messagesForLLM.indices {
@@ -16675,7 +16676,7 @@ extension ConversationManager {
                 let identity = await bgPruneIdentity(execution)
                 let limits = bgPruneLimits(identity: identity.identity, model: identity.model)
                 if fresh >= limits.ceiling {
-                    let reduction = try await bgPruneReduce(runId: runId, requestKey: "pre-request", appliedAlready: true,
+                    let reduction = try await bgPruneReduce(runId: runId, requestKey: "round1", appliedAlready: true,
                         execution: execution, need: { $0 >= $2 }, admitted: estimate, liveRounds: bgPruneCheckpointRounds,
                         afterApply: { _ in }, inline: inline)
                     return did || reduction.changed
@@ -16700,7 +16701,7 @@ extension ConversationManager {
                 let identity = await bgPruneIdentity(execution)
                 let limits = bgPruneLimits(identity: identity.identity, model: identity.model)
                 guard current.total >= limits.ceiling else { return did }
-                let reduction = try await bgPruneReduce(runId: runId, requestKey: "pre-request", appliedAlready: false,
+                let reduction = try await bgPruneReduce(runId: runId, requestKey: "round1", appliedAlready: false,
                     execution: execution, need: { $0 >= $2 }, admitted: estimate, liveRounds: bgPruneCheckpointRounds,
                     afterApply: { _ in }, inline: inline)
                 return did || reduction.changed
@@ -16720,7 +16721,8 @@ extension ConversationManager {
     /// M: the mid-loop decision. `block(nil)` runs today's mid-loop block
     /// (prune call and its result handling, with compaction); `block(r)`
     /// runs only today's result handling for an applied prune (§7.2 step 6).
-    func backgroundPruneMidLoop(runId: UUID?, inputs: BackgroundPruneSummaryInputs, execution: ProviderExecutionContext?,
+    func backgroundPruneMidLoop(runId: UUID?, nextRequestKey: String, inputs: BackgroundPruneSummaryInputs,
+                                execution: ProviderExecutionContext?,
                                 history: () -> [Message], rounds: [ToolInteraction],
                                 replace: ([UUID: Message]) -> Void,
                                 block: (MidLoopPruneResult?) async throws -> Bool) async throws {
@@ -16742,7 +16744,7 @@ extension ConversationManager {
                 let identity = await bgPruneIdentity(execution)
                 let limits = bgPruneLimits(identity: identity.identity, model: identity.model)
                 if fresh.total >= limits.ceiling {
-                    let reduction = try await bgPruneReduce(runId: runId, requestKey: "mid-loop", appliedAlready: true,
+                    let reduction = try await bgPruneReduce(runId: runId, requestKey: nextRequestKey, appliedAlready: true,
                         execution: execution, need: { $0 >= $2 }, admitted: { try await estimate().total },
                         liveRounds: { rounds }, afterApply: replace, inline: { try await block(nil) })
                     if case .inlineHandled = reduction { return }
@@ -16768,7 +16770,7 @@ extension ConversationManager {
                 let identity = await bgPruneIdentity(execution)
                 let limits = bgPruneLimits(identity: identity.identity, model: identity.model)
                 guard current.total >= limits.ceiling else { return }
-                let reduction = try await bgPruneReduce(runId: runId, requestKey: "mid-loop", appliedAlready: false,
+                let reduction = try await bgPruneReduce(runId: runId, requestKey: nextRequestKey, appliedAlready: false,
                     execution: execution, need: { $0 >= $2 }, admitted: { try await estimate().total },
                     liveRounds: { rounds }, afterApply: replace, inline: { try await block(nil) })
                 if case .applied = reduction { try await handleApplied() }
