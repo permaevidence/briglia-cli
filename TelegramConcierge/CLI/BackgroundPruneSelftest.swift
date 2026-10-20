@@ -32,7 +32,7 @@ struct BackgroundPruneSelftest: AsyncParsableCommand {
     @Option(name: .long, help: .hidden) var only: String?
     @Option(name: .long, help: .hidden) var crash: String?
 
-    static let linkName = "briglia-bg-prune-selftest"
+    static let linkName = "briglia-mw-bg-prune-selftest"
     static let rootPrefix = "briglia-bg-prune-"
 
     @MainActor func run() async throws {

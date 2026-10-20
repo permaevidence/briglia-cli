@@ -581,6 +581,16 @@ def depth_profile(ctoks):
 
 
 FORBIDDEN_IN_REGION_DIRECTIVES = ("#if", "#elseif", "#else", "#endif", "#sourceLocation")
+# Codex impl round 4, R4-1: closed attribute vocabularies (allowlists,
+# checked at every nesting depth). Anything else — every underscored
+# attribute (@_silgen_name, @_cdecl, @_dynamicReplacement, @_exported,
+# @_implementationOnly, @_transparent …), @main, @objc, @inline,
+# @usableFromInline, @available, @dynamicCallable, @propertyWrapper,
+# @resultBuilder, @globalActor, attached macros — is rejected.
+REGION_ATTRIBUTES = frozenset({"@MainActor", "@Sendable", "@escaping"})
+NEW_FILE_ATTRIBUTES = frozenset({"@MainActor", "@Sendable", "@escaping", "@autoclosure",
+                                 "@discardableResult", "@unchecked"})
+SELFTEST_ATTRIBUTES = frozenset({"@Flag", "@Option"})
 
 
 def common_region_errors(text, ctoks, anchor, allow_extension=False):
@@ -588,8 +598,8 @@ def common_region_errors(text, ctoks, anchor, allow_extension=False):
     for t in ctoks:
         if t.kind == "directive" and t.text in FORBIDDEN_IN_REGION_DIRECTIVES:
             errs.append(f"{anchor}: '{t.text}' inside a region")
-        if t.kind == "attr" and (t.text == "@main" or t.text.startswith("@_")):
-            errs.append(f"{anchor}: attribute {t.text} inside a region")
+        if t.kind == "attr" and t.text not in REGION_ATTRIBUTES:
+            errs.append(f"{anchor}: attribute {t.text} inside a region (not on the attribute allowlist)")
         if t.kind == "word" and t.text in ("operator", "precedencegroup", "import"):
             errs.append(f"{anchor}: '{t.text}' inside a region")
         if t.kind == "word" and t.text == "extension" and not allow_extension:
@@ -915,10 +925,20 @@ def new_file_errors(rel, text):
             continue
         if t.kind == "directive":
             errs.append(f"{rel}:{t.line}: directive {t.text} outside the fixed import header")
+        # Codex impl round 4, R4-1: the attribute vocabulary is closed at
+        # every nesting depth, not only at the top level. Linkage and
+        # code-generation attributes (@_silgen_name, @_cdecl,
+        # @_dynamicReplacement, @objc, @inline, @usableFromInline, macros,
+        # property wrappers other than the selftest's fixed @Flag/@Option…)
+        # could replace or alias a symbol protected code relies on.
+        if t.kind == "attr":
+            allowed = NEW_FILE_ATTRIBUTES | (SELFTEST_ATTRIBUTES if SELFTEST_PATTERN.match(rel) else set())
+            if t.text not in allowed:
+                errs.append(f"{rel}:{t.line}: attribute {t.text} not allowed (not on the attribute allowlist)")
+            elif t.text == "@unchecked" and not (j + 1 < len(ctoks) and ctoks[j + 1].text == "Sendable"):
+                errs.append(f"{rel}:{t.line}: @unchecked only as '@unchecked Sendable'")
         if d == 0:
             if t.kind == "attr":
-                if t.text == "@main" or t.text.startswith("@_"):
-                    errs.append(f"{rel}:{t.line}: attribute {t.text} not allowed")
                 j += 1
                 continue
             kw = t.text
@@ -937,6 +957,11 @@ def new_file_errors(rel, text):
                 while j < len(ctoks) and not (ctoks[j].kind == "punct" and ctoks[j].text == "{"):
                     if ctoks[j].kind == "word" and ctoks[j].text in ("extension", "protocol"):
                         errs.append(f"{rel}:{ctoks[j].line}: '{ctoks[j].text}' in a type header")
+                    if ctoks[j].kind == "attr" and ctoks[j].text not in ("@unchecked", "@MainActor", "@Sendable"):
+                        errs.append(f"{rel}:{ctoks[j].line}: attribute {ctoks[j].text} in a type header (not on the attribute allowlist)")
+                    if ctoks[j].kind == "attr" and ctoks[j].text == "@unchecked" and not (
+                            j + 1 < len(ctoks) and ctoks[j + 1].text == "Sendable"):
+                        errs.append(f"{rel}:{ctoks[j].line}: @unchecked only as '@unchecked Sendable'")
                     j += 1
                 d = 1
                 j += 1

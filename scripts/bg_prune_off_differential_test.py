@@ -51,20 +51,29 @@ compared through a per-payload Profile:
     fingerprint (random per run); UUIDs numbered consistently;
   * product clocks at named locations only: Message.timestamp (except the
     user's own text messages), tool-round issuedAt/completedAt, named
-    timestamp fields of usage/diagnostic/stop files, and the product's own
-    clock phrases ("[System Note: Current time is now …]", "…issued at …",
-    "Assistant reply time: …", day headings, round/delivery stamps) inside
-    message-content strings — never in tool arguments or other data;
+    timestamp fields of usage/diagnostic/stop files, and clock phrases in
+    the exact anchored form the product writes ("[System Note: Current time
+    is now …]", "[System Note: The following tool calls were issued at …",
+    a line "Assistant reply time: …", day-heading lines, round/delivery
+    header lines) inside message-content strings — never in tool arguments
+    or other data. This is a TEMPLATE seam, not provenance: text of exactly
+    that form at such a location is masked whoever wrote it. The fixture
+    corpus is checked to contain none (so no fixture input is ever masked),
+    and phrases quoted mid-line are not masked;
   * the Bash tool's own pid/running_for_seconds/waited_seconds inside a
     saved Bash result (located through its tool-call id);
   * free member order only in payloads written from unordered dictionaries
-    (base-vs-base evidence), with each member keeping its own whitespace;
+    (base-vs-base evidence), with each member keeping its own whitespace
+    and the separators after members order-free only when uniform
+    (non-uniform separators: compared in written order); an embedded Bash
+    JSON result keeps its own outer whitespace;
     main/summary/maintenance request bodies stay byte-exact;
   * stage markers: clock fields dropped, order kept per call and per stage
     family, plus the round's happens-after edges (all_tools_finished /
     execution_complete after their calls' records).
 Command discovery compares stdout/stderr/exit plus every file the run
-created in its isolated root and its throwaway preference domain.
+created in its isolated root and its throwaway preference domain, piped and
+terminal-attached (stdout on an 80-column PTY; stdin/stdout/stderr on it).
 
 Usage: bg_prune_off_differential_test.py [--only o1|o9|f1|control] [--keep]
 """
@@ -317,21 +326,33 @@ def enc_styles(decoded):
 
 
 # ---------------------------------------------------------------- seams
-# Product clock phrases (templates): each masks only the clock part of a
-# phrase the product writes itself, and is applied only at the string
-# locations a profile lists — never to tool arguments or other data.
+# Product clock phrases (templates). This is a TEMPLATE-MATCHING seam, not a
+# provenance proof (Codex impl round 4): a template masks only the clock
+# part of a phrase whose exact product-written form (with its fixed
+# leading context: a "[System Note: " / "[Run clock: " bracket, or the start
+# of a line for the line-shaped notes) matches at a string location a
+# profile lists — never tool arguments or other data. Text that is not the
+# product's but has exactly that shape at such a location (a user quoting a
+# whole "[System Note: Current time is now 10:00]" line, say) would be
+# masked too; the guarantee therefore does not extend to clock-shaped
+# phrases inside arbitrary user/tool content. Two things bound it:
+#   * fixture_corpus_controls(): none of the fixture-authored text (user
+#     messages, tool outputs, provider replies — all in the driver source)
+#     contains any template match, so no fixture input is ever masked;
+#   * the anchored forms do not match a phrase quoted mid-line (Codex's
+#     "quote: Assistant reply time: …" control is reported).
 ISO = r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?"
 DATE_LONG = r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{1,2} [A-Z][a-z]+ \d{4}"
 TEMPLATES = {
-    "issued": re.compile(r"(The following tool calls were issued at )\d{2}:\d{2}:\d{2}(?: on " + DATE_LONG + ")?"),
-    "round-issued": re.compile(r"(TOOL ROUND \(issued )\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC[+-]\d{2}(?::?\d{2})?"),
+    "issued": re.compile(r"(\[System Note: The following tool calls were issued at )\d{2}:\d{2}:\d{2}(?: on " + DATE_LONG + ")?"),
+    "round-issued": re.compile(r"(?m)(^COMPLETE TOOL ROUND \(issued )\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC[+-]\d{2}(?::?\d{2})?"),
     "now": re.compile(r"(\[System Note: Current time is now )\d{2}:\d{2}(?::\d{2})?(?=\])"),
-    "delivered": re.compile(r"(\(delivered )\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC[+-]\d{2}(?::?\d{2})?"),
+    "delivered": re.compile(r"(?m)(^Result \S+ \(delivered )\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC[+-]\d{2}(?::?\d{2})?"),
     "result-delivered": re.compile(r"(?m)^(Result delivered: )" + ISO + "$"),
-    "reply-time": re.compile(r"(Assistant reply time: )\d{2}:\d{2}(?::\d{2})?"),
+    "reply-time": re.compile(r"(?m)(^Assistant reply time: )\d{2}:\d{2}(?::\d{2})?$"),
     "run-clock": re.compile(r"(\[Run clock: this run started at )\d{2}:\d{2}:\d{2} on " + DATE_LONG + r" \(UTC[+-]\d{2}(?::?\d{2})?\)"),
-    "day-heading": re.compile(r"(--- )" + DATE_LONG + r"(?= ---)"),
-    "free-space": re.compile(r"(Available space: )\d+(?= bytes)"),
+    "day-heading": re.compile(r"(?m)(^--- )" + DATE_LONG + r"(?= ---$)"),
+    "free-space": re.compile(r"(\. Available space: )\d+(?= bytes)"),
 }
 CHAT_TEXT = ("issued", "round-issued", "now", "delivered", "reply-time", "run-clock", "day-heading")
 
@@ -395,13 +416,20 @@ def rep(node, profile, path=(), parent=None):
             members.append([w0, key, w1, w2, rep(value, profile, path + (k,), decoded), w3])
         if not profile.permute:
             return ["{", members]
-        # Order-free, lossless otherwise: each member keeps its own
-        # whitespace; the separators after members are compared as a
-        # multiset and the closing whitespace separately.
+        # Order-free, lossless otherwise (Codex impl round 4 note): each
+        # member keeps its own leading/colon whitespace. The whitespace after
+        # each non-last member (before its comma) is order-free only when it
+        # is one uniform run for the whole object — then a permutation cannot
+        # move it and it is kept once with its count; the closing whitespace
+        # is kept separately. Non-uniform separators lose the order freedom:
+        # the object is compared in written order, every run attached to
+        # its member (fail-closed).
+        seps = [m[5] for m in members[:-1]]
+        if len(set(seps)) > 1:
+            return ["{", members]
         body = sorted(([m[0], m[1], m[2], m[3], m[4]] for m in members),
                       key=lambda m: UUID_RE.sub("<U>", json.dumps(m, sort_keys=True, ensure_ascii=False)))
-        seps = sorted(m[5] for m in members[:-1])
-        return ["{~", body, seps, members[-1][5]]
+        return ["{~", body, [seps[0] if seps else None, len(seps)], members[-1][5]]
     if kind == "arr":
         if not node[1]:
             return ["[]", node[2]]
@@ -423,7 +451,10 @@ def rep(node, profile, path=(), parent=None):
         if style is not None:
             if emb:
                 try:
-                    return ["<json>", style, rep(jparse(decoded)[1], emb[2])]
+                    # The embedded document's own leading/trailing
+                    # whitespace stays exact (Codex impl round 4 note).
+                    lead, inner, trail = jparse(decoded)
+                    return ["<json>", style, lead, rep(inner, emb[2]), trail]
                 except JSONSyntax:
                     pass
             if texts:
@@ -544,10 +575,11 @@ def stages(raw):
     top level only). Records are grouped by tool call (`call`), or by stage
     family for records without a call; order within a group is kept and ids
     are renamed per group. Cross-group causality is kept for the round
-    coordinator: every `round.*` record without a call carries, for each
-    call, how many of that call's records preceded it (round.dispatched
-    before its calls, round.all_tools_finished / execution_complete after
-    them). Interleaving between unrelated calls stays free."""
+    coordinator: each round.all_tools_finished / round.execution_complete
+    record (ROUND_AFTER) carries, for each call, how many of that call's
+    records preceded it. round.dispatched carries no edge (calls may emit
+    records before that marker). Interleaving between unrelated calls
+    stays free."""
     groups, ids, seen = {}, {}, {}
     for line in raw.splitlines():
         try:
@@ -725,7 +757,78 @@ FACTORY_MUTANT = """    static func CommandConfiguration(
 
 """
 RUN_LINE = "    @MainActor func run() async throws {"
+# Codex impl round 4, R4-1, verbatim.
+SYMBOL_PROBE = """import Foundation
+
+struct BackgroundPruneSymbolProbe {
+    @_silgen_name("$s6Darwin5ioctlys5Int32VAD_SuSvtF")
+    static func bgPruneIoctl(
+        _ fd: Int32, _ request: UInt, _ ptr: UnsafeMutableRawPointer
+    ) -> Int32 {
+        if isatty(fd) == 1,
+           let root = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"] {
+            try? "CODEX_OFF_SYMBOL_SIDE_EFFECT".write(
+                toFile: root + "/codex-off-symbol.txt",
+                atomically: true, encoding: .utf8)
+        }
+        return -1
+    }
+}
+"""
 DISCOVERY_ARGS = [["--help"], ["help"], ["__bgprune-off-diff", "--help"]]
+# Codex impl round 4, R4-1: discovery also runs terminal-attached. "pipe":
+# stdout/stderr piped (the earlier coverage); "pty-stdout": stdout on a fresh
+# 80x24 pseudo-terminal, stderr piped; "pty-all": stdin, stdout and stderr all
+# on the pseudo-terminal (an interactive shell). ArgumentParser queries the
+# terminal size only when stdout is a terminal.
+DISCOVERY_MODES = ("pipe", "pty-stdout", "pty-all")
+
+
+def _run_pty(argv, env, mode, timeout=60):
+    """Run argv with stdout (and for pty-all also stdin/stderr) on a fresh
+    80-column pseudo-terminal; returns (exit, terminal output, piped stderr)."""
+    import fcntl
+    import pty
+    import struct
+    import termios
+    import threading
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    chunks = []
+
+    def drain():
+        while True:
+            try:
+                data = os.read(master, 65536)
+            except OSError:
+                return
+            if not data:
+                return
+            chunks.append(data)
+
+    reader = threading.Thread(target=drain, daemon=True)
+    try:
+        if mode == "pty-all":
+            proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True)
+        else:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=slave, stderr=subprocess.PIPE, env=env)
+        os.close(slave)
+        slave = None
+        reader.start()
+        try:
+            _, err = proc.communicate(timeout=timeout) if mode != "pty-all" else (None, b"")
+            if mode == "pty-all":
+                proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            err = b"<timeout>"
+        reader.join(timeout=10)
+    finally:
+        if slave is not None:
+            os.close(slave)
+        os.close(master)
+    return proc.returncode, b"".join(chunks).decode("utf-8", "replace"), (err or b"").decode("utf-8", "replace")
 
 
 # A throwaway preference domain (TestPrefsDomains prefix "briglia-mw-"):
@@ -781,7 +884,7 @@ def discovery(binary):
     domain the binary runs under."""
     outs = []
     _prefs_domain(DISCOVERY_LINK, purge=True)
-    for args in DISCOVERY_ARGS:
+    for mode, args in [(m, a) for m in DISCOVERY_MODES for a in DISCOVERY_ARGS]:
         root = tempfile.mkdtemp(prefix="bgprune-discovery-")
         try:
             env = {k: v for k, v in os.environ.items()
@@ -803,11 +906,15 @@ def discovery(binary):
                 os.symlink(bundle, os.path.join(root, "briglia-cli_briglia.bundle"))
                 skip.add("briglia-cli_briglia.bundle")
             before = _effects(root, skip)
-            proc = subprocess.run([link] + args, capture_output=True, text=True, env=env, timeout=60)
+            if mode == "pipe":
+                proc = subprocess.run([link] + args, capture_output=True, text=True, env=env, timeout=60)
+                status, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
+            else:
+                status, stdout, stderr = _run_pty([link] + args, env, mode)
             effects = _effects(root, skip)
             created = {k: v for k, v in effects.items() if before.get(k) != v}
-            outs.append({"args": args, "exit": proc.returncode,
-                         "stdout": proc.stdout.replace(root, "<ROOT>"), "stderr": proc.stderr.replace(root, "<ROOT>"),
+            outs.append({"mode": mode, "args": args, "exit": status,
+                         "stdout": stdout.replace(root, "<ROOT>"), "stderr": stderr.replace(root, "<ROOT>"),
                          "effects": created, "prefs": _prefs_domain(DISCOVERY_LINK, purge=True)})
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -931,6 +1038,88 @@ def located_seam_controls(sample, round_sample):
           b["files"]["conversation.json"] != conv and differs(sample, b))
 
 
+PRODUCT_CLOCK_PREFIXES = ("System Note", "Assistant reply time", "Run clock", "TOOL ROUND", "(delivered ",
+                          "Result delivered", "Available space", "--- ")
+
+
+def fixture_corpus_controls():
+    """Codex impl round 4 (template seam): every fixture-authored text — user
+    messages, tool commands/outputs, provider replies, seeded history — comes
+    from the driver source. None of it may contain a clock template match or
+    even one of the product's clock-note prefixes, so the template seam can
+    never mask fixture input; any masked phrase in a capture was rendered by
+    the product (or is identical on both sides)."""
+    src = open(DRIVER, encoding="utf-8").read()
+    hits = {k: [m.group(0) for m in t.finditer(src)] for k, t in TEMPLATES.items()}
+    hits = {k: v for k, v in hits.items() if v}
+    prefixes = [p for p in PRODUCT_CLOCK_PREFIXES if p in src]
+    check("template seam: the fixture corpus (driver source) contains no clock template match and none of the "
+          "product's clock-note prefixes", not hits and not prefixes, f"{hits} {prefixes}")
+
+
+def template_seam_controls(sample):
+    """Codex impl round 4, three comparator controls (verbatim inputs); each
+    must be reported. Plus one disclosed-residual row: a whole line in the
+    product's exact note form is masked wherever a listed location holds it."""
+    import copy
+
+    def differs(a, b):
+        return first_diff(normalise(a), normalise(b)) is not None
+
+    # (1) Trailing member whitespace moved without any member permutation.
+    a, b = copy.deepcopy(sample), copy.deepcopy(sample)
+    a["files"]["context_usage.json"] = '{"a":1 ,"b":2\t,"c":3}'
+    b["files"]["context_usage.json"] = '{"a":1\t,"b":2 ,"c":3}'
+    check("R4 comparator control: trailing member whitespace moved in a free-order payload is reported", differs(a, b))
+    a, b = copy.deepcopy(sample), copy.deepcopy(sample)
+    a["files"]["context_usage.json"] = '{"a":1 ,"b":2 ,"c":3}'
+    b["files"]["context_usage.json"] = '{"b":2 ,"c":3 ,"a":1}'
+    check("R4 comparator positive control: a pure permutation with uniform separators compares equal", not differs(a, b))
+    # (2) Outer whitespace of an embedded Bash JSON result.
+    conv = sample["files"]["conversation.json"]
+    content = None
+    for msg in json.loads(conv):
+        for inter in (msg.get("toolInteractions") or []):
+            for res in inter.get("results", []):
+                if isinstance(res.get("content"), str) and '"pid"' in res["content"]:
+                    content = res["content"]
+                    break
+    raw = spelled = None
+    if content is not None:
+        for style, enc in enc_styles(content).items():
+            if enc in conv:
+                raw, spelled = enc, enc_styles(" " + content + " ")[style]
+                break
+    padded = copy.deepcopy(sample)
+    if raw:
+        padded["files"]["conversation.json"] = conv.replace(raw, spelled, 1)
+    check("R4 comparator control: outer whitespace added around a saved Bash result's JSON is reported",
+          raw is not None and differs(sample, padded), "Bash result not located" if raw is None else "")
+    # (3) A quoted clock phrase in an appended user message.
+    main = next(i for i, r in enumerate(sample["requests"]) if r["kind"] == "main")
+
+    def with_user(text):
+        lead, node, trail = jparse(sample["requests"][main]["body"])
+        members = [list(m) for m in node[1]]
+        k = next(i for i, m in enumerate(members) if json.loads(m[1]) == "messages")
+        arr = members[k][4]
+        item = ["", ("obj", [["", '"role"', "", "", ("str", '"user"'), ""],
+                             ["", '"content"', "", "", ("str", json.dumps(text)), ""]], None), ""]
+        members[k][4] = ("arr", list(arr[1]) + [item], None)
+        x = copy.deepcopy(sample)
+        x["requests"][main]["body"] = lead + unparse(("obj", members, None)) + trail
+        return x
+    check("R4 comparator control: 'quote: Assistant reply time: 01:02:03' vs '…22:33:44' in an appended user "
+          "message is reported", differs(with_user("quote: Assistant reply time: 01:02:03"),
+                                         with_user("quote: Assistant reply time: 22:33:44")))
+    check("R4 comparator control: a reply-time phrase quoted mid-line in a user message is reported",
+          differs(with_user("she said Assistant reply time: 01:02 yesterday"),
+                  with_user("she said Assistant reply time: 22:33 yesterday")))
+    residual = not differs(with_user("Assistant reply time: 01:02:03"), with_user("Assistant reply time: 22:33:44"))
+    check("R4 disclosed residual (template seam, not provenance): a whole line in the product's exact note form "
+          f"is masked at a listed location (masked: {residual})", residual)
+
+
 def o1(base_bin, cand_bin, out):
     # Comparator calibration: the same 0.2.56 binary run twice.
     first, second = run(base_bin, "o1:pre:success", out), run(base_bin, "o1:pre:success", out + "/again")
@@ -949,7 +1138,8 @@ def o1(base_bin, cand_bin, out):
         d = first_diff(normalise(x), normalise(y))
         check(f"comparator: 0.2.56 {scenario} run twice compares equal (raw differs: {x != y})", d is None, d or "")
     bd, cd = discovery(base_bin), discovery(cand_bin)
-    check("O1 command discovery (--help, help, driver --help): output, written files and settings ≡ 0.2.56", bd == cd,
+    check("O1 command discovery (--help, help, driver --help; piped, stdout on an 80-column PTY, all on the PTY): "
+          "output, written files and settings ≡ 0.2.56", bd == cd,
           first_diff(bd, cd) or "")
     for scenario in O1:
         b = normalise(run(base_bin, scenario, out))
@@ -998,6 +1188,7 @@ def o9(base_bin, cand_bin, out):
     if all(x and "__failed__" not in x for x in (text_sample, binary_sample, round_sample)):
         comparator_controls(text_sample, binary_sample)
         located_seam_controls(text_sample, round_sample)
+        template_seam_controls(text_sample)
 
 
 def prefix_index(raw):
@@ -1208,7 +1399,39 @@ def control(cand_tree, base_bin, out):
     marker = [o["args"] for o in fd if any(k.endswith("codex-off-discovery.txt") for k in o["effects"])]
     check("R3-1 control: the discovery differential reports the factory's help-time write through the "
           f"observed effects (stdout/stderr/exit identical: {streams_equal}; written at {marker})",
-          bd != fd and len(marker) == 2, first_diff(bd, fd) or "no difference")
+          bd != fd and len(marker) == 2 * len(DISCOVERY_MODES), first_diff(bd, fd) or "no difference")
+    # R4-1 compiled control (Codex impl round 4, verbatim): a nested
+    # @_silgen_name redefining the Darwin overlay ioctl symbol (third,
+    # incremental build). The gate must reject it; on macOS the
+    # terminal-attached discovery must observe its write.
+    probe_rel = "TelegramConcierge/Services/BackgroundPruneSymbolProbe.swift"
+    probe_path = os.path.join(cand_tree, probe_rel)
+    open(probe_path, "w", encoding="utf-8").write(SYMBOL_PROBE)
+    try:
+        probe_bin = build(cand_tree, "control (symbol probe)")
+    finally:
+        os.remove(probe_path)
+    gate_root = tempfile.mkdtemp(prefix="bgprune-gatecopy-")
+    try:
+        for name in ("TelegramConcierge", "Package.swift", "Package.resolved"):
+            src = os.path.join(ROOT, name)
+            (shutil.copytree if os.path.isdir(src) else shutil.copy2)(src, os.path.join(gate_root, name))
+        open(os.path.join(gate_root, probe_rel), "w", encoding="utf-8").write(SYMBOL_PROBE)
+        findings = gate.validate(gate_root)
+    finally:
+        shutil.rmtree(gate_root, ignore_errors=True)
+    check("R4-1 control: the structural gate rejects Codex's nested @_silgen_name ioctl override",
+          any("attribute @_silgen_name not allowed" in f for f in findings), f"{findings}")
+    bd, pd = discovery(base_bin), discovery(probe_bin)
+    marked = [(o["mode"], o["args"]) for o in pd if any(k.endswith("codex-off-symbol.txt") for k in o["effects"])]
+    pipe_equal = [o for o in bd if o["mode"] == "pipe"] == [o for o in pd if o["mode"] == "pipe"]
+    if sys.platform == "darwin":
+        check("R4-1 control: the terminal-attached discovery reports the override's write "
+              f"(piped discovery alone sees nothing: {pipe_equal}; written at {marked})",
+              bd != pd and bool(marked) and all(m != "pipe" for m, _ in marked), first_diff(bd, pd) or "no difference")
+    else:
+        print(f"- R4-1 note: the probe's symbol is the Darwin overlay's; on this platform it is inert "
+              f"(written at {marked}); the gate rejection above is the platform-independent check")
 
 
 def main():
@@ -1241,6 +1464,7 @@ def main():
         cand_bin = build(cand, "candidate")
         out = os.path.join(scratch, "out")
         os.makedirs(out)
+        fixture_corpus_controls()
         if args.only in (None, "o1"):
             o1(base_bin, cand_bin, out)
         if args.only in (None, "o9"):

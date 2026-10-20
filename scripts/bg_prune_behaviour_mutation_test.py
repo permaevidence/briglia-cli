@@ -11,7 +11,9 @@ Usage: bg_prune_behaviour_mutation_test.py [--only NAME]
 """
 import argparse
 import os
+import shutil
 import subprocess
+import tempfile
 import sys
 import time
 
@@ -157,6 +159,18 @@ BREAKS = [
 ]
 
 
+# Codex impl round 4: these breaks must fail their intended invariant
+# assertion (the failing "✖" line must match), not merely fail for an
+# unrelated reason such as a timing flake elsewhere in the section.
+EXPECT = {
+    "R2-2: ON bookkeeping after a successful resend despite a completed OFF":
+        "R2-2 OFF during the held successful resend",
+    "apply without its evidence gate": "§8.3 evidence gate (ON)",
+    "forced-final convergence rebuild dropping the refusal suffix":
+        "B4b(i) suffix after both rebuilds",
+}
+
+
 def build():
     proc = subprocess.run(["swift", "build", "--build-system", "native"], cwd=ROOT, capture_output=True, text=True)
     return proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
@@ -165,8 +179,14 @@ def build():
 def run_section(section, timeout):
     start = time.time()
     try:
-        proc = subprocess.run([BINARY, "__background-prune-selftest", "--only", section],
-                              cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+        # Isolated config/data roots (the live Briglia is never touched).
+        root = tempfile.mkdtemp(prefix="bgprune-breaks-")
+        env = dict(os.environ, XDG_CONFIG_HOME=os.path.join(root, "config"), XDG_DATA_HOME=os.path.join(root, "data"))
+        try:
+            proc = subprocess.run([BINARY, "__background-prune-selftest", "--only", section],
+                                  cwd=ROOT, capture_output=True, text=True, timeout=timeout, env=env)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
         failed = [l for l in proc.stdout.splitlines() if l.startswith("✖")]
         return proc.returncode, failed, time.time() - start
     except subprocess.TimeoutExpired:
@@ -201,10 +221,15 @@ def main():
                 print(f"✖ {label}: mutated build failed\n{log}")
                 continue
             code, failed, seconds = run_section(section, 300 if section == "release3" else 150)
-            if code != 0:
+            want = EXPECT.get(label)
+            if code != 0 and want and not any(want in f for f in failed):
+                print(f"✖ break caught for the wrong reason: {label} [{section}] — expected a failed "
+                      f"'{want}' assertion, got {failed[:3] or code}")
+            elif code != 0:
                 caught += 1
                 why = "hang past the timeout" if code == "timeout" else (failed[0] if failed else f"exit {code}")
-                print(f"✔ break caught: {label} [{section}] — {why[:160]} ({seconds:.0f}s)")
+                tag = " (intended assertion)" if want else ""
+                print(f"✔ break caught{tag}: {label} [{section}] — {why[:160]} ({seconds:.0f}s)")
             else:
                 print(f"✖ break NOT caught: {label} [{section}]")
     finally:

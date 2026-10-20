@@ -92,6 +92,27 @@ FACTORY_MUTANT = '''    static func CommandConfiguration(
     }'''
 
 
+# Codex impl round 4, R4-1, verbatim: a nested @_silgen_name that defines
+# the Darwin overlay ioctl symbol ArgumentParser's terminal-size query uses.
+SYMBOL_PROBE = """import Foundation
+
+struct BackgroundPruneSymbolProbe {
+    @_silgen_name("$s6Darwin5ioctlys5Int32VAD_SuSvtF")
+    static func bgPruneIoctl(
+        _ fd: Int32, _ request: UInt, _ ptr: UnsafeMutableRawPointer
+    ) -> Int32 {
+        if isatty(fd) == 1,
+           let root = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"] {
+            try? "CODEX_OFF_SYMBOL_SIDE_EFFECT".write(
+                toFile: root + "/codex-off-symbol.txt",
+                atomically: true, encoding: .utf8)
+        }
+        return -1
+    }
+}
+"""
+
+
 def mutate(root, label, rel, fn, expect, manifest=None):
     """Apply fn(text) -> text to rel, validate, require a finding matching
     `expect` (regex), restore."""
@@ -238,6 +259,44 @@ def run(root):
            lambda t: "import Foundation\n\nextension Message {\n    var x: Int { 0 }\n}\n", r"only struct/enum|extension")
     mutate(root, "new file with an unlisted #if", "TelegramConcierge/Services/BackgroundPruneExtra.swift",
            lambda t: "import Foundation\n#if DEBUG\nenum BackgroundPruneExtra {}\n#endif\n", r"directive")
+    # Codex impl round 4, R4-1: the attribute vocabulary is closed at every depth.
+    probe_path = "TelegramConcierge/Services/BackgroundPruneSymbolProbe.swift"
+    mutate(root, "R4-1 Codex's nested @_silgen_name ioctl override (verbatim)", probe_path,
+           lambda t: SYMBOL_PROBE, r"attribute @_silgen_name not allowed")
+    nested = lambda attr, decl="static func bgPruneX() {}": (
+        "import Foundation\n\nstruct BackgroundPruneExtra {\n    enum Inner {\n        " + attr + "\n        "
+        + decl + "\n    }\n}\n")
+    for attr, decl in (('@_cdecl("bgPruneX")', "static func bgPruneX() {}"),
+                       ("@_dynamicReplacement(for: bgPruneY)", "static func bgPruneX() {}"),
+                       ("@_transparent", "static func bgPruneX() {}"),
+                       ("@inline(__always)", "static func bgPruneX() {}"),
+                       ("@usableFromInline", "static func bgPruneX() {}"),
+                       ("@objc", "static func bgPruneX() {}"),
+                       ("@available(*, deprecated)", "static func bgPruneX() {}"),
+                       ("@_spi(Bg)", "static func bgPruneX() {}")):
+        mutate(root, f"R4-1 nested {attr.split('(')[0]} two levels deep", "TelegramConcierge/Services/BackgroundPruneExtra.swift",
+               lambda t, a=attr, d=decl: nested(a, d), r"not on the attribute allowlist")
+    mutate(root, "R4-1 @_silgen_name on a local function inside a method body", "TelegramConcierge/Services/BackgroundPruneExtra.swift",
+           lambda t: ("import Foundation\n\nenum BackgroundPruneExtra {\n    static func bgPruneRun() {\n"
+                      '        @_silgen_name("bgPruneZ") func bgPruneLocal() -> Int32\n        _ = bgPruneLocal()\n    }\n}\n'),
+           r"attribute @_silgen_name not allowed")
+    mutate(root, "R4-1 underscored attribute in a type header", "TelegramConcierge/Services/BackgroundPruneExtra.swift",
+           lambda t: "import Foundation\n\nstruct BackgroundPruneExtra: @_unsafeInheritExecutor Sendable {}\n",
+           r"in a type header")
+    mutate(root, "R4-1 @unchecked not followed by Sendable", "TelegramConcierge/Services/BackgroundPruneExtra.swift",
+           lambda t: "import Foundation\n\nstruct BackgroundPruneExtra {\n    var x: @unchecked Int = 0\n}\n",
+           r"@unchecked only as")
+    mutate(root, "R4-1 @Flag outside the selftest file", "TelegramConcierge/Services/BackgroundPruneExtra.swift",
+           lambda t: "import Foundation\n\nstruct BackgroundPruneExtra {\n    @Flag var bgPruneX = false\n}\n",
+           r"attribute @Flag not allowed")
+    mutate(root, "R4-1 nested @_silgen_name inside a T-EXT region", CM,
+           lambda t: t.replace("    var backgroundPruneEngaged: Bool {",
+                               '    @_silgen_name("bgPruneW") static func backgroundPruneW() -> Int32\n    var backgroundPruneEngaged: Bool {', 1),
+           r"attribute @_silgen_name inside a region")
+    mutate(root, "R4-1 @objc inside a T-EXT region", CM,
+           lambda t: t.replace("    var backgroundPruneEngaged: Bool {",
+                               "    @objc func backgroundPruneW() {}\n    var backgroundPruneEngaged: Bool {", 1),
+           r"attribute @objc inside a region")
     mutate(root, "new file top-level type without the prefix", "TelegramConcierge/Services/BackgroundPruneExtra.swift",
            lambda t: "import Foundation\n\nenum Helper {}\n", r"lacks the BackgroundPrune prefix")
     mutate(root, "selftest without shouldDisplay: false", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",

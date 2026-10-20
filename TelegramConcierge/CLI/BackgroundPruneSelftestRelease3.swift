@@ -265,6 +265,11 @@ enum BackgroundPruneSelftestRelease3 {
         let history = h.prunableHistory()
         let triggerTime = Date()
         let triggerId = UUID()
+        // Codex impl round 4 note: pin the chronology clock for this byte
+        // fixture, so OFF and ON cannot straddle a second boundary in the
+        // refusal round's "issued at" note. Bodies are compared exactly.
+        HarnessClock.overrideForTesting = { triggerTime }
+        defer { HarnessClock.overrideForTesting = nil }
         func run(on: Bool) async -> [String] {
             let manager = await h.freshManager(history: history, switchOn: on)
             h.router.summaryReply = { n, _ in
