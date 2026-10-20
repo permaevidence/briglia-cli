@@ -64,6 +64,7 @@ enum BackgroundPruneSelftestCrash {
         process.arguments = ["__background-prune-selftest", "--child", "--crash", phase]
         var env = ProcessInfo.processInfo.environment
         env["BGPRUNE_CRASH_STORE"] = h.filesRoot.appendingPathComponent("descriptions.json").path
+        env["BGPRUNE_FILES_ROOT"] = h.filesRoot.path
         process.environment = env
         let pipe = Pipe()
         process.standardOutput = pipe

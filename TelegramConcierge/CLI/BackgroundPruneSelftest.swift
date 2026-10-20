@@ -215,7 +215,13 @@ final class BackgroundPruneSelftestHarness {
     init(only: String?) throws {
         self.only = only
         self.server = try CaptureServer()
-        self.filesRoot = FileManager.default.temporaryDirectory.appendingPathComponent("bgprune-files-" + UUID().uuidString)
+        // A crash child shares its parent's directory (the parent removes it;
+        // a killed child never runs its cleanup).
+        if let shared = ProcessInfo.processInfo.environment["BGPRUNE_FILES_ROOT"] {
+            self.filesRoot = URL(fileURLWithPath: shared)
+        } else {
+            self.filesRoot = FileManager.default.temporaryDirectory.appendingPathComponent("bgprune-files-" + UUID().uuidString)
+        }
         try FileManager.default.createDirectory(at: filesRoot, withIntermediateDirectories: true)
     }
 
