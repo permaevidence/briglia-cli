@@ -349,6 +349,22 @@ final class BgPruneOffDiffRun {
         return history
     }
 
+    /// F1 synthetic compression: stale email/reminder/subagent messages.
+    func syntheticHistory() -> [Message] {
+        var history = prunableHistory()
+        let base = Date(timeIntervalSince1970: 1_789_995_000)
+        let synthetic: [(MessageKind, String)] = [
+            (.emailArrived, "from: Fixture Sender <fixture@example.com>\nsubject: Quarterly figures\n\n" + String(repeating: "email body line ", count: 600)),
+            (.reminderFired, "Reminder fired: water the plants. " + String(repeating: "reminder detail ", count: 400)),
+            (.subagentComplete, "Subagent finished: research summary. " + String(repeating: "finding ", count: 800)),
+        ]
+        for (i, item) in synthetic.enumerated() {
+            history.insert(Message(role: .user, content: item.1, timestamp: base.addingTimeInterval(TimeInterval(i * 30)), kind: item.0),
+                           at: 2 + i * 4)
+        }
+        return history
+    }
+
     /// F1 six compact logs (index 0 cleared outside the manifest).
     func compactLogHistory() -> [Message] {
         var history = prunableHistory(pairs: 10)
@@ -589,6 +605,7 @@ final class BgPruneOffDiffRun {
         case "media", "descfail": history = mediaHistory()
         case "reasoning": history = reasoningHistory()
         case "compactlogs": history = compactLogHistory()
+        case "synthetic": history = syntheticHistory()
         default: history = prunableHistory()
         }
         notes.append("seeded \(history.count)")

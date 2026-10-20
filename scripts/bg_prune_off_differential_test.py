@@ -85,7 +85,7 @@ O1 = [f"o1:{site}:{v}" for site in ("pre", "mid")
 O9 = [f"o9:{path}:{proto}:{v}" for path in ("loop", "final") for proto in ("chat", "responses")
       for v in ("success", "image")] + ["o9:loop:chat:render", "o9:loop:responses:render"]
 F1 = ["f1:basic", "f1:rich", "f1:media", "f1:descfail", "f1:error", "f1:rejected", "f1:tools",
-      "f1:reasoning", "f1:compactlogs"]
+      "f1:reasoning", "f1:compactlogs", "f1:synthetic"]
 
 failures = 0
 total = 0
