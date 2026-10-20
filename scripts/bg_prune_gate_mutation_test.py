@@ -113,6 +113,36 @@ struct BackgroundPruneSymbolProbe {
 """
 
 
+# Codex impl round 5, N1, verbatim: the R4-1 override hidden inside a
+# string interpolation (the token passes saw one opaque `str` token).
+INTERPOLATION_PROBE = r'''import Foundation
+
+struct BackgroundPruneInterpolationProbe {
+    static func bgPruneUnused() -> String {
+        return """
+        \({ () -> String in
+            struct BackgroundPruneNested {
+            @_silgen_name("$s6Darwin5ioctlys5Int32VAD_SuSvtF")
+            static func bgPruneIoctl(
+                _ fd: Int32, _ request: UInt, _ ptr: UnsafeMutableRawPointer
+            ) -> Int32 {
+                if isatty(fd) == 1,
+                   let root = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"] {
+                    try? "CODEX_OFF_SYMBOL_SIDE_EFFECT".write(
+                        toFile: root + "/codex-off-symbol.txt",
+                        atomically: true, encoding: .utf8)
+                }
+                return -1
+            }
+            }
+            return String(describing: BackgroundPruneNested.bgPruneIoctl)
+        }())
+        """
+    }
+}
+'''
+
+
 def mutate(root, label, rel, fn, expect, manifest=None):
     """Apply fn(text) -> text to rel, validate, require a finding matching
     `expect` (regex), restore."""
@@ -259,6 +289,48 @@ def run(root):
            lambda t: "import Foundation\n\nextension Message {\n    var x: Int { 0 }\n}\n", r"only struct/enum|extension")
     mutate(root, "new file with an unlisted #if", "TelegramConcierge/Services/BackgroundPruneExtra.swift",
            lambda t: "import Foundation\n#if DEBUG\nenum BackgroundPruneExtra {}\n#endif\n", r"directive")
+    # Codex impl round 5, N1: interpolations are scanned as code.
+    mutate(root, "N1 Codex's @_silgen_name inside a string interpolation (verbatim)",
+           "TelegramConcierge/Services/BackgroundPruneInterpolationProbe.swift",
+           lambda t: INTERPOLATION_PROBE, r"@_silgen_name inside a string interpolation")
+    mutate(root, "N1 nested type declared in an interpolation inside a region", CM,
+           lambda t: t.replace("    var backgroundPruneEngaged: Bool {",
+                               '    func bgPruneProbe() -> String { "\\({ () -> String in struct BgPruneT {}; return "" }())" }\n'
+                               "    var backgroundPruneEngaged: Bool {", 1),
+           r"declaration keyword 'struct' inside a string interpolation")
+    mutate(root, "N1 interpolation nested inside an interpolation declaring a func",
+           "TelegramConcierge/Services/BackgroundPruneTypes.swift",
+           lambda t: t + '\nenum BackgroundPruneProbeInterp { static let v = "a\\("b\\({ () -> Int in func f() -> Int { 1 }; return f() }())")" }\n',
+           r"declaration keyword 'func' inside a string interpolation")
+    # Release prep: only the sequence declaration line of ReleaseSigning.swift may differ.
+    rs = gate.RELEASE_SIGNING
+    seq_re = re.compile(r"^let adaCLIReleaseSequence = [0-9]+$", re.M)
+    for value in (gate.BASELINE_RELEASE_SEQUENCE + 1, gate.BASELINE_RELEASE_SEQUENCE + 7):
+        orig = read(root, rs)
+        try:
+            write(root, rs, seq_re.sub(f"let adaCLIReleaseSequence = {value}", orig, count=1))
+            errs = gate.validate(root)
+            check(f"positive control: release-prep sequence bump to {value} is accepted", errs == [], f"{errs[:3]}")
+        finally:
+            write(root, rs, orig)
+    for label, fn in (
+        ("sequence lowered below the baseline", lambda t: seq_re.sub("let adaCLIReleaseSequence = 115", t, count=1)),
+        ("sequence bump plus a trailing comment", lambda t: seq_re.sub("let adaCLIReleaseSequence = 117 // x", t, count=1)),
+        ("sequence bump as an expression", lambda t: seq_re.sub("let adaCLIReleaseSequence = 116 + 1", t, count=1)),
+        ("sequence bump plus another change in the file", lambda t: seq_re.sub("let adaCLIReleaseSequence = 117", t, count=1) + "\n// extra\n"),
+        ("sequence bump plus a second declaration line", lambda t: seq_re.sub("let adaCLIReleaseSequence = 117\nlet adaCLIReleaseSequenceShadow = 1", t, count=1)),
+        ("sequence line indented", lambda t: seq_re.sub(" let adaCLIReleaseSequence = 117", t, count=1)),
+    ):
+        mutate(root, f"ReleaseSigning.swift: {label}", rs, fn, r"protected file changed: TelegramConcierge/CLI/ReleaseSigning.swift")
+    rs_text = read(root, rs)
+    rs_digest = gate.load_manifest()["files"][rs]
+    for value, want in ((gate.BASELINE_RELEASE_SEQUENCE, False), (gate.BASELINE_RELEASE_SEQUENCE - 1, False),
+                        (0, False), (gate.BASELINE_RELEASE_SEQUENCE + 1, True)):
+        bumped = seq_re.sub(f"let adaCLIReleaseSequence = {value}", rs_text, count=1).encode()
+        check(f"release-sequence exemption unit: value {value} → {'accepted' if want else 'refused'}",
+              gate.release_sequence_bump_ok(bumped, rs_digest) == want)
+    mutate(root, "sequence-shaped change in another protected file", "TelegramConcierge/CLI/UpgradeService.swift",
+           lambda t: t + "\nlet adaCLIReleaseSequence = 117\n", r"protected file changed: TelegramConcierge/CLI/UpgradeService.swift")
     # Codex impl round 4, R4-1: the attribute vocabulary is closed at every depth.
     probe_path = "TelegramConcierge/Services/BackgroundPruneSymbolProbe.swift"
     mutate(root, "R4-1 Codex's nested @_silgen_name ioctl override (verbatim)", probe_path,
@@ -435,18 +507,23 @@ def run(root):
     errs = gate.validate(root, altered)
     check("O8 neighbouring baseline line hash altered → rejected",
           any("A-T0: neighbouring baseline line" in e for e in errs), f"{errs[:3]}")
-    # wrong manifest hash
-    mpath = os.path.join(HERE, gate.MANIFEST_NAME)
-    with open(mpath, "rb") as fh:
+    # wrong manifest hash (Codex impl round 5, N3: the altered manifest lives
+    # in a scratch directory; the tracked manifest is never written)
+    with open(os.path.join(HERE, gate.MANIFEST_NAME), "rb") as fh:
         original = fh.read()
+    mdir = tempfile.mkdtemp(prefix="bgprune-manifest-")
+    saved_here = gate.HERE
     try:
-        with open(mpath, "wb") as fh:
+        with open(os.path.join(mdir, gate.MANIFEST_NAME), "wb") as fh:
             fh.write(original + b" ")
+        gate.HERE = mdir
         errs = gate.validate(root)
         check("O8 wrong manifest hash → rejected", any("manifest hash mismatch" in e for e in errs), f"{errs[:2]}")
     finally:
-        with open(mpath, "wb") as fh:
-            fh.write(original)
+        gate.HERE = saved_here
+        shutil.rmtree(mdir, ignore_errors=True)
+    with open(os.path.join(HERE, gate.MANIFEST_NAME), "rb") as fh:
+        check("N3: the tracked manifest is byte-identical after the wrong-hash control", fh.read() == original)
 
     # C2 rules exercised directly on the baseline (independent of anchors).
     stripped, _ = gate.extract_regions(cm, CM)

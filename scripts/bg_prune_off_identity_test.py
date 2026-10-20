@@ -122,10 +122,12 @@ class Tok:
         return f"Tok({self.kind},{self.text!r},{self.line})"
 
 
-def lex(src, base_line=1):
+def lex(src, base_line=1, interpolations=None):
     """Tokenises Swift source. Fails closed (GateError) on anything it
     cannot classify: an unterminated literal or comment, an unknown
-    delimiter form, a regex literal."""
+    delimiter form, a regex literal. If `interpolations` is a list, the
+    (start, end) source span of every string interpolation's inner code, at
+    every nesting depth, is appended to it (Codex impl round 5, N1)."""
     toks = []
     i = 0
     n = len(src)
@@ -182,6 +184,8 @@ def lex(src, base_line=1):
                             m += 1
                         else:
                             m += 1
+                    if interpolations is not None:
+                        interpolations.append((k + 1, m - 1))
                     j = m
                     continue
                 if k < n and src[k] == "\n":
@@ -869,6 +873,65 @@ def manifest_bytes(manifest):
     return (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode("utf-8")
 
 
+# Codex impl round 5, N1: string interpolations are code. The token passes
+# above see an interpolated literal as one `str` token, so every
+# interpolation's inner code (at every nesting depth) is lexed separately
+# and fails closed on any attribute or any declaration keyword: a type,
+# function, alias, extension or import declared inside an interpolation is
+# rejected outright (the feature needs none).
+INTERPOLATION_FORBIDDEN_WORDS = frozenset({"struct", "class", "enum", "actor", "protocol", "extension",
+                                           "func", "typealias", "import", "subscript", "macro"})
+
+
+def interpolation_errors(text, where):
+    spans = []
+    try:
+        lex(text, interpolations=spans)
+    except GateError as e:
+        return [f"{where}: {e}"]
+    errs = []
+    for start, end in spans:
+        inner = text[start:end]
+        line = text.count("\n", 0, start) + 1
+        try:
+            itoks = code(lex(inner, base_line=line))
+        except GateError as e:
+            errs.append(f"{where}:{line}: interpolation: {e}")
+            continue
+        for t in itoks:
+            if t.kind in ("attr", "directive"):
+                errs.append(f"{where}:{t.line}: {t.text} inside a string interpolation (N1)")
+            elif t.kind == "word" and t.text in INTERPOLATION_FORBIDDEN_WORDS:
+                errs.append(f"{where}:{t.line}: declaration keyword {t.text!r} inside a string interpolation (N1)")
+    return errs
+
+
+# Release prep: the one protected-file change every release needs. Each
+# release-prep commit bumps the embedded signed-release sequence in
+# ReleaseSigning.swift. That file stays protected; the only accepted
+# difference from the baseline is that single declaration line, with a
+# decimal value strictly greater than the baseline's. Any other byte change
+# in the file (or a value <= the baseline) is still "protected file changed".
+RELEASE_SIGNING = "TelegramConcierge/CLI/ReleaseSigning.swift"
+BASELINE_RELEASE_SEQUENCE = 116
+RELEASE_SEQUENCE_LINE = re.compile(r"^let adaCLIReleaseSequence = ([1-9][0-9]{0,8})$")
+
+
+def release_sequence_bump_ok(data, digest):
+    try:
+        lines = data.decode("utf-8").split("\n")
+    except UnicodeDecodeError:
+        return False
+    hits = [i for i, l in enumerate(lines) if l.startswith("let adaCLIReleaseSequence")]
+    if len(hits) != 1:
+        return False
+    m = RELEASE_SEQUENCE_LINE.match(lines[hits[0]])
+    if not m or int(m.group(1)) <= BASELINE_RELEASE_SEQUENCE:
+        return False
+    lines[hits[0]] = f"let adaCLIReleaseSequence = {BASELINE_RELEASE_SEQUENCE}"
+    return sha("\n".join(lines).encode("utf-8")) == digest
+
+
 def load_manifest():
     path = os.path.join(HERE, MANIFEST_NAME)
     with open(path, "rb") as fh:
@@ -1327,6 +1390,7 @@ def validate(root, manifest=None):
             text = fh.read()
         e, types = new_file_errors(rel, text)
         errs += e
+        errs += interpolation_errors(text, rel)
         new_types |= types
         try:
             errs += reserved_name_errors(rel, code(lex(text)), selftest=bool(SELFTEST_PATTERN.match(rel)))
@@ -1342,8 +1406,9 @@ def validate(root, manifest=None):
         if rel in ALLOW_LISTED:
             continue
         with open(p, "rb") as fh:
-            if sha(fh.read()) != digest:
-                errs.append(f"protected file changed: {rel}")
+            data = fh.read()
+        if sha(data) != digest and not (rel == RELEASE_SIGNING and release_sequence_bump_ok(data, digest)):
+            errs.append(f"protected file changed: {rel}")
     anchors = {a["id"]: a for a in manifest["anchors"]}
     seen = {}
     for rel in ALLOW_LISTED:
@@ -1380,6 +1445,7 @@ def validate(root, manifest=None):
                 errs += reserved_name_errors(f"{rel} region {r['id']}", code(lex(r["text"])))
             except GateError:
                 pass                              # reported by template_errors
+            errs += interpolation_errors(r["text"], f"{rel} region {r['id']}")
         for base_id, parts in by_id.items():
             a = anchors.get(base_id)
             if a is None:

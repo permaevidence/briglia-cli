@@ -1425,10 +1425,16 @@ def control(cand_tree, base_bin, out):
     bd, pd = discovery(base_bin), discovery(probe_bin)
     marked = [(o["mode"], o["args"]) for o in pd if any(k.endswith("codex-off-symbol.txt") for k in o["effects"])]
     pipe_equal = [o for o in bd if o["mode"] == "pipe"] == [o for o in pd if o["mode"] == "pipe"]
+    # Codex impl round 5, N2: the control's own predicate requires the
+    # piped discovery to be identical AND the write in exactly the six
+    # terminal-attached combinations (2 PTY modes x 3 command spellings).
+    expected_marked = sorted((m, tuple(a)) for m in DISCOVERY_MODES if m != "pipe" for a in DISCOVERY_ARGS)
+    marked_set = sorted((m, tuple(a)) for m, a in marked)
     if sys.platform == "darwin":
         check("R4-1 control: the terminal-attached discovery reports the override's write "
-              f"(piped discovery alone sees nothing: {pipe_equal}; written at {marked})",
-              bd != pd and bool(marked) and all(m != "pipe" for m, _ in marked), first_diff(bd, pd) or "no difference")
+              f"(piped discovery identical: {pipe_equal}; written at {marked})",
+              bd != pd and pipe_equal and marked_set == expected_marked,
+              first_diff(bd, pd) or "no difference")
     else:
         print(f"- R4-1 note: the probe's symbol is the Darwin overlay's; on this platform it is inert "
               f"(written at {marked}); the gate rejection above is the platform-independent check")
