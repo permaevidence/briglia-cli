@@ -117,6 +117,21 @@ BREAKS = [
         return "round\\(next)"''',
      '''        _ = runId
         return "final"'''),
+    ("R2-2: ON bookkeeping after a successful resend despite a completed OFF", "round2",
+     [('''            let response = try await resend()
+            // A successful resend is returned as is; a completed OFF during
+            // the resend (or the identity lookup) skips the ON bookkeeping
+            // (Codex impl round 2, R2-2).
+            guard backgroundPruneEngaged else {
+                bgPruneLog("bgprune.converge.resent-disengaged", requestKey)
+                return response
+            }
+            let identity = await bgPruneIdentity(execution)
+            guard backgroundPruneEngaged else {
+                bgPruneLog("bgprune.converge.resent-disengaged", requestKey)
+                return response
+            }''', '''            let response = try await resend()
+            let identity = await bgPruneIdentity(execution)''')], None),
 ]
 
 

@@ -11,6 +11,7 @@ enum BackgroundPruneSelftestRound2 {
     @MainActor static func run(_ h: BackgroundPruneSelftestHarness) async {
         await offDuringHeldToolLoopResponse(h)
         await offDuringHeldFinalResponse(h)
+        await offDuringHeldSuccessfulResend(h)
         await directInlineSharesAllowance(h)
         await midLoopSharesFinalAllowance(h)
         await insufficientApplyAtFinal(h)
@@ -117,6 +118,40 @@ enum BackgroundPruneSelftestRound2 {
                 && h.eventCount("bgprune.converge.reduce") == 0 && h.mainRequests.count == 2 && helperEntries(h) == 0
                 && h.router.summaries == 0,
                 "reply \(reply) events \(h.allEvents) main \(h.mainRequests.count) error \(String(describing: manager._testLastError))")
+    }
+
+    /// R2-2: OFF completes while the convergence resend is held; the resend
+    /// then succeeds. The successful response is kept, and no ON bookkeeping
+    /// (learned bound) is installed after the completed OFF.
+    @MainActor static func offDuringHeldSuccessfulResend(_ h: BackgroundPruneSelftestHarness) async {
+        let manager = await h.freshManager(history: h.prunableHistory())
+        manager.bgPruneTestSetLastPromptTokens(1_000)
+        let gate = BackgroundPruneSelftestGate()
+        let router = h.router
+        let log = h.log
+        let count = BackgroundPruneSelftestLog()
+        h.server.router = { request in
+            if BackgroundPruneSelftestRouter.isMain(request) {
+                log.append("request.main")
+                count.append("x")
+                if count.all.count == 2 { gate.wait() }
+                return nil
+            }
+            return router.route(request)
+        }
+        h.server.script([errorBody, BackgroundPruneSelftestHarness.chat("successful resend after OFF", prompt: 100)], statuses: [400, 200])
+        manager._testStartTurn(for: Message(role: .user, content: "in-band failure, then a held successful resend"))
+        _ = await h.waitUntil { gate.arrived == 1 }
+        let before = manager.bgPruneTestObservedBounds.count
+        let reply = await manager.bgPruneTestCommand("/prunebackground off")
+        gate.release()
+        _ = await manager._testAwaitIdle(timeout: 30)
+        h.check("R2-2 OFF during the held successful resend: response kept, no learned bound installed",
+                reply == "Background pruning: OFF." && manager._testLastError == nil
+                && manager._testMessages.last?.content == "successful resend after OFF"
+                && before == 0 && manager.bgPruneTestObservedBounds.isEmpty
+                && h.eventCount("bgprune.converge.resent-disengaged") == 1 && h.eventCount("bgprune.converge.resent") == 0,
+                "before \(before) after \(manager.bgPruneTestObservedBounds.count) events \(h.allEvents) error \(String(describing: manager._testLastError))")
     }
 
     // MARK: R2

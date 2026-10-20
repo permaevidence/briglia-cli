@@ -68,6 +68,13 @@ def write(root, rel, text):
         fh.write(text)
 
 
+CONF = '''    static let configuration = CommandConfiguration(
+        commandName: "__background-prune-selftest",
+        abstract: "Internal: verify background pruning.",
+        shouldDisplay: false
+    )'''
+
+
 def mutate(root, label, rel, fn, expect, manifest=None):
     """Apply fn(text) -> text to rel, validate, require a finding matching
     `expect` (regex), restore."""
@@ -235,14 +242,53 @@ def run(root):
             abstract: "Internal: verify background pruning.",
             shouldDisplay: false
         )
-    }()''', 1), r"plain CommandConfiguration")
+    }()''', 1), r"selftest configuration must be a plain")
     mutate(root, "R3a configuration argument with an interpolated side effect", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
            lambda t: t.replace('''        abstract: "Internal: verify background pruning.",''',
-                               '''        abstract: "Internal: \\(sideEffect())",''', 1), r"configuration argument not allowed")
+                               '''        abstract: "Internal: \\(sideEffect())",''', 1), r"selftest configuration must be a plain")
     mutate(root, "R3a configuration with an extra argument", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
            lambda t: t.replace('''        abstract: "Internal: verify background pruning.",''',
                                '''        abstract: "Internal: verify background pruning.",
-        subcommands: [Eager.self],''', 1), r"configuration argument not allowed")
+        subcommands: [Eager.self],''', 1), r"selftest configuration must be a plain")
+    # Codex impl round 2, R2-1: declaration discovery on the token stream.
+    mutate(root, "R2-1 newline between static and let, closure initializer (compiled control)",
+           "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(CONF, '''    static
+    let configuration: CommandConfiguration = {
+        print("CODEX_OFF_DISCOVERY_SIDE_EFFECT")
+        return CommandConfiguration(
+            commandName: "__background-prune-selftest",
+            abstract: "Internal: verify background pruning.",
+            shouldDisplay: false
+        )
+    }()''', 1), r"selftest configuration must be a plain")
+    mutate(root, "R2-1 comment between static and let", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(CONF, CONF.replace("static let configuration", "static /* x */ let configuration", 1)
+                               .replace("CommandConfiguration(", "eager(CommandConfiguration(", 1) + ")", 1),
+           r"selftest configuration must be a plain")
+    mutate(root, "R2-1 modifier between static and let", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace("    static let configuration = CommandConfiguration(",
+                               "    nonisolated(unsafe) static\n    var configuration = CommandConfiguration(", 1),
+           r"selftest configuration must be a plain")
+    mutate(root, "R2-1 static literal continued on the next line", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace('    static let rootPrefix = "briglia-bg-prune-"',
+                               '    static let rootPrefix = "briglia-bg-prune-"\n        .appending(eager())', 1),
+           r"static property")
+    mutate(root, "R2-1 static literal split across lines", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace('    static let rootPrefix = "briglia-bg-prune-"',
+                               '    static\n    let rootPrefix = eager()', 1),
+           r"static property")
+    mutate(root, "R2-1 command option with a side-effect default", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace("    @Option(name: .long, help: .hidden) var only: String?",
+                               "    @Option(name: .long, help: .hidden) var only: String? = eager()", 1),
+           r"command property not allowed")
+    mutate(root, "R2-1 extra command instance property", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace("    @Option(name: .long, help: .hidden) var only: String?",
+                               "    @Option(name: .long, help: .hidden) var only: String?\n    var probe = eager()", 1),
+           r"command property not allowed")
+    mutate(root, "R2-1 second configuration declaration", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(CONF, CONF + "\n    static let configuration2 = eager()", 1),
+           r"static property")
     mutate(root, "R3b valid header then an unprefixed overload on the same line", CM,
            lambda t: t.replace("    var backgroundPruneEngaged: Bool {",
                                "    func bgPruneProbe() {} ; private func sendText(_ text: String) async throws { print(\"CODEX_OFF_OVERLOAD\") }\n    var backgroundPruneEngaged: Bool {", 1),

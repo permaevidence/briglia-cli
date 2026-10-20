@@ -30,6 +30,7 @@ struct BackgroundPruneSelftest: AsyncParsableCommand {
 
     @Flag(name: .long, help: .hidden) var child = false
     @Option(name: .long, help: .hidden) var only: String?
+    @Option(name: .long, help: .hidden) var crash: String?
 
     static let linkName = "briglia-bg-prune-selftest"
     static let rootPrefix = "briglia-bg-prune-"
@@ -41,6 +42,11 @@ struct BackgroundPruneSelftest: AsyncParsableCommand {
         setvbuf(stdout, nil, _IOLBF, 0)
         guard child else { try Self.reexecIsolated(only: only); return }
         let h = try BackgroundPruneSelftestHarness(only: only)
+        if let crash {
+            // Crash/kill reconstruction (§16.5): the parent kills this process.
+            await BackgroundPruneSelftestCrash.child(h, phase: crash)
+            return
+        }
         await h.runAll()
         if h.failures > 0 {
             print("\n\(h.failures) of \(h.total) background prune check(s) FAILED")
@@ -137,27 +143,32 @@ final class BackgroundPruneSelftestRouter: @unchecked Sendable {
     var holdDescriptions: Set<Int> = []
     var gate = BackgroundPruneSelftestGate()
     var summaryText: (Int) -> String = { "Fixture prune summary number \($0): kept facts alpha, beta, gamma." }
+    /// Optional full reply for summary request n (protocol-specific body).
+    var summaryReply: ((Int, Bool) -> String?)? = nil
     var summaries: Int { lock.lock(); defer { lock.unlock() }; return _summaries }
     var descriptions: Int { lock.lock(); defer { lock.unlock() }; return _descriptions }
     var descriptionFiles: [String] { lock.lock(); defer { lock.unlock() }; return _descriptionFiles }
     var other: Int { lock.lock(); defer { lock.unlock() }; return _other }
 
     static let summaryMarker = "PRUNE SUMMARY REQUEST"
+    static let summaryRetryMarker = "PRUNE SUMMARY RETRY"
     static let descriptionMarker = "provides brief, accurate file descriptions"
 
     static func isMain(_ request: CapturedHTTPRequest) -> Bool {
         let text = String(data: request.body, encoding: .utf8) ?? ""
-        guard !text.contains(summaryMarker), !text.contains(descriptionMarker),
+        guard !text.contains(summaryMarker), !text.contains(summaryRetryMarker), !text.contains(descriptionMarker),
               let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any] else { return false }
         return object["tools"] != nil
     }
 
     func route(_ request: CapturedHTTPRequest) -> (body: String, delay: TimeInterval)? {
         let text = String(data: request.body, encoding: .utf8) ?? ""
-        if text.contains(Self.summaryMarker) {
-            lock.lock(); _summaries += 1; let n = _summaries; let hold = holdSummaries.contains(n); let make = summaryText; lock.unlock()
+        if text.contains(Self.summaryMarker) || text.contains(Self.summaryRetryMarker) {
+            lock.lock(); _summaries += 1; let n = _summaries; let hold = holdSummaries.contains(n); let make = summaryText; let full = summaryReply; lock.unlock()
             if hold { gate.wait() }
-            return (BackgroundPruneSelftestHarness.chat(make(n), prompt: 100), 0)
+            let responses = request.target.hasSuffix("/responses")
+            if let body = full?(n, responses) { return (body, 0) }
+            return (responses ? BackgroundPruneSelftestHarness.rText(make(n)) : BackgroundPruneSelftestHarness.chat(make(n), prompt: 100), 0)
         }
         if text.contains(Self.descriptionMarker) {
             lock.lock(); _descriptions += 1; let n = _descriptions; let hold = holdDescriptions.contains(n); lock.unlock()
@@ -170,6 +181,7 @@ final class BackgroundPruneSelftestRouter: @unchecked Sendable {
             }
             lock.lock(); _descriptionFiles.append(contentsOf: files); lock.unlock()
             let reply = files.map { "\($0): description-\(n) of \($0)." }.joined(separator: "\n")
+            if request.target.hasSuffix("/responses") { return (BackgroundPruneSelftestHarness.rText(reply), 0) }
             return (BackgroundPruneSelftestHarness.chat(reply, prompt: 100), 0)
         }
         guard let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
@@ -178,6 +190,7 @@ final class BackgroundPruneSelftestRouter: @unchecked Sendable {
         if ArchiveFullChunkSelftest.systemContent(request.body).contains(ArchiveFullChunkSelftest.summaryMarker) {
             return (BAArchiveRouter.chat(BAArchiveRouter.summaryText(n)), 0)
         }
+        if request.target.hasSuffix("/responses") { return (BackgroundPruneSelftestHarness.rText("NO_CHANGES"), 0) }
         return (BackgroundPruneSelftestHarness.chat("NO_CHANGES", prompt: 100), 0)
     }
 }
@@ -245,6 +258,8 @@ final class BackgroundPruneSelftestHarness {
         if section("descriptions") { await BackgroundPruneSelftestDescriptions.run(self) }
         if section("archive") { await BackgroundPruneSelftestArchive.run(self) }
         if section("round2") { await BackgroundPruneSelftestRound2.run(self) }
+        if section("release") { await BackgroundPruneSelftestRelease.run(self) }
+        if section("crash") { await BackgroundPruneSelftestCrash.run(self) }
     }
 
     func configureProvider() throws {
@@ -371,6 +386,28 @@ final class BackgroundPruneSelftestHarness {
             return ["id": call.id, "type": "function", "function": ["name": call.name, "arguments": args]]
         }
         return body(["role": "assistant", "content": NSNull(), "tool_calls": toolCalls], finish: "tool_calls", prompt: prompt)
+    }
+
+    nonisolated static func rText(_ text: String, input: Int = 100, id: String = UUID().uuidString) -> String {
+        rBody([["type": "message", "role": "assistant", "status": "completed", "id": "msg_" + id,
+                "content": [["type": "output_text", "text": text, "annotations": []]]]], id: id, input: input)
+    }
+
+    nonisolated static func rTools(_ calls: [(id: String, name: String, args: [String: Any])], input: Int = 100,
+                                   id: String = UUID().uuidString) -> String {
+        let items: [[String: Any]] = calls.map { call in
+            let args = String(data: try! JSONSerialization.data(withJSONObject: call.args, options: [.sortedKeys]), encoding: .utf8)!
+            return ["type": "function_call", "id": "fc_" + call.id, "call_id": call.id, "status": "completed",
+                    "name": call.name, "arguments": args]
+        }
+        return rBody(items, id: id, input: input)
+    }
+
+    nonisolated private static func rBody(_ output: [[String: Any]], id: String, input: Int) -> String {
+        let body: [String: Any] = ["id": "resp_" + id, "status": "completed", "output": output,
+            "usage": ["input_tokens": input, "input_tokens_details": ["cached_tokens": 0],
+                      "output_tokens": 10, "output_tokens_details": ["reasoning_tokens": 0]]]
+        return String(data: try! JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]), encoding: .utf8)!
     }
 
     nonisolated private static func body(_ message: [String: Any], finish: String, prompt: Int) -> String {

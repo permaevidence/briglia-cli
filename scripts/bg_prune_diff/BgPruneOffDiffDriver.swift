@@ -53,6 +53,9 @@ struct BgPruneOffDiffDriver: AsyncParsableCommand {
         guard data.contains("bgprune-offdiff-"), ProcessInfo.processInfo.processName == Self.linkName else {
             print("refusing to run outside the scratch home (\(data))"); throw ExitCode(2)
         }
+        // Hermetic description store inside the scratch data root (both trees
+        // support the seam), so saved descriptions are compared as a file.
+        FileDescriptionsStore._testStoreURL = StoragePaths.dataRoot.appendingPathComponent("offdiff-descriptions.json")
         let driver = try BgPruneOffDiffRun(mode: mode)
         let result = await driver.run(scenario)
         let json = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
@@ -102,6 +105,7 @@ struct BgPruneOffDiffDriver: AsyncParsableCommand {
 /// the scenario's summary mode; main-agent requests use the scripted queue.
 final class BgPruneDiffRouter: @unchecked Sendable {
     static let summaryMarker = "PRUNE SUMMARY REQUEST"
+    static let summaryRetryMarker = "PRUNE SUMMARY RETRY"
     static let descriptionMarker = "provides brief, accurate file descriptions"
     private let lock = NSLock()
     private var counts: [String: Int] = [:]
@@ -109,12 +113,13 @@ final class BgPruneDiffRouter: @unchecked Sendable {
     var responses = false
     let gate = BgPruneDiffGate()
     var holdSummary = false
+    var failFirstDescription = false
 
     func count(_ key: String) -> Int { lock.lock(); defer { lock.unlock() }; counts[key, default: 0] += 1; return counts[key]! }
 
     static func kind(_ request: CapturedHTTPRequest) -> String {
         let text = String(data: request.body, encoding: .utf8) ?? ""
-        if text.contains(summaryMarker) { return "summary" }
+        if text.contains(summaryMarker) || text.contains(summaryRetryMarker) { return "summary" }
         if text.contains(descriptionMarker) { return "description" }
         // Main-agent requests carry tools; maintenance requests (compaction
         // included) carry none or an empty list.
@@ -156,6 +161,10 @@ final class BgPruneDiffRouter: @unchecked Sendable {
 
     func status(_ request: CapturedHTTPRequest) -> Int? {
         if Self.kind(request) == "summary", summaryMode == "error" { return 500 }
+        if Self.kind(request) == "description", failFirstDescription {
+            lock.lock(); let first = (counts["description-status"] ?? 0) == 0; counts["description-status"] = 1; lock.unlock()
+            if first { return 500 }
+        }
         return nil
     }
 }
@@ -196,6 +205,7 @@ final class BgPruneOffDiffRun {
     var replies: [String] = []
     var notes: [String] = []
     var identityCounter = 0
+    let startedAt = Date()
 
     init(mode: String) throws {
         self.mode = mode
@@ -306,6 +316,47 @@ final class BgPruneOffDiffRun {
         }
         for i in 0..<8 { older[1].compactToolLog = (older[1].compactToolLog ?? "") + "• log line \(i): read_file /tmp/older-\(i).txt\n" }
         history.insert(contentsOf: older, at: 0)
+        return history
+    }
+
+    /// F1 media: two pruned actions send the same document (one description
+    /// request, first kept), a pruned assistant message references an image,
+    /// and an older user message carries an image (media pruning).
+    func mediaHistory() -> [Message] {
+        var history = prunableHistory()
+        let doc = file("shared-report.txt", "Shared report body for the F1 media fixture.\n")
+        let args = "{\"file_path\":\"\(doc)\"}"
+        history[1].toolInteractions = [toolRound(id: "send-1", size: 16_000, name: "send_document_to_chat", args: args)]
+        history[3].toolInteractions = [toolRound(id: "send-2", size: 16_000, name: "send_document_to_chat", args: args)]
+        let images = StoragePaths.dataRoot.appendingPathComponent("images", isDirectory: true)
+        try? FileManager.default.createDirectory(at: images, withIntermediateDirectories: true)
+        try? IRFixtures.png.write(to: images.appendingPathComponent("f1-ref.png"))
+        try? IRFixtures.png.write(to: images.appendingPathComponent("f1-user.png"))
+        history[5] = Message(id: history[5].id, role: .assistant, content: history[5].content, timestamp: history[5].timestamp,
+                             referencedImageFileNames: ["f1-ref.png"], toolInteractions: history[5].toolInteractions)
+        history[0] = Message(id: history[0].id, role: .user, content: history[0].content, timestamp: history[0].timestamp,
+                             imageFileNames: ["f1-user.png"])
+        return history
+    }
+
+    /// F1 reasoning removal: pruned assistant messages carry final reasoning.
+    func reasoningHistory() -> [Message] {
+        var history = prunableHistory()
+        for i in history.indices where history[i].role == .assistant {
+            history[i].finalReasoning = .string("fixture reasoning \(i) " + String(repeating: "think ", count: 400))
+            history[i].finalReasoningModel = "glm-5.3"
+        }
+        return history
+    }
+
+    /// F1 six compact logs (index 0 cleared outside the manifest).
+    func compactLogHistory() -> [Message] {
+        var history = prunableHistory(pairs: 10)
+        var logged = 0
+        for i in history.indices where history[i].role == .assistant && logged < 6 {
+            history[i].compactToolLog = "• compact log \(logged): read_file /tmp/log-\(logged).txt (\(logged * 10) lines)"
+            logged += 1
+        }
         return history
     }
 
@@ -530,7 +581,16 @@ final class BgPruneOffDiffRun {
     func f1(variant: String) async throws -> ConversationManager {
         try configure(responses: false)
         if mode == "on" { UserDefaults.standard.set(true, forKey: "ada.pruneBackground") }
-        let history = variant == "rich" ? richHistory() : prunableHistory()
+        if ["error", "rejected", "tools"].contains(variant) { router.summaryMode = variant }
+        if variant == "descfail" { router.failFirstDescription = true }
+        let history: [Message]
+        switch variant {
+        case "rich": history = richHistory()
+        case "media", "descfail": history = mediaHistory()
+        case "reasoning": history = reasoningHistory()
+        case "compactlogs": history = compactLogHistory()
+        default: history = prunableHistory()
+        }
         notes.append("seeded \(history.count)")
         let manager = await manager(history: history)
         server.script([Self.chat("answered", prompt: 100), Self.chat("answered again", prompt: 100)])
@@ -538,7 +598,18 @@ final class BgPruneOffDiffRun {
         if mode == "on" {
             // Nothing appended to the frozen range; the ready job is applied
             // at the next boundary (T0 of the next turn).
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            // The worker may still be retrying (transport backoff): wait until
+            // the loopback has been quiet for 8 s (at most 90 s) before the
+            // next turn. The base build has no job accessor to poll.
+            var last = server.completeRequests.count
+            var quietSince = Date()
+            let deadline = Date().addingTimeInterval(90)
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                let now = server.completeRequests.count
+                if now != last { last = now; quietSince = Date() }
+                if Date().timeIntervalSince(quietSince) >= 8 { break }
+            }
             await turn(manager, "next turn applies the ready job", at: 200)
         }
         return manager
@@ -571,6 +642,9 @@ final class BgPruneOffDiffRun {
             key.hasPrefix("briglia.") || key.hasPrefix("ada.") || key.hasPrefix("sm.")
         }
         result["defaults"] = defaults.mapValues { "\($0)" }
+        result["port"] = server.port
+        result["startedAt"] = startedAt.timeIntervalSince1970
+        result["endedAt"] = Date().timeIntervalSince1970
         result["dataRoot"] = StoragePaths.dataRoot.path
         result["configRoot"] = StoragePaths.configRoot.path
         return result
@@ -587,7 +661,7 @@ final class BgPruneOffDiffRun {
             if skip.contains(where: { rel == $0 || rel.hasPrefix($0 + "/") }) { continue }
             guard (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
                   let data = try? Data(contentsOf: url) else { continue }
-            out[rel] = String(data: data, encoding: .utf8) ?? "<binary \(data.count) bytes>"
+            out[rel] = String(data: data, encoding: .utf8) ?? ("b64:" + data.base64EncodedString())
         }
         return out
     }

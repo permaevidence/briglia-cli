@@ -16058,6 +16058,7 @@ extension ConversationManager {
     /// Test seams (nil in production).
     nonisolated(unsafe) static var bgPruneHoldForTesting: (@Sendable (String) async -> Void)? = nil
     nonisolated(unsafe) static var bgPruneEventForTesting: (@Sendable (String) -> Void)? = nil
+    nonisolated(unsafe) static var bgPruneDetailForTesting: (@Sendable (String, String) -> Void)? = nil
     nonisolated(unsafe) static var bgPruneDeadlineSecondsForTesting: Double? = nil
     nonisolated(unsafe) static var bgPruneDrainSecondsForTesting: Double? = nil
     nonisolated(unsafe) static var bgPruneWriteSetViolationForTesting: Bool? = nil
@@ -16849,6 +16850,7 @@ extension ConversationManager {
         // termination) during the awaits (Codex impl R1).
         guard backgroundPruneJob != nil else { return .noChange }
         let limits = bgPruneLimits(identity: identity.identity, model: identity.model)
+        Self.bgPruneDetailForTesting?("admit.estimate", "\(requestKey) \(estimate) \(limits.ceiling)")
         guard estimate >= limits.ceiling else { return .noChange }
         bgPruneLog("bgprune.admit.reduce", "\(requestKey): ~\(estimate) ≥ \(limits.ceiling)")
         return try await bgPruneReduce(runId: runId, requestKey: requestKey, appliedAlready: false, execution: execution,
@@ -16895,7 +16897,18 @@ extension ConversationManager {
             }
             print("[BackgroundPrune] resending after reduction; first error: \(error.localizedDescription)")
             let response = try await resend()
+            // A successful resend is returned as is; a completed OFF during
+            // the resend (or the identity lookup) skips the ON bookkeeping
+            // (Codex impl round 2, R2-2).
+            guard backgroundPruneEngaged else {
+                bgPruneLog("bgprune.converge.resent-disengaged", requestKey)
+                return response
+            }
             let identity = await bgPruneIdentity(execution)
+            guard backgroundPruneEngaged else {
+                bgPruneLog("bgprune.converge.resent-disengaged", requestKey)
+                return response
+            }
             let bound = Int(Double(admittedEstimate) * 0.9)
             backgroundPruneObservedBounds[identity.identity] = min(backgroundPruneObservedBounds[identity.identity] ?? Int.max, bound)
             bgPruneLog("bgprune.converge.resent", requestKey)

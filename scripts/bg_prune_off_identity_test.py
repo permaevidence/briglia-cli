@@ -956,62 +956,191 @@ def new_file_errors(rel, text):
     return errs, types
 
 
+DECL_MODIFIERS = {"nonisolated", "private", "fileprivate", "internal", "public", "final", "lazy",
+                  "override", "dynamic", "unsafe", "(", ")"}
+# Tokens that may follow a complete static literal declaration: the start
+# of the next declaration or the end of the enclosing body.
+NEXT_DECL = {"static", "class", "let", "var", "func", "init", "deinit", "subscript", "struct", "enum",
+             "final", "private", "fileprivate", "internal", "public", "nonisolated", "case", "typealias",
+             "lazy", "override", "mutating", "}"}
+CONFIG_LABELS = {"commandName", "abstract", "discussion"}
+COMMAND_PROPERTY_FORMS = (
+    re.compile(r"@Flag \( name : \. long , help : \. hidden \) var [A-Za-z_][A-Za-z0-9_]* = false"),
+    re.compile(r"@Option \( name : \. long , help : \. hidden \) var [A-Za-z_][A-Za-z0-9_]* : [A-Za-z]+ \?"),
+)
+
+
+def _plain_string(tok):
+    """A single-line, non-raw string literal without interpolation."""
+    return (tok.kind == "str" and tok.text.startswith('"') and not tok.text.startswith('"""')
+            and tok.line == tok.end_line and "\\(" not in tok.text)
+
+
+def _next_starts_decl(toks, k, after_line):
+    if k >= len(toks):
+        return True
+    t = toks[k]
+    if t.kind == "attr":
+        return t.line > after_line
+    return t.text in NEXT_DECL and (t.line > after_line or t.text == "}")
+
+
 def selftest_errors(rel, text):
-    """Hidden and inert during command discovery: shouldDisplay: false and
-    static properties limited to `configuration` and literal constants."""
+    """Hidden and inert during command discovery (Codex impl R3a, round-2
+    R2-1). Works on the lexed token stream, so whitespace, newlines and
+    comments between modifiers cannot hide a declaration:
+      * every `static`/`class` stored property is either the exact
+        `static let configuration = CommandConfiguration(...)` literal
+        (literal commandName/abstract/discussion, exactly one
+        `shouldDisplay: false`) or `static let NAME [: Type] = <literal>`;
+        anything unrecognised is rejected, never skipped;
+      * every instance property of a ParsableCommand type is one of the
+        fixed hidden @Flag/@Option forms (ArgumentParser evaluates them
+        during discovery and --help)."""
     errs = []
     if ("ParsableCommand" in text or "CommandConfiguration" in text) and "shouldDisplay: false" not in text:
         errs.append(f"{rel}: selftest configuration must use shouldDisplay: false")
-    lines = text.split("\n")
-    config_lines = set()
-    for no, raw in enumerate(lines, start=1):
-        s = raw.strip()
-        if not re.match(r"^(?:nonisolated\(unsafe\) )?static (let|var) configuration\b", s):
+    try:
+        toks = code(lex(text))
+    except GateError as e:
+        return [f"{rel}: {e}"]
+    n = len(toks)
+    configs = 0
+    depth = 0
+    command_depths = []          # body depths of ParsableCommand types
+    pending_command = False
+    i = 0
+    while i < n:
+        t = toks[i]
+        if t.kind == "punct" and t.text == "{":
+            depth += 1
+            if pending_command:
+                command_depths.append(depth)
+                pending_command = False
+            i += 1
             continue
-        # Closed initializer grammar (Codex impl R3a): exactly
-        # `static let configuration = CommandConfiguration(` then only
-        # literal commandName/abstract/discussion arguments and
-        # `shouldDisplay: false`, then `)`. No closure, no type annotation,
-        # no interpolation, no other argument.
-        if s != "static let configuration = CommandConfiguration(":
-            errs.append(f"{rel}:{no}: selftest configuration must be a plain CommandConfiguration(...) literal: {s!r}")
+        if t.kind == "punct" and t.text == "}":
+            if command_depths and command_depths[-1] == depth:
+                command_depths.pop()
+            depth -= 1
+            i += 1
             continue
-        args = []
-        j = no
-        closed = False
-        while j < len(lines):
-            a = lines[j].strip()
-            j += 1
-            if a == ")":
-                closed = True
+        if t.kind == "word" and t.text in ("struct", "class", "enum", "actor") and i + 1 < n \
+                and toks[i + 1].kind == "word" and toks[i + 1].text not in ("var", "let", "func", "subscript"):
+            k = i + 2
+            while k < n and not (toks[k].kind == "punct" and toks[k].text == "{"):
+                if toks[k].text in ("ParsableCommand", "AsyncParsableCommand"):
+                    pending_command = True
+                k += 1
+            i += 1
+            continue
+        if t.kind == "word" and t.text in ("static", "class"):
+            k = i + 1
+            while k < n and (toks[k].text in DECL_MODIFIERS or toks[k].kind == "attr"):
+                k += 1
+            if k >= n:
                 break
-            args.append((j, a))
-        config_lines.update(range(no, j + 1))
-        if not closed:
-            errs.append(f"{rel}:{no}: selftest configuration not closed by a lone ')'")
+            kw = toks[k].text
+            if kw in ("func", "subscript", "init"):
+                i = k
+                continue
+            if kw not in ("let", "var"):
+                if t.text == "static":
+                    errs.append(f"{rel}:{t.line}: unrecognised static declaration ({kw!r})")
+                i += 1
+                continue
+            name = toks[k + 1] if k + 1 < n else None
+            if name is None or name.kind != "word":
+                errs.append(f"{rel}:{t.line}: static declaration without a plain name")
+                i = k + 1
+                continue
+            if name.text == "configuration":
+                configs += 1
+                ok = (kw == "let" and t.text == "static" and k == i + 1 and k + 4 < n
+                      and toks[k + 2].text == "=" and toks[k + 3].text == "CommandConfiguration"
+                      and toks[k + 4].text == "(")
+                m = k + 5
+                labels = []
+                while ok:
+                    if m < n and toks[m].text == ")":
+                        break
+                    if m + 2 >= n:
+                        ok = False
+                        break
+                    label, colon, value = toks[m], toks[m + 1], toks[m + 2]
+                    if colon.text != ":":
+                        ok = False
+                        break
+                    if label.text in CONFIG_LABELS and _plain_string(value):
+                        labels.append(label.text)
+                    elif label.text == "shouldDisplay" and value.text == "false":
+                        labels.append("shouldDisplay")
+                    else:
+                        ok = False
+                        break
+                    m += 3
+                    if m < n and toks[m].text == ",":
+                        m += 1
+                if ok and (m >= n or toks[m].text != ")" or labels.count("shouldDisplay") != 1
+                           or len(set(labels)) != len(labels) or not _next_starts_decl(toks, m + 1, toks[m].line)):
+                    ok = False
+                if not ok:
+                    errs.append(f"{rel}:{t.line}: selftest configuration must be a plain "
+                                f"`static let configuration = CommandConfiguration(...)` literal")
+                    i = k + 2
+                    continue
+                i = m + 1
+                continue
+            # any other static/class stored property: literal constant only
+            m = k + 2
+            if m < n and toks[m].text == ":":
+                m += 2 if m + 1 < n and toks[m + 1].kind == "word" else 1
+            ok = kw == "let" and t.text == "static" and m < n and toks[m].text == "="
+            m += 1
+            if ok and m < n and toks[m].kind == "op" and toks[m].text == "-":
+                m += 1
+            ok = ok and m < n and (_plain_string(toks[m]) or toks[m].kind == "num" or toks[m].text in ("true", "false"))
+            if ok:
+                ok = _next_starts_decl(toks, m + 1, toks[m].end_line)
+            if not ok:
+                errs.append(f"{rel}:{t.line}: selftest static property must be `configuration` "
+                            f"or a literal constant (`{name.text}`)")
+            i = m + 1
             continue
-        names = []
-        for k, (ln, a) in enumerate(args):
-            last = k == len(args) - 1
-            m = re.fullmatch(r'(commandName|abstract|discussion): "((?:[^"\\]|\\[^(])*)"' + ("" if last else ","), a)
-            if a == ("shouldDisplay: false" if last else "shouldDisplay: false,"):
-                names.append("shouldDisplay")
-            elif m:
-                names.append(m.group(1))
-            else:
-                errs.append(f"{rel}:{ln}: selftest configuration argument not allowed: {a!r}")
-        if "shouldDisplay" not in names or len(set(names)) != len(names):
-            errs.append(f"{rel}:{no}: selftest configuration needs exactly one shouldDisplay: false and no repeated argument")
-    for no, raw in enumerate(lines, start=1):
-        s = raw.strip()
-        m = re.match(r"^(?:nonisolated\(unsafe\) )?static (let|var) ([A-Za-z0-9_]+)", s)
-        if not m:
+        # instance properties of a ParsableCommand type
+        if command_depths and depth == command_depths[-1] and (
+                t.kind == "attr" or (t.kind == "word" and t.text in ("var", "let"))):
+            line = t.line
+            q = i
+            while q < n and toks[q].line == line and (toks[q].kind == "attr" or toks[q].text in DECL_MODIFIERS
+                                                       or (q > i and toks[q - 1].kind == "attr" and toks[q].text == "(")):
+                if toks[q].kind == "attr" and q + 1 < n and toks[q + 1].text == "(":
+                    # skip the attribute's argument list
+                    d2 = 0
+                    q += 1
+                    while q < n:
+                        if toks[q].text == "(":
+                            d2 += 1
+                        elif toks[q].text == ")":
+                            d2 -= 1
+                            if d2 == 0:
+                                break
+                        q += 1
+                q += 1
+            if q >= n or toks[q].text not in ("var", "let"):
+                i += 1
+                continue
+            k = i
+            while k < n and toks[k].line == line:
+                k += 1
+            joined = " ".join(x.text for x in toks[i:k])
+            if not any(f.fullmatch(joined) for f in COMMAND_PROPERTY_FORMS) or not _next_starts_decl(toks, k, line):
+                errs.append(f"{rel}:{line}: command property not allowed: {joined!r}")
+            i = k
             continue
-        if m.group(2) == "configuration":
-            continue
-        if re.fullmatch(r'static let [A-Za-z0-9_]+(: [A-Za-z]+)? = ("(?:[^"\\]|\\[^(])*"|-?[0-9_.]+|true|false)', s):
-            continue
-        errs.append(f"{rel}:{no}: selftest static property must be `configuration` or a literal constant: {s!r}")
+        i += 1
+    if "ParsableCommand" in text and configs != 1:
+        errs.append(f"{rel}: a selftest command needs exactly one configuration declaration (found {configs})")
     return errs
 
 
