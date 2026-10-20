@@ -1292,7 +1292,11 @@ def f1_path_checks(scenario, rb, rc):
         # The 12-page PDF goes through the page-cap branch (> 10 pages) and is
         # rendered to page images for the description request on macOS; a
         # platform that cannot open it sends no pages (both builds alike).
-        pdf_pages = sum(r["body"].count("data:image\\/jpeg") for r in descs if described_files(r["body"]) == ["fb-pages.pdf"])
+        # A rendered page is sent as JPEG, or kept as PNG when the sparse page
+        # PNG-compresses below its JPEG (FilesystemTools.recompressedRenderedPage;
+        # the GitHub macOS runner image does that for these fixture pages).
+        pdf_pages = sum(r["body"].count("data:image\\/jpeg") + r["body"].count("data:image\\/png")
+                        for r in descs if described_files(r["body"]) == ["fb-pages.pdf"])
         pdf_ok = pdf_pages >= 1 if sys.platform == "darwin" else bool(pdf)
         check(f"F1 f1:fallback: batch-limit fallbacks {skipped}, large-file fallback {large!r}, PDF {pdf!r} "
               f"(rendered page images sent: {pdf_pages})",
