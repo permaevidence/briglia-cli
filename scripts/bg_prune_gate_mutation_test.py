@@ -222,6 +222,35 @@ def run(root):
            lambda t: t.replace('    static let rootPrefix = "briglia-bg-prune-"',
                                '    static let rootPrefix = "briglia-bg-prune-"\n    static let eager = ConversationManager.self', 1),
            r"static property")
+    # Codex impl review R3a/R3b: both compiled bypasses must be rejected.
+    mutate(root, "R3a configuration built by a closure (discovery side effect)", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace('''    static let configuration = CommandConfiguration(
+        commandName: "__background-prune-selftest",
+        abstract: "Internal: verify background pruning.",
+        shouldDisplay: false
+    )''', '''    static let configuration: CommandConfiguration = {
+        print("CODEX_OFF_DISCOVERY_SIDE_EFFECT")
+        return CommandConfiguration(
+            commandName: "__background-prune-selftest",
+            abstract: "Internal: verify background pruning.",
+            shouldDisplay: false
+        )
+    }()''', 1), r"plain CommandConfiguration")
+    mutate(root, "R3a configuration argument with an interpolated side effect", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace('''        abstract: "Internal: verify background pruning.",''',
+                               '''        abstract: "Internal: \\(sideEffect())",''', 1), r"configuration argument not allowed")
+    mutate(root, "R3a configuration with an extra argument", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace('''        abstract: "Internal: verify background pruning.",''',
+                               '''        abstract: "Internal: verify background pruning.",
+        subcommands: [Eager.self],''', 1), r"configuration argument not allowed")
+    mutate(root, "R3b valid header then an unprefixed overload on the same line", CM,
+           lambda t: t.replace("    var backgroundPruneEngaged: Bool {",
+                               "    func bgPruneProbe() {} ; private func sendText(_ text: String) async throws { print(\"CODEX_OFF_OVERLOAD\") }\n    var backgroundPruneEngaged: Bool {", 1),
+           r"second declaration on one line|';' at member level")
+    mutate(root, "R3b second prefixed declaration on one line", CM,
+           lambda t: t.replace("    var backgroundPruneEngaged: Bool {",
+                               "    func bgPruneProbe() {} ; func bgPruneProbe2() {}\n    var backgroundPruneEngaged: Bool {", 1),
+           r"second declaration on one line|';' at member level")
     # pinned anchors
     mutate(root, "Codex's real-source capture at 8686|8687 (tool-loop catch/else)", CM,
            lambda t: move_region(t, "A-GEN1", 8686), r"A-GEN1: region not at its pinned insertion point")

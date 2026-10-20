@@ -53,6 +53,8 @@ jobs:
         run: python3 scripts/bg_prune_gate_mutation_test.py
       - name: Background prune selftest
         run: .build/debug/briglia __background-prune-selftest
+      - name: Background prune O1/O9/F1 differential against a v0.2.56 build
+        run: python3 scripts/bg_prune_off_differential_test.py
       - name: Persisted model source contract and negative tests
         run: python3 scripts/chat_persistence_contract_test.py
       - name: Installer next-step wording
@@ -155,6 +157,8 @@ jobs:
         run: python3 scripts/bg_prune_gate_mutation_test.py
       - name: Background prune selftest
         run: .build/debug/briglia __background-prune-selftest
+      - name: Background prune O1/O9/F1 differential against a v0.2.56 build
+        run: python3 scripts/bg_prune_off_differential_test.py
       - name: Persisted model source contract and negative tests
         run: python3 scripts/chat_persistence_contract_test.py
       - name: Installer next-step wording

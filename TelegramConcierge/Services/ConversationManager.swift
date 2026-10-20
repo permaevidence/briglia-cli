@@ -135,6 +135,7 @@ class ConversationManager: ObservableObject {
     private var backgroundPruneCounters: [String: Int] = [:]
     private var backgroundPruneLastApply: BackgroundPruneApplyRecord? = nil
     private var backgroundPruneStopNote: BackgroundPruneStopNote? = nil
+    private var backgroundPruneNextRound: [String: Int] = [:]
     // }BGPRUNE
 
     /// Undeduplicated local notices (terminal and app socket): ordinary /stop
@@ -9285,7 +9286,7 @@ class ConversationManager: ObservableObject {
                         emailContext: emailContext, chunkSummaries: chunkSummaries, totalChunkCount: totalChunkCount,
                         currentUserMessageId: currentUserMessageId, turnStartDate: systemPromptDate,
                         deferredMCPSummaries: deferredSummaries, persona: turnPersona)
-                    try await backgroundPruneMidLoop(runId: salvageRunId, nextRequestKey: "round\(round + 1)", inputs: bgPruneInputs,
+                    try await backgroundPruneMidLoop(runId: salvageRunId, nextRound: round + 1, inputs: bgPruneInputs,
         execution: responsesExecution,
                         history: { messagesForLLM }, rounds: toolInteractions,
                         replace: { bgPruneReplacements in
@@ -9445,7 +9446,7 @@ class ConversationManager: ObservableObject {
             // BGPRUNE{ A-FFD
             if backgroundPruneEngaged {
                 if backgroundPruneJob != nil {
-                    _ = try await backgroundPruneAdmit(runId: salvageRunId, requestKey: "final", execution: responsesExecution,
+                    _ = try await backgroundPruneAdmit(runId: salvageRunId, requestKey: backgroundPruneFinalRequestKey(runId: salvageRunId), execution: responsesExecution,
                         admitted: {
                             try await self.backgroundPruneFinalEstimate(history: finalHistory, rounds: finalForceInteractions,
                                 tools: lastToolsForRound, calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
@@ -9541,7 +9542,7 @@ class ConversationManager: ObservableObject {
                     return recovered.response
                 }
                 do {
-                    response = try await backgroundPruneConverge(runId: salvageRunId, requestKey: "final",
+                    response = try await backgroundPruneConverge(runId: salvageRunId, requestKey: backgroundPruneFinalRequestKey(runId: salvageRunId),
                         admittedEstimate: bgPruneAdmittedEstimate, admittedMaximum: bgPruneAdmittedMaximum, execution: responsesExecution,
                         send: { try await bgPruneFinalSend() },
                         admitted: {
@@ -16627,14 +16628,11 @@ extension ConversationManager {
                 break step
             }
         }
-        // Step 3: the inline fallback, once per logical request.
-        let ledgerKey = "\(runId.uuidString)|\(requestKey)"
-        let used = backgroundPruneRequestLedger[ledgerKey, default: 0]
-        guard used & 1 == 0 else {
-            bgPruneLog("bgprune.admit.overceiling", requestKey)
+        // Step 3: the inline fallback, once per logical request (shared
+        // with the direct T1/M inline paths, Codex impl R2).
+        guard bgPruneClaimInline(runId: runId, key: requestKey) else {
             return applied ? .applied : .noChange
         }
-        backgroundPruneRequestLedger[ledgerKey] = used | 1
         backgroundPruneFallbackDue = false
         if let job = backgroundPruneJob, job.isRetiring { job.inlineDebtConsumed = true }
         lastPromptTokens = nil
@@ -16643,12 +16641,34 @@ extension ConversationManager {
         return .inlineHandled(changed: changed || applied)
     }
 
+    /// The one inline allowance of a logical request (§7.7 step 3). Every
+    /// ON inline path claims it: R's step 3 and the direct T1/M paths.
+    private func bgPruneClaimInline(runId: UUID, key: String) -> Bool {
+        let ledgerKey = "\(runId.uuidString)|\(key)"
+        let used = backgroundPruneRequestLedger[ledgerKey, default: 0]
+        guard used & 1 == 0 else {
+            bgPruneLog("bgprune.admit.overceiling", key)
+            return false
+        }
+        backgroundPruneRequestLedger[ledgerKey] = used | 1
+        return true
+    }
+
+    /// The logical request a forced final belongs to: the request M
+    /// prepared (§7.4: M is the boundary for whatever comes next; all final
+    /// attempts are one logical request).
+    func backgroundPruneFinalRequestKey(runId: UUID?) -> String {
+        guard let runId, let next = backgroundPruneNextRound[runId.uuidString] else { return "final" }
+        return "round\(next)"
+    }
+
     // MARK: Boundaries (§7.1–7.2)
 
     /// T0: apply a ready job only (never consumes an owed decision).
     func backgroundPruneTurnStart(runId: UUID?) async {
         guard let runId else { return }
         backgroundPruneRequestLedger = backgroundPruneRequestLedger.filter { $0.key.hasPrefix(runId.uuidString) }
+        backgroundPruneNextRound = [:]
         backgroundPruneT0AppliedRun = nil
         guard let job = backgroundPruneJob, job.isReady else { return }
         let result = await bgPruneApply(job, runId: runId, liveRounds: bgPruneCheckpointRounds())
@@ -16666,8 +16686,20 @@ extension ConversationManager {
                                    inline: () async throws -> Bool) async throws -> Bool {
         guard let runId else { return try await inline() }
         await bgPruneHold("t1.entry")
+        backgroundPruneNextRound[runId.uuidString] = 1
         var did = false
         func estimate() async throws -> Int { try await bgPrunePreRequestEstimate(inputs).total }
+        /// Today's pre-request statement, entered once per logical request
+        /// (round 1). The entry is counted at the helper call itself.
+        func helper() async throws -> Bool {
+            bgPruneLog("bgprune.helper.pre-request")
+            return try await inline()
+        }
+        func directInline(_ reason: String) async throws -> Bool {
+            guard bgPruneClaimInline(runId: runId, key: "round1") else { return false }
+            bgPruneLog("bgprune.inline.direct", "round1: \(reason)")
+            return try await helper()
+        }
         // 1. A ready job (became ready between T0 and T1).
         if let job = backgroundPruneJob, job.isReady {
             let result = await bgPruneApply(job, runId: runId, liveRounds: bgPruneCheckpointRounds())
@@ -16680,7 +16712,7 @@ extension ConversationManager {
                 if fresh >= limits.ceiling {
                     let reduction = try await bgPruneReduce(runId: runId, requestKey: "round1", appliedAlready: true,
                         execution: execution, need: { $0 >= $2 }, admitted: estimate, liveRounds: bgPruneCheckpointRounds,
-                        afterApply: { _ in }, inline: inline)
+                        afterApply: { _ in }, inline: helper)
                     return did || reduction.changed
                 }
             }
@@ -16691,12 +16723,15 @@ extension ConversationManager {
         let maximum = configuredMaxContextTokens()
         // 4. Not over the maximum → done.
         guard current.total > maximum else { return did }
+        // OFF completed during the awaits (Codex impl R1): today's
+        // statement, which re-estimates itself, as the OFF branch would.
+        guard backgroundPruneEngaged else { return try await helper() || did }
         // 5. Over the maximum.
-        guard current.prunable else { return try await inline() || did }
+        guard current.prunable else { return try await directInline("nothing prunable") || did }
         if backgroundPruneFallbackDue {
             backgroundPruneFallbackDue = false
             bgPruneLog("bgprune.owed-inline", "pre-request")
-            return try await inline() || did
+            return try await directInline("owed") || did
         }
         if let job = backgroundPruneJob {
             if job.isRunning {
@@ -16705,32 +16740,39 @@ extension ConversationManager {
                 guard current.total >= limits.ceiling else { return did }
                 let reduction = try await bgPruneReduce(runId: runId, requestKey: "round1", appliedAlready: false,
                     execution: execution, need: { $0 >= $2 }, admitted: estimate, liveRounds: bgPruneCheckpointRounds,
-                    afterApply: { _ in }, inline: inline)
+                    afterApply: { _ in }, inline: helper)
                 return did || reduction.changed
             }
             if job.isRetiring { job.inlineDebtConsumed = true }
             bgPruneLog("bgprune.inline.unusable", job.phase.name)
-            return try await inline() || did
+            return try await directInline("unusable job") || did
         }
-        guard backgroundPruneSwitchOn else { return try await inline() || did }
+        guard backgroundPruneSwitchOn else { return try await directInline("switch off") || did }
         if try await bgPruneFreeze(site: .preRequest, capture: capture, totalTokens: current.total, liveSource: { messages },
                                    currentRounds: [], inputs: inputs, execution: execution) {
             return did
         }
-        return try await inline() || did
+        return try await directInline("ineligible") || did
     }
 
     /// M: the mid-loop decision. `block(nil)` runs today's mid-loop block
     /// (prune call and its result handling, with compaction); `block(r)`
     /// runs only today's result handling for an applied prune (§7.2 step 6).
-    func backgroundPruneMidLoop(runId: UUID?, nextRequestKey: String, inputs: BackgroundPruneSummaryInputs,
+    func backgroundPruneMidLoop(runId: UUID?, nextRound: Int, inputs: BackgroundPruneSummaryInputs,
                                 execution: ProviderExecutionContext?,
                                 history: () -> [Message], rounds: [ToolInteraction],
                                 replace: ([UUID: Message]) -> Void,
                                 block: (MidLoopPruneResult?) async throws -> Bool) async throws {
         guard let runId else { _ = try await block(nil); return }
+        backgroundPruneNextRound[runId.uuidString] = nextRound
+        let nextRequestKey = "round\(nextRound)"
         func estimate() async throws -> (total: Int, prunable: Bool) {
             try await bgPruneMidLoopEstimate(history: history(), rounds: rounds, inputs: inputs)
+        }
+        func directInline(_ reason: String) async throws {
+            guard bgPruneClaimInline(runId: runId, key: nextRequestKey) else { return }
+            bgPruneLog("bgprune.inline.direct", "\(nextRequestKey): \(reason)")
+            _ = try await block(nil)
         }
         func handleApplied() async throws {
             let fresh = try await estimate()
@@ -16760,11 +16802,13 @@ extension ConversationManager {
         let current = try await estimate()
         let maximum = configuredMaxContextTokens()
         guard current.total > maximum else { return }
-        guard current.prunable else { _ = try await block(nil); return }
+        // OFF completed during the awaits (Codex impl R1): today's block.
+        guard backgroundPruneEngaged else { _ = try await block(nil); return }
+        guard current.prunable else { try await directInline("nothing prunable"); return }
         if backgroundPruneFallbackDue {
             backgroundPruneFallbackDue = false
             bgPruneLog("bgprune.owed-inline", "mid-loop")
-            _ = try await block(nil)
+            try await directInline("owed")
             return
         }
         if let job = backgroundPruneJob {
@@ -16780,15 +16824,15 @@ extension ConversationManager {
             }
             if job.isRetiring { job.inlineDebtConsumed = true }
             bgPruneLog("bgprune.inline.unusable", job.phase.name)
-            _ = try await block(nil)
+            try await directInline("unusable job")
             return
         }
-        guard backgroundPruneSwitchOn else { _ = try await block(nil); return }
+        guard backgroundPruneSwitchOn else { try await directInline("switch off"); return }
         if try await bgPruneFreeze(site: .midLoop, capture: capture, totalTokens: current.total, liveSource: history,
                                    currentRounds: rounds, inputs: inputs, execution: execution) {
             return
         }
-        _ = try await block(nil)
+        try await directInline("ineligible")
     }
 
     /// D: pre-dispatch admission (tool loop and every forced-final
@@ -16798,8 +16842,12 @@ extension ConversationManager {
                               afterApply: ([UUID: Message]) async throws -> Void,
                               inline: () async throws -> Bool) async throws -> BackgroundPruneReduction {
         guard let runId, backgroundPruneJob != nil else { return .noChange }
+        await bgPruneHold("admit.\(requestKey)")
         let estimate = try await admitted()
         let identity = await bgPruneIdentity(execution)
+        // D never acts without a job; one may have been released (OFF,
+        // termination) during the awaits (Codex impl R1).
+        guard backgroundPruneJob != nil else { return .noChange }
         let limits = bgPruneLimits(identity: identity.identity, model: identity.model)
         guard estimate >= limits.ceiling else { return .noChange }
         bgPruneLog("bgprune.admit.reduce", "\(requestKey): ~\(estimate) ≥ \(limits.ceiling)")
@@ -16822,6 +16870,12 @@ extension ConversationManager {
             try Task.checkCancellation()
             guard let runId, admittedEstimate > admittedMaximum, !(error is CancellationError),
                   BackgroundPruneErrors.isEligibleInBand(error) else { throw error }
+            // A completed OFF during the send await ends all ON work: the
+            // original error surfaces exactly as OFF (Codex impl R1).
+            guard backgroundPruneEngaged else {
+                bgPruneLog("bgprune.converge.disengaged", requestKey)
+                throw error
+            }
             let ledgerKey = "\(runId.uuidString)|\(requestKey)"
             let used = backgroundPruneRequestLedger[ledgerKey, default: 0]
             guard used & 2 == 0 else { throw error }
@@ -16833,6 +16887,10 @@ extension ConversationManager {
             try Task.checkCancellation()
             guard reduction.changed else {
                 bgPruneLog("bgprune.converge.no-change", requestKey)
+                throw error
+            }
+            guard backgroundPruneEngaged else {
+                bgPruneLog("bgprune.converge.disengaged", requestKey)
                 throw error
             }
             print("[BackgroundPrune] resending after reduction; first error: \(error.localizedDescription)")
@@ -16865,8 +16923,10 @@ extension ConversationManager {
         let generationBefore = salvageRunId.flatMap { activeTurnCheckpoints[$0]?.generation }
         let midLoopResult: MidLoopPruneResult
         if let precomputed {
+            bgPruneLog("bgprune.handling.applied")
             midLoopResult = precomputed
         } else {
+            bgPruneLog("bgprune.helper.mid-loop")
             midLoopResult = try await pruneStoredToolInteractionsMidLoop(
                 messagesForLLM: &messagesForLLM,
                 currentTurnInteractions: rounds,
@@ -17251,7 +17311,7 @@ extension ConversationManager {
             try? await sendText("""
                 Background pruning: \(enabled ? "ON" : "OFF") (default: off).
                 Off: when the context reaches its maximum, I stop, summarize and prune old tool output, then continue (today's behaviour).
-                On: the summary is prepared in the background while I keep working with the unchanged conversation; it is applied at the next step. If the context reaches the ceiling (maximum + 100k tokens, lower for small models) before it is ready, I wait for it. Requests between the maximum and the ceiling carry more input and can cost more (some providers charge a long-context premium). Turning it off cancels a summary being prepared.
+                On: the summary is prepared in the background while I keep working with the unchanged conversation; it is applied at the next step. If the context reaches the ceiling (maximum + 100k tokens) before it is ready, I wait for it. Model context windows are not known yet, so the ceiling is not lowered for smaller models: if a request is rejected as too long, I prune at once and resend it once. Requests between the maximum and the ceiling carry more input and can cost more (some providers charge a long-context premium). Turning it off cancels a summary being prepared.
                 Switch with /prunebackground on or /prunebackground off.
                 """)
             return

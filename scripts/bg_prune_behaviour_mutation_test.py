@@ -93,6 +93,30 @@ BREAKS = [
     ("inline archive starting while a job runs", "archive",
      '''        return "background prune running"''',
      '''        _ = "background prune running"'''),
+    ("R1: convergence without the post-send engagement check", "round2",
+     '''            // A completed OFF during the send await ends all ON work: the
+            // original error surfaces exactly as OFF (Codex impl R1).
+            guard backgroundPruneEngaged else {
+                bgPruneLog("bgprune.converge.disengaged", requestKey)
+                throw error
+            }
+            let ledgerKey''',
+     '''            let ledgerKey'''),
+    ("R2a: direct inline paths not claiming the shared allowance", "round2",
+     '''        guard used & 1 == 0 else {
+            bgPruneLog("bgprune.admit.overceiling", key)
+            return false
+        }
+        backgroundPruneRequestLedger[ledgerKey] = used | 1
+        return true''',
+     '''        if used & 1 != 0, key.hasPrefix("round1") == false { bgPruneLog("bgprune.admit.overceiling", key); return false }
+        backgroundPruneRequestLedger[ledgerKey] = used | 1
+        return true'''),
+    ("R2b: forced final keyed apart from the request M prepared", "round2",
+     '''        guard let runId, let next = backgroundPruneNextRound[runId.uuidString] else { return "final" }
+        return "round\\(next)"''',
+     '''        _ = runId
+        return "final"'''),
 ]
 
 

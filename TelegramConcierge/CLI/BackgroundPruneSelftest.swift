@@ -244,6 +244,7 @@ final class BackgroundPruneSelftestHarness {
         if section("converge") { await BackgroundPruneSelftestConverge.run(self) }
         if section("descriptions") { await BackgroundPruneSelftestDescriptions.run(self) }
         if section("archive") { await BackgroundPruneSelftestArchive.run(self) }
+        if section("round2") { await BackgroundPruneSelftestRound2.run(self) }
     }
 
     func configureProvider() throws {

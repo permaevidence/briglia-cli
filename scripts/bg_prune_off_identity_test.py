@@ -649,6 +649,16 @@ def check_ext(text, ctoks, anchor):
     for i, t in enumerate(ctoks):
         is_first = t.line not in first_on_line
         first_on_line.add(t.line)
+        # Every declaration is validated, not one header per physical line
+        # (Codex impl R3b): no ';' at member level and no declaration that
+        # follows a closed member on the same line.
+        if i > 0 and d == 1 and pd == 0:
+            prev = ctoks[i - 1]
+            if t.kind == "punct" and t.text == ";":
+                errs.append(f"{anchor}: ';' at member level (line {t.line})")
+            if (t.kind == "attr" or (t.kind == "word" and t.text in DECL_START)) and prev.line == t.line \
+               and prev.kind == "punct" and prev.text in "};":
+                errs.append(f"{anchor}: second declaration on one line (line {t.line})")
         if not is_first:
             if i > 0 and d == 1 and pd == 0 and (t.kind == "attr" or (t.kind == "word" and t.text in DECL_START)) \
                and t.line not in validated_lines:
@@ -952,12 +962,52 @@ def selftest_errors(rel, text):
     errs = []
     if ("ParsableCommand" in text or "CommandConfiguration" in text) and "shouldDisplay: false" not in text:
         errs.append(f"{rel}: selftest configuration must use shouldDisplay: false")
-    for no, raw in enumerate(text.split("\n"), start=1):
+    lines = text.split("\n")
+    config_lines = set()
+    for no, raw in enumerate(lines, start=1):
+        s = raw.strip()
+        if not re.match(r"^(?:nonisolated\(unsafe\) )?static (let|var) configuration\b", s):
+            continue
+        # Closed initializer grammar (Codex impl R3a): exactly
+        # `static let configuration = CommandConfiguration(` then only
+        # literal commandName/abstract/discussion arguments and
+        # `shouldDisplay: false`, then `)`. No closure, no type annotation,
+        # no interpolation, no other argument.
+        if s != "static let configuration = CommandConfiguration(":
+            errs.append(f"{rel}:{no}: selftest configuration must be a plain CommandConfiguration(...) literal: {s!r}")
+            continue
+        args = []
+        j = no
+        closed = False
+        while j < len(lines):
+            a = lines[j].strip()
+            j += 1
+            if a == ")":
+                closed = True
+                break
+            args.append((j, a))
+        config_lines.update(range(no, j + 1))
+        if not closed:
+            errs.append(f"{rel}:{no}: selftest configuration not closed by a lone ')'")
+            continue
+        names = []
+        for k, (ln, a) in enumerate(args):
+            last = k == len(args) - 1
+            m = re.fullmatch(r'(commandName|abstract|discussion): "((?:[^"\\]|\\[^(])*)"' + ("" if last else ","), a)
+            if a == ("shouldDisplay: false" if last else "shouldDisplay: false,"):
+                names.append("shouldDisplay")
+            elif m:
+                names.append(m.group(1))
+            else:
+                errs.append(f"{rel}:{ln}: selftest configuration argument not allowed: {a!r}")
+        if "shouldDisplay" not in names or len(set(names)) != len(names):
+            errs.append(f"{rel}:{no}: selftest configuration needs exactly one shouldDisplay: false and no repeated argument")
+    for no, raw in enumerate(lines, start=1):
         s = raw.strip()
         m = re.match(r"^(?:nonisolated\(unsafe\) )?static (let|var) ([A-Za-z0-9_]+)", s)
         if not m:
             continue
-        if m.group(2) == "configuration" and m.group(1) == "let":
+        if m.group(2) == "configuration":
             continue
         if re.fullmatch(r'static let [A-Za-z0-9_]+(: [A-Za-z]+)? = ("(?:[^"\\]|\\[^(])*"|-?[0-9_.]+|true|false)', s):
             continue
