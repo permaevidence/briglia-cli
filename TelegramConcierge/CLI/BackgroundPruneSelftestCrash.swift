@@ -5,7 +5,8 @@ import Glibc
 import Darwin
 #endif
 
-/// Crash/kill reconstruction (§16.5, Codex implementation review answer 4):
+/// Crash/kill reconstruction (§16.5, Codex implementation review answer 4;
+/// the retiring phase added for round 3):
 /// a child process (same scratch home) reaches a job phase and is killed
 /// with SIGKILL; a fresh manager over the same disk must carry no job, load
 /// the last saved history (nothing half-applied, no description saved by
@@ -15,7 +16,7 @@ enum BackgroundPruneSelftestCrash {
     static let readyMarker = "BGPRUNE-CRASH-READY"
 
     @MainActor static func run(_ h: BackgroundPruneSelftestHarness) async {
-        for phase in ["running", "ready", "applying"] {
+        for phase in ["running", "ready", "applying", "retiring"] {
             await crash(h, phase: phase)
         }
     }
@@ -34,6 +35,14 @@ enum BackgroundPruneSelftestCrash {
         case "ready":
             _ = await h.frozenRunningJob(manager, holdSummary: false)
             _ = await h.waitPhase(manager, "ready")
+        case "retiring":
+            // The deadline fires while the worker ignores cancellation: the
+            // job is retiring (slot still occupied) when the process dies.
+            let worker = BackgroundPruneSelftestGate()
+            ConversationManager.bgPruneHoldForTesting = { point in if point == "worker.summary" { await worker.awaitRelease() } }
+            ConversationManager.bgPruneDeadlineSecondsForTesting = 0.5
+            _ = await h.frozenRunningJob(manager)
+            _ = await h.waitUntil(timeout: 30) { manager.bgPruneTestPhase.hasPrefix("retiring") }
         default:
             _ = await h.frozenRunningJob(manager, holdSummary: false)
             _ = await h.waitPhase(manager, "ready")
@@ -74,7 +83,7 @@ enum BackgroundPruneSelftestCrash {
         process.waitUntilExit()
         pipe.fileHandleForReading.readabilityHandler = nil
         h.check("crash [\(phase)] child reached the phase and was killed (SIGKILL)",
-                reached && process.terminationReason == .uncaughtSignal && reportedPhase == phase, "reported \(reportedPhase)")
+                reached && process.terminationReason == .uncaughtSignal && reportedPhase.hasPrefix(phase), "reported \(reportedPhase)")
         // The child pointed the provider at its own (now dead) server.
         try? h.configureProvider()
         let disk = h.diskHistory()

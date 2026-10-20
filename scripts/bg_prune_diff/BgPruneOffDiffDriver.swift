@@ -114,6 +114,9 @@ final class BgPruneDiffRouter: @unchecked Sendable {
     let gate = BgPruneDiffGate()
     var holdSummary = false
     var failFirstDescription = false
+    /// F1 descfail (Codex impl round 3, R3-3): fail the first description
+    /// request whose file list names this file.
+    var failDescriptionFor: String?
 
     func count(_ key: String) -> Int { lock.lock(); defer { lock.unlock() }; counts[key, default: 0] += 1; return counts[key]! }
 
@@ -144,11 +147,8 @@ final class BgPruneDiffRouter: @unchecked Sendable {
         case "description":
             let n = count("description")
             let text = String(data: request.body, encoding: .utf8) ?? ""
-            var files: [String] = []
-            if let range = text.range(of: "Files: ") {
-                let line = text[range.upperBound...].prefix { $0 != "\\" && $0 != "\n" }
-                files = line.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-            }
+            _ = text
+            let files = Self.files(in: request)
             let reply = files.map { "\($0): description-\(n) of \($0)." }.joined(separator: "\n")
             return (BgPruneOffDiffRun.chat(reply, prompt: 100), 0)
         case "other":
@@ -159,10 +159,22 @@ final class BgPruneDiffRouter: @unchecked Sendable {
         }
     }
 
+    static func files(in request: CapturedHTTPRequest) -> [String] {
+        let text = String(data: request.body, encoding: .utf8) ?? ""
+        guard let range = text.range(of: "Files: ") else { return [] }
+        let line = text[range.upperBound...].prefix { $0 != "\\" && $0 != "\n" }
+        return line.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
     func status(_ request: CapturedHTTPRequest) -> Int? {
         if Self.kind(request) == "summary", summaryMode == "error" { return 500 }
         if Self.kind(request) == "description", failFirstDescription {
             lock.lock(); let first = (counts["description-status"] ?? 0) == 0; counts["description-status"] = 1; lock.unlock()
+            if first { return 500 }
+        }
+        if Self.kind(request) == "description", let target = failDescriptionFor,
+           Self.files(in: request).contains(target) {
+            lock.lock(); let first = (counts["description-target"] ?? 0) == 0; counts["description-target"] = 1; lock.unlock()
             if first { return 500 }
         }
         return nil
@@ -339,6 +351,51 @@ final class BgPruneOffDiffRun {
         return history
     }
 
+    /// F1 fallback overlay (Codex impl round 3, R3-3): one action sends ten
+    /// small files (batch limit 8 → two "File skipped" fallbacks), a later
+    /// action sends a file above the 5 MB limit ("Large file" fallback), a
+    /// 12-page PDF (page cap) and repeats one skipped and one described file
+    /// (excluded by the earlier save / the worker's overlay), and a third
+    /// action repeats a described file again.
+    func fallbackHistory() -> [Message] {
+        var history = prunableHistory()
+        let small = (0..<10).map { file("fb-\($0).txt", "Fallback fixture file \($0).\n") }
+        let big = file("fb-big.txt", String(repeating: "B", count: 5 * 1024 * 1024 + 4096))
+        let pdfURL = StoragePaths.dataRoot.appendingPathComponent("offdiff-files/fb-pages.pdf")
+        try? Self.pdf(pages: 12).write(to: pdfURL)
+        history[1].toolInteractions = [sendRound(id: "fb-send-1", paths: small)]
+        history[3].toolInteractions = [sendRound(id: "fb-send-2", paths: [big, pdfURL.path, small[9], small[0]])]
+        history[5].toolInteractions = [sendRound(id: "fb-send-3", paths: [small[1]])]
+        return history
+    }
+
+    func sendRound(id: String, paths: [String]) -> ToolInteraction {
+        let calls = paths.enumerated().map { i, path in
+            ToolCall(id: "\(id)-\(i)", type: "function",
+                     function: FunctionCall(name: "send_document_to_chat", arguments: "{\"file_path\":\"\(path)\"}"))
+        }
+        let results = calls.map { call in
+            ToolResultMessage(toolCallId: call.id, content: "RESULT-\(call.id) " + String(repeating: "lorem ipsum dolor ", count: 2_000 / max(1, calls.count)))
+        }
+        return ToolInteraction(assistantMessage: AssistantToolCallMessage(content: nil, toolCalls: calls), results: results)
+    }
+
+    /// A minimal, valid PDF with `pages` empty pages (fixed bytes).
+    static func pdf(pages: Int) -> Data {
+        var out = "%PDF-1.4\n"
+        var offsets: [Int] = []
+        func obj(_ body: String) { offsets.append(out.utf8.count); out += "\(offsets.count) 0 obj\n\(body)\nendobj\n" }
+        let kids = (0..<pages).map { "\($0 + 3) 0 R" }.joined(separator: " ")
+        obj("<< /Type /Catalog /Pages 2 0 R >>")
+        obj("<< /Type /Pages /Kids [\(kids)] /Count \(pages) >>")
+        for _ in 0..<pages { obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>") }
+        let xref = out.utf8.count
+        out += "xref\n0 \(offsets.count + 1)\n0000000000 65535 f \n"
+        for o in offsets { out += String(format: "%010d 00000 n \n", o) }
+        out += "trailer\n<< /Size \(offsets.count + 1) /Root 1 0 R >>\nstartxref\n\(xref)\n%%EOF\n"
+        return Data(out.utf8)
+    }
+
     /// F1 reasoning removal: pruned assistant messages carry final reasoning.
     func reasoningHistory() -> [Message] {
         var history = prunableHistory()
@@ -410,6 +467,8 @@ final class BgPruneOffDiffRun {
     }
 
     var activitySubscription: AnyCancellable?
+    var noticeSubscription: AnyCancellable?
+    var maintenanceNotices: [String] = []
 
     /// Every change of the maintenance-activity list, in order (the
     /// @Published publisher fires synchronously on each mutation).
@@ -417,6 +476,12 @@ final class BgPruneOffDiffRun {
         activitySubscription = manager.$maintenanceActivities.sink { [weak self] list in
             let now = list.map { "\($0.kind)" }.sorted().joined(separator: "+")
             MainActor.assumeIsolated { self?.activities.append(now.isEmpty ? "-" : now) }
+        }
+        // Maintenance notices (status-line only; e.g. the demotion-snapshot
+        // failure notice), every non-nil value in order.
+        noticeSubscription = manager.$maintenanceNotice.sink { [weak self] value in
+            guard let value else { return }
+            MainActor.assumeIsolated { self?.maintenanceNotices.append(value) }
         }
         return Task {}
     }
@@ -598,11 +663,24 @@ final class BgPruneOffDiffRun {
         try configure(responses: false)
         if mode == "on" { UserDefaults.standard.set(true, forKey: "ada.pruneBackground") }
         if ["error", "rejected", "tools"].contains(variant) { router.summaryMode = variant }
-        if variant == "descfail" { router.failFirstDescription = true }
+        if variant == "descfail-first" { router.failFirstDescription = true }
+        if variant == "descfail" { router.failDescriptionFor = "shared-report.txt" }
+        if variant == "demotefail" {
+            // The second snapshot write is the demotion snapshot (the first is
+            // the prune's own: inline on 0.2.56, the freeze's pin when ON).
+            var writes = 0
+            PruneArchiveStore.faultForTesting = { stage in
+                guard stage == "write" else { return }
+                writes += 1
+                if writes == 2 { throw NSError(domain: "offdiff", code: 3, userInfo: [NSLocalizedDescriptionKey: "injected demotion snapshot fault"]) }
+            }
+        }
         let history: [Message]
         switch variant {
         case "rich": history = richHistory()
-        case "media", "descfail": history = mediaHistory()
+        case "media", "descfail", "descfail-first": history = mediaHistory()
+        case "fallback": history = fallbackHistory()
+        case "demotefail": history = richHistory()
         case "reasoning": history = reasoningHistory()
         case "compactlogs": history = compactLogHistory()
         case "synthetic": history = syntheticHistory()
@@ -610,6 +688,8 @@ final class BgPruneOffDiffRun {
         }
         notes.append("seeded \(history.count)")
         let manager = await manager(history: history)
+        let sampler = sampleActivities(manager)
+        defer { sampler.cancel() }
         server.script([Self.chat("answered", prompt: 100), Self.chat("answered again", prompt: 100)])
         await turn(manager, "over the maximum", at: 100)
         if mode == "on" {
@@ -629,6 +709,7 @@ final class BgPruneOffDiffRun {
             }
             await turn(manager, "next turn applies the ready job", at: 200)
         }
+        PruneArchiveStore.faultForTesting = nil
         return manager
     }
 
@@ -650,6 +731,7 @@ final class BgPruneOffDiffRun {
         result["notices"] = channel.delivered
         result["replies"] = replies
         result["activities"] = activities
+        result["maintenanceNotices"] = maintenanceNotices
         result["receipts"] = BgPruneDiffRecorder.shared.all
         result["notes"] = notes
         result["files"] = tree(StoragePaths.dataRoot, skip: ["logs"])

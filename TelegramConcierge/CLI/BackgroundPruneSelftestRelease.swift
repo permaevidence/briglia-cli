@@ -167,8 +167,10 @@ enum BackgroundPruneSelftestRelease {
         let note = "mid-turn note for the receipt test"
         await manager._testDispatchUser(Message(role: .user, content: note))
         let held = await h.waitUntil(timeout: 30) { mainGate.arrived == 1 }
+        let salvageBefore = BackgroundPruneSelftestRelease3.salvageBytes()
         h.router.gate.release()
         let ready = await h.waitPhase(manager, "ready", timeout: 30)
+        let salvageAfter = BackgroundPruneSelftestRelease3.salvageBytes()
         mainGate.release()
         _ = await manager._testAwaitIdle(timeout: 60)
         await h.sleep(0.5)
@@ -181,6 +183,8 @@ enum BackgroundPruneSelftestRelease {
         h.check("B17 the mid-turn note reached the model once and was not redelivered after the summary completed",
                 delivered == 1 && inHistory == 1 && mains.count == 2 && manager._testLastError == nil,
                 "delivered \(delivered) history \(inHistory) main \(mains.count) error \(String(describing: manager._testLastError))")
+        h.check("B17 (summary first) the worker left the salvage file untouched while the main request was in flight",
+                salvageBefore == salvageAfter, "before \(salvageBefore?.count ?? -1) after \(salvageAfter?.count ?? -1)")
         useChat(h)
     }
 
@@ -216,8 +220,11 @@ enum BackgroundPruneSelftestRelease {
         let snapshots = manager._testMessages.flatMap { $0.toolInteractions }.flatMap { $0.results }
             .flatMap { $0.fileAttachmentReferences }.compactMap { $0.snapshotPath }
         let present = snapshots.filter { FileManager.default.fileExists(atPath: $0) }
-        h.check("F4 a file attached after the freeze stays readable after the apply at \(site)",
-                h.eventCount("bgprune.applied") == 1 && !snapshots.isEmpty && present.count == snapshots.count,
+        // Re-read after the apply: the snapshot bytes are the attached file's.
+        let intact = snapshots.filter { (try? Data(contentsOf: URL(fileURLWithPath: $0))) == IRFixtures.png }
+        h.check("F4 a file attached after the freeze stays readable after the apply at \(site) (re-read, bytes equal)",
+                h.eventCount("bgprune.applied") == 1 && !snapshots.isEmpty && present.count == snapshots.count
+                && intact.count == snapshots.count,
                 "applied \(h.eventCount("bgprune.applied")) snapshots \(snapshots.count) present \(present.count) events \(h.allEvents) rounds \(manager._testMessages.map { "\($0.role):\($0.toolInteractions.map { $0.results.map { "\($0.toolCallId)/\($0.fileAttachmentReferences.count)/\($0.content.prefix(80))" } })" })")
     }
 
@@ -285,8 +292,11 @@ enum BackgroundPruneSelftestRelease {
                 && finalObserved[1].estimate >= finalObserved[1].ceiling && h.eventCount("bgprune.admit.reduce") == 1
                 && h.eventCount("bgprune.applied") == 1 && manager._testLastError == nil,
                 "observed \(observed) events \(h.allEvents) error \(String(describing: manager._testLastError))")
-        h.check("B4b(d-ff) the refused tool was not executed and one final logical request kept one allowance",
-                finalObserved.allSatisfy { $0.key == finalObserved[0].key } && h.eventCount(prefix: "bgprune.helper.") <= 1,
+        let refusedRuns = BackgroundPruneSelftestRelease3.toolExecutions("ff-refused")
+        let readRuns = BackgroundPruneSelftestRelease3.toolExecutions("ff-read-1")
+        h.check("B4b(d-ff) the refused call was never executed (tool.execute records: refused \(refusedRuns), round-1 read \(readRuns)); one final logical request kept one allowance",
+                refusedRuns == 0 && readRuns >= 1 && finalObserved.allSatisfy { $0.key == finalObserved[0].key }
+                && h.eventCount(prefix: "bgprune.helper.") <= 1,
                 "\(observed) \(h.allEvents)")
     }
 
@@ -298,7 +308,12 @@ enum BackgroundPruneSelftestRelease {
     @MainActor static func frozenExecutionTemporal(_ h: BackgroundPruneSelftestHarness, responses: Bool) async {
         let proto = responses ? "Responses" : "Chat Completions"
         let manager = await h.freshManager(history: h.prunableHistory())
-        if responses { useResponses(h) }
+        if responses {
+            // A frozen effort to check against the changed one ("low").
+            try? ProviderProfiles.saveProfile(.custom, apiKey: h.apiKey, baseURL: "http://127.0.0.1:\(h.server.port)/v1",
+                                              model: h.model, effort: "high", textOnly: false, wireProtocol: .responses)
+            try? ProviderProfiles.activate(.custom)
+        }
         h.router.holdSummaries = [1]
         h.router.summaryReply = { n, isResponses in
             guard n == 1 else { return nil }
@@ -327,8 +342,19 @@ enum BackgroundPruneSelftestRelease {
         let expectedTarget = responses ? "/responses" : "/chat/completions"
         let frozen = summaries.allSatisfy { h.bodyText($0).contains("\"model\":\"\(h.model)\"") && !h.bodyText($0).contains("changed-model-b")
             && $0.target.hasSuffix(expectedTarget) }
-        h.check("B16 \(proto): held first attempt, finished turn, changed model/protocol, retry → both sends frozen",
-                idle && ready && summaries.count == 2 && frozen,
+        // The frozen reasoning payload: both sends carry the same reasoning
+        // settings (the frozen effort), never the changed one.
+        func reasoning(_ body: String) -> String {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any] else { return "<unparsed>" }
+            let keys = ["reasoning", "reasoning_effort", "thinking"]
+            let parts = keys.compactMap { key in object[key].map { "\(key)=\($0)" } }
+            return parts.joined(separator: ";")
+        }
+        let payloads = summaries.map { reasoning(h.bodyText($0)) }
+        let reasoningFrozen = payloads.count == 2 && payloads[0] == payloads[1] && !payloads[0].contains("low")
+            && (!responses || payloads[0].contains("high"))
+        h.check("B16 \(proto): held first attempt, finished turn, changed model/protocol, retry → both sends frozen (reasoning payload \(payloads.first ?? "-"))",
+                idle && ready && summaries.count == 2 && frozen && reasoningFrozen,
                 "idle \(idle) ready \(ready) summaries \(summaries.map { $0.target }) phase \(manager.bgPruneTestPhase)")
         h.router.summaryReply = nil
         try? KeychainHelper.save(key: KeychainHelper.openAICompatibleModelKey, value: h.model)
@@ -350,7 +376,9 @@ enum BackgroundPruneSelftestRelease {
         let crafted = craftMind(source: path, extra: ["ada.pruneBackground": true, "pruneBackground": true, "backgroundPrune": true])
         h.check("B19 crafted Mind built (extra fields true)", crafted != nil)
         let cases: [(label: String, local: Bool?, archive: String?, expected: Bool?)] = [
+            ("local absent + plain Mind (field absent)", nil, path, nil),
             ("local absent + crafted extra field true", nil, crafted, nil),
+            ("local OFF + plain Mind (field absent)", false, path, false),
             ("local OFF + crafted extra field true", false, crafted, false),
             ("local ON + plain Mind (field absent)", true, path, true),
             ("local ON + crafted Mind", true, crafted, true),

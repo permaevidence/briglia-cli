@@ -17325,6 +17325,7 @@ extension ConversationManager {
                 Background pruning: \(enabled ? "ON" : "OFF") (default: off).
                 Off: when the context reaches its maximum, I stop, summarize and prune old tool output, then continue (today's behaviour).
                 On: the summary is prepared in the background while I keep working with the unchanged conversation; it is applied at the next step. If the context reaches the ceiling (maximum + 100k tokens) before it is ready, I wait for it. Model context windows are not known yet, so the ceiling is not lowered for smaller models: if a request is rejected as too long, I prune at once and resend it once. Requests between the maximum and the ceiling carry more input and can cost more (some providers charge a long-context premium). Turning it off cancels a summary being prepared.
+                Only enable with a model whose context window is at least threshold + 100k (350k by default).
                 Switch with /prunebackground on or /prunebackground off.
                 """)
             return

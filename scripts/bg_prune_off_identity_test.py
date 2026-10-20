@@ -966,7 +966,7 @@ NEXT_DECL = {"static", "class", "let", "var", "func", "init", "deinit", "subscri
 CONFIG_LABELS = {"commandName", "abstract", "discussion"}
 COMMAND_PROPERTY_FORMS = (
     re.compile(r"@Flag \( name : \. long , help : \. hidden \) var [A-Za-z_][A-Za-z0-9_]* = false"),
-    re.compile(r"@Option \( name : \. long , help : \. hidden \) var [A-Za-z_][A-Za-z0-9_]* : [A-Za-z]+ \?"),
+    re.compile(r"@Option \( name : \. long , help : \. hidden \) var [A-Za-z_][A-Za-z0-9_]* : (String|Int|Double) \?"),
 )
 
 
@@ -1144,6 +1144,138 @@ def selftest_errors(rel, text):
     return errs
 
 
+# ------------------------------------------------- reserved names (R3-1)
+
+# Codex impl round 3, R3-1: name resolution. Command discovery evaluates
+# `static let configuration = CommandConfiguration(...)` and the @Flag/@Option
+# property-wrapper initialisers; which declarations those names resolve to is
+# decided by lookup, not by spelling. A new member/type/typealias/generic
+# parameter called `CommandConfiguration` (or `Flag`, `Option`, a literal-type
+# alias, `String`, ...) would shadow the imported declaration. Lookup from the
+# command type reaches: its own members and generic parameters, the module's
+# top level, and the fixed imports. Protected files are byte-identical to
+# 0.2.56 and new files may only add `BackgroundPrune*` top-level types, so the
+# only way to shadow is a declaration in NEW code. Therefore:
+#   * no declaration in new code (files and marked regions) may bind a name in
+#     RESERVED_DECL, in any declaration position (`func/var/let/struct/class/
+#     enum/actor/typealias/case/associatedtype/protocol/macro/for NAME`, enum
+#     case lists, tuple patterns, generic parameter lists);
+#   * the ArgumentParser-specific names in AP_POSITIONAL may appear only at
+#     their single approved position: `import ArgumentParser`, the approved
+#     configuration call, and the command type's inheritance clause. Any other
+#     occurrence (including a qualified `ArgumentParser.X` lookup) is rejected.
+# The approved configuration call therefore resolves to ArgumentParser's
+# `CommandConfiguration` initialiser by exhaustion.
+AP_POSITIONAL = {"CommandConfiguration", "ArgumentParser", "ParsableCommand", "AsyncParsableCommand",
+                 "ParsableArguments", "Flag", "Option", "Argument", "OptionGroup", "ArgumentHelp",
+                 "NameSpecification", "ArgumentVisibility", "ExpressibleByArgument", "EnumerableFlag",
+                 "CommandGroup", "ArgumentArrayParsingStrategy", "SingleValueParsingStrategy",
+                 "ArrayParsingStrategy", "FlagInversion", "FlagExclusivity", "CompletionKind",
+                 "ParsableArgumentsValidator"}
+RESERVED_DECL = AP_POSITIONAL | {
+    "ExitCode", "CleanExit", "ValidationError",
+    "String", "Int", "Double", "Float", "Bool", "Character", "Substring", "Optional", "Array",
+    "Dictionary", "Set", "Never", "Void", "Any", "AnyObject", "Error",
+    "Swift", "Foundation", "FoundationNetworking", "Glibc", "Darwin",
+    "StringLiteralType", "IntegerLiteralType", "FloatLiteralType", "BooleanLiteralType",
+    "ExtendedGraphemeClusterLiteralType", "UnicodeScalarLiteralType",
+}
+DECL_INTRODUCERS = {"func", "var", "let", "struct", "class", "enum", "actor", "typealias", "case",
+                    "associatedtype", "protocol", "macro", "for"}
+GENERIC_HOSTS = {"struct", "class", "enum", "actor", "func", "typealias", "protocol"}
+
+
+def _bracket_end(toks, i, open_, close):
+    """Index of the token closing the bracket opened at toks[i]."""
+    d = 0
+    for j in range(i, len(toks)):
+        if toks[j].text == open_ or (open_ == "<" and toks[j].kind == "op" and toks[j].text.startswith("<")):
+            d += toks[j].text.count(open_) if open_ == "<" else 1
+        elif toks[j].text == close or (close == ">" and toks[j].kind == "op" and set(toks[j].text) == {">"}):
+            d -= toks[j].text.count(close) if close == ">" else 1
+            if d <= 0:
+                return j
+    return len(toks) - 1
+
+
+def reserved_name_errors(where, toks, selftest=False):
+    """toks: code tokens (comments removed). `selftest`: the file may hold the
+    approved configuration / command inheritance (BackgroundPruneSelftest*)."""
+    errs = []
+    n = len(toks)
+    bound = []                                   # (token index) of binding names
+
+    def bind(j):
+        if 0 <= j < n and toks[j].kind == "word":
+            bound.append(j)
+
+    for i, t in enumerate(toks):
+        if t.kind != "word":
+            continue
+        prev = toks[i - 1] if i > 0 else None
+        # 1. NAME right after a declaration introducer
+        if t.text in DECL_INTRODUCERS:
+            bind(i + 1)
+            # tuple pattern: let (a, b) / case let (a, b) / for (a, b) in
+            if i + 1 < n and toks[i + 1].text == "(" and t.text in ("var", "let", "for"):
+                e = _bracket_end(toks, i + 1, "(", ")")
+                for j in range(i + 2, e):
+                    if toks[j - 1].text in ("(", ",") and toks[j].kind == "word":
+                        bind(j)
+            # enum case list: case a, b(Int), c = 1
+            if t.text == "case" and i + 1 < n and toks[i + 1].kind == "word" \
+                    and toks[i + 1].text not in ("let", "var", "is", "_"):
+                line = toks[i].line
+                pd = 0
+                for j in range(i + 1, n):
+                    if toks[j].line != line:
+                        break
+                    if toks[j].text in "([":
+                        pd += 1
+                    elif toks[j].text in ")]":
+                        pd -= 1
+                    elif toks[j].text == ":" and pd == 0:
+                        break                     # a switch label, not a declaration
+                    elif toks[j].text == "," and pd == 0:
+                        bind(j + 1)
+            # generic parameter list: KW NAME < P1, P2: C, ... >
+            if t.text in GENERIC_HOSTS and i + 2 < n and toks[i + 2].kind == "op" and toks[i + 2].text.startswith("<"):
+                e = _bracket_end(toks, i + 2, "<", ">")
+                depth = 0
+                for j in range(i + 2, e + 1):
+                    if toks[j].kind == "op" and toks[j].text.startswith("<"):
+                        depth += toks[j].text.count("<")
+                        if depth == 1:
+                            bind(j + 1)
+                    elif toks[j].kind == "op" and set(toks[j].text) == {">"}:
+                        depth -= len(toks[j].text)
+                    elif toks[j].text == "," and depth == 1:
+                        bind(j + 1)
+        if t.text in ("init", "subscript") and i + 1 < n and toks[i + 1].kind == "op" and toks[i + 1].text.startswith("<"):
+            e = _bracket_end(toks, i + 1, "<", ">")
+            for j in range(i + 1, e):
+                if toks[j].text in (",",) or (toks[j].kind == "op" and toks[j].text.startswith("<")):
+                    bind(j + 1)
+        # 2. ArgumentParser-specific names: only at their approved position
+        if t.text in AP_POSITIONAL:
+            approved = False
+            if t.text == "ArgumentParser":
+                approved = prev is not None and prev.text == "import"
+            elif t.text == "CommandConfiguration" and selftest:
+                approved = (i >= 4 and [x.text for x in toks[i - 4:i]] == ["static", "let", "configuration", "="]
+                            and i + 1 < n and toks[i + 1].text == "(")
+            elif t.text in ("ParsableCommand", "AsyncParsableCommand") and selftest:
+                approved = (i >= 3 and toks[i - 1].text == ":" and toks[i - 2].kind == "word"
+                            and toks[i - 3].text == "struct" and i + 1 < n and toks[i + 1].text == "{")
+            if not approved:
+                errs.append(f"{where}:{t.line}: ArgumentParser name {t.text!r} outside its approved position "
+                            f"(R3-1: it must resolve to the imported declaration)")
+    for j in bound:
+        if toks[j].text in RESERVED_DECL:
+            errs.append(f"{where}:{toks[j].line}: declaration shadows reserved name {toks[j].text!r} (R3-1)")
+    return errs
+
+
 # ---------------------------------------------------------------- validate
 
 def validate(root, manifest=None):
@@ -1171,6 +1303,10 @@ def validate(root, manifest=None):
         e, types = new_file_errors(rel, text)
         errs += e
         new_types |= types
+        try:
+            errs += reserved_name_errors(rel, code(lex(text)), selftest=bool(SELFTEST_PATTERN.match(rel)))
+        except GateError as e:
+            errs.append(f"{rel}: {e}")
         if SELFTEST_PATTERN.match(rel):
             errs += selftest_errors(rel, text)
     for rel, digest in sorted(files.items()):
@@ -1214,6 +1350,11 @@ def validate(root, manifest=None):
             base_id, _, part = rid.partition("/")
             by_id.setdefault(base_id, []).append((part, r))
             order.append(base_id)
+        for r in regions:
+            try:
+                errs += reserved_name_errors(f"{rel} region {r['id']}", code(lex(r["text"])))
+            except GateError:
+                pass                              # reported by template_errors
         for base_id, parts in by_id.items():
             a = anchors.get(base_id)
             if a is None:

@@ -244,7 +244,11 @@ final class BackgroundPruneSelftestHarness {
         guard FileDescriptionsStore.isHermetic else {
             print("✖ description store is not hermetic; aborting"); failures += 1; return
         }
-        defer { server.stop() }
+        defer {
+            server.stop()
+            // The describable-files fixture directory is owned by this run.
+            try? FileManager.default.removeItem(at: filesRoot)
+        }
         do { try configureProvider() } catch { check("configure scratch provider", false, "\(error)"); return }
         let log = self.log
         ConversationManager.bgPruneEventForTesting = { event in log.append(event) }
@@ -259,6 +263,7 @@ final class BackgroundPruneSelftestHarness {
         if section("archive") { await BackgroundPruneSelftestArchive.run(self) }
         if section("round2") { await BackgroundPruneSelftestRound2.run(self) }
         if section("release") { await BackgroundPruneSelftestRelease.run(self) }
+        if section("release3") { await BackgroundPruneSelftestRelease3.run(self) }
         if section("crash") { await BackgroundPruneSelftestCrash.run(self) }
     }
 

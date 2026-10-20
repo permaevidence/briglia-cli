@@ -132,6 +132,28 @@ BREAKS = [
                 return response
             }''', '''            let response = try await resend()
             let identity = await bgPruneIdentity(execution)''')], None),
+    # Codex impl round 3, R3-3: the new release cases must catch these.
+    ("apply without its evidence gate", "release3",
+     '''        do { try settleJobEvidenceBeforeRemoval(of: job.source.filter { manifest.contains($0.id) }) }
+        catch { outcome = .abandoned("evidence"); return (outcome, [:]) }''',
+     '''        _ = manifest'''),
+    ("forced-final convergence rebuild dropping the refusal suffix", "release3",
+     '''                                finalForceInteractions = toolInteractions + Array(finalForceInteractions.dropFirst(bgPruneFinalBase))
+                                bgPruneFinalBase = toolInteractions.count
+                            }
+                            return bgPruneChanged
+                        },
+                        resend: {
+                            prevRoundPromptTokens = nil; self.lastPromptTokens = nil; previousPromptScope = nil
+                            return try await bgPruneFinalSend()''',
+     '''                                finalForceInteractions = toolInteractions
+                                bgPruneFinalBase = toolInteractions.count
+                            }
+                            return bgPruneChanged
+                        },
+                        resend: {
+                            prevRoundPromptTokens = nil; self.lastPromptTokens = nil; previousPromptScope = nil
+                            return try await bgPruneFinalSend()'''),
 ]
 
 
@@ -178,7 +200,7 @@ def main():
             if not ok:
                 print(f"✖ {label}: mutated build failed\n{log}")
                 continue
-            code, failed, seconds = run_section(section, 150)
+            code, failed, seconds = run_section(section, 300 if section == "release3" else 150)
             if code != 0:
                 caught += 1
                 why = "hang past the timeout" if code == "timeout" else (failed[0] if failed else f"exit {code}")

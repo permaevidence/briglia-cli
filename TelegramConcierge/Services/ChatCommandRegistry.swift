@@ -50,7 +50,7 @@ enum ChatCommandRegistry {
         ChatCommand(name: "archiveinline", description: "Wait for memory archiving before replying (on), or archive in the background (off, default)",
                     usage: "[on|off]", inMenu: false, category: "System"),
                     // BGPRUNE{ A-REG
-                    ChatCommand(name: "prunebackground", description: "Prune old tool output in the background while I keep working (on), or wait for it (off, default)",
+                    ChatCommand(name: "prunebackground", description: "Prune old tool output in the background while I keep working (on), or wait for it (off, default). Only enable with a model whose context window is at least threshold + 100k (350k by default)",
                                 usage: "[on|off]", inMenu: false, category: "System"),
                     // }BGPRUNE
         ChatCommand(name: "orprovider", description: "Pin the current OpenRouter model to one upstream host (each model remembers its own), let OpenRouter choose, or return to Briglia's host",

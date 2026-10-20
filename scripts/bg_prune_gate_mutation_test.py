@@ -75,6 +75,23 @@ CONF = '''    static let configuration = CommandConfiguration(
     )'''
 
 
+# Codex impl round 3, R3-1: a static factory shadowing the imported
+# CommandConfiguration initialiser, with a help-time file write.
+FACTORY_MUTANT = '''    static func CommandConfiguration(
+        commandName: String, abstract: String, shouldDisplay: Bool
+    ) -> ArgumentParser.CommandConfiguration {
+        if ProcessInfo.processInfo.arguments.contains("--help") {
+            let root = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]!
+            try? "CODEX_OFF_FACTORY_SIDE_EFFECT".write(
+                toFile: root + "/codex-off-discovery.txt",
+                atomically: true, encoding: .utf8)
+        }
+        return ArgumentParser.CommandConfiguration(
+            commandName: commandName, abstract: abstract,
+            shouldDisplay: shouldDisplay)
+    }'''
+
+
 def mutate(root, label, rel, fn, expect, manifest=None):
     """Apply fn(text) -> text to rel, validate, require a finding matching
     `expect` (regex), restore."""
@@ -289,6 +306,46 @@ def run(root):
     mutate(root, "R2-1 second configuration declaration", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
            lambda t: t.replace(CONF, CONF + "\n    static let configuration2 = eager()", 1),
            r"static property")
+    # Codex impl round 3, R3-1: name resolution (shadowing the imported names).
+    run_line = "    @MainActor func run() async throws {"
+    mutate(root, "R3-1 static func CommandConfiguration shadowing the constructor (Codex's compiled mutant)", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(run_line, FACTORY_MUTANT + "\n\n" + run_line, 1), r"shadows reserved name 'CommandConfiguration'")
+    mutate(root, "R3-1 backtick-escaped static func `CommandConfiguration`", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(run_line, "    static func `CommandConfiguration`(commandName: String, abstract: String, shouldDisplay: Bool) -> Int { 0 }\n" + run_line, 1),
+           r"shadows reserved name 'CommandConfiguration'")
+    mutate(root, "R3-1 nested type named CommandConfiguration", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(run_line, "    struct CommandConfiguration { init(commandName: String, abstract: String, shouldDisplay: Bool) {} }\n" + run_line, 1),
+           r"shadows reserved name 'CommandConfiguration'")
+    mutate(root, "R3-1 typealias CommandConfiguration", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(run_line, "    typealias CommandConfiguration = BackgroundPruneSelftestHarness\n" + run_line, 1),
+           r"shadows reserved name 'CommandConfiguration'")
+    mutate(root, "R3-1 generic parameter named CommandConfiguration on the command type", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace("struct BackgroundPruneSelftest: AsyncParsableCommand {",
+                               "struct BackgroundPruneSelftest<CommandConfiguration>: AsyncParsableCommand {", 1),
+           r"shadows reserved name 'CommandConfiguration'|outside its approved position")
+    mutate(root, "R3-1 property-wrapper type Flag shadowed by a nested type", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(run_line, "    @propertyWrapper struct Flag { var wrappedValue: Bool }\n" + run_line, 1),
+           r"shadows reserved name 'Flag'")
+    mutate(root, "R3-1 enum case list binding Option", "TelegramConcierge/Services/BackgroundPruneTypes.swift",
+           lambda t: t + "\nenum BackgroundPruneProbeCases { case first, Option }\n", r"shadows reserved name 'Option'")
+    mutate(root, "R3-1 literal-type alias changing default literal types", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(run_line, "    typealias StringLiteralType = BackgroundPruneSelftestHarness\n" + run_line, 1),
+           r"shadows reserved name 'StringLiteralType'")
+    mutate(root, "R3-1 shadowed String used by a hidden @Option type", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(run_line, "    struct String {}\n" + run_line, 1), r"shadows reserved name 'String'")
+    mutate(root, "R3-1 @Option of a custom value type", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace("@Option(name: .long, help: .hidden) var only: String?",
+                               "@Option(name: .long, help: .hidden) var only: BackgroundPruneProbe?", 1),
+           r"command property not allowed")
+    mutate(root, "R3-1 qualified ArgumentParser.CommandConfiguration lookup in a helper", "TelegramConcierge/Services/BackgroundPruneTypes.swift",
+           lambda t: t + "\nenum BackgroundPruneProbeLookup { static func f() -> Any { ArgumentParser.CommandConfiguration.self } }\n",
+           r"outside its approved position")
+    mutate(root, "R3-1 tuple pattern binding a reserved name", "TelegramConcierge/CLI/BackgroundPruneSelftest.swift",
+           lambda t: t.replace(run_line, "    let (probeA, Int) = (1, 2)\n" + run_line, 1), r"shadows reserved name 'Int'|command property not allowed")
+    mutate(root, "R3-1 reserved declaration inside a marked region", CM,
+           lambda t: t.replace("    var backgroundPruneEngaged: Bool {",
+                               "    func bgPruneProbe() { struct CommandConfiguration {} }\n    var backgroundPruneEngaged: Bool {", 1),
+           r"shadows reserved name 'CommandConfiguration'")
     mutate(root, "R3b valid header then an unprefixed overload on the same line", CM,
            lambda t: t.replace("    var backgroundPruneEngaged: Bool {",
                                "    func bgPruneProbe() {} ; private func sendText(_ text: String) async throws { print(\"CODEX_OFF_OVERLOAD\") }\n    var backgroundPruneEngaged: Bool {", 1),
