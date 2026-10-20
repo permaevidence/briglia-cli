@@ -174,7 +174,10 @@ final class BackgroundPruneSelftestRouter: @unchecked Sendable {
         }
         guard let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
               object["tools"] == nil else { return nil }
-        lock.lock(); _other += 1; lock.unlock()
+        lock.lock(); _other += 1; let n = _other; lock.unlock()
+        if ArchiveFullChunkSelftest.systemContent(request.body).contains(ArchiveFullChunkSelftest.summaryMarker) {
+            return (BAArchiveRouter.chat(BAArchiveRouter.summaryText(n)), 0)
+        }
         return (BackgroundPruneSelftestHarness.chat("NO_CHANGES", prompt: 100), 0)
     }
 }
