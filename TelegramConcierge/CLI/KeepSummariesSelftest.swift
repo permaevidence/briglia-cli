@@ -112,7 +112,10 @@ extension RetentionHarness {
         }
         if section("invalidate") { try await invalidationSection(); try await invalidationFaultSection() }
         if section("restore") { try await restoreAcceptSection(); try await restoreRefusalSection(); try await restoreInjectionSection() }
-        if section("idle") { try await idleBlockerSection(); try await idleBudgetSection(); try await idleTriggerSection() }
+        if section("idle") { try await idleBlockerSection(); try await idleBudgetSection(); try await idleTriggerSection()
+            try await idleBudgetAccountingSection(); try await idleRetrySection(); try await idleHistoryRetrySection() }
+        if section("downgrade") { try await downgradeSection() }
+        if only == "downgrade-export" || only == "downgrade-import" { try await downgradeRealPhases() }
         if section("archive") { try await archiveSection() }
         if section("commits") { try await commitSection() }
         UserDefaults.standard.removeObject(forKey: KeepSummariesSetting.defaultsKey)

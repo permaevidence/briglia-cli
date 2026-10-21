@@ -254,7 +254,7 @@ extension RetentionHarness {
             let noRestore = report.restored == 0 && report.measurementClearFailed
                 && records(diskHistory() ?? []).count == 2 && records(manager._testMessages).count == 2
             let retry = manager.summaryRetentionIdlePass()
-            check("K8b usage clear fails (\(point)): no restored text is published (on disk or in memory; usage \(point == "before-write" ? "old" : "cleared on disk")); retryable",
+            check("K8b usage clear fails (\(point == "before-write" ? "before the atomic write" : "after the atomic write completed: caller's post-write failure path; a failing directory-fsync syscall is not injected")): no restored text is published (on disk or in memory; usage \(point == "before-write" ? "old" : "cleared on disk")); retryable",
                   noRestore && usageOK && retry.restored == 2, "\(report) usage \(String(describing: usage)) retry \(retry)")
         }
         for (name, before) in [("before replacement", true), ("after replacement", false)] {

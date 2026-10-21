@@ -89,7 +89,7 @@ extension RetentionHarness {
         ConversationManager.requestViewObserverForTesting = nil
         server.router = nil
         let body = mainBodies().last ?? ""
-        check("K7 a change while a request is composed does not split it: that request keeps the view it was built with",
+        check("K7 a change while a request is composed does not split it: the captured view's limit is the one sent (observed at build time and in the final body; the estimator input is not observed independently)",
               observed.first == .defaultValue && fullCount(body, labels: labels) == 3 && KeepSummariesSetting.current() == .count(1),
               "observed \(observed), full \(fullCount(body, labels: labels))")
         UserDefaults.standard.removeObject(forKey: KeepSummariesSetting.defaultsKey)
@@ -119,7 +119,7 @@ extension RetentionHarness {
         let pressureBodies = server.completeRequests.map { String(decoding: $0.body, as: UTF8.self) }
         let main = mainBodies().last ?? ""
         let heavyPruned = message(manager._testMessages, "REPLY_HEAVY")?.toolInteractions.isEmpty == true
-        check("K15 N = all over the budget: the prune runs on the composed view (the heavy turn is pruned) and the request still shows all six summaries",
+        check("K15 (Chat Completions, N = all only) over the budget: the prune runs on the composed view (the heavy turn is pruned) and the request still shows all six summaries",
               heavyPruned && pressureBodies.count > 1 && fullCount(main, labels: labels) == 6,
               "\(pressureBodies.count) requests, full \(fullCount(main, labels: labels))")
         UserDefaults.standard.removeObject(forKey: KeepSummariesSetting.defaultsKey)

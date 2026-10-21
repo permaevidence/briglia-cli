@@ -27,6 +27,7 @@ extension RetentionHarness {
             ("maintenance", { m in let id = m._testBeginMaintenance(); return { m._testEndMaintenance(id) } }),
             ("active turn", { m in m._testSetActiveRunPlaceholder(true); return { m._testSetActiveRunPlaceholder(false) } }),
             ("archive recovery", { m in m._testSetArchiveRecoveryPlaceholder(true); return { m._testSetArchiveRecoveryPlaceholder(false) } }),
+            ("archive job", { m in m._testSetArchiveJobPlaceholder(true); return { m._testSetArchiveJobPlaceholder(false) } }),
             ("Mind restore", { m in _ = m.beginMindRestore(); return { m.endMindRestore() } }),
             ("persistence stall", { m in m._testSetRecoveryBlocked(true); return { m._testSetRecoveryBlocked(false) } }),
         ]
@@ -40,14 +41,14 @@ extension RetentionHarness {
             let after = manager.summaryRetentionIdlePass()
             if after.stubsRepaired != 3 { blocked.append(name + " (after release: \(after))") }
         }
-        check("K13a the idle pass never runs during maintenance, an active turn, archive recovery, a Mind restore or a persistence stall; it runs once released",
+        check("K13a the idle pass never runs during maintenance, an active turn, archive recovery, an archive job, a Mind restore or a persistence stall; it runs once released",
               blocked.isEmpty, blocked.joined(separator: ", "))
 
         // Retriggers: the pass is scheduled when a blocking owner releases its slot.
         ConversationManager.summaryRetentionIdlePassEnabled = true
         defer { ConversationManager.summaryRetentionIdlePassEnabled = false }
         var retriggered: [String] = []
-        for (name, apply) in blockers where name != "active turn" && name != "persistence stall" {
+        for (name, apply) in blockers where name != "active turn" && name != "persistence stall" && name != "archive job" {
             let manager = await unstubbedManager()
             let undo = apply(manager)
             manager._testScheduleIdlePass()
