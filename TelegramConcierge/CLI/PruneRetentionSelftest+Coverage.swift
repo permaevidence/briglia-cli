@@ -67,24 +67,28 @@ extension RetentionHarness {
         after.append(toolTurn("TAIL", at: at(2026, 9, 30, 16, 0), issued: [at(2026, 9, 30, 15, 30)]))
         manager._testSeedHistory(after)
         try await pruneLast(manager)
-        let c4 = message(manager._testMessages, "REPLY_D29")?.demotedPruneSummaries.first?.line ?? ""
-        check("C4 archived start: the demoted line still shows 27 Sep and its files",
+        let c4 = message(composed(manager._testMessages), "REPLY_D29")?.demotedPruneSummaries.first?.line ?? ""
+        check("C4 archived start: the pointer line still shows 27 Sep and its files",
               c4.hasPrefix("Earlier work 27 Sep 2026 09:30 – 29 Sep 2026 10:00 (UTC+02:00)") && c4.contains("day27.swift"), c4)
 
-        // C5: re-demotion uses the second prune's coverage; the first record stays.
+        // C5: an extended summary gets a fresh pointer for the merged text
+        // and coverage; the stale one is replaced, never stacked.
         manager = await freshManager(history: anchoredHistory(3))
         try await pruneLast(manager)
-        let first = message(manager._testMessages, "REPLY_A0")?.demotedPruneSummaries
+        let first = message(manager._testMessages, "REPLY_A0")?.prunedContextSummaryStub
         var reanchored = manager._testMessages
         let a0 = reanchored.firstIndex { $0.content == "REPLY_A0" }!
         reanchored[a0].toolInteractions = [round("again", issued: at(2026, 9, 25, 8, 0))]
         manager._testReplaceMessages(reanchored); _ = manager._testSave()
         _ = try await manager._testRetentionPrune(affected: [a0], trigger: "manual", summary: "A0_AGAIN")
-        let second = message(manager._testMessages, "REPLY_A0")?.demotedPruneSummaries ?? []
-        check("C5 re-demotion: second record carries the second prune's coverage; first unchanged",
-              second.count == 2 && second.first == first?.first && second[1].coverage?.start == at(2026, 9, 1, 10, 0)
-              && second[1].coverage?.end == at(2026, 9, 25, 8, 0) && second[1].snapshot != second[0].snapshot,
-              "\(second.map(\.line))")
+        let extended = message(manager._testMessages, "REPLY_A0")
+        let shown = message(composed(manager._testMessages), "REPLY_A0")?.demotedPruneSummaries ?? []
+        check("C5 extension: one fresh pointer with the merged coverage replaces the stale one; full text kept",
+              extended?.prunedContextSummary == "FULL_SUMMARY_A0\n\nA0_AGAIN" && shown.count == 1
+              && extended?.prunedContextSummaryStub?.isUsable(for: extended?.prunedContextSummary) == true
+              && shown[0].coverage?.start == at(2026, 9, 1, 9, 50) && shown[0].coverage?.end == at(2026, 9, 25, 8, 0)
+              && shown[0].snapshot != first?.record.snapshot,
+              "\(shown.map(\.line))")
 
         // C7: rendering does not depend on the device zone at demotion.
         var lines: [String] = []
@@ -94,7 +98,7 @@ extension RetentionHarness {
             manager = await freshManager(history: h)
             PruneSummaryRetention.timeZoneForTesting = deviceZone
             try await pruneLast(manager)
-            let line = message(manager._testMessages, "REPLY_A0")?.demotedPruneSummaries.first?.line ?? ""
+            let line = message(composed(manager._testMessages), "REPLY_A0")?.demotedPruneSummaries.first?.line ?? ""
             lines.append(line.components(separatedBy: PruneSummaryRetention.linkPrefix).first ?? "")
         }
         PruneSummaryRetention.timeZoneForTesting = zone
@@ -139,8 +143,8 @@ extension RetentionHarness {
         h[1].prunedContextSummaryCoverage = nil
         let manager = await freshManager(history: h)
         try await pruneLast(manager)
-        let line = message(manager._testMessages, "REPLY_A0")?.demotedPruneSummaries.first?.line ?? ""
-        check("C8b an anchor without valid coverage is demoted under the legacy approx. rule",
+        let line = message(composed(manager._testMessages), "REPLY_A0")?.demotedPruneSummaries.first?.line ?? ""
+        check("C8b an anchor without valid coverage is shown as a pointer under the legacy approx. rule",
               line.hasPrefix(PruneSummaryRetention.approxPrefix), line)
     }
 
@@ -191,7 +195,7 @@ extension RetentionHarness {
         let afterRestart = PruneSummaryRetention.legacyCoverage(in: manager._testMessages, anchor: 2)
             .flatMap { PruneSummaryRetention.line(for: $0, snapshot: ref()) }
         try await pruneLast(manager)
-        let demoted = message(manager._testMessages, "REPLY_A0")?.demotedPruneSummaries.first?.line ?? ""
+        let demoted = message(composed(manager._testMessages), "REPLY_A0")?.demotedPruneSummaries.first?.line ?? ""
         check("C6 legacy anchor after restart: approx. prefix, span/files from surviving messages, same before and after",
               before != nil && before == afterRestart && demoted.hasPrefix("Earlier work, approx. 30 Aug 2026 09:00 – 1 Sep 2026 10:00 (UTC+02:00)")
               && demoted.contains("kept.swift"), "\(before ?? "nil") | \(demoted)")
@@ -225,10 +229,10 @@ extension RetentionHarness {
             if restartFirst { manager = await restart() }
             let replyIndex = manager._testMessages.firstIndex { $0.content == "REPLY_C9" }!
             _ = try await manager._testRetentionPrune(affected: [replyIndex], trigger: "manual", summary: "C9_SUMMARY")
-            let reply = message(manager._testMessages, "REPLY_C9")
+            let reply = message(composed(manager._testMessages), "REPLY_C9")
             let record = reply?.demotedPruneSummaries.first
             let notes = await manager._testMetadataNote(reply ?? Message(role: .assistant, content: "")) ?? ""
-            check("C9\(name.prefix(1)) \(name): demoted with complete = false and the approx. prefix, never an exact 09:45 start",
+            check("C9\(name.prefix(1)) \(name): pointer with complete = false and the approx. prefix, never an exact 09:45 start",
                   record?.coverage?.complete == false && record?.line.hasPrefix(PruneSummaryRetention.approxPrefix) == true
                   && !notes.contains(PruneSummaryRetention.wrapperPrefix + PruneSummaryRetention.exactPrefix),
                   record?.line ?? "no record")

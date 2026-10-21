@@ -69,6 +69,11 @@ enum PruneArchiveStore {
         init(_ detail: String) { self.detail = detail }
         var errorDescription: String? { detail }
     }
+    /// A capped write (`maxBytes`) would exceed its budget; nothing was
+    /// published (the staged output is discarded).
+    struct OverBudget: Error, LocalizedError {
+        var errorDescription: String? { "snapshot output over its byte budget" }
+    }
     struct Header: Codable {
         let version: Int
         let id: UUID
@@ -126,7 +131,8 @@ enum PruneArchiveStore {
 
     static func write(messages: [Message], currentRounds: [ToolInteraction] = [],
                       alternateMessages: [Message] = [], trigger: String,
-                      removedIDs: [UUID], removedCallIDs: [String] = [], priorActiveSummary: ActiveTurnCompaction? = nil, leadNote: String? = nil, directory: URL = root, pin: Bool = false) throws -> PruneArchiveReference {
+                      removedIDs: [UUID], removedCallIDs: [String] = [], priorActiveSummary: ActiveTurnCompaction? = nil, leadNote: String? = nil, directory: URL = root, pin: Bool = false,
+                      maxBytes: Int? = nil) throws -> PruneArchiveReference {
         lock.lock(); defer { lock.unlock() }
         _ = try directoryExists(directory)
         try PrivateStorage.ensureDirectory(directory)
@@ -148,10 +154,14 @@ enum PruneArchiveStore {
 
         // Bounded conversion: even a single enormous tool-result line never
         // creates a second whole-transcript UTF-8 Data allocation.
+        // `maxBytes` (the /keepsummaries idle pass) is enforced while writing.
+        var written = 0
         func emit(_ text: String) throws {
             var slice = text.utf8[...]
             while !slice.isEmpty {
                 let part = slice.prefix(64 * 1024)
+                written += part.count
+                if let maxBytes, written > maxBytes { throw OverBudget() }
                 let data = Data(part)
                 try data.withUnsafeBytes { raw in
                     var offset = 0
@@ -382,8 +392,9 @@ enum PruneArchiveStore {
         // an open crash record. The limit may be exceeded temporarily; it is
         // restored as records settle.
         let proofPinned = SettlementEvidence.pinnedSnapshotIds(snapshots: directory, entries: all)
-        // Summary retention (Part B §6): a snapshot behind a demoted summary
-        // line in the COMMITTED history (disk, not memory: right after a
+        // Summary retention (Part B §6, /keepsummaries): a snapshot behind a
+        // legacy demoted line or a summary stub (live or stale) in the
+        // COMMITTED history (disk, not memory: right after a
         // restart, a Mind import or a post-rename write failure) is spared.
         // Unreadable history deletes nothing this run and does not throw.
         let demotionLinked: Set<UUID>

@@ -254,17 +254,19 @@ extension RetentionHarness {
             try PrivateStorage.writeAtomically(try JSONSerialization.data(withJSONObject: history), to: historyURL)
             let manager = await restart()
             try await pruneLast(manager)
-            let after = manager._testMessages
+            let after = composed(manager._testMessages)
             let a0 = message(after, "REPLY_A0"), tail = message(after, "REPLY_TAIL")
             let line = a0?.demotedPruneSummaries.first?.line ?? ""
-            let merged = tail?.prunedContextSummaryCoverage
+            let merged = message(manager._testMessages, "REPLY_TAIL")?.prunedContextSummaryCoverage
+            _ = tail
             let ok = line.hasPrefix(PruneSummaryRetention.approxPrefix) && a0?.prunedContextSummary == nil
                 && a0?.measuredTokens == (positive ? Int.max : 1)
+                && message(manager._testMessages, "REPLY_A0")?.prunedContextSummary != nil
                 && merged?.isValid == true && merged?.complete == false
-                && (diskHistory().map { message($0, "REPLY_A0")?.demotedPruneSummaries.count == 1 } ?? false)
+                && (diskHistory().map { message(composed($0), "REPLY_A0")?.demotedPruneSummaries.count == 1 } ?? false)
             if !ok { failed.append("\(name): line '\(line)' merged \(String(describing: merged)) measured \(String(describing: a0?.measuredTokens))") }
         }
-        check("X4 prune over extreme saved coverage: demotes under the legacy approx. rule, merge falls back to approx., measuredTokens saturates; no trap",
+        check("X4 prune over extreme saved coverage: pointer under the legacy approx. rule, merge falls back to approx., measuredTokens saturates; no trap",
               failed.isEmpty, failed.joined(separator: " | "))
     }
 

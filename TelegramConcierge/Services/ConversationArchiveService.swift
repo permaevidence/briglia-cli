@@ -2998,6 +2998,7 @@ actor ConversationArchiveService {
             || message.prunedContextSummary != nil
             || message.prunedContextSummaryCoverage != nil
             || !message.demotedPruneSummaries.isEmpty
+            || message.prunedContextSummaryStub != nil
             || message.activeTurnCompaction != nil
             || message.measuredToolTokens != nil
             || message.measuredTokens != nil

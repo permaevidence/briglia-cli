@@ -88,6 +88,9 @@ enum BackgroundPruneSelftestApply {
                 copy.pruneArchiveReferences = []
                 copy.prunedContextSummaryCoverage = nil
                 copy.measuredTokens = nil
+                // /keepsummaries: each run's pointer names its own stub
+                // snapshot; both must carry a usable one (checked below).
+                copy.prunedContextSummaryStub = nil
                 return copy
             }
             return h.encoded(kept)
@@ -102,6 +105,11 @@ enum BackgroundPruneSelftestApply {
         _ = await h.waitPhase(on, "ready")
         _ = await h.turn(on, "apply turn")
         let onView = normalized(on._testMessages, ids: frozenIds)
+        func pointersUsable(_ messages: [Message]) -> Bool {
+            let anchors = messages.filter(PruneSummaryRetention.isFullAnchor)
+            return !anchors.isEmpty && anchors.allSatisfy { $0.prunedContextSummaryStub?.isUsable(for: $0.prunedContextSummary) == true }
+        }
+        h.check("F1 /keepsummaries: both commits prepared a usable pointer for every anchor", pointersUsable(off._testMessages) && pointersUsable(on._testMessages))
         h.check("F1 frozen range after ON apply ≡ today's inline prune (same plan, same summary)", onView == offView && !onView.isEmpty,
                 "off pruned \(h.prunedIds(off).count), on pruned \(h.prunedIds(on).count)")
     }

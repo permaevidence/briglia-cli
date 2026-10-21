@@ -163,6 +163,15 @@ class ConversationManager: ObservableObject {
     @Published private(set) var maintenanceNotice: String?
     /// One demotion-snapshot failure notice per episode (Part B §4.4).
     private var demotionSnapshotNoticeShown = false
+    /// /keepsummaries idle pass: refused/unsupported restores, keyed by
+    /// (message id, legacy snapshot id); cleared on history replacement.
+    private var summaryRestoreAttempts: Set<String> = []
+    /// Stub repairs too large for an empty pass, keyed by (message id, digest).
+    private var summaryStubRepairUnsupported: Set<String> = []
+    /// The next pass also checks stub snapshots for completeness (startup
+    /// and after a history replacement).
+    private var summaryRetentionScanPending = true
+    private var summaryRetentionPassScheduled = false
     private var maintenanceNoticeClearTask: Task<Void, Never>?
     /// Maps archive-service phases to activity ids so begin/end pairs match.
     private var maintenancePhaseActivityIds: [ConversationArchiveService.MaintenancePhase: UUID] = [:]
@@ -176,6 +185,7 @@ class ConversationManager: ObservableObject {
 
     private func endMaintenance(_ id: UUID) {
         maintenanceActivities.removeAll { $0.id == id }
+        if maintenanceActivities.isEmpty { scheduleSummaryRetentionIdlePass() }
     }
 
     private func showMaintenanceNotice(_ text: String) {
@@ -1164,6 +1174,11 @@ class ConversationManager: ObservableObject {
     @Published private(set) var lastPromptTokens: Int? {
         didSet { saveContextUsageSnapshot() }
     }
+    /// The composition key of the request that produced `lastPromptTokens`
+    /// (KEEP_SUMMARIES_PLAN §4.4): the measurement is used only under the
+    /// same composition. Always assigned BEFORE `lastPromptTokens`, whose
+    /// observer then saves both together.
+    private var lastPromptRenderKey: String = PruneSummaryRetention.emptyRenderKey
     /// Completion tokens from the most recent turn's final API response.
     /// Used to compute per-message measured tokens via delta arithmetic.
     private var lastCompletionTokens: Int? {
@@ -1178,6 +1193,44 @@ class ConversationManager: ObservableObject {
         let lastPromptTokens: Int?
         let lastCompletionTokens: Int?
         let updatedAt: Date
+        /// Absent in snapshots written by ≤0.2.57, which never composed
+        /// pointers: exactly the empty-set key (§4.4).
+        var lastPromptRenderKey: String? = nil
+        /// Decoding detail, never encoded: a key of the wrong type.
+        var renderKeyUnreadable = false
+
+        enum CodingKeys: String, CodingKey { case lastPromptTokens, lastCompletionTokens, updatedAt, lastPromptRenderKey }
+
+        init(lastPromptTokens: Int?, lastCompletionTokens: Int?, updatedAt: Date, lastPromptRenderKey: String?) {
+            self.lastPromptTokens = lastPromptTokens; self.lastCompletionTokens = lastCompletionTokens
+            self.updatedAt = updatedAt; self.lastPromptRenderKey = lastPromptRenderKey
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            lastPromptTokens = try c.decodeIfPresent(Int.self, forKey: .lastPromptTokens)
+            lastCompletionTokens = try c.decodeIfPresent(Int.self, forKey: .lastCompletionTokens)
+            updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+            if c.contains(.lastPromptRenderKey) {
+                if let key = try? c.decode(String.self, forKey: .lastPromptRenderKey) { lastPromptRenderKey = key }
+                else { renderKeyUnreadable = true }
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encodeIfPresent(lastPromptTokens, forKey: .lastPromptTokens)
+            try c.encodeIfPresent(lastCompletionTokens, forKey: .lastCompletionTokens)
+            try c.encode(updatedAt, forKey: .updatedAt)
+            try c.encodeIfPresent(lastPromptRenderKey, forKey: .lastPromptRenderKey)
+        }
+
+        /// The key the loaded measurement may be used under.
+        var effectiveRenderKey: String {
+            if renderKeyUnreadable { return PruneSummaryRetention.unknownRenderKey }
+            guard let key = lastPromptRenderKey else { return PruneSummaryRetention.emptyRenderKey }
+            return PruneSummaryRetention.isValidRenderKey(key) ? key : PruneSummaryRetention.unknownRenderKey
+        }
     }
 
     private struct ToolAwareResponse {
@@ -1703,6 +1756,7 @@ class ConversationManager: ObservableObject {
             await archiveService.recoverPendingChunks(defaultContext: defaultContext)
             await MainActor.run {
                 self?.archiveRecoveryTask = nil
+                self?.scheduleSummaryRetentionIdlePass()
             }
         }
     }
@@ -3750,6 +3804,8 @@ class ConversationManager: ObservableObject {
                 currentTurnLogIsActive = false
                 turnActivity = nil
             }
+            // /keepsummaries: end of a turn is an idle-pass trigger.
+            scheduleSummaryRetentionIdlePass()
             // Mid-turn early wake: this run can no longer be woken; a newer
             // run's arm/scope is never touched (run-id scoped).
             let executor = toolExecutor
@@ -4422,6 +4478,9 @@ class ConversationManager: ObservableObject {
         // }BGPRUNE
         case "/archiveinline":
             await handleArchiveInlineCommand(argument: commandArgument(from: text))
+            return true
+        case "/keepsummaries":
+            await handleKeepSummariesCommand(argument: commandArgument(from: text))
             return true
         case "/upgrade":
             await handleUpgradeCommand()
@@ -6919,16 +6978,20 @@ class ConversationManager: ObservableObject {
             calendar: frozenContext.calendar, email: frozenContext.email, summaries: chunkSummaries,
             totalChunks: totalChunkCount, date: currentSystemPromptTimestamp(), deferred: deferredSummaries)
 
-        // Use real prompt_tokens from API when available, fall back to estimation
+        // Use real prompt_tokens from API when available, fall back to estimation.
+        // /keepsummaries §4.4: decide on the composed view; a measurement
+        // taken under another composition is ignored.
+        let summaryLimit = KeepSummariesSetting.current()
+        let decisionView = PruneSummaryRetention.compose(messages, limit: summaryLimit)
         var totalTokens: Int
-        if let real = lastPromptTokens {
-            let addedSinceLastPrompt = estimatedTokensAddedSinceLastPrompt(currentUserMessageId: nil, isLMStudio: providerIsLMStudio)
+        if let real = promptMeasurement(for: decisionView) {
+            let addedSinceLastPrompt = estimatedTokensAddedSinceLastPrompt(currentUserMessageId: nil, isLMStudio: providerIsLMStudio, in: decisionView.messages)
             totalTokens = real + addedSinceLastPrompt
             print("[ConversationManager] Manual prune using real prompt_tokens: \(real) + ~\(addedSinceLastPrompt) new tokens")
         } else {
             totalTokens = mandatoryEstimate?.tokens ?? estimateSystemPromptTokens(
                 calendarContext: frozenContext.calendar, emailContext: frozenContext.email, chunkSummaries: chunkSummaries)
-            for message in messages {
+            for message in decisionView.messages {
                 totalTokens += estimatedPromptTokens(for: message, isLMStudio: providerIsLMStudio)
                 totalTokens += toolInteractionTokens(message.toolInteractions, isLMStudio: providerIsLMStudio)
             }
@@ -6997,13 +7060,16 @@ class ConversationManager: ObservableObject {
             totalChunkCount: totalChunkCount,
             currentUserMessageId: nil,
             turnStartDate: currentSystemPromptTimestamp(),
-            deferredMCPSummaries: deferredSummaries
+            deferredMCPSummaries: deferredSummaries,
+            summaryLimit: summaryLimit
         )
             }
             // Count only the summary/reference delta, so existing notes are
             // not charged twice. Use the committed view, including nil-summary
             // and explicit no-snapshot outcomes.
-            func noteTokens(_ history: [Message]) -> Int { Self.manualPruneNoteTokens(history) }
+            func noteTokens(_ history: [Message]) -> Int {
+                Self.manualPruneNoteTokens(PruneSummaryRetention.compose(history, limit: summaryLimit).messages)
+            }
             totalTokens += noteTokens(committed) - noteTokens(plannedSource)
         } catch {
             let failure = error.localizedDescription
@@ -8670,9 +8736,31 @@ class ConversationManager: ObservableObject {
         let turnStartCompletionTokens = lastCompletionTokens
         var measuredUserTokens: Int?
         var finalCompletionTokens: Int?
+        // §4.4 (/keepsummaries): every baseline carries the composition key
+        // of the request that produced it; a response is attributed only
+        // against a baseline with the same key as the request it answers.
+        var prevRoundPromptKey = lastPromptRenderKey
+        let turnStartPromptKey = lastPromptRenderKey
+        var sentRenderKey = PruneSummaryRetention.emptyRenderKey
+        var sentStubIDs: Set<UUID> = []
+        // Closed once a mismatched first measurement was seen, so a later
+        // round never becomes a "first user" delta.
+        var userAttributionClosed = false
+        func attributeUserTokens(_ tokens: Int) {
+            guard measuredUserTokens == nil, !userAttributionClosed, let start = turnStartPromptTokens else { return }
+            guard turnStartPromptKey == sentRenderKey, !sentStubIDs.contains(currentUserMessageId) else {
+                userAttributionClosed = true; return
+            }
+            let totalDelta = tokens - start
+            let prevAssistant = turnStartCompletionTokens ?? 0
+            measuredUserTokens = max(totalDelta - prevAssistant, 0)
+        }
 
         toolLoop: for round in 1...maxToolRoundsSafetyLimit {
             try Task.checkCancellation()
+            // /keepsummaries: read once per round; this round's estimate and
+            // send (and every resend inside it) compose with this value.
+            let roundLimit = KeepSummariesSetting.current()
             print("[ConversationManager] Tool round \(round) (turn spend: $\(formatUSD(cumulativeToolSpendUSD)) / \(toolSpendLimitPerTurnUSD.map { "$" + formatUSD($0) } ?? "no cap"), today: $\(formatUSD(todaySpentUSD)), month: $\(formatUSD(monthSpentUSD)))")
             
             // Call LLM (with tools available for chaining)
@@ -8730,7 +8818,7 @@ class ConversationManager: ObservableObject {
                     _ = try await backgroundPruneAdmit(runId: salvageRunId, requestKey: "round\(round)", execution: responsesExecution,
                         admitted: {
                             try await self.backgroundPruneRequestEstimate(
-                                projected: try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId), rounds: toolInteractions,
+                                projected: try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId, limit: roundLimit).messages, rounds: toolInteractions,
                                 tools: toolsForRound, calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
                                 totalChunks: totalChunkCount, date: systemPromptDate, deferred: deferredSummaries, persona: turnPersona)
                         },
@@ -8761,7 +8849,8 @@ class ConversationManager: ObservableObject {
                 }
             }
             // }BGPRUNE
-            let projected = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+            let projectedView = try requestView(messagesForLLM, runId: salvageRunId, limit: roundLimit)
+            let projected = projectedView.messages
             let estimate = try await openRouterService.activeTurnRequestEstimate(messages: projected, rounds: toolInteractions,
                 images: imagesDirectory, documents: documentsDirectory, tools: toolsForRound,
                 calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
@@ -8789,12 +8878,14 @@ class ConversationManager: ObservableObject {
                 // §10: the same send (image recovery inside), wrapped in one
                 // best-effort in-band reduction and resend.
                 let bgPruneAdmittedMaximum = backgroundPruneMaximum()
-                func bgPruneSend(_ bgPruneHistory: [Message]) async throws -> LLMResponse {
-                    var requestHistory = bgPruneHistory
+                func bgPruneSend(_ bgPruneView: ComposedHistory) async throws -> LLMResponse {
+                    var requestHistory = bgPruneView.messages
+                    var requestComposition = bgPruneView
                     var requestRounds = toolInteractions
                     let recovered = try await ImageRejectionRecovery.run(
                         send: { log in
-                            try await openRouterService.generateResponse(
+                            sentRenderKey = requestComposition.renderKey; sentStubIDs = requestComposition.stubIDs
+                            return try await openRouterService.generateResponse(
                                 messages: requestHistory,
                                 imagesDirectory: imagesDirectory,
                                 documentsDirectory: documentsDirectory,
@@ -8820,7 +8911,8 @@ class ConversationManager: ObservableObject {
                                                                           messagesForLLM: &messagesForLLM, rounds: &rounds)
                             toolInteractions = rounds
                             guard committed else { return false }
-                            requestHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+                            requestComposition = try requestView(messagesForLLM, runId: salvageRunId, limit: roundLimit)
+                            requestHistory = requestComposition.messages
                             requestRounds = toolInteractions
                             return true
                         }
@@ -8836,10 +8928,10 @@ class ConversationManager: ObservableObject {
                 do {
                     response = try await backgroundPruneConverge(runId: salvageRunId, requestKey: "round\(round)",
                         admittedEstimate: estimate.tokens, admittedMaximum: bgPruneAdmittedMaximum, execution: responsesExecution,
-                        send: { try await bgPruneSend(projected) },
+                        send: { try await bgPruneSend(projectedView) },
                         admitted: {
                             try await self.backgroundPruneRequestEstimate(
-                                projected: try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId), rounds: toolInteractions,
+                                projected: try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId, limit: roundLimit).messages, rounds: toolInteractions,
                                 tools: toolsForRound, calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
                                 totalChunks: totalChunkCount, date: systemPromptDate, deferred: deferredSummaries, persona: turnPersona)
                         },
@@ -8869,9 +8961,9 @@ class ConversationManager: ObservableObject {
                         },
                         resend: {
                             prevRoundPromptTokens = nil; self.lastPromptTokens = nil; previousPromptScope = nil
-                            let bgPruneProjected = try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId)
+                            let bgPruneProjected = try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId, limit: roundLimit)
                             expectedPromptEstimate = try await self.backgroundPruneRequestEstimate(
-                                projected: bgPruneProjected, rounds: toolInteractions,
+                                projected: bgPruneProjected.messages, rounds: toolInteractions,
                                 tools: toolsForRound, calendar: calendarContext, email: emailContext, summaries: chunkSummaries,
                                 totalChunks: totalChunkCount, date: systemPromptDate, deferred: deferredSummaries, persona: turnPersona)
                             return try await bgPruneSend(bgPruneProjected)
@@ -8889,10 +8981,12 @@ class ConversationManager: ObservableObject {
                 // the marks and resends the request rebuilt from that state;
                 // tools are not re-run. Any other outcome is exactly today's.
                 var requestHistory = projected
+                var requestComposition = projectedView
                 var requestRounds = toolInteractions
                 let recovered = try await ImageRejectionRecovery.run(
                     send: { log in
-                        try await openRouterService.generateResponse(
+                        sentRenderKey = requestComposition.renderKey; sentStubIDs = requestComposition.stubIDs
+                        return try await openRouterService.generateResponse(
                             messages: requestHistory,
                             imagesDirectory: imagesDirectory,
                             documentsDirectory: documentsDirectory,
@@ -8918,7 +9012,8 @@ class ConversationManager: ObservableObject {
                                                                       messagesForLLM: &messagesForLLM, rounds: &rounds)
                         toolInteractions = rounds
                         guard committed else { return false }
-                        requestHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+                        requestComposition = try requestView(messagesForLLM, runId: salvageRunId, limit: roundLimit)
+                        requestHistory = requestComposition.messages
                         requestRounds = toolInteractions
                         return true
                     }
@@ -8959,21 +9054,18 @@ class ConversationManager: ObservableObject {
             case .text(let content, let reasoning, let reasoningDetails, let promptTokens, let completionTokens, _, let native, _):
                 // LLM decided to respond with text - we're done
                 if let tokens = promptTokens {
+                    lastPromptRenderKey = sentRenderKey
                     lastPromptTokens = tokens
                     if let expectedPromptEstimate, activeTurnCheckpoints[salvageRunId ?? UUID()]?.generation ?? 0 > 0 {
                         print("[ActiveCompaction] estimated=\(expectedPromptEstimate) measured=\(tokens) difference=\(tokens - expectedPromptEstimate)")
                     }
                     // Attribute delta to the last tool interaction if one exists
-                    if let prev = prevRoundPromptTokens, !toolInteractions.isEmpty {
+                    if let prev = prevRoundPromptTokens, prevRoundPromptKey == sentRenderKey, !toolInteractions.isEmpty {
                         let delta = tokens - prev
                         applyMeasuredTokenDelta(delta, to: &toolInteractions[toolInteractions.count - 1])
                     }
                     // Compute user message tokens from first-round delta
-                    if measuredUserTokens == nil, let start = turnStartPromptTokens {
-                        let totalDelta = tokens - start
-                        let prevAssistant = turnStartCompletionTokens ?? 0
-                        measuredUserTokens = max(totalDelta - prevAssistant, 0)
-                    }
+                    attributeUserTokens(tokens)
                     print("[ConversationManager] LLM returned text response after \(round) round(s) (\(tokens) prompt tokens)")
                 } else {
                     print("[ConversationManager] LLM returned text response after \(round) round(s)")
@@ -9015,21 +9107,19 @@ class ConversationManager: ObservableObject {
 
                 // Track prompt tokens and attribute delta to previous interaction
                 if let tokens = roundPromptTokens {
+                    lastPromptRenderKey = sentRenderKey
                     lastPromptTokens = tokens
                     if let expectedPromptEstimate, activeTurnCheckpoints[salvageRunId ?? UUID()]?.generation ?? 0 > 0 {
                         print("[ActiveCompaction] estimated=\(expectedPromptEstimate) measured=\(tokens) difference=\(tokens - expectedPromptEstimate)")
                     }
-                    if let prev = prevRoundPromptTokens, !toolInteractions.isEmpty {
+                    if let prev = prevRoundPromptTokens, prevRoundPromptKey == sentRenderKey, !toolInteractions.isEmpty {
                         let delta = tokens - prev
                         applyMeasuredTokenDelta(delta, to: &toolInteractions[toolInteractions.count - 1])
                     }
                     // Compute user message tokens from first-round delta
-                    if measuredUserTokens == nil, let start = turnStartPromptTokens {
-                        let totalDelta = tokens - start
-                        let prevAssistant = turnStartCompletionTokens ?? 0
-                        measuredUserTokens = max(totalDelta - prevAssistant, 0)
-                    }
+                    attributeUserTokens(tokens)
                     prevRoundPromptTokens = tokens
+                    prevRoundPromptKey = sentRenderKey
                 }
                 
                 if let perTurnCap = toolSpendLimitPerTurnUSD, cumulativeToolSpendUSD >= perTurnCap {
@@ -9421,7 +9511,10 @@ class ConversationManager: ObservableObject {
         // an active-turn compaction the summary note and the carried verbatim
         // user messages live only in the checkpoint projection, not in
         // messagesForLLM. Computed once so every retry replays the same history.
-        var finalHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+        // /keepsummaries: one limit for the whole forced final (every retry).
+        let finalLimit = KeepSummariesSetting.current()
+        var finalComposition = try requestView(messagesForLLM, runId: salvageRunId, limit: finalLimit)
+        var finalHistory = finalComposition.messages
         var finalResponse: LLMResponse?
         var finalForceInteractions = toolInteractions
         var finalForceSpendUSD: Double = 0
@@ -9463,7 +9556,7 @@ class ConversationManager: ObservableObject {
                             let bgPruneRefreshed = await self.getFrozenSystemContext(forceRefresh: true)
                             calendarContext = bgPruneRefreshed.calendar
                             emailContext = bgPruneRefreshed.email
-                            finalHistory = try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId)
+                            finalComposition = try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId, limit: finalLimit); finalHistory = finalComposition.messages
                             finalForceInteractions = toolInteractions + Array(finalForceInteractions.dropFirst(bgPruneFinalBase))
                             bgPruneFinalBase = toolInteractions.count
                         },
@@ -9480,7 +9573,7 @@ class ConversationManager: ObservableObject {
                                     prevRoundPromptTokens: &prevRoundPromptTokens, previousPromptScope: &previousPromptScope,
                                     cumulativeToolSpendUSD: &cumulativeToolSpendUSD, todaySpentUSD: &todaySpentUSD, monthSpentUSD: &monthSpentUSD)
                             if bgPruneChanged {
-                                finalHistory = try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId)
+                                finalComposition = try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId, limit: finalLimit); finalHistory = finalComposition.messages
                                 finalForceInteractions = toolInteractions + Array(finalForceInteractions.dropFirst(bgPruneFinalBase))
                                 bgPruneFinalBase = toolInteractions.count
                             }
@@ -9502,6 +9595,7 @@ class ConversationManager: ObservableObject {
                         send: { log in
                             // The attempt's projection, read at send time (same value as today's).
                             let bgPruneFinalHistory = finalHistory
+                            sentRenderKey = finalComposition.renderKey; sentStubIDs = finalComposition.stubIDs
                             return try await openRouterService.generateResponse(
                                 messages: bgPruneFinalHistory,
                                 imagesDirectory: imagesDirectory,
@@ -9530,7 +9624,7 @@ class ConversationManager: ObservableObject {
                             toolInteractions = rounds
                             _ = ImageRejectionMarks.apply(scope, toCurrent: &finalForceInteractions)
                             guard committed else { return false }
-                            finalHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+                            finalComposition = try requestView(messagesForLLM, runId: salvageRunId, limit: finalLimit); finalHistory = finalComposition.messages
                             return true
                         }
                     )
@@ -9561,7 +9655,7 @@ class ConversationManager: ObservableObject {
                             let bgPruneRefreshed = await self.getFrozenSystemContext(forceRefresh: true)
                             calendarContext = bgPruneRefreshed.calendar
                             emailContext = bgPruneRefreshed.email
-                            finalHistory = try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId)
+                            finalComposition = try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId, limit: finalLimit); finalHistory = finalComposition.messages
                             finalForceInteractions = toolInteractions + Array(finalForceInteractions.dropFirst(bgPruneFinalBase))
                             bgPruneFinalBase = toolInteractions.count
                         },
@@ -9578,7 +9672,7 @@ class ConversationManager: ObservableObject {
                                     prevRoundPromptTokens: &prevRoundPromptTokens, previousPromptScope: &previousPromptScope,
                                     cumulativeToolSpendUSD: &cumulativeToolSpendUSD, todaySpentUSD: &todaySpentUSD, monthSpentUSD: &monthSpentUSD)
                             if bgPruneChanged {
-                                finalHistory = try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId)
+                                finalComposition = try self.backgroundPruneProjection(messagesForLLM, runId: salvageRunId, limit: finalLimit); finalHistory = finalComposition.messages
                                 finalForceInteractions = toolInteractions + Array(finalForceInteractions.dropFirst(bgPruneFinalBase))
                                 bgPruneFinalBase = toolInteractions.count
                             }
@@ -9599,7 +9693,8 @@ class ConversationManager: ObservableObject {
                 // Same image-rejection recovery as the tool loop (plan v2 §2.4).
                 let recovered = try await ImageRejectionRecovery.run(
                     send: { log in
-                        try await openRouterService.generateResponse(
+                        sentRenderKey = finalComposition.renderKey; sentStubIDs = finalComposition.stubIDs
+                        return try await openRouterService.generateResponse(
                             messages: finalHistory,
                             imagesDirectory: imagesDirectory,
                             documentsDirectory: documentsDirectory,
@@ -9627,7 +9722,7 @@ class ConversationManager: ObservableObject {
                         toolInteractions = rounds
                         _ = ImageRejectionMarks.apply(scope, toCurrent: &finalForceInteractions)
                         guard committed else { return false }
-                        finalHistory = try activeTurnCheckpoints[salvageRunId ?? UUID()]?.projectedHistory(messagesForLLM, canonical: messages) ?? messagesForLLM
+                        finalComposition = try requestView(messagesForLLM, runId: salvageRunId, limit: finalLimit); finalHistory = finalComposition.messages
                         return true
                     }
                 )
@@ -9687,15 +9782,12 @@ class ConversationManager: ObservableObject {
             finalCompTokens = ct
         }
         if let tokens = finalPromptTokens {
+            lastPromptRenderKey = sentRenderKey
             lastPromptTokens = tokens
-            if let prev = prevRoundPromptTokens, !toolInteractions.isEmpty {
+            if let prev = prevRoundPromptTokens, prevRoundPromptKey == sentRenderKey, !toolInteractions.isEmpty {
                 applyMeasuredTokenDelta(tokens - prev, to: &toolInteractions[toolInteractions.count - 1])
             }
-            if measuredUserTokens == nil, let start = turnStartPromptTokens {
-                let totalDelta = tokens - start
-                let prevAssistant = turnStartCompletionTokens ?? 0
-                measuredUserTokens = max(totalDelta - prevAssistant, 0)
-            }
+            attributeUserTokens(tokens)
         }
 
         let totalMeasuredSpend = toolInteractionTokens(toolInteractions)
@@ -10212,10 +10304,12 @@ class ConversationManager: ObservableObject {
         interaction.measuredReplayTokenCost = measured
     }
 
-    private func estimatedTokensAddedSinceLastPrompt(currentUserMessageId: UUID?, isLMStudio: Bool) -> Int {
+    /// `view`: the decision's composed history (/keepsummaries); the
+    /// canonical history when nil.
+    private func estimatedTokensAddedSinceLastPrompt(currentUserMessageId: UUID?, isLMStudio: Bool, in view: [Message]? = nil) -> Int {
         var tokens = lastCompletionTokens ?? 0
         if let currentUserMessageId,
-           let currentUser = messages.first(where: { $0.id == currentUserMessageId }) {
+           let currentUser = (view ?? messages).first(where: { $0.id == currentUserMessageId }) {
             tokens += estimatedPromptTokens(for: currentUser, isLMStudio: isLMStudio)
         }
         return tokens
@@ -10407,11 +10501,11 @@ class ConversationManager: ObservableObject {
                 + " Stored conversation is approximately \(preimageBytes.count) bytes; snapshot size may differ. Nothing was pruned. Free space and retry, or explicitly send /prune nosnapshot to discard details for this prune only.")
         }
         defer { PruneArchiveStore.release(reference) }
-        // Demotion snapshot (summary retention Part B): pinned from creation
+        // Summary-stub snapshot (/keepsummaries §5.1): pinned from creation
         // until this function exits, i.e. after the checked history write
         // and the retention call below.
-        var demotionReference: PruneArchiveReference?
-        defer { PruneArchiveStore.release(demotionReference) }
+        var stubReference: PruneArchiveReference?
+        defer { PruneArchiveStore.release(stubReference) }
         let text = await summary(summarySource ?? source)
         for action in plan.actions {
             switch action {
@@ -10448,7 +10542,7 @@ class ConversationManager: ObservableObject {
             candidateView[anchor].measuredTokens = measured + (reference?.promptText.count ?? 0) / 4
         }
         if !noSnapshot {
-            demotionReference = demoteOlderSummaryAnchors(in: &candidateView, sourceIDs: sourceIDs, trigger: trigger)
+            stubReference = prepareSummaryStubs(in: &candidateView, trigger: trigger)
         }
         Self.beforePruneHistoryWriteForTesting?()
         var replacements: [UUID: Message] = [:]
@@ -10469,7 +10563,7 @@ class ConversationManager: ObservableObject {
         applyPrunePlan(plan, to: &trackerPreimage, clearTrackers: true)
         cleanupOrphanedToolAttachmentSnapshots(additionalLiveInteractions: currentRounds)
         TruncationService.cleanupOldFiles()
-        do { try PruneArchiveStore.retainLatest(protecting: Set([reference?.id, demotionReference?.id].compactMap { $0 })) }
+        do { try PruneArchiveStore.retainLatest(protecting: Set([reference?.id, stubReference?.id].compactMap { $0 })) }
         catch { showMaintenanceNotice("Snapshot retention: \(error.localizedDescription)") }
         return candidateView
     }
@@ -10485,56 +10579,252 @@ class ConversationManager: ObservableObject {
         }
     }
 
-    /// Summary retention (Part B §4): inside the prune commit only. Keeps the
-    /// newest three summary anchors in full and demotes every older one to a
-    /// deterministic line pointing at a snapshot written FIRST. A failed
-    /// snapshot keeps every anchor in full (the next prune retries); the
-    /// prune itself is never blocked. Returns the pinned demotion snapshot.
-    private func demoteOlderSummaryAnchors(in view: inout [Message], sourceIDs: Set<UUID>, trigger: String) -> PruneArchiveReference? {
-        let anchors = view.indices.filter { PruneSummaryRetention.isFullAnchor(view[$0]) }
-        guard anchors.count > PruneSummaryRetention.maxFullPruneSummaryAnchors else { return nil }
-        // A summary outside the prune's source would make the count wrong.
-        if messages.contains(where: { !sourceIDs.contains($0.id) && PruneSummaryRetention.isFullAnchor($0) }) {
-            print("[PruneRetention] summary outside the prune source; demotion skipped")
-            return nil
+    /// /keepsummaries §5.1: inside the prune commit (inline and background
+    /// apply). Every source anchor whose stub is missing or stale (normally
+    /// the one just created or extended) gets a pointer: its line, one pinned
+    /// snapshot (written FIRST) holding the full text, and the digest of the
+    /// summary it stands for. Nothing is demoted: full summaries stay; the
+    /// newest-N rule applies only when a request is composed. A failed
+    /// snapshot leaves no new usable stub (an older stale one stays inert),
+    /// shows the notice once per episode, and never blocks the prune; a later
+    /// commit or the idle pass retries. Returns the pinned snapshot.
+    private func prepareSummaryStubs(in view: inout [Message], trigger: String) -> PruneArchiveReference? {
+        let needing = view.indices.filter { index in
+            PruneSummaryRetention.isFullAnchor(view[index])
+                && !(view[index].prunedContextSummaryStub?.isUsable(for: view[index].prunedContextSummary) ?? false)
         }
-        let selected = Array(anchors.dropLast(PruneSummaryRetention.maxFullPruneSummaryAnchors))
-        let demotionRef: PruneArchiveReference
+        guard !needing.isEmpty else { return nil }
+        let stubRef: PruneArchiveReference
         do {
-            demotionRef = try PruneArchiveStore.write(messages: selected.map { view[$0] }, trigger: trigger,
-                removedIDs: selected.map { view[$0].id }, leadNote: PruneSummaryRetention.snapshotLeadNote, pin: true)
+            stubRef = try PruneArchiveStore.write(messages: needing.map { view[$0] }, trigger: trigger,
+                removedIDs: needing.map { view[$0].id }, leadNote: PruneSummaryRetention.snapshotLeadNote, pin: true)
             demotionSnapshotNoticeShown = false
         } catch {
-            print("[PruneRetention] demotion snapshot failed: \(error.localizedDescription)")
+            print("[PruneRetention] summary stub snapshot failed: \(error.localizedDescription)")
             if !demotionSnapshotNoticeShown {
                 demotionSnapshotNoticeShown = true
-                showMaintenanceNotice("Older summaries stay in full for now: their snapshot could not be saved (\(error.localizedDescription)). The next prune retries.")
+                showMaintenanceNotice("Summaries stay in full for now: their snapshot could not be saved (\(error.localizedDescription)). The next prune retries.")
             }
             return nil
         }
-        Self.afterDemotionSnapshotForTesting?(demotionRef)
-        for index in selected {
-            let message = view[index]
-            guard let summary = message.prunedContextSummary else { continue }
-            let recorded = message.prunedContextSummaryCoverage.flatMap { $0.isValid ? $0 : nil }
-            guard let coverage = recorded ?? PruneSummaryRetention.legacyCoverage(in: view, anchor: index),
-                  let line = PruneSummaryRetention.line(for: coverage, snapshot: demotionRef),
-                  let record = try? DemotedPruneSummary(line: line, snapshot: demotionRef, coverage: coverage) else {
-                print("[PruneRetention] demotion line over budget; anchor kept in full")
-                continue
-            }
-            view[index].demotedPruneSummaries.append(record)
-            view[index].prunedContextSummary = nil
-            view[index].prunedContextSummaryCoverage = nil
-            if !view[index].pruneArchiveReferences.contains(demotionRef) { view[index].pruneArchiveReferences.append(demotionRef) }
-            if let measured = view[index].measuredTokens {
-                // Saturating: measuredTokens is persisted, so never trap on it.
-                let delta = PruneSummaryRetention.wrapper(line).count / 4 - summary.count / 4
-                let (sum, overflow) = measured.addingReportingOverflow(delta)
-                view[index].measuredTokens = max(1, overflow ? (delta < 0 ? 1 : Int.max) : sum)
+        Self.afterDemotionSnapshotForTesting?(stubRef)
+        for index in needing {
+            if let stub = PruneSummaryRetention.makeStub(for: view, anchor: index, snapshot: stubRef) {
+                view[index].prunedContextSummaryStub = stub
+            } else {
+                print("[PruneRetention] summary pointer line over budget; anchor stays in full")
             }
         }
-        return demotionRef
+        return stubRef
+    }
+
+    // MARK: /keepsummaries idle pass (KEEP_SUMMARIES_PLAN §5.2, §5.3, §6)
+
+    /// What one idle pass did (tests and logs).
+    struct SummaryRetentionPassReport: Equatable {
+        var blocked: String? = nil
+        var stubsRepaired = 0
+        var restored = 0
+        var refused = 0
+        var deferred = 0
+        var bytes = 0
+        var measurementClearFailed = false
+        var historyWriteFailed = false
+    }
+
+    /// Runs the pass at the next main-actor turn (coalesced), so a trigger
+    /// inside a transition sees that transition completed first.
+    func scheduleSummaryRetentionIdlePass() {
+        guard Self.summaryRetentionIdlePassEnabled, !summaryRetentionPassScheduled else { return }
+        summaryRetentionPassScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.summaryRetentionPassScheduled = false
+            self.summaryRetentionIdlePass()
+        }
+    }
+
+    /// The safe idle point (§5.2): nothing that reads or rewrites the
+    /// history, its measurement or the snapshot directory may be running.
+    var summaryRetentionIdleBlocker: String? {
+        if activeRunId != nil || activeProcessingTask != nil { return "turn" }
+        if backgroundPruneJob != nil { return "background prune" }
+        if archiveJob != nil { return "archive job" }
+        if archiveRecoveryTask != nil { return "archive recovery" }
+        if !maintenanceActivities.isEmpty { return "maintenance" }
+        if isRestoringMind { return "mind restore" }
+        if historyLoadFailure != nil || checkpointWriteFailure != nil || recoveryBlocked || inboundDurabilityFailure {
+            return "persistence stall"
+        }
+        return nil
+    }
+
+    /// One legacy record, no current summary, complete recorded coverage.
+    private static func isRestoreCandidate(_ message: Message) -> Bool {
+        guard message.prunedContextSummary == nil, message.demotedPruneSummaries.count == 1,
+              let coverage = message.demotedPruneSummaries[0].coverage else { return false }
+        return coverage.complete && coverage.isValid
+    }
+
+    private static func restoreAttemptKey(_ message: Message) -> String {
+        message.id.uuidString + "|" + (message.demotedPruneSummaries.first?.snapshot.id.uuidString ?? "")
+    }
+
+    private static func stubRepairKey(_ message: Message) -> String {
+        message.id.uuidString + "|" + PruneSummaryStub.digest(message.prunedContextSummary ?? "")
+    }
+
+    /// Repairs missing, stale or broken stubs and restores the provably
+    /// exact legacy pointers. Synchronous on the main actor from the
+    /// precondition check to the checked history write; snapshot I/O is
+    /// bounded by the per-file and per-pass budgets.
+    @discardableResult
+    func summaryRetentionIdlePass() -> SummaryRetentionPassReport {
+        var report = SummaryRetentionPassReport()
+        if let blocker = summaryRetentionIdleBlocker { report.blocked = blocker; return report }
+        let scan = summaryRetentionScanPending
+        summaryRetentionScanPending = false
+        let history = messages
+        var repairs: [Int] = []
+        var restores: [Int] = []
+        for index in history.indices {
+            let message = history[index]
+            if PruneSummaryRetention.isFullAnchor(message) {
+                if let stub = message.prunedContextSummaryStub, stub.isUsable(for: message.prunedContextSummary) {
+                    // Broken snapshots are found by the startup/import scan,
+                    // not only by digest.
+                    if scan && !PruneArchiveStore.isCompleteSnapshot(stub.record.snapshot) { repairs.append(index) }
+                } else if !summaryStubRepairUnsupported.contains(Self.stubRepairKey(message)) {
+                    repairs.append(index)
+                }
+            } else if Self.isRestoreCandidate(message), !summaryRestoreAttempts.contains(Self.restoreAttemptKey(message)) {
+                restores.append(index)
+            }
+        }
+        guard !repairs.isEmpty || !restores.isEmpty else { return report }
+        var budget = PruneSummaryRestore.maxPassBytes
+        var candidate = history
+        var pinned: [PruneArchiveReference] = []
+        defer { pinned.forEach { PruneArchiveStore.release($0) } }
+
+        // Restores: grouped by snapshot file, files in a fixed order, each
+        // read and indexed once. A file that would exceed the remaining
+        // budget is not started; everything not reached stays untouched.
+        var restored: [Int] = []
+        let groups = Dictionary(grouping: restores) { history[$0].demotedPruneSummaries[0].snapshot.id }
+        let references = groups.keys.compactMap { id in restores.lazy.map { history[$0].demotedPruneSummaries[0].snapshot }.first { $0.id == id } }
+        for reference in references.sorted(by: { $0.basename < $1.basename }) {
+            let indices = groups[reference.id] ?? []
+            func refuse() { for i in indices { summaryRestoreAttempts.insert(Self.restoreAttemptKey(history[i])) }; report.refused += indices.count }
+            guard let size = PruneSummaryRestore.fileSize(reference) else { refuse(); continue }
+            guard size <= PruneSummaryRestore.maxFileBytes else { refuse(); continue }
+            guard size <= budget else { report.deferred += indices.count; continue }
+            budget -= size; report.bytes += size
+            switch PruneSummaryRestore.index(reference) {
+            case .failure(let refusal):
+                print("[KeepSummaries] snapshot \(reference.basename) not restorable: \(refusal.reason)")
+                refuse()
+            case .success(let indexed):
+                for i in indices {
+                    let record = history[i].demotedPruneSummaries[0]
+                    guard let coverage = record.coverage else {
+                        summaryRestoreAttempts.insert(Self.restoreAttemptKey(history[i])); report.refused += 1; continue
+                    }
+                    let text: String
+                    switch PruneSummaryRestore.recover(messageID: history[i].id, coverage: coverage, from: indexed) {
+                    case .success(let recovered): text = recovered
+                    case .failure(let refusal):
+                        print("[KeepSummaries] summary of \(history[i].id) stays a pointer: \(refusal.reason)")
+                        summaryRestoreAttempts.insert(Self.restoreAttemptKey(history[i])); report.refused += 1; continue
+                    }
+                    var message = history[i]
+                    message.prunedContextSummary = text
+                    message.prunedContextSummaryCoverage = coverage
+                    message.demotedPruneSummaries = []
+                    // The stub reuses the record: same line, same snapshot.
+                    message.prunedContextSummaryStub = PruneSummaryStub(summary: text, record: record)
+                    if let measured = message.measuredTokens {
+                        message.measuredTokens = PruneSummaryRetention.saturatingMeasured(measured,
+                            delta: text.count / 4 - PruneSummaryRetention.wrapper(record.line).count / 4)
+                    }
+                    candidate[i] = message
+                    restored.append(i)
+                }
+            }
+        }
+
+        // Stub repairs: one pinned snapshot per anchor, its output capped
+        // by the remaining budget WHILE it is written (incomplete output is
+        // discarded and the anchor left unchanged).
+        for index in repairs {
+            guard budget > 0 else { report.deferred += 1; continue }
+            do {
+                let reference = try PruneArchiveStore.write(messages: [candidate[index]], trigger: "automatic",
+                    removedIDs: [candidate[index].id], leadNote: PruneSummaryRetention.snapshotLeadNote, pin: true, maxBytes: budget)
+                pinned.append(reference)
+                let size = PruneSummaryRestore.fileSize(reference) ?? budget
+                budget -= size; report.bytes += size
+                if let stub = PruneSummaryRetention.makeStub(for: candidate, anchor: index, snapshot: reference) {
+                    candidate[index].prunedContextSummaryStub = stub
+                    report.stubsRepaired += 1
+                } else {
+                    summaryStubRepairUnsupported.insert(Self.stubRepairKey(candidate[index]))
+                }
+            } catch is PruneArchiveStore.OverBudget {
+                // Too big even for an empty pass: unsupported. Otherwise only
+                // deferred to a later idle point.
+                if budget == PruneSummaryRestore.maxPassBytes { summaryStubRepairUnsupported.insert(Self.stubRepairKey(candidate[index])) }
+                report.deferred += 1
+            } catch {
+                // Transient: never cached; retried at a later idle point.
+                print("[KeepSummaries] stub repair snapshot failed: \(error.localizedDescription)")
+                report.deferred += 1
+            }
+        }
+
+        // R3-2: no restored text is published unless the cached measurement
+        // was durably cleared first. A failure keeps the restores retryable.
+        if !restored.isEmpty {
+            do { try clearPromptMeasurementDurably() }
+            catch {
+                print("[KeepSummaries] measurement could not be cleared; restore retried later: \(error.localizedDescription)")
+                report.measurementClearFailed = true
+                for i in restored { candidate[i] = history[i] }
+                restored = []
+            }
+        }
+        report.restored = restored.count
+        guard report.stubsRepaired > 0 || !restored.isEmpty else { return report }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        do { try writeHistoryFile(try encoder.encode(candidate)) }
+        catch {
+            // Memory unchanged; the disk may hold the old or new copy, as
+            // with prune commits. Parsed restores stay retryable.
+            print("[KeepSummaries] history write failed: \(error.localizedDescription)")
+            report.historyWriteFailed = true
+            report.restored = 0; report.stubsRepaired = 0
+            return report
+        }
+        messages = candidate
+        committedMessages = candidate
+        print("[KeepSummaries] idle pass: \(report.stubsRepaired) stub(s) prepared, \(report.restored) summary(ies) restored, \(report.refused) left as pointers")
+        return report
+    }
+
+    /// One checked, durable write of a cleared usage snapshot (file fsync,
+    /// rename, parent fsync), observers suppressed so nothing else writes.
+    private func clearPromptMeasurementDurably() throws {
+        let now = Date()
+        let snapshot = ContextUsageSnapshot(lastPromptTokens: nil, lastCompletionTokens: nil, updatedAt: now, lastPromptRenderKey: nil)
+        let data = try JSONEncoder().encode(snapshot)
+        try Self.usageClearFaultForTesting?("before-write")
+        try PrivateStorage.writeAtomically(data, to: contextUsageFileURL)
+        try Self.usageClearFaultForTesting?("after-rename")
+        isRestoringContextUsageSnapshot = true
+        lastPromptRenderKey = PruneSummaryRetention.emptyRenderKey
+        lastPromptTokens = nil
+        lastCompletionTokens = nil
+        isRestoringContextUsageSnapshot = false
     }
 
     private func appendPrunedContextSummary(_ summary: String, toMessageAt index: Int) {
@@ -10712,9 +11002,14 @@ class ConversationManager: ObservableObject {
         turnStartDate: Date,
         deferredMCPSummaries: [(name: String, description: String, toolCount: Int)],
         execution: ProviderExecutionContext? = nil,
-        persona: PromptPersona? = nil
+        persona: PromptPersona? = nil,
+        summaryLimit: KeepSummariesLimit
     ) async -> String? {
         guard !plan.isEmpty || !compressedIndices.isEmpty else { return nil }
+        // /keepsummaries: the decision's composition, for every attempt
+        // (retries and tool-refusal replies included). The canonical source
+        // still drives the manifest and the fallback.
+        let requestMessages = PruneSummaryRetention.compose(sourceMessages, limit: summaryLimit).messages
 
         // Only the newly unprotected oversized newest tool turn takes the
         // bounded path. Ordinary historical-prune request bytes stay unchanged.
@@ -10727,7 +11022,7 @@ class ConversationManager: ObservableObject {
             }
             do {
                 return try await summarizeActivePrefix(affected.flatMap { sourceMessages[$0].toolInteractions }, previous: nil,
-                    execution: execution, date: turnStartDate, contextMessages: sourceMessages, persona: persona)
+                    execution: execution, date: turnStartDate, contextMessages: requestMessages, persona: persona)
             } catch {
                 print("[ActiveCompaction] Oversized historical summary unavailable: \(error.localizedDescription)")
                 return fallbackPrunedContextSummary(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
@@ -10823,7 +11118,7 @@ class ConversationManager: ObservableObject {
                 let response: LLMResponse
                 do {
                     response = try await openRouterService.generateResponse(
-                        messages: sourceMessages,
+                        messages: requestMessages,
                         imagesDirectory: imagesDirectory,
                         documentsDirectory: documentsDirectory,
                         tools: summaryExecution == nil ? tools : [],
@@ -10877,7 +11172,7 @@ class ConversationManager: ObservableObject {
 
                         do {
                             let retryResponse = try await openRouterService.generateResponse(
-                                messages: sourceMessages,
+                                messages: requestMessages,
                                 imagesDirectory: imagesDirectory,
                                 documentsDirectory: documentsDirectory,
                                 tools: summaryExecution == nil ? tools : [],
@@ -11025,14 +11320,17 @@ class ConversationManager: ObservableObject {
         let providerIsLMStudio = currentProviderIsLMStudio()
 
         // Use real prompt_tokens from API when available, fall back to estimation
+        // (§4.4: only a measurement taken under this composition).
+        let summaryLimit = KeepSummariesSetting.current()
+        let decisionView = PruneSummaryRetention.compose(messages, limit: summaryLimit)
         var totalTokens: Int
-        if let real = lastPromptTokens {
-            let addedSinceLastPrompt = estimatedTokensAddedSinceLastPrompt(currentUserMessageId: currentUserMessageId, isLMStudio: providerIsLMStudio)
+        if let real = promptMeasurement(for: decisionView) {
+            let addedSinceLastPrompt = estimatedTokensAddedSinceLastPrompt(currentUserMessageId: currentUserMessageId, isLMStudio: providerIsLMStudio, in: decisionView.messages)
             totalTokens = real + addedSinceLastPrompt
             print("[ConversationManager] Using real prompt_tokens: \(real) + ~\(addedSinceLastPrompt) new tokens")
         } else {
             totalTokens = mandatoryEstimate.tokens
-            for message in messages {
+            for message in decisionView.messages {
                 totalTokens += estimatedPromptTokens(for: message, isLMStudio: providerIsLMStudio)
                 totalTokens += toolInteractionTokens(message.toolInteractions, isLMStudio: providerIsLMStudio)
             }
@@ -11107,7 +11405,7 @@ class ConversationManager: ObservableObject {
             currentUserMessageId: currentUserMessageId,
             turnStartDate: turnStartDate,
             deferredMCPSummaries: deferredMCPSummaries, execution: execution,
-            persona: persona
+            persona: persona, summaryLimit: summaryLimit
         )
             }
         return !plan.actions.isEmpty || !compressedIndices.isEmpty
@@ -11152,13 +11450,16 @@ class ConversationManager: ObservableObject {
         let providerIsLMStudio = currentProviderIsLMStudio()
 
         // Use real prompt_tokens when available, fall back to estimation
+        // (§4.4: only a measurement taken under this composition).
+        let summaryLimit = KeepSummariesSetting.current()
+        let decisionView = PruneSummaryRetention.compose(messagesForLLM, limit: summaryLimit)
         var totalTokens: Int
-        if let real = lastPromptTokens {
+        if let real = promptMeasurement(for: decisionView) {
             let unsentInteractionTokens = currentTurnInteractions.last.map { currentTurnInteractionTokens($0, isLMStudio: providerIsLMStudio) } ?? 0
             totalTokens = real + unsentInteractionTokens
         } else {
             totalTokens = mandatoryEstimate.tokens
-            for message in messagesForLLM {
+            for message in decisionView.messages {
                 totalTokens += estimatedPromptTokens(for: message, isLMStudio: providerIsLMStudio)
                 totalTokens += toolInteractionTokens(message.toolInteractions, isLMStudio: providerIsLMStudio)
             }
@@ -11212,7 +11513,7 @@ class ConversationManager: ObservableObject {
             isMidLoop: true
         )
 
-        let oldMetadataTokens = messagesForLLM.reduce(0) { $0 + prunedContextSummaryTokens(for: $1) + $1.renderedPruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 } }
+        let oldMetadataTokens = decisionView.messages.reduce(0) { $0 + prunedContextSummaryTokens(for: $1) + $1.renderedPruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 } }
         messagesForLLM = try await commitPrune(plan: plan, compressedIndices: compressedIndices, safeBoundary: safeBoundary,
                 source: plannedSource, currentRounds: currentTurnInteractions, trigger: "mid-turn") { snapshotForSummary in
                 await generatePrunedContextSummary(
@@ -11228,11 +11529,11 @@ class ConversationManager: ObservableObject {
             currentUserMessageId: currentUserMessageId,
             turnStartDate: turnStartDate,
             deferredMCPSummaries: deferredMCPSummaries, execution: execution,
-            persona: persona
+            persona: persona, summaryLimit: summaryLimit
         )
             }
         totalTokens -= plan.savedTokens
-        totalTokens += messagesForLLM.reduce(0) { $0 + prunedContextSummaryTokens(for: $1) + $1.renderedPruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 } } - oldMetadataTokens
+        totalTokens += PruneSummaryRetention.compose(messagesForLLM, limit: summaryLimit).messages.reduce(0) { $0 + prunedContextSummaryTokens(for: $1) + $1.renderedPruneArchiveReferences.reduce(0) { $0 + $1.promptText.count / 4 } } - oldMetadataTokens
         let anyPruned = !plan.actions.isEmpty || !compressedIndices.isEmpty
         // If we pruned but context is STILL over budget, report exhausted so the
         // caller can force a response rather than looping indefinitely.
@@ -13112,6 +13413,7 @@ class ConversationManager: ObservableObject {
             }
             committedMessages = []
             noteHistoryLoaded()
+            noteSummaryHistoryReplaced()
             return
         }
 
@@ -13146,10 +13448,21 @@ class ConversationManager: ObservableObject {
                 dirty = true
             }
             if dirty { saveConversation() }
+            noteSummaryHistoryReplaced()
         } catch {
             print("Failed to load conversation: \(error)")
             noteHistoryUnreadable(error)
         }
+    }
+
+    /// History replaced (startup load, Mind import, wipe): the idle pass's
+    /// attempt caches belong to the old history; the next pass also scans
+    /// stub snapshots for completeness.
+    private func noteSummaryHistoryReplaced() {
+        summaryRestoreAttempts = []
+        summaryStubRepairUnsupported = []
+        summaryRetentionScanPending = true
+        scheduleSummaryRetentionIdlePass()
     }
 
     /// A successful load (or a known-absent file) ends any unreadable-history
@@ -13372,6 +13685,14 @@ class ConversationManager: ObservableObject {
     /// Selftest seam: throw to simulate a failed history write (before the
     /// file is touched, as a failed atomic write leaves it).
     nonisolated(unsafe) static var historyWriteFaultForTesting: (() throws -> Void)?
+    /// /keepsummaries K8b: fault points of the durable measurement clear
+    /// ("before-write", "after-rename"). Test-only.
+    nonisolated(unsafe) static var usageClearFaultForTesting: ((String) throws -> Void)?
+    /// The idle pass runs from its triggers unless a selftest turns it off
+    /// to drive it explicitly. Always true in production.
+    nonisolated(unsafe) static var summaryRetentionIdlePassEnabled = true
+    /// /keepsummaries K7: observes each request view as it is built. Test-only.
+    nonisolated(unsafe) static var requestViewObserverForTesting: ((ComposedHistory) -> Void)?
     /// Selftest seam: throw to simulate a failed turn-checkpoint write.
     nonisolated(unsafe) static var checkpointWriteFaultForTesting: (() throws -> Void)?
     /// Selftest seam: throw AFTER the history file was replaced (a failed
@@ -13488,6 +13809,7 @@ class ConversationManager: ObservableObject {
             let data = try Data(contentsOf: contextUsageFileURL)
             let snapshot = try JSONDecoder().decode(ContextUsageSnapshot.self, from: data)
             isRestoringContextUsageSnapshot = true
+            lastPromptRenderKey = snapshot.effectiveRenderKey
             lastPromptTokens = snapshot.lastPromptTokens
             lastCompletionTokens = snapshot.lastCompletionTokens
             isRestoringContextUsageSnapshot = false
@@ -13504,7 +13826,8 @@ class ConversationManager: ObservableObject {
             let snapshot = ContextUsageSnapshot(
                 lastPromptTokens: lastPromptTokens,
                 lastCompletionTokens: lastCompletionTokens,
-                updatedAt: Date()
+                updatedAt: Date(),
+                lastPromptRenderKey: lastPromptTokens == nil ? nil : lastPromptRenderKey
             )
             let data = try JSONEncoder().encode(snapshot)
             try PrivateStorage.writeAtomically(data, to: contextUsageFileURL)
@@ -13515,6 +13838,8 @@ class ConversationManager: ObservableObject {
     
     func clearConversation() {
         messages = []
+        summaryRestoreAttempts = []
+        summaryStubRepairUnsupported = []
         pendingMidTurnMessages.removeAll()
         inFlightMidTurnBatch = nil
         persistPendingMidTurnQueue()
@@ -13891,8 +14216,9 @@ class ConversationManager: ObservableObject {
         )
         let allTools = nativeTools + mainMcpTools
 
+        // Composed (/keepsummaries): this diagnostic shows what the model sees.
         return await openRouterService.renderContextSnapshot(
-            messages: messages,
+            messages: PruneSummaryRetention.compose(messages, limit: KeepSummariesSetting.current()).messages,
             tools: allTools,
             calendarContext: frozenContext.calendar,
             emailContext: frozenContext.email,
@@ -14298,6 +14624,8 @@ class ConversationManager: ObservableObject {
 
     func endMindRestore() {
         isRestoringMind = false
+        // After a Mind import: repair stubs and restore at the next idle point.
+        scheduleSummaryRetentionIdlePass()
     }
 
     func reloadAfterMindRestore() async {
@@ -14843,6 +15171,46 @@ class ConversationManager: ObservableObject {
             : "✅ Memory archiving now runs in the background, from the next archive.")
     }
 
+    /// `/keepsummaries [N|all]` (KEEP_SUMMARIES_PLAN §9): how many past-turn
+    /// summaries the model sees in full. Applies from the next request; never
+    /// touches persisted bytes or running jobs. No idle guard.
+    private func handleKeepSummariesCommand(argument: String) async {
+        guard replyAddress != nil else { return }
+        try? await sendText(keepSummariesReply(argument: argument))
+    }
+
+    static let keepSummariesCostLine = "More summaries = larger context: each is ~1.3–2.7k tokens (10 ≈ 15–25k, 20 ≈ 30–50k)."
+
+    /// The reply (and the setting change) for one `/keepsummaries` command.
+    func keepSummariesReply(argument: String) -> String {
+        let current = KeepSummariesSetting.current()
+        let text = argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // Legacy pointers the one-time restore could not prove exact can
+        // only ever be shown as pointers, whatever the setting.
+        let legacy = messages.reduce(0) { $0 + $1.demotedPruneSummaries.count }
+        let legacyNote = legacy > 0
+            ? "\nNote: \(legacy) older summar\(legacy == 1 ? "y" : "ies") can only be shown as a pointer (the full text is in its snapshot)."
+            : ""
+        if text.isEmpty {
+            return """
+                Past-turn summaries kept in full: \(current) (default: 3).
+                Older ones are shown as a one-line pointer to a snapshot with the full text; nothing is deleted.
+                Change it with /keepsummaries <1–50> or /keepsummaries all; /keepsummaries 3 returns to the default.
+                \(Self.keepSummariesCostLine)
+                """ + legacyNote
+        }
+        guard let target = KeepSummariesSetting.parseArgument(text) else {
+            return "Usage: /keepsummaries [1–50|all] (currently \(current); default 3)."
+        }
+        // The default always removes the key, before any "already" reply.
+        if target == .defaultValue { KeepSummariesSetting.store(target) }
+        guard target != current else {
+            return "Past-turn summaries kept in full: already \(target) (default: 3)."
+        }
+        KeepSummariesSetting.store(target)
+        return "✅ Past-turn summaries kept in full: \(target) (default is 3; send /keepsummaries 3 to return to it). Applies from the next request; full texts are kept either way, so you can change it back at any time." + legacyNote
+    }
+
     // MARK: - Summarization Context Builder
     
     /// Build full context for summarization so the LLM can properly understand
@@ -15242,7 +15610,9 @@ extension ConversationManager {
         calendar: String?, email: String?, summaries: [ArchivedSummaryItem], totalChunks: Int,
         date: Date, deferred: [(name: String, description: String, toolCount: Int)],
         persona: PromptPersona?) async throws -> Int {
-        let projection = try checkpoint.projectedHistory(history, canonical: messages)
+        // /keepsummaries: the estimate sees what the request will show.
+        let projection = PruneSummaryRetention.compose(try checkpoint.projectedHistory(history, canonical: messages),
+                                                       limit: KeepSummariesSetting.current()).messages
         let estimate = try await openRouterService.activeTurnRequestEstimate(messages: projection,
             rounds: checkpoint.retainedInteractions, images: imagesDirectory, documents: documentsDirectory,
             tools: tools, calendar: calendar, email: email, summaries: summaries,
@@ -15333,7 +15703,10 @@ extension ConversationManager {
         activeTurnCheckpoints[runID] = pending
         let contextIDs = Set([original.taskMessageID] + original.deliveredUserMessageIDs)
         let summary = try await summarizeActivePrefix(prefix, previous: original.activeTurnCompaction?.summaryText,
-            execution: execution, date: date, contextMessages: messages.filter { contextIDs.contains($0.id) }, persona: persona)
+            execution: execution, date: date,
+            // /keepsummaries: composed before it is flattened into source text.
+            contextMessages: PruneSummaryRetention.compose(messages, limit: KeepSummariesSetting.current()).messages.filter { contextIDs.contains($0.id) },
+            persona: persona)
         try Task.checkCancellation()
         guard activeRunId == runID,
               activeTurnCheckpoints[runID]?.generation == original.generation,
@@ -15958,6 +16331,19 @@ extension ConversationManager {
     func _testSummaryNoteTokens(_ message: Message) -> Int { prunedContextSummaryTokens(for: message) }
     func _testPromptTokens(_ message: Message) -> Int { estimatedPromptTokens(for: message, isLMStudio: false) }
     var _testMaintenanceNotice: String? { maintenanceNotice }
+    // /keepsummaries (`__keep-summaries-selftest`).
+    var _testPromptRenderKey: String { lastPromptRenderKey }
+    var _testLastPromptTokens: Int? { lastPromptTokens }
+    var _testLastCompletionTokens: Int? { lastCompletionTokens }
+    func _testSetPromptMeasurement(_ tokens: Int?, key: String) { lastPromptRenderKey = key; lastPromptTokens = tokens }
+    func _testBeginMaintenance() -> UUID { beginMaintenance(.pruning) }
+    func _testEndMaintenance(_ id: UUID) { endMaintenance(id) }
+    func _testSetArchiveRecoveryPlaceholder(_ on: Bool) {
+        if on { archiveRecoveryTask = Task {} } else { archiveRecoveryTask = nil }
+    }
+    func _testSetActiveRunPlaceholder(_ on: Bool) { activeRunId = on ? UUID() : nil }
+    func _testScheduleIdlePass() { scheduleSummaryRetentionIdlePass() }
+    func _testMarkScanPending() { summaryRetentionScanPending = true }
     var _testArchiveService: ConversationArchiveService { archiveService }
 }
 
@@ -16132,11 +16518,12 @@ extension ConversationManager {
             persona: inputs.persona)
         let providerIsLMStudio = currentProviderIsLMStudio()
         var totalTokens: Int
-        if let real = lastPromptTokens {
-            totalTokens = real + estimatedTokensAddedSinceLastPrompt(currentUserMessageId: inputs.currentUserMessageId, isLMStudio: providerIsLMStudio)
+        let decisionView = PruneSummaryRetention.compose(messages, limit: KeepSummariesSetting.current())
+        if let real = promptMeasurement(for: decisionView) {
+            totalTokens = real + estimatedTokensAddedSinceLastPrompt(currentUserMessageId: inputs.currentUserMessageId, isLMStudio: providerIsLMStudio, in: decisionView.messages)
         } else {
             totalTokens = mandatoryEstimate.tokens
-            for message in messages {
+            for message in decisionView.messages {
                 totalTokens += estimatedPromptTokens(for: message, isLMStudio: providerIsLMStudio)
                 totalTokens += toolInteractionTokens(message.toolInteractions, isLMStudio: providerIsLMStudio)
             }
@@ -16154,11 +16541,12 @@ extension ConversationManager {
             persona: inputs.persona)
         let providerIsLMStudio = currentProviderIsLMStudio()
         var totalTokens: Int
-        if let real = lastPromptTokens {
+        let decisionView = PruneSummaryRetention.compose(history, limit: KeepSummariesSetting.current())
+        if let real = promptMeasurement(for: decisionView) {
             totalTokens = real + (rounds.last.map { currentTurnInteractionTokens($0, isLMStudio: providerIsLMStudio) } ?? 0)
         } else {
             totalTokens = mandatoryEstimate.tokens
-            for message in history {
+            for message in decisionView.messages {
                 totalTokens += estimatedPromptTokens(for: message, isLMStudio: providerIsLMStudio)
                 totalTokens += toolInteractionTokens(message.toolInteractions, isLMStudio: providerIsLMStudio)
             }
@@ -16347,6 +16735,7 @@ extension ConversationManager {
         job.released = true
         PruneArchiveStore.release(job.snapshotRef)
         backgroundPruneJob = nil
+        scheduleSummaryRetentionIdlePass()
         job.watchdog?.cancel()
         bgPruneResumePhaseWaiters(job)
         let drains = job.drainWaiters
@@ -16499,12 +16888,11 @@ extension ConversationManager {
         let plan = bgPrunePlan(job)
         let source = job.source
         let anchor = job.anchor
-        let sourceIDs = Set(source.map(\.id))
         var text: String? = nil
         if case .text(let summary) = result.summary { text = summary }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        var demotionReference: PruneArchiveReference?
-        defer { PruneArchiveStore.release(demotionReference) }
+        var stubReference: PruneArchiveReference?
+        defer { PruneArchiveStore.release(stubReference) }
         var candidateView = source
         applyPrunePlan(plan, to: &candidateView)
         _ = pruneCompressibleUserMessages(upToIndex: job.safeBoundary, in: &candidateView)
@@ -16522,7 +16910,7 @@ extension ConversationManager {
         if let measured = candidateView[anchor].measuredTokens {
             candidateView[anchor].measuredTokens = measured + job.snapshotRef.promptText.count / 4
         }
-        demotionReference = demoteOlderSummaryAnchors(in: &candidateView, sourceIDs: sourceIDs, trigger: job.site.rawValue)
+        stubReference = prepareSummaryStubs(in: &candidateView, trigger: job.site.rawValue)
         Self.beforePruneHistoryWriteForTesting?()
         for (old, updated) in zip(source, candidateView) {
             guard let oldBytes = try? encoder.encode(old), let newBytes = try? encoder.encode(updated) else {
@@ -16559,7 +16947,7 @@ extension ConversationManager {
         applyPrunePlan(plan, to: &trackerPreimage, clearTrackers: true)
         cleanupOrphanedToolAttachmentSnapshots(additionalLiveInteractions: liveRounds)
         TruncationService.cleanupOldFiles()
-        do { try PruneArchiveStore.retainLatest(protecting: Set([job.snapshotRef.id, demotionReference?.id].compactMap { $0 })) }
+        do { try PruneArchiveStore.retainLatest(protecting: Set([job.snapshotRef.id, stubReference?.id].compactMap { $0 })) }
         catch { showMaintenanceNotice("Snapshot retention: \(error.localizedDescription)") }
         job.committed = true
         outcome = .applied
@@ -16996,9 +17384,26 @@ extension ConversationManager {
         return BackgroundPruneCeiling.saturatingAdd(estimate.tokens, ActiveTurnBudget.text(tail))
     }
 
-    /// The live request projection of the active turn (the 8616 expression).
-    func backgroundPruneProjection(_ history: [Message], runId: UUID?) throws -> [Message] {
-        try activeTurnCheckpoints[runId ?? UUID()]?.projectedHistory(history, canonical: messages) ?? history
+    /// The live request projection of the active turn (the 8616 expression),
+    /// composed with the request's /keepsummaries limit.
+    func backgroundPruneProjection(_ history: [Message], runId: UUID?, limit: KeepSummariesLimit) throws -> ComposedHistory {
+        try requestView(history, runId: runId, limit: limit)
+    }
+
+    /// One model request's view (KEEP_SUMMARIES_PLAN §4.2): the active-turn
+    /// projection, then summary composition. Its estimate and its send use
+    /// this same value; nothing ever writes it back.
+    func requestView(_ history: [Message], runId: UUID?, limit: KeepSummariesLimit) throws -> ComposedHistory {
+        let projected = try activeTurnCheckpoints[runId ?? UUID()]?.projectedHistory(history, canonical: messages) ?? history
+        let view = PruneSummaryRetention.compose(projected, limit: limit)
+        Self.requestViewObserverForTesting?(view)
+        return view
+    }
+
+    /// §4.4: the cached measurement, only under the composition that produced it.
+    private func promptMeasurement(for view: ComposedHistory) -> Int? {
+        guard let tokens = lastPromptTokens, lastPromptRenderKey == view.renderKey else { return nil }
+        return tokens
     }
 
     func backgroundPruneRequestEstimate(projected: [Message], rounds: [ToolInteraction], tools: [ToolDefinition],
@@ -17035,6 +17440,9 @@ extension ConversationManager {
         let turnStartDate = inputs.turnStartDate
         let deferredMCPSummaries = inputs.deferredMCPSummaries
         let persona = inputs.persona
+        // /keepsummaries: one composition (read once here) for every attempt;
+        // the canonical source still drives the manifest and the fallback.
+        let requestMessages = PruneSummaryRetention.compose(sourceMessages, limit: KeepSummariesSetting.current()).messages
 
         let manifest = pruneSummaryManifest(plan: plan, compressedIndices: compressedIndices, sourceMessages: sourceMessages)
         guard !manifest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .text(nil) }
@@ -17120,7 +17528,7 @@ extension ConversationManager {
                 if Task.isCancelled { return .cancelled }
                 do {
                     response = try await openRouterService.generateResponse(
-                        messages: sourceMessages,
+                        messages: requestMessages,
                         imagesDirectory: imagesDirectory,
                         documentsDirectory: documentsDirectory,
                         tools: isResponses ? [] : tools,
@@ -17174,7 +17582,7 @@ extension ConversationManager {
                         if Task.isCancelled { return .cancelled }
                         do {
                             let retryResponse = try await openRouterService.generateResponse(
-                                messages: sourceMessages,
+                                messages: requestMessages,
                                 imagesDirectory: imagesDirectory,
                                 documentsDirectory: documentsDirectory,
                                 tools: isResponses ? [] : tools,
@@ -17506,6 +17914,8 @@ extension ConversationManager {
         lastPromptTokens
     }
     func bgPruneTestSetLastPromptTokens(_ value: Int?) {
+        // A measurement of the current view (/keepsummaries §4.4 key).
+        lastPromptRenderKey = PruneSummaryRetention.compose(messages, limit: KeepSummariesSetting.current()).renderKey
         lastPromptTokens = value
     }
     func bgPruneTestSetFallbackDue(_ value: Bool) {
@@ -17567,7 +17977,8 @@ extension ConversationManager {
                              pruningBoundary: (affected.max() ?? -1) + 1)
         return await generatePrunedContextSummary(plan: plan, compressedIndices: [], sourceMessages: messages, tools: [],
             calendarContext: "", emailContext: "", chunkSummaries: [], totalChunkCount: 0, currentUserMessageId: nil,
-            turnStartDate: Date(timeIntervalSince1970: 1_790_000_000), deferredMCPSummaries: [], execution: nil, persona: nil)
+            turnStartDate: Date(timeIntervalSince1970: 1_790_000_000), deferredMCPSummaries: [], execution: nil, persona: nil,
+            summaryLimit: KeepSummariesSetting.current())
     }
     func bgPruneTestDescriptions(actions: [BackgroundPrunePlanAction]) async -> [BackgroundPruneActionDescriptions] {
         await backgroundPruneDescriptions(actions: actions, source: messages)

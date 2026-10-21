@@ -76,7 +76,7 @@ extension RetentionHarness {
         manager = await freshManager(history: anchoredHistory(3))
         try await pruneLast(manager)
         let before = diskHistory() ?? []
-        let demotion = records(before).map(\.snapshot)
+        let demotion = records(composed(before)).map(\.snapshot)
         _ = try fillSnapshots(305, future: true)
         let whitelist = ["manual", "automatic", "mid-turn", "chunk-archive", "active-turn-compaction"] // v0.2.45, literal
         let triggersOK = demotion.allSatisfy { snapshotHeaderTrigger($0).map(whitelist.contains) == true }
@@ -90,10 +90,11 @@ extension RetentionHarness {
         let restored = diskHistory() ?? []
         let ids = snapshotIDs()
         check("P7 Mind round trip: lines, coverage and snapshots restored; protection holds; triggers in the unchanged whitelist",
-              mindError.isEmpty && !demotion.isEmpty && triggersOK && records(restored) == records(before)
+              mindError.isEmpty && !demotion.isEmpty && triggersOK && records(composed(restored)) == records(composed(before))
+              && restored.map(\.prunedContextSummaryStub) == before.map(\.prunedContextSummaryStub)
               && restored.map(\.prunedContextSummaryCoverage) == before.map(\.prunedContextSummaryCoverage)
               && demotion.allSatisfy { ids.contains($0.id) } && ids.count == 300,
-              "\(records(restored).count) records, \(ids.count) snapshots, triggers \(triggersOK) \(mindError)")
+              "\(records(composed(restored)).count) records, \(ids.count) snapshots, triggers \(triggersOK) \(mindError)")
     }
 
     /// P2 unreadable history; P3/P4 both sides of a failed write; P5 pin;
@@ -158,7 +159,7 @@ extension RetentionHarness {
         ConversationManager.historyPostWriteFaultForTesting = { throw PruneArchiveStore.Failure("injected post-rename failure") }
         let failedAfter = (try? await pruneLast(manager)) == nil
         ConversationManager.historyPostWriteFaultForTesting = nil
-        let onDisk = records(diskHistory() ?? []).map(\.snapshot.id)
+        let onDisk = records(composed(diskHistory() ?? [])).map(\.snapshot.id)
         _ = try fillSnapshots(305, future: true)
         try PruneArchiveStore.retainLatest()
         let kept = demotionRef.map { snapshotIDs().contains($0.id) } ?? false
@@ -166,9 +167,9 @@ extension RetentionHarness {
         _ = try fillSnapshots(5, future: true)
         try PruneArchiveStore.retainLatest()
         let keptAfterRestart = demotionRef.map { snapshotIDs().contains($0.id) } ?? false
-        check("P4 failure after rename → disk holds the line; its snapshot stays protected, after a restart too",
+        check("P4 failure after rename → disk holds the pointer; its snapshot stays protected, after a restart too",
               failedAfter && demotionRef.map { onDisk.contains($0.id) } == true && kept && keptAfterRestart
-              && records(manager._testMessages).count == 1,
+              && records(composed(manager._testMessages)).count == 1,
               "failed \(failedAfter) kept \(kept) restart \(keptAfterRestart)")
         ConversationManager.afterDemotionSnapshotForTesting = nil
     }
@@ -193,14 +194,17 @@ extension RetentionHarness {
         manager = await freshManager(history: anchoredHistory(3))
         try await pruneLast(manager)
         let holder = message(manager._testMessages, "REPLY_A0")!
-        let snapshot = holder.demotedPruneSummaries[0].snapshot
+        let snapshot = holder.prunedContextSummaryStub!.record.snapshot
         let sanitized = await manager._testArchiveService._testSanitizeForArchive(holder)
-        manager._testSeedHistory(manager._testMessages.filter { $0.id != holder.id && $0.content != "U_A0" })
+        // The commit's one stub snapshot is shared by every anchor it
+        // prepared; it can expire only once none of them is live.
+        manager._testSeedHistory(manager._testMessages.filter { $0.prunedContextSummaryStub?.record.snapshot != snapshot && !$0.content.hasPrefix("U_") })
         _ = try fillSnapshots(305, future: true)
         try PruneArchiveStore.retainLatest()
-        check("P6 the archive drops both fields and keeps the reference; once the line leaves history the snapshot can expire",
+        check("P6 the archive drops summary, coverage and pointer and keeps the references; once no live pointer references the snapshot it can expire",
               sanitized.demotedPruneSummaries.isEmpty && sanitized.prunedContextSummaryCoverage == nil
-              && sanitized.pruneArchiveReferences.contains(snapshot) && !snapshotIDs().contains(snapshot.id))
+              && sanitized.prunedContextSummaryStub == nil && sanitized.prunedContextSummary == nil
+              && sanitized.pruneArchiveReferences == holder.pruneArchiveReferences && !snapshotIDs().contains(snapshot.id))
     }
 
     /// P8: retention's decode and the loader agree on which lines are live.

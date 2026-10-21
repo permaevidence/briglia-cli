@@ -3,13 +3,14 @@ import Foundation
 /// F1–F3 field handling; W1–W2 (and L4/L5's request half) on real requests.
 extension RetentionHarness {
 
-    /// A real demotion; returns the manager and the demoted message.
+    /// A real prune of four anchors; returns the manager and the oldest
+    /// anchor as a request shows it (composed as a pointer, default 3).
     func demotedFixture(files: [String] = []) async throws -> (ConversationManager, Message) {
         var h = anchoredHistory(3)
         if !files.isEmpty { h[1].prunedContextSummaryCoverage = coverage(at(2026, 9, 1, 9, 0), at(2026, 9, 1, 10, 0), files: files) }
         let manager = await freshManager(history: h)
         try await pruneLast(manager)
-        return (manager, message(manager._testMessages, "REPLY_A0")!)
+        return (manager, message(composed(manager._testMessages), "REPLY_A0")!)
     }
 
     func fieldsSection() async throws {
@@ -67,10 +68,10 @@ extension RetentionHarness {
         measured[1].measuredTokens = 1000
         let m2 = await freshManager(history: measured)
         try await pruneLast(m2)
-        let after = message(m2._testMessages, "REPLY_A0")!
+        let after = message(composed(m2._testMessages), "REPLY_A0")!
         let expected = 1000 - "FULL_SUMMARY_A0".count / 4 + PruneSummaryRetention.wrapper(after.demotedPruneSummaries[0].line).count / 4
-        check("F2g measuredTokens adjusted on demotion: − summary/4 + wrapper/4",
-              after.measuredTokens == expected, "\(after.measuredTokens ?? -1) vs \(expected)")
+        check("F2g measuredTokens adjusted in the pointer shape: − summary/4 + wrapper/4 (persisted value unchanged)",
+              after.measuredTokens == expected && message(m2._testMessages, "REPLY_A0")?.measuredTokens == 1000, "\(after.measuredTokens ?? -1) vs \(expected)")
 
         // F3: the archive sanitizer drops both fields.
         let archive = manager._testArchiveService
@@ -121,7 +122,8 @@ extension RetentionHarness {
             let label = responses ? "Responses" : "Chat Completions"
             check("W1b (\(label)) no request carries a separately serialized coverage object",
                   !main.isEmpty && !bodies.contains { $0.contains("prunedContextSummaryCoverage") || $0.contains("startOffsetSeconds")
-                                                       || $0.contains("demotedPruneSummaries") })
+                                                       || $0.contains("demotedPruneSummaries") || $0.contains("prunedContextSummaryStub")
+                                                       || $0.contains("summaryDigest") })
             let expectedLine = MarkerNeutralizer.escape(PruneSummaryRetention.wrapper(record.line))
             check("W2 (\(label)) the demoted wrapper line replaces the full summary, with exactly one snapshot link",
                   Self.occurrences(expectedLine, in: text) == 1 && !text.contains("FULL_SUMMARY_A0")

@@ -150,13 +150,15 @@ struct DemotedPruneSummary: Codable, Equatable {
     }
 }
 
-/// Past-turn summary retention (Part B): the newest three summary anchors
-/// stay in full; older ones become a fixed one-line pointer to a snapshot.
+/// Past-turn summary retention (Part B): by default the newest three summary
+/// anchors are shown in full and older ones as a fixed one-line pointer to a
+/// snapshot (`/keepsummaries`, applied when a request is composed).
 /// Everything here is deterministic and makes no model request.
 enum PruneSummaryRetention {
-    /// Anchors (messages with a live prune summary) kept in full. A count of
-    /// anchors, not a token ceiling: one anchor may hold several summaries.
-    static let maxFullPruneSummaryAnchors = 3
+    /// Default number of anchors (messages with a live prune summary) shown in
+    /// full. A count of anchors, not a token ceiling: one anchor may hold
+    /// several summaries. `/keepsummaries` changes it per request.
+    static let maxFullPruneSummaryAnchors = KeepSummariesLimit.defaultCount
     static let lineCap = 300
     static let componentCap = 40
     static let wrapperPrefix = "Earlier work summarized (full text in snapshot): "
@@ -392,7 +394,7 @@ enum PruneSummaryRetention {
         case unreadable(String)
     }
 
-    /// Snapshot ids referenced by demoted lines in the COMMITTED history file
+    /// Snapshot ids referenced by demoted lines and summary stubs in the COMMITTED history file
     /// next to a snapshot directory. Decoded with the same decoder as the
     /// conversation loader, so both always agree on which lines are live.
     static func liveDemotionSnapshots(historyFile: URL) -> LiveHistory {
@@ -404,7 +406,11 @@ enum PruneSummaryRetention {
         do {
             let data = try Data(contentsOf: historyFile)
             let history = try JSONDecoder().decode([Message].self, from: data)
-            return .snapshots(Set(history.flatMap { $0.demotedPruneSummaries.map(\.snapshot.id) }))
+            // Legacy lines and pointer stubs (live or stale) alike: a
+            // snapshot is unprotected only once nothing references it.
+            return .snapshots(Set(history.flatMap { message in
+                message.demotedPruneSummaries.map(\.snapshot.id) + [message.prunedContextSummaryStub?.record.snapshot.id].compactMap { $0 }
+            }))
         } catch {
             return .unreadable(error.localizedDescription)
         }

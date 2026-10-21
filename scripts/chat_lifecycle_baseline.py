@@ -162,9 +162,14 @@ def instrument(tree):
 # set; its four accesses in ConversationArchiveService.swift became one
 # removal there (/deleteuserdata) and one removal in UserContextMaintenance.swift
 # (first state load). Both are redirected like every other access.
+# /keepsummaries (KEEP_SUMMARIES_PLAN v5 §9): the new setting
+# `ada.keepSummaries` is read and written through one accessor in the new
+# PruneSummaryComposition.swift; redirected like every other access (fixtures
+# never set it, so every scenario composes with the default 3).
 REVIEWED_DEFAULTS_DELTAS = {
     "TelegramConcierge/Services/ConversationArchiveService.swift:defaults": (4, 1),
     "TelegramConcierge/Services/UserContextMaintenance.swift:defaults": (None, 1),
+    "TelegramConcierge/Services/PruneSummaryComposition.swift:defaults": (None, 1),
 }
 
 
@@ -348,6 +353,9 @@ def main():
             from subagent_dialogue_compaction_lifecycle_migration import migrate_lifecycle as migrate_subagent_dialogue_lifecycle
             from output_cap_removal_migration import migrate_lifecycle as migrate_output_cap_removal_lifecycle, verify_candidate as verify_no_output_cap
             from summary_retention_lifecycle_migration import migrate_candidate as migrate_summary_retention_candidate
+            from keep_summaries_lifecycle_migration import migrate_candidate as migrate_keep_summaries_candidate
+            # r14 (/keepsummaries) removes exactly the validated summary
+            # pointers (stubs) from the candidate before r13 runs.
             # r13 (summary retention) removes exactly the reviewed persisted
             # coverage objects from the candidate and refuses any demotion or
             # request change; r12 (no output-token caps) migrates the reference's setup probe and
@@ -355,7 +363,7 @@ def main():
             # send), r10 (AGENTS.md bullet), r9 (runtime identity), r8 (reply
             # policy) and r7 (chronology) restore the candidate; earlier gates
             # remain unchanged.
-            verify_migration(migrate_output_cap_removal_lifecycle(migrate_subagent_dialogue_lifecycle(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"])))), verify_no_output_cap(migrate_summary_retention_candidate(results["candidate"])), compare)
+            verify_migration(migrate_output_cap_removal_lifecycle(migrate_subagent_dialogue_lifecycle(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"])))), verify_no_output_cap(migrate_summary_retention_candidate(migrate_keep_summaries_candidate(results["candidate"]))), compare)
             # New-binary export MUST open with the pinned release's actual importer.
             imported = root / "cross-import"
             env = dict(os.environ, SWIFT_DETERMINISTIC_HASHING="1", LC_ALL="C", TZ="UTC")
@@ -365,7 +373,7 @@ def main():
                     json.loads((imported / "import.json").read_text()))
             wire.command(["python3", str(ROOT / "scripts/chat_lifecycle_client_test.py"),
                           str(root / "candidate-capture/status.json")])
-        print("DIAGNOSTIC ONLY" if args.candidate_only else "Lifecycle r3–r13 migrations and shipped-client differential PASS")
+        print("DIAGNOSTIC ONLY" if args.candidate_only else "Lifecycle r3–r14 migrations and shipped-client differential PASS")
     finally:
         print(f"Evidence: {root}", flush=True)
         if not args.keep_trees:

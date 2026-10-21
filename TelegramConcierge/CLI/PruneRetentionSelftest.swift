@@ -91,7 +91,23 @@ final class RetentionHarness {
     /// A fixed device zone so recorded offsets are deterministic.
     let zone = TimeZone(secondsFromGMT: 7200)!
 
+    /// The isolation this run must find (the retention battery's by default;
+    /// the /keepsummaries battery passes its own).
+    var rootMarker = "briglia-prune-retention-"
+    var childName = PruneRetentionSelftest.childName
+
     init(only: String?, fuzzCases: Int) { self.only = only; self.fuzzCases = fuzzCases }
+
+    /// Refuses unless running in the isolated scratch home and the private
+    /// preference domain.
+    func isolated() -> Bool {
+        let data = StoragePaths.dataRoot.path
+        guard data.contains(rootMarker), ProcessInfo.processInfo.processName == childName else {
+            print("✖ refusing to run outside the isolated scratch home / private preference domain (data root \(data))")
+            failures += 1; return false
+        }
+        return true
+    }
 
     func check(_ label: String, _ ok: Bool, _ detail: @autoclosure () -> String = "") {
         total += 1
@@ -107,13 +123,10 @@ final class RetentionHarness {
     }
 
     func runAll() async throws {
-        let data = StoragePaths.dataRoot.path
-        guard data.contains("briglia-prune-retention-"),
-              ProcessInfo.processInfo.processName == PruneRetentionSelftest.childName else {
-            print("✖ refusing to run outside the isolated scratch home / private preference domain (data root \(data))")
-            failures += 1; return
-        }
+        guard isolated() else { return }
         PruneSummaryRetention.timeZoneForTesting = zone
+        // Driven explicitly by the K13 rows; never from a trigger mid-row.
+        ConversationManager.summaryRetentionIdlePassEnabled = false
         server = try CaptureServer()
         defer { server.stop() }
         try configureProvider()
@@ -144,6 +157,10 @@ final class RetentionHarness {
     func resetState() {
         PruneArchiveStore.faultForTesting = nil
         PruneArchiveStore.identityForTesting = nil
+        ConversationManager.usageClearFaultForTesting = nil
+        ConversationManager.requestViewObserverForTesting = nil
+        PruneSummaryRestore.indexCountForTesting = 0
+        UserDefaults.standard.removeObject(forKey: KeepSummariesSetting.defaultsKey)
         ConversationManager.historyWriteFaultForTesting = nil
         ConversationManager.historyPostWriteFaultForTesting = nil
         ConversationManager.beforePruneHistoryWriteForTesting = nil
@@ -267,6 +284,10 @@ final class RetentionHarness {
     }
 
     func records(_ history: [Message]) -> [DemotedPruneSummary] { history.flatMap(\.demotedPruneSummaries) }
+    /// What a request shows (/keepsummaries composition at `limit`, default 3).
+    func composed(_ history: [Message], _ limit: KeepSummariesLimit = .defaultValue) -> [Message] {
+        PruneSummaryRetention.compose(history, limit: limit).messages
+    }
     func message(_ history: [Message], _ content: String) -> Message? { history.first { $0.content == content } }
 
     /// Fill the snapshot store with `count` old snapshots (oldest first).
