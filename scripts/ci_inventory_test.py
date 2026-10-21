@@ -650,7 +650,12 @@ def _needs_cases():
 
 
 def truth_table(script, cache=None):
-    """Run the aggregator script like GitHub's default Linux shell does."""
+    """Run the aggregator script exactly as GitHub runs a step with no `shell:`.
+
+    The aggregator sets no shell, so GitHub uses its default `bash -e {0}`
+    (no pipefail). Running it here with pipefail would let an edit such as
+    piping the script through `cat` pass this test yet go green in CI.
+    """
     if cache is not None and script in cache:
         return cache[script]
     with tempfile.TemporaryDirectory() as td:
@@ -661,7 +666,7 @@ def truth_table(script, cache=None):
         def run(case):
             label, needs, expect = case
             env = dict(os.environ, NEEDS_JSON=json.dumps(needs))
-            p = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", path], env=env,
+            p = subprocess.run(["bash", "-e", path], env=env,
                                capture_output=True, timeout=60)
             return label, expect, p.returncode == 0
 
@@ -783,7 +788,7 @@ EXPECT = {
     "28": "needs must be exactly", "29": "job keys", "30": "step keys", "31": "truth table",
     "32": "truth table", "33": "raw `on:`", "34": "re-derived", "35": "upload",
     "36": "inventory step must appear exactly once", "37": "setup", "38": "job name",
-    "39": "frozen relative order",
+    "39": "frozen relative order", "40": "truth table",
     "P1": "duplicate key", "P2": "indicator '&'", "P3": "unrecognised line", "P4": "indicator '{'",
     "P5": "tab character", "P6": "unsupported block scalar", "P7": "document marker",
 }
@@ -842,6 +847,7 @@ def breaks():
         ("37 Node setup copied into a gate job", _node_into_gate),
         ("38 a test job named CI complete", lambda t: sub_once(t, "    name: macOS gates", "    name: CI complete", job="macos-gates")),
         ("39 two steps reordered inside a job", _reorder_gates_b),
+        ("40 aggregator output piped through cat", lambda t: sub_once(t, "python3 - <<'PY'\n", "python3 - <<'PY' | cat\n", job=agg)),
         ("P1 parser: duplicate key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    runs-on: macos-15\n")),
         ("P2 parser: anchor and alias", lambda t: sub_once(sub_once(t, "    runs-on: macos-15\n", "    runs-on: &rn macos-15\n", job="macos-core"), "    runs-on: macos-15\n", "    runs-on: *rn\n", job="macos-gates")),
         ("P3 parser: merge key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    <<: *base\n")),
