@@ -75,9 +75,22 @@ extension FloodRow {
         } else {
             c("F6 spill file has no raw token", false, "no spill path")
         }
-        let matches = await BackgroundProcessRegistry.shared.drainWatchMatches()
-        // Exit teardown events (stream "system") are not line matches.
-        let lineMatches = matches.filter { $0.stream != "system" }
+        // Watch matches are recorded by the output reader, which can trail
+        // the exit notice on a loaded runner: poll (bounded, 10 s) until both
+        // watches have fired, then drain once more after a short settle so a
+        // duplicate fire is still counted. Exit teardown events (stream
+        // "system") are not line matches.
+        var lineMatches: [BackgroundProcessRegistry.WatchMatch] = []
+        let pollDeadline = Date().addingTimeInterval(10)
+        while true {
+            let drained = await BackgroundProcessRegistry.shared.drainWatchMatches()
+            lineMatches += drained.filter { $0.stream != "system" }
+            let fired = Set(lineMatches.map(\.watchId))
+            if (fired.contains(w1id) && fired.contains(w2id)) || Date() >= pollDeadline { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        lineMatches += (await BackgroundProcessRegistry.shared.drainWatchMatches()).filter { $0.stream != "system" }
         let m1 = lineMatches.filter { $0.watchId == w1id }
         let m2 = lineMatches.filter { $0.watchId == w2id }
         c("F6 marker-line watch fired once with the exact line",

@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Real main-loop compaction checks in disposable roots, with negative controls."""
 import argparse
+import sys
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import chat_wire_baseline as wire
+
+# Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
+# large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
+LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 
 ROOT = wire.ROOT
 parser = argparse.ArgumentParser()
@@ -68,7 +73,7 @@ for name, s in sources.items():
     if not p.exists() or p.read_text() != s: p.write_text(s)
 print('Active compaction evidence:', root, flush=True)
 build = Path('/tmp/briglia-active-owner-scratch')
-wire.command(['swift', 'build', '--scratch-path', str(build)], cwd=tree)
+wire.command(['swift', 'build', *LINUX_JOBS, '--scratch-path', str(build)], cwd=tree)
 binary = Path(subprocess.check_output(['swift', 'build', '--scratch-path', str(build), '--show-bin-path'], cwd=tree, text=True).strip()) / 'briglia'
 wire.command([str(binary), '__active-compaction-owner-selftest'], cwd=tree, timeout=480)
 for control in ['--disable-compaction', '--omit-carried', '--conservative-start-gate', '--omit-prune-notes', '--unprojected-final', '--old-ceiling-gate', '--protect-newest-turn']:

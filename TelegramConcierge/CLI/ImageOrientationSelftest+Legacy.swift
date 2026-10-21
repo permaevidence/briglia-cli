@@ -169,9 +169,9 @@ extension OrientHarness {
         }
     }
 
-    /// Byte comparison against the legacy copy. When the legacy function is
-    /// not byte-deterministic on this host (ImageMagick PNG date chunks), it
-    /// falls back to decoded pixels and says so.
+    /// Byte comparison against the legacy copy. PNG outputs, and outputs the
+    /// legacy function cannot reproduce byte-for-byte on this host, are
+    /// compared as decoded pixels and say so.
     func compareGolden(_ label: String, new: () -> Data?, legacy: () -> Data?) {
         let n = new(), l1 = legacy()
         guard let n, let l1 else {
@@ -179,6 +179,17 @@ extension OrientHarness {
             return
         }
         if n == l1 { check("\(label) (bytes)", true); return }
+        // PNG output: ImageMagick embeds creation/modification dates (tIME /
+        // tEXt date:*) at one-second resolution, so two runs a second apart
+        // differ in bytes only. PNG is lossless: compare decoded pixels.
+        let pngSignature = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        if n.prefix(8) == pngSignature && l1.prefix(8) == pngSignature {
+            let pn = OrientFixture.decode(n), pl = OrientFixture.decode(l1)
+            check("\(label) (PNG pixels; date chunks ignored)",
+                  pn != nil && pn?.0 == pl?.0 && pn?.1 == pl?.1 && pn?.2 == pl?.2,
+                  "new \(n.count) bytes, legacy \(l1.count) bytes")
+            return
+        }
         let l2 = legacy()
         if l2 == l1 {
             check("\(label) (bytes)", false, "new \(n.count) bytes ≠ legacy \(l1.count) bytes (legacy is deterministic)")

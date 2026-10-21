@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """P0 release-versus-candidate lifecycle gate; all instrumentation is disposable."""
 import argparse
+import sys
 import base64
 import hashlib
 import hmac
@@ -13,6 +14,10 @@ import subprocess
 import tempfile
 import platform
 import chat_wire_baseline as wire
+
+# Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
+# large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
+LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 
 ROOT = wire.ROOT
 FIXTURES = ROOT / "scripts/fixtures/chat-lifecycle"
@@ -314,7 +319,7 @@ def main():
             elif reference_evidence is not None and evidence != reference_evidence:
                 raise RuntimeError("Instrumentation differs between release and candidate: inspect per-file UserDefaults counts and seam hashes; extraction moves require explicit review, not silent relaxation")
             scratch = (args.scratch_root or root / "build") / label
-            wire.command(["swift", "build", "--scratch-path", str(scratch)], cwd=tree)
+            wire.command(["swift", "build", *LINUX_JOBS, "--scratch-path", str(scratch)], cwd=tree)
             bindir = subprocess.check_output(["swift", "build", "--scratch-path", str(scratch), "--show-bin-path"], cwd=tree, text=True).strip()
             binary = Path(bindir) / "briglia"
             binaries[label] = binary

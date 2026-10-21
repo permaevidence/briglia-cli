@@ -23,6 +23,7 @@ run uses a scratch HOME/XDG root and a reserved binary link name (own
 preference domain), which is deleted afterwards.
 """
 import argparse
+import sys
 import base64
 import json
 import os
@@ -30,6 +31,10 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+
+# Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
+# large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
+LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BASE = "418472c5c2159a1f1ea4f663263cd3996be017be"
@@ -65,7 +70,7 @@ def prepare(tree, ref, candidate):
 
 
 def build(tree, scratch):
-    run(["swift", "build", "-Xswiftc", "-suppress-warnings", "--scratch-path", str(scratch)], cwd=tree)
+    run(["swift", "build", *LINUX_JOBS, "-Xswiftc", "-suppress-warnings", "--scratch-path", str(scratch)], cwd=tree)
     bindir = subprocess.check_output(["swift", "build", "--scratch-path", str(scratch), "--show-bin-path"], cwd=tree, text=True).strip()
     return pathlib.Path(bindir) / "briglia"
 

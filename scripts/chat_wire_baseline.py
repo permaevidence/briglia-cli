@@ -5,6 +5,7 @@ Only disposable worktrees are instrumented. --record always builds SOURCE;
 changed candidate production files can never become the reference.
 """
 import argparse
+import sys
 import base64
 import hashlib
 import json
@@ -14,6 +15,10 @@ import platform
 import shutil
 import subprocess
 import tempfile
+
+# Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
+# large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
+LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = "4dd86133de03b484bed62fb81ce59935b89a7de8"
@@ -124,7 +129,7 @@ def instrument(tree):
 
 def build_and_capture(tree, scratch, captures):
     captures.mkdir(parents=True, exist_ok=False)
-    command(["swift", "build", "--scratch-path", str(scratch)], cwd=tree)
+    command(["swift", "build", *LINUX_JOBS, "--scratch-path", str(scratch)], cwd=tree)
     binary_dir = subprocess.check_output(["swift", "build", "--scratch-path", str(scratch), "--show-bin-path"], cwd=tree, text=True).strip()
     binary = pathlib.Path(binary_dir) / "briglia"
     first, summary = run_driver(binary, captures / "first")

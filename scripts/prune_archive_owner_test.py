@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Private-owner snapshot transactions in a disposable build; no live state."""
 import os
+import sys
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import chat_wire_baseline as wire
+
+# Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
+# large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
+LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 
 ROOT = wire.ROOT
 root = Path(tempfile.mkdtemp(prefix='briglia-snapshot-owner-build-'))
@@ -38,7 +43,7 @@ try:
         s = path.read_text().replace('UserDefaults.standard', 'SnapshotOwnerInputs.defaults').replace('UserDefaults = .standard', 'UserDefaults = SnapshotOwnerInputs.defaults')
         path.write_text(s)
     build = Path('/tmp/briglia-snapshot-owner-scratch')
-    wire.command(['swift', 'build', '--scratch-path', str(build)], cwd=tree)
+    wire.command(['swift', 'build', *LINUX_JOBS, '--scratch-path', str(build)], cwd=tree)
     binary = Path(subprocess.check_output(['swift', 'build', '--scratch-path', str(build), '--show-bin-path'], cwd=tree, text=True).strip()) / 'briglia'
     output = root / 'exports'
     wire.command([str(binary), '__snapshot-owner-selftest', '--output', str(output)], cwd=tree, timeout=180)
