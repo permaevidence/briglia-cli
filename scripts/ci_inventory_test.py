@@ -763,6 +763,32 @@ def _node_into_gate(t):
     return _insert_after(t, "linux-gates-a", "        run: git config --global --add safe.directory \"$GITHUB_WORKSPACE\"\n", node)
 
 
+def _reorder_gates_b(t):
+    t, snap = remove_step(t, "linux-gates-b", SNAPSHOT)
+    return sub_once(t, ACTIVE, snap + ACTIVE, job="linux-gates-b")
+
+
+# The reason each break must be caught for (a substring of one reported error),
+# so a break caught only incidentally by another rule does not count.
+EXPECT = {
+    "01": "missing or altered", "02": "not in the frozen inventory", "03": "missing or altered",
+    "04": "macos: step not in the frozen inventory", "05": "missing or altered", "06": "missing or altered",
+    "07": "missing or altered", "08": "missing or altered", "09": "missing or altered",
+    "10": "missing or altered", "11": "missing or altered", "12": "missing or altered",
+    "13": "job keys", "14": "workflow keys", "15": "workflow keys", "16": "job keys", "17": "job keys",
+    "18": "job keys", "19": "job keys", "20a": "container", "20b": "job keys", "20c": "container",
+    "21": "runs-on", "22": "setup position", "23": "uses .build/debug/briglia but is not after Build",
+    "24": "not with/after a Playwright install", "25": "uses .build/debug/briglia but is not after Build",
+    "26": "holding the Node setup", "27": "inventory step must appear exactly once",
+    "28": "needs must be exactly", "29": "job keys", "30": "step keys", "31": "truth table",
+    "32": "truth table", "33": "raw `on:`", "34": "re-derived", "35": "upload",
+    "36": "inventory step must appear exactly once", "37": "setup", "38": "job name",
+    "39": "frozen relative order",
+    "P1": "duplicate key", "P2": "indicator '&'", "P3": "unrecognised line", "P4": "indicator '{'",
+    "P5": "tab character", "P6": "unsupported block scalar", "P7": "document marker",
+}
+
+
 def _tamper_fixture(fx):
     fx = copy.deepcopy(fx)
     fx["platforms"]["linux"]["tests"][-1]["run"] = fx["platforms"]["linux"]["tests"][-1]["run"].replace("menu_browser_test.py", "menu_browser_tests.py")
@@ -815,6 +841,7 @@ def breaks():
         ("36 inventory step altered (extra env)", lambda t: sub_once(t, INV_LINE, INV_LINE + "        env:\n          CI_INVENTORY_SKIP: \"1\"\n", job="linux-core")),
         ("37 Node setup copied into a gate job", _node_into_gate),
         ("38 a test job named CI complete", lambda t: sub_once(t, "    name: macOS gates", "    name: CI complete", job="macos-gates")),
+        ("39 two steps reordered inside a job", _reorder_gates_b),
         ("P1 parser: duplicate key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    runs-on: macos-15\n")),
         ("P2 parser: anchor and alias", lambda t: sub_once(sub_once(t, "    runs-on: macos-15\n", "    runs-on: &rn macos-15\n", job="macos-core"), "    runs-on: macos-15\n", "    runs-on: *rn\n", job="macos-gates")),
         ("P3 parser: merge key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    <<: *base\n")),
@@ -853,8 +880,16 @@ def run_breaks(text, fixture, cache):
             # The fixture is checked against its source commit on every run.
             errs += provenance_against(fx, fixture)
         errs += check_workflow(t, fx, cache)
-        if errs:
-            print(f"  BREAK {name}: caught — {errs[0]}")
+        want = EXPECT.get(name.split(" ", 1)[0])
+        hit = [e for e in errs if want and want in e]
+        if errs and want is None:
+            passed_breaks.append(f"{name}: no expected reason defined")
+            print(f"  BREAK {name}: NO EXPECTED REASON")
+        elif hit:
+            print(f"  BREAK {name}: caught — {hit[0]}")
+        elif errs:
+            passed_breaks.append(f"{name}: caught only for another reason ({errs[0]})")
+            print(f"  BREAK {name}: WRONG REASON — {errs[0]}")
         else:
             passed_breaks.append(name)
             print(f"  BREAK {name}: NOT CAUGHT")
