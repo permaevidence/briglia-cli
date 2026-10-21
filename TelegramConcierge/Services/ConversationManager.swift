@@ -10760,7 +10760,8 @@ class ConversationManager: ObservableObject {
         // Stub repairs: one pinned snapshot per anchor, its output capped
         // by the remaining budget WHILE it is written. Every byte written is
         // charged, including staging output that is then discarded (R1), so
-        // the pass's total snapshot I/O never exceeds its budget. The first
+        // the snapshot reads and writes of one pass never exceed its budget
+        // (other disk writes, such as the history save, are not counted). The first
         // failure ends the pass's repair work; the rest is deferred.
         var stopped = false
         var outstanding = false

@@ -55,6 +55,8 @@ extension RetentionHarness {
         // Partial write failure: the staging output already written counts,
         // the pass stops, and the work is retried later.
         manager = await heavyUnstubbed(3, logBytes: 4 * 1024 * 1024)
+        let idsBeforeFailure = snapshotIDs()
+        let filesBeforeFailure = Set((try? FileManager.default.contentsOfDirectory(atPath: snapshotDir.path)) ?? [])
         var failedBytes = 0, attempts = 0
         PruneArchiveStore.bytesWrittenForTesting = { failedBytes += $0 }
         PruneArchiveStore.faultForTesting = { stage in
@@ -64,11 +66,14 @@ extension RetentionHarness {
         let failed = manager.summaryRetentionIdlePass()
         PruneArchiveStore.faultForTesting = nil
         PruneArchiveStore.bytesWrittenForTesting = nil
+        let noSnapshotAfterFailure = snapshotIDs() == idsBeforeFailure
+            && Set((try? FileManager.default.contentsOfDirectory(atPath: snapshotDir.path)) ?? []) == filesBeforeFailure
         let (retry, retryBytes) = measuringSnapshotWrites { manager.summaryRetentionIdlePass() }
-        check("K13k a write that fails part-way: the bytes already written are charged and reported (≥ 1 MiB here), the pass stops (no other anchor attempted), nothing is published; the next idle point repairs all three",
+        check("K13k a write that fails part-way: the bytes already written are charged and reported (≥ 1 MiB here), the pass stops (no other anchor attempted), nothing is published and no snapshot or staging file is left behind; the next idle point repairs all three",
               failedBytes >= 1024 * 1024 && failed.bytes == failedBytes && attempts == 1 && failed.stubsRepaired == 0 && failed.deferred == 3
+              && noSnapshotAfterFailure
               && retry.stubsRepaired == 3 && retry.bytes == retryBytes && retryBytes <= cap && stubbedCount(manager) == 3,
-              "failed \(failed) actual \(failedBytes) attempts \(attempts); retry \(retry) actual \(retryBytes)")
+              "failed \(failed) actual \(failedBytes) attempts \(attempts) clean \(noSnapshotAfterFailure); retry \(retry) actual \(retryBytes)")
     }
 
     /// A stubbed history whose shared stub snapshot was deleted, with the
