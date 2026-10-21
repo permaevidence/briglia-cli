@@ -13,6 +13,9 @@ pre-split file) and then checks the current .github/workflows/ci.yml:
     (every key: name, run/uses/with, env, shell, working-directory, if,
     continue-on-error, timeout-minutes, ...), so nothing is lost, duplicated,
     altered or moved to the other platform;
+  * `job-setup` amendments: a fixed extra setup step (e.g. host swap) that must
+    sit, exactly once and unchanged, right after the setup prefix (and the
+    inventory step) of every job of its platform, and on no other job;
   * frozen relative order inside each job, and co-location of prerequisites
     (build before its binary consumers, Playwright before the browser tests,
     Linux smoke with Node, each artifact upload with and after its producer);
@@ -384,7 +387,7 @@ def record(commit):
     fixture = {
         "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by "
                    "scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` "
-                   "({op: add|remove, platform, step, reason}).",
+                   "({op: add|remove|replace|job-setup, platform, step, reason}).",
         "schema": 1,
         "source": {"commit": full, "path": WORKFLOW_PATH, "sha256": hashlib.sha256(blob).hexdigest()},
         **inv,
@@ -473,6 +476,8 @@ def expected_tests(fixture, plat):
             continue
         if not a.get("reason"):
             raise ValueError("amendment without a reason")
+        if a.get("op") == "job-setup":
+            continue  # validated and placed by job_setup_steps(), not a test step
         if a.get("op") == "add":
             exp.append(canon(a["step"]))
         elif a.get("op") == "remove":
@@ -487,10 +492,45 @@ def expected_tests(fixture, plat):
             if {k: v for k, v in old.items() if k != "run"} != {k: v for k, v in new.items() if k != "run"} \
                     or set(old) != set(new) or "run" not in old:
                 raise ValueError("replace amendment may change only the `run` value of a step")
+            if not isinstance(new["run"], str) or not new["run"]:
+                raise ValueError("replace amendment `run` must be a non-empty string")
             exp[exp.index(canon(old))] = canon(new)
         else:
             raise ValueError(f"unknown amendment op {a.get('op')!r}")
     return exp
+
+
+JOB_SETUP_KEYS = {"name", "run"}
+
+
+def job_setup_steps(fixture):
+    """{platform: [canon(step), ...]} from the `job-setup` amendments, validated.
+
+    Deliberately narrow: the step is exactly {name, run} (no if/env/shell/
+    continue-on-error/...), never builds or runs the product, and is not a
+    frozen setup, test or inventory step.
+    """
+    frozen = {canon(s["step"]) for p in ("linux", "macos") for s in fixture["platforms"][p]["setup"]}
+    frozen |= {canon(t) for p in ("linux", "macos") for t in fixture["platforms"][p]["tests"]}
+    frozen.add(canon(INVENTORY_STEP))
+    out = {"linux": [], "macos": []}
+    for a in fixture.get("amendments", []):
+        if a.get("op") != "job-setup":
+            continue
+        step = a.get("step")
+        if set(a) != {"op", "platform", "step", "reason"} or a.get("platform") not in out \
+                or not isinstance(a.get("reason"), str) or not a["reason"]:
+            raise ValueError("job-setup amendment must be exactly {op, platform, step, reason} with a known platform")
+        if not isinstance(step, dict) or set(step) != JOB_SETUP_KEYS \
+                or not all(isinstance(step[k], str) and step[k] for k in JOB_SETUP_KEYS):
+            raise ValueError("job-setup amendment step must be exactly {name, run} with non-empty strings")
+        if "swift build" in step["run"] or ".build/" in step["run"]:
+            raise ValueError("job-setup amendment step must not build or run the product")
+        c = canon(step)
+        if c in frozen or any(c in v for v in out.values()):
+            raise ValueError("job-setup amendment step duplicates a frozen or another job-setup step")
+        out[a["platform"]].append(c)
+    return out
 
 
 def check_workflow(text, fixture, truth_cache=None):
@@ -518,6 +558,12 @@ def check_workflow(text, fixture, truth_cache=None):
     all_setup_canon = {canon(s) for recs in setup_records.values() for s in recs.values()}
     placed = {"linux": [], "macos": []}  # (job, position-in-job, step)
     node_jobs = []
+    try:
+        job_setup = job_setup_steps(fixture)
+    except (ValueError, KeyError) as e:
+        errors.append(f"fixture amendments invalid: {e}")
+        job_setup = {"linux": [], "macos": []}
+    job_setup_plat = {c: p for p, cs in job_setup.items() for c in cs}
 
     for jid, (plat, prefix) in LAYOUT.items():
         job = jobs.get(jid)
@@ -547,6 +593,7 @@ def check_workflow(text, fixture, truth_cache=None):
             node_jobs.append(jid)
         rest = list(enumerate(steps))[len(prefix):]
         inv_count = 0
+        js_count = collections.Counter()
         for pos, step in rest:
             c = canon(step)
             if c in all_setup_canon:
@@ -554,6 +601,9 @@ def check_workflow(text, fixture, truth_cache=None):
                 continue
             if c == canon(INVENTORY_STEP):
                 inv_count += 1
+                continue
+            if c in job_setup_plat:
+                js_count[c] += 1
                 continue
             placed[plat].append((jid, pos, step))
         if jid in CORE_JOBS:
@@ -563,6 +613,17 @@ def check_workflow(text, fixture, truth_cache=None):
                 errors.append(f"{jid}: the inventory step must come right after the setup prefix")
         elif inv_count:
             errors.append(f"{jid}: inventory step only belongs in the core jobs")
+        for c, p2 in job_setup_plat.items():
+            nm = json.loads(c).get("name")
+            if p2 != plat and js_count[c]:
+                errors.append(f"{jid}: per-job setup step {nm!r} belongs only on {p2} jobs")
+            elif p2 == plat and js_count[c] != 1:
+                errors.append(f"{jid}: per-job setup step {nm!r} must appear exactly once (found {js_count[c]})")
+        start = len(prefix) + (1 if jid in CORE_JOBS else 0)
+        want = job_setup[plat]
+        if want and [canon(s) for s in steps[start:start + len(want)]] != want:
+            errors.append(f"{jid}: per-job setup steps must come right after the setup prefix"
+                          f"{' and the inventory step' if jid in CORE_JOBS else ''}, in amendment order")
 
     for plat in ("linux", "macos"):
         try:
@@ -806,6 +867,10 @@ EXPECT = {
     "39": "frozen relative order", "40": "truth table",
     "41": "linux: frozen step missing or altered", "42": "macos: step not in the frozen inventory",
     "43": "replace amendment may change only", "44": "frozen relative order",
+    "45": "per-job setup step 'Add host swap (Linux compiler memory headroom)' must appear exactly once",
+    "46": "belongs only on linux jobs", "47": "must come right after the setup prefix and the inventory step",
+    "48": "linux: step not in the frozen inventory", "49": "job-setup amendment step must be exactly {name, run}",
+    "50": "must come right after the setup prefix, in amendment order",
     "P1": "duplicate key", "P2": "indicator '&'", "P3": "unrecognised line", "P4": "indicator '{'",
     "P5": "tab character", "P6": "unsupported block scalar", "P7": "document marker",
 }
@@ -824,6 +889,35 @@ def _amend_more_than_run(fx):
             a["with"] = dict(a["with"], **{"continue-on-error": True})
             return fx
     raise BreakSetupError("no replace amendment in the fixture")
+
+
+SWAP_STEP = "      - name: Add host swap (Linux compiler memory headroom)\n        run: python3 scripts/ci_host_swap.py\n"
+SWAP_NAME = "      - name: Add host swap (Linux compiler memory headroom)\n"
+
+
+def _swap_after_build(t):
+    t = sub_once(t, SWAP_STEP, "", job="linux-core")
+    b = "      - name: Build\n        run: swift build -j 2\n"
+    return sub_once(t, b, b + SWAP_STEP, job="linux-core")
+
+
+def _swap_to_macos(t):
+    return _insert_after(t, "macos-core", INV_LINE, SWAP_STEP)
+
+
+def _job_setup_widened(fx):
+    fx = copy.deepcopy(fx)
+    for a in fx.get("amendments", []):
+        if a.get("op") == "job-setup":
+            a["step"] = dict(a["step"], **{"continue-on-error": True})
+            return fx
+    raise BreakSetupError("no job-setup amendment in the fixture")
+
+
+def _swap_after_first_gate_test(t):
+    t = sub_once(t, SWAP_STEP, "", job="linux-gates-b")
+    st = step_text(t, "linux-gates-b", ACTIVE)
+    return sub_once(t, st, st + SWAP_STEP, job="linux-gates-b")
 
 
 def _build_after_smoke(t):
@@ -890,6 +984,12 @@ def breaks():
         ("42 macOS Build silently given -j 2", lambda t: sub_once(t, "        run: swift build\n", "        run: swift build -j 2\n", job="macos-core")),
         ("43 Build amendment widened beyond `run`", lambda t: t, _amend_more_than_run),
         ("44 Linux Build moved after smoke", _build_after_smoke),
+        ("45 host swap step missing from a Linux gate job", lambda t: sub_once(t, SWAP_STEP, "", job="linux-gates-b")),
+        ("46 host swap step added to a macOS job", _swap_to_macos),
+        ("47 host swap step moved after the Linux Build", _swap_after_build),
+        ("48 host swap step given continue-on-error", lambda t: _insert_after(t, "linux-gates-a", SWAP_STEP, "        continue-on-error: true\n")),
+        ("49 job-setup amendment widened beyond {name, run}", lambda t: t, _job_setup_widened),
+        ("50 host swap step moved after a gate test", _swap_after_first_gate_test),
         ("P1 parser: duplicate key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    runs-on: macos-15\n")),
         ("P2 parser: anchor and alias", lambda t: sub_once(sub_once(t, "    runs-on: macos-15\n", "    runs-on: &rn macos-15\n", job="macos-core"), "    runs-on: macos-15\n", "    runs-on: *rn\n", job="macos-gates")),
         ("P3 parser: merge key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    <<: *base\n")),

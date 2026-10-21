@@ -12,9 +12,18 @@
         "name": "Build",
         "run": "swift build -j 2"
       }
+    },
+    {
+      "op": "job-setup",
+      "platform": "linux",
+      "reason": "0.2.58 private CI run 39674823202: Linux gates A and B were OOM-killed (exit 137 / runner lost) compiling the briglia module even at -j 2; a single compiler frontend approaches the runner's RAM. Add an 8 GiB host swap file (scripts/ci_host_swap.py, via the job container's mounted Docker socket) at the start of every Linux job, before any build. Owner-approved 2026-10-21; macOS unchanged.",
+      "step": {
+        "name": "Add host swap (Linux compiler memory headroom)",
+        "run": "python3 scripts/ci_host_swap.py"
+      }
     }
   ],
-  "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove, platform, step, reason}).",
+  "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove|replace|job-setup, platform, step, reason}).",
   "platforms": {
     "linux": {
       "container": "swift:6.1-jammy",
