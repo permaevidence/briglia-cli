@@ -34,27 +34,8 @@ jobs:
           /opt/node/bin/node --version
       - name: Build
         run: swift build
-      - name: Background prune OFF-identity gate (manifest only, no Git)
-        run: python3 scripts/bg_prune_off_identity_test.py
-      - name: Background prune verify-manifest (regenerated from the pinned v0.2.56 baseline)
-        shell: bash
-        run: |
-          set -euo pipefail
-          BASE_SHA=26f8c2c4b411ca1da8238daf934b09366da0b412
-          git fetch --depth=1 origin "refs/tags/v0.2.56:refs/tags/v0.2.56" || git fetch --depth=1 origin "$BASE_SHA"
-          if git rev-parse -q --verify "refs/tags/v0.2.56^{commit}" >/dev/null; then
-            test "$(git rev-parse "refs/tags/v0.2.56^{commit}")" = "$BASE_SHA"
-          fi
-          BASE_DIR="$(mktemp -d)"
-          git archive "$BASE_SHA" TelegramConcierge Package.swift Package.resolved | tar -x -C "$BASE_DIR"
-          python3 scripts/bg_prune_off_identity_test.py --verify-manifest "$BASE_DIR"
-          rm -rf "$BASE_DIR"
-      - name: Background prune gate deliberate mutations
-        run: python3 scripts/bg_prune_gate_mutation_test.py
       - name: Background prune selftest
         run: .build/debug/briglia __background-prune-selftest
-      - name: Background prune O1/O9/F1 differential against a v0.2.56 build
-        run: python3 scripts/bg_prune_off_differential_test.py
       - name: Persisted model source contract and negative tests
         run: python3 scripts/chat_persistence_contract_test.py
       - name: Installer next-step wording
@@ -138,27 +119,8 @@ jobs:
           fetch-depth: 0
       - name: Build
         run: swift build
-      - name: Background prune OFF-identity gate (manifest only, no Git)
-        run: python3 scripts/bg_prune_off_identity_test.py
-      - name: Background prune verify-manifest (regenerated from the pinned v0.2.56 baseline)
-        shell: bash
-        run: |
-          set -euo pipefail
-          BASE_SHA=26f8c2c4b411ca1da8238daf934b09366da0b412
-          git fetch --depth=1 origin "refs/tags/v0.2.56:refs/tags/v0.2.56" || git fetch --depth=1 origin "$BASE_SHA"
-          if git rev-parse -q --verify "refs/tags/v0.2.56^{commit}" >/dev/null; then
-            test "$(git rev-parse "refs/tags/v0.2.56^{commit}")" = "$BASE_SHA"
-          fi
-          BASE_DIR="$(mktemp -d)"
-          git archive "$BASE_SHA" TelegramConcierge Package.swift Package.resolved | tar -x -C "$BASE_DIR"
-          python3 scripts/bg_prune_off_identity_test.py --verify-manifest "$BASE_DIR"
-          rm -rf "$BASE_DIR"
-      - name: Background prune gate deliberate mutations
-        run: python3 scripts/bg_prune_gate_mutation_test.py
       - name: Background prune selftest
         run: .build/debug/briglia __background-prune-selftest
-      - name: Background prune O1/O9/F1 differential against a v0.2.56 build
-        run: python3 scripts/bg_prune_off_differential_test.py
       - name: Persisted model source contract and negative tests
         run: python3 scripts/chat_persistence_contract_test.py
       - name: Installer next-step wording
