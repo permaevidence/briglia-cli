@@ -614,14 +614,22 @@ def main():
     result = run_selftest([os.path.abspath(ADA), "__user-context-maintenance-selftest"], capture_output=True, text=True, timeout=900)
     check("user-context maintenance selftest", result.returncode == 0, (result.stdout + result.stderr)[-2500:])
 
-    # Past-turn summary retention (Part B): the newest 3 prune-summary
-    # anchors stay in full, older ones become a deterministic one-line
-    # snapshot pointer (300-scalar budget, recorded coverage, approx. rule),
-    # demotion inside the prune commit, snapshot protection in retention via
-    # the committed history. Re-executes itself in a private scratch home and
-    # preference domain.
+    # Past-turn summary retention (Part B): by default the newest 3
+    # prune-summary anchors are shown in full, older ones as a deterministic
+    # one-line snapshot pointer (300-scalar budget, recorded coverage, approx.
+    # rule), composed when a request is built (/keepsummaries); the commit
+    # keeps full texts and prepares the pointers; snapshot protection in
+    # retention via the committed history. Re-executes itself in a private
+    # scratch home and preference domain.
     result = run_selftest([os.path.abspath(ADA), "__prune-retention-selftest"], capture_output=True, text=True, timeout=900)
     check("prune retention selftest", result.returncode == 0, (result.stdout + result.stderr)[-2500:])
+
+    # /keepsummaries: render-time composition (newest N in full), one view
+    # per request, measurement keys, commit-time pointers, the one-time exact
+    # restore of 0.2.48–0.2.57 pointers and the bounded idle pass. Private
+    # scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__keep-summaries-selftest"], capture_output=True, text=True, timeout=1200)
+    check("keep-summaries selftest", result.returncode == 0, (result.stdout + result.stderr)[-2500:])
 
     # File-tool diff pipe deadlock: full rewrites (~80 KB and >1 MB) through
     # the real write_file / edit_file / apply_patch paths return with a capped

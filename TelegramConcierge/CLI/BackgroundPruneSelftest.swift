@@ -271,6 +271,7 @@ final class BackgroundPruneSelftestHarness {
         if section("release") { await BackgroundPruneSelftestRelease.run(self) }
         if section("release3") { await BackgroundPruneSelftestRelease3.run(self) }
         if section("crash") { await BackgroundPruneSelftestCrash.run(self) }
+        if section("keepsummaries") { await BackgroundPruneSelftestKeepSummaries.run(self) }
     }
 
     func configureProvider() throws {
