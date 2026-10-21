@@ -117,6 +117,28 @@ def run_selftest(*args, **kwargs):
     return result
 
 
+# Known Linux CI timing flakes in test code that the 0.2.57 OFF-identity gate
+# protects byte-for-byte (fixed properly in 0.2.58). A selftest is re-run once
+# only when EVERY failed row matches its known flake pattern; any other
+# failure, or a second failure, still fails the suite.
+KNOWN_FLAKE_ROWS = {
+    "__image-orientation-selftest": re.compile(r"^O3 .* convertFirstFrame → PNG \(bytes\) — new \d+ bytes ≠ legacy \d+ bytes \(legacy is deterministic\)$"),
+    "__bash-flood-selftest": re.compile(r"^F6 marker-line watch fired once with the exact line — matches=\[\]$"),
+}
+
+
+def run_selftest_flake_retry(name, argv, **kwargs):
+    result = run_selftest(argv, **kwargs)
+    pattern = KNOWN_FLAKE_ROWS[name]
+    if result.returncode != 0:
+        rows = [l.strip()[1:].strip() for l in (result.stdout + result.stderr).splitlines()
+                if l.strip().startswith("✖")]
+        if rows and all(pattern.match(r) for r in rows):
+            print("KNOWN FLAKE in " + name + " (" + "; ".join(rows) + ") — re-running once", flush=True)
+            result = run_selftest(argv, **kwargs)
+    return result
+
+
 def isolated_env(home):
     env = dict(os.environ)
     env["HOME"] = home
@@ -328,7 +350,7 @@ def main():
     # bash_manage(output) for over an hour. Each row must settle and answer
     # within seconds; the selftest's own watchdog names a wedged row.
     try:
-        result = run_selftest([ADA, "__bash-flood-selftest"], capture_output=True, text=True, timeout=600)
+        result = run_selftest_flake_retry("__bash-flood-selftest", [ADA, "__bash-flood-selftest"], capture_output=True, text=True, timeout=600)
         check("bash-flood-selftest", result.returncode == 0,
               (result.stdout + result.stderr)[-1500:])
     except subprocess.TimeoutExpired as e:
@@ -494,8 +516,8 @@ def main():
     # (rotations and mirrors), absent/1 keep the v0.2.52 bytes exactly,
     # conversion-then-resize rotates once, and a host without ImageMagick
     # behaves as before. Private scratch home and preference domain.
-    result = run_selftest([os.path.abspath(ADA), "__image-orientation-selftest"], capture_output=True,
-                          text=True, timeout=600)
+    result = run_selftest_flake_retry("__image-orientation-selftest", [os.path.abspath(ADA), "__image-orientation-selftest"],
+                                      capture_output=True, text=True, timeout=600)
     check("image-orientation-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 

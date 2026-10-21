@@ -101,7 +101,9 @@ def main():
         # Large batches of legacy diagnostics can stall macOS SwiftPM's output
         # regex. Production/CI builds still report warnings; this disposable
         # instrumented build suppresses warnings only, never compiler errors.
-        wire.command(['swift', 'build', '-Xswiftc', '-suppress-warnings', '--scratch-path', str(scratch)], cwd=tree)
+        # -j 2 bounds peak compiler memory: with 4 parallel jobs this build of
+        # the pinned tree was OOM-killed (exit 137) on the 16 GB Linux runner.
+        wire.command(['swift', 'build', '-j', '2', '-Xswiftc', '-suppress-warnings', '--scratch-path', str(scratch)], cwd=tree)
         binarydir = subprocess.check_output(['swift', 'build', '--scratch-path', str(scratch), '--show-bin-path'], cwd=tree, text=True).strip()
         binary = Path(binarydir) / 'briglia'
         print('Instrumented binary: ' + str(binary), flush=True)
