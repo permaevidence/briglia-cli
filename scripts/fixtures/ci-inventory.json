@@ -1,0 +1,240 @@
+{
+  "amendments": [],
+  "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove, platform, step, reason}).",
+  "platforms": {
+    "linux": {
+      "container": "swift:6.1-jammy",
+      "runs_on": "ubuntu-latest",
+      "setup": [
+        {
+          "id": "checkout",
+          "step": {
+            "uses": "actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8",
+            "with": {
+              "fetch-depth": 0
+            }
+          }
+        },
+        {
+          "id": "safe-directory",
+          "step": {
+            "name": "Trust the exact checkout in the Swift container",
+            "run": "git config --global --add safe.directory \"$GITHUB_WORKSPACE\""
+          }
+        },
+        {
+          "id": "deps",
+          "step": {
+            "name": "Install runtime dependencies",
+            "run": "apt-get update\napt-get install -y python3 python3-pip sudo poppler-utils imagemagick procps curl xz-utils zip unzip\n"
+          }
+        },
+        {
+          "id": "node",
+          "step": {
+            "name": "Install Node.js LTS (nodejs.org, SHASUMS256-verified) for the live Playwright bootstrap check",
+            "run": "set -euo pipefail\nVERSION=\"$(curl -fsSL https://nodejs.org/dist/index.json | python3 -c 'import json,sys; print(next(e[\"version\"] for e in json.load(sys.stdin) if isinstance(e.get(\"lts\"), str)))')\"\nFILE=\"node-${VERSION}-linux-x64.tar.xz\"\ncurl -fsSLO \"https://nodejs.org/dist/${VERSION}/${FILE}\"\ncurl -fsSL \"https://nodejs.org/dist/${VERSION}/SHASUMS256.txt\" | grep \" ${FILE}\\$\" | sha256sum -c -\nmkdir -p /opt/node && tar -xJf \"${FILE}\" -C /opt/node --strip-components=1\necho \"/opt/node/bin\" >> \"$GITHUB_PATH\"\n/opt/node/bin/node --version\n",
+            "shell": "bash"
+          }
+        }
+      ],
+      "source_job": "linux",
+      "tests": [
+        {
+          "name": "Build",
+          "run": "swift build"
+        },
+        {
+          "name": "Background prune selftest",
+          "run": ".build/debug/briglia __background-prune-selftest"
+        },
+        {
+          "name": "Persisted model source contract and negative tests",
+          "run": "python3 scripts/chat_persistence_contract_test.py"
+        },
+        {
+          "name": "Installer next-step wording",
+          "run": "python3 scripts/installer_next_step_test.py"
+        },
+        {
+          "name": "Wire comparator negative tests",
+          "run": "python3 scripts/chat_wire_baseline_test.py\npython3 scripts/chronology_wire_migration_test.py\npython3 scripts/web_subagent_r2_wire_migration_test.py\npython3 scripts/harness_identity_migration_test.py\npython3 scripts/agents_md_migration_test.py\npython3 scripts/image_explicit_send_migration_test.py\npython3 scripts/read_file_description_migration_test.py\npython3 scripts/reasoning_history_removal_migration_test.py\npython3 scripts/image_schema_contract_test.py .build/debug/briglia\n"
+        },
+        {
+          "name": "Chat Completions pinned-release differential gate",
+          "run": "python3 scripts/chat_wire_baseline.py --save-reference chat-wire-reference.json --baseline scripts/fixtures/chat-wire/ci-linux-x86_64-r2.json"
+        },
+        {
+          "name": "Preserve pinned-release reference",
+          "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+          "with": {
+            "name": "chat-wire-reference-${{ runner.os }}-${{ runner.arch }}",
+            "path": "chat-wire-reference.json"
+          }
+        },
+        {
+          "name": "Lifecycle comparator negative tests",
+          "run": "python3 scripts/chat_lifecycle_baseline_test.py\npython3 scripts/prune_lifecycle_migration_test.py\npython3 scripts/active_compaction_lifecycle_migration_test.py\npython3 scripts/newest_turn_protection_lifecycle_migration_test.py\npython3 scripts/subagent_dialogue_compaction_lifecycle_migration_test.py\npython3 scripts/chronology_lifecycle_migration_test.py\npython3 scripts/web_subagent_r2_lifecycle_migration_test.py\npython3 scripts/output_cap_removal_migration_test.py\npython3 scripts/summary_retention_lifecycle_migration_test.py\npython3 scripts/keep_summaries_lifecycle_migration_test.py\npython3 scripts/prune_schema_contract_test.py\n"
+        },
+        {
+          "name": "Chat Completions lifecycle r3 and shipped-client differential gate",
+          "run": "python3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline scripts/fixtures/chat-lifecycle/ci-linux-x86_64-r2.json"
+        },
+        {
+          "if": "${{ !cancelled() }}",
+          "name": "Preserve pinned lifecycle reference",
+          "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+          "with": {
+            "name": "chat-lifecycle-reference-${{ runner.os }}-${{ runner.arch }}",
+            "path": "chat-lifecycle-reference.json"
+          }
+        },
+        {
+          "name": "Configured subscription shipped-client compatibility",
+          "run": "python3 scripts/subscription_client_test.py .build/debug/briglia"
+        },
+        {
+          "name": "Active-turn compaction owners and negative controls",
+          "run": "python3 scripts/active_compaction_contract_test.py\npython3 scripts/active_turn_compaction_test.py\n"
+        },
+        {
+          "name": "Snapshot owner transactions and Mind transfer",
+          "run": "python3 scripts/prune_archive_owner_test.py"
+        },
+        {
+          "name": "Responses real-owner lifecycle",
+          "run": "python3 scripts/responses_lifecycle_test.py"
+        },
+        {
+          "name": "User-profile maintenance against v0.2.48 (unchanged requests, downgrade and re-upgrade)",
+          "run": "python3 scripts/user_context_wire_test.py"
+        },
+        {
+          "env": {
+            "BRIGLIA_SELFTEST_REAL_PIP": "1"
+          },
+          "name": "Smoke test",
+          "run": "python3 scripts/smoke_test.py .build/debug/briglia"
+        },
+        {
+          "name": "Install Playwright (browser test of the quick-setup page)",
+          "run": "python3 -m pip install playwright==1.55.0\npython3 -m playwright install --with-deps chromium\n"
+        },
+        {
+          "name": "Quick-setup browser test",
+          "run": "python3 scripts/quicksetup_browser_test.py .build/debug/briglia\npython3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish\npython3 scripts/quicksetup_main_provider_browser_test.py .build/debug/briglia\npython3 scripts/subscription_browser_test.py\npython3 scripts/menu_browser_test.py\npython3 scripts/browser_settings_test.py .build/debug/briglia\n"
+        }
+      ]
+    },
+    "macos": {
+      "container": null,
+      "runs_on": "macos-15",
+      "setup": [
+        {
+          "id": "checkout",
+          "step": {
+            "uses": "actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8",
+            "with": {
+              "fetch-depth": 0
+            }
+          }
+        }
+      ],
+      "source_job": "macos",
+      "tests": [
+        {
+          "name": "Build",
+          "run": "swift build"
+        },
+        {
+          "name": "Background prune selftest",
+          "run": ".build/debug/briglia __background-prune-selftest"
+        },
+        {
+          "name": "Persisted model source contract and negative tests",
+          "run": "python3 scripts/chat_persistence_contract_test.py"
+        },
+        {
+          "name": "Installer next-step wording",
+          "run": "python3 scripts/installer_next_step_test.py"
+        },
+        {
+          "name": "Wire comparator negative tests",
+          "run": "python3 scripts/chat_wire_baseline_test.py\npython3 scripts/chronology_wire_migration_test.py\npython3 scripts/web_subagent_r2_wire_migration_test.py\npython3 scripts/harness_identity_migration_test.py\npython3 scripts/agents_md_migration_test.py\npython3 scripts/image_explicit_send_migration_test.py\npython3 scripts/read_file_description_migration_test.py\npython3 scripts/reasoning_history_removal_migration_test.py\npython3 scripts/image_schema_contract_test.py .build/debug/briglia\n"
+        },
+        {
+          "name": "Chat Completions pinned-release differential gate",
+          "run": "python3 scripts/chat_wire_baseline.py --save-reference chat-wire-reference.json --baseline scripts/fixtures/chat-wire/ci-darwin-arm64-r2.json"
+        },
+        {
+          "name": "Preserve pinned-release reference",
+          "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+          "with": {
+            "name": "chat-wire-reference-${{ runner.os }}-${{ runner.arch }}",
+            "path": "chat-wire-reference.json"
+          }
+        },
+        {
+          "name": "Lifecycle comparator negative tests",
+          "run": "python3 scripts/chat_lifecycle_baseline_test.py\npython3 scripts/prune_lifecycle_migration_test.py\npython3 scripts/active_compaction_lifecycle_migration_test.py\npython3 scripts/newest_turn_protection_lifecycle_migration_test.py\npython3 scripts/subagent_dialogue_compaction_lifecycle_migration_test.py\npython3 scripts/chronology_lifecycle_migration_test.py\npython3 scripts/web_subagent_r2_lifecycle_migration_test.py\npython3 scripts/output_cap_removal_migration_test.py\npython3 scripts/summary_retention_lifecycle_migration_test.py\npython3 scripts/keep_summaries_lifecycle_migration_test.py\npython3 scripts/prune_schema_contract_test.py\n"
+        },
+        {
+          "name": "Chat Completions lifecycle r3 and shipped-client differential gate",
+          "run": "echo \"runner image: $ImageOS $ImageVersion\"\ncase \"$ImageVersion\" in\n  20260829.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2.json ;;\n  20260907.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2-image20260907.json ;;\n  *) echo \"no frozen lifecycle fixture recorded for runner image '$ImageVersion'\"; exit 1 ;;\nesac\npython3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline \"$fixture\"\n"
+        },
+        {
+          "if": "${{ !cancelled() }}",
+          "name": "Preserve pinned lifecycle reference",
+          "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+          "with": {
+            "name": "chat-lifecycle-reference-${{ runner.os }}-${{ runner.arch }}",
+            "path": "chat-lifecycle-reference.json"
+          }
+        },
+        {
+          "name": "Configured subscription shipped-client compatibility",
+          "run": "python3 scripts/subscription_client_test.py .build/debug/briglia"
+        },
+        {
+          "name": "Active-turn compaction owners and negative controls",
+          "run": "python3 scripts/active_compaction_contract_test.py\npython3 scripts/active_turn_compaction_test.py\n"
+        },
+        {
+          "name": "Snapshot owner transactions and Mind transfer",
+          "run": "python3 scripts/prune_archive_owner_test.py"
+        },
+        {
+          "name": "Responses real-owner lifecycle",
+          "run": "python3 scripts/responses_lifecycle_test.py"
+        },
+        {
+          "name": "User-profile maintenance against v0.2.48 (unchanged requests, downgrade and re-upgrade)",
+          "run": "python3 scripts/user_context_wire_test.py"
+        },
+        {
+          "name": "Smoke test",
+          "run": "python3 scripts/smoke_test.py .build/debug/briglia"
+        },
+        {
+          "continue-on-error": true,
+          "name": "Quick-setup browser test (best effort on the macOS runner)",
+          "run": "python3 -m pip install --break-system-packages playwright==1.55.0 || python3 -m pip install playwright==1.55.0\npython3 -m playwright install chromium\npython3 scripts/quicksetup_browser_test.py .build/debug/briglia\npython3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish\npython3 scripts/quicksetup_main_provider_browser_test.py .build/debug/briglia\npython3 scripts/subscription_browser_test.py\npython3 scripts/menu_browser_test.py\n"
+        },
+        {
+          "name": "Browser settings browser test",
+          "run": "python3 scripts/browser_settings_test.py .build/debug/briglia"
+        }
+      ]
+    }
+  },
+  "schema": 1,
+  "source": {
+    "commit": "d0899c1331a91813b92493d06ba22f0b0ce9731d",
+    "path": ".github/workflows/ci.yml",
+    "sha256": "9e5b53c088101a50cb2928dd9b3c06211c33077151a1afbc89b8d13bc92b89c6"
+  },
+  "workflow": {
+    "name": "CI",
+    "on_raw": "on:\n  push:\n    branches: [main, 'wip/responses-*', 'wip/subscription-*', 'wip/browser-settings', 'wip/413-retry', 'wip/telegram-buttons', 'wip/release-*']\n  pull_request:\n  workflow_dispatch:\n\n"
+  }
+}
