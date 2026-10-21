@@ -10682,26 +10682,30 @@ class ConversationManager: ObservableObject {
     func summaryRetentionIdlePass() -> SummaryRetentionPassReport {
         var report = SummaryRetentionPassReport()
         if let blocker = summaryRetentionIdleBlocker { report.blocked = blocker; return report }
+        // The completeness scan (startup, Mind import, wipe) stays pending
+        // until every broken pointer it finds has been durably replaced or
+        // is known unsupported (R2): a failed or deferred repair is retried
+        // at the next idle point, not forgotten.
         let scan = summaryRetentionScanPending
-        summaryRetentionScanPending = false
         let history = messages
         var repairs: [Int] = []
         var restores: [Int] = []
         for index in history.indices {
             let message = history[index]
             if PruneSummaryRetention.isFullAnchor(message) {
+                guard !summaryStubRepairUnsupported.contains(Self.stubRepairKey(message)) else { continue }
                 if let stub = message.prunedContextSummaryStub, stub.isUsable(for: message.prunedContextSummary) {
                     // Broken snapshots are found by the startup/import scan,
                     // not only by digest.
                     if scan && !PruneArchiveStore.isCompleteSnapshot(stub.record.snapshot) { repairs.append(index) }
-                } else if !summaryStubRepairUnsupported.contains(Self.stubRepairKey(message)) {
+                } else {
                     repairs.append(index)
                 }
             } else if Self.isRestoreCandidate(message), !summaryRestoreAttempts.contains(Self.restoreAttemptKey(message)) {
                 restores.append(index)
             }
         }
-        guard !repairs.isEmpty || !restores.isEmpty else { return report }
+        guard !repairs.isEmpty || !restores.isEmpty else { summaryRetentionScanPending = false; return report }
         var budget = PruneSummaryRestore.maxPassBytes
         var candidate = history
         var pinned: [PruneArchiveReference] = []
@@ -10754,16 +10758,22 @@ class ConversationManager: ObservableObject {
         }
 
         // Stub repairs: one pinned snapshot per anchor, its output capped
-        // by the remaining budget WHILE it is written (incomplete output is
-        // discarded and the anchor left unchanged).
+        // by the remaining budget WHILE it is written. Every byte written is
+        // charged, including staging output that is then discarded (R1), so
+        // the pass's total snapshot I/O never exceeds its budget. The first
+        // failure ends the pass's repair work; the rest is deferred.
+        var stopped = false
+        var outstanding = false
         for index in repairs {
-            guard budget > 0 else { report.deferred += 1; continue }
+            guard !stopped, budget > 0 else { report.deferred += 1; outstanding = true; continue }
+            let fresh = budget == PruneSummaryRestore.maxPassBytes
+            let meter = PruneArchiveStore.ByteMeter()
+            defer { budget -= min(meter.bytes, budget); report.bytes += meter.bytes }
             do {
                 let reference = try PruneArchiveStore.write(messages: [candidate[index]], trigger: "automatic",
-                    removedIDs: [candidate[index].id], leadNote: PruneSummaryRetention.snapshotLeadNote, pin: true, maxBytes: budget)
+                    removedIDs: [candidate[index].id], leadNote: PruneSummaryRetention.snapshotLeadNote, pin: true,
+                    maxBytes: budget, meter: meter)
                 pinned.append(reference)
-                let size = PruneSummaryRestore.fileSize(reference) ?? budget
-                budget -= size; report.bytes += size
                 if let stub = PruneSummaryRetention.makeStub(for: candidate, anchor: index, snapshot: reference) {
                     candidate[index].prunedContextSummaryStub = stub
                     report.stubsRepaired += 1
@@ -10771,14 +10781,18 @@ class ConversationManager: ObservableObject {
                     summaryStubRepairUnsupported.insert(Self.stubRepairKey(candidate[index]))
                 }
             } catch is PruneArchiveStore.OverBudget {
-                // Too big even for an empty pass: unsupported. Otherwise only
-                // deferred to a later idle point.
-                if budget == PruneSummaryRestore.maxPassBytes { summaryStubRepairUnsupported.insert(Self.stubRepairKey(candidate[index])) }
+                // Too big even for a fresh pass: unsupported in this history
+                // (stays in full / keeps its pointer, never retried). Otherwise
+                // only deferred to a later idle point.
+                if fresh { summaryStubRepairUnsupported.insert(Self.stubRepairKey(candidate[index])) } else { outstanding = true }
                 report.deferred += 1
+                stopped = true
             } catch {
                 // Transient: never cached; retried at a later idle point.
                 print("[KeepSummaries] stub repair snapshot failed: \(error.localizedDescription)")
                 report.deferred += 1
+                outstanding = true
+                stopped = true
             }
         }
 
@@ -10794,7 +10808,10 @@ class ConversationManager: ObservableObject {
             }
         }
         report.restored = restored.count
-        guard report.stubsRepaired > 0 || !restored.isEmpty else { return report }
+        guard report.stubsRepaired > 0 || !restored.isEmpty else {
+            if scan { summaryRetentionScanPending = outstanding }
+            return report
+        }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         do { try writeHistoryFile(try encoder.encode(candidate)) }
         catch {
@@ -10803,10 +10820,11 @@ class ConversationManager: ObservableObject {
             print("[KeepSummaries] history write failed: \(error.localizedDescription)")
             report.historyWriteFailed = true
             report.restored = 0; report.stubsRepaired = 0
-            return report
+            return report // a pending scan stays pending
         }
         messages = candidate
         committedMessages = candidate
+        if scan { summaryRetentionScanPending = outstanding }
         print("[KeepSummaries] idle pass: \(report.stubsRepaired) stub(s) prepared, \(report.restored) summary(ies) restored, \(report.refused) left as pointers")
         return report
     }
@@ -16342,6 +16360,15 @@ extension ConversationManager {
         if on { archiveRecoveryTask = Task {} } else { archiveRecoveryTask = nil }
     }
     func _testSetActiveRunPlaceholder(_ on: Bool) { activeRunId = on ? UUID() : nil }
+    /// A finished (succeeded, uncommitted) archive job holding the slot.
+    func _testSetArchiveJobPlaceholder(_ on: Bool) {
+        if on {
+            let view = ArchivePromptView(items: [], totalChunkCount: 0, hiddenRowIds: [], visibleChunkIds: [], leaseId: UUID())
+            var job = ArchiveJob(id: UUID(), batch: [], generation: archiveGeneration, startedAt: Date(), frozenView: view)
+            job.outcome = .succeeded
+            archiveJob = job
+        } else { archiveJob = nil }
+    }
     func _testScheduleIdlePass() { scheduleSummaryRetentionIdlePass() }
     func _testMarkScanPending() { summaryRetentionScanPending = true }
     var _testArchiveService: ConversationArchiveService { archiveService }

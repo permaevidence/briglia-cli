@@ -101,8 +101,15 @@ enum PruneArchiveStore {
             if count > 1 { pinned[reference.id] = count - 1 } else { pinned.removeValue(forKey: reference.id) }
         }
     }
+    /// Counts every byte a write actually puts on disk, including staging
+    /// output that is later discarded (over budget, failed write, fsync or
+    /// rename). The /keepsummaries idle pass charges its budget from this.
+    final class ByteMeter { var bytes = 0 }
     /// Fault injection is test-only, never configured from environment/user data.
     static var faultForTesting: ((String) throws -> Void)?
+    /// Test-only observer of each completed write syscall (byte count), so
+    /// tests can measure actual output independently of `ByteMeter`.
+    static var bytesWrittenForTesting: ((Int) -> Void)?
     static var identityForTesting: (() -> (Date, UUID))?
 
     /// Chunk sanitization retains attachment names; snapshots add no media bytes.
@@ -132,7 +139,7 @@ enum PruneArchiveStore {
     static func write(messages: [Message], currentRounds: [ToolInteraction] = [],
                       alternateMessages: [Message] = [], trigger: String,
                       removedIDs: [UUID], removedCallIDs: [String] = [], priorActiveSummary: ActiveTurnCompaction? = nil, leadNote: String? = nil, directory: URL = root, pin: Bool = false,
-                      maxBytes: Int? = nil) throws -> PruneArchiveReference {
+                      maxBytes: Int? = nil, meter: ByteMeter? = nil) throws -> PruneArchiveReference {
         lock.lock(); defer { lock.unlock() }
         _ = try directoryExists(directory)
         try PrivateStorage.ensureDirectory(directory)
@@ -170,9 +177,12 @@ enum PruneArchiveStore {
                         if n < 0 && errno == EINTR { continue }
                         guard n > 0 else { throw error("write snapshot", staging.path) }
                         offset += n
+                        meter?.bytes += n
+                        bytesWrittenForTesting?(n)
                     }
                 }
                 slice = slice.dropFirst(part.count)
+                try faultForTesting?("emit")
             }
         }
         func line(_ value: String = "") throws { try emit(value); try emit("\n") }
