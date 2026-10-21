@@ -39,7 +39,7 @@ jobs:
       - name: CI inventory (every pre-split step still runs, unchanged)
         run: python3 scripts/ci_inventory_test.py
       - name: Build
-        run: swift build
+        run: swift build -j 2
       - name: Background prune selftest
         run: .build/debug/briglia __background-prune-selftest
       - name: Persisted model source contract and negative tests

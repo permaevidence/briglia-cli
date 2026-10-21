@@ -446,6 +446,9 @@ INVENTORY_STEP = {
     "run": "python3 scripts/ci_inventory_test.py",
 }
 RESULTS = ("success", "failure", "cancelled", "skipped")
+# Build commands the prerequisite check recognises; which one each platform must use is
+# fixed by the frozen inventory plus its `replace` amendment (Linux: -j 2, macOS: plain).
+BUILD_RUNS = ("swift build", "swift build -j 2")
 
 
 def _strings(obj):
@@ -474,6 +477,17 @@ def expected_tests(fixture, plat):
             exp.append(canon(a["step"]))
         elif a.get("op") == "remove":
             exp.remove(canon(a["step"]))
+        elif a.get("op") == "replace":
+            # In-place edit of one frozen step (keeps its position for the order check).
+            # Deliberately narrow: only the `run` value may change; every other key and
+            # value (name, if, env, shell, continue-on-error, ...) must stay identical.
+            old, new = a["step"], a["with"]
+            if not isinstance(old, dict) or not isinstance(new, dict):
+                raise ValueError("replace amendment needs mapping `step` and `with`")
+            if {k: v for k, v in old.items() if k != "run"} != {k: v for k, v in new.items() if k != "run"} \
+                    or set(old) != set(new) or "run" not in old:
+                raise ValueError("replace amendment may change only the `run` value of a step")
+            exp[exp.index(canon(old))] = canon(new)
         else:
             raise ValueError(f"unknown amendment op {a.get('op')!r}")
     return exp
@@ -551,9 +565,10 @@ def check_workflow(text, fixture, truth_cache=None):
             errors.append(f"{jid}: inventory step only belongs in the core jobs")
 
     for plat in ("linux", "macos"):
-        frozen = [canon(t) for t in fixture["platforms"][plat]["tests"]]
         try:
-            exp = collections.Counter(expected_tests(fixture, plat))
+            # frozen order = the recorded tests with in-place `replace` amendments applied
+            frozen = expected_tests(fixture, plat)
+            exp = collections.Counter(frozen)
         except (ValueError, KeyError) as e:
             errors.append(f"fixture amendments invalid: {e}")
             continue
@@ -571,7 +586,7 @@ def check_workflow(text, fixture, truth_cache=None):
             if idx != sorted(idx) or len(set(idx)) != len(idx):
                 errors.append(f"{jid}: test steps are not in their frozen relative order")
         # prerequisites
-        builds = [(j, p) for j, p, s in placed[plat] if s.get("run") == "swift build"]
+        builds = [(j, p) for j, p, s in placed[plat] if s.get("name") == "Build" and s.get("run") in BUILD_RUNS]
         if len(builds) != 1:
             errors.append(f"{plat}: expected exactly one Build step, found {len(builds)}")
         else:
@@ -789,6 +804,8 @@ EXPECT = {
     "32": "truth table", "33": "raw `on:`", "34": "re-derived", "35": "upload",
     "36": "inventory step must appear exactly once", "37": "setup", "38": "job name",
     "39": "frozen relative order", "40": "truth table",
+    "41": "linux: frozen step missing or altered", "42": "macos: step not in the frozen inventory",
+    "43": "replace amendment may change only", "44": "frozen relative order",
     "P1": "duplicate key", "P2": "indicator '&'", "P3": "unrecognised line", "P4": "indicator '{'",
     "P5": "tab character", "P6": "unsupported block scalar", "P7": "document marker",
 }
@@ -798,6 +815,27 @@ def _tamper_fixture(fx):
     fx = copy.deepcopy(fx)
     fx["platforms"]["linux"]["tests"][-1]["run"] = fx["platforms"]["linux"]["tests"][-1]["run"].replace("menu_browser_test.py", "menu_browser_tests.py")
     return fx
+
+
+def _amend_more_than_run(fx):
+    fx = copy.deepcopy(fx)
+    for a in fx.get("amendments", []):
+        if a.get("op") == "replace":
+            a["with"] = dict(a["with"], **{"continue-on-error": True})
+            return fx
+    raise BreakSetupError("no replace amendment in the fixture")
+
+
+def _build_after_smoke(t):
+    lo, hi = _job_span(t, "linux-core")
+    seg = t[lo:hi]
+    b = "      - name: Build\n        run: swift build -j 2\n"
+    if b not in seg:
+        raise BreakSetupError("linux-core Build step not found")
+    seg = seg.replace(b, "", 1)
+    k = seg.index("      - name: Smoke test\n")
+    k2 = seg.index("      - name:", k + 1)
+    return t[:lo] + seg[:k2] + b + seg[k2:] + t[hi:]
 
 
 def breaks():
@@ -848,6 +886,10 @@ def breaks():
         ("38 a test job named CI complete", lambda t: sub_once(t, "    name: macOS gates", "    name: CI complete", job="macos-gates")),
         ("39 two steps reordered inside a job", _reorder_gates_b),
         ("40 aggregator output piped through cat", lambda t: sub_once(t, "python3 - <<'PY'\n", "python3 - <<'PY' | cat\n", job=agg)),
+        ("41 Linux Build back to unbounded swift build", lambda t: sub_once(t, "        run: swift build -j 2\n", "        run: swift build\n", job="linux-core")),
+        ("42 macOS Build silently given -j 2", lambda t: sub_once(t, "        run: swift build\n", "        run: swift build -j 2\n", job="macos-core")),
+        ("43 Build amendment widened beyond `run`", lambda t: t, _amend_more_than_run),
+        ("44 Linux Build moved after smoke", _build_after_smoke),
         ("P1 parser: duplicate key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    runs-on: macos-15\n")),
         ("P2 parser: anchor and alias", lambda t: sub_once(sub_once(t, "    runs-on: macos-15\n", "    runs-on: &rn macos-15\n", job="macos-core"), "    runs-on: macos-15\n", "    runs-on: *rn\n", job="macos-gates")),
         ("P3 parser: merge key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    <<: *base\n")),

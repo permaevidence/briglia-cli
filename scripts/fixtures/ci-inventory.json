@@ -1,5 +1,19 @@
 {
-  "amendments": [],
+  "amendments": [
+    {
+      "op": "replace",
+      "platform": "linux",
+      "reason": "0.2.58 private CI run 39649589015: the unbounded Linux `swift build` was OOM-killed (exit 137) in the final briglia-module batch on the 16 GB runner; cap compiler parallelism at 2, as the pinned-build differentials already do. Owner-approved 2026-10-21; macOS unchanged.",
+      "step": {
+        "name": "Build",
+        "run": "swift build"
+      },
+      "with": {
+        "name": "Build",
+        "run": "swift build -j 2"
+      }
+    }
+  ],
   "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove, platform, step, reason}).",
   "platforms": {
     "linux": {
