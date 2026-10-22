@@ -230,6 +230,11 @@ struct ProviderSelftest: AsyncParsableCommand {
               && load(KeychainHelper.openRouterProvidersKey) == nil
               && Pin.pinnedSlugs() == ["novita", "deepinfra/turbo"] && Pin.isPinned
               && Pin.statusLine()?.contains("novita, deepinfra/turbo") == true, Pin.statusLine() ?? "nil")
+        // 0.2.59: the scope wording names the Web researcher (it runs the main
+        // model and carries the pin since 0.2.37); the stale "not web research" is gone.
+        check("orprovider status scope: main agent, subagents and Web researcher; page reading keeps its own hosts",
+              Pin.statusLine()?.contains("main agent, subagents and Web researcher; page reading keeps its own hosts") == true
+              && Pin.statusLine()?.contains("not web research") == false, Pin.statusLine() ?? "nil")
         try Pin._testSetPin(nil)
         check("orprovider storage: cleared → automatic",
               !Pin.isPinned && Pin.statusLine() == nil)

@@ -86,6 +86,14 @@ struct CommandMenuSelftest: ParsableCommand {
                   line.contains("/\(cmd.name)") && line.contains(cmd.description)
               })
 
+        // 6. 0.2.59: /restart reloads mcp.json only; skills are rescanned on
+        // every request, so its help must not claim it reloads them.
+        let restartDesc = commands.first { $0.name == "restart" }?.description ?? ""
+        check("/restart help names mcp.json and says skills need no restart",
+              restartDesc.contains("reloads mcp.json") && restartDesc.contains("skills need no restart")
+              && !restartDesc.contains("and skills)")
+              && ChatCommandRegistry.commandsListText().contains(restartDesc))
+
         print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")
         if failures > 0 { throw ExitCode(1) }
     }

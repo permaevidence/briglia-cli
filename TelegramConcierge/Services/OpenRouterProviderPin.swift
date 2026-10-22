@@ -193,10 +193,14 @@ enum OpenRouterProviderPin {
     /// MAIN MODEL wherever it runs — the main agent, and every subagent,
     /// which runs on exactly the main model while a pin is set because the
     /// cheap-vision/cheap-text lanes are bypassed (`SubagentModelLanes`;
-    /// the picks stay stored and return on release). Anything on another
-    /// model keeps OpenRouter's automatic routing: the Web researcher and
-    /// the legacy web pipeline (their own backend and key), a configured
-    /// description model, the OCR/vision preprocessor (own ZDR routing).
+    /// the picks stay stored and return on release), and the Web researcher,
+    /// which runs the main model since 0.2.37 — the legacy research loop
+    /// (`/websubagent off`) included, through the same main-model execution
+    /// context. Anything on another model keeps its own routing: page
+    /// reading/extraction and web_fetch compression (GPT-6 Luna on fixed
+    /// hosts), a configured description model, the OCR/vision preprocessor
+    /// (own ZDR routing). Only the orchestrator's no-service harness fallback
+    /// (tests, no OpenRouterService supplied) uses automatic routing.
     static let scopeNote = "Applies to the main model: the main agent and every subagent, the Web researcher included (cheap lanes are bypassed while pinned). Each OpenRouter model remembers its own host."
 
     /// One line for /status and doctor; nil when nothing worth saying.
@@ -206,7 +210,7 @@ enum OpenRouterProviderPin {
         let status = OpenRouterPresets.hostStatus(model: model, store: store)
         let slugs = pinnedSlugs(store: store)
         if !slugs.isEmpty {
-            lines.append("📌 OpenRouter host for \(model): \(slugs.joined(separator: ", ")) (\(status.state == .autoPinned ? "pinned automatically" : "your choice"); main agent + subagents, not web research; /orprovider off lets OpenRouter choose)")
+            lines.append("📌 OpenRouter host for \(model): \(slugs.joined(separator: ", ")) (\(status.state == .autoPinned ? "pinned automatically" : "your choice"); main agent, subagents and Web researcher; page reading keeps its own hosts; /orprovider off lets OpenRouter choose)")
         } else if [.corrupt, .unsupported, .upgradePending, .released, .pendingLegacy].contains(status.state) {
             lines.append("OpenRouter: " + OpenRouterPresets.hostClause(status))
         }
