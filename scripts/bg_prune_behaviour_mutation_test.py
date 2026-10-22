@@ -17,8 +17,13 @@ import tempfile
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cm_split_paths as cmp  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CM = os.path.join(ROOT, "TelegramConcierge/Services/ConversationManager.swift")
+# ConversationManager: one file before 0.2.59, a 15-file family after. Every
+# mutation anchor must occur exactly once across the family
+# (cm_split_paths.replace_once); the whole family is restored after each case.
 BINARY = os.path.join(ROOT, ".build/debug/briglia")
 
 BREAKS = [
@@ -198,8 +203,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only")
     args = ap.parse_args()
-    with open(CM, encoding="utf-8") as fh:
-        original = fh.read()
+    originals = {p: open(os.path.join(ROOT, p), encoding="utf-8").read() for p in cmp.cm_paths(ROOT)}
+    original = "".join(originals.values())
+
+    def restore():
+        for p, text in originals.items():
+            with open(os.path.join(ROOT, p), "w", encoding="utf-8") as fh:
+                fh.write(text)
     caught = 0
     total = 0
     try:
@@ -211,11 +221,9 @@ def main():
             if any(original.count(o) != 1 for o, _ in pairs):
                 print(f"✖ {label}: mutation anchor not found exactly once")
                 continue
-            mutated = original
+            restore()
             for o, n in pairs:
-                mutated = mutated.replace(o, n)
-            with open(CM, "w", encoding="utf-8") as fh:
-                fh.write(mutated)
+                cmp.replace_once(ROOT, o, n)
             ok, log = build()
             if not ok:
                 print(f"✖ {label}: mutated build failed\n{log}")
@@ -233,11 +241,9 @@ def main():
             else:
                 print(f"✖ break NOT caught: {label} [{section}]")
     finally:
-        with open(CM, "w", encoding="utf-8") as fh:
-            fh.write(original)
+        restore()
         ok, log = build()
-        with open(CM, encoding="utf-8") as fh:
-            restored = fh.read() == original
+        restored = all(open(os.path.join(ROOT, p), encoding="utf-8").read() == text for p, text in originals.items())
         print(f"restored source {'identical' if restored else 'DIFFERS'}; rebuild {'ok' if ok else 'FAILED'}")
     print(f"\n{caught}/{total} deliberate behaviour breaks caught")
     return 0 if caught == total else 1

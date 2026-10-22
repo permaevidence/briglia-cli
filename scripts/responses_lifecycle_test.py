@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import chat_wire_baseline as wire
+import cm_split_paths as cmp
 
 ROOT = wire.ROOT
 
@@ -44,18 +45,16 @@ def main():
         capture_parser.write_text(capture_text.replace(header_anchor, header_anchor + ' || $0 == 95'))
         fixture = ROOT / 'scripts/fixtures/responses'
         shutil.copyfile(fixture / 'Driver.swift', tree / 'TelegramConcierge/CLI/ResponsesLifecycleSelftest.swift')
-        manager = tree / 'TelegramConcierge/Services/ConversationManager.swift'
-        text = manager.read_text()
-        anchor = '    private func persistResponsesSalvage(_ interactions: [ToolInteraction]) throws {'
-        assert text.count(anchor) == 1
-        text = text.replace(anchor, anchor + '\n        try P2Life.beforeSalvage(turnSalvageFileURL)')
-        anchor = '    private func saveConversation() -> Bool {'
-        assert text.count(anchor) == 1
-        text = text.replace(anchor, anchor + '\n        P2Life.beforeConversationSave(conversationFileURL, messages: messages)')
-        anchor = '    private func sendText(_ text: String, to address: ChannelAddress? = nil) async throws {'
-        assert text.count(anchor) == 1
-        text = text.replace(anchor, anchor + '\n        if P2Life.captureDelivery { P2Life.deliveries.append(text); return }')
-        manager.write_text(text + (fixture / 'ManagerSeam.swift').read_text())
+        # ConversationManager anchors (one file, or the 0.2.59 split family): each
+        # declaration may be in its base or promoted spelling, exactly once overall.
+        cmp.replace_variant_once(tree, '    private func persistResponsesSalvage(_ interactions: [ToolInteraction]) throws {',
+                                 '\n        try P2Life.beforeSalvage(turnSalvageFileURL)')
+        cmp.replace_variant_once(tree, '    private func saveConversation() -> Bool {',
+                                 '\n        P2Life.beforeConversationSave(conversationFileURL, messages: messages)')
+        cmp.replace_variant_once(tree, '    private func sendText(_ text: String, to address: ChannelAddress? = nil) async throws {',
+                                 '\n        if P2Life.captureDelivery { P2Life.deliveries.append(text); return }')
+        manager = cmp.main_path(tree)
+        manager.write_text(manager.read_text() + (fixture / 'ManagerSeam.swift').read_text())
         archive = tree / 'TelegramConcierge/Services/ConversationArchiveService.swift'
         archive.write_text(archive.read_text() + (fixture / 'ArchiveSeam.swift').read_text())
         main = tree / 'TelegramConcierge/CLI/AdaMain.swift'

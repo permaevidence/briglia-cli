@@ -210,7 +210,12 @@ extension MenuSelftestContext {
         // MARK: Mind and /deleteuserdata leave servers alone (like profiles)
         if let root = Self.repoRoot() {
             let mind = (try? String(contentsOf: root.appendingPathComponent("TelegramConcierge/Services/MindExportService.swift"), encoding: .utf8)) ?? ""
-            let cm = (try? String(contentsOf: root.appendingPathComponent("TelegramConcierge/Services/ConversationManager.swift"), encoding: .utf8)) ?? ""
+            // ConversationManager is one file before 0.2.59 and a 15-file family after
+            // (main file first, then the explicitly enumerated pieces of either naming).
+            let cmGroups = ["Channels", "Inbound", "MidTurn", "ControlCommands", "ModelCommands", "Stop", "ToolLoop",
+                            "Pruning", "PruneSummaries", "Ambient", "Persistence", "Archive", "BackgroundPrune", "SelftestSeams"]
+            let cmFiles = ["ConversationManager.swift"] + cmGroups.map { "ConversationManager+\($0).swift" } + cmGroups.map { "\($0)+ConversationManager.swift" }
+            let cm = cmFiles.compactMap { try? String(contentsOf: root.appendingPathComponent("TelegramConcierge/Services/" + $0), encoding: .utf8) }.joined()
             let wipe = cm.components(separatedBy: "func deleteAllMemory()").dropFirst().first?.prefix(20000) ?? ""
             check("Mind export/import and /deleteuserdata never touch the server list or its keys (same rule as profiles)",
                   !mind.isEmpty && !wipe.isEmpty && !mind.contains("ProviderServers") && !mind.contains("ProviderProfiles.")

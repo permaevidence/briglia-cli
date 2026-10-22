@@ -1,0 +1,5266 @@
+{
+ "comment": "0.2.59 ConversationManager split: the compiler-driven, individually reviewable access-edit list (plan v3 \u00a74, D2). Every entry is a modifier the compiler rejected the split without (production build, plus the seam-instrumented builds for the two test-seam entries); reason files are the files where the compiler reported the inaccessible reference. cm_split_check.py reads this file from the pinned C1 commit and requires the C2 manifest's access_edits to equal it exactly.",
+ "naming": "conventional",
+ "access_edits": [
+  {
+   "line": 25,
+   "name": "telegramService",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 26,
+   "name": "openRouterService",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 27,
+   "name": "toolExecutor",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 28,
+   "name": "archiveService",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 30,
+   "name": "pollingTask",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 34,
+   "name": "isStartingPolling",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 35,
+   "name": "archiveRecoveryTask",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 36,
+   "name": "activeProcessingTask",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 37,
+   "name": "subscriptionLoginTask",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 40,
+   "name": "subscriptionLoginRunID",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 41,
+   "name": "activeRunId",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 61,
+   "name": "turnActivity",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private(set) ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 69,
+   "name": "lastMidTurnUserAddress",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 108,
+   "name": "stoppedRunsFinishing",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private(set) ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 109,
+   "name": "stoppedRunWatchers",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 123,
+   "name": "runPhases",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 128,
+   "name": "backgroundPruneJob",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 129,
+   "name": "backgroundPruneFallbackDue",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 130,
+   "name": "backgroundPruneGeneration",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 131,
+   "name": "backgroundPrunePendingOff",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 132,
+   "name": "backgroundPruneObservedBounds",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 133,
+   "name": "backgroundPruneT0AppliedRun",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 134,
+   "name": "backgroundPruneRequestLedger",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 135,
+   "name": "backgroundPruneCounters",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 136,
+   "name": "backgroundPruneLastApply",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 137,
+   "name": "backgroundPruneStopNote",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 138,
+   "name": "backgroundPruneNextRound",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 145,
+   "name": "noticeSeriesRegistry",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 148,
+   "name": "registeredTelegramTokenIdentity",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift"
+    ]
+   }
+  },
+  {
+   "line": 159,
+   "name": "isRestoringMind",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private(set) ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 165,
+   "name": "demotionSnapshotNoticeShown",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 168,
+   "name": "summaryRestoreAttempts",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 170,
+   "name": "summaryStubRepairUnsupported",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 173,
+   "name": "summaryRetentionScanPending",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 174,
+   "name": "summaryRetentionPassScheduled",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 180,
+   "name": "beginMaintenance",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 186,
+   "name": "endMaintenance",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 191,
+   "name": "showMaintenanceNotice",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 203,
+   "name": "handleArchiveMaintenancePhase",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 247,
+   "name": "currentTurnToolLog",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 250,
+   "name": "currentTurnLogIsActive",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 254,
+   "name": "activeTurnCheckpoints",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 255,
+   "name": "checkpointWriteFailure",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 256,
+   "name": "recoveryBlocked",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 266,
+   "name": "historyLoadFailure",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 268,
+   "name": "historyHoldNoticeSent",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 279,
+   "name": "heldQueueFileProblem",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 283,
+   "name": "workHeldReason",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 288,
+   "name": "promptEstimateCorrections",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 289,
+   "name": "pendingCompactionCalibration",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 290,
+   "name": "latestEstimateScope",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 298,
+   "name": "pendingMidTurnMessages",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private(set) ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 310,
+   "name": "InFlightMidTurnBatch",
+   "member_kind": "struct",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 314,
+   "name": "inFlightMidTurnBatch",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 321,
+   "name": "pendingAmbientTriggers",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 333,
+   "name": "midTurnGeneration",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 334,
+   "name": "nextMidTurnGeneration",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 338,
+   "name": "appendedMidTurnGeneration",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 339,
+   "name": "seenGenerationAtRequest",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 342,
+   "name": "consecutiveSuppressions",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 350,
+   "name": "committedMessages",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 355,
+   "name": "lastSavedMessageIDs",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 359,
+   "name": "pendingCompletionAcks",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 363,
+   "name": "pendingSubagentAcks",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 368,
+   "name": "roundDeliveryReservations",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 378,
+   "name": "roundDeliveredIds",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 382,
+   "name": "roundDeliveryRecordRetries",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 386,
+   "name": "turnSalvageWriteFailedRuns",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 389,
+   "name": "salvageWritesRefusedForOwnership",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 393,
+   "name": "stoppedJobIds",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 395,
+   "name": "stopIntent",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 398,
+   "name": "recoveredWakeTrigger",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 400,
+   "name": "detachRecordFailureShown",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 401,
+   "name": "pairedChatId",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 407,
+   "name": "processingTelegramUpdateId",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 416,
+   "name": "channels",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 417,
+   "name": "lastUserChannelAddress",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 423,
+   "name": "lastUserChannelDefaultsKey",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift"
+    ]
+   }
+  },
+  {
+   "line": 425,
+   "name": "telegramAddress",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 431,
+   "name": "isTelegramConfigured",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 448,
+   "name": "replyAddress",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 453,
+   "name": "noteUserActivity",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 461,
+   "name": "loadLastUserChannelAddress",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 476,
+   "name": "sendText",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift",
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 511,
+   "name": "parkedOutbound",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 522,
+   "name": "flushParkedOutbound",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 547,
+   "name": "deliverAgentMidTurnMessage",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 589,
+   "name": "sendPhoto",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 595,
+   "name": "sendDocument",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 1000,
+   "name": "appendAppChannelPhoto",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 1028,
+   "name": "appendAppChannelDocument",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 1103,
+   "name": "pendingImages",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1104,
+   "name": "pendingDocuments",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1105,
+   "name": "pendingReferencedImages",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1106,
+   "name": "pendingReferencedDocuments",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1107,
+   "name": "pendingForwardContext",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1108,
+   "name": "pendingReplyContext",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1109,
+   "name": "pendingAttachmentNotes",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1118,
+   "name": "inboundDurabilityFailure",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1126,
+   "name": "stalledConfirmUpdateId",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1127,
+   "name": "durabilityStallAnnounced",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 1131,
+   "name": "durabilityStallSeries",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1134,
+   "name": "durabilityStallPauseOwed",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1138,
+   "name": "activeTurnTriggerMessage",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1139,
+   "name": "toolRunLogPrefix",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift"
+    ]
+   }
+  },
+  {
+   "line": 1140,
+   "name": "maxRetainedToolRunLogs",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift"
+    ]
+   }
+  },
+  {
+   "line": 1141,
+   "name": "maxAssistantMessageChars",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1146,
+   "name": "pendingContinuationText",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1151,
+   "name": "minimumToolSpendLimitPerTurnUSD",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1152,
+   "name": "maxToolRoundsSafetyLimit",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1155,
+   "name": "shouldResumePollingDefaultsKey",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 1156,
+   "name": "privacyModeDefaultsKey",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 1157,
+   "name": "systemPromptTimestampKey",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift"
+    ]
+   }
+  },
+  {
+   "line": 1158,
+   "name": "defaultMaxContextTokens",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 1159,
+   "name": "defaultTargetContextTokens",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 1166,
+   "name": "frozenCalendarContext",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1167,
+   "name": "frozenEmailContext",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1168,
+   "name": "frozenContextDay",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1169,
+   "name": "isRestoringContextUsageSnapshot",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 1174,
+   "name": "lastPromptTokens",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private(set) ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1181,
+   "name": "lastPromptRenderKey",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1184,
+   "name": "lastCompletionTokens",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1190,
+   "name": "budgetContentHashCache",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 1192,
+   "name": "ContextUsageSnapshot",
+   "member_kind": "struct",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 1236,
+   "name": "ToolAwareResponse",
+   "member_kind": "struct",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1268,
+   "name": "PruneAction",
+   "member_kind": "enum",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 1287,
+   "name": "PrunePlan",
+   "member_kind": "struct",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1316,
+   "name": "SpendLimitStatus",
+   "member_kind": "struct",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1349,
+   "name": "appFolder",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1355,
+   "name": "conversationFileURL",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1359,
+   "name": "contextUsageFileURL",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 1363,
+   "name": "pendingContinuationFileURL",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1370,
+   "name": "turnSalvageFileURL",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1380,
+   "name": "pendingMidTurnFileURL",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1388,
+   "name": "pendingAttachmentsFileURL",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 1399,
+   "name": "pendingAmbientFileURL",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1408,
+   "name": "activeTurnMarkerFileURL",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1412,
+   "name": "imagesDirectory",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1424,
+   "name": "toolAttachmentsDirectory",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 1433,
+   "name": "archiveRetryBackoffUntil",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 1454,
+   "name": "archiveJob",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1457,
+   "name": "archiveGeneration",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1460,
+   "name": "archiveExitPending",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1462,
+   "name": "turnViewLeaseId",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 1464,
+   "name": "lastTurnArchiveView",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift"
+    ]
+   }
+  },
+  {
+   "line": 1478,
+   "name": "consecutivePollFailures",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 1481,
+   "name": "lastLoggedPollError",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 1482,
+   "name": "pollFailureAlertThreshold",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 1489,
+   "name": "staleChannelEpisodeSwept",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 1575,
+   "name": "currentVoiceTranscriptionProvider",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 1581,
+   "name": "openAITranscriptionAPIKey",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 1586,
+   "name": "configuredGeminiImageModel",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 1592,
+   "name": "configuredGeminiImagePricing",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 1752,
+   "name": "scheduleArchiveRecovery",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 2028,
+   "name": "shouldResumePollingOnLaunch",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 2040,
+   "name": "hasRequiredPollingConfiguration",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 2068,
+   "name": "telegramBotDownloadLimitBytes",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 2112,
+   "name": "unreadableReplyKeys",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 2113,
+   "name": "unreadableReplyKeyLimit",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 2189,
+   "name": "processUpdate",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 2659,
+   "name": "processWhatsAppInbound",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 2835,
+   "name": "dispatchUserTurn",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 2907,
+   "name": "heldQueueRefusalNoticeSent",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 2917,
+   "name": "holdInboundWhileHistoryUnreadable",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift"
+    ]
+   }
+  },
+  {
+   "line": 2951,
+   "name": "deliverMidTurnMessages",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3070,
+   "name": "noteMidTurnEnqueued",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 3082,
+   "name": "noteAppendedToHistory",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 3094,
+   "name": "batchIsStale",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3112,
+   "name": "wakeNoteStatus",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3158,
+   "name": "clearInFlightMidTurnBatchIfCarried",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3166,
+   "name": "clearResponsesMidTurnBatch",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3188,
+   "name": "commitImageRejectionMarks",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3232,
+   "name": "cacheDiagnosticsToolSignature",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3233,
+   "name": "cacheDiagnosticsSystemDate",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3249,
+   "name": "requireSalvageOwnership",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3255,
+   "name": "ownsSalvageFile",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3263,
+   "name": "persistResponsesSalvage",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3274,
+   "name": "stripCurrentTurnAnnotations",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3288,
+   "name": "restoreInFlightMidTurnBatch",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3327,
+   "name": "QueueFileState",
+   "member_kind": "enum",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 3336,
+   "name": "readHeldQueueFile",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 3353,
+   "name": "hydrateHeldQueueFromDisk",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3376,
+   "name": "setHeldQueueProblem",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 3388,
+   "name": "TurnMarkerState",
+   "member_kind": "enum",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 3394,
+   "name": "readActiveTurnMarkerState",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3404,
+   "name": "allStopEntries",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3419,
+   "name": "persistPendingMidTurnQueue",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 3442,
+   "name": "persistPendingAmbientTriggers",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 3464,
+   "name": "recoverPersistedAmbientTriggers",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 3498,
+   "name": "recoverPersistedMidTurnMessages",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 3561,
+   "name": "PendingFileRecord",
+   "member_kind": "struct",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 3566,
+   "name": "PendingInboundBuffers",
+   "member_kind": "struct",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 3587,
+   "name": "persistPendingInboundBuffers",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 3624,
+   "name": "restorePendingInboundBuffers",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 3642,
+   "name": "ActiveTurnMarker",
+   "member_kind": "struct",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 3667,
+   "name": "writeActiveTurnMarker",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 3692,
+   "name": "remarkActiveTurnIfNeeded",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 3699,
+   "name": "clearActiveTurnMarker",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3707,
+   "name": "clearActiveTurnMarker",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 3722,
+   "name": "resumeInterruptedActiveTurnIfNeeded",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 3750,
+   "name": "startActiveProcessing",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 4159,
+   "name": "isCancellation",
+   "member_kind": "static-func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 4165,
+   "name": "commandToken",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 4209,
+   "name": "commandCapture",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 4249,
+   "name": "sendCommandMenu",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 4273,
+   "name": "processCallbackQuery",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 4333,
+   "name": "currentMainModel",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 4385,
+   "name": "handleControlCommandIfNeeded",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 4520,
+   "name": "pendingUserNameProposal",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 4812,
+   "name": "PendingMindImport",
+   "member_kind": "struct",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 4818,
+   "name": "pendingMindImport",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 5086,
+   "name": "PendingBotSwitch",
+   "member_kind": "struct",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 5095,
+   "name": "pendingBotSwitch",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 5096,
+   "name": "botSwitchDiscoveryTask",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 5101,
+   "name": "botSwitchCutoverInProgress",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 5317,
+   "name": "cutOverTelegramBot",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 5329,
+   "name": "retryDurabilityStall",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 5357,
+   "name": "noteDurabilityStallBegan",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 5380,
+   "name": "noteDurabilityStallRecovered",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 5402,
+   "name": "performPendingBotSwitchIfReady",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 5665,
+   "name": "handleModelCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 5822,
+   "name": "validReasoningEfforts",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 5832,
+   "name": "handleEffortCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 5912,
+   "name": "handleSubagentModelsCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6022,
+   "name": "modelRoutingGeneration",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6106,
+   "name": "handleOrProviderCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6286,
+   "name": "upgradePresetPass",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6288,
+   "name": "pendingHostNotice",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6323,
+   "name": "handleSubscriptionCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6382,
+   "name": "handleProviderCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6528,
+   "name": "handleWebSearchBackendCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6620,
+   "name": "handleSubagentsCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6665,
+   "name": "switchDefaults",
+   "member_kind": "computed-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 6673,
+   "name": "handleWebSubagentCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6715,
+   "name": "sendTurnStatus",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 6776,
+   "name": "backgroundStatusSection",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 6845,
+   "name": "toolResultIndicatesError",
+   "member_kind": "static-func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 6926,
+   "name": "manualPruneToolInteractions",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 7096,
+   "name": "switchVoiceTranscriptionProvider",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 7155,
+   "name": "handleSpendCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 7253,
+   "name": "setPrivacyMode",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 7286,
+   "name": "stopActiveExecution",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 7589,
+   "name": "stoppedRunEnded",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 7757,
+   "name": "gaveUpNoticeSeries",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 7763,
+   "name": "makeNoticeSeries",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 7800,
+   "name": "invalidateNoticeSeries",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 7813,
+   "name": "retireVisibilityNoticesForWipe",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 7859,
+   "name": "resetEarlyWakeStateForReplacedHistory",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 7897,
+   "name": "loadStopIntent",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 7914,
+   "name": "applyPersistedStopMarker",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 7959,
+   "name": "reconcileJobRecords",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 8122,
+   "name": "settleJobEvidenceBeforeRemoval",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 8229,
+   "name": "stopEntries",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 8232,
+   "name": "stoppedSubagentHandles",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 8238,
+   "name": "appendHeldPreStopNotes",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 8255,
+   "name": "retireSettledStopEntries",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 8264,
+   "name": "retireSettledStopEntries",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 8323,
+   "name": "increaseSpendLimitIfNeeded",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 8370,
+   "name": "generateResponseWithTools",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 9845,
+   "name": "configuredToolSpendLimitPerTurnUSD",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 9884,
+   "name": "currentSpendLimitStatus",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 9933,
+   "name": "spendUSD",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 9954,
+   "name": "configuredMaxContextTokens",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 9962,
+   "name": "configuredTargetContextTokens",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 9970,
+   "name": "normalizedMimeType",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift"
+    ]
+   }
+  },
+  {
+   "line": 10204,
+   "name": "currentProviderIsLMStudio",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 10252,
+   "name": "estimatedPromptTokens",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 10291,
+   "name": "currentTurnInteractionTokens",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 10298,
+   "name": "applyMeasuredTokenDelta",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 10309,
+   "name": "estimatedTokensAddedSinceLastPrompt",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 10321,
+   "name": "toolInteractionTokens",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 10339,
+   "name": "toolTokensForMessage",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 10348,
+   "name": "estimatedFinalReasoningTokens",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 10365,
+   "name": "mediaSavingsForMessage",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 10379,
+   "name": "estimateSystemPromptTokens",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 10398,
+   "name": "lastAssistantIndexWithTools",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "test-seam",
+    "seam": "scripts/fixtures/chat-lifecycle/ManagerSeam.swift"
+   }
+  },
+  {
+   "line": 10410,
+   "name": "prunedContextSummaryTokens",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 10417,
+   "name": "buildPrunePlan",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 10454,
+   "name": "compressibleUserMessageIndices",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 10471,
+   "name": "commitPrune",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 10591,
+   "name": "prepareSummaryStubs",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 10861,
+   "name": "pruneSummaryAnchorIndex",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 10867,
+   "name": "notifyAutomaticPruningStarted",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 10895,
+   "name": "applyPrunePlan",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 10947,
+   "name": "pruneSummaryManifest",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 11010,
+   "name": "generatePrunedContextSummary",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 11263,
+   "name": "disabledMaintenanceToolInteraction",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 11287,
+   "name": "fallbackPrunedContextSummary",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 11320,
+   "name": "pruneToolInteractionsIfNeeded",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 11448,
+   "name": "pruneStoredToolInteractionsMidLoop",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 11570,
+   "name": "cleanupOrphanedToolAttachmentSnapshots",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 11645,
+   "name": "compressibleSyntheticKinds",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 11663,
+   "name": "pruneCompressibleUserMessages",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 11699,
+   "name": "compressibleSyntheticKindsList",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 11865,
+   "name": "pruneOldCompactToolLogs",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 11883,
+   "name": "currentSystemPromptTimestamp",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 11895,
+   "name": "refreshSystemPromptTimestamp",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 11906,
+   "name": "getFrozenSystemContext",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 11943,
+   "name": "formatUSD",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 11954,
+   "name": "extractAccessedProjects",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 11975,
+   "name": "partitionToolCallsForExecution",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 12100,
+   "name": "buildCompactToolExecutionLog",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 12123,
+   "name": "summarizeToolOutcome",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 12236,
+   "name": "pruneOldToolLogMessages",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 12255,
+   "name": "watcherChecksInFlight",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 12261,
+   "name": "pendingWatcherFireMessages",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 12263,
+   "name": "checkDueReminders",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 12486,
+   "name": "externalEventsShownPerFire",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift"
+    ]
+   }
+  },
+  {
+   "line": 12686,
+   "name": "triageRunsInFlight",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 12697,
+   "name": "lastTriageRunStart",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift"
+    ]
+   }
+  },
+  {
+   "line": 12960,
+   "name": "checkScratchDiskPressure",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 12981,
+   "name": "checkBackgroundBashCompletions",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 13055,
+   "name": "checkBackgroundSubagentCompletions",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 13113,
+   "name": "settleToolCharges",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 13172,
+   "name": "checkBashWatchMatches",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 13275,
+   "name": "processNewUnreadEmails",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 13403,
+   "name": "drainPendingAmbientTriggers",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift"
+    ]
+   }
+  },
+  {
+   "line": 13425,
+   "name": "loadConversation",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 13517,
+   "name": "writeHistoryFile",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 13547,
+   "name": "saveConversation",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Ambient.swift",
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+SelftestSeams.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 13674,
+   "name": "persistTurnSalvage",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 13725,
+   "name": "clearTurnSalvageFile",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 13740,
+   "name": "clearTurnSalvageFile",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 13749,
+   "name": "recoverInterruptedTurnSalvageIfNeeded",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift",
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 13817,
+   "name": "loadContextUsageSnapshot",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 13841,
+   "name": "saveContextUsageSnapshot",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 14495,
+   "name": "browserSettingsMutation",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 14496,
+   "name": "browserSettingsPollIngress",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 14497,
+   "name": "browserSettingsAppIngress",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Channels.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 14498,
+   "name": "browserSettingsCommandIngress",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 14565,
+   "name": "appliedEmailState",
+   "member_kind": "stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 14569,
+   "name": "startEmailProvider",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift"
+    ]
+   }
+  },
+  {
+   "line": 14716,
+   "name": "formattedTime",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+Stop.swift"
+    ]
+   }
+  },
+  {
+   "line": 14722,
+   "name": "capAssistantMessageForHistoryAndTelegram",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 14743,
+   "name": "continuationNoticeReserve",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 14775,
+   "name": "loadPendingContinuation",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager.swift"
+    ]
+   }
+  },
+  {
+   "line": 14785,
+   "name": "sendPendingContinuationChunk",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 14904,
+   "name": "archiveStartRefusal",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 14922,
+   "name": "startBackgroundArchiveJob",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 14977,
+   "name": "invalidateArchiveJobForReplacedHistory",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 14993,
+   "name": "adoptTurnArchiveView",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 15010,
+   "name": "diagnosticArchiveView",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 15018,
+   "name": "captureFreshArchiveView",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 15033,
+   "name": "refreshTurnArchiveViewAfterInlineArchive",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 15043,
+   "name": "ArchiveCommitStep",
+   "member_kind": "enum",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift"
+    ]
+   }
+  },
+  {
+   "line": 15050,
+   "name": "commitArchiveIfReady",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 15152,
+   "name": "archiveModeStatusLine",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 15165,
+   "name": "handleArchiveInlineCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 15196,
+   "name": "handleKeepSummariesCommand",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ControlCommands.swift"
+    ]
+   }
+  },
+  {
+   "line": 15238,
+   "name": "buildSummarizationContext",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Inbound.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 15281,
+   "name": "generateDescriptionsBeforePruning",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+Pruning.swift"
+    ]
+   }
+  },
+  {
+   "line": 15357,
+   "name": "descriptionContextMessages",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 15384,
+   "name": "collectInlineMediaFilesForDescription",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 15405,
+   "name": "descriptionMaxPDFPages",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 15406,
+   "name": "descriptionMaxFiles",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 15407,
+   "name": "descriptionMaxFileSizeBytes",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift",
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 15412,
+   "name": "describableToolNames",
+   "member_kind": "static-stored-property",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Archive.swift"
+    ]
+   }
+  },
+  {
+   "line": 15416,
+   "name": "collectToolAttachmentFilesForDescription",
+   "member_kind": "func",
+   "scope": "class-body",
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift"
+    ]
+   }
+  },
+  {
+   "line": 15588,
+   "name": "recordDeliveredUserMessages",
+   "member_kind": "func",
+   "scope": {
+    "extension": 15587
+   },
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 15596,
+   "name": "writeTurnCheckpoint",
+   "member_kind": "func",
+   "scope": {
+    "extension": 15587
+   },
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift",
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 15643,
+   "name": "recordCompactionCalibration",
+   "member_kind": "func",
+   "scope": {
+    "extension": 15587
+   },
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 15661,
+   "name": "compactActiveTurn",
+   "member_kind": "func",
+   "scope": {
+    "extension": 15587
+   },
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+BackgroundPrune.swift",
+     "TelegramConcierge/Services/ConversationManager+ToolLoop.swift"
+    ]
+   }
+  },
+  {
+   "line": 15783,
+   "name": "summarizeActivePrefix",
+   "member_kind": "func",
+   "scope": {
+    "extension": 15587
+   },
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  },
+  {
+   "line": 15932,
+   "name": "boundInterruptedCheckpoint",
+   "member_kind": "func",
+   "scope": {
+    "extension": 15587
+   },
+   "delete": "private ",
+   "reason": {
+    "type": "test-seam",
+    "seam": "scripts/fixtures/active-compaction/ManagerSeam.swift"
+   }
+  },
+  {
+   "line": 15949,
+   "name": "discardTurnRecoveryForReplacement",
+   "member_kind": "func",
+   "scope": {
+    "extension": 15587
+   },
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 15961,
+   "name": "preserveInterruptedCheckpoint",
+   "member_kind": "func",
+   "scope": {
+    "extension": 15587
+   },
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+MidTurn.swift"
+    ]
+   }
+  },
+  {
+   "line": 15979,
+   "name": "recoverTurnCheckpoint",
+   "member_kind": "func",
+   "scope": {
+    "extension": 15587
+   },
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+Persistence.swift"
+    ]
+   }
+  },
+  {
+   "line": 17432,
+   "name": "promptMeasurement",
+   "member_kind": "func",
+   "scope": {
+    "extension": 16464
+   },
+   "delete": "private ",
+   "reason": {
+    "type": "cross-file",
+    "files": [
+     "TelegramConcierge/Services/ConversationManager+ModelCommands.swift",
+     "TelegramConcierge/Services/ConversationManager+PruneSummaries.swift"
+    ]
+   }
+  }
+ ]
+}

@@ -14,12 +14,17 @@ import subprocess
 import tempfile
 import platform
 import chat_wire_baseline as wire
+import cm_split_paths as cmp
 
 # Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
 # large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
 LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 
 ROOT = wire.ROOT
+# UserDefaults.standard accesses in ConversationManager (the whole family): 13 on
+# the pinned reference and on 0.2.58/0.2.59 (frozen evidence key
+# "TelegramConcierge/Services/ConversationManager.swift:defaults" = 13).
+CM_DEFAULTS = 13
 FIXTURES = ROOT / "scripts/fixtures/chat-lifecycle"
 
 
@@ -50,19 +55,18 @@ def instrument(tree):
     shutil.copyfile(FIXTURES / "Driver.swift", tree / "TelegramConcierge/CLI/ChatLifecycleSelftest.swift")
     main = tree / "TelegramConcierge/CLI/AdaMain.swift"
     replace(main, "AffinitySelftest.self,", "AffinitySelftest.self, ChatLifecycleSelftest.self,")
-    for target, seam in (("ConversationManager.swift", "ManagerSeam.swift"), ("ConversationArchiveService.swift", "ArchiveSeam.swift"), ("OpenRouterService.swift", "MediaSeam.swift")):
-        path = tree / "TelegramConcierge/Services" / target
+    # Seams are appended to the main ConversationManager file on both layouts.
+    for path, seam in ((cmp.main_path(tree), "ManagerSeam.swift"), (tree / "TelegramConcierge/Services/ConversationArchiveService.swift", "ArchiveSeam.swift"), (tree / "TelegramConcierge/Services/OpenRouterService.swift", "MediaSeam.swift")):
         with path.open("a") as f:
             f.write((FIXTURES / seam).read_text())
     if (tree / "TelegramConcierge/Services/ActiveTurnCompaction.swift").exists():
         # The frozen direct-call exhaustion fixture has no real turn owner. The
         # new real-owner suite replaces its old forced-final semantics; keep the
         # first request exact and assert the ownerless call now fails closed.
-        manager = tree / "TelegramConcierge/Services/ConversationManager.swift"
-        replace(manager,
+        cmp.replace_once(tree,
             'id: activeTurnCheckpoints[runId].flatMap { $0.isEnvelope ? $0.outcomeMessageID : nil } ?? UUID(),',
             'id: activeTurnCheckpoints[runId].flatMap { $0.isEnvelope ? $0.outcomeMessageID : nil } ?? P0Life.messageID(),')
-        replace(manager,
+        cmp.replace_once(tree,
             "        let reply = try await generateResponseWithTools(currentUserMessageId: history.last!.id, turnStartDate: P0Life.instant)",
             '''        let reply: ToolAwareResponse
         do { reply = try await generateResponseWithTools(currentUserMessageId: history.last!.id, turnStartDate: P0Life.instant) }
@@ -75,8 +79,13 @@ def instrument(tree):
             '        P0Life.require((observations["loop-exhausted"] as! [String: Any])["ownerRequired"] as? Bool == true, "ownerless exhaustion must fail closed")')
     # Storage input seam: owner preferences must never be read/written by a fixture.
     # XDG handles files; this separately redirects every standard-defaults access.
+    # ConversationManager (one file on pinned releases, a 15-file family from
+    # 0.2.59) is rewritten below as one counted bulk rewrite whose total is
+    # recorded under the main file's key, so both layouts give equal evidence.
+    family = set(cmp.cm_paths(tree))
     for path in (tree / "TelegramConcierge").rglob("*.swift"):
         if "selftest" in path.name.lower(): continue
+        if str(path.relative_to(tree)) in family: continue
         text = path.read_text()
         count = text.count("UserDefaults.standard")
         if count:
@@ -86,17 +95,18 @@ def instrument(tree):
         if "UserDefaults = .standard" in text:
             evidence[str(path.relative_to(tree)) + ":defaults-default"] = text.count("UserDefaults = .standard")
             path.write_text(text.replace("UserDefaults = .standard", "UserDefaults = P0Life.defaults"))
-    manager = tree / "TelegramConcierge/Services/ConversationManager.swift"
-    replace(manager, "let now = Date()\n        UserDefaults.standard.set(now, forKey: systemPromptTimestampKey)".replace("UserDefaults.standard", "P0Life.defaults"),
+    evidence[cmp.MAIN + ":defaults"] = cmp.replace_all_counted(tree, "UserDefaults.standard", "P0Life.defaults", CM_DEFAULTS)
+    cmp.replace_all_counted(tree, "UserDefaults = .standard", "UserDefaults = P0Life.defaults", 0)
+    cmp.replace_once(tree, "let now = Date()\n        UserDefaults.standard.set(now, forKey: systemPromptTimestampKey)".replace("UserDefaults.standard", "P0Life.defaults"),
             "let now = P0Life.instant\n        P0Life.defaults.set(now, forKey: systemPromptTimestampKey)")
-    replace(manager, "P0Life.defaults.set(Date(), forKey: systemPromptTimestampKey)",
+    cmp.replace_once(tree, "P0Life.defaults.set(Date(), forKey: systemPromptTimestampKey)",
             "P0Life.defaults.set(P0Life.instant, forKey: systemPromptTimestampKey)")
     # Main-agent batch clock. R0 chronology (WEB_SUBAGENT_PLAN §12) moved it, with
     # every other harness-recorded chronology time (subagent batch delivery,
     # reply completion, compaction-summary creation), behind one HarnessClock
     # read; pin that read on the candidate layout, the formatter call on SOURCE.
-    if "let currentRealTime = postToolTimeFormatter.string(from: Date())" in manager.read_text():
-        replace(manager, "let currentRealTime = postToolTimeFormatter.string(from: Date())",
+    if "let currentRealTime = postToolTimeFormatter.string(from: Date())" in cmp.cm_text(tree):
+        cmp.replace_once(tree, "let currentRealTime = postToolTimeFormatter.string(from: Date())",
                 "let currentRealTime = postToolTimeFormatter.string(from: P0Life.instant)")
     else:
         replace(tree / "TelegramConcierge/Services/Chronology.swift",
@@ -143,7 +153,7 @@ def instrument(tree):
     replace(path, 'id = String((0..<5).map { _ in base36.randomElement()! })', 'id = "p0001"')
     replace(tree / "TelegramConcierge/Models/Message.swift", "id: UUID = UUID(),", "id: UUID = P0Life.messageID(),")
     replace(tree / "TelegramConcierge/Models/Message.swift", "timestamp: Date = Date(),", "timestamp: Date = P0Life.instant,")
-    replace(manager, "updatedAt: Date()", "updatedAt: P0Life.instant")
+    cmp.replace_once(tree, "updatedAt: Date()", "updatedAt: P0Life.instant")
     replace(path, "created: Date()", "created: P0Life.instant")
     replace(path, "lastUsed: Date()", "lastUsed: P0Life.instant")
     replace(path, "session.lastUsed = Date()", "session.lastUsed = P0Life.instant", 3)

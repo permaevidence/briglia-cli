@@ -33,6 +33,9 @@ import shutil
 import subprocess
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cm_split_paths as cmp  # noqa: E402
+
 # Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
 # large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
 LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
@@ -66,7 +69,7 @@ def prepare(tree, ref, candidate):
                 (tree / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / name, tree / name, follow_symlinks=False)
     shutil.copyfile(FIXTURE / "InlineDriver.swift", tree / "TelegramConcierge/CLI/BackgroundArchiveInlineDriver.swift")
-    manager = tree / "TelegramConcierge/Services/ConversationManager.swift"
+    manager = cmp.main_path(tree)  # seams are appended to the main file on both layouts
     manager.write_text(manager.read_text() + (FIXTURE / "ManagerSeam.swift").read_text())
     main = tree / "TelegramConcierge/CLI/AdaMain.swift"
     text = main.read_text()

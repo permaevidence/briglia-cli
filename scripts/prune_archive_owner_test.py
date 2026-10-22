@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import chat_wire_baseline as wire
+import cm_split_paths as cmp
 
 # Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
 # large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
@@ -25,8 +26,8 @@ try:
             shutil.copyfile(ROOT / name, tree / name, follow_symlinks=False)
     fixture = ROOT / 'scripts/fixtures/prune-archives'
     shutil.copyfile(fixture / 'Driver.swift', tree / 'TelegramConcierge/CLI/SnapshotOwnerSelftest.swift')
-    for source, seam in [('ConversationManager.swift', 'ManagerSeam.swift'), ('ConversationArchiveService.swift', 'ArchiveSeam.swift')]:
-        path = tree / 'TelegramConcierge/Services' / source
+    # Seams are appended to the main ConversationManager file on both layouts.
+    for path, seam in [(cmp.main_path(tree), 'ManagerSeam.swift'), (tree / 'TelegramConcierge/Services/ConversationArchiveService.swift', 'ArchiveSeam.swift')]:
         path.write_text(path.read_text() + (fixture / seam).read_text())
     storage = tree / 'TelegramConcierge/Utilities/PrivateStorage.swift'
     text = storage.read_text(); anchor = '        guard rename(tmp.path, target) == 0 else {'

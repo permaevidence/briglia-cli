@@ -13,9 +13,15 @@ import os
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cm_split_paths as cmp  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BINARY = os.path.join(ROOT, ".build/debug/briglia")
-CM = "TelegramConcierge/Services/ConversationManager.swift"
+# ConversationManager: one file before 0.2.59, a 15-file family after; CM
+# mutants are injected with cm_split_paths.replace_once (anchor exactly once
+# across the family).
+CM = "<ConversationManager family>"
 COMPOSE = "TelegramConcierge/Services/PruneSummaryComposition.swift"
 RESTORE = "TelegramConcierge/Services/PruneSummaryRestore.swift"
 
@@ -113,6 +119,10 @@ def build():
 
 
 def apply(path, old, new):
+    if path == CM:
+        before = {p: open(os.path.join(ROOT, p)).read() for p in cmp.cm_paths(ROOT)}
+        target = cmp.replace_once(ROOT, old, new)
+        return target, before[target]
     full = os.path.join(ROOT, path)
     source = open(full).read()
     if old is None:
@@ -124,19 +134,19 @@ def apply(path, old, new):
             raise SystemExit(f"anchor not found exactly once in {path}: {old[:80]!r}")
         mutated = source.replace(old, new)
     open(full, "w").write(mutated)
-    return source
+    return path, source
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--only")
     args = parser.parse_args()
-    originals = {p: open(os.path.join(ROOT, p)).read() for p in (CM, COMPOSE, RESTORE)}
+    originals = {p: open(os.path.join(ROOT, p)).read() for p in cmp.cm_paths(ROOT) + [COMPOSE, RESTORE]}
     caught = 0
     cases = [b for b in BREAKS if not args.only or args.only in b[0]]
     try:
         for name, path, old, new, command, section in cases:
-            original = apply(path, old, new)
+            path, original = apply(path, old, new)
             try:
                 if not build():
                     print(f"✖ {name}: mutated source did not build")

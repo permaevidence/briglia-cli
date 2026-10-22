@@ -20,6 +20,8 @@ Usage:
 import os
 import re
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cm_split_paths as cmp  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "TelegramConcierge")
@@ -44,7 +46,10 @@ def source_files():
                 rel = os.path.relpath(path, ROOT)
                 if SKIP_FILE.search(rel):
                     continue
-                yield rel, path
+                # 0.2.59: the ConversationManager split family is accounted under
+                # the main file's path (explicitly enumerated paths only), so the
+                # allowlist entries and their match multiplicities are unchanged.
+                yield cmp.canonical(rel), path
 
 
 def call_sites():

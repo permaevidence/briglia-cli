@@ -7,12 +7,14 @@ from pathlib import Path
 import subprocess
 import tempfile
 import chat_wire_baseline as wire
+import cm_split_paths as cmp
 
 # Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
 # large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
 LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 
 ROOT = wire.ROOT
+CM_DEFAULTS = 13  # UserDefaults.standard accesses across the ConversationManager family
 parser = argparse.ArgumentParser()
 parser.add_argument('--reuse', type=Path)
 args = parser.parse_args()
@@ -26,27 +28,27 @@ assert 'briglia-active-owner-' in str(root)
 sources = {str(p.relative_to(ROOT)): p.read_text() for p in (ROOT / 'TelegramConcierge').rglob('*.swift')}
 fixture = ROOT / 'scripts/fixtures/active-compaction'
 sources['TelegramConcierge/CLI/ActiveCompactionOwnerSelftest.swift'] = (fixture / 'Driver.swift').read_text()
-key = 'TelegramConcierge/Services/ConversationManager.swift'
-s = sources[key] + (fixture / 'ManagerSeam.swift').read_text() + (fixture / 'SummaryBoundsSeam.swift').read_text()
+# ConversationManager: one file on pinned releases, the 15-file family from
+# 0.2.59. Seams are appended to the main file; each of the 8 CM anchors must
+# occur exactly once across the family (cm_split_paths.replace_once_in).
+cm_main = cmp.main_key()
+sources[cm_main] = sources[cm_main] + (fixture / 'ManagerSeam.swift').read_text() + (fixture / 'SummaryBoundsSeam.swift').read_text()
 anchor = '        let activity = beginMaintenance(.pruning)\n        defer { endMaintenance(activity) }\n        let budget = ActiveTurnBudget'
-assert s.count(anchor) == 1
-sources[key] = s.replace(anchor, '        if CompactionTestInputs.disableCompaction { throw PruneArchiveStore.Failure("negative control: old exhaustion") }\n' + anchor)
-sources[key] = sources[key].replace('        activeTurnCheckpoints[runID] = candidate\n        pendingCompactionCalibration',
+cmp.replace_once_in(sources, anchor, '        if CompactionTestInputs.disableCompaction { throw PruneArchiveStore.Failure("negative control: old exhaustion") }\n' + anchor)
+cmp.replace_once_in(sources, '        activeTurnCheckpoints[runID] = candidate\n        pendingCompactionCalibration',
     '        CompactionTestInputs.noteCompaction()\n        activeTurnCheckpoints[runID] = candidate\n        pendingCompactionCalibration')
-sources[key] = sources[key].replace('        let contextIDs = Set([original.taskMessageID] + original.deliveredUserMessageIDs)',
+cmp.replace_once_in(sources, '        let contextIDs = Set([original.taskMessageID] + original.deliveredUserMessageIDs)',
     '        if let hook = CompactionTestInputs.maintenanceHook { CompactionTestInputs.maintenanceHook = nil; await hook(self) }\n        let contextIDs = Set([original.taskMessageID] + original.deliveredUserMessageIDs)')
-sources[key] = sources[key].replace('               estimate.fixedTextTokens > configuredMaxContextTokens() {',
+cmp.replace_once_in(sources, '               estimate.fixedTextTokens > configuredMaxContextTokens() {',
     '               (CompactionTestInputs.conservativeStartGate ? estimate.tokens : estimate.fixedTextTokens) > configuredMaxContextTokens() {')
-sources[key] = sources[key].replace('            totalTokens += noteTokens(committed) - noteTokens(plannedSource)',
+cmp.replace_once_in(sources, '            totalTokens += noteTokens(committed) - noteTokens(plannedSource)',
     '            if !CompactionTestInputs.omitPruneNotes { totalTokens += noteTokens(committed) - noteTokens(plannedSource) }')
-sources[key] = sources[key].replace('        guard after < before, after <= budget.maximum else {',
+cmp.replace_once_in(sources, '        guard after < before, after <= budget.maximum else {',
     '        guard after < before, after <= (CompactionTestInputs.oldCeilingGate ? budget.inputCeiling : budget.maximum) else {')
 anchor = '        for message in messagesForLLM {\n            if message.role == .assistant'
-assert sources[key].count(anchor) == 1
-sources[key] = sources[key].replace(anchor, '        for (i, message) in messagesForLLM.enumerated() {\n            if (!CompactionTestInputs.protectNewestTurn || i != lastAssistantIndexWithTools(in: messagesForLLM, mandatoryTokens: mandatoryEstimate.tokens)) && message.role == .assistant')
+cmp.replace_once_in(sources, anchor, '        for (i, message) in messagesForLLM.enumerated() {\n            if (!CompactionTestInputs.protectNewestTurn || i != lastAssistantIndexWithTools(in: messagesForLLM, mandatoryTokens: mandatoryEstimate.tokens)) && message.role == .assistant')
 anchor = '                    messages: finalHistory,'
-assert sources[key].count(anchor) == 1
-sources[key] = sources[key].replace(anchor, '                    messages: CompactionTestInputs.unprojectedFinal ? messagesForLLM : finalHistory,')
+cmp.replace_once_in(sources, anchor, '                    messages: CompactionTestInputs.unprojectedFinal ? messagesForLLM : finalHistory,')
 key = 'TelegramConcierge/CLI/AffinitySelftest.swift'
 sources[key] = sources[key].replace('        let body = scripted ?? (status == 200',
     '        let body = CompactionTestInputs.dynamicReply(completeRequests.last!) ?? scripted ?? (status == 200')
@@ -66,8 +68,11 @@ sources[key] = s
 key = 'TelegramConcierge/CLI/AdaMain.swift'
 s = sources[key]; assert s.count('PruneArchiveSelftest.self,') == 1
 sources[key] = s.replace('PruneArchiveSelftest.self,', 'PruneArchiveSelftest.self, ActiveCompactionOwnerSelftest.self,')
+family = set(cmp.cm_keys(sources))
+cmp.replace_all_counted_in(sources, 'UserDefaults.standard', 'CompactionTestInputs.defaults', CM_DEFAULTS)
+cmp.replace_all_counted_in(sources, 'UserDefaults = .standard', 'UserDefaults = CompactionTestInputs.defaults', 0)
 for name, s in sources.items():
-    if 'selftest' not in Path(name).name.lower():
+    if 'selftest' not in Path(name).name.lower() and name not in family:
         s = s.replace('UserDefaults.standard', 'CompactionTestInputs.defaults').replace('UserDefaults = .standard', 'UserDefaults = CompactionTestInputs.defaults')
     p = tree / name; p.parent.mkdir(parents=True, exist_ok=True)
     if not p.exists() or p.read_text() != s: p.write_text(s)
