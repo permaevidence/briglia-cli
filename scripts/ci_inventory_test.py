@@ -851,6 +851,11 @@ def _reorder_gates_b(t):
 
 # The reason each break must be caught for (a substring of one reported error),
 # so a break caught only incidentally by another rule does not count.
+# 0.2.59: the add amendment verifying the immutable ConversationManager split (C1 -> C2).
+SPLIT_STEP = ("      - name: ConversationManager split moved-lines check (C1 to C2, through 0.2.60)\n"
+              "        run: python3 scripts/cm_split_check.py --verify-commit 8bd2718465e1b2150cfcaac03d8274a59e56039e"
+              " --c1 47865661a67cbaefe969cf60e7652e3f310bbcdd\n")
+
 EXPECT = {
     "01": "missing or altered", "02": "not in the frozen inventory", "03": "missing or altered",
     "04": "macos: step not in the frozen inventory", "05": "missing or altered", "06": "missing or altered",
@@ -871,6 +876,9 @@ EXPECT = {
     "46": "belongs only on linux jobs", "47": "must come right after the setup prefix and the inventory step",
     "48": "linux: step not in the frozen inventory", "49": "job-setup amendment step must be exactly {name, run}",
     "50": "must come right after the setup prefix, in amendment order",
+    "51": "linux: frozen step missing or altered (1x): ConversationManager split moved-lines check",
+    "52": "linux: frozen step missing or altered (1x): ConversationManager split moved-lines check",
+    "53": "macos: step not in the frozen inventory (1x): ConversationManager split moved-lines check",
     "P1": "duplicate key", "P2": "indicator '&'", "P3": "unrecognised line", "P4": "indicator '{'",
     "P5": "tab character", "P6": "unsupported block scalar", "P7": "document marker",
 }
@@ -990,6 +998,9 @@ def breaks():
         ("48 host swap step given continue-on-error", lambda t: _insert_after(t, "linux-gates-a", SWAP_STEP, "        continue-on-error: true\n")),
         ("49 job-setup amendment widened beyond {name, run}", lambda t: t, _job_setup_widened),
         ("50 host swap step moved after a gate test", _swap_after_first_gate_test),
+        ("51 split moved-lines check removed", lambda t: sub_once(t, SPLIT_STEP, "", job="linux-core")),
+        ("52 split moved-lines check pointed at another commit", lambda t: sub_once(t, "--verify-commit 8bd2718", "--verify-commit 0000000", job="linux-core")),
+        ("53 split moved-lines check moved to macOS", lambda t: sub_once(sub_once(t, SPLIT_STEP, "", job="linux-core"), "        run: python3 scripts/browser_settings_test.py .build/debug/briglia\n", "        run: python3 scripts/browser_settings_test.py .build/debug/briglia\n" + SPLIT_STEP, job="macos-core")),
         ("P1 parser: duplicate key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    runs-on: macos-15\n")),
         ("P2 parser: anchor and alias", lambda t: sub_once(sub_once(t, "    runs-on: macos-15\n", "    runs-on: &rn macos-15\n", job="macos-core"), "    runs-on: macos-15\n", "    runs-on: *rn\n", job="macos-gates")),
         ("P3 parser: merge key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    <<: *base\n")),

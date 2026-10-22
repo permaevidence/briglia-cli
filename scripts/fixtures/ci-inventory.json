@@ -21,6 +21,15 @@
         "name": "Add host swap (Linux compiler memory headroom)",
         "run": "python3 scripts/ci_host_swap.py"
       }
+    },
+    {
+      "op": "add",
+      "platform": "linux",
+      "reason": "0.2.59 mechanical ConversationManager split (plan v3 §7, D4): verify the immutable C1 -> C2 transformation from git objects (exact construction from the pinned 59860aa base, reviewed access edits read from C1, exact C2 file set) and run its deliberate breaks; independent of the current tree, so later development is unaffected. Kept through 0.2.60, then retired by a reviewed CI change. Owner-approved 2026-10-22; macOS unchanged.",
+      "step": {
+        "name": "ConversationManager split moved-lines check (C1 to C2, through 0.2.60)",
+        "run": "python3 scripts/cm_split_check.py --verify-commit 8bd2718465e1b2150cfcaac03d8274a59e56039e --c1 47865661a67cbaefe969cf60e7652e3f310bbcdd"
+      }
     }
   ],
   "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove|replace|job-setup, platform, step, reason}).",
