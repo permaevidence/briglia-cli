@@ -19,22 +19,40 @@ swap plus headroom. So the helper first deletes preinstalled HOST toolchains
 that no Linux job uses: every job runs inside the swift:*-jammy container with
 its own Swift, apt packages, Node (/opt/node inside the container) and
 Playwright; the host only provides Docker and the runner itself. Only the fixed
-paths in CLEANUP_PATHS are removed; the runner (/home/runner), Docker
-(/var/lib/docker), the tool cache mounted into the job as /__t
-(/opt/hostedtoolcache) and the system binaries are never touched, and the
-script refuses to run if the list ever overlaps them.
+paths in CLEANUP_PATHS are removed, and every one of them must be in the
+reviewed allow-list APPROVED_CLEANUP_PATHS (exact strings, plain lowercase
+canonical absolute paths). Adding a path means editing that list, which
+scripts/ci_inventory_test.py pins, so every addition is reviewed on its own.
+The list is validated before the first Docker call. On the host, every path
+is checked before anything is deleted: a symlinked path or ancestor, or a path
+that is itself a mount point, aborts the step with nothing removed. Removal
+uses `rm --one-file-system`, so a different filesystem mounted further inside
+fails the step instead of being crossed. This protects against the listed
+mistakes for these fixed paths on a GitHub-hosted runner; it is not a general
+filesystem sandbox (a concurrent process could still change the host between
+the check and the removal).
+
+The swap step is idempotent: an already-active briglia-ci.swap on either
+candidate filesystem is reused before any free-space check.
 
 The step fails loudly if cleanup or the swap fails, so a run never silently
-goes back to the no-headroom configuration. Standard library only.
+goes back to the no-headroom configuration. A failure after deletions started
+can leave some toolchains removed (the runner VM is disposable). The helper
+container carries a per-run label; it is force-removed by ID, or found by that
+label when the create response was lost. A killed script can still leave a
+helper behind until the VM is discarded. Standard library only.
 """
 
 import http.client
 import json
 import os
+import posixpath
+import re
 import socket
 import struct
 import sys
 import urllib.parse
+import uuid
 
 SOCKET = "/var/run/docker.sock"
 SWAP_FILE_NAME = "briglia-ci.swap"
@@ -52,53 +70,83 @@ CLEANUP_PATHS = (
     "/usr/local/share/powershell",
     "/usr/share/swift",           # host Swift; the jobs use the container's
 )
-# Never deleted, and no cleanup path may be inside or above one of these.
-PROTECTED_PATHS = (
-    "/", "/usr", "/usr/local", "/usr/share", "/usr/local/lib", "/usr/local/share",
-    "/opt", "/usr/bin", "/usr/local/bin", "/usr/lib", "/bin", "/sbin", "/lib",
-    "/etc", "/var", "/var/lib/docker", "/var/run", "/home", "/home/runner",
-    "/opt/hostedtoolcache", "/mnt", "/tmp", "/proc", "/sys", "/dev", "/boot", "/run",
-)
+# The reviewed allow-list. A cleanup path must be one of these exact strings;
+# scripts/ci_inventory_test.py pins this set, so a new entry needs its own review.
+APPROVED_CLEANUP_PATHS = frozenset({
+    "/usr/local/lib/android",
+    "/usr/share/dotnet",
+    "/opt/ghc",
+    "/usr/local/.ghcup",
+    "/usr/local/share/boost",
+    "/usr/local/share/powershell",
+    "/usr/share/swift",
+})
+# Lowercase ASCII components, no empty/"."/".." component, no leading "//".
+_PLAIN_PATH = re.compile(r"(?:/(?!\.{1,2}(?:/|\Z))[a-z0-9._-]+)+\Z")
 
 
-def check_cleanup_paths(paths=CLEANUP_PATHS, protected=PROTECTED_PATHS):
-    """Refuse a cleanup list that could reach anything the runner or Docker needs."""
+def check_cleanup_paths(paths=CLEANUP_PATHS, approved=APPROVED_CLEANUP_PATHS):
+    """Refuse any cleanup list that is not a subset of the reviewed allow-list."""
+    if not isinstance(paths, (tuple, list)) or not paths:
+        raise ValueError("cleanup list must be a non-empty tuple of paths")
+    if len(set(paths)) != len(paths):
+        raise ValueError("cleanup list has a duplicate path")
     for p in paths:
-        if not p.startswith("/") or p != os.path.normpath(p) or "'" in p or " " in p:
-            raise ValueError(f"cleanup path {p!r} is not a plain absolute path")
-        for q in protected:
-            if p == q or q.startswith(p.rstrip("/") + "/"):
-                raise ValueError(f"cleanup path {p} would delete protected {q}")
-            if q != "/" and p.startswith(q + "/") and q not in ("/usr", "/usr/local", "/usr/share",
-                                                                 "/usr/local/lib", "/usr/local/share", "/opt"):
-                raise ValueError(f"cleanup path {p} is inside protected {q}")
+        if not isinstance(p, str) or not _PLAIN_PATH.match(p) or posixpath.normpath(p) != p:
+            raise ValueError(f"cleanup path {p!r} is not a plain canonical absolute path")
+        if p not in approved:
+            raise ValueError(f"cleanup path {p} is not in the reviewed allow-list")
 
+
+# __ROOT__ is empty on the runner; scripts/ci_inventory_test.py renders it with
+# a scratch directory (and stub host commands) to exercise this logic.
 HOST_SCRIPT = r"""
 set -eu
+ROOT=__ROOT__
 SIZE_GIB=__SIZE__
 SPARE_GIB=__SPARE__
 NAME=__NAME__
-echo "host disk before cleanup:"; df -h / /mnt 2>/dev/null || df -h /
-pids=""
+command -v mountpoint >/dev/null 2>&1 || { echo "mountpoint(1) missing; refusing to delete anything" >&2; exit 1; }
+echo "host disk before cleanup:"; df -h "$ROOT/" "$ROOT/mnt" 2>/dev/null || df -h "$ROOT/"
+# Check every path (and each ancestor) before deleting anything.
+present=""
 for p in __CLEANUP__; do
-  if [ -L "$p" ]; then echo "refusing: $p is a symlink" >&2; exit 1; fi
-  if [ -e "$p" ]; then echo "removing $p"; rm -rf --one-file-system -- "$p" & pids="$pids $!"; else echo "absent: $p"; fi
+  t="$ROOT$p"
+  a="$ROOT"
+  rest="${p#/}"
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    a="$a/$part"
+    if [ -L "$a" ]; then echo "refusing: $a is a symlink" >&2; exit 1; fi
+    case "$rest" in */*) rest="${rest#*/}" ;; *) rest="" ;; esac
+  done
+  if [ -e "$t" ]; then
+    if mountpoint -q "$t"; then echo "refusing: $t is a mount point" >&2; exit 1; fi
+    present="$present $t"
+  else
+    echo "absent: $t"
+  fi
 done
+pids=""
+for t in $present; do echo "removing $t"; rm -rf --one-file-system -- "$t" & pids="$pids $!"; done
 for pid in $pids; do wait "$pid" || { echo "cleanup failed" >&2; exit 1; }; done
-echo "host disk after cleanup:"; df -h / /mnt 2>/dev/null || df -h /
+echo "host disk after cleanup:"; df -h "$ROOT/" "$ROOT/mnt" 2>/dev/null || df -h "$ROOT/"
 echo "host swap before:"; swapon --show || true; free -h
-DIR=""
-for d in /mnt /; do
-  [ -d "$d" ] || continue
-  avail=$(df -Pk "$d" | awk 'NR==2 {print $4}')
-  if [ "$avail" -ge $(( (SIZE_GIB + SPARE_GIB) * 1024 * 1024 )) ]; then DIR="$d"; break; fi
-  echo "$d: only ${avail} KiB free, need $(( (SIZE_GIB + SPARE_GIB) * 1024 * 1024 )) KiB"
+SWAP=""
+for d in "$ROOT/mnt" "$ROOT/"; do
+  c="${d%/}/$NAME"
+  if swapon --show=NAME --noheadings | grep -qx "$c"; then SWAP="$c"; echo "$SWAP already active"; break; fi
 done
-[ -n "$DIR" ] || { echo "no filesystem with room for a ${SIZE_GIB} GiB swap file" >&2; exit 1; }
-SWAP="${DIR%/}/$NAME"
-if swapon --show=NAME --noheadings | grep -qx "$SWAP"; then
-  echo "$SWAP already active"
-else
+if [ -z "$SWAP" ]; then
+  DIR=""
+  for d in "$ROOT/mnt" "$ROOT/"; do
+    [ -d "$d" ] || continue
+    avail=$(df -Pk "$d" | awk 'NR==2 {print $4}')
+    if [ "$avail" -ge $(( (SIZE_GIB + SPARE_GIB) * 1024 * 1024 )) ]; then DIR="$d"; break; fi
+    echo "$d: only ${avail} KiB free, need $(( (SIZE_GIB + SPARE_GIB) * 1024 * 1024 )) KiB"
+  done
+  [ -n "$DIR" ] || { echo "no filesystem with room for a ${SIZE_GIB} GiB swap file" >&2; exit 1; }
+  SWAP="${DIR%/}/$NAME"
   rm -f "$SWAP"
   fallocate -l "${SIZE_GIB}G" "$SWAP" || dd if=/dev/zero of="$SWAP" bs=1M count=$(( SIZE_GIB * 1024 )) status=none
   chmod 600 "$SWAP"
@@ -107,6 +155,18 @@ else
 fi
 echo "host swap after:"; swapon --show; free -h
 """
+
+
+def render_host_script(root="", paths=CLEANUP_PATHS):
+    """The host shell script; `root` is "" on the runner (tests use a scratch dir)."""
+    check_cleanup_paths(paths)
+    if root and (not root.startswith("/") or any(ch in root for ch in "'\"\\$` \t\n")):
+        raise ValueError("test root must be a plain absolute path (no quotes, spaces or shell characters)")
+    return (HOST_SCRIPT.replace("__ROOT__", f"'{root}'")
+            .replace("__SIZE__", str(SIZE_GIB))
+            .replace("__SPARE__", str(SPARE_GIB))
+            .replace("__NAME__", SWAP_FILE_NAME)
+            .replace("__CLEANUP__", " ".join(f"'{p}'" for p in paths)))
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -157,25 +217,43 @@ def swap_total_kib():
     raise RuntimeError("SwapTotal missing from /proc/meminfo")
 
 
+HELPER_LABEL = "briglia-ci-swap-helper"
+
+
+def remove_labelled_helpers(token):
+    """Force-remove helpers of this run found by label (lost create response)."""
+    filters = urllib.parse.quote(json.dumps({"label": [f"{HELPER_LABEL}={token}"]}))
+    for c in api("GET", f"/containers/json?all=1&filters={filters}") or []:
+        api("DELETE", f"/containers/{c['Id']}?force=1")
+
+
 def main():
+    # Validate before any Docker call or host change.
+    check_cleanup_paths(CLEANUP_PATHS)
+    script = render_host_script("", CLEANUP_PATHS)
     if not os.path.exists(SOCKET):
         print(f"{SOCKET} is not mounted into the job container", file=sys.stderr)
         return 1
     me = api("GET", f"/containers/{urllib.parse.quote(socket.gethostname())}/json")
     image = me["Config"]["Image"]
-    check_cleanup_paths()
     before = swap_total_kib()
-    script = (HOST_SCRIPT.replace("__SIZE__", str(SIZE_GIB))
-              .replace("__SPARE__", str(SPARE_GIB))
-              .replace("__NAME__", SWAP_FILE_NAME)
-              .replace("__CLEANUP__", " ".join(f"'{p}'" for p in CLEANUP_PATHS)))
-    created = api("POST", "/containers/create", {
-        "Image": image,
-        "User": "0",
-        "Entrypoint": ["nsenter"],
-        "Cmd": ["--target", "1", "--mount", "--", "/bin/sh", "-c", script],
-        "HostConfig": {"Privileged": True, "PidMode": "host", "NetworkMode": "none"},
-    })
+    token = uuid.uuid4().hex
+    try:
+        created = api("POST", "/containers/create", {
+            "Image": image,
+            "User": "0",
+            "Labels": {HELPER_LABEL: token},
+            "Entrypoint": ["nsenter"],
+            "Cmd": ["--target", "1", "--mount", "--", "/bin/sh", "-c", script],
+            "HostConfig": {"Privileged": True, "PidMode": "host", "NetworkMode": "none"},
+        })
+    except Exception:
+        # The daemon may have created it even though the response was lost.
+        try:
+            remove_labelled_helpers(token)
+        except Exception as e:  # cleanup only; the create error is what fails the step
+            print(f"warning: helper lookup by label failed: {e}", file=sys.stderr)
+        raise
     cid = created["Id"]
     try:
         api("POST", f"/containers/{cid}/start")

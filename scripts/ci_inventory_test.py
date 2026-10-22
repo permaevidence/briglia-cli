@@ -501,14 +501,18 @@ def expected_tests(fixture, plat):
 
 
 JOB_SETUP_KEYS = {"name", "run"}
+# Exact, reviewed job-setup commands. A literal "no swift build" test let
+# `swift  build` or an indirectly building script through (Codex, swap review
+# 2026-10-21 note 2); a new setup command now needs its own entry here.
+APPROVED_JOB_SETUP_RUNS = frozenset({"python3 scripts/ci_host_swap.py"})
 
 
 def job_setup_steps(fixture):
     """{platform: [canon(step), ...]} from the `job-setup` amendments, validated.
 
     Deliberately narrow: the step is exactly {name, run} (no if/env/shell/
-    continue-on-error/...), never builds or runs the product, and is not a
-    frozen setup, test or inventory step.
+    continue-on-error/...), its run is one of APPROVED_JOB_SETUP_RUNS (exact
+    string), and it is not a frozen setup, test or inventory step.
     """
     frozen = {canon(s["step"]) for p in ("linux", "macos") for s in fixture["platforms"][p]["setup"]}
     frozen |= {canon(t) for p in ("linux", "macos") for t in fixture["platforms"][p]["tests"]}
@@ -524,8 +528,8 @@ def job_setup_steps(fixture):
         if not isinstance(step, dict) or set(step) != JOB_SETUP_KEYS \
                 or not all(isinstance(step[k], str) and step[k] for k in JOB_SETUP_KEYS):
             raise ValueError("job-setup amendment step must be exactly {name, run} with non-empty strings")
-        if "swift build" in step["run"] or ".build/" in step["run"]:
-            raise ValueError("job-setup amendment step must not build or run the product")
+        if step["run"] not in APPROVED_JOB_SETUP_RUNS:
+            raise ValueError("job-setup amendment step run is not an approved setup command")
         c = canon(step)
         if c in frozen or any(c in v for v in out.values()):
             raise ValueError("job-setup amendment step duplicates a frozen or another job-setup step")
@@ -879,6 +883,8 @@ EXPECT = {
     "51": "linux: frozen step missing or altered (1x): ConversationManager split moved-lines check",
     "52": "linux: frozen step missing or altered (1x): ConversationManager split moved-lines check",
     "53": "macos: step not in the frozen inventory (1x): ConversationManager split moved-lines check",
+    "54": "job-setup amendment step run is not an approved setup command",
+    "55": "job-setup amendment step run is not an approved setup command",
     "P1": "duplicate key", "P2": "indicator '&'", "P3": "unrecognised line", "P4": "indicator '{'",
     "P5": "tab character", "P6": "unsupported block scalar", "P7": "document marker",
 }
@@ -920,6 +926,17 @@ def _job_setup_widened(fx):
             a["step"] = dict(a["step"], **{"continue-on-error": True})
             return fx
     raise BreakSetupError("no job-setup amendment in the fixture")
+
+
+def _job_setup_run(run):
+    def mutate(fx):
+        fx = copy.deepcopy(fx)
+        for a in fx.get("amendments", []):
+            if a.get("op") == "job-setup":
+                a["step"] = dict(a["step"], run=run)
+                return fx
+        raise BreakSetupError("no job-setup amendment in the fixture")
+    return mutate
 
 
 def _swap_after_first_gate_test(t):
@@ -1001,6 +1018,8 @@ def breaks():
         ("51 split moved-lines check removed", lambda t: sub_once(t, SPLIT_STEP, "", job="linux-core")),
         ("52 split moved-lines check pointed at another commit", lambda t: sub_once(t, "--verify-commit 8bd2718", "--verify-commit 0000000", job="linux-core")),
         ("53 split moved-lines check moved to macOS", lambda t: sub_once(sub_once(t, SPLIT_STEP, "", job="linux-core"), "        run: python3 scripts/browser_settings_test.py .build/debug/briglia\n", "        run: python3 scripts/browser_settings_test.py .build/debug/briglia\n" + SPLIT_STEP, job="macos-core")),
+        ("54 job-setup amendment builds with two spaces (swift  build)", lambda t: t, _job_setup_run("swift  build -j 2")),
+        ("55 job-setup amendment runs a script that builds indirectly", lambda t: t, _job_setup_run("python3 scripts/responses_lifecycle_test.py")),
         ("P1 parser: duplicate key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    runs-on: macos-15\n")),
         ("P2 parser: anchor and alias", lambda t: sub_once(sub_once(t, "    runs-on: macos-15\n", "    runs-on: &rn macos-15\n", job="macos-core"), "    runs-on: macos-15\n", "    runs-on: *rn\n", job="macos-gates")),
         ("P3 parser: merge key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    <<: *base\n")),
@@ -1192,6 +1211,303 @@ def psych(refs):
 
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Host swap helper contract (scripts/ci_host_swap.py)
+# ---------------------------------------------------------------------------
+# The workflow step is frozen above; this pins what the script it runs may
+# delete and how it behaves (Codex swap reviews 2026-10-21/22 notes). The host
+# shell logic runs for real inside a scratch root with stub host commands
+# (df/free/swapon/fallocate/mkswap/mountpoint/rm); nothing outside the scratch
+# root is touched and no swap is created.
+
+SWAP_SCRIPT = os.path.join(ROOT, "scripts", "ci_host_swap.py")
+# The reviewed allow-list, pinned here: widening it is a reviewed test edit.
+SWAP_APPROVED = (
+    "/usr/local/lib/android", "/usr/share/dotnet", "/opt/ghc", "/usr/local/.ghcup",
+    "/usr/local/share/boost", "/usr/local/share/powershell", "/usr/share/swift",
+)
+# Well-formed but not approved: refused by the allow-list.
+SWAP_UNAPPROVED_PATHS = ("/usr/sbin", "/root", "/usr/lib64", "/usr/bin", "/var/lib/docker", "/opt/hostedtoolcache")
+# Malformed: refused by the path grammar even if an allow-list contained them.
+SWAP_BAD_GRAMMAR_PATHS = ("//usr/bin", "/usr/share/swift\t", "/usr/share/../share/swift", "/usr/share/swift/",
+                          "/opt/./ghc", "/USR/share/swift", "/", "", "usr/share/swift", "/usr/share/swift dotnet")
+
+STUBS = {
+    "df": r"""#!/bin/sh
+if [ "$1" = "-Pk" ]; then
+  echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+  case "$2" in */mnt) a="${STUB_DF_MNT:-0}" ;; *) a="${STUB_DF_ROOT:-0}" ;; esac
+  echo "stub 100 0 $a 0% $2"; exit 0
+fi
+echo "df $*"
+""",
+    "free": "#!/bin/sh\necho free\n",
+    "swapon": r"""#!/bin/sh
+case "$1" in
+  --show*) [ -n "${STUB_ACTIVE:-}" ] && printf '%s\n' "$STUB_ACTIVE"; exit 0 ;;
+  *) echo "swapon $1" >> "$STUB_LOG" ;;
+esac
+""",
+    "fallocate": "#!/bin/sh\necho \"fallocate $*\" >> \"$STUB_LOG\"\n: > \"$3\"\n",
+    "mkswap": "#!/bin/sh\necho \"mkswap $1\" >> \"$STUB_LOG\"\n",
+    "mountpoint": r"""#!/bin/sh
+[ "$1" = "-q" ] || exit 2
+for m in ${STUB_MOUNTS:-}; do [ "$m" = "$2" ] && exit 0; done
+exit 1
+""",
+    "rm": r"""#!/bin/sh
+if [ "$1" = "-rf" ] && [ "$2" = "--one-file-system" ] && [ "$3" = "--" ] && [ $# -eq 4 ]; then
+  for f in ${STUB_RM_FAIL:-}; do [ "$f" = "$4" ] && exit 1; done
+  echo "rm $4" >> "$STUB_LOG"; exec /bin/rm -rf -- "$4"
+fi
+if [ "$1" = "-f" ] && [ $# -eq 2 ]; then exec /bin/rm -f "$2"; fi
+echo "unexpected rm $*" >&2; exit 2
+""",
+}
+
+
+def load_swap_module(source=None):
+    import types
+    if source is None:
+        with open(SWAP_SCRIPT, encoding="utf-8") as f:
+            source = f.read()
+    mod = types.ModuleType("ci_host_swap_under_test")
+    mod.__file__ = SWAP_SCRIPT
+    exec(compile(source, SWAP_SCRIPT, "exec"), mod.__dict__)
+    return mod
+
+
+def _host_scenarios(mod, base):
+    """Run the rendered host script in scratch roots; return error strings."""
+    errs = []
+    stubdir = os.path.join(base, "stubs")
+    os.makedirs(stubdir)
+    for name, body in STUBS.items():
+        path = os.path.join(stubdir, name)
+        with open(path, "w") as f:
+            f.write(body)
+        os.chmod(path, 0o755)
+    # Hermetic PATH: the stubs plus the few real tools the script needs, so a
+    # host's real mountpoint/swapon/df can never be reached.
+    import shutil
+    for tool in ("awk", "grep", "chmod"):
+        real = shutil.which(tool)
+        if not real:
+            return [f"swap: {tool} not found for the host-script scenarios"]
+        os.symlink(real, os.path.join(stubdir, tool))
+    big, small = str(40 * 1024 * 1024), str(1024 * 1024)
+
+    def run(tag, setup, env_extra, no_mountpoint=False):
+        root = os.path.join(base, tag)
+        assert root.startswith(base + os.sep) and os.path.isdir(base)
+        for p in SWAP_APPROVED:
+            os.makedirs(root + p)
+            with open(os.path.join(root + p, "payload"), "w") as f:
+                f.write("x")
+        os.makedirs(os.path.join(root, "mnt"))
+        log = os.path.join(base, tag + ".log")
+        open(log, "w").close()
+        setup(root)
+        sd = stubdir
+        if no_mountpoint:
+            sd = os.path.join(base, tag + "-stubs")
+            os.makedirs(sd)
+            for n in os.listdir(stubdir):
+                if n != "mountpoint":
+                    os.symlink(os.path.join(stubdir, n), os.path.join(sd, n))
+        env = {"PATH": sd, "STUB_LOG": log, "LC_ALL": "C"}
+        env.update({k: v.replace("@ROOT@", root) for k, v in env_extra.items()})
+        script = mod.render_host_script(root, mod.CLEANUP_PATHS)
+        r = subprocess.run(["/bin/sh", "-c", script], env=env, capture_output=True, text=True, timeout=60)
+        with open(log) as f:
+            calls = f.read().splitlines()
+        present = [p for p in SWAP_APPROVED if os.path.lexists(root + p)]
+        return r, calls, present, root
+
+    # a) clean run: every path removed, one swap file allocated under /mnt.
+    r, calls, present, root = run("a", lambda root: None, {"STUB_DF_MNT": big, "STUB_DF_ROOT": big})
+    swap = root + "/mnt/briglia-ci.swap"
+    if r.returncode != 0 or present or f"swapon {swap}" not in calls or not any(c.startswith("fallocate") for c in calls):
+        errs.append(f"swap: clean run did not remove every path and allocate the swap file under /mnt (exit {r.returncode}, {len(present)} path(s) left; {r.stderr.strip()[:120]})")
+
+    def refused(tag, setup, extra, what, **kw):
+        r, calls, present, _ = run(tag, setup, dict({"STUB_DF_MNT": big, "STUB_DF_ROOT": big}, **extra), **kw)
+        removed = [c for c in calls if c.startswith("rm ")]
+        if r.returncode == 0 or removed:
+            errs.append(f"swap: {what} was not refused before any deletion (exit {r.returncode}, {len(removed)} path(s) removed)")
+
+    def ancestor_link(root):
+        os.rename(root + "/usr/local", root + "/usr/local-real")
+        os.symlink(root + "/usr/local-real", root + "/usr/local")
+    refused("b", ancestor_link, {}, "a symlinked ancestor")
+
+    def final_link(root):  # last path in the list: earlier paths must survive
+        import shutil
+        shutil.rmtree(root + "/usr/share/swift")
+        os.symlink(root + "/opt", root + "/usr/share/swift")
+    refused("c", final_link, {}, "a symlinked final path (late in the list)")
+    refused("d", lambda root: None, {"STUB_MOUNTS": "@ROOT@/usr/share/dotnet"}, "a path that is a mount point")
+    refused("e", lambda root: None, {}, "cleanup without mountpoint(1)", no_mountpoint=True)
+
+    # f/g) idempotent: an active file is reused even with no free space left.
+    for tag, active in (("f", "@ROOT@/mnt/briglia-ci.swap"), ("g", "@ROOT@/briglia-ci.swap")):
+        r, calls, _, _ = run(tag, lambda root: None, {"STUB_DF_MNT": small, "STUB_DF_ROOT": small, "STUB_ACTIVE": active})
+        if r.returncode != 0 or any(c.startswith(("fallocate", "swapon")) for c in calls):
+            errs.append(f"swap: already-active {active.replace('@ROOT@', '')} was not reused (exit {r.returncode}, allocated {any(c.startswith('fallocate') for c in calls)})")
+    # h) no room anywhere and nothing active: fail loudly.
+    r, calls, _, _ = run("h", lambda root: None, {"STUB_DF_MNT": small, "STUB_DF_ROOT": small})
+    if r.returncode == 0 or any(c.startswith("fallocate") for c in calls):
+        errs.append(f"swap: no room for the swap file did not fail the step (exit {r.returncode})")
+    # i) one removal fails: the step fails.
+    r, calls, _, _ = run("i", lambda root: None, {"STUB_DF_MNT": big, "STUB_DF_ROOT": big, "STUB_RM_FAIL": "@ROOT@/usr/share/dotnet"})
+    if r.returncode == 0:
+        errs.append("swap: a failed removal did not fail the step")
+    return errs
+
+
+def swap_contract_errors(source=None):
+    errs = []
+    try:
+        mod = load_swap_module(source)
+    except Exception as e:  # noqa: BLE001 - any load failure is a contract failure
+        return [f"swap: script does not load: {e}"]
+    approved = getattr(mod, "APPROVED_CLEANUP_PATHS", None)
+    if approved != frozenset(SWAP_APPROVED):
+        errs.append(f"swap: allow-list differs from the reviewed pin: {sorted(set(approved or ()) ^ set(SWAP_APPROVED))}")
+    try:
+        mod.check_cleanup_paths(mod.CLEANUP_PATHS, mod.APPROVED_CLEANUP_PATHS)
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"swap: the shipped cleanup list is refused: {e}")
+    if not set(getattr(mod, "CLEANUP_PATHS", ())) <= set(SWAP_APPROVED):
+        errs.append("swap: cleanup list goes beyond the reviewed allow-list")
+    probes = [(bad, mod.APPROVED_CLEANUP_PATHS, "pinned allow-list") for bad in SWAP_UNAPPROVED_PATHS + SWAP_BAD_GRAMMAR_PATHS]
+    probes += [(bad, frozenset({bad}), "allow-list containing it") for bad in SWAP_BAD_GRAMMAR_PATHS]
+    probes += [(("/opt/ghc", "/opt/ghc"), mod.APPROVED_CLEANUP_PATHS, "duplicate")]
+    for bad, appr, how in probes:
+        try:
+            mod.check_cleanup_paths(bad if isinstance(bad, tuple) else (bad,), appr)
+            errs.append(f"swap: path guard accepted {bad!r} ({how})")
+        except ValueError:
+            pass
+    # Validation precedes every Docker call.
+    calls = []
+    mod.api = lambda *a, **k: calls.append(a) or {"Config": {"Image": "x"}, "Id": "x", "StatusCode": 0}
+    mod.os = type("O", (), {"path": type("P", (), {"exists": staticmethod(lambda p: True)})})
+    mod.swap_total_kib = lambda: 0
+    mod.CLEANUP_PATHS = ("/root",)
+    try:
+        with _quiet():
+            mod.main()
+        errs.append("swap: main() accepted a cleanup list outside the allow-list")
+    except ValueError:
+        pass
+    if calls:
+        errs.append(f"swap: main() called Docker before validating the cleanup list ({calls[0][:2]})")
+    # A lost create response: the helper is found by its label and removed.
+    mod = load_swap_module(source)
+    seen = []
+
+    def api(method, path, body=None, **k):
+        seen.append((method, path, body))
+        if method == "POST" and path == "/containers/create":
+            raise TimeoutError("response lost")
+        if method == "GET" and path.startswith("/containers/json"):
+            return [{"Id": "orphan"}]
+        return {"Config": {"Image": "x"}}
+    mod.api = api
+    mod.os = type("O", (), {"path": type("P", (), {"exists": staticmethod(lambda p: True)})})
+    mod.swap_total_kib = lambda: 0
+    try:
+        with _quiet():
+            mod.main()
+    except TimeoutError:
+        pass
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"swap: lost create response raised {type(e).__name__} instead of the original error")
+    created = [b for m, p, b in seen if p == "/containers/create"]
+    label = (created[0] or {}).get("Labels", {}).get(getattr(mod, "HELPER_LABEL", ""), "") if created else ""
+    listed = [p for m, p, _ in seen if m == "GET" and p.startswith("/containers/json")]
+    if not label or not any(urllib_quote_label(label) in p for p in listed) or ("DELETE", "/containers/orphan?force=1", None) not in seen:
+        errs.append("swap: a helper created behind a lost response is not found by its label and removed")
+    import tempfile as _tf
+    with _tf.TemporaryDirectory(prefix="briglia-swap-contract-") as base:
+        errs += _host_scenarios(mod, os.path.realpath(base))
+    return errs
+
+
+def _quiet():
+    import contextlib
+    import io
+    stack = contextlib.ExitStack()
+    stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+    stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+    return stack
+
+
+def urllib_quote_label(token):
+    import urllib.parse
+    return urllib.parse.quote(token)
+
+
+def _swap_sub(old, new):
+    def mutate(src):
+        if old not in src:
+            raise BreakSetupError(f"swap source anchor not found: {old[:60]!r}")
+        return src.replace(old, new, 1)
+    return mutate
+
+
+SWAP_BREAKS = [
+    ("S1 allow-list widened with /root (list and set together)",
+     lambda src: _swap_sub('    "/usr/share/swift",\n})', '    "/usr/share/swift",\n    "/root",\n})')(
+         _swap_sub('    "/usr/share/swift",           # host Swift; the jobs use the container\'s\n)',
+                   '    "/usr/share/swift",           # host Swift; the jobs use the container\'s\n    "/root",\n)')(src)),
+     "allow-list differs from the reviewed pin"),
+    ("S2 allow-list check disabled", _swap_sub("        if p not in approved:\n", "        if False:\n"), "path guard accepted '/usr/sbin'"),
+    ("S3 path grammar check removed", _swap_sub("not _PLAIN_PATH.match(p) or ", ""), "path guard accepted '//usr/bin'"),
+    ("S4 validation moved after the Docker inspect",
+     lambda src: _swap_sub('    image = me["Config"]["Image"]\n', '    image = me["Config"]["Image"]\n    check_cleanup_paths(CLEANUP_PATHS)\n')(
+         _swap_sub('    check_cleanup_paths(CLEANUP_PATHS)\n    script = render_host_script("", CLEANUP_PATHS)\n', '    script = None\n')(src).replace(
+             '"Cmd": ["--target", "1", "--mount", "--", "/bin/sh", "-c", script]', '"Cmd": ["--target", "1", "--mount", "--", "/bin/sh", "-c", render_host_script("", CLEANUP_PATHS)]')),
+     "called Docker before validating"),
+    ("S5 symlink check removed", _swap_sub('    if [ -L "$a" ]; then echo "refusing: $a is a symlink" >&2; exit 1; fi\n', ''), "a symlinked ancestor"),
+    ("S6 mount-point check removed", _swap_sub('    if mountpoint -q "$t"; then echo "refusing: $t is a mount point" >&2; exit 1; fi\n', ''), "a path that is a mount point"),
+    ("S7 missing mountpoint(1) no longer refused", _swap_sub('command -v mountpoint >/dev/null 2>&1 || { echo "mountpoint(1) missing; refusing to delete anything" >&2; exit 1; }\n', ''), "cleanup without mountpoint(1)"),
+    ("S8 deletion interleaved with the checks", _swap_sub('    present="$present $t"\n', '    rm -rf --one-file-system -- "$t"\n    present="$present $t"\n'), "a symlinked final path (late in the list)"),
+    ("S9 idempotence check dropped", _swap_sub('  if swapon --show=NAME --noheadings | grep -qx "$c"; then SWAP="$c"; echo "$SWAP already active"; break; fi\n', ''), "was not reused"),
+    ("S10 rm without --one-file-system", _swap_sub('rm -rf --one-file-system -- "$t" &', 'rm -rf -- "$t" &'), "clean run did not remove every path"),
+    ("S11 lost create response no longer cleaned up", _swap_sub("            remove_labelled_helpers(token)\n", "            pass\n"), "not found by its label"),
+]
+
+
+def run_swap_breaks():
+    with open(SWAP_SCRIPT, encoding="utf-8") as f:
+        src = f.read()
+    missed = []
+    for name, mutate, want in SWAP_BREAKS:
+        try:
+            mutated = mutate(src)
+        except BreakSetupError as e:
+            missed.append(f"{name}: could not be applied ({e})")
+            print(f"  BREAK {name}: NOT APPLIED ({e})")
+            continue
+        if mutated == src:
+            missed.append(f"{name}: mutation changed nothing")
+            continue
+        errs = swap_contract_errors(mutated)
+        hit = [e for e in errs if want in e]
+        if hit:
+            print(f"  BREAK {name}: caught — {hit[0]}")
+        elif errs:
+            missed.append(f"{name}: caught only for another reason ({errs[0]})")
+            print(f"  BREAK {name}: WRONG REASON — {errs[0]}")
+        else:
+            missed.append(name)
+            print(f"  BREAK {name}: NOT CAUGHT")
+    return len(SWAP_BREAKS), missed
+
+
+
 def main(argv):
     if argv[:1] == ["--record"] and len(argv) == 2:
         record(argv[1])
@@ -1240,7 +1556,16 @@ def main(argv):
     print(f"deliberate breaks caught: {nb - len(missed)}/{nb}")
     for m in missed:
         print(f"  NOT CAUGHT: {m}")
-    return 0 if not (pfail or prov or errs or missed) else 1
+    swap_errs = swap_contract_errors()
+    print(f"host swap helper contract (scripts/ci_host_swap.py): {'ok' if not swap_errs else 'FAILED'}")
+    for e in swap_errs:
+        print(f"  {e}")
+    print("host swap helper deliberate breaks:")
+    ns, smissed = run_swap_breaks()
+    print(f"host swap helper breaks caught: {ns - len(smissed)}/{ns}")
+    for m in smissed:
+        print(f"  NOT CAUGHT: {m}")
+    return 0 if not (pfail or prov or errs or missed or swap_errs or smissed) else 1
 
 
 if __name__ == "__main__":
