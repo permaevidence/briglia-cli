@@ -1,5 +1,5 @@
 {
   "source": "summary-bounds",
-  "sha256": "b471a56ab032fa6cc6ef62aa6ac0ab0583cd2746233fdb0998d15f381e3e4e34",
-  "purpose": "Versioned active-turn checkpoint and optional Message summary; requires independent review. Last change: accepted summary bound 36,000 -> CompactionSummaryPolicy.maxBytes (65,536); no field added or removed."
+  "sha256": "13bf45910b41360e9e1f7b87f70cc2dd4019e5797e7b0e1998f9b9592141e632",
+  "purpose": "Versioned active-turn checkpoint and optional Message summary; requires independent review. Last change: projectedHistory gives the transient outcome note the compaction time (snapshot basename, then task message) instead of Date(), so its reply-time metadata stays stable across requests; no field added or removed, persisted format unchanged."
 }

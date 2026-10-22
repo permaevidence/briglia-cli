@@ -94,7 +94,15 @@ struct TurnCheckpoint: Codable {
         try validate(history: canonical)
         guard let activeTurnCompaction else { return history }
         var result = history
-        var note = Message(id: outcomeMessageID, role: .assistant, content: "")
+        // The note is rebuilt for every request; its time is rendered as the
+        // "Assistant reply time" metadata line, so it must not be "now" or the
+        // request prefix changes whenever a minute boundary falls between two
+        // rounds of a compacted turn. Use the compaction's own time (its
+        // snapshot), then the task message's, both stable for the turn.
+        let stableTime = activeTurnCompaction.latestSnapshotReference.createdAt
+            ?? canonical.first(where: { $0.id == taskMessageID })?.timestamp
+            ?? Date()
+        var note = Message(id: outcomeMessageID, role: .assistant, content: "", timestamp: stableTime)
         note.activeTurnCompaction = activeTurnCompaction
         result.append(note)
         let existing = Set(history.map(\.id))

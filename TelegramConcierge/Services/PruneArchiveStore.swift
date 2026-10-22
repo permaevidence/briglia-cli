@@ -55,6 +55,19 @@ struct PruneArchiveReference: Codable, Equatable {
     }
 
     var relativePath: String { "prune-archives/" + basename }
+    /// The UTC second the snapshot was published, read back from the
+    /// validated basename (`yyyy-MM-dd_HHmmss'Z'_<id>.txt`). Persisted with the
+    /// reference, so it is stable across requests and restarts. Nil only if
+    /// the digits are not a real date (the basename regex checks the shape,
+    /// not the calendar).
+    var createdAt: Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd_HHmmss'Z'"
+        formatter.isLenient = false
+        return formatter.date(from: String(basename.prefix(18)))
+    }
     var promptText: String {
         "Full context snapshot: `\(StoragePaths.dataRoot.appendingPathComponent(relativePath).path)`\nThis folder contains up to the latest 300 conversation snapshots, with filenames sortable chronologically."
     }

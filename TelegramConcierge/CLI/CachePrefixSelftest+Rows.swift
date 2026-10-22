@@ -42,6 +42,46 @@ extension MidturnHarness {
         let eviction = CacheDiagnostics.check([req(body(items: base)), req(body(items: rewritten, tools: ["a", "b"]), ["native-replay-eviction"])])
         check("U8 native replay eviction: an input rewrite in scope; a tools change would not be",
               eviction.findings.isEmpty)
+        cpProjectionTimeRows()
+    }
+
+    /// The compacted-turn note is rebuilt for every request and its time is
+    /// rendered as "Assistant reply time: HH:mm". It must be the compaction's
+    /// time, not "now" (the CP-transitions-chatb minute-boundary flake: the
+    /// prefix changed between two rounds when the wall clock crossed a minute).
+    /// A 2020 snapshot makes any "now" fallback fail on every run.
+    func cpProjectionTimeRows() {
+        let task = Message(role: .user, content: "task", timestamp: Date(timeIntervalSince1970: 1_000_000_000))
+        var checkpoint = TurnCheckpoint(runID: UUID(), taskMessageID: task.id)
+        let compacted = Date(timeIntervalSince1970: 1_577_934_245) // 2020-01-02 03:04:05Z
+        let basename = "2020-01-02_030405Z_" + String(repeating: "a", count: 32) + ".txt"
+        guard let reference = try? PruneArchiveReference(id: UUID(), basename: basename),
+              let summary = try? ActiveTurnCompaction(summaryText: "Progress summarized.", reference: reference, through: 1) else {
+            check("U9 projection fixture builds", false); return
+        }
+        check("U9 a snapshot reference reads its publication time back from the basename",
+              reference.createdAt == compacted, "\(String(describing: reference.createdAt))")
+        checkpoint.activeTurnCompaction = summary
+        func note() -> Message? {
+            (try? checkpoint.projectedHistory([task], canonical: [task]))?.first { $0.id == checkpoint.outcomeMessageID }
+        }
+        let first = note()
+        Thread.sleep(forTimeInterval: 1.1)
+        let second = note()
+        check("U10 the compacted-turn note carries the compaction time, identical on every request (not the wall clock)",
+              first?.timestamp == compacted && second?.timestamp == compacted
+                && first.map { Chronology.assistantReplyTimeLine($0.timestamp) } == second.map { Chronology.assistantReplyTimeLine($0.timestamp) },
+              "\(String(describing: first?.timestamp)) / \(String(describing: second?.timestamp))")
+        // A basename with the right shape but an impossible date falls back to
+        // the task message's time, still stable for the turn.
+        if let odd = try? PruneArchiveReference(id: UUID(), basename: "2020-13-40_256199Z_" + String(repeating: "b", count: 32) + ".txt"),
+           let oddSummary = try? ActiveTurnCompaction(summaryText: "Progress summarized.", reference: odd, through: 1) {
+            checkpoint.activeTurnCompaction = oddSummary
+            check("U11 an unreadable snapshot time falls back to the task message time",
+                  odd.createdAt == nil && note()?.timestamp == task.timestamp, "\(String(describing: note()?.timestamp))")
+        } else {
+            check("U11 fallback fixture builds", false)
+        }
     }
 
     /// ≥ 30 main-lane rounds across two turns: tool results, an image, a
