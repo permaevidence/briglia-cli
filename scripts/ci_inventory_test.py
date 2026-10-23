@@ -1406,11 +1406,12 @@ def swap_contract_errors(source=None):
     # A lost create response: the helper is found by its label and removed.
     mod = load_swap_module(source)
     seen = []
+    lost = TimeoutError("response lost")
 
     def api(method, path, body=None, **k):
         seen.append((method, path, body))
         if method == "POST" and path == "/containers/create":
-            raise TimeoutError("response lost")
+            raise lost
         if method == "GET" and path.startswith("/containers/json"):
             return [{"Id": "orphan"}]
         return {"Config": {"Image": "x"}}
@@ -1419,11 +1420,14 @@ def swap_contract_errors(source=None):
     mod.swap_total_kib = lambda: 0
     try:
         with _quiet():
-            mod.main()
-    except TimeoutError:
-        pass
+            rc = mod.main()
+    except TimeoutError as e:
+        if e is not lost:
+            errs.append("swap: lost create response raised a different TimeoutError instead of the original error")
     except Exception as e:  # noqa: BLE001
         errs.append(f"swap: lost create response raised {type(e).__name__} instead of the original error")
+    else:
+        errs.append(f"swap: lost create response was swallowed (main() returned {rc!r} instead of raising the original error)")
     created = [b for m, p, b in seen if p == "/containers/create"]
     label = (created[0] or {}).get("Labels", {}).get(getattr(mod, "HELPER_LABEL", ""), "") if created else ""
     listed = [p for m, p, _ in seen if m == "GET" and p.startswith("/containers/json")]
@@ -1477,6 +1481,8 @@ SWAP_BREAKS = [
     ("S9 idempotence check dropped", _swap_sub('  if swapon --show=NAME --noheadings | grep -qx "$c"; then SWAP="$c"; echo "$SWAP already active"; break; fi\n', ''), "was not reused"),
     ("S10 rm without --one-file-system", _swap_sub('rm -rf --one-file-system -- "$t" &', 'rm -rf -- "$t" &'), "clean run did not remove every path"),
     ("S11 lost create response no longer cleaned up", _swap_sub("            remove_labelled_helpers(token)\n", "            pass\n"), "not found by its label"),
+    ("S12 lost create error swallowed", _swap_sub('            print(f"warning: helper lookup by label failed: {e}", file=sys.stderr)\n        raise\n',
+                                                 '            print(f"warning: helper lookup by label failed: {e}", file=sys.stderr)\n        return 0\n'), "was swallowed"),
 ]
 
 
