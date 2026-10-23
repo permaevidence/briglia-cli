@@ -1,0 +1,697 @@
+#!/usr/bin/env python3
+"""Daily dependency vulnerability watch (security auto-update plan, Phase 0).
+
+Reads security/dependencies.json (scripts/security_inventory.py) and checks
+  * every exact-version entry with watch=osv against OSV (querybatch, with
+    pagination, then the full record of every hit); watch=osv-package entries
+    (ecosystems OSV does not version-match, e.g. GitHub Actions) fetch every
+    advisory of the package and evaluate the affected ranges locally,
+  * every watch=github-repo-advisories entry against the upstream repository's
+    published GitHub security advisories,
+  * CISA KEV, to flag known-exploited CVEs,
+then opens or updates GitHub issues in THIS repository. It never changes code,
+never opens pull requests, never builds or releases, and holds no secret
+beyond the workflow's own issues-scoped token.
+
+Issues (all labelled `security-watch`, each carrying a machine marker):
+  finding  one per advisory group (OSV id + its CVE/GHSA aliases, merged).
+           New -> created. Changed severity/KEV/affected components/fixed
+           versions -> body updated + ONE comment; a closed issue is reopened
+           only when it got worse (new component, higher severity, newly KEV).
+           No longer matched by a complete run -> one comment, never closed
+           automatically (closing is the owner's call once the fix ships).
+  gaps     one issue listing the components the watch cannot check
+           (unpinned, ranges, OS-owned); updated only when the list changes.
+  health   opened (or reopened) when a feed fails or returns incomplete data,
+           closed with a comment on the next fully successful run. A failed
+           feed never counts as "no advisories".
+Nothing is posted when nothing changed: no daily "all clear".
+
+Untrusted feed text is bounded and neutralised (no @-mentions, no HTML
+comments that could forge a marker, no control characters).
+
+Usage:
+  security_watch.py [--dry-run] [--inventory PATH]
+                    [--osv-api URL] [--github-api URL] [--kev-url URL] [--repo OWNER/NAME]
+Environment: GITHUB_TOKEN (required unless --dry-run), GITHUB_REPOSITORY.
+Exit: 0 healthy run, 1 a feed failed or was incomplete (health issue raised),
+      2 configuration/usage error or a GitHub write failed.
+"""
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_INVENTORY = os.path.join(ROOT, "security", "dependencies.json")
+OSV_API = "https://api.osv.dev"
+GITHUB_API = "https://api.github.com"
+KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+
+LABEL = "security-watch"
+MARKER_RE = re.compile(r"<!-- briglia-security-watch v1 kind=(finding|gaps|health) ids=([A-Za-z0-9:._,-]*) fp=([0-9a-f]{16}) -->")
+MAX_BYTES = 32 * 1024 * 1024
+MAX_PAGES = 25
+MAX_VULNS = 400
+MAX_FINDINGS = 200
+BATCH = 500
+SEVERITY_ORDER = {"UNKNOWN": 0, "LOW": 1, "MODERATE": 2, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+BACKOFF = float(os.environ.get("SECURITY_WATCH_BACKOFF", "2"))
+
+
+class FeedError(Exception):
+    pass
+
+
+class WriteError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
+
+def http(method, url, body=None, headers=None, timeout=30, retries=2):
+    """(status, parsed JSON or None, response headers). Retries 5xx/network errors."""
+    data = json.dumps(body).encode() if body is not None else None
+    hdrs = {"Accept": "application/json", "User-Agent": "briglia-security-watch"}
+    if data is not None:
+        hdrs["Content-Type"] = "application/json"
+    hdrs.update(headers or {})
+    last = None
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read(MAX_BYTES + 1)
+                if len(raw) > MAX_BYTES:
+                    raise FeedError(f"{method} {url}: response larger than {MAX_BYTES} bytes")
+                parsed = json.loads(raw) if raw.strip() else None
+                return resp.status, parsed, dict(resp.headers)
+        except urllib.error.HTTPError as e:
+            last = f"HTTP {e.code}"
+            if e.code < 500 and e.code != 429:
+                raw = e.read(65536)
+                try:
+                    parsed = json.loads(raw) if raw.strip() else None
+                except ValueError:
+                    parsed = None
+                return e.code, parsed, dict(e.headers or {})
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            last = f"{type(e).__name__}: {e}"
+        if attempt < retries:
+            time.sleep(BACKOFF * (attempt + 1))
+    raise FeedError(f"{method} {url}: {last}")
+
+
+def next_link(headers):
+    link = headers.get("Link") or headers.get("link") or ""
+    for part in link.split(","):
+        m = re.match(r'\s*<([^>]+)>;\s*rel="next"', part)
+        if m:
+            return m.group(1)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Text hygiene for untrusted feed content
+# ---------------------------------------------------------------------------
+
+def clean(text, limit=300):
+    text = "" if text is None else str(text)
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", text)
+    text = text.replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    text = text.replace("@", "@​")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{1,79}$")
+
+
+def valid_id(i):
+    return isinstance(i, str) and bool(ID_RE.match(i))
+
+
+# ---------------------------------------------------------------------------
+# Version ranges (GitHub repository advisories)
+# ---------------------------------------------------------------------------
+
+def parse_semver(v):
+    v = v.strip().lstrip("vV")
+    m = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$", v)
+    if not m:
+        return None
+    nums = tuple(int(x or 0) for x in m.group(1, 2, 3))
+    pre = m.group(4)
+    pre_key = (1,) if pre is None else (0,) + tuple((0, int(p)) if p.isdigit() else (1, p) for p in pre.split("."))
+    return nums + (pre_key,)
+
+
+def in_range(version, rng):
+    """True/False when `rng` (e.g. ">= 1.0.0, < 1.3.1") can be evaluated, else None."""
+    v = parse_semver(version or "")
+    if v is None or not isinstance(rng, str) or not rng.strip():
+        return None
+    for clause in rng.split(","):
+        m = re.match(r"^\s*(>=|<=|>|<|=)?\s*(\S+)\s*$", clause)
+        if not m:
+            return None
+        op, bound = m.group(1) or "=", parse_semver(m.group(2))
+        if bound is None:
+            return None
+        ok = {">=": v >= bound, "<=": v <= bound, ">": v > bound, "<": v < bound, "=": v == bound}[op]
+        if not ok:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Feeds
+# ---------------------------------------------------------------------------
+
+def osv_query(components, api):
+    """{vuln_id: set(component ids)} for every OSV-watched component."""
+    watched = [c for c in components if c["watch"] in ("osv", "osv-package")]
+    hits = {}
+    for start in range(0, len(watched), BATCH):
+        chunk = watched[start:start + BATCH]
+        pending = [(i, None) for i in range(len(chunk))]
+        pages = 0
+        while pending:
+            pages += 1
+            if pages > MAX_PAGES:
+                raise FeedError("OSV querybatch: too many pages (results incomplete)")
+            queries = []
+            for i, token in pending:
+                c = chunk[i]
+                q = {"package": {"ecosystem": c["ecosystem"], "name": c["name"]}}
+                if c["watch"] == "osv":
+                    q["version"] = c["version"]  # osv-package: every advisory of the package, ranges checked locally
+                if token:
+                    q["page_token"] = token
+                queries.append(q)
+            status, data, _ = http("POST", f"{api}/v1/querybatch", {"queries": queries})
+            if status != 200 or not isinstance(data, dict) or not isinstance(data.get("results"), list) \
+                    or len(data["results"]) != len(queries):
+                raise FeedError(f"OSV querybatch: unexpected response (HTTP {status})")
+            nxt = []
+            for (i, _), res in zip(pending, data["results"]):
+                if not isinstance(res, dict):
+                    raise FeedError("OSV querybatch: malformed result")
+                for v in res.get("vulns") or []:
+                    vid = v.get("id") if isinstance(v, dict) else None
+                    if not valid_id(vid):
+                        raise FeedError("OSV querybatch: malformed vulnerability id")
+                    hits.setdefault(vid, set()).add(chunk[i]["id"])
+                token = res.get("next_page_token")
+                if token:
+                    nxt.append((i, token))
+            pending = nxt
+    if len(hits) > MAX_VULNS:
+        raise FeedError(f"OSV: {len(hits)} vulnerabilities exceed the per-run bound {MAX_VULNS}")
+    return hits
+
+
+def osv_record(vid, api):
+    status, data, _ = http("GET", f"{api}/v1/vulns/{urllib.parse.quote(vid)}")
+    if status != 200 or not isinstance(data, dict) or data.get("id") != vid:
+        raise FeedError(f"OSV vulns/{vid}: unexpected response (HTTP {status})")
+    return data
+
+
+def severity_of(record):
+    ds = record.get("database_specific") or {}
+    sev = str(ds.get("severity") or "").upper()
+    return sev if sev in SEVERITY_ORDER else "UNKNOWN"
+
+
+def fixed_versions(record, component):
+    out = set()
+    for aff in record.get("affected") or []:
+        pkg = aff.get("package") or {}
+        if pkg.get("name") != component["name"] or pkg.get("ecosystem") != component["ecosystem"]:
+            continue
+        for r in aff.get("ranges") or []:
+            for ev in r.get("events") or []:
+                if isinstance(ev, dict) and isinstance(ev.get("fixed"), str):
+                    out.add(clean(ev["fixed"], 60))
+    return out
+
+
+def osv_affects(record, component):
+    """Local evaluation of an OSV record's ranges for `component`'s version:
+    True/False, or None when no range of the package can be evaluated."""
+    v = parse_semver(component.get("version") or "")
+    verdicts = []
+    for aff in record.get("affected") or []:
+        pkg = aff.get("package") or {}
+        if pkg.get("name") != component["name"] or pkg.get("ecosystem") != component["ecosystem"]:
+            continue
+        if component.get("version") in (aff.get("versions") or []):
+            return True
+        for r in aff.get("ranges") or []:
+            if r.get("type") not in ("ECOSYSTEM", "SEMVER") or v is None:
+                verdicts.append(None)
+                continue
+            affected, ok = False, True
+            for ev in r.get("events") or []:
+                if not isinstance(ev, dict) or len(ev) != 1:
+                    ok = False
+                    break
+                (kind, ver), = ev.items()
+                b = (0, 0, 0, (0,)) if (kind == "introduced" and ver == "0") else parse_semver(str(ver))
+                if b is None or kind not in ("introduced", "fixed", "last_affected", "limit"):
+                    ok = False
+                    break
+                if kind == "introduced" and v >= b:
+                    affected = True
+                elif kind == "fixed" and v >= b:
+                    affected = False
+                elif kind == "last_affected" and v > b:
+                    affected = False
+                elif kind == "limit" and v >= b:
+                    affected = False
+            verdicts.append(affected if ok else None)
+    if any(x is True for x in verdicts):
+        return True
+    if verdicts and all(x is False for x in verdicts):
+        return False
+    return None
+
+
+def repo_advisories(component, api, token):
+    """Published advisories of the upstream repo that (may) affect the component."""
+    url = f"{api}/repos/{component['name']}/security-advisories?state=published&per_page=100"
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    out, pages = [], 0
+    while url:
+        pages += 1
+        if pages > MAX_PAGES:
+            raise FeedError(f"advisories of {component['name']}: too many pages")
+        status, data, hdrs = http("GET", url, headers=headers)
+        if status != 200 or not isinstance(data, list):
+            raise FeedError(f"advisories of {component['name']}: HTTP {status}")
+        for adv in data:
+            gid = adv.get("ghsa_id") if isinstance(adv, dict) else None
+            if not valid_id(gid) or adv.get("withdrawn_at"):
+                continue
+            ranges = [v.get("vulnerable_version_range") for v in adv.get("vulnerabilities") or [] if isinstance(v, dict)]
+            verdicts = [in_range(component.get("version"), r) for r in ranges] or [None]
+            if any(v is True for v in verdicts):
+                applies = "affected"
+            elif all(v is False for v in verdicts):
+                continue
+            else:
+                applies = "applicability unknown (version not pinned or range not evaluable)"
+            ids = [gid] + ([adv["cve_id"]] if valid_id(adv.get("cve_id")) else [])
+            fixed = {clean(v.get("patched_versions"), 60) for v in adv.get("vulnerabilities") or []
+                     if isinstance(v, dict) and v.get("patched_versions")}
+            sev = str(adv.get("severity") or "").upper()
+            out.append({"ids": ids, "summary": adv.get("summary"), "severity": sev if sev in SEVERITY_ORDER else "UNKNOWN",
+                        "fixed": fixed, "applies": applies, "url": adv.get("html_url")})
+        url = next_link(hdrs)
+    return out
+
+
+def kev_set(url):
+    status, data, _ = http("GET", url)
+    if status != 200 or not isinstance(data, dict) or not isinstance(data.get("vulnerabilities"), list):
+        raise FeedError(f"CISA KEV: unexpected response (HTTP {status})")
+    return {v.get("cveID") for v in data["vulnerabilities"] if isinstance(v, dict) and valid_id(v.get("cveID"))}
+
+
+# ---------------------------------------------------------------------------
+# Findings
+# ---------------------------------------------------------------------------
+
+def primary_id(ids):
+    for prefix in ("GHSA-", "CVE-"):
+        pick = sorted(i for i in ids if i.startswith(prefix))
+        if pick:
+            return pick[0]
+    return sorted(ids)[0]
+
+
+def merge_findings(raw):
+    """raw: list of {ids, summary, severity, kev?, components, fixed, applies, url}. Union by shared id."""
+    groups = []
+    for item in raw:
+        ids = set(item["ids"])
+        merged = [g for g in groups if g["ids"] & ids]
+        target = {"ids": ids, "summaries": [], "severity": "UNKNOWN", "components": set(), "fixed": set(),
+                  "applies": set(), "urls": set()}
+        for g in merged:
+            groups.remove(g)
+            for k in ("ids", "components", "fixed", "applies", "urls"):
+                target[k] |= g[k]
+            target["summaries"] += g["summaries"]
+            target["severity"] = max(target["severity"], g["severity"], key=SEVERITY_ORDER.get)
+        target["components"] |= set(item["components"])
+        target["fixed"] |= set(item.get("fixed") or ())
+        target["applies"].add(item.get("applies") or "affected")
+        if item.get("url"):
+            target["urls"].add(clean(item["url"], 200))
+        if item.get("summary"):
+            target["summaries"].append(clean(item["summary"]))
+        target["severity"] = max(target["severity"], item["severity"], key=SEVERITY_ORDER.get)
+        groups.append(target)
+    return groups
+
+
+def fingerprint(*parts):
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, default=sorted).encode()).hexdigest()[:16]
+
+
+def finding_doc(g, kev, by_id):
+    ids = sorted(g["ids"])
+    is_kev = any(i in kev for i in ids)
+    comps = sorted(g["components"])
+    fp = fingerprint(ids, g["severity"], is_kev, comps, sorted(g["fixed"]), sorted(g["applies"]))
+    pid = primary_id(ids)
+    names = ", ".join(f"{by_id[c]['name']} {by_id[c].get('version') or '(unpinned)'}" for c in comps)
+    title = clean(f"[security] {pid} {g['severity']}{' KEV' if is_kev else ''} — {names}", 200)
+    summary = next((s for s in g["summaries"] if s), "(no summary)")
+    lines = [
+        f"**{pid}** · severity **{g['severity']}**" + (" · **listed in CISA KEV (exploited in the wild)**" if is_kev else ""),
+        "",
+        f"Summary (from the feed, untrusted): {summary}",
+        "",
+        f"Aliases: {', '.join(ids)}",
+        "",
+        "Affected inventory components:",
+    ]
+    for c in comps:
+        comp = by_id[c]
+        lines.append(f"- `{c}` — {comp['name']} {comp.get('version') or '(unpinned)'} · owner {comp['owner']} · {comp['source'].split(':')[0]}")
+    lines += ["", f"Fixed versions in the feed: {', '.join(sorted(g['fixed'])) or 'none listed'}",
+              f"Applicability: {'; '.join(sorted(g['applies']))}"]
+    if g["urls"]:
+        lines.append("Advisory: " + " ".join(sorted(g["urls"])))
+    lines += ["", "Next step (manual): triage reachability; if a fix is needed, bump the pin after the 72 h "
+              "upstream cooldown in an ordinary reviewed, phone-signed release. This job never changes code.",
+              "", f"<!-- briglia-security-watch v1 kind=finding ids={','.join(ids)} fp={fp} -->"]
+    return {"kind": "finding", "ids": ids, "fp": fp, "title": title, "body": "\n".join(lines),
+            "severity": g["severity"], "kev": is_kev, "components": comps}
+
+
+def gaps_doc(components):
+    gaps = sorted((c["id"], c.get("gap") or "") for c in components if c["watch"] not in ("osv", "osv-package") and c.get("gap"))
+    fp = fingerprint(gaps)
+    lines = ["Components the daily watch cannot check automatically (no exact version, no OSV coverage, or OS-owned).",
+             "This issue changes only when the list changes.", ""]
+    lines += [f"- `{i}` — {clean(r, 400)}" for i, r in gaps]
+    lines += ["", f"<!-- briglia-security-watch v1 kind=gaps ids=gaps fp={fp} -->"]
+    return {"kind": "gaps", "ids": ["gaps"], "fp": fp, "title": f"[security-watch] coverage gaps ({len(gaps)} components)",
+            "body": "\n".join(lines)}
+
+
+def health_doc(failures):
+    fp = fingerprint(sorted(failures))
+    lines = ["The security watch could not complete a full check. Missing data is NOT treated as \"no advisories\".", ""]
+    lines += [f"- {clean(f, 400)}" for f in sorted(failures)]
+    lines += ["", "Closed automatically by the next fully successful run.",
+              "", f"<!-- briglia-security-watch v1 kind=health ids=health fp={fp} -->"]
+    return {"kind": "health", "ids": ["health"], "fp": fp, "title": "[security-watch] watch run failing", "body": "\n".join(lines)}
+
+
+# ---------------------------------------------------------------------------
+# GitHub issues
+# ---------------------------------------------------------------------------
+
+class Issues:
+    def __init__(self, api, repo, token, dry_run):
+        self.api, self.repo, self.token, self.dry = api, repo, token, dry_run
+        self.actions = []
+
+    def _h(self):
+        return {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json"} if self.token else {}
+
+    def load(self):
+        url = f"{self.api}/repos/{self.repo}/issues?labels={LABEL}&state=all&per_page=100"
+        out, pages = [], 0
+        while url:
+            pages += 1
+            if pages > MAX_PAGES:
+                raise WriteError("issue list: too many pages")
+            try:
+                status, data, hdrs = http("GET", url, headers=self._h())
+            except FeedError as e:
+                raise WriteError(f"issue list: {e}")
+            if status != 200 or not isinstance(data, list):
+                raise WriteError(f"issue list: HTTP {status}")
+            for it in data:
+                if not isinstance(it, dict) or "pull_request" in it:
+                    continue
+                m = MARKER_RE.search(it.get("body") or "")
+                if not m:
+                    continue
+                out.append({"number": it["number"], "state": it.get("state"), "kind": m.group(1),
+                            "ids": [i for i in m.group(2).split(",") if i], "fp": m.group(3),
+                            "labels": sorted(l.get("name") for l in it.get("labels") or [] if isinstance(l, dict)),
+                            "body": it.get("body") or ""})
+            url = next_link(hdrs)
+        out.sort(key=lambda i: i["number"])
+        return out
+
+    def _write(self, method, path, body, what):
+        self.actions.append((method, path, what))
+        if self.dry:
+            print(f"  [dry-run] {method} {path}: {what}")
+            return {"number": 0}
+        try:
+            status, data, _ = http(method, f"{self.api}/repos/{self.repo}{path}", body, headers=self._h(), retries=1)
+        except FeedError as e:
+            raise WriteError(f"{method} {path}: {e}")
+        if status not in (200, 201):
+            raise WriteError(f"{method} {path}: HTTP {status}")
+        return data or {}
+
+    def create(self, doc, labels):
+        return self._write("POST", "/issues", {"title": doc["title"], "body": doc["body"], "labels": labels},
+                           f"create {doc['kind']} {primary_id(doc['ids'])}")
+
+    def update(self, number, doc, labels, state=None):
+        body = {"title": doc["title"], "body": doc["body"], "labels": labels}
+        if state:
+            body["state"] = state
+        return self._write("PATCH", f"/issues/{number}", body, f"update #{number}" + (f" -> {state}" if state else ""))
+
+    def comment(self, number, text):
+        return self._write("POST", f"/issues/{number}/comments", {"body": text}, f"comment #{number}")
+
+    def close(self, number):
+        return self._write("PATCH", f"/issues/{number}", {"state": "closed"}, f"close #{number}")
+
+
+def labels_for(doc):
+    out = [LABEL]
+    if doc["kind"] == "finding":
+        out.append(f"severity:{doc['severity'].lower()}")
+        if doc["kev"]:
+            out.append("kev")
+    return out
+
+
+UNMATCHED_NOTE = "No longer matched by the current inventory"
+
+
+def merged_labels(it, doc):
+    """Keep labels the owner added; replace only the watch's own severity/KEV labels."""
+    own = [l for l in it.get("labels") or [] if l and not l.startswith("severity:") and l not in ("kev", LABEL)]
+    return labels_for(doc) + sorted(own)
+
+
+def got_worse(old_body, doc):
+    """A closed finding is reopened only when it got worse."""
+    old_sev = re.search(r"severity \*\*([A-Z]+)\*\*", old_body)
+    old_sev = old_sev.group(1) if old_sev else "UNKNOWN"
+    old_kev = "listed in CISA KEV" in old_body
+    old_comps = set(re.findall(r"^- `([^`]+)`", old_body, re.M))
+    return (SEVERITY_ORDER.get(doc["severity"], 0) > SEVERITY_ORDER.get(old_sev, 0)
+            or (doc["kev"] and not old_kev) or bool(set(doc["components"]) - old_comps))
+
+
+def reconcile(issues, docs, complete, failures):
+    existing = issues.load()
+    used = set()
+
+    def match(doc):
+        for it in existing:
+            if it["kind"] == doc["kind"] and set(it["ids"]) & set(doc["ids"]):
+                return it
+        return None
+
+    for doc in docs:
+        it = match(doc)
+        if it is None:
+            issues.create(doc, labels_for(doc))
+            continue
+        used.add(it["number"])
+        if it["fp"] == doc["fp"] and UNMATCHED_NOTE not in it["body"]:
+            continue
+        labels = merged_labels(it, doc)
+        if it["state"] == "closed":
+            if doc["kind"] != "finding" or got_worse(it["body"], doc):
+                issues.update(it["number"], doc, labels, state="open")
+                issues.comment(it["number"], "Reopened by the security watch: the advisory now affects more, is more "
+                                             "severe or is known-exploited. See the updated description.")
+            else:
+                issues.update(it["number"], doc, labels)  # silent refresh of a closed issue
+        else:
+            issues.update(it["number"], doc, labels)
+            issues.comment(it["number"], "Updated by the security watch: severity, KEV status, affected components "
+                                         "or fixed versions changed. See the updated description.")
+
+    # Findings no longer matched: only meaningful after a COMPLETE run.
+    if complete:
+        for it in existing:
+            if it["kind"] != "finding" or it["number"] in used or it["state"] != "open":
+                continue
+            if UNMATCHED_NOTE in it["body"]:
+                continue
+            note = f"\n\n_{UNMATCHED_NOTE} (pin bumped or advisory withdrawn). Close when the release ships._"
+            body = MARKER_RE.sub("", it["body"]).rstrip() + note + "\n\n" + \
+                f"<!-- briglia-security-watch v1 kind=finding ids={','.join(it['ids'])} fp={it['fp']} -->"
+            issues._write("PATCH", f"/issues/{it['number']}", {"body": body}, f"mark #{it['number']} unmatched")
+            issues.comment(it["number"], "The security watch no longer matches this advisory against the current "
+                                         "inventory. Close it once the release carrying the fix ships.")
+
+    health = [it for it in existing if it["kind"] == "health"]
+    if failures:
+        doc = health_doc(failures)
+        if not health:
+            issues.create(doc, labels_for(doc))
+        else:
+            it = health[0]
+            if it["state"] == "closed" or it["fp"] != doc["fp"]:
+                issues.update(it["number"], doc, labels_for(doc), state="open" if it["state"] == "closed" else None)
+                issues.comment(it["number"], "The security watch is failing again or failing differently.")
+    else:
+        for it in health:
+            if it["state"] == "open":
+                issues.comment(it["number"], "The security watch completed a full check again; closing.")
+                issues.close(it["number"])
+
+
+# ---------------------------------------------------------------------------
+
+def load_inventory(path):
+    with open(path, encoding="utf-8") as f:
+        inv = json.load(f)
+    if inv.get("schema") != 1 or not isinstance(inv.get("components"), list):
+        raise ValueError("inventory: expected schema 1 with a components list")
+    for c in inv["components"]:
+        for k in ("id", "name", "watch", "owner", "source"):
+            if not isinstance(c.get(k), str) or not c[k]:
+                raise ValueError(f"inventory: component lacks {k}: {c!r}"[:200])
+    return inv["components"]
+
+
+def run(args):
+    components = load_inventory(args.inventory)
+    by_id = {c["id"]: c for c in components}
+    failures, raw, complete = [], [], True
+
+    try:
+        hits = osv_query(components, args.osv_api)
+        for vid in sorted(hits):
+            rec = osv_record(vid, args.osv_api)
+            if rec.get("withdrawn"):
+                continue
+            ids = [vid] + [a for a in rec.get("aliases") or [] if valid_id(a)]
+            comps, applies = set(), "affected (OSV matched the exact version)"
+            for cid in hits[vid]:
+                if by_id[cid]["watch"] == "osv-package":
+                    verdict = osv_affects(rec, by_id[cid])
+                    if verdict is False:
+                        continue
+                    if verdict is None:
+                        applies = "applicability unknown (affected range not evaluable)"
+                comps.add(cid)
+            if not comps:
+                continue
+            fixed = set()
+            for cid in comps:
+                fixed |= fixed_versions(rec, by_id[cid])
+            urls = [r.get("url") for r in rec.get("references") or [] if isinstance(r, dict)
+                    and r.get("type") == "ADVISORY" and isinstance(r.get("url"), str)][:2]
+            raw.append({"ids": ids, "summary": rec.get("summary") or rec.get("details", "")[:300],
+                        "severity": severity_of(rec), "components": comps, "fixed": fixed,
+                        "applies": applies, "url": urls[0] if urls else None})
+    except FeedError as e:
+        failures.append(f"OSV: {e}")
+        complete = False
+
+    for c in components:
+        if c["watch"] != "github-repo-advisories":
+            continue
+        try:
+            for adv in repo_advisories(c, args.github_api, args.token):
+                adv["components"] = {c["id"]}
+                raw.append(adv)
+        except FeedError as e:
+            failures.append(f"GitHub advisories ({c['name']}): {e}")
+            complete = False
+
+    try:
+        kev = kev_set(args.kev_url)
+    except FeedError as e:
+        failures.append(f"KEV: {e}")
+        kev = set()  # findings are still posted; a later KEV listing escalates them
+
+    groups = merge_findings(raw)
+    if len(groups) > MAX_FINDINGS:
+        failures.append(f"{len(groups)} findings exceed the per-run bound {MAX_FINDINGS}; only the first {MAX_FINDINGS} posted")
+        complete = False
+        groups = sorted(groups, key=lambda g: (-SEVERITY_ORDER.get(g["severity"], 0), primary_id(g["ids"])))[:MAX_FINDINGS]
+    docs = [finding_doc(g, kev, by_id) for g in groups] + [gaps_doc(components)]
+
+    print(f"security watch: {len(components)} components, {sum(1 for c in components if c['watch'] in ('osv', 'osv-package'))} OSV-checked, "
+          f"{len(groups)} advisory group(s), {len(failures)} feed problem(s)")
+    for d in docs:
+        if d["kind"] == "finding":
+            print(f"  · {d['title']}")
+    for f in failures:
+        print(f"  ✖ {f}")
+
+    issues = Issues(args.github_api, args.repo, args.token, args.dry_run)
+    reconcile(issues, docs, complete and not failures, failures)
+    print(f"github writes: {len(issues.actions)}{' (dry run, none sent)' if args.dry_run else ''}")
+    return 1 if failures else 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--inventory", default=DEFAULT_INVENTORY)
+    p.add_argument("--osv-api", default=OSV_API)
+    p.add_argument("--github-api", default=GITHUB_API)
+    p.add_argument("--kev-url", default=KEV_URL)
+    p.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
+    args = p.parse_args(argv)
+    args.token = os.environ.get("GITHUB_TOKEN", "")
+    if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", args.repo or ""):
+        print("✖ --repo / GITHUB_REPOSITORY must be OWNER/NAME", file=sys.stderr)
+        return 2
+    if not args.token and not args.dry_run:
+        print("✖ GITHUB_TOKEN is required (or use --dry-run)", file=sys.stderr)
+        return 2
+    try:
+        return run(args)
+    except WriteError as e:
+        print(f"✖ GitHub: {e}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError) as e:
+        print(f"✖ {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

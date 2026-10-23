@@ -1,0 +1,38 @@
+name: Security watch
+
+# Daily check of every pinned dependency in security/dependencies.json against
+# OSV and the upstream repositories' GitHub security advisories (plus CISA KEV).
+# Output is GitHub issues in this repository only: no code changes, no pull
+# requests, no builds, no releases, no secrets beyond the issues-scoped token.
+# Runs only in the private repository (the public mirror carries this file but
+# the job is skipped there).
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: security-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: Dependency vulnerability watch (issues only)
+    if: github.repository == 'permaevidence/briglia-cli-private'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Inventory matches the sources
+        run: python3 scripts/security_inventory.py --check
+      - name: Check advisories and open or update issues
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/security_watch.py
