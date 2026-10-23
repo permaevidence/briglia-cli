@@ -72,6 +72,14 @@ class Channel:
         self.url = f"http://127.0.0.1:{self.srv.server_port}/manifest.sig.json"
 
 
+# The binary's embedded release sequence. The mock channel must publish
+# sequences RELATIVE to it: the release-prep commit bumps the constant, so a
+# hardcoded "newer" sequence stops being newer exactly when a release is cut.
+def source_release_sequence():
+    src = (ROOT / "TelegramConcierge/CLI/ReleaseSigning.swift").read_text()
+    return int(re.search(r"^let adaCLIReleaseSequence = (\d+)$", src, re.M).group(1))
+
+
 def manifest(seq, security=None):
     v = f"0.3.{seq}"
     m = {"schema": 1, "channel": "briglia-cli", "sequence": seq, "version": v,
@@ -120,7 +128,9 @@ def notice_e2e(binary):
     with tempfile.TemporaryDirectory() as tmp:
         env = scratch_env(tmp)
         ch = Channel()
-        ch.envelope, key = sign(binary, env, tmp, manifest(121))
+        base = source_release_sequence()
+        s1, s2, s3 = base + 1, base + 2, base + 10
+        ch.envelope, key = sign(binary, env, tmp, manifest(s1))
         trust = Path(tmp) / "trust.json"
         trust.write_text('{"domains":{"elsewhere":7},"schema":2}')
         before = trust.read_bytes()
@@ -128,25 +138,25 @@ def notice_e2e(binary):
                    BRIGLIA_RELEASE_URL_PREFIX="https://example.invalid/download/v{version}/", BRIGLIA_RELEASE_TRUST_FILE=str(trust))
         t0 = int(time.time())
         rc, out = run(binary, ["__update-check-once", "--now", str(t0)], env)
-        check("e2e: a signed newer release → exactly one notice", out.count("NOTICE[") == 1 and "Briglia 0.3.121 is available." in out, out)
+        check("e2e: a signed newer release → exactly one notice", out.count("NOTICE[") == 1 and f"Briglia 0.3.{s1} is available." in out, out)
         notice = Path(tmp) / "data/briglia/update/notice.json"
         check("e2e: state written to ~/.local/share/briglia/update/notice.json (mode 0600)",
               notice.exists() and (notice.stat().st_mode & 0o777) == 0o600)
         rc, out = run(binary, ["__update-check-once", "--now", str(t0 + 7 * 3600)], env)
         check("e2e: next check (same release) → no notice", "NOTICE[" not in out and "FETCHES: 1" in out, out)
-        ch.envelope, _ = sign(binary, env, tmp, manifest(122, {"cumulative": [
-            {"id": "CVE-2026-4242", "aliases": [], "level": "recommended", "affectsFromSequence": 100, "fixedInSequence": 122}],
+        ch.envelope, _ = sign(binary, env, tmp, manifest(s2, {"cumulative": [
+            {"id": "CVE-2026-4242", "aliases": [], "level": "recommended", "affectsFromSequence": 1, "fixedInSequence": s2}],
             "securityFloor": {"recommended": 0, "critical": 0}, "summary": "Fixes a TLS problem"}))
         rc, out = run(binary, ["__update-check-once", "--now", str(t0 + 14 * 3600)], env)
         check("e2e: a release with a security fix for this version → immediate security notice with the summary",
               "includes security fixes for your version" in out and "Fixes a TLS problem" in out, out)
-        ch.envelope, _ = sign(binary, env, tmp, manifest(130, {"cumulative": [{"id": "CVE-2026-1", "level": "urgent",
+        ch.envelope, _ = sign(binary, env, tmp, manifest(s3, {"cumulative": [{"id": "CVE-2026-1", "level": "urgent",
                                                                                "affectsFromSequence": 1, "fixedInSequence": 2}],
                                                                 "securityFloor": {"recommended": 0, "critical": 0}}))
         rc, out = run(binary, ["__update-check-once", "--now", str(t0 + 30 * 86400)], env)
         check("e2e: invalid security block → plain notice + attention, never a claim",
-              "Briglia 0.3.130 is available." in out and "includes security" not in out.split("STATUS")[0]
-              and "security information of Briglia 0.3.130 could not be read" in out, out)
+              f"Briglia 0.3.{s3} is available." in out and "includes security" not in out.split("STATUS")[0]
+              and f"security information of Briglia 0.3.{s3} could not be read" in out, out)
         check("e2e: the anti-rollback trust file is byte-identical after every notice check", trust.read_bytes() == before)
         rc, out = run(binary, ["upgradecheck", "off"], env)
         hits = ch.hits
