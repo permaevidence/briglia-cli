@@ -10,6 +10,10 @@ extension ConversationManager {
     /// lock). Detached: never blocks startup or a turn.
     func startUpdateNoticeService() {
         guard UpdateNoticeService.current == nil else { return }
+        // Development builds (every test harness runs one) never contact the
+        // real release channel on their own: the loop starts there only for
+        // an explicit test channel. Stamped releases always run it.
+        if adaCLIVersion.hasSuffix("-dev"), ProcessInfo.processInfo.environment["BRIGLIA_ENVELOPE_URL"] == nil { return }
         let policy = ReleasePolicy.effective
         let service = UpdateNoticeService(deps: UpdateNoticeService.Deps(
             paths: .live,

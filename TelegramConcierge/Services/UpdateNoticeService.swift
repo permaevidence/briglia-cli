@@ -205,7 +205,7 @@ final class UpdateNoticeService {
     func consumeNext() -> AttemptRecord? {
         let env = self.env
         do {
-            return try UpdateNoticeStore.transaction(deps.paths, now: env.now) { setting, s in
+            let record: AttemptRecord? = try UpdateNoticeStore.transaction(deps.paths, now: env.now) { setting, s in
                 guard setting.enabled else { return (false, nil) }
                 UpdateNotice.stateOnlyPass(&s, env: env)
                 guard let p = UpdateNotice.proposals(s, env: env).first,
@@ -225,6 +225,8 @@ final class UpdateNoticeService {
                                      noticeGeneration: setting.generation, newClassId: deps.newClassId)
                 return (true, s.attempt(p.kind))
             }
+            if record != nil { saveFailed = false }
+            return record
         } catch {
             saveFailed = true
             deps.log("update notice: state cannot be saved — nothing sent (\(error.localizedDescription))")
