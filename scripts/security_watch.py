@@ -25,19 +25,34 @@ Issues (all labelled `security-watch`, each carrying a machine marker):
   health   opened (or reopened) when a feed fails or returns incomplete data,
            closed with a comment on the next fully successful run. A failed
            feed never counts as "no advisories".
-Nothing is posted when nothing changed: no daily "all clear".
+  node     the newest Node.js security release of every supported LTS line
+           (nodejs.org/dist/index.json): Briglia's managed Node copy is not
+           pinned, so a new security release there is news. Body updated + one
+           comment when it changes.
+  heartbeat one issue whose BODY is rewritten at the end of every run (time,
+           run link, per-feed status). A body edit notifies nobody; the owner's
+           independent release watcher alerts when it is older than 36 h, so a
+           job that stops running is a state change, not silence. A gap of
+           more than 36 h since the previous run gets one comment.
+Triage: an open finding with no reachability label (`reachable` /
+`not-reachable`) gets the `triage-overdue` label and one comment after 7 days
+(HIGH/CRITICAL or KEV) or 30 days (otherwise); the label goes away once the
+owner labels it.
+Nothing else is posted when nothing changed: no daily "all clear".
 
 Untrusted feed text is bounded and neutralised (no @-mentions, no HTML
 comments that could forge a marker, no control characters).
 
 Usage:
   security_watch.py [--dry-run] [--inventory PATH]
-                    [--osv-api URL] [--github-api URL] [--kev-url URL] [--repo OWNER/NAME]
+                    [--osv-api URL] [--github-api URL] [--kev-url URL] [--node-index URL]
+                    [--repo OWNER/NAME]
 Environment: GITHUB_TOKEN (required unless --dry-run), GITHUB_REPOSITORY.
 Exit: 0 healthy run, 1 a feed failed or was incomplete (health issue raised),
       2 configuration/usage error or a GitHub write failed.
 """
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -53,9 +68,15 @@ DEFAULT_INVENTORY = os.path.join(ROOT, "security", "dependencies.json")
 OSV_API = "https://api.osv.dev"
 GITHUB_API = "https://api.github.com"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+NODE_INDEX = "https://nodejs.org/dist/index.json"
+NODE_MIN_MAJOR = 20          # ManagedPlaywright.minimumNodeMajor
+HEARTBEAT_GAP_HOURS = 36
+REACHABILITY = ("reachable", "not-reachable")
+OVERDUE = "triage-overdue"
+TRIAGE_DAYS_URGENT, TRIAGE_DAYS = 7, 30
 
 LABEL = "security-watch"
-MARKER_RE = re.compile(r"<!-- briglia-security-watch v1 kind=(finding|gaps|health) ids=([A-Za-z0-9:._,-]*) fp=([0-9a-f]{16}) -->")
+MARKER_RE = re.compile(r"<!-- briglia-security-watch v1 kind=(finding|gaps|health|node|heartbeat) ids=([A-Za-z0-9:._,-]*) fp=([0-9a-f]{16}) -->")
 MAX_BYTES = 32 * 1024 * 1024
 MAX_PAGES = 25
 MAX_VULNS = 400
@@ -324,7 +345,33 @@ def kev_set(url):
     status, data, _ = http("GET", url)
     if status != 200 or not isinstance(data, dict) or not isinstance(data.get("vulnerabilities"), list):
         raise FeedError(f"CISA KEV: unexpected response (HTTP {status})")
-    return {v.get("cveID") for v in data["vulnerabilities"] if isinstance(v, dict) and valid_id(v.get("cveID"))}
+    out = {v.get("cveID") for v in data["vulnerabilities"] if isinstance(v, dict) and valid_id(v.get("cveID"))}
+    if not out:
+        raise FeedError("CISA KEV: empty catalogue (the real one lists over a thousand CVEs)")
+    return out
+
+
+def node_security_releases(url):
+    """{major: newest security release "vX.Y.Z"} for every LTS line >= NODE_MIN_MAJOR."""
+    status, data, _ = http("GET", url)
+    if status != 200 or not isinstance(data, list) or not data:
+        raise FeedError(f"Node release index: unexpected response (HTTP {status})")
+    out, lts_seen = {}, False
+    for rel in data:
+        if not isinstance(rel, dict):
+            continue
+        v = parse_semver(str(rel.get("version") or ""))
+        if v is None or not rel.get("lts"):
+            continue
+        lts_seen = True
+        major = v[0]
+        if major < NODE_MIN_MAJOR or rel.get("security") is not True:
+            continue
+        if major not in out or v > parse_semver(out[major]):
+            out[major] = clean(rel["version"], 20)
+    if not lts_seen:
+        raise FeedError("Node release index: no LTS releases listed")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +468,38 @@ def health_doc(failures):
     return {"kind": "health", "ids": ["health"], "fp": fp, "title": "[security-watch] watch run failing", "body": "\n".join(lines)}
 
 
+def node_doc(latest):
+    rows = sorted(latest.items())
+    fp = fingerprint([[m, v] for m, v in rows])
+    lines = ["Briglia's managed Node.js copy (~/.local/node, used only when no system Node >= 20 exists) is installed as "
+             "the latest LTS at install time and never updated, so every Node security release matters until Phase 1 pins it.",
+             "", "Newest security release per LTS line (nodejs.org/dist/index.json):", ""]
+    lines += [f"- Node {m}: {v}" for m, v in rows] or ["- (none listed)"]
+    lines += ["", "Next step (manual): check https://nodejs.org/en/blog/vulnerability for reachability; Phase 1 moves Node "
+              "to an exact pin shipped in a release.", "", f"<!-- briglia-security-watch v1 kind=node ids=node-security fp={fp} -->"]
+    return {"kind": "node", "ids": ["node-security"], "fp": fp, "title": "[security-watch] Node.js security releases",
+            "body": "\n".join(lines)}
+
+
+def heartbeat_doc(now, feeds, run_url, previous_at):
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    fp = fingerprint(sorted(feeds.items()))
+    lines = ["The security watch rewrites this description at the end of every run. A description older than "
+             f"{HEARTBEAT_GAP_HOURS} h means the job stopped running (the owner's release watcher alerts on that).", "",
+             f"last-run: {stamp}", ""]
+    if run_url:
+        lines += [f"Run: {run_url}", ""]
+    lines += ["Feeds:"] + [f"- {name}: {state}" for name, state in sorted(feeds.items())]
+    if previous_at:
+        lines += ["", f"Previous run: {previous_at}"]
+    lines += ["", f"<!-- briglia-security-watch v1 kind=heartbeat ids=heartbeat fp={fp} -->"]
+    return {"kind": "heartbeat", "ids": ["heartbeat"], "fp": fp, "title": "[security-watch] heartbeat",
+            "body": "\n".join(lines), "stamp": stamp}
+
+
+LAST_RUN_RE = re.compile(r"^last-run: (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)$", re.M)
+
+
 # ---------------------------------------------------------------------------
 # GitHub issues
 # ---------------------------------------------------------------------------
@@ -455,7 +534,7 @@ class Issues:
                 out.append({"number": it["number"], "state": it.get("state"), "kind": m.group(1),
                             "ids": [i for i in m.group(2).split(",") if i], "fp": m.group(3),
                             "labels": sorted(l.get("name") for l in it.get("labels") or [] if isinstance(l, dict)),
-                            "body": it.get("body") or ""})
+                            "body": it.get("body") or "", "created_at": it.get("created_at") or ""})
             url = next_link(hdrs)
         out.sort(key=lambda i: i["number"])
         return out
@@ -489,6 +568,9 @@ class Issues:
     def close(self, number):
         return self._write("PATCH", f"/issues/{number}", {"state": "closed"}, f"close #{number}")
 
+    def set_labels(self, number, labels):
+        return self._write("PATCH", f"/issues/{number}", {"labels": labels}, f"labels #{number}")
+
 
 def labels_for(doc):
     out = [LABEL]
@@ -508,6 +590,26 @@ def merged_labels(it, doc):
     return labels_for(doc) + sorted(own)
 
 
+def parse_time(text):
+    try:
+        return datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def triage_labels(labels, created_at, now):
+    """The finding's labels after the reachability-triage rule, or None when unchanged."""
+    labels = list(labels)
+    if any(l in REACHABILITY for l in labels):
+        return [l for l in labels if l != OVERDUE] if OVERDUE in labels else None
+    created = parse_time(created_at)
+    if created is None or OVERDUE in labels:
+        return None
+    urgent = "kev" in labels or "severity:high" in labels or "severity:critical" in labels
+    days = TRIAGE_DAYS_URGENT if urgent else TRIAGE_DAYS
+    return labels + [OVERDUE] if (now - created).total_seconds() > days * 86400 else None
+
+
 def got_worse(old_body, doc):
     """A closed finding is reopened only when it got worse."""
     old_sev = re.search(r"severity \*\*([A-Z]+)\*\*", old_body)
@@ -518,9 +620,11 @@ def got_worse(old_body, doc):
             or (doc["kev"] and not old_kev) or bool(set(doc["components"]) - old_comps))
 
 
-def reconcile(issues, docs, complete, failures):
+def reconcile(issues, docs, complete, failures, now=None, feeds=None, run_url=None):
+    now = now or datetime.datetime.now(datetime.timezone.utc)
     existing = issues.load()
     used = set()
+    labels_now = {it["number"]: list(it["labels"]) for it in existing}
 
     def match(doc):
         for it in existing:
@@ -537,8 +641,10 @@ def reconcile(issues, docs, complete, failures):
         if it["fp"] == doc["fp"] and UNMATCHED_NOTE not in it["body"]:
             continue
         labels = merged_labels(it, doc)
+        labels_now[it["number"]] = labels
         if it["state"] == "closed":
             if doc["kind"] != "finding" or got_worse(it["body"], doc):
+                it["state"] = "open"
                 issues.update(it["number"], doc, labels, state="open")
                 issues.comment(it["number"], "Reopened by the security watch: the advisory now affects more, is more "
                                              "severe or is known-exploited. See the updated description.")
@@ -563,6 +669,19 @@ def reconcile(issues, docs, complete, failures):
             issues.comment(it["number"], "The security watch no longer matches this advisory against the current "
                                          "inventory. Close it once the release carrying the fix ships.")
 
+    # Reachability triage: unlabelled open findings past their review deadline.
+    for it in existing:
+        if it["kind"] != "finding" or it["state"] != "open":
+            continue
+        new = triage_labels(labels_now[it["number"]], it["created_at"], now)
+        if new is None:
+            continue
+        issues.set_labels(it["number"], new)
+        if OVERDUE in new:
+            issues.comment(it["number"], "Reachability triage is overdue: label this `reachable` or `not-reachable` "
+                                         f"(review within {TRIAGE_DAYS_URGENT} days for HIGH/CRITICAL or KEV, "
+                                         f"{TRIAGE_DAYS} days otherwise).")
+
     health = [it for it in existing if it["kind"] == "health"]
     if failures:
         doc = health_doc(failures)
@@ -578,6 +697,25 @@ def reconcile(issues, docs, complete, failures):
             if it["state"] == "open":
                 issues.comment(it["number"], "The security watch completed a full check again; closing.")
                 issues.close(it["number"])
+
+    # Heartbeat LAST: a run that failed before this point leaves it stale.
+    if feeds is not None:
+        beats = [it for it in existing if it["kind"] == "heartbeat"]
+        previous = None
+        if beats:
+            m = LAST_RUN_RE.search(beats[0]["body"])
+            previous = m.group(1) if m else None
+        doc = heartbeat_doc(now, feeds, run_url, previous)
+        if not beats:
+            issues.create(doc, [LABEL])
+        else:
+            it = beats[0]
+            issues.update(it["number"], doc, [LABEL] + [l for l in it["labels"] if l != LABEL],
+                          state="open" if it["state"] == "closed" else None)
+            prev = parse_time(previous)
+            if prev is not None and (now - prev).total_seconds() > HEARTBEAT_GAP_HOURS * 3600:
+                issues.comment(it["number"], f"Gap: the previous run was {(now - prev).total_seconds() / 3600:.0f} h ago "
+                                             f"(more than {HEARTBEAT_GAP_HOURS} h). Scheduled runs were missed.")
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +736,7 @@ def run(args):
     components = load_inventory(args.inventory)
     by_id = {c["id"]: c for c in components}
     failures, raw, complete = [], [], True
+    feeds = {}
 
     try:
         hits = osv_query(components, args.osv_api)
@@ -625,26 +764,41 @@ def run(args):
             raw.append({"ids": ids, "summary": rec.get("summary") or rec.get("details", "")[:300],
                         "severity": severity_of(rec), "components": comps, "fixed": fixed,
                         "applies": applies, "url": urls[0] if urls else None})
+        feeds["OSV"] = f"ok ({len(hits)} advisory record(s))"
     except FeedError as e:
         failures.append(f"OSV: {e}")
+        feeds["OSV"] = "FAILED"
         complete = False
 
     for c in components:
         if c["watch"] != "github-repo-advisories":
             continue
         try:
-            for adv in repo_advisories(c, args.github_api, args.token):
+            advs = repo_advisories(c, args.github_api, args.token)
+            for adv in advs:
                 adv["components"] = {c["id"]}
                 raw.append(adv)
+            feeds[f"GitHub advisories {c['name']}"] = f"ok ({len(advs)} relevant)"
         except FeedError as e:
             failures.append(f"GitHub advisories ({c['name']}): {e}")
+            feeds[f"GitHub advisories {c['name']}"] = "FAILED"
             complete = False
 
     try:
         kev = kev_set(args.kev_url)
+        feeds["CISA KEV"] = f"ok ({len(kev)} CVEs)"
     except FeedError as e:
         failures.append(f"KEV: {e}")
+        feeds["CISA KEV"] = "FAILED"
         kev = set()  # findings are still posted; a later KEV listing escalates them
+
+    node = None
+    try:
+        node = node_security_releases(args.node_index)
+        feeds["Node.js releases"] = "ok (" + ", ".join(f"{m}: {v}" for m, v in sorted(node.items())) + ")"
+    except FeedError as e:
+        failures.append(f"Node releases: {e}")
+        feeds["Node.js releases"] = "FAILED"
 
     groups = merge_findings(raw)
     if len(groups) > MAX_FINDINGS:
@@ -652,6 +806,8 @@ def run(args):
         complete = False
         groups = sorted(groups, key=lambda g: (-SEVERITY_ORDER.get(g["severity"], 0), primary_id(g["ids"])))[:MAX_FINDINGS]
     docs = [finding_doc(g, kev, by_id) for g in groups] + [gaps_doc(components)]
+    if node is not None:
+        docs.append(node_doc(node))
 
     print(f"security watch: {len(components)} components, {sum(1 for c in components if c['watch'] in ('osv', 'osv-package'))} OSV-checked, "
           f"{len(groups)} advisory group(s), {len(failures)} feed problem(s)")
@@ -662,7 +818,10 @@ def run(args):
         print(f"  ✖ {f}")
 
     issues = Issues(args.github_api, args.repo, args.token, args.dry_run)
-    reconcile(issues, docs, complete and not failures, failures)
+    run_url = None
+    if os.environ.get("GITHUB_RUN_ID", "").isdigit() and args.repo:
+        run_url = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{args.repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+    reconcile(issues, docs, complete and not failures, failures, feeds=feeds, run_url=run_url)
     print(f"github writes: {len(issues.actions)}{' (dry run, none sent)' if args.dry_run else ''}")
     return 1 if failures else 0
 
@@ -674,6 +833,7 @@ def main(argv=None):
     p.add_argument("--osv-api", default=OSV_API)
     p.add_argument("--github-api", default=GITHUB_API)
     p.add_argument("--kev-url", default=KEV_URL)
+    p.add_argument("--node-index", default=NODE_INDEX)
     p.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     args = p.parse_args(argv)
     args.token = os.environ.get("GITHUB_TOKEN", "")

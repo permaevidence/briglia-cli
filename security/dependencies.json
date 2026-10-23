@@ -483,7 +483,7 @@
   {
    "ecosystem": null,
    "exposure": "runs the Playwright MCP, the WhatsApp bridge and user MCP/LSP servers",
-   "gap": "unpinned at install, then never updated; ~/.local/node and its ~/.local/bin links are shared entry points",
+   "gap": "unpinned at install, then never updated (the installed version is per machine, unknown here); ~/.local/node and its ~/.local/bin links are shared entry points",
    "group": "U1 Node.js (managed copy when no system Node >= 20)",
    "id": "runtime:node",
    "name": "node",
@@ -493,7 +493,7 @@
    "scope": "runtime-managed",
    "source": "TelegramConcierge/Services/MCPRegistry.swift: https://nodejs.org/dist/index.json",
    "version": null,
-   "watch": "gap"
+   "watch": "node-releases"
   },
   {
    "ecosystem": null,
@@ -642,6 +642,7 @@
  "watch": {
   "gap": "cannot be checked automatically today; listed in the watch job's coverage-gap issue",
   "github-repo-advisories": "checked daily against the upstream repository's published GitHub security advisories",
+  "node-releases": "newest Node.js security release per supported LTS line tracked daily (nodejs.org/dist/index.json); the per-machine installed version is not known here",
   "osv": "exact version checked daily against OSV (scripts/security_watch.py)",
   "osv-package": "all OSV advisories of the package fetched daily; affected ranges evaluated by the watch itself (OSV does not version-match this ecosystem)"
  }

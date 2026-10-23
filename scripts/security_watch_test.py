@@ -15,6 +15,7 @@ list read from the public mirror (anonymous, read-only). Proves the query
 shapes match the real services; nothing is written anywhere.
 """
 import copy
+import datetime
 import http.server
 import json
 import os
@@ -55,7 +56,15 @@ class World:
         self.osv_pkg = {}      # (eco, name) -> [ids] for package-only queries
         self.vulns = {}        # id -> record
         self.paged = set()     # (eco, name, version) served over two pages
-        self.kev = []
+        self.kev = ["CVE-2000-0001"]   # the real catalogue is never empty
+        self.node = [  # nodejs.org/dist/index.json shape, newest first
+            {"version": "v24.9.1", "lts": "Krypton", "security": True},
+            {"version": "v24.9.0", "lts": "Krypton", "security": False},
+            {"version": "v25.1.0", "lts": False, "security": True},          # current line, not LTS
+            {"version": "v22.20.0", "lts": "Jod", "security": True},
+            {"version": "v18.20.9", "lts": "Hydrogen", "security": True},     # below the minimum major
+        ]
+        self.heartbeat_writes = 0
         self.advisories = {}   # repo -> [advisory]
         self.fail = set()      # {"osv", "kev", "adv", "vulns"}
         self.issues = []       # dicts
@@ -116,7 +125,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self._send(201, {"id": 1})
                 num = len(W.issues) + 1
                 W.issues.append({"number": num, "state": "open", "title": body["title"], "body": body["body"],
-                                 "labels": [{"name": l} for l in body.get("labels", [])]})
+                                 "labels": [{"name": l} for l in body.get("labels", [])],
+                                 "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
                 return self._send(201, {"number": num})
         self._send(404, {"message": "no"})
 
@@ -126,8 +136,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with W.lock:
             m = re.match(rf"^/gh/repos/{REPO}/issues/(\d+)$", path)
             if m:
-                W.writes.append(("PATCH", path))
                 it = next(i for i in W.issues if i["number"] == int(m.group(1)))
+                if "kind=heartbeat" in it["body"]:
+                    W.heartbeat_writes += 1   # the per-run heartbeat body edit is counted apart
+                else:
+                    W.writes.append(("PATCH", path))
                 for k in ("title", "body", "state"):
                     if k in body:
                         it[k] = body[k]
@@ -150,6 +163,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if "kev" in W.fail:
                     return self._send(503, {})
                 return self._send(200, {"vulnerabilities": [{"cveID": c} for c in W.kev]})
+            if path == "/node/index.json":
+                if "node" in W.fail:
+                    return self._send(503, {})
+                return self._send(200, W.node)
             if path == f"/gh/repos/{REPO}/issues":
                 page = int(qs.get("page", ["1"])[0])
                 per = 2  # force pagination of the issue list
@@ -191,7 +208,8 @@ def run_watch(script, inventory=None, dry=False, extra=()):
             json.dump(INVENTORY, f)
     env = dict(os.environ, GITHUB_TOKEN="test-token", GITHUB_REPOSITORY=REPO, SECURITY_WATCH_BACKOFF="0")
     cmd = [sys.executable, script, "--inventory", inv, "--osv-api", f"{BASE}/osv",
-           "--github-api", f"{BASE}/gh", "--kev-url", f"{BASE}/kev.json"] + (["--dry-run"] if dry else []) + list(extra)
+           "--github-api", f"{BASE}/gh", "--kev-url", f"{BASE}/kev.json",
+           "--node-index", f"{BASE}/node/index.json"] + (["--dry-run"] if dry else []) + list(extra)
     p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
     return p.returncode, p.stdout + p.stderr
 
@@ -254,10 +272,41 @@ def scenarios(script):
     check("fresh: gaps issue lists the unpinned component", "`node`" in issues("gaps")[0]["body"] if issues("gaps") else False)
     check("fresh: severity labels set", any(l["name"] == "severity:high" for i in ghsa for l in i["labels"]))
 
-    # 2. rerun, nothing changed -> zero writes
-    W.writes.clear()
+    # heartbeat + node issue on the first run
+    hb = issues("heartbeat")
+    check("fresh: one heartbeat issue with the run time and every feed ok",
+          len(hb) == 1 and re.search(r"^last-run: \d{4}-\d\d-\d\dT", hb[0]["body"], re.M)
+          and "- OSV: ok" in hb[0]["body"] and "- CISA KEV: ok" in hb[0]["body"] and "FAILED" not in hb[0]["body"],
+          hb[0]["body"] if hb else "none")
+    node = issues("node")
+    check("fresh: Node issue lists the newest security release of LTS lines >= 20 only",
+          len(node) == 1 and "Node 24: v24.9.1" in node[0]["body"] and "Node 22: v22.20.0" in node[0]["body"]
+          and "v25" not in node[0]["body"] and "Node 18" not in node[0]["body"], node[0]["body"] if node else "none")
+
+    # 2. rerun, nothing changed -> zero writes besides the heartbeat body
+    W.writes.clear(); W.heartbeat_writes = 0
     rc, out = run_watch(script)
     check("rerun: unchanged world makes no GitHub writes", rc == 0 and not W.writes, W.writes)
+    check("rerun: the heartbeat body is rewritten exactly once, with no comment",
+          W.heartbeat_writes == 1 and not W.comments.get(hb[0]["number"]))
+    # a missed day: previous heartbeat older than 36 h -> one gap comment
+    hb[0]["body"] = re.sub(r"^last-run: .*$", "last-run: 2020-01-01T00:00:00Z", hb[0]["body"], flags=re.M)
+    run_watch(script)
+    check("heartbeat: a gap of more than 36 h since the previous run gets one comment",
+          len(W.comments.get(hb[0]["number"], [])) == 1 and "Gap" in W.comments[hb[0]["number"]][0])
+    run_watch(script)
+    check("heartbeat: no repeated gap comment on the next on-time run", len(W.comments.get(hb[0]["number"], [])) == 1)
+
+    # Node: a new security release is news (body + one comment); feed down -> failure, issue untouched
+    W.node.insert(0, {"version": "v24.10.1", "lts": "Krypton", "security": True})
+    W.writes.clear()
+    run_watch(script)
+    check("node: a new security release updates the issue once with one comment",
+          "Node 24: v24.10.1" in node[0]["body"] and len(W.comments.get(node[0]["number"], [])) == 1, W.writes)
+    W.node.insert(0, {"version": "v24.10.2", "lts": "Krypton", "security": False})
+    W.writes.clear()
+    run_watch(script)
+    check("node: a non-security release is not news", not W.writes, W.writes)
 
     # 3. KEV listing + escalation -> one update + one comment on that issue only
     W.kev = ["CVE-2026-1111"]
@@ -292,6 +341,8 @@ def scenarios(script):
     W.writes.clear()
     rc, out = run_watch(script)
     health = issues("health")
+    hb = issues("heartbeat")
+    check("osv down: the heartbeat still records the run, with OSV FAILED", hb and "- OSV: FAILED" in hb[0]["body"])
     check("osv down: exit 1, one health issue, nothing marked unmatched",
           rc == 1 and len(health) == 1 and health[0]["state"] == "open"
           and not any("No longer matched" in i["body"] for i in issues("finding")), out[-600:])
@@ -308,6 +359,16 @@ def scenarios(script):
     W.fail = {"adv"}
     rc, out = run_watch(script)
     check("advisory feed down: exit 1, reported as a failure (not as 'no advisories')", rc == 1 and "GitHub advisories" in health[0]["body"])
+    W.fail = set()
+    saved_kev, W.kev = W.kev, []
+    rc, out = run_watch(script)
+    check("empty KEV catalogue: a failure, not 'nothing exploited'", rc == 1 and "empty catalogue" in health[0]["body"], out[-400:])
+    W.kev = saved_kev
+    W.fail = {"node"}
+    node_body = issues("node")[0]["body"]
+    rc, out = run_watch(script)
+    check("node feed down: exit 1, health names it, Node issue untouched",
+          rc == 1 and "Node releases" in health[0]["body"] and issues("node")[0]["body"] == node_body)
     W.fail = set()
     run_watch(script)
 
@@ -326,7 +387,28 @@ def scenarios(script):
     # 7. dry run never writes
     reset(); base_world()
     rc, out = run_watch(script, dry=True)
-    check("dry run: plans actions, sends no writes", rc == 0 and not W.writes and "[dry-run] POST" in out, out[-400:])
+    check("dry run: plans actions, sends no writes", rc == 0 and not W.writes and not W.issues and "[dry-run] POST" in out, out[-400:])
+
+    # 7b. reachability triage deadlines
+    reset(); base_world()
+    run_watch(script)
+    old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    high = next(i for i in issues("finding") if "GHSA-aaaa-bbbb-cccc" in i["body"])        # HIGH
+    moderate = next(i for i in issues("finding") if "OSV-1" in i["body"])                  # MODERATE
+    high["created_at"] = moderate["created_at"] = old
+    W.writes.clear()
+    run_watch(script)
+    lab = lambda it: [l["name"] for l in it["labels"]]
+    check("triage: HIGH finding unlabelled after 8 days -> triage-overdue + one comment; MODERATE not yet (30 days)",
+          "triage-overdue" in lab(high) and len(W.comments.get(high["number"], [])) == 1
+          and "triage-overdue" not in lab(moderate) and not W.comments.get(moderate["number"]), (lab(high), lab(moderate)))
+    W.writes.clear()
+    run_watch(script)
+    check("triage: no repeated overdue comment", not W.writes and len(W.comments.get(high["number"], [])) == 1, W.writes)
+    high["labels"].append({"name": "not-reachable"})
+    run_watch(script)
+    check("triage: once the owner labels reachability the overdue label is removed (no comment)",
+          "triage-overdue" not in lab(high) and "not-reachable" in lab(high) and len(W.comments.get(high["number"], [])) == 1, lab(high))
 
     # 8. owner labels are kept on update
     reset(); base_world()
@@ -340,8 +422,9 @@ def scenarios(script):
     # 9. the real inventory loads and runs against an empty feed
     reset()
     rc, out = run_watch(script, inventory=REAL_INVENTORY)
-    check("real inventory: runs clean against an empty feed (gaps issue only)",
-          rc == 0 and len(W.issues) == 1 and issues("gaps"), out[-600:])
+    check("real inventory: runs clean against an empty feed (gaps, Node and heartbeat issues only)",
+          rc == 0 and len(W.issues) == 3 and issues("gaps") and issues("node") and issues("heartbeat")
+          and "runtime:node" in issues("gaps")[0]["body"], out[-600:])
 
     # 10. config errors
     p = subprocess.run([sys.executable, script, "--repo", REPO], capture_output=True, text=True,
@@ -372,10 +455,17 @@ BREAKS = [
     ("health never closed", 'issues.close(it["number"])', "pass"),
     ("range check always true", "        if not ok:\n            return False", "        if False:\n            return False"),
     ("KEV failure ignored", 'failures.append(f"KEV: {e}")', "pass"),
-    ("unmatched marked after an incomplete run", "reconcile(issues, docs, complete and not failures, failures)", "reconcile(issues, docs, True, failures)"),
+    ("unmatched marked after an incomplete run", "reconcile(issues, docs, complete and not failures, failures,", "reconcile(issues, docs, True, failures,"),
     ("osv-package ranges not evaluated", "                    if verdict is False:\n                        continue", "                    if False:\n                        continue"),
     ("osv-package queried by version", 'if c["watch"] == "osv":\n                    q["version"]', 'if True:\n                    q["version"]'),
     ("issue list pagination ignored", "            url = next_link(hdrs)\n        out.sort", "            url = None\n        out.sort"),
+    ("no heartbeat", "    if feeds is not None:\n        beats", "    if False:\n        beats"),
+    ("heartbeat gap never reported", "if prev is not None and (now - prev).total_seconds() > HEARTBEAT_GAP_HOURS * 3600:", "if False:"),
+    ("empty KEV accepted", "    if not out:\n        raise FeedError(\"CISA KEV", "    if False:\n        raise FeedError(\"CISA KEV"),
+    ("Node security flag ignored", 'rel.get("security") is not True', "False"),
+    ("Node feed failure ignored", 'failures.append(f"Node releases: {e}")', "pass"),
+    ("triage never overdue", "return labels + [OVERDUE] if (now - created).total_seconds() > days * 86400 else None", "return None"),
+    ("triage overdue on day one", "days = TRIAGE_DAYS_URGENT if urgent else TRIAGE_DAYS", "days = 0"),
 ]
 
 
@@ -401,6 +491,7 @@ def live_control():
               ("live: SwiftURL github.com/apple/swift-nio-http2 1.19.1 -> GHSA-q36x-r5x4-h4q6", "GHSA-q36x-r5x4-h4q6" in out),
               ("live: GitHub Actions tj-actions/changed-files 45.0.7 -> GHSA-mrrh-fwg8-r2c3, flagged KEV", "GHSA-mrrh-fwg8-r2c3 HIGH KEV" in out),
               ("live: the already-fixed 46.0.5 pin is not reported", "46.0.5" not in out),
+              ("live: the real Node release index parsed (LTS security releases found)", "[dry-run] POST /issues: create node node-security" in out),
               ("live: dry run sent nothing", "(dry run, none sent)" in out)]
     for label, ok in checks:
         print(f"{'✔' if ok else '✖'} {label}")
