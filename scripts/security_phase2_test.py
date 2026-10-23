@@ -164,6 +164,7 @@ class FakeBotAPI:
 
     def __init__(self, mode):
         self.mode, self.requests = mode, 0
+        probe = socket.socket(); probe.bind(("127.0.0.1", 0)); self.dead_port = probe.getsockname()[1]; probe.close()
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(8)
@@ -189,10 +190,16 @@ class FakeBotAPI:
                     self.requests += 1
                 replies = {"ok": (200, b'{"ok":true,"result":{"message_id":1}}'),
                            "429": (429, b'{"ok":false,"error_code":429,"parameters":{"retry_after":17}}'),
-                           "502": (502, b'{"ok":false,"description":"Bad Gateway"}')}
+                           "502": (502, b'{"ok":false,"description":"Bad Gateway"}'),
+                           "307": (307, b''), "308": (308, b''), "307-dead": (307, b'')}
                 if self.mode != "drop":
                     status, payload = replies[self.mode]
-                    conn.sendall(f"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode() + payload)
+                    location = ""
+                    if self.mode in ("307", "308"):
+                        location = f"Location: http://127.0.0.1:{self.port}/second\r\n"
+                    elif self.mode == "307-dead":
+                        location = f"Location: http://127.0.0.1:{self.dead_port}/second\r\n"
+                    conn.sendall(f"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{location}Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode() + payload)
             except Exception:
                 pass
             finally:
@@ -203,18 +210,80 @@ def telegram_e2e(binary):
     with tempfile.TemporaryDirectory() as tmp:
         env = scratch_env(tmp)
         for mode, expect in (("ok", "accepted"), ("429", "refused(retryAfterSeconds: Optional(17)"),
-                             ("502", "ambiguous"), ("drop", "ambiguous")):
+                             ("502", "ambiguous"), ("drop", "ambiguous"),
+                             ("307", "ambiguous"), ("308", "ambiguous"), ("307-dead", "ambiguous")):
             api = FakeBotAPI(mode)
             env["BRIGLIA_TELEGRAM_API_BASE"] = f"http://127.0.0.1:{api.port}/bot"
             rc, out = run(binary, ["__update-notice-send-once"], env, timeout=60)
             time.sleep(0.2)
-            check(f"telegram wire: {mode} → {expect.split('(')[0]}, exactly one wire request",
+            label = {"307": "307 redirect (refused, never followed)", "308": "308 redirect (refused, never followed)",
+                     "307-dead": "redirect to a dead port (no second hop, so no false 'nothing sent')"}.get(mode, mode)
+            check(f"telegram wire: {label} → {expect.split('(')[0]}, exactly one wire request",
                   expect in out and api.requests == 1, f"{out} requests={api.requests}")
             api.sock.close()
         s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
         env["BRIGLIA_TELEGRAM_API_BASE"] = f"http://127.0.0.1:{port}/bot"
         rc, out = run(binary, ["__update-notice-send-once"], env, timeout=60)
         check("telegram wire: connection refused (nothing written) → refused (retryable)", "refused(" in out, out)
+
+
+def parity(binary):
+    """Round-1 R2: whatever release_security.py authorizes and emits, the
+    client parses as known (no unknown block, no unknown component)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("release_security", ROOT / ".github/scripts/release_security.py")
+    rs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rs)
+    hist = [{"schema": 1, "channel": "briglia-cli", "sequence": 136, "version": "0.3.136"}]
+    base = dict(schema=1, forSequence=137, cumulative=[], securityFloor={"recommended": 0, "critical": 0},
+                aliasLookup="skipped: parity fixture")
+    cve = dict(id="CVE-2026-1000", aliases=["GHSA-aaaa-bbbb-cccc"], level="critical", affectsFromSequence=101, fixedInSequence=137)
+    comps = [
+        dict(ecosystem="deb", identity={"distro": "ubuntu", "release": "noble", "arch": "arm64", "sourcePackage": "ffmpeg"},
+             minimumSafe="7:6.1.1-3ubuntu5.2", advisories=["USN-7000-1"], level="recommended"),
+        dict(ecosystem="brew", identity={"tap": "homebrew/core", "formula": "ffmpeg", "versionScheme": 0},
+             minimumSafe="7.1.1_2", advisories=["CVE-2026-1001"], level="recommended"),
+        dict(ecosystem="npm", identity={"package": "playwright-core"}, minimumSafe="1.55.1", advisories=["GHSA-zzzz-yyyy-xxxx"], level="critical"),
+        dict(ecosystem="pypi", identity={"distribution": "weasyprint"}, minimumSafe="66.0", advisories=["PYSEC-2026-1"], level="recommended"),
+        dict(ecosystem="binary", identity={"vendor": "nodejs", "product": "node", "platform": "aarch64-apple-darwin"},
+             minimumSafe="22.20.0", advisories=["CVE-2026-1002"], level="recommended"),
+    ]
+    intro = [dict(id="CVE-2026-1000", level="critical", component="playwright-core")]
+    e = dict(id="CVE-2026-1000", aliases=[], level="recommended", affectsFromSequence=101, fixedInSequence=137)
+    many = [dict(id=f"CVE-2026-{2000 + i}", aliases=[f"GHSA-{i:04d}-xxxx-yyyy"], level="recommended",
+                 affectsFromSequence=101, fixedInSequence=137) for i in range(64)]
+    candidates = {
+        "full block (critical CVE+GHSA, floors, summary, introduces, all five component ecosystems)":
+            dict(base, cumulative=[cve], introduces=intro, securityFloor={"recommended": 120, "critical": 110},
+                 summary="Fixes a browser sandbox escape", componentAdvisories=comps),
+        "64 cumulative entries, 16-ID identity": dict(base, cumulative=many[:63] + [dict(many[63], aliases=[f"GHSA-{i:04d}-aaaa-bbbb" for i in range(15)])]),
+        "R2 introduces merging to 19 IDs": dict(base, cumulative=[e], introduces=[
+            dict(id="CVE-2026-1000", level="recommended", aliases=[f"ADV-{p}{i}" for i in range(9)]) for p in ("A", "B")]),
+        "R2 65 raw aliases": dict(base, cumulative=[dict(e, aliases=["CVE-2026-1000"] * 65)]),
+        "R2 component identity value not a string": dict(base, componentAdvisories=[dict(comps[2], identity={"package": 123})]),
+        "R2 component minimumSafe of 129 bytes": dict(base, componentAdvisories=[dict(comps[2], minimumSafe="1" * 129)]),
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        env = scratch_env(tmp)
+        allowed = 0
+        for label, c in candidates.items():
+            reasons = rs.authorize(c, 137, hist, alias_lookup=lambda ids, base: set())
+            if reasons:
+                check(f"parity: {label} → refused by the tooling", label.startswith("R2"), "; ".join(reasons))
+                continue
+            allowed += 1
+            payload = dict(manifest(137), **rs.emit(c))
+            path = Path(tmp) / "payload.json"
+            path.write_text(json.dumps(payload))
+            rc, out = run(binary, ["__release-security-parse", str(path)], env)
+            try:
+                got = json.loads(out.strip().splitlines()[-1])
+            except Exception:
+                got = {}
+            check(f"parity: {label} → authorized AND parsed as known by the client",
+                  not label.startswith("R2") and got.get("security") == "known" and got.get("componentsUnknown") == 0
+                  and got.get("componentsInvalid") is False, out)
+        check("parity: the valid candidates were authorized", allowed == 2)
 
 
 def compat(binary, old_binary):
@@ -276,6 +345,7 @@ def main():
     selftests(binary)
     notice_e2e(binary)
     telegram_e2e(binary)
+    parity(binary)
     compat(binary, args.old_binary)
     print(f"\n{'ALL' if failed == 0 else 'FAILED:'} {passed if failed == 0 else failed} SECURITY PHASE 2 CHECKS {'PASSED' if failed == 0 else f'of {passed + failed}'}")
     return 1 if failed else 0

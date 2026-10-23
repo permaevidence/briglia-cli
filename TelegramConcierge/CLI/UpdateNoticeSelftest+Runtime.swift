@@ -108,6 +108,7 @@ extension UpdateNoticeSelftest {
         var idle = true
         var now = UpdateNoticeSelftest.t0
         var onFetch: (() -> Void)? = nil
+        var trust: Int? = nil
     }
 
     static func verifiedManifest(_ seq: Int, security: Any? = nil) -> ReleaseSigning.Manifest {
@@ -117,7 +118,12 @@ extension UpdateNoticeSelftest {
 
     @MainActor
     static func service(_ p: UpdateNoticeStore.Paths, _ net: FakeNet, installed: Int = 130) -> UpdateNoticeService {
-        UpdateNoticeService(deps: UpdateNoticeService.Deps(
+        UpdateNoticeService(deps: deps(p, net, installed: installed))
+    }
+
+    @MainActor
+    static func deps(_ p: UpdateNoticeStore.Paths, _ net: FakeNet, installed: Int = 130) -> UpdateNoticeService.Deps {
+        UpdateNoticeService.Deps(
             paths: p, now: { net.now }, installed: installed, installedVersion: "0.3.\(installed)", policy: testPolicy,
             platform: "linux-x64",
             fetch: {
@@ -126,18 +132,20 @@ extension UpdateNoticeSelftest {
                 if let e = net.fail { throw e }
                 return net.manifests.removeFirst()
             },
-            trustFloor: { nil }, jitter: { 0 }, newClassId: { UUID().uuidString }, language: { "en" },
+            trustFloor: { net.trust }, jitter: { 0 }, newClassId: { UUID().uuidString }, language: { "en" },
             isIdle: { net.idle },
             destination: { .init(channelKind: "telegram", chatId: "1", channelGeneration: 0) },
             channelGeneration: { _ in 0 },
             send: { r in net.sends.append(r); return net.outcome },
-            log: { _ in }))
+            log: { _ in })
     }
 
     struct Boom: LocalizedError { var errorDescription: String? { "network down" } }
 
     @MainActor
     static func serviceGroup(_ t: Tally) async {
+        await serviceLaunch(t)
+        serviceTrustFloor(t)
         await serviceBasics(t)
         await serviceOff(t)
         await serviceRaces(t)
@@ -150,7 +158,7 @@ extension UpdateNoticeSelftest {
         let net = FakeNet()
         net.manifests = [verifiedManifest(131)]
         let svc = service(p, net)
-        svc.start(tickSeconds: 3600)
+        svc.start(tickNanoseconds: 3_600_000_000_000)
         svc.stop()
         await svc.tick()
         t.check("service: no check during the first 5 minutes after startup", net.fetches == 0)
@@ -171,12 +179,59 @@ extension UpdateNoticeSelftest {
         // Restart: a new service on the same files.
         net.fail = nil
         let again = service(p, net)
-        again.start(tickSeconds: 3600)
+        again.start(tickNanoseconds: 3_600_000_000_000)
         again.stop()
         net.now = net.now.addingTimeInterval(301)
         await again.tick()
         t.check("service: restart → no repeat, no storm (startup check suppressed by lastAttempt < 1 h)",
                 net.fetches == 2 && net.sends.count == 1)
+    }
+
+    /// Round-1 R1: started through the production owner by a function that
+    /// keeps no reference (as `startUpdateNoticeService` does), the loop
+    /// still runs its check once the clock passes the startup delay.
+    @MainActor
+    static func startLikeConversationManager(_ p: UpdateNoticeStore.Paths, _ net: FakeNet) {
+        UpdateNoticeService.launch(deps: deps(p, net), tickNanoseconds: 5_000_000)
+    }
+
+    @MainActor
+    static func serviceLaunch(_ t: Tally) async {
+        let p = tempPaths("launch"); defer { cleanup(p) }
+        let net = FakeNet()
+        net.manifests = [verifiedManifest(131)]
+        startLikeConversationManager(p, net)
+        await Task.yield()
+        t.check("R1 the production owner retains the service after the starter returns", UpdateNoticeService.current != nil)
+        net.now = t0.addingTimeInterval(301)
+        for _ in 0..<400 where net.sends.isEmpty { try? await Task.sleep(nanoseconds: 5_000_000) }
+        t.check("R1 …its loop runs: the startup check after 5 min and one notice, without a test-held reference",
+                net.fetches == 1 && net.sends.count == 1, "fetches \(net.fetches), sends \(net.sends.count)")
+        UpdateNoticeService.current?.stop()
+        t.check("R1 stop() releases the owner", UpdateNoticeService.current == nil)
+    }
+
+    /// Round-1 R4: a verified manifest below max(installed, persisted trust)
+    /// is a lower observation even when it equals the observed record.
+    @MainActor
+    static func serviceTrustFloor(_ t: Tally) {
+        let p = tempPaths("floor"); defer { cleanup(p) }
+        let net = FakeNet()
+        let svc = service(p, net)
+        svc.apply(verifiedManifest(135), generation: 0)
+        let first = UpdateNoticeStore.snapshot(p).1?.domain(svc.domain)?.observed?.lastConfirmedAt
+        net.trust = 137     // a manual /upgrade check saw 137; the user cancelled
+        net.now = t0.addingTimeInterval(hour)
+        svc.apply(verifiedManifest(135), generation: 0)
+        let d = UpdateNoticeStore.snapshot(p).1?.domain(svc.domain)
+        t.check("R4 same 135 after the trust floor moved to 137 → lower observation, not a renewal",
+                d?.lowerSince != nil && d?.observed?.lastConfirmedAt == first && d?.observed?.sequence == 135)
+        svc.apply(verifiedManifest(136), generation: 0)
+        t.check("R4 136 (above the record, below the floor) → lower, record kept",
+                UpdateNoticeStore.snapshot(p).1?.domain(svc.domain)?.observed?.sequence == 135)
+        svc.apply(verifiedManifest(137), generation: 0)
+        let after = UpdateNoticeStore.snapshot(p).1?.domain(svc.domain)
+        t.check("R4 137 (at the floor) → newer observation, flags cleared", after?.observed?.sequence == 137 && after?.lowerSince == nil)
     }
 
     @MainActor
@@ -270,6 +325,8 @@ extension UpdateNoticeSelftest {
             ("502 with ok:false body → ambiguous (5xx is never proof)", http(502, "{\"ok\":false}"), nil, { if case .ambiguous = $0 { return true }; return false }),
             ("4xx without a JSON body → ambiguous", http(404, "<html>"), nil, { if case .ambiguous = $0 { return true }; return false }),
             ("200 without ok:true → ambiguous", http(200, "{}"), nil, { if case .ambiguous = $0 { return true }; return false }),
+            ("307 (redirect not followed) → ambiguous", http(307, ""), nil, { if case .ambiguous = $0 { return true }; return false }),
+            ("308 (redirect not followed) → ambiguous", http(308, ""), nil, { if case .ambiguous = $0 { return true }; return false }),
             ("timeout after the request was written → ambiguous", nil, URLError(.timedOut), { if case .ambiguous = $0 { return true }; return false }),
             ("connection lost → ambiguous", nil, URLError(.networkConnectionLost), { if case .ambiguous = $0 { return true }; return false }),
             ("DNS failure (pre-send) → refused", nil, URLError(.cannotFindHost), { if case .refused = $0 { return true }; return false }),

@@ -9,6 +9,7 @@ extension UpdateNoticeSelftest {
 
     static func boundedGroup(_ t: Tally) {
         boundedSaturation(t)
+        boundedFloorOnlyCapacity(t)
         boundedManyReleases(t)
         boundedThreeNotices(t)
         boundedSize(t)
@@ -40,6 +41,24 @@ extension UpdateNoticeSelftest {
         let fresh = w.step()
         t.check("3b upgrade clears saturation and classifies afresh (one notice for the new install)",
                 w.s.saturated == nil && fresh.contains { if case .security = $0.proposal { return true }; return false })
+    }
+
+    /// Round-1 N1: a floor-only notice must not create row 257.
+    static func boundedFloorOnlyCapacity(_ t: Tally) {
+        var w = World(installed: 130)
+        for (n, fixed) in [131, 133, 135, 137].enumerated() {
+            _ = w.observe(fixed, block(manyEntries(64, offset: 64 * n, fixed: fixed), floorR: fixed - 2 < 130 ? 0 : fixed - 2))
+            w.step()
+            w.advance(hour)
+            _ = w.observe(fixed + 1, block([], floorR: fixed))
+            w.step()
+            w.advance(hour)
+        }
+        t.check("N1 256 classes from four introduce/retire pairs", w.s.classes.count == 256, "\(w.s.classes.count)")
+        _ = w.observe(139, block([], floorR: 137, floorC: 137))
+        let sent = w.step()
+        t.check("N1 a critical floor with a full table → saturated, no 257th row, no security notice",
+                w.s.classes.count == 256 && w.s.saturated != nil && !sent.contains { if case .security = $0.proposal { return true }; return false })
     }
 
     static func boundedManyReleases(_ t: Tally) {

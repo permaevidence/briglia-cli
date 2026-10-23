@@ -48,7 +48,7 @@ struct AdaCLI: AsyncParsableCommand {
                       EmailCalendarSelftest.self, AgentMailKeyCommand.self, AgentMailCommand.self,
                       WebLiveTest.self, QuickSetupSelftest.self, MenuSelftest.self,
                       StageMarkersCommand.self, StageMarkersSelftest.self, SecurityStatusSelftest.self,
-                      UpgradeCheck.self, UpdateCheckOnceCommand.self, UpdateNoticeSendOnceCommand.self, UpdateNoticeSelftest.self],
+                      UpgradeCheck.self, UpdateCheckOnceCommand.self, UpdateNoticeSendOnceCommand.self, UpdateNoticeSelftest.self, ReleaseSecurityParseCommand.self],
         defaultSubcommand: Chat.self
     )
 }

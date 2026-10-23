@@ -66,11 +66,16 @@ def _seq(v, name, problems):
 
 
 def _identity(entry, problems, what):
+    """Mirrors ReleaseSecurity.identity: aliases a list of ≤ 64 raw IDs, every
+    ID matching the pattern, the de-duplicated set ≤ 16."""
     ids = []
-    raw = [entry.get("id")] + list(entry.get("aliases") or [])
-    if not isinstance(entry.get("aliases", []), list):
+    aliases = entry.get("aliases", [])
+    if not isinstance(aliases, list):
         problems.append(f"{what}: aliases is not a list")
-        raw = [entry.get("id")]
+        aliases = []
+    elif len(aliases) > MAX_LIST:
+        problems.append(f"{what}: aliases has more than {MAX_LIST} entries")
+    raw = [entry.get("id")] + list(aliases)
     for x in raw:
         if not isinstance(x, str) or not ID_RE.match(x):
             problems.append(f"{what}: advisory ID {x!r} does not match the ID pattern")
@@ -173,10 +178,13 @@ def parse_security(sec, sequence):
         elif any(ord(c) < 32 or ord(c) == 127 for c in summary):
             problems.append("summary contains control characters")
     merged = merge_transitively(cumulative)
-    for g in merged:
-        if len(g["ids"]) > MAX_IDS:
-            problems.append(f"merged identity {g['ids'][0]} has {len(g['ids'])} IDs after the transitive merge (limit {MAX_IDS})")
-    return merged, merge_transitively(introduces), fr, fc, problems
+    merged_intro = merge_transitively(introduces)
+    # The client applies the cap after the merge to BOTH lists (round-1 R2).
+    for key, groups in (("cumulative", merged), ("introduces", merged_intro)):
+        for g in groups:
+            if len(g["ids"]) > MAX_IDS:
+                problems.append(f"merged {key} identity {g['ids'][0]} has {len(g['ids'])} IDs after the transitive merge (limit {MAX_IDS})")
+    return merged, merged_intro, fr, fc, problems
 
 
 # ------------------------------------------------------- version comparison
@@ -265,6 +273,17 @@ def parse_components(items, problems):
         if eco not in ECOSYSTEMS or not isinstance(ident, dict):
             problems.append(f"{what}: unknown ecosystem or identity missing")
             continue
+        # Identity values as the client reads them: strings ≤ 512 bytes;
+        # brew's versionScheme may also be an integer 0–999.
+        bad_value = False
+        for k, val in ident.items():
+            if k == "versionScheme" and isinstance(val, int) and not isinstance(val, bool) and 0 <= val < 1000:
+                continue
+            if not isinstance(val, str) or len(val.encode()) > MAX_STRING:
+                bad_value = True
+        if bad_value:
+            problems.append(f"{what}: identity values must be strings ≤ {MAX_STRING} bytes")
+            continue
         need = set(ECOSYSTEMS[eco])
         if eco == "deb":
             named = [k for k in ("sourcePackage", "binaryPackage") if k in ident]
@@ -279,8 +298,8 @@ def parse_components(items, problems):
         if not isinstance(adv, list) or not 1 <= len(adv) <= MAX_IDS or not all(isinstance(x, str) and ID_RE.match(x) for x in adv):
             problems.append(f"{what}: advisories must be 1–16 valid IDs")
             continue
-        if not isinstance(e.get("minimumSafe"), str) or e.get("level") not in LEVELS:
-            problems.append(f"{what}: minimumSafe/level invalid")
+        if not isinstance(e.get("minimumSafe"), str) or len(e["minimumSafe"].encode()) > 128 or e.get("level") not in LEVELS:
+            problems.append(f"{what}: minimumSafe (string ≤ 128 bytes) or level invalid")
             continue
         key = json.dumps([eco, ident], sort_keys=True)
         if key in out:
@@ -454,6 +473,52 @@ def emit(spec):
 
 # ----------------------------------------------------------------- history
 
+ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def validate_payload(payload, repo, channel, tag):
+    """The client's manifest validation (ReleaseSigning.validateManifest)
+    with the expiry exempt — this is a historical read — plus the tag/version
+    binding (round-1 note on fetch-history: envelope authentication alone is
+    not the client's complete check)."""
+    problems = []
+    if not isinstance(payload, dict):
+        return ["payload is not a JSON object"]
+    if payload.get("schema") != 1:
+        problems.append("schema is not 1")
+    if payload.get("channel") != channel:
+        problems.append(f"channel {payload.get('channel')!r} is not {channel!r}")
+    seq = payload.get("sequence")
+    if not _is_int(seq) or seq < 1:
+        problems.append("sequence is not a positive integer")
+    version = payload.get("version")
+    if not isinstance(version, str) or not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+$", version):
+        problems.append("version is not exact SemVer")
+    elif tag is not None and version != tag[1:]:
+        problems.append(f"version {version!r} does not match the release tag {tag!r}")
+    for field in ("published", "expires"):
+        if not isinstance(payload.get(field), str) or not ISO_RE.match(payload[field]):
+            problems.append(f"{field} is not an ISO 8601 timestamp")
+    platforms = payload.get("platforms")
+    if not isinstance(platforms, dict) or not platforms:
+        problems.append("no platforms")
+        return problems
+    prefix = f"https://github.com/{repo}/releases/download/v{version}/"
+    for name, e in platforms.items():
+        if not isinstance(e, dict):
+            problems.append(f"platform {name}: not an object")
+            continue
+        url = e.get("url")
+        if not isinstance(url, str) or not url.startswith(prefix) or not re.match(r"^[A-Za-z0-9._-]+$", url[len(prefix):]) or ".." in url:
+            problems.append(f"platform {name}: url outside the pinned release location")
+        if not isinstance(e.get("sha256"), str) or not re.match(r"^[0-9a-f]{64}$", e["sha256"]):
+            problems.append(f"platform {name}: sha256 is not 64 lowercase hex characters")
+        size = e.get("size")
+        if not _is_int(size) or not 0 < size <= 2 * 1024 ** 3:
+            problems.append(f"platform {name}: size out of range")
+    return problems
+
+
 def fetch_history(repo, pubkey, channel, out_dir, api_base, verify_script):
     """Every published (non-draft, non-prerelease) release with a signed
     manifest, verified with the committed key. Never `latest` alone."""
@@ -485,8 +550,9 @@ def fetch_history(repo, pubkey, channel, out_dir, api_base, verify_script):
                 if res.returncode != 0:
                     raise Refused(f"published release {rel['tag_name']} does not verify: {res.stdout.strip()} {res.stderr.strip()}")
                 payload = json.load(open(payload_path))
-            if payload.get("version") != rel["tag_name"][1:]:
-                raise Refused(f"published release {rel['tag_name']} carries version {payload.get('version')!r}")
+            problems = validate_payload(payload, repo, channel, rel["tag_name"])
+            if problems:
+                raise Refused(f"published release {rel['tag_name']} fails the client's manifest validation: {problems[0]}")
             payloads.append(payload)
             with open(os.path.join(out_dir, f"{payload['sequence']}.json"), "w") as f:
                 json.dump(payload, f, sort_keys=True)

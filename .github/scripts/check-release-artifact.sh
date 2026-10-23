@@ -76,6 +76,19 @@ else
     echo "✖ __playwright-selftest --child-run: expected exit 2 + refusal text, got exit $rc:"; echo "$out" | tail -5; fail=1
 fi
 
+# 1c. The update-notice development drivers (security plan v8 Phase 2) refuse:
+#     they would otherwise run a check/send against an arbitrary channel.
+for cmd in "__update-check-once" "__update-notice-send-once" "__release-security-parse /dev/null"; do
+    # shellcheck disable=SC2086
+    set +e; out="$("$BIN" $cmd 2>&1)"; rc=$?; set -e
+    name="${cmd%% *}"
+    if [[ $rc -eq 2 && "$out" == *"$name is a development-build command"* ]]; then
+        echo "✔ $name: refused (exit 2)"
+    else
+        echo "✖ $name: expected exit 2 + refusal text, got exit $rc:"; echo "$out" | tail -5; fail=1
+    fi
+done
+
 # 2. The migration path stays open on a clean scratch HOME.
 expect_ok "migrate --status"    "not needed"  migrate --status
 expect_ok "migrate --dump-spec" "healthProbe" migrate --dump-spec

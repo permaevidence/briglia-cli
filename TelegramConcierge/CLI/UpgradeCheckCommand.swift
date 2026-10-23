@@ -60,6 +60,12 @@ struct UpdateCheckOnceCommand: AsyncParsableCommand {
             print("✖ __update-check-once is a development-build command")
             throw ExitCode(2)
         }
+        // A test driver: never against the real channel or the real roots.
+        let env = ProcessInfo.processInfo.environment
+        guard env["BRIGLIA_ENVELOPE_URL"] != nil, env["XDG_CONFIG_HOME"] != nil, env["XDG_DATA_HOME"] != nil else {
+            print("✖ __update-check-once needs a test channel (BRIGLIA_ENVELOPE_URL) and isolated XDG_CONFIG_HOME/XDG_DATA_HOME")
+            throw ExitCode(2)
+        }
         let clock = now.map { Date(timeIntervalSince1970: $0) }
         let policy = ReleasePolicy.effective
         let wanted = outcome
@@ -108,10 +114,48 @@ struct UpdateNoticeSendOnceCommand: AsyncParsableCommand {
             print("✖ __update-notice-send-once is a development-build command")
             throw ExitCode(2)
         }
+        guard ProcessInfo.processInfo.environment["BRIGLIA_TELEGRAM_API_BASE"] != nil else {
+            print("✖ __update-notice-send-once needs a fake Bot API (BRIGLIA_TELEGRAM_API_BASE)")
+            throw ExitCode(2)
+        }
         let service = TelegramBotService()
         await service.configure(token: "123456:TEST_TOKEN_SHAPE_ONLY_abcdefghijklmnop")
         let outcome = await service.sendNoticeOnce(chatId: chat, text: text,
                                                    expectedGeneration: NoticeChannelGenerations.current(.telegram))
         print("OUTCOME: \(outcome)")
+    }
+}
+
+/// Dev-build-only: the client's parse of a manifest payload's security
+/// metadata, as one JSON line — the cross-language parity check between
+/// `release_security.py authorize/emit` and `ReleaseSecurity.parse`
+/// (round-1 R2: everything the tooling authorizes must parse as known).
+struct ReleaseSecurityParseCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "__release-security-parse",
+        abstract: "Print the client's parse of a manifest payload's security metadata (development builds only).",
+        shouldDisplay: false
+    )
+
+    @Argument var payloadPath: String
+
+    func run() throws {
+        guard adaCLIVersion.hasSuffix("-dev") else {
+            print("✖ __release-security-parse is a development-build command")
+            throw ExitCode(2)
+        }
+        let payload = try Data(contentsOf: URL(fileURLWithPath: payloadPath))
+        let sequence = ((try? JSONSerialization.jsonObject(with: payload)) as? [String: Any])?["sequence"] as? Int ?? 0
+        let parsed = ReleaseSecurity.parse(payload: payload, sequence: sequence)
+        var out: [String: Any] = ["componentsUnknown": parsed.components.unknownEntries,
+                                  "componentsInvalid": parsed.components.invalid,
+                                  "components": parsed.components.entries.count]
+        switch parsed.security {
+        case .absent: out["security"] = "absent"
+        case .known(let b): out["security"] = "known"; out["cumulative"] = b.cumulative.count
+        case .unknown(let why): out["security"] = "unknown"; out["reason"] = why
+        }
+        let data = try JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])
+        print(String(decoding: data, as: UTF8.self))
     }
 }

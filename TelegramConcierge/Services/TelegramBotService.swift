@@ -449,9 +449,12 @@ actor TelegramBotService {
         -1200, -1201, -1202, -1203, -1204, -1205, -1206, // TLS / certificates
     ]
 
-    /// Exactly ONE `transportData` call (one wire request: URLSession does
-    /// not replay a POST, and this path has no retry loop of its own), with
-    /// the generation check at credential capture like `sendNoticeText`.
+    /// Exactly ONE wire request: `NoticeHTTPTransport` refuses redirects
+    /// (round-1 R3: the shared session's redirect handling could send a
+    /// second POST and a later hop's connect error was mistaken for proof
+    /// that nothing was sent) and this path has no retry loop of its own.
+    /// The generation check happens at credential capture like
+    /// `sendNoticeText`.
     func sendNoticeOnce(chatId: String, text: String, expectedGeneration: UInt64) async -> OneAttemptOutcome {
         guard NoticeChannelGenerations.current(.telegram) == expectedGeneration else { return .credentialsChanged }
         guard let numericId = Int(chatId) else { return .refused(retryAfterSeconds: nil, reason: "invalid chat id") }
@@ -462,7 +465,12 @@ actor TelegramBotService {
             return .refused(retryAfterSeconds: nil, reason: "not configured")
         }
         do {
-            let (data, response) = try await transportData(for: request)
+            let (data, response): (Data, URLResponse)
+            if let override = Self.transportOverrideForTesting {
+                (data, response) = try await override(request)
+            } else {
+                (data, response) = try await NoticeHTTPTransport.send(request)
+            }
             return Self.classifyNoticeResponse(data: data, response: response)
         } catch TelegramError.transport(let code, let description) {
             return Self.preSendTransportCodes.contains(code)
@@ -473,8 +481,12 @@ actor TelegramBotService {
             return Self.preSendTransportCodes.contains(code)
                 ? .refused(retryAfterSeconds: nil, reason: "network (\(code)) before sending")
                 : .ambiguous("network (\(code))")
+        } catch let nsError as NSError where nsError.domain == NSURLErrorDomain {
+            return Self.preSendTransportCodes.contains(nsError.code)
+                ? .refused(retryAfterSeconds: nil, reason: "network (\(nsError.code)) before sending")
+                : .ambiguous("network (\(nsError.code))")
         } catch {
-            return .ambiguous("\(error)".prefix(120).description)
+            return .ambiguous(Self.redactBotTokens(in: String("\(error)".prefix(160))))
         }
     }
 
@@ -486,6 +498,8 @@ actor TelegramBotService {
         let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         let ok = body?["ok"] as? Bool
         if status == 200 { return ok == true ? .accepted : .ambiguous("HTTP 200 without ok:true") }
+        // 3xx (a refused redirect) proves the server received the request.
+        if (300...399).contains(status) { return .ambiguous("HTTP \(status) (redirect not followed)") }
         if (400...499).contains(status), ok == false {
             let retry = (body?["parameters"] as? [String: Any])?["retry_after"] as? Int
             return .refused(retryAfterSeconds: retry, reason: "Telegram refused (HTTP \(status))")

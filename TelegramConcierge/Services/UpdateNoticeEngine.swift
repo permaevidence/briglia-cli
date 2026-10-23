@@ -155,11 +155,14 @@ enum UpdateNotice {
             if observed.sequence > env.installed {
                 let a = analyze(s, observed: observed, block: block, env: env)
                 let incoming = a.newEntries.count + (a.floorCriticalNews ? 1 : 0) + (a.floorRecommendedNews ? 1 : 0)
-                if a.newEntries.count > 0, s.classes.count + incoming > maxClasses {
+                // Every class the notice would create counts, synthetic
+                // floor classes included (round-1 N1: a floor-only notice
+                // must not create row 257).
+                if incoming > 0, s.classes.count + incoming > maxClasses {
                     if s.saturated == nil {
-                        s.saturated = Saturation(since: env.now, droppedCount: a.newEntries.count)
-                    } else if s.saturated!.droppedCount != a.newEntries.count {
-                        s.saturated!.droppedCount = a.newEntries.count
+                        s.saturated = Saturation(since: env.now, droppedCount: incoming)
+                    } else if s.saturated!.droppedCount != incoming {
+                        s.saturated!.droppedCount = incoming
                     }
                 }
             }

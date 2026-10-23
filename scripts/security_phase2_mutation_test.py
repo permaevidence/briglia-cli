@@ -72,6 +72,23 @@ MUTATIONS = [
     ("M14 saturation is not entered (the 257th advisory would repeat)", E,
      "                if a.newEntries.count > 0, s.classes.count + incoming > maxClasses {",
      "                if a.newEntries.count > 0, s.classes.count + incoming > maxClasses * 1000 {", SELF),
+    ("M15 the notice transport follows redirects (a second POST)", "TelegramConcierge/Services/NoticeHTTPTransport.swift",
+     "                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {\n        completionHandler(nil)",
+     "                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {\n        completionHandler(request)", E2E),
+    ("M16 the service is not retained by its owner (round-1 R1)", SVC,
+     "        current = service\n        service.start(tickNanoseconds: tickNanoseconds)",
+     "        service.start(tickNanoseconds: tickNanoseconds)", SELF),
+    ("M17 below-floor equality renews the record (round-1 R4)", SVC,
+     "                if manifest.sequence < floor {",
+     "                if manifest.sequence < floor, (s.domain(domain)?.observed?.sequence ?? 0) < manifest.sequence {", SELF),
+    ("M18 a floor-only notice ignores the 256-row cap (round-1 N1)", E,
+     "                if incoming > 0, s.classes.count + incoming > maxClasses {",
+     "                if a.newEntries.count > 0, s.classes.count + incoming > maxClasses {", SELF),
+    ("T7 tooling: the post-merge cap skips introduces (round-1 R2)", RS,
+     "    for key, groups in ((\"cumulative\", merged), (\"introduces\", merged_intro)):",
+     "    for key, groups in ((\"cumulative\", merged),):", TOOL),
+    ("T8 tooling: component identity values are not type-checked (round-1 R2)", RS,
+     "        if bad_value:\n", "        if False:\n", TOOL),
     ("T1 tooling: no reintroduction rule (R6-1 reopened)", RS,
      "        if covered(e[\"level\"], e[\"fixed\"], p_fr, p_fc):\n            reasons.append(f\"entering entry",
      "        if False:\n            reasons.append(f\"entering entry", TOOL),
@@ -118,7 +135,7 @@ def main():
     caught = total = 0
     swift_dirty = False
     for label, rel, old, new, kind in MUTATIONS:
-        if args.only and not label.startswith(args.only):
+        if args.only and not any(label.startswith(x) for x in args.only.split(",")):
             continue
         total += 1
         path = ROOT / rel

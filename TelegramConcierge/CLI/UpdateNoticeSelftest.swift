@@ -56,6 +56,10 @@ struct UpdateNoticeSelftest: AsyncParsableCommand {
             print("— service —")
             await Self.serviceGroup(t)
         }
+        if only.map({ "manager".contains($0) }) ?? true {
+            print("— manager —")
+            await Self.managerGroup(t)
+        }
         if only.map({ "telegram".contains($0) }) ?? true {
             print("— telegram —")
             await Self.telegramGroup(t)

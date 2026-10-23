@@ -15,7 +15,7 @@ extension ConversationManager {
         // an explicit test channel. Stamped releases always run it.
         if adaCLIVersion.hasSuffix("-dev"), ProcessInfo.processInfo.environment["BRIGLIA_ENVELOPE_URL"] == nil { return }
         let policy = ReleasePolicy.effective
-        let service = UpdateNoticeService(deps: UpdateNoticeService.Deps(
+        UpdateNoticeService.launch(deps: UpdateNoticeService.Deps(
             paths: .live,
             now: { Date() },
             installed: adaCLIReleaseSequence,
@@ -42,7 +42,6 @@ extension ConversationManager {
                 return await self.sendUpdateNoticeOnce(record)
             },
             log: { print("[UpdateNotice] \($0)") }))
-        service.start()
     }
 
     /// The ambient destination (the user's last messaging channel, else

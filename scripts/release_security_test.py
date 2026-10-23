@@ -38,8 +38,12 @@ def entry(id_, aliases=(), level="recommended", frm=101, fixed=135):
     return {"id": id_, "aliases": list(aliases), "level": level, "affectsFromSequence": frm, "fixedInSequence": fixed}
 
 
-def payload(seq, cumulative=None, floor_r=0, floor_c=0, components=None, security=True):
-    p = {"schema": 1, "channel": "briglia-cli", "sequence": seq, "version": f"0.3.{seq}"}
+def payload(seq, cumulative=None, floor_r=0, floor_c=0, components=None, security=True, repo="o/r"):
+    v = f"0.3.{seq}"
+    p = {"schema": 1, "channel": "briglia-cli", "sequence": seq, "version": v,
+         "published": "2026-10-01T00:00:00Z", "expires": "2027-03-30T00:00:00Z",
+         "platforms": {"linux-x64": {"url": f"https://github.com/{repo}/releases/download/v{v}/briglia-linux-x64.tar.gz",
+                                     "sha256": "a" * 64, "size": 10}}}
     if security:
         p["security"] = {"cumulative": cumulative or [], "securityFloor": {"recommended": floor_r, "critical": floor_c}}
     if components is not None:
@@ -190,6 +194,43 @@ def components():
           v("deb", "1.0~rc1", "1.0") == -1 and v("deb", "1.0-3ubuntu5.10", "1.0-3ubuntu5.2") == 1 and v("deb", "1:0.1", "9.9") == 1)
 
 
+def parity_refusals():
+    """Round-1 R2: inputs the client would mark unknown are refused here."""
+    hist = [payload(136)]
+    base = dict(schema=1, forSequence=137, cumulative=[], securityFloor={"recommended": 0, "critical": 0},
+                aliasLookup="skipped: offline review fixture")
+    e = dict(id="CVE-2026-1000", aliases=[], level="recommended", affectsFromSequence=101, fixedInSequence=137)
+    intro = [dict(id="CVE-2026-1000", level="recommended", aliases=[f"ADV-{p}{i}" for i in range(9)]) for p in ("A", "B")]
+    cases = {
+        "introduces merging to 19 IDs": dict(base, cumulative=[e], introduces=intro),
+        "65 raw aliases (deduplicated to 1)": dict(base, cumulative=[dict(e, aliases=["CVE-2026-1000"] * 65)]),
+        "component identity value not a string": dict(base, componentAdvisories=[dict(ecosystem="npm", identity={"package": 123},
+                                                                                       minimumSafe="1.0.0", advisories=["CVE-2026-1000"], level="recommended")]),
+        "component minimumSafe of 129 bytes": dict(base, componentAdvisories=[dict(ecosystem="npm", identity={"package": "x"},
+                                                                                    minimumSafe="1" * 129, advisories=["CVE-2026-1000"], level="recommended")]),
+        "component identity value over 512 bytes": dict(base, componentAdvisories=[dict(ecosystem="npm", identity={"package": "p" * 513},
+                                                                                         minimumSafe="1.0.0", advisories=["CVE-2026-1000"], level="recommended")]),
+    }
+    for label, c in cases.items():
+        check(f"R2 parity: {label} → refused (the client would mark it unknown)", run(c, 137, hist) != [])
+    brew = dict(base, componentAdvisories=[dict(ecosystem="brew", identity={"tap": "homebrew/core", "formula": "ffmpeg", "versionScheme": 0},
+                                                minimumSafe="7.1.1_2", advisories=["CVE-2026-1000"], level="recommended")])
+    check("R2 parity: brew versionScheme as an integer → allowed (the client accepts it)", run(brew, 137, hist) == [])
+
+
+def history_validation():
+    bad = payload(140)
+    bad["platforms"]["linux-x64"]["url"] = "https://evil.invalid/x.tar.gz"
+    check("fetch-history validation: a payload pointing outside the pinned location → problems",
+          rs.validate_payload(bad, "o/r", "briglia-cli", "v0.3.140") != [])
+    check("fetch-history validation: a version different from the tag → problems",
+          rs.validate_payload(payload(140), "o/r", "briglia-cli", "v0.3.141") != [])
+    expired = payload(140)
+    expired["expires"] = "2020-01-01T00:00:00Z"
+    check("fetch-history validation: expiry is exempt for historical reads",
+          rs.validate_payload(expired, "o/r", "briglia-cli", "v0.3.140") == [])
+
+
 def predecessor():
     # 137 and 138 published; candidate 139 must compare against 138 even if
     # GitHub's `latest` still pointed at 137.
@@ -324,6 +365,8 @@ def main():
     alias_lint()
     item7()
     components()
+    parity_refusals()
+    history_validation()
     predecessor()
     emit_fragment()
     fetch_history_test()

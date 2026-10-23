@@ -36,7 +36,21 @@ final class UpdateNoticeService {
         var log: (String) -> Void
     }
 
-    static weak var current: UpdateNoticeService?
+    /// The running service, STRONGLY owned for the polling process's
+    /// lifetime (round-1 R1: a weak reference let the starter's local go out
+    /// of scope before the loop's first tick). `stop()` releases it.
+    private(set) static var current: UpdateNoticeService?
+
+    /// The production owner path: create, retain in `current`, start.
+    /// No-op while one is already running.
+    @discardableResult
+    static func launch(deps: Deps, tickNanoseconds: UInt64 = 60_000_000_000) -> UpdateNoticeService {
+        if let running = current { return running }
+        let service = UpdateNoticeService(deps: deps)
+        current = service
+        service.start(tickNanoseconds: tickNanoseconds)
+        return service
+    }
 
     let deps: Deps
     let domain: String
@@ -72,9 +86,8 @@ final class UpdateNoticeService {
 
     /// Settles attempts a crashed process left in flight (lost, terminal),
     /// decides the startup extra check, starts the loop. Returns at once.
-    func start(tickSeconds: UInt64 = 60) {
+    func start(tickNanoseconds: UInt64 = 60_000_000_000) {
         guard loop == nil else { return }
-        Self.current = self
         let now = deps.now()
         _ = try? UpdateNoticeStore.transaction(deps.paths, now: now) { setting, s in
             let changed = UpdateNotice.settleCrashedAttempts(&s, env: env)
@@ -85,7 +98,7 @@ final class UpdateNoticeService {
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.tick()
-                try? await Task.sleep(nanoseconds: tickSeconds * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: tickNanoseconds)
             }
         }
     }
@@ -168,9 +181,10 @@ final class UpdateNoticeService {
         do {
             try UpdateNoticeStore.transaction(deps.paths, now: env.now) { setting, s in
                 guard setting.enabled, setting.generation == generation else { return (false, ()) }
-                if manifest.sequence < floor, (s.domain(domain)?.observed?.sequence ?? 0) < manifest.sequence {
-                    // Below the trust floor and not even what we already
-                    // recorded: a lower observation (§5.3).
+                if manifest.sequence < floor {
+                    // Below max(installed, persisted trust): always a lower
+                    // observation (§5.3), also when it equals the observed
+                    // record — never a renewal (round-1 R4).
                     UpdateNotice.observeBelowTrustFloor(&s, domain: domain, sequence: manifest.sequence, env: env)
                 } else {
                     UpdateNotice.observe(&s, observation, env: env)
