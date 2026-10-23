@@ -15,6 +15,7 @@ ONE release sequence, the manifest's `security` block and optional
 Standard library only. Exit 0 = allowed; any refusal prints every reason.
 """
 import argparse
+import datetime
 import json
 import os
 import re
@@ -159,10 +160,14 @@ def parse_security(sec, sequence):
                     problems.append(f"{what}: range [{frm}, {fixed}) violates affectsFrom < fixedIn ≤ {sequence}")
             else:
                 fixed, frm = sequence, 0
-                comp = e.get("component")
-                if comp is not None and (not isinstance(comp, str) or len(comp.encode()) > MAX_STRING):
-                    problems.append(f"{what}.component is not a string ≤ {MAX_STRING} bytes")
-            out.append({"ids": ids, "level": level, "from": frm, "fixed": fixed})
+                # Present means validated — an explicit null is not absence
+                # (the client rejects it; round-2 R2).
+                if "component" in e:
+                    comp = e["component"]
+                    if not isinstance(comp, str) or len(comp.encode()) > MAX_STRING:
+                        problems.append(f"{what}.component is not a string ≤ {MAX_STRING} bytes")
+            if ids:   # an entry without one valid ID is already a problem
+                out.append({"ids": ids, "level": level, "from": frm, "fixed": fixed})
     floors = sec.get("securityFloor")
     if not isinstance(floors, dict) or set(floors) - {"recommended", "critical"}:
         problems.append("securityFloor missing, not an object, or with unknown fields")
@@ -171,8 +176,8 @@ def parse_security(sec, sequence):
     fc = _seq(floors.get("critical", 0), "securityFloor.critical", problems)
     if fr > sequence or fc > sequence:
         problems.append("a security floor is above the release's own sequence")
-    summary = sec.get("summary")
-    if summary is not None:
+    if "summary" in sec:
+        summary = sec["summary"]
         if not isinstance(summary, str) or len(summary.encode()) > MAX_SUMMARY:
             problems.append(f"summary is not a string ≤ {MAX_SUMMARY} bytes")
         elif any(ord(c) < 32 or ord(c) == 127 for c in summary):
@@ -254,8 +259,10 @@ def compare_versions(ecosystem, a, b):
     return (pa[1] > pb[1]) - (pa[1] < pb[1])
 
 
-def parse_components(items, problems):
-    if items is None:
+def parse_components(items, problems, present=False):
+    """`present`: the key exists in the release being authorized, so an
+    explicit null is an error (the client marks it invalid), not absence."""
+    if items is None and not present:
         return {}
     if not isinstance(items, list):
         problems.append("componentAdvisories is not a list")
@@ -270,7 +277,7 @@ def parse_components(items, problems):
             continue
         eco = e.get("ecosystem")
         ident = e.get("identity")
-        if eco not in ECOSYSTEMS or not isinstance(ident, dict):
+        if not isinstance(eco, str) or eco not in ECOSYSTEMS or not isinstance(ident, dict):
             problems.append(f"{what}: unknown ecosystem or identity missing")
             continue
         # Identity values as the client reads them: strings ≤ 512 bytes;
@@ -378,7 +385,7 @@ def authorize(spec, sequence, history, osv_base=None, alias_lookup=osv_aliases):
     sec = {k: spec[k] for k in SECURITY_KEYS if k in spec}
     cum, intro, fr, fc, problems = parse_security(sec, sequence)
     reasons += problems
-    comp = parse_components(spec.get("componentAdvisories"), reasons)
+    comp = parse_components(spec["componentAdvisories"], reasons, present=True) if "componentAdvisories" in spec else {}
 
     for e in cum:
         if e["level"] == "critical" and not any(NAMED_RE.match(x) for x in e["ids"]):
@@ -476,29 +483,44 @@ def emit(spec):
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
-def validate_payload(payload, repo, channel, tag):
+SWIFT_INT_MAX = (1 << 63) - 1
+
+
+def validate_payload(payload, repo, channel, tag, now=None):
     """The client's manifest validation (ReleaseSigning.validateManifest)
     with the expiry exempt — this is a historical read — plus the tag/version
     binding (round-1 note on fetch-history: envelope authentication alone is
     not the client's complete check)."""
     problems = []
+    now = now or datetime.datetime.now(datetime.timezone.utc)
     if not isinstance(payload, dict):
         return ["payload is not a JSON object"]
-    if payload.get("schema") != 1:
-        problems.append("schema is not 1")
+    schema = payload.get("schema")
+    if not _is_int(schema) or schema != 1:
+        problems.append("schema is not the integer 1")
     if payload.get("channel") != channel:
         problems.append(f"channel {payload.get('channel')!r} is not {channel!r}")
     seq = payload.get("sequence")
-    if not _is_int(seq) or seq < 1:
-        problems.append("sequence is not a positive integer")
+    if not _is_int(seq) or not 1 <= seq <= SWIFT_INT_MAX:
+        problems.append("sequence is not a positive integer the client can decode")
     version = payload.get("version")
     if not isinstance(version, str) or not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+$", version):
         problems.append("version is not exact SemVer")
     elif tag is not None and version != tag[1:]:
         problems.append(f"version {version!r} does not match the release tag {tag!r}")
+    stamps = {}
     for field in ("published", "expires"):
-        if not isinstance(payload.get(field), str) or not ISO_RE.match(payload[field]):
-            problems.append(f"{field} is not an ISO 8601 timestamp")
+        value = payload.get(field)
+        try:
+            if not isinstance(value, str) or not ISO_RE.match(value):
+                raise ValueError
+            stamps[field] = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            problems.append(f"{field} is not a valid ISO 8601 timestamp")
+    # The client refuses a publication time more than 24 h in the future;
+    # expiry is exempt for a historical read.
+    if "published" in stamps and stamps["published"] > now + datetime.timedelta(hours=24):
+        problems.append("published is in the future")
     platforms = payload.get("platforms")
     if not isinstance(platforms, dict) or not platforms:
         problems.append("no platforms")
@@ -615,7 +637,8 @@ def main(argv=None):
                     return 1
                 sec = {k: spec[k] for k in SECURITY_KEYS if k in spec}
                 problems = parse_security(sec, args.sequence)[4]
-                parse_components(spec.get("componentAdvisories"), problems)
+                if "componentAdvisories" in spec:
+                    parse_components(spec["componentAdvisories"], problems, present=True)
                 if problems:
                     for p in problems:
                         print(f"✖ {p}")

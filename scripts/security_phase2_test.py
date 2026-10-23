@@ -262,6 +262,10 @@ def parity(binary):
         "R2 65 raw aliases": dict(base, cumulative=[dict(e, aliases=["CVE-2026-1000"] * 65)]),
         "R2 component identity value not a string": dict(base, componentAdvisories=[dict(comps[2], identity={"package": 123})]),
         "R2 component minimumSafe of 129 bytes": dict(base, componentAdvisories=[dict(comps[2], minimumSafe="1" * 129)]),
+        "R2 summary: null": dict(base, cumulative=[e], summary=None),
+        "R2 introduces component: null": dict(base, cumulative=[e], introduces=[dict(id="CVE-2026-1000", level="recommended", component=None)]),
+        "R2 componentAdvisories: null": dict(base, cumulative=[e], componentAdvisories=None),
+        "single entry, no optional fields (positive control)": dict(base, cumulative=[e]),
     }
     with tempfile.TemporaryDirectory() as tmp:
         env = scratch_env(tmp)
@@ -283,7 +287,70 @@ def parity(binary):
             check(f"parity: {label} → authorized AND parsed as known by the client",
                   not label.startswith("R2") and got.get("security") == "known" and got.get("componentsUnknown") == 0
                   and got.get("componentsInvalid") is False, out)
-        check("parity: the valid candidates were authorized", allowed == 2)
+        check("parity: the valid candidates were authorized", allowed == 3)
+        fuzz_parity(binary, rs, hist, candidates["full block (critical CVE+GHSA, floors, summary, introduces, all five component ecosystems)"], env, tmp)
+
+
+def fuzz_parity(binary, rs, hist, valid, env, tmp, rounds=400, seed=20261023):
+    """Deterministic structural fuzz of the parity contract: replace, delete
+    or add one value anywhere in a valid candidate; whenever the tooling
+    still authorizes it, the client must parse the emitted metadata as known."""
+    import copy
+    import random
+    rnd = random.Random(seed)
+    values = [None, True, False, 0, -1, 2 ** 53, 2 ** 63, 1.5, "", "x" * 600, "CVE-2026-9999", [], {}, ["CVE-2026-9999"],
+              {"k": 1}, "critical", "recommended", "1.0", "\u0007"]
+
+    def paths(node, prefix=()):
+        out = [prefix]
+        if isinstance(node, dict):
+            for k, v in node.items():
+                out += paths(v, prefix + (k,))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                out += paths(v, prefix + (i,))
+        return out
+
+    allowed = mismatches = 0
+    first = ""
+    skip = {("schema",), ("forSequence",), ("aliasLookup",)}
+    candidates_paths = [p for p in paths(valid) if p and p not in skip]
+    for n in range(rounds):
+        c = copy.deepcopy(valid)
+        path = rnd.choice(candidates_paths)
+        parent = c
+        for key in path[:-1]:
+            parent = parent[key]
+        last = path[-1]
+        op = rnd.random()
+        if op < 0.15 and isinstance(parent, dict):
+            del parent[last]
+        elif op < 0.25 and isinstance(parent, dict):
+            parent["unexpected"] = rnd.choice(values)
+        else:
+            parent[last] = copy.deepcopy(rnd.choice(values))
+        try:
+            if rs.authorize(c, 137, hist, alias_lookup=lambda ids, base: set()):
+                continue
+        except Exception as ex:   # the tooling must refuse, never crash
+            mismatches += 1
+            first = first or f"authorize crashed on {path}: {ex!r}"
+            continue
+        allowed += 1
+        payload = dict(manifest(137), **rs.emit(c))
+        path_file = Path(tmp) / f"fuzz-{n}.json"
+        path_file.write_text(json.dumps(payload))
+        rc, out = run(binary, ["__release-security-parse", str(path_file)], env)
+        path_file.unlink()
+        try:
+            got = json.loads(out.strip().splitlines()[-1])
+        except Exception:
+            got = {}
+        if not (got.get("security") == "known" and got.get("componentsUnknown") == 0 and got.get("componentsInvalid") is False):
+            mismatches += 1
+            first = first or f"{path} → {json.dumps(c)[:300]} → {out.strip()[:200]}"
+    check(f"parity fuzz: {rounds} single mutations, {allowed} still authorized — every one parsed as known by the client",
+          mismatches == 0 and allowed > 0, first)
 
 
 def compat(binary, old_binary):

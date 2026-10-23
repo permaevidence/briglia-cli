@@ -213,6 +213,16 @@ def parity_refusals():
     }
     for label, c in cases.items():
         check(f"R2 parity: {label} → refused (the client would mark it unknown)", run(c, 137, hist) != [])
+    valid = dict(base, cumulative=[e])
+    nulls = {
+        "summary: null": dict(valid, summary=None),
+        "introduces component: null": dict(valid, introduces=[dict(id="CVE-2026-1000", level="recommended", component=None)]),
+        "componentAdvisories: null": dict(valid, componentAdvisories=None),
+        "aliases: null": dict(base, cumulative=[dict(e, aliases=None)]),
+    }
+    for label, c in nulls.items():
+        check(f"R2 (round 2) parity: present-but-null {label} → refused", run(c, 137, hist) != [])
+    check("R2 (round 2): the same candidate without the null field → allowed", run(valid, 137, hist) == [])
     brew = dict(base, componentAdvisories=[dict(ecosystem="brew", identity={"tap": "homebrew/core", "formula": "ffmpeg", "versionScheme": 0},
                                                 minimumSafe="7.1.1_2", advisories=["CVE-2026-1000"], level="recommended")])
     check("R2 parity: brew versionScheme as an integer → allowed (the client accepts it)", run(brew, 137, hist) == [])
@@ -225,6 +235,13 @@ def history_validation():
           rs.validate_payload(bad, "o/r", "briglia-cli", "v0.3.140") != [])
     check("fetch-history validation: a version different from the tag → problems",
           rs.validate_payload(payload(140), "o/r", "briglia-cli", "v0.3.141") != [])
+    for label, mutate in (("schema: true", lambda p: p.__setitem__("schema", True)),
+                          ("published 2026-99-99", lambda p: p.__setitem__("published", "2026-99-99T00:00:00Z")),
+                          ("published in the future", lambda p: p.__setitem__("published", "2099-01-01T00:00:00Z")),
+                          ("sequence 2**80", lambda p: p.__setitem__("sequence", 2 ** 80))):
+        q = payload(140)
+        mutate(q)
+        check(f"fetch-history validation (client parity): {label} → problems", rs.validate_payload(q, "o/r", "briglia-cli", "v0.3.140") != [])
     expired = payload(140)
     expired["expires"] = "2020-01-01T00:00:00Z"
     check("fetch-history validation: expiry is exempt for historical reads",
