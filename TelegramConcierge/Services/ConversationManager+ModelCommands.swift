@@ -1071,6 +1071,9 @@ extension ConversationManager {
         if let background = await backgroundStatusSection() { contextLine += "\n" + background }
         if let paused = statusSpendPauseLine() { contextLine += "\n" + paused }
         contextLine += "\n" + (await archiveModeStatusLine())
+        // Security (auto-update plan, Phase 0): read-only; the host check
+        // runs in the background at most every 6 h, /status never waits.
+        contextLine += "\n" + SecurityStatusCache.shared.statusLine()
         // BGPRUNE{ A-STATUS
         if backgroundPruneEngaged {
             contextLine += "\n" + backgroundPruneStatusLine()

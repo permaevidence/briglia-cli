@@ -373,6 +373,14 @@ struct Doctor: AsyncParsableCommand {
             }
         }
 
+        // Security (auto-update plan, Phase 0): read-only, never a failing
+        // check — Briglia's own pins and the host's pending OS updates.
+        print("\nSecurity")
+        for line in SecurityStatus.doctorLines(components: SecurityStatus.components(probeVersions: true),
+                                               host: SecurityStatus.hostReport(.live), now: Date()) {
+            note(line)
+        }
+
         if online {
             print("\nOnline probes")
             if !baseURL.isEmpty && !model.isEmpty {
