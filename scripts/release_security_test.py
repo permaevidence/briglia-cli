@@ -232,7 +232,10 @@ def fetch_history_test():
             return json.dumps({"format": "ada-release-envelope-v1", "channel": "briglia-cli", "keyId": key_id,
                                "payload": base64.b64encode(body).decode(), "signature": base64.b64encode(sig).decode()}).encode()
 
-        files = {"/e/137": envelope(payload(137)), "/e/138": envelope(payload(138)),
+        old_channel = json.loads(envelope(payload(58)))
+        old_channel["channel"] = "ada-cli"
+        files = {"/e/58": json.dumps(old_channel).encode(),
+                 "/e/137": envelope(payload(137)), "/e/138": envelope(payload(138)),
                  "/e/139": envelope(payload(139)), "/e/140": envelope(payload(140))}
         hits = []
 
@@ -252,6 +255,7 @@ def fetch_history_test():
                         {"tag_name": "v0.3.139", "draft": True, "prerelease": False, "assets": [{"name": "manifest.sig.json", "browser_download_url": base + "/e/139"}]},
                         {"tag_name": "v0.3.140", "draft": False, "prerelease": True, "assets": [{"name": "manifest.sig.json", "browser_download_url": base + "/e/140"}]},
                         {"tag_name": "v0.1.50", "draft": False, "prerelease": False, "assets": []},
+                        {"tag_name": "v0.1.58", "draft": False, "prerelease": False, "assets": [{"name": "manifest.sig.json", "browser_download_url": base + "/e/58"}]},
                     ] if page == 1 else []
                     data = json.dumps(rels).encode()
                 elif self.path in files:
@@ -271,7 +275,7 @@ def fetch_history_test():
             got = rs.fetch_history("o/r", str(pem), "briglia-cli", str(out), f"http://127.0.0.1:{srv.server_port}",
                                    str(ROOT / ".github/scripts/verify-envelope.sh"))
             seqs = sorted(p["sequence"] for p in got)
-            check("fetch-history: only published releases (drafts, prereleases, pre-signing skipped), all verified",
+            check("fetch-history: only published releases (drafts, prereleases, pre-rename v0.1.x on the old channel skipped), all verified",
                   seqs == [137, 138], f"{seqs}")
             check("fetch-history: never asks for the `latest` pointer", not any("latest" in h for h in hits), f"{hits}")
             files["/e/138"] = envelope(payload(138), tamper=True)

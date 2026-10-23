@@ -41,6 +41,11 @@ ECOSYSTEMS = {
 }
 SECURITY_KEYS = {"introduces", "cumulative", "securityFloor", "summary"}
 FILE_KEYS = SECURITY_KEYS | {"schema", "forSequence", "componentAdvisories", "aliasLookup"}
+# Releases before the Briglia rename (v0.2.0) were signed on the old channel
+# (`ada-cli`), another trust domain: they carry no security metadata and are
+# skipped by tag, never by anything the envelope claims. Every release from
+# v0.2.0 on must verify on this channel.
+FIRST_CHANNEL_VERSION = (0, 2, 0)
 
 
 class Refused(Exception):
@@ -466,9 +471,11 @@ def fetch_history(repo, pubkey, channel, out_dir, api_base, verify_script):
         for rel in releases:
             if rel.get("draft") or rel.get("prerelease") or not re.match(r"^v\d+\.\d+\.\d+$", rel.get("tag_name", "")):
                 continue
+            if tuple(int(x) for x in rel["tag_name"][1:].split(".")) < FIRST_CHANNEL_VERSION:
+                continue   # pre-rename releases: another channel, no security metadata
             asset = next((a for a in rel.get("assets", []) if a.get("name") == "manifest.sig.json"), None)
             if asset is None:
-                continue   # pre-signing releases carry no envelope
+                raise Refused(f"published release {rel['tag_name']} has no signed manifest — refusing (fail closed)")
             with tempfile.TemporaryDirectory() as tmp:
                 env_path, payload_path = os.path.join(tmp, "e.json"), os.path.join(tmp, "p.json")
                 req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "briglia-release-security"})

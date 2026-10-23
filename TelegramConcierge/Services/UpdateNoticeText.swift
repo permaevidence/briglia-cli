@@ -60,6 +60,8 @@ enum UpdateNoticeText {
         var reasons: [SecurityStatus.Reason]
         /// Doctor / `/upgradecheck` detail lines.
         var details: [String]
+        /// "last update notice: sent / may not have arrived" (also on /status).
+        var lastNotice: String? = nil
     }
 
     static func age(_ date: Date?, now: Date) -> String { SecurityStatus.age(date, now: now) }
@@ -76,6 +78,7 @@ enum UpdateNoticeText {
                        installedVersion: String, domain: String, now: Date, saveFailed: Bool = false) -> Status {
         var reasons: [SecurityStatus.Reason] = []
         var details: [String] = []
+        var lastNotice: String? = nil
         func reason(_ en: String, _ it: String) { reasons.append(SecurityStatus.Reason(en: en, it: it)) }
         let part: String
         let s = state ?? UpdateNoticeState()
@@ -147,10 +150,11 @@ enum UpdateNoticeText {
             case .dropped: word = "not sent (channel changed)"
             }
             details.append("last update notice (\(out.kind.rawValue)) \(age(out.at, now: now)): \(word)")
+            lastNotice = "last update notice: \(word)"
         }
         let pending = s.classes.filter { !$0.reminderAttempted && $0.reminderDueAt != nil }.compactMap(\.reminderDueAt).min()
         if let due = pending { details.append("one security reminder is scheduled for \(day(due))") }
         _ = installedVersion
-        return Status(part: part, reasons: reasons, details: details)
+        return Status(part: part, reasons: reasons, details: details, lastNotice: lastNotice)
     }
 }

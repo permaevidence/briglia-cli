@@ -223,7 +223,10 @@ extension SecurityStatus {
         let pinned = components.filter { $0.state == .pinned }.count
         var parts: [String] = []
         if let binary { parts.append("Briglia \(binary.version) (release \(binary.sequence))") }
-        if let update { parts.append(update.part) }
+        if let update {
+            parts.append(update.part)
+            if let notice = update.lastNotice { parts.append(notice) }
+        }
         parts.append("\(pinned) pinned" + (unpinned.isEmpty ? "" : ", unpinned: \(unpinned.joined(separator: ", "))"))
         if let host {
             parts += host.updates.map { describe($0, now: now) }

@@ -146,6 +146,20 @@ extension UpdateNoticeSelftest {
         _ = m.observe(137, block([adv(["CVE-2026-711", "CVE-2026-712"], fixed: 136)]))
         _ = m.run(hours: 24 * 8)
         t.check("3d merge with an already-reminded class suppresses the other's pending reminder", m.reminders.count == 1)
+        // The reminded class is the LATER one (the survivor is pending).
+        var l = World(installed: 130)
+        _ = l.observe(135, block([adv(["CVE-2026-721"], fixed: 135)]))
+        l.step()
+        l.advance(hour)
+        _ = l.observe(136, block([adv(["CVE-2026-721"], fixed: 135), adv(["CVE-2026-722"], .critical, 101, 136)]))
+        l.step()
+        _ = l.run(hours: 26)
+        t.check("3d (later class reminded first at +1 day)", l.reminders.count == 1 && l.cls("CVE-2026-721")?.reminderAttempted == false)
+        l.advance(hour)
+        _ = l.observe(137, block([adv(["CVE-2026-721", "CVE-2026-722"], .critical, 101, 136)]))
+        _ = l.run(hours: 24 * 4)
+        t.check("3d merging a pending survivor with an already-reminded class → no second reminder", l.reminders.count == 1,
+                "\(l.reminders.map(\.at))")
     }
 
     static func writerDeadlines(_ t: Tally) {

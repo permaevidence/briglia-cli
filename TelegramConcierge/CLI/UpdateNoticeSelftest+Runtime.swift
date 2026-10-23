@@ -88,6 +88,12 @@ extension UpdateNoticeSelftest {
         t.check("app surface: 'Send /upgrade or tap Update in the app'", app.contains("tap Update in the app"), app)
         let it = UpdateNoticeText.message(.release(sequence: 1, classification: .none), version: "0.2.64", critical: false, summary: nil, lang: "it", surface: .chat)
         t.check("Italian wording", it == "È disponibile Briglia 0.2.64. Invia /upgrade per installarla.", it)
+        var st = UpdateNoticeState(lastSuccess: t0)
+        st.lastOutcome = OutcomeRecord(kind: .release, at: t0, outcome: .ambiguous, sequence: 131)
+        let status = UpdateNoticeText.status(setting: .defaultOn, state: st, installed: 130, installedVersion: "x", domain: dom, now: t0)
+        let line = SecurityStatus.summaryLine(components: [], host: nil, now: t0, update: status)
+        t.check("/status line shows the last notice as 'may not have arrived', never as confirmed receipt",
+                line.contains("last update notice: may not have arrived"), line)
         t.check("no chat text says 'send briglia toolchain upgrade'", ![plain, rec, crit, rem, app, it].contains { $0.contains("toolchain") })
     }
 
