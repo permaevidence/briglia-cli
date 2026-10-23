@@ -7,6 +7,9 @@
 #                       permaevidence/briglia-cli; staging overrides)
 #        PUBLISHED_AT   ISO8601 override for reproducibility tests
 #        EXPIRES_DAYS   metadata validity window (default 180, plan §5.2)
+#        SECURITY_FRAGMENT  optional JSON from `release_security.py emit`:
+#                       its `security` / `componentAdvisories` keys are added
+#                       to the signed manifest (security plan v8 §4)
 set -euo pipefail
 
 VERSION="${1#v}"; VERSION="${VERSION:?usage: build-manifest.sh <version> <sequence> <out>}"
@@ -56,6 +59,14 @@ manifest = {
     "expires": iso(expires_dt),
     "platforms": platforms,
 }
+fragment = os.environ.get("SECURITY_FRAGMENT")
+if fragment:
+    with open(fragment) as f:
+        extra = json.load(f)
+    unknown = set(extra) - {"security", "componentAdvisories"}
+    if unknown:
+        sys.exit(f"✖ security fragment has unexpected keys {sorted(unknown)}")
+    manifest.update(extra)
 with open(out, "w") as f:
     json.dump(manifest, f, separators=(",", ":"), sort_keys=True)
 print(f"manifest: v{version} seq {sequence} platforms {sorted(platforms)}")

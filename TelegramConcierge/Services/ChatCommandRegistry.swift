@@ -59,6 +59,8 @@ enum ChatCommandRegistry {
                     usage: "[slug|off|default|remembered|forget <model>]", inMenu: false, category: "Models"),
         ChatCommand(name: "upgrade", description: "Update Briglia to the latest release",
                     usage: nil, inMenu: true, category: "System"),
+        ChatCommand(name: "upgradecheck", description: "Show or set the update check: every 6 hours Briglia looks for a new version and tells you once (on, default), or never checks (off)",
+                    usage: "[on|off]", inMenu: false, category: "System"),
         ChatCommand(name: "restart", description: "Restart Briglia (reloads mcp.json; skills need no restart)",
                     usage: nil, inMenu: false, category: "System"),
         ChatCommand(name: "commands", description: "List standard Briglia commands",

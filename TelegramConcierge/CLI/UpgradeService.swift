@@ -118,7 +118,10 @@ enum UpgradeService {
     /// `warn` surfaces non-fatal trust-state problems (corrupt or unwritable
     /// anti-rollback file) without failing the check — per the plan they are
     /// reported, never silently swallowed.
-    static func check(warn: (String) -> Void = { _ in }) async -> CheckResult {
+    /// `onManifest` receives the authenticated manifest (display only: the
+    /// security wording and the "GitHub may still be updating" line).
+    static func check(warn: (String) -> Void = { _ in },
+                      onManifest: (ReleaseSigning.Manifest) -> Void = { _ in }) async -> CheckResult {
         guard let platform = platformKey else { return .unsupportedPlatform }
         let policy = ReleasePolicy.effective
         let manifest: ReleaseSigning.Manifest
@@ -129,6 +132,7 @@ enum UpgradeService {
         } catch {
             return .failed(error.localizedDescription)
         }
+        onManifest(manifest)
         // Anti-rollback floor for THIS trust domain only (channel + pinned
         // artifact location): a staging or mock channel's sequence is never
         // production's floor, and vice versa.
@@ -158,6 +162,16 @@ enum UpgradeService {
             break
         }
         return decision
+    }
+
+    /// The update notice's check (security plan v8 §5.1): the same fetch and
+    /// verification as `check`, with the 30 s timeout, and NO trust-store
+    /// write — the notice path is read-only; only a user-started upgrade
+    /// moves the anti-rollback floor.
+    static func fetchVerifiedManifest(policy: ReleasePolicy = .effective) async throws -> ReleaseSigning.Manifest {
+        let raw = try await BoundedHTTP.fetchData(
+            url: URL(string: envelopeURL)!, maxBytes: ReleaseSigning.maxEnvelopeBytes, timeout: 30)
+        return try ReleaseSigning.verifyEnvelope(raw, policy: policy)
     }
 
     /// Pure decision core over an already-AUTHENTICATED manifest — separated

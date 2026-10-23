@@ -79,6 +79,16 @@ jobs:
           SEQUENCE="$SEQUENCE" REF_NAME="$REF_NAME" REPO="$REPO" EXPECTED_PUBKEY="$EXPECTED_PUBKEY" \
             ./.github/scripts/check-supersession.sh
 
+          # Signed security metadata (security plan v8 §4.4): verify every
+          # PUBLISHED release with the committed key (enumerated, never
+          # `latest` alone), then run the authorize checks of the reviewed
+          # RELEASE_SECURITY.json against that history. Fails closed.
+          HISTORY="$(mktemp -d)"
+          python3 .github/scripts/release_security.py fetch-history \
+            --repo "$REPO" --pubkey "$EXPECTED_PUBKEY" --out "$HISTORY"
+          python3 .github/scripts/release_security.py authorize \
+            --file RELEASE_SECURITY.json --sequence "$SEQUENCE" --history "$HISTORY"
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "sequence=$SEQUENCE" >> "$GITHUB_OUTPUT"
 
@@ -180,7 +190,11 @@ jobs:
           for platform in macos-arm64 linux-x64 linux-arm64; do
             [ -f "dist/briglia-$platform.tar.gz" ] || { echo "✖ missing dist/briglia-$platform.tar.gz"; exit 1; }
           done
-          ./.github/scripts/build-manifest.sh "$VERSION" "$SEQUENCE" dist/manifest.json
+          python3 .github/scripts/release_security.py emit \
+            --file RELEASE_SECURITY.json --sequence "$SEQUENCE" --out dist/security-fragment.json
+          SECURITY_FRAGMENT=dist/security-fragment.json \
+            ./.github/scripts/build-manifest.sh "$VERSION" "$SEQUENCE" dist/manifest.json
+          rm -f dist/security-fragment.json
           cat dist/manifest.json
           # Checksum sidecars for the installer's disclosed TLS-bootstrap
           # fallback (systems without python3/openssl); signed-path clients

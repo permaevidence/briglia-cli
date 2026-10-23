@@ -310,7 +310,18 @@
     if (reasons.length) text = T('🛡️ Security needs attention: ', '🛡️ Sicurezza, da controllare: ') + reasons.join('; ') + T('. Details: type briglia doctor in a terminal.', '. Dettagli: scrivi briglia doctor in un terminale.');
     else if (sec.checking) text = T('🛡️ Security: checking this computer’s updates…', '🛡️ Sicurezza: controllo degli aggiornamenti di questo computer in corso…');
     else text = T('🛡️ Security: the local checks found nothing to fix. Details: type briglia doctor in a terminal.', '🛡️ Sicurezza: i controlli locali non hanno trovato nulla da sistemare. Dettagli: scrivi briglia doctor in un terminale.');
-    return h('p', { class: 'small security' + (reasons.length ? ' attention' : ''), text: text });
+    var note = h('p', { class: 'small security' + (reasons.length ? ' attention' : ''), text: text });
+    if (typeof sec.update_check !== 'boolean') return note;
+    // Update-check switch (security plan v8 §5.6): Briglia checks for a new
+    // version every 6 hours and tells you once; it never installs by itself.
+    var on = sec.update_check;
+    var sw = h('p', { class: 'small' }, [
+      on ? T('Update check: on (Briglia tells you once when a new version is out; it never installs by itself). ',
+             'Controllo aggiornamenti: attivo (Briglia ti avvisa una volta quando esce una nuova versione; non installa mai da solo). ')
+         : T('Update check: off. ', 'Controllo aggiornamenti: disattivato. '),
+      h('button', { class: 'btn ghost small', type: 'button', onclick: function () { act('upgradecheck', { on: !on }, 'dashboard'); } },
+        [on ? T('Turn off', 'Disattiva') : T('Turn on', 'Attiva')])]);
+    return h('div', {}, [note, sw]);
   }
 
   // The live hub: Briglia keeps running while this page is open.

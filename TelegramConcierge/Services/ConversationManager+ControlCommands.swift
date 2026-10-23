@@ -260,6 +260,9 @@ extension ConversationManager {
         case "/upgrade":
             await handleUpgradeCommand()
             return true
+        case "/upgradecheck":
+            await handleUpgradeCheckCommand(argument: commandArgument(from: text))
+            return true
         case "/restart", "/riavvia":
             await handleRestartCommand()
             return true
@@ -1314,9 +1317,18 @@ extension ConversationManager {
         archiveExitPending = true
         defer { archiveExitPending = false }
         var trustWarnings: [String] = []
-        let checkResult = await UpgradeService.check(warn: { trustWarnings.append($0) })
+        var checkedManifest: ReleaseSigning.Manifest? = nil
+        let checkResult = await UpgradeService.check(warn: { trustWarnings.append($0) },
+                                                     onManifest: { checkedManifest = $0 })
         for warning in trustWarnings {
             try? await sendText(warning)
+        }
+        // Display only (security plan v8 §5.6): security wording for an
+        // available release; the lagging-GitHub line when this manifest is
+        // lower than one the update notice already saw.
+        if let note = Self.upgradeDisplayNote(manifest: checkedManifest, installed: adaCLIReleaseSequence,
+                                              observed: Self.observedForUpgradeDisplay()) {
+            try? await sendText(note)
         }
         switch checkResult {
         case .rollbackRefused(let live, let floor):

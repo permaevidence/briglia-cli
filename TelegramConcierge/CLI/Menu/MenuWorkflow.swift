@@ -951,6 +951,25 @@ final class MenuWorkflow {
         case "keepawake":
             return try await fixKeepAwake(how: str(body, "how"), checkpoint: checkpoint)
 
+        case "upgradecheck":
+            // Security plan v8 §5.6: the same serialized setting write as
+            // /upgradecheck and `briglia upgradecheck` (a running checker
+            // re-reads it under the lock; OFF stops every request).
+            let on = body["on"] as? Bool ?? true
+            try checkpoint()
+            do {
+                try env.setUpdateCheck(on)
+            } catch {
+                return (false, L("Could not save the update-check setting: \(error.localizedDescription)",
+                                 "Impossibile salvare l\u{2019}impostazione del controllo aggiornamenti: \(error.localizedDescription)"))
+            }
+            security = nil
+            return (true, on
+                ? L("Update checks are on: every 6 hours Briglia looks for a new version and tells you once. It never installs anything by itself.",
+                    "Controllo aggiornamenti attivo: ogni 6 ore Briglia cerca una nuova versione e te lo dice una volta. Non installa mai nulla da solo.")
+                : L("Update checks are off: no update requests and no update messages. You can still type /upgrade.",
+                    "Controllo aggiornamenti disattivato: nessuna richiesta e nessun messaggio sugli aggiornamenti. Puoi sempre scrivere /upgrade."))
+
         case "recheck":
             await reload()
             refreshToolchain()

@@ -597,6 +597,11 @@ extension ConversationManager {
         setPendingContinuation(nil)
         parkedOutbound.removeAll()
         retireVisibilityNoticesForWipe()
+        // Update notice (§5.6): under its lock, bump the notice generation
+        // (a check or send in progress cannot write back), then delete the
+        // derived state. An explicit /upgradecheck off survives.
+        do { try UpdateNoticeStore.wipeDerivedState(paths: .live, now: Date()) }
+        catch { failures.append("update notice state: \(error.localizedDescription)") }
         pendingAmbientTriggers.removeAll()
         _ = persistPendingAmbientTriggers()
         pendingWatcherFireMessages.removeAll()

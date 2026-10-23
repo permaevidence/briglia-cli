@@ -171,8 +171,9 @@ extension SecurityStatus {
     /// trust record, a Briglia copy behind its pin, pending OS security
     /// updates, a needed restart, stale or unknown OS data. Never "up to
     /// date": this status has no advisory data.
-    static func attentionReasons(_ components: [Component], _ host: HostReport?, binary: BinaryInfo? = nil) -> [Reason] {
-        var reasons: [Reason] = []
+    static func attentionReasons(_ components: [Component], _ host: HostReport?, binary: BinaryInfo? = nil,
+                                 update: UpdateNoticeText.Status? = nil) -> [Reason] {
+        var reasons: [Reason] = update?.reasons ?? []
         if let binary {
             if let floor = binary.floor, floor > binary.sequence {
                 reasons.append(Reason(en: "a newer signed Briglia release was seen (sequence \(floor)) — send /upgrade",
@@ -210,28 +211,31 @@ extension SecurityStatus {
         return reasons
     }
 
-    static func needsAttention(_ components: [Component], _ host: HostReport?, binary: BinaryInfo? = nil) -> [String] {
-        attentionReasons(components, host, binary: binary).map(\.en)
+    static func needsAttention(_ components: [Component], _ host: HostReport?, binary: BinaryInfo? = nil,
+                               update: UpdateNoticeText.Status? = nil) -> [String] {
+        attentionReasons(components, host, binary: binary, update: update).map(\.en)
     }
 
     /// One line for /status and doctor's header.
-    static func summaryLine(components: [Component], host: HostReport?, now: Date, binary: BinaryInfo? = nil) -> String {
+    static func summaryLine(components: [Component], host: HostReport?, now: Date, binary: BinaryInfo? = nil,
+                            update: UpdateNoticeText.Status? = nil) -> String {
         let unpinned = components.filter { $0.state == .unpinned }.map(\.name)
         let pinned = components.filter { $0.state == .pinned }.count
         var parts: [String] = []
         if let binary { parts.append("Briglia \(binary.version) (release \(binary.sequence))") }
+        if let update { parts.append(update.part) }
         parts.append("\(pinned) pinned" + (unpinned.isEmpty ? "" : ", unpinned: \(unpinned.joined(separator: ", "))"))
         if let host {
             parts += host.updates.map { describe($0, now: now) }
         } else {
             parts.append("OS updates: checking… (ask again in a moment, or run `briglia doctor`)")
         }
-        let reasons = needsAttention(components, host, binary: binary)
+        let reasons = needsAttention(components, host, binary: binary, update: update)
         let head = reasons.isEmpty ? "🛡️ Security" : "🛡️ Security — needs attention (\(reasons.joined(separator: "; ")))"
         return head + ": " + parts.joined(separator: " · ")
     }
 
-    static func binaryLine(_ b: BinaryInfo) -> String {
+    static func binaryLine(_ b: BinaryInfo, checkRecorded: Bool = false) -> String {
         let floor: String
         if b.trustUnreadable {
             floor = "unreadable (the next update check rebuilds it from this binary's sequence)"
@@ -240,13 +244,15 @@ extension SecurityStatus {
         } else {
             floor = "none recorded yet (no update check on this channel)"
         }
-        return "Briglia \(b.version): signed release sequence \(b.sequence); anti-rollback floor on this channel: \(floor); "
-            + "the time of the last update check is not recorded"
+        return "Briglia \(b.version): signed release sequence \(b.sequence); anti-rollback floor on this channel: \(floor)"
+            + (checkRecorded ? "" : "; the time of the last update check is not recorded")
     }
 
-    static func doctorLines(components: [Component], host: HostReport, now: Date, binary: BinaryInfo? = nil) -> [String] {
-        var lines = [summaryLine(components: components, host: host, now: now, binary: binary)]
-        if let binary { lines.append(binaryLine(binary)) }
+    static func doctorLines(components: [Component], host: HostReport, now: Date, binary: BinaryInfo? = nil,
+                            update: UpdateNoticeText.Status? = nil) -> [String] {
+        var lines = [summaryLine(components: components, host: host, now: now, binary: binary, update: update)]
+        if let binary { lines.append(binaryLine(binary, checkRecorded: update != nil)) }
+        if let update { lines += update.details }
         for c in components { lines.append("\(c.name): \(c.state.label) — \(c.detail)") }
         for u in host.updates { lines.append(describe(u, now: now)) }
         if host.stale { lines.append("update information more than 7 days old\(host.staleSources.isEmpty ? "" : " (" + host.staleSources.joined(separator: ", ") + ")"): the counts above may be out of date") }
@@ -257,9 +263,12 @@ extension SecurityStatus {
 
     /// The menu dashboard's Security note (both languages; the page picks).
     /// `checking` while the first host check is still running.
-    static func menuPayload(components: [Component], host: HostReport?, binary: BinaryInfo?) -> [String: Any] {
-        let reasons = attentionReasons(components, host, binary: binary)
-        return ["checking": host == nil, "attention": reasons.map(\.en), "attention_it": reasons.map(\.it)]
+    static func menuPayload(components: [Component], host: HostReport?, binary: BinaryInfo?,
+                            update: UpdateNoticeText.Status? = nil, updateCheckOn: Bool? = nil) -> [String: Any] {
+        let reasons = attentionReasons(components, host, binary: binary, update: update)
+        var out: [String: Any] = ["checking": host == nil, "attention": reasons.map(\.en), "attention_it": reasons.map(\.it)]
+        if let updateCheckOn { out["update_check"] = updateCheckOn }
+        return out
     }
 }
 
@@ -295,11 +304,14 @@ final class SecurityStatusCache: @unchecked Sendable {
 
     func statusLine() -> String {
         SecurityStatus.summaryLine(components: SecurityStatus.components(probeVersions: false),
-                                   host: hostReport(), now: Date(), binary: SecurityStatus.liveBinaryInfo())
+                                   host: hostReport(), now: Date(), binary: SecurityStatus.liveBinaryInfo(),
+                                   update: UpdateNoticeService.liveStatus())
     }
 
     func menuPayload() -> [String: Any] {
         SecurityStatus.menuPayload(components: SecurityStatus.components(probeVersions: false),
-                                   host: hostReport(), binary: SecurityStatus.liveBinaryInfo())
+                                   host: hostReport(), binary: SecurityStatus.liveBinaryInfo(),
+                                   update: UpdateNoticeService.liveStatus(),
+                                   updateCheckOn: UpdateNoticeStore.snapshot(.live).0.enabled)
     }
 }

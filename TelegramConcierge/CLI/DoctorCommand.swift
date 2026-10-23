@@ -378,7 +378,8 @@ struct Doctor: AsyncParsableCommand {
         print("\nSecurity")
         for line in SecurityStatus.doctorLines(components: SecurityStatus.components(probeVersions: true),
                                                host: SecurityStatus.hostReport(.live), now: Date(),
-                                               binary: SecurityStatus.liveBinaryInfo()) {
+                                               binary: SecurityStatus.liveBinaryInfo(),
+                                               update: UpdateNoticeService.liveStatus()) {
             note(line)
         }
 

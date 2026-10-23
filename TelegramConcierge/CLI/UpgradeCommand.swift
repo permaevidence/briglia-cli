@@ -20,7 +20,14 @@ struct Upgrade: AsyncParsableCommand {
         try IdentityMigration.gateMutatingEntry()
         print("Checking for updates…")
         let update: UpgradeService.Update
-        switch await UpgradeService.check(warn: { print($0) }) {
+        var checkedManifest: ReleaseSigning.Manifest? = nil
+        let result = await UpgradeService.check(warn: { print($0) }, onManifest: { checkedManifest = $0 })
+        // Display only (security plan v8 §5.6).
+        if let note = ConversationManager.upgradeDisplayNote(manifest: checkedManifest, installed: adaCLIReleaseSequence,
+                                                            observed: ConversationManager.observedForUpgradeDisplay()) {
+            print(note)
+        }
+        switch result {
         case .rollbackRefused(let live, let floor):
             print("✖ The release channel serves signed metadata with sequence \(live), BELOW this install's trusted floor \(floor). This can be a stale mirror — or a rollback attack. Refusing; if it persists, check https://github.com/permaevidence/briglia-cli/releases directly.")
             throw ExitCode(1)

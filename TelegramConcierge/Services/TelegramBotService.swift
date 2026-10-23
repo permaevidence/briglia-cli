@@ -419,6 +419,80 @@ actor TelegramBotService {
         try checkSendMessageResponse(data: data, response: response)
     }
 
+    // MARK: - One-attempt notices (security plan v8 §5.5)
+
+    /// Outcome of ONE wire request for an update notice. Telegram's
+    /// sendMessage has no idempotency key, so only proven non-delivery is
+    /// `refused` (retryable); anything that may have reached the chat is
+    /// `ambiguous` and must never be retried.
+    enum OneAttemptOutcome: Equatable {
+        case accepted
+        /// HTTP 4xx whose body is `ok:false` (incl. 429 + retry_after), or a
+        /// failure proven to happen before any request byte was written.
+        case refused(retryAfterSeconds: Int?, reason: String)
+        case ambiguous(String)
+        /// The channel generation changed: nothing was built or sent.
+        case credentialsChanged
+    }
+
+    /// URLError codes that prove no request byte was written (name
+    /// resolution, connection establishment, TLS handshake / certificate).
+    /// Every other transport failure — timeout, lost connection, reset,
+    /// cancellation — is ambiguous.
+    nonisolated static let preSendTransportCodes: Set<Int> = [
+        -1003, // cannotFindHost
+        -1006, // dnsLookupFailed
+        -1004, // cannotConnectToHost
+        -1009, // notConnectedToInternet
+        -1018, -1019, -1020, // roaming off / call active / data not allowed
+        -1022, // ATS
+        -1200, -1201, -1202, -1203, -1204, -1205, -1206, // TLS / certificates
+    ]
+
+    /// Exactly ONE `transportData` call (one wire request: URLSession does
+    /// not replay a POST, and this path has no retry loop of its own), with
+    /// the generation check at credential capture like `sendNoticeText`.
+    func sendNoticeOnce(chatId: String, text: String, expectedGeneration: UInt64) async -> OneAttemptOutcome {
+        guard NoticeChannelGenerations.current(.telegram) == expectedGeneration else { return .credentialsChanged }
+        guard let numericId = Int(chatId) else { return .refused(retryAfterSeconds: nil, reason: "invalid chat id") }
+        let request: URLRequest
+        do {
+            request = try makeSendMessageRequest(chatId: numericId, text: text, keyboard: nil)
+        } catch {
+            return .refused(retryAfterSeconds: nil, reason: "not configured")
+        }
+        do {
+            let (data, response) = try await transportData(for: request)
+            return Self.classifyNoticeResponse(data: data, response: response)
+        } catch TelegramError.transport(let code, let description) {
+            return Self.preSendTransportCodes.contains(code)
+                ? .refused(retryAfterSeconds: nil, reason: "network (\(code)) before sending")
+                : .ambiguous("network (\(code)): \(description.prefix(120))")
+        } catch let urlError as URLError {
+            let code = urlError.code.rawValue
+            return Self.preSendTransportCodes.contains(code)
+                ? .refused(retryAfterSeconds: nil, reason: "network (\(code)) before sending")
+                : .ambiguous("network (\(code))")
+        } catch {
+            return .ambiguous("\(error)".prefix(120).description)
+        }
+    }
+
+    /// 200 + ok:true → accepted; 4xx with a parseable `ok:false` body →
+    /// refused (with `parameters.retry_after` when given); everything else,
+    /// including any 5xx (even with an ok:false body) → ambiguous.
+    nonisolated static func classifyNoticeResponse(data: Data, response: URLResponse) -> OneAttemptOutcome {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let ok = body?["ok"] as? Bool
+        if status == 200 { return ok == true ? .accepted : .ambiguous("HTTP 200 without ok:true") }
+        if (400...499).contains(status), ok == false {
+            let retry = (body?["parameters"] as? [String: Any])?["retry_after"] as? Int
+            return .refused(retryAfterSeconds: retry, reason: "Telegram refused (HTTP \(status))")
+        }
+        return .ambiguous("HTTP \(status)")
+    }
+
     /// Fingerprint of a bot token (never the token itself), used by the
     /// manager to notice a token change at channel registration.
     nonisolated static func credentialIdentity(_ token: String) -> String {

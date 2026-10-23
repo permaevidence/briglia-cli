@@ -180,6 +180,8 @@ struct MenuEnvironment {
     /// pins and pending OS updates, never a child process on this call (the
     /// host check runs in the background, at most every 6 h).
     var security: () -> [String: Any] = { SecurityStatusCache.shared.menuPayload() }
+    /// The update-check switch (security plan v8 §5.6).
+    var setUpdateCheck: (Bool) throws -> Void = { try UpdateNoticeStore.setEnabled($0, paths: .live, now: Date()) }
 
     var snapshot: () async -> MenuSnapshot = { await MenuEnvironment.liveSnapshot() }
     var toolchainStatus: () async -> ToolchainService.DesktopStatus = {

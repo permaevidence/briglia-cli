@@ -190,6 +190,10 @@ enum ReleaseSigning {
         let published: Date
         let expires: Date
         let platforms: [String: Platform]
+        /// The authenticated payload bytes, for metadata parsed separately
+        /// from (and after) this verification: the security block and the
+        /// update notice's content identity (security plan v8 §4.2, §5.2).
+        var payload = Data()
     }
 
     private struct RawManifest: Decodable {
@@ -345,7 +349,7 @@ enum ReleaseSigning {
         return Manifest(
             schema: raw.schema, channel: raw.channel, sequence: raw.sequence,
             version: raw.version, published: published, expires: expires,
-            platforms: platforms)
+            platforms: platforms, payload: payload)
     }
 }
 

@@ -48,6 +48,24 @@
         "name": "Security Phase 0 (dependency inventory, security watch, resolved Swift pins, read-only Security line)",
         "run": "python3 scripts/security_phase0_test.py .build/debug/briglia"
       }
+    },
+    {
+      "op": "add",
+      "platform": "linux",
+      "reason": "Security auto-update plan v8 Phase 2 (owner-approved 2026-10-23): the update-notice selftest (state machine, store, Telegram one-request classifier), the release-security tooling tests (authorize checks, predecessor from the published history, alias lint, componentAdvisories), a signed fake channel driving the real binary's notice path (one notice, OFF makes zero requests, trust file byte-identical), one-attempt Telegram sends against a fake Bot API counting wire requests, and old-client compatibility of the new manifest fields. Local fakes only, no network; no change to any other step.",
+      "step": {
+        "name": "Security Phase 2 (signed security metadata, release tooling, update-available notice)",
+        "run": "python3 scripts/security_phase2_test.py .build/debug/briglia"
+      }
+    },
+    {
+      "op": "add",
+      "platform": "macos",
+      "reason": "Security auto-update plan v8 Phase 2 (owner-approved 2026-10-23): the update-notice selftest (state machine, store, Telegram one-request classifier), the release-security tooling tests (authorize checks, predecessor from the published history, alias lint, componentAdvisories), a signed fake channel driving the real binary's notice path (one notice, OFF makes zero requests, trust file byte-identical), one-attempt Telegram sends against a fake Bot API counting wire requests, and old-client compatibility of the new manifest fields. Local fakes only, no network; no change to any other step.",
+      "step": {
+        "name": "Security Phase 2 (signed security metadata, release tooling, update-available notice)",
+        "run": "python3 scripts/security_phase2_test.py .build/debug/briglia"
+      }
     }
   ],
   "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove|replace|job-setup, platform, step, reason}).",

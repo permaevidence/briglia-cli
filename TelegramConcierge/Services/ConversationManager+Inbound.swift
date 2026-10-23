@@ -186,6 +186,9 @@ extension ConversationManager {
         // D10: the one-time preset host for the model in use at upgrade
         // (detached; never blocks startup or a turn).
         startUpgradePresetPass()
+        // Update-available notice (security plan v8 §5): detached, one
+        // signed-manifest check every 6 h, never installs anything.
+        startUpdateNoticeService()
 
         // Crash-recovery passes, in dependency order, before the first poll
         // tick: buffered attachments first (a recovered turn may reference
