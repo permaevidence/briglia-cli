@@ -92,6 +92,8 @@ jobs:
           python3 scripts/browser_settings_test.py .build/debug/briglia
       - name: ConversationManager split moved-lines check (C1 to C2, through 0.2.60)
         run: python3 scripts/cm_split_check.py --verify-commit 8bd2718465e1b2150cfcaac03d8274a59e56039e --c1 47865661a67cbaefe969cf60e7652e3f310bbcdd
+      - name: Security Phase 0 (dependency inventory, security watch, resolved Swift pins, read-only Security line)
+        run: python3 scripts/security_phase0_test.py .build/debug/briglia
 
   linux-gates-a:
     name: Linux gates A (wire, lifecycle, Responses)
@@ -212,6 +214,8 @@ jobs:
           python3 scripts/menu_browser_test.py
       - name: Browser settings browser test
         run: python3 scripts/browser_settings_test.py .build/debug/briglia
+      - name: Security Phase 0 (dependency inventory, security watch, resolved Swift pins, read-only Security line)
+        run: python3 scripts/security_phase0_test.py .build/debug/briglia
 
   macos-gates:
     name: macOS gates

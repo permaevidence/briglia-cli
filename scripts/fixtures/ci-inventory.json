@@ -30,6 +30,24 @@
         "name": "ConversationManager split moved-lines check (C1 to C2, through 0.2.60)",
         "run": "python3 scripts/cm_split_check.py --verify-commit 8bd2718465e1b2150cfcaac03d8274a59e56039e --c1 47865661a67cbaefe969cf60e7652e3f310bbcdd"
       }
+    },
+    {
+      "op": "add",
+      "platform": "linux",
+      "reason": "Security auto-update plan Phase 0 (owner-approved 2026-10-23): security/dependencies.json must match the sources; the issues-only security watch passes its mocked-feed scenarios and deliberate breaks; release builds force Package.resolved; the read-only Security status selftest and doctor's Security section on this platform's real host. No network; no change to any other step.",
+      "step": {
+        "name": "Security Phase 0 (dependency inventory, security watch, resolved Swift pins, read-only Security line)",
+        "run": "python3 scripts/security_phase0_test.py .build/debug/briglia"
+      }
+    },
+    {
+      "op": "add",
+      "platform": "macos",
+      "reason": "Security auto-update plan Phase 0 (owner-approved 2026-10-23): security/dependencies.json must match the sources; the issues-only security watch passes its mocked-feed scenarios and deliberate breaks; release builds force Package.resolved; the read-only Security status selftest and doctor's Security section on this platform's real host. No network; no change to any other step. macOS runs the same checks (Software Update/Homebrew probe instead of apt).",
+      "step": {
+        "name": "Security Phase 0 (dependency inventory, security watch, resolved Swift pins, read-only Security line)",
+        "run": "python3 scripts/security_phase0_test.py .build/debug/briglia"
+      }
     }
   ],
   "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove|replace|job-setup, platform, step, reason}).",
