@@ -226,7 +226,11 @@ def osv_query(components, api):
             for (i, _), res in zip(pending, data["results"]):
                 if not isinstance(res, dict):
                     raise FeedError("OSV querybatch: malformed result")
-                for v in res.get("vulns") or []:
+                vulns = res.get("vulns", [])   # omitted = no advisories; present must be a list
+                token = res.get("next_page_token")
+                if not isinstance(vulns, list) or (token is not None and not isinstance(token, str)):
+                    raise FeedError("OSV querybatch: malformed result")
+                for v in vulns:
                     vid = v.get("id") if isinstance(v, dict) else None
                     if not valid_id(vid):
                         raise FeedError("OSV querybatch: malformed vulnerability id")
@@ -361,6 +365,9 @@ def repo_advisories(component, api, token):
             gid = adv.get("ghsa_id") if isinstance(adv, dict) else None
             if not valid_id(gid) or not isinstance(adv.get("vulnerabilities"), list):
                 raise FeedError(f"advisories of {component['name']}: malformed advisory record")
+            if not all(isinstance(v, dict) and isinstance(v.get("vulnerable_version_range"), (str, type(None)))
+                       for v in adv["vulnerabilities"]):
+                raise FeedError(f"advisories of {component['name']}: malformed vulnerability entry")
             if adv.get("withdrawn_at"):
                 continue
             ranges = [v.get("vulnerable_version_range") for v in adv["vulnerabilities"] if isinstance(v, dict)]
@@ -720,8 +727,9 @@ def reconcile(issues, docs, complete, failures, now=None, feeds=None, run_url=No
                                          "inventory. Close it once the release carrying the fix ships.")
 
     # Reachability triage: unlabelled open findings past their review deadline.
+    # Like every other finding change, only after a complete run.
     for it in existing:
-        if it["kind"] != "finding" or it["state"] != "open":
+        if not complete or it["kind"] != "finding" or it["state"] != "open":
             continue
         new = triage_labels(labels_now[it["number"]], it["created_at"], now)
         if new is None:

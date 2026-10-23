@@ -69,6 +69,7 @@ class World:
         self.fail = set()      # {"osv", "kev", "adv", "vulns", "node"}
         self.fail_ids = set()  # OSV record ids whose GET fails
         self.adv_override = None  # raw advisory list served instead (malformed-success cases)
+        self.osv_override = None  # raw querybatch result served for every query instead
         self.issues = []       # dicts
         self.comments = {}     # number -> [text]
         self.writes = []
@@ -103,6 +104,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/osv/v1/querybatch":
                 if "osv" in W.fail:
                     return self._send(503, {"error": "down"})
+                if W.osv_override is not None:
+                    return self._send(200, {"results": [copy.deepcopy(W.osv_override) for _ in body["queries"]]})
                 results = []
                 for q in body["queries"]:
                     if "version" not in q:
@@ -295,6 +298,16 @@ def unit_checks(script, check):
         ("Node: an LTS row without the security field", [{"version": "v24.0.0", "lts": "Krypton"}], lambda: w.node_security_releases("u")),
         ("Node: truncated index (no security release on a supported LTS line)", [{"version": "v24.0.0", "lts": "Krypton", "security": False}], lambda: w.node_security_releases("u")),
         ("KEV: a malformed catalogue row", {"vulnerabilities": [{"cveID": "CVE-2000-0001"}, {}]}, lambda: w.kev_set("u")),
+        ("OSV: a present vulns field that is not a list", {"results": [{"vulns": {}}]},
+         lambda: w.osv_query([dict(act, id="a", version="5.0.0", watch="osv-package")], "u")),
+        ("OSV: a non-string next_page_token", {"results": [{"vulns": [], "next_page_token": 7}]},
+         lambda: w.osv_query([dict(act, id="a", version="5.0.0", watch="osv-package")], "u")),
+        ("advisories: a valid out-of-range row mixed with a malformed one",
+         [{"ghsa_id": "GHSA-aaaa-bbbb-cccc", "vulnerabilities": [{"vulnerable_version_range": "< 1.2.0"}, 42]}],
+         lambda: w.repo_advisories({"name": "acme/repo", "version": "1.3.0"}, "u", "")),
+        ("advisories: a vulnerability range that is not a string",
+         [{"ghsa_id": "GHSA-aaaa-bbbb-cccc", "vulnerabilities": [{"vulnerable_version_range": 5}]}],
+         lambda: w.repo_advisories({"name": "acme/repo", "version": "1.3.0"}, "u", "")),
     ]
     for label, payload, call in cases:
         feed(payload)
@@ -310,6 +323,12 @@ def unit_checks(script, check):
     except w.FeedError:
         ok = False
     check("advisories: a genuinely empty list stays a healthy empty result", ok)
+    feed({"results": [{}]})
+    try:
+        ok = w.osv_query([dict(act, id="a", version="5.0.0", watch="osv-package")], "u") == {}
+    except w.FeedError:
+        ok = False
+    check("OSV: an omitted vulns field stays a healthy 'no advisories'", ok)
 
 
 def scenarios(script):
@@ -546,6 +565,38 @@ def scenarios(script):
     run_watch(script, inventory=inv)
     check("pin bumped but still affected: the finding shows the new version", "4.1.1" in act["body"] and "4.1.0" not in act["body"])
 
+    # 8f. malformed NESTED HTTP-200 content after a known finding and an outage: no false recovery
+    for label, setup in [("OSV result with vulns: {}", lambda: setattr(W, "osv_override", {"vulns": {}})),
+                         ("advisory with a malformed vulnerability row",
+                          lambda: setattr(W, "adv_override", [{"ghsa_id": "GHSA-mail-0002-bbbb", "cve_id": None, "summary": "x",
+                                                               "severity": "critical",
+                                                               "vulnerabilities": [{"vulnerable_version_range": "< 1.0.0"}, 42]}]))]:
+        reset(); base_world()
+        run_watch(script)
+        W.fail = {"osv", "adv"}
+        run_watch(script)
+        W.fail = set()
+        setup()
+        rc, out = run_watch(script)
+        hb = issues("heartbeat")
+        check(f"malformed nested feed ({label}): exit 1, health stays open, nothing marked unmatched, heartbeat FAILED",
+              rc == 1 and issues("health")[0]["state"] == "open"
+              and not any("No longer matched" in i["body"] for i in issues("finding")) and "FAILED" in hb[0]["body"], out[-400:])
+        W.osv_override = W.adv_override = None
+
+    # 8g. triage waits for a complete run like every other finding change
+    reset(); base_world()
+    run_watch(script)
+    high = next(i for i in issues("finding") if "GHSA-aaaa-bbbb-cccc" in i["body"])
+    high["created_at"] = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    W.fail = {"kev"}
+    run_watch(script)
+    check("triage: no overdue label or comment during an incomplete run",
+          "triage-overdue" not in [l["name"] for l in high["labels"]] and not W.comments.get(high["number"]))
+    W.fail = set()
+    run_watch(script)
+    check("triage: applied on the next complete run", "triage-overdue" in [l["name"] for l in high["labels"]])
+
     # 9. the real inventory loads and runs against an empty feed
     reset()
     rc, out = run_watch(script, inventory=REAL_INVENTORY)
@@ -604,6 +655,9 @@ BREAKS = [
     ("malformed advisory skipped", "raise FeedError(f\"advisories of {component['name']}: malformed advisory record\")", "continue"),
     ("Node rows without security accepted", 'not isinstance(rel.get("security"), bool)', "False"),
     ("component versions not fingerprinted", '[[c, by_id[c].get("version")] for c in comps]', "comps"),
+    ("OSV vulns type not checked", "if not isinstance(vulns, list) or (token is not None and not isinstance(token, str)):", "if False:"),
+    ("malformed vulnerability rows skipped", "            if not all(isinstance(v, dict) and isinstance(v.get(\"vulnerable_version_range\"), (str, type(None)))", "            if False and all(isinstance(v, dict) and isinstance(v.get(\"vulnerable_version_range\"), (str, type(None)))"),
+    ("triage during incomplete runs", '        if not complete or it["kind"] != "finding" or it["state"] != "open":', '        if it["kind"] != "finding" or it["state"] != "open":'),
 ]
 
 

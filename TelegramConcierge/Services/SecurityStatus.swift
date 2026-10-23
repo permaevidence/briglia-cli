@@ -68,7 +68,9 @@ enum SecurityStatus {
         var fileExists: (String) -> Bool
         var readData: (String) -> Data?
         var modificationDate: (String) -> Date?
-        var listDirectory: (String) -> [String]
+        /// nil when the directory cannot be read (missing, denied, not a
+        /// directory): never confused with a readable empty directory.
+        var listDirectory: (String) -> [String]?
         var findBinary: (String) -> String?
         /// (executable, arguments, timeout) → (exit status, merged output).
         var run: (String, [String], TimeInterval) -> (Int32, String)
@@ -86,7 +88,7 @@ enum SecurityStatus {
                 fileExists: { fm.fileExists(atPath: $0) },
                 readData: { fm.contents(atPath: $0) },
                 modificationDate: { (try? fm.attributesOfItem(atPath: $0))?[.modificationDate] as? Date },
-                listDirectory: { (try? fm.contentsOfDirectory(atPath: $0)) ?? [] },
+                listDirectory: { try? fm.contentsOfDirectory(atPath: $0) },
                 findBinary: { PlatformBinary.find($0) },
                 run: { exe, args, timeout in
                     let r = UserdataToolchain.run(exe, args, timeout: timeout)
@@ -162,7 +164,7 @@ enum SecurityStatus {
 
     static func newestAptList(_ probe: Probe) -> Date? {
         let dir = "/var/lib/apt/lists"
-        return probe.listDirectory(dir)
+        return (probe.listDirectory(dir) ?? [])
             .filter { $0.hasSuffix("_InRelease") || $0.hasSuffix("_Release") }
             .compactMap { probe.modificationDate(dir + "/" + $0) }
             .max()
@@ -229,10 +231,16 @@ enum SecurityStatus {
         guard let catalogue = parseBrewCatalogue(data) else {
             return .unknown(source: source, reason: "the cached catalogue's format is not recognised")
         }
+        guard let installed = probe.listDirectory(cellar) else {
+            return .unknown(source: source, reason: "the Cellar (\(cellar)) cannot be read")
+        }
         var differ = 0
-        for name in probe.listDirectory(cellar) where !name.hasPrefix(".") {
+        for name in installed where !name.hasPrefix(".") {
             guard let current = catalogue[name] else { continue }   // other taps: not in the catalogue
-            let kegs = probe.listDirectory(cellar + "/" + name).filter { !$0.hasPrefix(".") }
+            guard let listed = probe.listDirectory(cellar + "/" + name) else {
+                return .unknown(source: source, reason: "the Cellar entry \(name) cannot be read")
+            }
+            let kegs = listed.filter { !$0.hasPrefix(".") }
             // A formula of the same name from another tap is not this one.
             if kegs.contains(where: { brewTap(probe, keg: cellar + "/" + name + "/" + $0).map { $0 != "homebrew/core" } ?? false }) { continue }
             if !kegs.contains(current) { differ += 1 }
@@ -255,7 +263,7 @@ enum SecurityStatus {
     /// older `api/formula.jws.json`.
     static func brewCataloguePath(_ probe: Probe, cache: String) -> String? {
         let internalDir = cache + "/api/internal"
-        let candidates = probe.listDirectory(internalDir)
+        let candidates = (probe.listDirectory(internalDir) ?? [])
             .filter { $0.hasPrefix("packages.") && $0.hasSuffix(".jws.json") }
             .map { internalDir + "/" + $0 }
         if let newest = candidates.max(by: { (probe.modificationDate($0) ?? .distantPast) < (probe.modificationDate($1) ?? .distantPast) }) {

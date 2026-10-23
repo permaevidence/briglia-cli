@@ -50,7 +50,7 @@ struct SecurityStatusSelftest: ParsableCommand {
         SecurityStatus.Probe(
             isMacOS: mac, isUbuntuTouch: ut, home: "/home/u", environment: [:], now: { now },
             fileExists: { files[$0] != nil || dirs[$0] != nil }, readData: { files[$0] },
-            modificationDate: { mtimes[$0] }, listDirectory: { dirs[$0] ?? [] }, findBinary: { binaries[$0] },
+            modificationDate: { mtimes[$0] }, listDirectory: { dirs[$0] }, findBinary: { binaries[$0] },
             run: { exe, args, _ in recorder.commands.append((exe, args)); return result(args) })
     }
 
@@ -165,6 +165,24 @@ struct SecurityStatusSelftest: ParsableCommand {
                 == .unknown(source: "Homebrew formulae", reason: "the cached catalogue's format is not recognised"))
         t.check("brew: legacy layout read when no internal catalogue exists",
                 SecurityStatus.homebrew(mac([api + "/formula.jws.json": legacy], [], mtime: now)) == .none(source: "Homebrew formulae", asOf: now))
+        func cellarCase(_ dirsOverride: [String: [String]?]) -> SecurityStatus.Updates? {
+            var dirs: [String: [String]] = cellar
+            for (k, v) in dirsOverride { dirs[k] = v }
+            dirs[api + "/internal"] = ["packages.arm64_x.jws.json"]
+            let files = [pkg: modern].merging(receipts) { a, _ in a }
+            return SecurityStatus.homebrew(fake(mac: true, files: files, dirs: dirs, mtimes: [pkg: now], binaries: brew, recorder: rec))
+        }
+        let unknownCellar = SecurityStatus.Updates.unknown(source: "Homebrew formulae", reason: "the Cellar (/opt/homebrew/Cellar) cannot be read")
+        t.check("brew: a missing or unreadable Cellar → unknown, never 'no pending updates'",
+                cellarCase(["/opt/homebrew/Cellar": nil]) == unknownCellar)
+        t.check("brew: an unreadable formula directory → unknown",
+                cellarCase(["/opt/homebrew/Cellar/python@3.14": nil]) == .unknown(source: "Homebrew formulae", reason: "the Cellar entry python@3.14 cannot be read"))
+        t.check("brew: a genuinely empty, readable Cellar → none (control)",
+                cellarCase(["/opt/homebrew/Cellar": []]) == .none(source: "Homebrew formulae", asOf: now))
+        let unknownHost = SecurityStatus.HostReport(updates: [unknownCellar], rebootRequired: false, stale: false)
+        t.check("brew: the unknown Cellar reaches the line and both menu languages",
+                SecurityStatus.summaryLine(components: [], host: unknownHost, now: now).contains("Homebrew formulae status unknown")
+                && ((SecurityStatus.menuPayload(components: [], host: unknownHost, binary: nil)["attention_it"] as? [String]) ?? []).contains("stato Homebrew formulae sconosciuto"))
         t.check("brew: no child process was ever started (brew is never run)", rec.commands.isEmpty, "\(rec.commands)")
 
         let old = now.addingTimeInterval(-30 * 86_400)
