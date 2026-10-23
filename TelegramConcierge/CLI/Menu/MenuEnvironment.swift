@@ -176,6 +176,10 @@ struct MenuEnvironment {
     /// First guess for the page language ("it" or "en"); the page's flag
     /// switch changes it.
     var language: String = MenuEnvironment.defaultLanguage()
+    /// The dashboard's read-only Security note (security plan Phase 0):
+    /// pins and pending OS updates, never a child process on this call (the
+    /// host check runs in the background, at most every 6 h).
+    var security: () -> [String: Any] = { SecurityStatusCache.shared.menuPayload() }
 
     var snapshot: () async -> MenuSnapshot = { await MenuEnvironment.liveSnapshot() }
     var toolchainStatus: () async -> ToolchainService.DesktopStatus = {

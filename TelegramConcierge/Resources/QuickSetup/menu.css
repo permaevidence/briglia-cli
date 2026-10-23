@@ -316,3 +316,5 @@ h2.section { font-size: 19px; margin: 26px 0 4px; letter-spacing: -.005em; }
   .usingbtn .ulabel { flex-basis: 100%; }
   .usingbtn .uvalue { flex: 1 1 0; }
 }
+.small.security { max-width: 620px; margin: 0 0 16px; }
+.small.security.attention { color: var(--warn); }

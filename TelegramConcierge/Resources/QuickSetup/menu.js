@@ -283,6 +283,7 @@
       h('p', { class: 'lead', text: missing.length ? (T('Still needed: ', 'Mancano ancora: ') + missing.map(function (s) { return s.title; }).join(', ') + '.') : T('Click anything to change it. Changes are saved right away.', 'Clicca su qualsiasi voce per modificarla. Le modifiche vengono salvate subito.') }),
       notice('dashboard'),
       missing.length ? null : paused,
+      securityNote(),
       lanesSection(),
       h('h2', { class: 'section', text: T('Other settings', 'Altre impostazioni') }),
       grid,
@@ -299,6 +300,19 @@
     ];
   }
 
+  // Read-only Security note (security plan Phase 0). Never a green "up to
+  // date": it says what the local checks found and where the details are.
+  function securityNote() {
+    var sec = S.security;
+    if (!sec) return null;
+    var reasons = (lang() === 'it' ? sec.attention_it : sec.attention) || [];
+    var text;
+    if (reasons.length) text = T('🛡️ Security needs attention: ', '🛡️ Sicurezza, da controllare: ') + reasons.join('; ') + T('. Details: type briglia doctor in a terminal.', '. Dettagli: scrivi briglia doctor in un terminale.');
+    else if (sec.checking) text = T('🛡️ Security: checking this computer’s updates…', '🛡️ Sicurezza: controllo degli aggiornamenti di questo computer in corso…');
+    else text = T('🛡️ Security: the local checks found nothing to fix. Details: type briglia doctor in a terminal.', '🛡️ Sicurezza: i controlli locali non hanno trovato nulla da sistemare. Dettagli: scrivi briglia doctor in un terminale.');
+    return h('p', { class: 'small security' + (reasons.length ? ' attention' : ''), text: text });
+  }
+
   // The live hub: Briglia keeps running while this page is open.
   function liveDashboard(missing, grid) {
     var service = S.run_mode === 'service';
@@ -310,6 +324,7 @@
         ' · ' + T('changes apply right away, between messages.', 'le modifiche valgono subito, tra un messaggio e l’altro.')])]),
       missing.length ? h('div', { class: 'notice warn' }, [T('Still needed: ', 'Mancano ancora: ') + missing.map(function (s) { return s.title; }).join(', ') + '.']) : null,
       notice('dashboard'),
+      securityNote(),
       lanesSection(),
       h('h2', { class: 'section', text: T('Other settings', 'Altre impostazioni') }),
       grid,

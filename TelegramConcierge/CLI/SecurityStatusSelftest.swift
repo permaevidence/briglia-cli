@@ -30,6 +30,7 @@ struct SecurityStatusSelftest: ParsableCommand {
         Self.hostDispatch(t)
         Self.classifiers(t)
         Self.wording(t)
+        Self.binaryAndMenu(t)
         Self.cache(t)
         print(t.failures == 0 ? "\nALL \(t.total) SECURITY STATUS CHECKS PASSED" : "\n\(t.failures) of \(t.total) FAILED")
         if t.failures > 0 { throw ExitCode(1) }
@@ -216,6 +217,57 @@ struct SecurityStatusSelftest: ParsableCommand {
         let doctor = SecurityStatus.doctorLines(components: pinned, host: clean, now: now)
         t.check("doctor lines: summary first, one per component, read-only footer",
                 doctor.count == 4 && doctor[0].hasPrefix("🛡️ Security") && doctor.last?.hasPrefix("read-only") == true, "\(doctor)")
+    }
+
+    static func binaryAndMenu(_ t: Tally) {
+        let domain = "briglia-cli|https://example.test/releases/"
+        func trust(_ json: String) -> Data { Data(json.utf8) }
+        let good = SecurityStatus.parseTrust(trust(#"{"schema":2,"domains":{"briglia-cli|https://example.test/releases/":121,"staging|x":900}}"#), domain: domain)
+        t.check("trust: this channel's floor is read; another channel's never counts",
+                good.floor == 121 && !good.unreadable, "\(good)")
+        t.check("trust: absent file → no floor, not unreadable; other-domain-only → no floor",
+                SecurityStatus.parseTrust(nil, domain: domain) == (nil, false)
+                && SecurityStatus.parseTrust(trust(#"{"schema":2,"domains":{"staging|x":900}}"#), domain: domain) == (nil, false))
+        t.check("trust: v1 / garbage / non-positive → unreadable (reported, never trusted)",
+                SecurityStatus.parseTrust(trust(#"{"schema":1,"sequence":5}"#), domain: domain).unreadable
+                && SecurityStatus.parseTrust(trust("{"), domain: domain).unreadable
+                && SecurityStatus.parseTrust(trust(#"{"schema":2,"domains":{"a":0}}"#), domain: domain).unreadable)
+
+        let clean = SecurityStatus.HostReport(updates: [.none(source: "apt", asOf: now)], rebootRequired: false, stale: false)
+        let same = SecurityStatus.BinaryInfo(version: "0.2.60", sequence: 120, floor: 120, trustUnreadable: false)
+        let newer = SecurityStatus.BinaryInfo(version: "0.2.60", sequence: 120, floor: 123, trustUnreadable: false)
+        let broken = SecurityStatus.BinaryInfo(version: "0.2.60", sequence: 120, floor: nil, trustUnreadable: true)
+        let line = SecurityStatus.summaryLine(components: [], host: clean, now: now, binary: same)
+        t.check("binary: the line names version and release sequence; floor == own sequence is not attention",
+                line.contains("Briglia 0.2.60 (release 120)") && !line.contains("needs attention"), line)
+        t.check("binary: a floor above this binary's sequence (newer release already seen) → attention naming /upgrade",
+                SecurityStatus.summaryLine(components: [], host: clean, now: now, binary: newer).contains("needs attention (a newer signed Briglia release was seen (sequence 123) — send /upgrade)"))
+        t.check("binary: an unreadable trust record → attention",
+                SecurityStatus.summaryLine(components: [], host: clean, now: now, binary: broken).contains("release-trust record is unreadable"))
+        let doctor = SecurityStatus.doctorLines(components: [], host: clean, now: now, binary: SecurityStatus.BinaryInfo(version: "0.2.60", sequence: 120, floor: nil, trustUnreadable: false))
+        t.check("doctor: the binary line says no floor is recorded yet and that the last-check time is not recorded",
+                doctor.count == 4 && doctor[1].contains("none recorded yet") && doctor[1].contains("not recorded"), "\(doctor)")
+
+        let behind = [SecurityStatus.Component(name: "AgentMail CLI", state: .differs, detail: "")]
+        let sec = SecurityStatus.HostReport(updates: [.pending(source: "apt", total: 3, security: 2, asOf: now), .unknown(source: "Homebrew", reason: "x")],
+                                            rebootRequired: true, stale: true)
+        let reasons = SecurityStatus.attentionReasons(behind, sec, binary: newer)
+        t.check("reasons: every reason has an Italian twin and the English list matches the summary",
+                reasons.count == 6 && reasons.allSatisfy { !$0.it.isEmpty && $0.it != $0.en }
+                && SecurityStatus.needsAttention(behind, sec, binary: newer) == reasons.map(\.en), "\(reasons)")
+        let menuChecking = SecurityStatus.menuPayload(components: [], host: nil, binary: same)
+        let menuClean = SecurityStatus.menuPayload(components: [], host: clean, binary: same)
+        let menuBad = SecurityStatus.menuPayload(components: behind, host: sec, binary: newer)
+        t.check("menu: no host data yet → checking with no reasons; clean → no reasons, not checking",
+                menuChecking["checking"] as? Bool == true && (menuChecking["attention"] as? [String])?.isEmpty == true
+                && menuClean["checking"] as? Bool == false && (menuClean["attention"] as? [String])?.isEmpty == true)
+        t.check("menu: attention reasons in both languages, same count",
+                (menuBad["attention"] as? [String])?.count == 6 && (menuBad["attention_it"] as? [String])?.count == 6
+                && (menuBad["attention_it"] as? [String])?.first?.contains("invia /upgrade") == true)
+        let js = QuickSetupPreflight.pageDirectory().flatMap { try? String(contentsOf: $0.appendingPathComponent("menu.js"), encoding: .utf8) } ?? ""
+        t.check("menu page: renders the note on both dashboards, never says 'up to date'",
+                js.components(separatedBy: "securityNote(),").count == 3 && js.contains("function securityNote()")
+                && !js.contains("Security: up to date"), js.isEmpty ? "menu.js not found next to the binary" : "")
     }
 
     static func cache(_ t: Tally) {

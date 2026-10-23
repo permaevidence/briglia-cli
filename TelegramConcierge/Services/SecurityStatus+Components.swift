@@ -63,6 +63,37 @@ extension SecurityStatus {
         deployed ? Component(name: "WhatsApp bridge", state: .unpinned, detail: "npm version ranges, no lockfile") : nil
     }
 
+    /// This binary's own release identity and the anti-rollback floor an
+    /// earlier update check recorded for this channel.
+    struct BinaryInfo: Equatable {
+        var version: String
+        var sequence: Int
+        /// Highest verified release sequence on this channel (nil: no check
+        /// has recorded one yet).
+        var floor: Int?
+        /// The trust file exists but cannot be parsed.
+        var trustUnreadable: Bool
+    }
+
+    /// The persisted floor for `domain`, parsed exactly like
+    /// `ReleaseTrustStore` does, but from bytes already read: no lock file,
+    /// no directory is created (a lockless read is consistent because every
+    /// store is a whole-file rename).
+    static func parseTrust(_ data: Data?, domain: String) -> (floor: Int?, unreadable: Bool) {
+        guard let data else { return (nil, false) }
+        guard let state = try? JSONDecoder().decode(ReleaseTrustStore.State.self, from: data),
+              state.schema == ReleaseTrustStore.schemaVersion,
+              state.domains.values.allSatisfy({ $0 >= 1 }) else { return (nil, true) }
+        return (state.domains[domain], false)
+    }
+
+    static func liveBinaryInfo() -> BinaryInfo {
+        let trust = parseTrust(FileManager.default.contents(atPath: ReleaseTrustStore.fileURL.path),
+                               domain: ReleasePolicy.effective.trustDomain)
+        return BinaryInfo(version: adaCLIVersion, sequence: adaCLIReleaseSequence,
+                          floor: trust.floor, trustUnreadable: trust.unreadable)
+    }
+
     static func classifyToolchain(manifest: [String: String]) -> Component? {
         guard !manifest.isEmpty else { return nil }
         return Component(name: "userdata toolchain", state: .osRepo,
@@ -122,48 +153,103 @@ extension SecurityStatus {
         }
     }
 
-    /// Needs attention: a Briglia copy behind its pin, pending OS security
+    /// One reason the line needs attention, in both page languages.
+    struct Reason: Equatable {
+        let en: String
+        let it: String
+    }
+
+    /// Needs attention: a newer signed release already seen, an unreadable
+    /// trust record, a Briglia copy behind its pin, pending OS security
     /// updates, a needed restart, stale or unknown OS data. Never "up to
     /// date": this status has no advisory data.
-    static func needsAttention(_ components: [Component], _ host: HostReport?) -> [String] {
-        var reasons: [String] = []
+    static func attentionReasons(_ components: [Component], _ host: HostReport?, binary: BinaryInfo? = nil) -> [Reason] {
+        var reasons: [Reason] = []
+        if let binary {
+            if let floor = binary.floor, floor > binary.sequence {
+                reasons.append(Reason(en: "a newer signed Briglia release was seen (sequence \(floor)) — send /upgrade",
+                                      it: "è uscita una versione firmata più recente di Briglia (sequenza \(floor)): invia /upgrade"))
+            }
+            if binary.trustUnreadable {
+                reasons.append(Reason(en: "the release-trust record is unreadable",
+                                      it: "il registro anti-rollback non è leggibile"))
+            }
+        }
         let behind = components.filter { $0.state == .differs }.map(\.name)
-        if !behind.isEmpty { reasons.append("behind this build's pin: \(behind.joined(separator: ", "))") }
+        if !behind.isEmpty {
+            let names = behind.joined(separator: ", ")
+            reasons.append(Reason(en: "behind this build's pin: \(names)", it: "non allineato alla versione prevista: \(names)"))
+        }
         guard let host else { return reasons }
         for u in host.updates {
             if case .pending(let source, _, let security, _) = u, (security ?? 1) > 0 {
-                reasons.append(security == nil ? "\(source) updates pending" : "\(source) security updates pending")
+                reasons.append(security == nil
+                    ? Reason(en: "\(source) updates pending", it: "aggiornamenti \(source) in attesa")
+                    : Reason(en: "\(source) security updates pending", it: "aggiornamenti di sicurezza \(source) in attesa"))
             }
-            if case .unknown(let source, _) = u { reasons.append("\(source) status unknown") }
+            if case .unknown(let source, _) = u {
+                reasons.append(Reason(en: "\(source) status unknown", it: "stato \(source) sconosciuto"))
+            }
         }
-        if host.stale { reasons.append("package lists more than 7 days old") }
-        if host.rebootRequired { reasons.append("restart required by OS updates") }
+        if host.stale {
+            reasons.append(Reason(en: "package lists more than 7 days old", it: "elenchi dei pacchetti più vecchi di 7 giorni"))
+        }
+        if host.rebootRequired {
+            reasons.append(Reason(en: "restart required by OS updates", it: "riavvio richiesto dagli aggiornamenti del sistema"))
+        }
         return reasons
     }
 
-    /// One line for /status, the dashboard and doctor's header.
-    static func summaryLine(components: [Component], host: HostReport?, now: Date) -> String {
+    static func needsAttention(_ components: [Component], _ host: HostReport?, binary: BinaryInfo? = nil) -> [String] {
+        attentionReasons(components, host, binary: binary).map(\.en)
+    }
+
+    /// One line for /status and doctor's header.
+    static func summaryLine(components: [Component], host: HostReport?, now: Date, binary: BinaryInfo? = nil) -> String {
         let unpinned = components.filter { $0.state == .unpinned }.map(\.name)
         let pinned = components.filter { $0.state == .pinned }.count
-        var parts = ["Briglia: \(pinned) pinned" + (unpinned.isEmpty ? "" : ", unpinned: \(unpinned.joined(separator: ", "))")]
+        var parts: [String] = []
+        if let binary { parts.append("Briglia \(binary.version) (release \(binary.sequence))") }
+        parts.append("\(pinned) pinned" + (unpinned.isEmpty ? "" : ", unpinned: \(unpinned.joined(separator: ", "))"))
         if let host {
             parts += host.updates.map { describe($0, now: now) }
         } else {
             parts.append("OS updates: checking… (ask again in a moment, or run `briglia doctor`)")
         }
-        let reasons = needsAttention(components, host)
+        let reasons = needsAttention(components, host, binary: binary)
         let head = reasons.isEmpty ? "🛡️ Security" : "🛡️ Security — needs attention (\(reasons.joined(separator: "; ")))"
         return head + ": " + parts.joined(separator: " · ")
     }
 
-    static func doctorLines(components: [Component], host: HostReport, now: Date) -> [String] {
-        var lines = [summaryLine(components: components, host: host, now: now)]
+    static func binaryLine(_ b: BinaryInfo) -> String {
+        let floor: String
+        if b.trustUnreadable {
+            floor = "unreadable (the next update check rebuilds it from this binary's sequence)"
+        } else if let f = b.floor {
+            floor = f > b.sequence ? "\(f) — a newer signed release was already seen; `briglia upgrade` installs it" : "\(f)"
+        } else {
+            floor = "none recorded yet (no update check on this channel)"
+        }
+        return "Briglia \(b.version): signed release sequence \(b.sequence); anti-rollback floor on this channel: \(floor); "
+            + "the time of the last update check is not recorded"
+    }
+
+    static func doctorLines(components: [Component], host: HostReport, now: Date, binary: BinaryInfo? = nil) -> [String] {
+        var lines = [summaryLine(components: components, host: host, now: now, binary: binary)]
+        if let binary { lines.append(binaryLine(binary)) }
         for c in components { lines.append("\(c.name): \(c.state.label) — \(c.detail)") }
         for u in host.updates { lines.append(describe(u, now: now)) }
         if host.stale { lines.append("cached package lists are more than 7 days old: the counts above may be out of date") }
         if host.rebootRequired { lines.append("the OS reports that a restart is required to finish installed updates") }
         lines.append("read-only: nothing was installed or changed; no advisory data here — the repository's daily watch tracks advisories")
         return lines
+    }
+
+    /// The menu dashboard's Security note (both languages; the page picks).
+    /// `checking` while the first host check is still running.
+    static func menuPayload(components: [Component], host: HostReport?, binary: BinaryInfo?) -> [String: Any] {
+        let reasons = attentionReasons(components, host, binary: binary)
+        return ["checking": host == nil, "attention": reasons.map(\.en), "attention_it": reasons.map(\.it)]
     }
 }
 
@@ -199,6 +285,11 @@ final class SecurityStatusCache: @unchecked Sendable {
 
     func statusLine() -> String {
         SecurityStatus.summaryLine(components: SecurityStatus.components(probeVersions: false),
-                                   host: hostReport(), now: Date())
+                                   host: hostReport(), now: Date(), binary: SecurityStatus.liveBinaryInfo())
+    }
+
+    func menuPayload() -> [String: Any] {
+        SecurityStatus.menuPayload(components: SecurityStatus.components(probeVersions: false),
+                                   host: hostReport(), binary: SecurityStatus.liveBinaryInfo())
     }
 }

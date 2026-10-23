@@ -159,6 +159,10 @@ final class MenuWorkflow {
     func L(_ en: String, _ it: String) -> String { lang == "it" ? it : en }
 
     private(set) var snapshot = MenuSnapshot()
+    /// The Security note, re-read at most every `securityRefresh` seconds
+    /// (the page polls often; the note's sources change slowly).
+    private var security: (at: Date, value: [String: Any])?
+    static let securityRefresh: TimeInterval = 30
     private(set) var toolchain: ToolchainService.DesktopStatus?
     private var toolchainTask: Task<Void, Never>?
     private(set) var closing: String?
@@ -587,7 +591,15 @@ final class MenuWorkflow {
         } else { out["startup"] = NSNull() }
         out["busy"] = busy ?? NSNull()
         out["closing"] = closing ?? NSNull()
+        out["security"] = securityNote()
         return out
+    }
+
+    private func securityNote() -> [String: Any] {
+        if let security, now().timeIntervalSince(security.at) < Self.securityRefresh { return security.value }
+        let value = env.security()
+        security = (now(), value)
+        return value
     }
 
     /// The AI provider part of the page state: the lane shown, what runs,

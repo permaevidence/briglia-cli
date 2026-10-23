@@ -377,7 +377,8 @@ struct Doctor: AsyncParsableCommand {
         // check — Briglia's own pins and the host's pending OS updates.
         print("\nSecurity")
         for line in SecurityStatus.doctorLines(components: SecurityStatus.components(probeVersions: true),
-                                               host: SecurityStatus.hostReport(.live), now: Date()) {
+                                               host: SecurityStatus.hostReport(.live), now: Date(),
+                                               binary: SecurityStatus.liveBinaryInfo()) {
             note(line)
         }
 

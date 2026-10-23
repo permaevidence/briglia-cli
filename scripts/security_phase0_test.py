@@ -175,8 +175,9 @@ def binary(bin_path):
               "🛡️ Security" in section and "read-only: nothing was installed or changed" in section, out[-1500:])
         print("    " + section.replace("\n", "\n    "))
         check("binary: the Security section never claims 'up to date'", "up to date" not in section.lower())
-        check("binary: doctor created nothing in the scratch roots it was given beyond what doctor already did",
-              set(os.listdir(scratch)) - set(before) <= {"config", "data"}, os.listdir(scratch))
+        created = [os.path.relpath(os.path.join(d, f), scratch) for d, _, fs in os.walk(scratch) for f in fs]
+        check("binary: doctor wrote no file in the scratch roots (no trust lock, no cache, nothing)",
+              set(os.listdir(scratch)) - set(before) <= {"config", "data"} and not created, created)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
