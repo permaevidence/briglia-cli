@@ -246,10 +246,48 @@ def osv_query(components, api):
 
 def osv_record(vid, api):
     status, data, _ = http("GET", f"{api}/v1/vulns/{urllib.parse.quote(vid)}")
-    if status != 200 or not isinstance(data, dict) or data.get("id") != vid \
-            or not isinstance(data.get("aliases", []), list) or not isinstance(data.get("affected", []), list):
+    if status != 200 or not isinstance(data, dict) or data.get("id") != vid:
         raise FeedError(f"OSV vulns/{vid}: unexpected response (HTTP {status})")
+    problem = osv_record_problem(data)
+    if problem:
+        raise FeedError(f"OSV vulns/{vid}: malformed record ({problem})")
     return data
+
+
+EVENT_KINDS = ("introduced", "fixed", "last_affected", "limit")
+
+
+def osv_record_problem(rec):
+    """None when every structure the watch consumes has the schema's type;
+    else what is wrong. Omitted optional fields are fine; a present field of
+    the wrong type is not (it would otherwise be read as 'nothing there')."""
+    def opt(obj, key, typ):
+        return key not in obj or isinstance(obj[key], typ)
+    if not opt(rec, "aliases", list) or not all(isinstance(a, str) for a in rec.get("aliases", [])):
+        return "aliases"
+    for key, typ in (("affected", list), ("references", list), ("database_specific", dict), ("summary", str),
+                     ("details", str), ("withdrawn", str)):
+        if not opt(rec, key, typ):
+            return key
+    if not all(isinstance(r, dict) for r in rec.get("references", [])):
+        return "references"
+    for aff in rec.get("affected", []):
+        if not isinstance(aff, dict) or not opt(aff, "package", dict) or not opt(aff, "versions", list) \
+                or not opt(aff, "ranges", list):
+            return "affected entry"
+        if not all(isinstance(v, str) for v in aff.get("versions", [])):
+            return "affected versions"
+        pkg = aff.get("package", {})
+        if not opt(pkg, "name", str) or not opt(pkg, "ecosystem", str):
+            return "affected package"
+        for r in aff.get("ranges", []):
+            if not isinstance(r, dict) or not isinstance(r.get("type"), str) or not isinstance(r.get("events"), list):
+                return "range"
+            for ev in r["events"]:
+                if not isinstance(ev, dict) or len(ev) != 1 or next(iter(ev)) not in EVENT_KINDS \
+                        or not isinstance(next(iter(ev.values())), str):
+                    return "range event"
+    return None
 
 
 def severity_of(record):

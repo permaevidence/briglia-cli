@@ -323,6 +323,27 @@ def unit_checks(script, check):
     except w.FeedError:
         ok = False
     check("advisories: a genuinely empty list stays a healthy empty result", ok)
+    pkg = {"name": "actions/download-artifact", "ecosystem": "GitHub Actions"}
+    unaffected = {"package": pkg, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.0.0"}]}]}
+    for label, bad in [("ranges is an object", {"package": pkg, "ranges": {}}),
+                       ("an event with two keys", {"package": pkg, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0", "fixed": "1"}]}]}),
+                       ("an event value that is not a string", {"package": pkg, "ranges": [{"type": "SEMVER", "events": [{"fixed": 4}]}]}),
+                       ("versions is a string", {"package": pkg, "versions": "4.1.0"}),
+                       ("an affected entry that is not an object", 42)]:
+        feed({"id": "GHSA-x", "affected": [unaffected, bad]})
+        try:
+            w.osv_record("GHSA-x", "u")
+            ok = False
+        except w.FeedError:
+            ok = True
+        check(f"OSV record: a malformed nested field is a feed failure, even beside a valid unaffected range ({label})", ok)
+    feed({"id": "GHSA-x", "affected": [unaffected, {"package": pkg}]})
+    try:
+        rec = w.osv_record("GHSA-x", "u")
+        ok = w.osv_affects(rec, dict(pkg, version="4.1.0")) is False
+    except w.FeedError:
+        ok = False
+    check("OSV record: a valid record with an omitted ranges field still evaluates (unaffected control)", ok)
     feed({"results": [{}]})
     try:
         ok = w.osv_query([dict(act, id="a", version="5.0.0", watch="osv-package")], "u") == {}
@@ -584,6 +605,22 @@ def scenarios(script):
               and not any("No longer matched" in i["body"] for i in issues("finding")) and "FAILED" in hb[0]["body"], out[-400:])
         W.osv_override = W.adv_override = None
 
+    # 8h. malformed nested OSV RECORD after a known finding and an outage: no false recovery
+    reset(); base_world()
+    run_watch(script)
+    W.fail = {"osv"}
+    run_watch(script)
+    W.fail = set()
+    pkgd = {"ecosystem": "GitHub Actions", "name": "actions/download-artifact"}
+    W.vulns["GHSA-act1-in00-rnge"]["affected"] = [
+        {"package": pkgd, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.0.0"}]}]},
+        {"package": pkgd, "ranges": {}}]
+    rc, out = run_watch(script)
+    act = next(i for i in issues("finding") if "GHSA-act1-in00-rnge" in i["body"])
+    check("malformed OSV record (ranges: {}): exit 1, health open, finding not marked unmatched, heartbeat OSV FAILED",
+          rc == 1 and issues("health")[0]["state"] == "open" and "No longer matched" not in act["body"]
+          and "- OSV: FAILED" in issues("heartbeat")[0]["body"], out[-400:])
+
     # 8g. triage waits for a complete run like every other finding change
     reset(); base_world()
     run_watch(script)
@@ -657,6 +694,8 @@ BREAKS = [
     ("component versions not fingerprinted", '[[c, by_id[c].get("version")] for c in comps]', "comps"),
     ("OSV vulns type not checked", "if not isinstance(vulns, list) or (token is not None and not isinstance(token, str)):", "if False:"),
     ("malformed vulnerability rows skipped", "            if not all(isinstance(v, dict) and isinstance(v.get(\"vulnerable_version_range\"), (str, type(None)))", "            if False and all(isinstance(v, dict) and isinstance(v.get(\"vulnerable_version_range\"), (str, type(None)))"),
+    ("OSV record structure not validated", "    problem = osv_record_problem(data)\n    if problem:", "    problem = None\n    if problem:"),
+    ("OSV ranges type not validated", 'or not opt(aff, "ranges", list):', 'or False:'),
     ("triage during incomplete runs", '        if not complete or it["kind"] != "finding" or it["state"] != "open":', '        if it["kind"] != "finding" or it["state"] != "open":'),
 ]
 
