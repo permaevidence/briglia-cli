@@ -66,7 +66,9 @@ class World:
         ]
         self.heartbeat_writes = 0
         self.advisories = {}   # repo -> [advisory]
-        self.fail = set()      # {"osv", "kev", "adv", "vulns"}
+        self.fail = set()      # {"osv", "kev", "adv", "vulns", "node"}
+        self.fail_ids = set()  # OSV record ids whose GET fails
+        self.adv_override = None  # raw advisory list served instead (malformed-success cases)
         self.issues = []       # dicts
         self.comments = {}     # number -> [text]
         self.writes = []
@@ -155,9 +157,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with W.lock:
             m = re.match(r"^/osv/v1/vulns/(.+)$", path)
             if m:
-                if "vulns" in W.fail:
-                    return self._send(500, {})
                 vid = urllib.parse.unquote(m.group(1))
+                if "vulns" in W.fail or vid in W.fail_ids:
+                    return self._send(500, {})
                 return self._send(200, W.vulns[vid]) if vid in W.vulns else self._send(404, {})
             if path == "/kev.json":
                 if "kev" in W.fail:
@@ -179,6 +181,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if m:
                 if "adv" in W.fail:
                     return self._send(502, {})
+                if W.adv_override is not None:
+                    return self._send(200, W.adv_override)
                 advs = W.advisories.get(m.group(1), [])
                 page = int(qs.get("page", ["1"])[0])
                 items = advs[(page - 1): page]  # one per page
@@ -244,12 +248,78 @@ def base_world():
     ]
 
 
+def load_module(script):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("watch_under_test", script)
+    mod = importlib.util.module_from_spec(spec)
+    sys.dont_write_bytecode = True
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def unit_checks(script, check):
+    w = load_module(script)
+    act = {"name": "actions/checkout", "ecosystem": "GitHub Actions"}
+
+    def affects(version, *ranges, eco="GitHub Actions", rtype="SEMVER"):
+        comp = dict(act, version=version, ecosystem=eco)
+        rec = {"affected": [{"package": {"name": comp["name"], "ecosystem": eco},
+                             "ranges": [{"type": rtype, "events": list(r)} for r in ranges]}]}
+        return w.osv_affects(rec, comp)
+
+    I = lambda v: {"introduced": v}
+    F = lambda v: {"fixed": v}
+    L = lambda v: {"limit": v}
+    LA = lambda v: {"last_affected": v}
+    check("range: ordered two-interval range, version in the second interval", affects("5.0.0", [I("0"), F("4.0.0"), I("5.0.0"), F("6.0.0")]) is True)
+    check("range: the same range with events received UNSORTED is evaluated after sorting",
+          affects("5.0.0", [I("0"), I("5.0.0"), F("4.0.0"), F("6.0.0")]) is True
+          and affects("4.5.0", [F("6.0.0"), I("5.0.0"), F("4.0.0"), I("0")]) is False)
+    check("range: below ANY limit is eligible (two limits); at/above every limit is not",
+          affects("3.0.0", [I("0"), L("2.0.0"), L("4.0.0")]) is True and affects("4.0.0", [I("0"), L("2.0.0"), L("4.0.0")]) is False)
+    check("range: limit '*' is infinity", affects("9.9.9", [I("1.0.0"), L("*")]) is True)
+    check("range: last_affected is inclusive", affects("2.0.0", [I("0"), LA("2.0.0")]) is True and affects("2.0.1", [I("0"), LA("2.0.0")]) is False)
+    check("range: malformed / ambiguous / non-local ecosystem -> unknown, never 'not affected'",
+          affects("1.0.0", [I("0"), {"fixed": "2.0.0", "introduced": "1.0.0"}]) is None
+          and affects("1.0.0", [I("1.0.0"), F("1.0.0")]) is None
+          and affects("1.0.0", [F("2.0.0")]) is None
+          and affects("1.0.0", [I("0"), F("not-a-version")]) is None
+          and affects("1.0.0", [I("0"), F("2.0.0")], eco="PyPI") is None
+          and affects("1.0.0", [I("0"), F("2.0.0")], rtype="GIT") is None)
+
+    def feed(payload):
+        w.http = lambda *a, **kw: (200, payload, {})
+    cases = [
+        ("advisories: a record without a GHSA id", [{}], lambda: w.repo_advisories({"name": "acme/repo", "version": "1.3.0"}, "u", "")),
+        ("advisories: a record without a vulnerabilities list", [{"ghsa_id": "GHSA-aaaa-bbbb-cccc"}], lambda: w.repo_advisories({"name": "acme/repo", "version": "1.3.0"}, "u", "")),
+        ("Node: an LTS row without the security field", [{"version": "v24.0.0", "lts": "Krypton"}], lambda: w.node_security_releases("u")),
+        ("Node: truncated index (no security release on a supported LTS line)", [{"version": "v24.0.0", "lts": "Krypton", "security": False}], lambda: w.node_security_releases("u")),
+        ("KEV: a malformed catalogue row", {"vulnerabilities": [{"cveID": "CVE-2000-0001"}, {}]}, lambda: w.kev_set("u")),
+    ]
+    for label, payload, call in cases:
+        feed(payload)
+        try:
+            call()
+            ok = False
+        except w.FeedError:
+            ok = True
+        check(f"malformed success is a feed failure: {label}", ok)
+    feed([])
+    try:
+        ok = w.repo_advisories({"name": "acme/repo", "version": "1.3.0"}, "u", "") == []
+    except w.FeedError:
+        ok = False
+    check("advisories: a genuinely empty list stays a healthy empty result", ok)
+
+
 def scenarios(script):
     """Returns a list of (label, ok, detail)."""
     res = []
 
     def check(label, ok, detail=""):
         res.append((label, bool(ok), detail))
+
+    unit_checks(script, check)
 
     # 1. fresh run: OSV with pagination + alias merge, repo advisories with range filter, gaps
     reset(); base_world()
@@ -419,6 +489,63 @@ def scenarios(script):
     run_watch(script)
     check("update keeps labels the owner added", any(l["name"] == "triaged" for l in tgt["labels"]))
 
+    # 8b. a failed KEV feed must not erase established exploitation; recovery is not "worse"
+    reset(); base_world()
+    W.kev = ["CVE-2026-1111"]
+    run_watch(script)
+    osv1 = next(i for i in issues("finding") if "OSV-1" in i["body"])
+    before_body, before_labels = osv1["body"], [l["name"] for l in osv1["labels"]]
+    W.fail = {"kev"}
+    W.writes.clear()
+    rc, out = run_watch(script)
+    check("kev down: existing findings untouched (KEV label and statement kept, no comment)",
+          rc == 1 and osv1["body"] == before_body and [l["name"] for l in osv1["labels"]] == before_labels
+          and not W.comments.get(osv1["number"]), W.writes)
+    osv1["state"] = "closed"
+    W.fail = set()
+    W.writes.clear()
+    rc, out = run_watch(script)
+    check("kev recovered, nothing changed: the closed finding is NOT reopened, no finding write",
+          rc == 0 and osv1["state"] == "closed" and not [x for x in W.writes if x[1].endswith(f"/issues/{osv1['number']}")], W.writes)
+
+    # 8c. a partial OSV pass (one record of an alias group fails) never shrinks a group
+    reset(); base_world()
+    run_watch(script)
+    ghsa = next(i for i in issues("finding") if "GHSA-aaaa-bbbb-cccc" in i["body"])
+    body = ghsa["body"]
+    W.fail_ids = {"OSV-2"}
+    rc, out = run_watch(script)
+    check("partial OSV: exit 1, the merged finding keeps both components", rc == 1 and ghsa["body"] == body
+          and "npm:b" in ghsa["body"], out[-400:])
+    W.fail_ids = set()
+
+    # 8d. a malformed but HTTP-200 advisory feed is a failure, not "no advisories"
+    reset(); base_world()
+    run_watch(script)
+    mail = next(i for i in issues("finding") if "GHSA-mail-0002-bbbb" in i["body"])
+    W.adv_override = [{}]
+    rc, out = run_watch(script)
+    hb = issues("heartbeat")
+    check("malformed advisory feed: exit 1, health open, finding not marked unmatched, heartbeat says FAILED",
+          rc == 1 and issues("health") and issues("health")[0]["state"] == "open" and "No longer matched" not in mail["body"]
+          and "GitHub advisories mailco/mail-cli: FAILED" in hb[0]["body"], out[-400:])
+    W.adv_override = None
+
+    # 8e. an affected pin bumped to another affected version updates the issue body
+    reset(); base_world()
+    tmp = tempfile.mkdtemp(prefix="secwatch-inv-")
+    inv = os.path.join(tmp, "inv.json")
+    data = copy.deepcopy(INVENTORY)
+    with open(inv, "w") as f:
+        json.dump(data, f)
+    run_watch(script, inventory=inv)
+    act = next(i for i in issues("finding") if "GHSA-act1-in00-rnge" in i["body"])
+    next(c for c in data["components"] if c["id"] == "action:dl")["version"] = "4.1.1"
+    with open(inv, "w") as f:
+        json.dump(data, f)
+    run_watch(script, inventory=inv)
+    check("pin bumped but still affected: the finding shows the new version", "4.1.1" in act["body"] and "4.1.0" not in act["body"])
+
     # 9. the real inventory loads and runs against an empty feed
     reset()
     rc, out = run_watch(script, inventory=REAL_INVENTORY)
@@ -455,17 +582,28 @@ BREAKS = [
     ("health never closed", 'issues.close(it["number"])', "pass"),
     ("range check always true", "        if not ok:\n            return False", "        if False:\n            return False"),
     ("KEV failure ignored", 'failures.append(f"KEV: {e}")', "pass"),
-    ("unmatched marked after an incomplete run", "reconcile(issues, docs, complete and not failures, failures,", "reconcile(issues, docs, True, failures,"),
+    ("unmatched marked after an incomplete run", "    reconcile(issues, docs, complete, failures, feeds=", "    reconcile(issues, docs, True, failures, feeds="),
     ("osv-package ranges not evaluated", "                    if verdict is False:\n                        continue", "                    if False:\n                        continue"),
     ("osv-package queried by version", 'if c["watch"] == "osv":\n                    q["version"]', 'if True:\n                    q["version"]'),
     ("issue list pagination ignored", "            url = next_link(hdrs)\n        out.sort", "            url = None\n        out.sort"),
     ("no heartbeat", "    if feeds is not None:\n        beats", "    if False:\n        beats"),
     ("heartbeat gap never reported", "if prev is not None and (now - prev).total_seconds() > HEARTBEAT_GAP_HOURS * 3600:", "if False:"),
     ("empty KEV accepted", "    if not out:\n        raise FeedError(\"CISA KEV", "    if False:\n        raise FeedError(\"CISA KEV"),
-    ("Node security flag ignored", 'rel.get("security") is not True', "False"),
+    ("Node security flag ignored", 'rel["security"] is not True', "False"),
     ("Node feed failure ignored", 'failures.append(f"Node releases: {e}")', "pass"),
     ("triage never overdue", "return labels + [OVERDUE] if (now - created).total_seconds() > days * 86400 else None", "return None"),
     ("triage overdue on day one", "days = TRIAGE_DAYS_URGENT if urgent else TRIAGE_DAYS", "days = 0"),
+    ("events not sorted", "    for b, kind in sorted(ordered):", "    for b, kind in ordered:"),
+    ("limits ignored", "    if limits and not any(l is None or v < l for l in limits):", "    if False:"),
+    ("limits require ALL", "not any(l is None or v < l for l in limits)", "not all(l is None or v < l for l in limits)"),
+    ("ties evaluated", "    if len(set(keys)) != len(keys):\n        return None", "    if False:\n        return None"),
+    ("any ecosystem evaluated as SemVer", 'or component["ecosystem"] not in LOCAL_RANGE_ECOSYSTEMS ', ''),
+    ("KEV failure updates existing findings", "        kev = set()  # NEW findings are still posted (KEV unknown); existing ones are left as they are\n        complete = False", "        kev = set()"),
+    ("incomplete runs still update findings", '        if doc["kind"] == "finding" and not complete:\n            continue', '        if False:\n            continue'),
+    ("partial OSV results used", "        raw += osv_raw   # only a complete OSV pass", "        pass   # only a complete OSV pass"),
+    ("malformed advisory skipped", "raise FeedError(f\"advisories of {component['name']}: malformed advisory record\")", "continue"),
+    ("Node rows without security accepted", 'not isinstance(rel.get("security"), bool)', "False"),
+    ("component versions not fingerprinted", '[[c, by_id[c].get("version")] for c in comps]', "comps"),
 ]
 
 

@@ -483,7 +483,7 @@
   {
    "ecosystem": null,
    "exposure": "runs the Playwright MCP, the WhatsApp bridge and user MCP/LSP servers",
-   "gap": "unpinned at install, then never updated (the installed version is per machine, unknown here); ~/.local/node and its ~/.local/bin links are shared entry points",
+   "gap": "unpinned at install, then never updated (the installed version is per machine, unknown here); ~/.local/node and its ~/.local/bin links are shared entry points; libraries bundled inside Node (OpenSSL, llhttp, zlib, …) are not inventoried separately",
    "group": "U1 Node.js (managed copy when no system Node >= 20)",
    "id": "runtime:node",
    "name": "node",
@@ -498,7 +498,7 @@
   {
    "ecosystem": null,
    "exposure": "optional email/calendar provider; parses mail and calendar data",
-   "gap": "unpinned; self-heal re-installs `latest` automatically; installed at ~/.local/bin/gws (shared)",
+   "gap": "unpinned; self-heal re-installs `latest` automatically; installed at ~/.local/bin/gws (shared); its embedded dependencies are not inventoried",
    "group": "U2 gws (Google Workspace CLI)",
    "id": "runtime:gws",
    "name": "googleworkspace/cli",

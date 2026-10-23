@@ -242,7 +242,8 @@ def osv_query(components, api):
 
 def osv_record(vid, api):
     status, data, _ = http("GET", f"{api}/v1/vulns/{urllib.parse.quote(vid)}")
-    if status != 200 or not isinstance(data, dict) or data.get("id") != vid:
+    if status != 200 or not isinstance(data, dict) or data.get("id") != vid \
+            or not isinstance(data.get("aliases", []), list) or not isinstance(data.get("affected", []), list):
         raise FeedError(f"OSV vulns/{vid}: unexpected response (HTTP {status})")
     return data
 
@@ -266,40 +267,77 @@ def fixed_versions(record, component):
     return out
 
 
+# Ecosystems whose version order is SemVer-like enough to evaluate locally
+# (osv-package is only used for these). Anything else stays "unknown".
+LOCAL_RANGE_ECOSYSTEMS = ("GitHub Actions",)
+ZERO, INF = "0", "*"
+
+
+def _range_verdict(v, events):
+    """OSV schema evaluation (BeforeLimits + sorted events) of one range for
+    parsed version `v`: True/False, or None when the range is malformed or
+    ambiguous (two events at the same version)."""
+    limits, ordered = [], []
+    for ev in events:
+        if not isinstance(ev, dict) or len(ev) != 1:
+            return None
+        (kind, ver), = ev.items()
+        if kind not in ("introduced", "fixed", "last_affected", "limit") or not isinstance(ver, str):
+            return None
+        if kind == "limit":
+            if ver == INF:
+                limits.append(None)
+                continue
+            b = parse_semver(ver)
+            if b is None:
+                return None
+            limits.append(b)
+            continue
+        if kind == "introduced" and ver == ZERO:
+            b = (-1,)                       # sorts before every version
+        else:
+            b = parse_semver(ver)
+            if b is None:
+                return None
+        ordered.append((b, kind))
+    if not ordered or not any(k == "introduced" for _, k in ordered):
+        return None
+    keys = [b for b, _ in ordered]
+    if len(set(keys)) != len(keys):
+        return None                         # ties have no defined order: stay unknown
+    if limits and not any(l is None or v < l for l in limits):
+        return False                        # at or above every limit
+    vulnerable = False
+    for b, kind in sorted(ordered):
+        if kind == "introduced" and (b == (-1,) or v >= b):
+            vulnerable = True
+        elif kind == "fixed" and v >= b:
+            vulnerable = False
+        elif kind == "last_affected" and v > b:
+            vulnerable = False
+    return vulnerable
+
+
 def osv_affects(record, component):
     """Local evaluation of an OSV record's ranges for `component`'s version:
     True/False, or None when no range of the package can be evaluated."""
     v = parse_semver(component.get("version") or "")
     verdicts = []
     for aff in record.get("affected") or []:
+        if not isinstance(aff, dict):
+            verdicts.append(None)
+            continue
         pkg = aff.get("package") or {}
         if pkg.get("name") != component["name"] or pkg.get("ecosystem") != component["ecosystem"]:
             continue
         if component.get("version") in (aff.get("versions") or []):
             return True
         for r in aff.get("ranges") or []:
-            if r.get("type") not in ("ECOSYSTEM", "SEMVER") or v is None:
+            if not isinstance(r, dict) or r.get("type") not in ("ECOSYSTEM", "SEMVER") or v is None \
+                    or component["ecosystem"] not in LOCAL_RANGE_ECOSYSTEMS or not isinstance(r.get("events"), list):
                 verdicts.append(None)
                 continue
-            affected, ok = False, True
-            for ev in r.get("events") or []:
-                if not isinstance(ev, dict) or len(ev) != 1:
-                    ok = False
-                    break
-                (kind, ver), = ev.items()
-                b = (0, 0, 0, (0,)) if (kind == "introduced" and ver == "0") else parse_semver(str(ver))
-                if b is None or kind not in ("introduced", "fixed", "last_affected", "limit"):
-                    ok = False
-                    break
-                if kind == "introduced" and v >= b:
-                    affected = True
-                elif kind == "fixed" and v >= b:
-                    affected = False
-                elif kind == "last_affected" and v > b:
-                    affected = False
-                elif kind == "limit" and v >= b:
-                    affected = False
-            verdicts.append(affected if ok else None)
+            verdicts.append(_range_verdict(v, r["events"]))
     if any(x is True for x in verdicts):
         return True
     if verdicts and all(x is False for x in verdicts):
@@ -321,9 +359,11 @@ def repo_advisories(component, api, token):
             raise FeedError(f"advisories of {component['name']}: HTTP {status}")
         for adv in data:
             gid = adv.get("ghsa_id") if isinstance(adv, dict) else None
-            if not valid_id(gid) or adv.get("withdrawn_at"):
+            if not valid_id(gid) or not isinstance(adv.get("vulnerabilities"), list):
+                raise FeedError(f"advisories of {component['name']}: malformed advisory record")
+            if adv.get("withdrawn_at"):
                 continue
-            ranges = [v.get("vulnerable_version_range") for v in adv.get("vulnerabilities") or [] if isinstance(v, dict)]
+            ranges = [v.get("vulnerable_version_range") for v in adv["vulnerabilities"] if isinstance(v, dict)]
             verdicts = [in_range(component.get("version"), r) for r in ranges] or [None]
             if any(v is True for v in verdicts):
                 applies = "affected"
@@ -345,7 +385,9 @@ def kev_set(url):
     status, data, _ = http("GET", url)
     if status != 200 or not isinstance(data, dict) or not isinstance(data.get("vulnerabilities"), list):
         raise FeedError(f"CISA KEV: unexpected response (HTTP {status})")
-    out = {v.get("cveID") for v in data["vulnerabilities"] if isinstance(v, dict) and valid_id(v.get("cveID"))}
+    if not all(isinstance(v, dict) and valid_id(v.get("cveID")) for v in data["vulnerabilities"]):
+        raise FeedError("CISA KEV: malformed catalogue entry")
+    out = {v["cveID"] for v in data["vulnerabilities"]}
     if not out:
         raise FeedError("CISA KEV: empty catalogue (the real one lists over a thousand CVEs)")
     return out
@@ -358,19 +400,21 @@ def node_security_releases(url):
         raise FeedError(f"Node release index: unexpected response (HTTP {status})")
     out, lts_seen = {}, False
     for rel in data:
-        if not isinstance(rel, dict):
-            continue
-        v = parse_semver(str(rel.get("version") or ""))
-        if v is None or not rel.get("lts"):
+        v = parse_semver(str(rel.get("version") or "")) if isinstance(rel, dict) else None
+        if v is None or not isinstance(rel.get("security"), bool) or not isinstance(rel.get("lts"), (str, bool)):
+            raise FeedError("Node release index: malformed release row")
+        if not rel["lts"]:
             continue
         lts_seen = True
         major = v[0]
-        if major < NODE_MIN_MAJOR or rel.get("security") is not True:
+        if major < NODE_MIN_MAJOR or rel["security"] is not True:
             continue
         if major not in out or v > parse_semver(out[major]):
             out[major] = clean(rel["version"], 20)
     if not lts_seen:
         raise FeedError("Node release index: no LTS releases listed")
+    if not out:
+        raise FeedError(f"Node release index: no security release on any LTS line >= {NODE_MIN_MAJOR}")
     return out
 
 
@@ -420,7 +464,7 @@ def finding_doc(g, kev, by_id):
     ids = sorted(g["ids"])
     is_kev = any(i in kev for i in ids)
     comps = sorted(g["components"])
-    fp = fingerprint(ids, g["severity"], is_kev, comps, sorted(g["fixed"]), sorted(g["applies"]))
+    fp = fingerprint(ids, g["severity"], is_kev, [[c, by_id[c].get("version")] for c in comps], sorted(g["fixed"]), sorted(g["applies"]))
     pid = primary_id(ids)
     names = ", ".join(f"{by_id[c]['name']} {by_id[c].get('version') or '(unpinned)'}" for c in comps)
     title = clean(f"[security] {pid} {g['severity']}{' KEV' if is_kev else ''} — {names}", 200)
@@ -621,6 +665,10 @@ def got_worse(old_body, doc):
 
 
 def reconcile(issues, docs, complete, failures, now=None, feeds=None, run_url=None):
+    """`complete`: every finding source (OSV, repository advisories, KEV) succeeded.
+    When it is False, existing findings are left exactly as they are (a failed
+    feed is unknown, not "no longer KEV" or "fewer components"); new findings
+    are still created and the health issue reports the failure."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     existing = issues.load()
     used = set()
@@ -638,6 +686,8 @@ def reconcile(issues, docs, complete, failures, now=None, feeds=None, run_url=No
             issues.create(doc, labels_for(doc))
             continue
         used.add(it["number"])
+        if doc["kind"] == "finding" and not complete:
+            continue
         if it["fp"] == doc["fp"] and UNMATCHED_NOTE not in it["body"]:
             continue
         labels = merged_labels(it, doc)
@@ -738,6 +788,7 @@ def run(args):
     failures, raw, complete = [], [], True
     feeds = {}
 
+    osv_raw = []
     try:
         hits = osv_query(components, args.osv_api)
         for vid in sorted(hits):
@@ -761,9 +812,10 @@ def run(args):
                 fixed |= fixed_versions(rec, by_id[cid])
             urls = [r.get("url") for r in rec.get("references") or [] if isinstance(r, dict)
                     and r.get("type") == "ADVISORY" and isinstance(r.get("url"), str)][:2]
-            raw.append({"ids": ids, "summary": rec.get("summary") or rec.get("details", "")[:300],
+            osv_raw.append({"ids": ids, "summary": rec.get("summary") or rec.get("details", "")[:300],
                         "severity": severity_of(rec), "components": comps, "fixed": fixed,
                         "applies": applies, "url": urls[0] if urls else None})
+        raw += osv_raw   # only a complete OSV pass contributes (no partial alias groups)
         feeds["OSV"] = f"ok ({len(hits)} advisory record(s))"
     except FeedError as e:
         failures.append(f"OSV: {e}")
@@ -790,7 +842,8 @@ def run(args):
     except FeedError as e:
         failures.append(f"KEV: {e}")
         feeds["CISA KEV"] = "FAILED"
-        kev = set()  # findings are still posted; a later KEV listing escalates them
+        kev = set()  # NEW findings are still posted (KEV unknown); existing ones are left as they are
+        complete = False
 
     node = None
     try:
@@ -821,7 +874,7 @@ def run(args):
     run_url = None
     if os.environ.get("GITHUB_RUN_ID", "").isdigit() and args.repo:
         run_url = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{args.repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-    reconcile(issues, docs, complete and not failures, failures, feeds=feeds, run_url=run_url)
+    reconcile(issues, docs, complete, failures, feeds=feeds, run_url=run_url)
     print(f"github writes: {len(issues.actions)}{' (dry run, none sent)' if args.dry_run else ''}")
     return 1 if failures else 0
 
