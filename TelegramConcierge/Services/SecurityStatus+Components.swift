@@ -33,7 +33,7 @@ extension SecurityStatus {
             return Component(name: "AgentMail CLI", state: .pinned, detail: "\(pinned), SHA-256 compiled in")
         }
         return Component(name: "AgentMail CLI", state: .differs,
-                         detail: "\(installed ?? "unknown version") installed, this build pins \(pinned) — `briglia agentmail upgrade` moves it")
+                         detail: "\(installed.map { "\($0) installed" } ?? "installed version unknown"), this build pins \(pinned) — `briglia agentmail upgrade` installs the pinned one")
     }
 
     /// `resolved` is `path` with symlinks resolved; `managedRoot` is the
@@ -87,9 +87,17 @@ extension SecurityStatus {
         return (state.domains[domain], false)
     }
 
+    /// Absent (nothing at the path) = nothing recorded yet. Anything there
+    /// that cannot be read as a file (a directory, a denied read) is
+    /// unreadable, never "none recorded".
+    static func readTrust(path: String, domain: String) -> (floor: Int?, unreadable: Bool) {
+        var st = stat()
+        guard lstat(path, &st) == 0 || errno != ENOENT else { return (nil, false) }
+        return parseTrust(FileManager.default.contents(atPath: path) ?? Data(), domain: domain)
+    }
+
     static func liveBinaryInfo() -> BinaryInfo {
-        let trust = parseTrust(FileManager.default.contents(atPath: ReleaseTrustStore.fileURL.path),
-                               domain: ReleasePolicy.effective.trustDomain)
+        let trust = readTrust(path: ReleaseTrustStore.fileURL.path, domain: ReleasePolicy.effective.trustDomain)
         return BinaryInfo(version: adaCLIVersion, sequence: adaCLIReleaseSequence,
                           floor: trust.floor, trustUnreadable: trust.unreadable)
     }
@@ -178,7 +186,7 @@ extension SecurityStatus {
         let behind = components.filter { $0.state == .differs }.map(\.name)
         if !behind.isEmpty {
             let names = behind.joined(separator: ", ")
-            reasons.append(Reason(en: "behind this build's pin: \(names)", it: "non allineato alla versione prevista: \(names)"))
+            reasons.append(Reason(en: "differs from this build's pin: \(names)", it: "diversa dalla versione prevista: \(names)"))
         }
         guard let host else { return reasons }
         for u in host.updates {
@@ -192,7 +200,9 @@ extension SecurityStatus {
             }
         }
         if host.stale {
-            reasons.append(Reason(en: "package lists more than 7 days old", it: "elenchi dei pacchetti più vecchi di 7 giorni"))
+            let names = host.staleSources.isEmpty ? "" : " (\(host.staleSources.joined(separator: ", ")))"
+            reasons.append(Reason(en: "update information more than 7 days old\(names)",
+                                  it: "informazioni sugli aggiornamenti più vecchie di 7 giorni\(names)"))
         }
         if host.rebootRequired {
             reasons.append(Reason(en: "restart required by OS updates", it: "riavvio richiesto dagli aggiornamenti del sistema"))
@@ -239,7 +249,7 @@ extension SecurityStatus {
         if let binary { lines.append(binaryLine(binary)) }
         for c in components { lines.append("\(c.name): \(c.state.label) — \(c.detail)") }
         for u in host.updates { lines.append(describe(u, now: now)) }
-        if host.stale { lines.append("cached package lists are more than 7 days old: the counts above may be out of date") }
+        if host.stale { lines.append("update information more than 7 days old\(host.staleSources.isEmpty ? "" : " (" + host.staleSources.joined(separator: ", ") + ")"): the counts above may be out of date") }
         if host.rebootRequired { lines.append("the OS reports that a restart is required to finish installed updates") }
         lines.append("read-only: nothing was installed or changed; no advisory data here — the repository's daily watch tracks advisories")
         return lines

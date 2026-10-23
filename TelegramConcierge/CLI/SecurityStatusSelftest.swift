@@ -114,31 +114,75 @@ struct SecurityStatusSelftest: ParsableCommand {
     static func readOnly(_ cmd: (String, [String])) -> Bool {
         guard cmd.0 == "/bin/sh", cmd.1.count == 3, cmd.1[0] == "-c" else { return false }
         let script = cmd.1[1]
-        let allowed = ["LC_ALL=C exec \"$0\" -s -o Debug::NoLocking=true dist-upgrade",
-                       "HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1 exec \"$0\" outdated --json=v2 2>/dev/null"]
-        return allowed.contains(script) && ["/usr/bin/apt-get", "/opt/homebrew/bin/brew"].contains(cmd.1[2])
+        return script == "LC_ALL=C exec \"$0\" -s -o Debug::NoLocking=true dist-upgrade" && cmd.1[2] == "/usr/bin/apt-get"
+    }
+
+    static func jws(_ payload: Any) -> Data {
+        let inner = String(data: try! JSONSerialization.data(withJSONObject: payload), encoding: .utf8)!
+        return try! JSONSerialization.data(withJSONObject: ["payload": inner, "signatures": []])
     }
 
     static func brewAndMac(_ t: Tally) {
-        t.check("brew: outdated JSON counts formulae + casks",
-                SecurityStatus.parseBrewOutdated(#"{"formulae":[{"name":"a"},{"name":"b"}],"casks":[{"name":"c"}]}"#) == 3)
-        t.check("brew: malformed / partial JSON → nil",
-                SecurityStatus.parseBrewOutdated("Warning: x") == nil && SecurityStatus.parseBrewOutdated(#"{"formulae":[]}"#) == nil)
+        let modern = jws(["metadata": [:], "formulae": ["openssl@3": ["stable_version": "3.5.9"], "python@3.14": ["stable_version": "3.14.9", "revision": 1],
+                                                       "ffmpeg": ["stable_version": "8.1"], "bun": ["stable_version": "1.4.4"]]])
+        t.check("brew catalogue: Homebrew 5+ internal packages → name → version (with revision)",
+                SecurityStatus.parseBrewCatalogue(modern) == ["openssl@3": "3.5.9", "python@3.14": "3.14.9_1", "ffmpeg": "8.1", "bun": "1.4.4"])
+        let legacy = jws([["name": "jq", "versions": ["stable": "1.8.1"], "revision": 0]])
+        t.check("brew catalogue: legacy formula.jws.json list", SecurityStatus.parseBrewCatalogue(legacy) == ["jq": "1.8.1"])
+        t.check("brew catalogue: corrupt / truncated / unknown shape / a row without a version → nil",
+                SecurityStatus.parseBrewCatalogue(Data("{".utf8)) == nil
+                && SecurityStatus.parseBrewCatalogue(modern.prefix(modern.count / 2)) == nil
+                && SecurityStatus.parseBrewCatalogue(jws(["casks": [:]])) == nil
+                && SecurityStatus.parseBrewCatalogue(jws(["formulae": ["x": ["desc": "no version"]]])) == nil)
         let rec = Recorder()
         let api = "/home/u/Library/Caches/Homebrew/api"
         let brew = ["brew": "/opt/homebrew/bin/brew"]
-        t.check("brew: not installed → omitted (nothing to report)",
-                SecurityStatus.homebrew(fake(mac: true, recorder: rec)) == nil)
-        t.check("brew: no cached metadata → unknown, brew never run (it would download)",
-                SecurityStatus.homebrew(fake(mac: true, binaries: brew, recorder: rec)) == .unknown(source: "Homebrew", reason: "metadata never downloaded (run `brew update` once)")
-                && rec.commands.isEmpty)
-        let ok = fake(mac: true, dirs: [api: ["formula_names.txt", "internal"]], mtimes: [api + "/internal": now.addingTimeInterval(-60)],
-                      binaries: brew, result: { _ in (0, #"{"formulae":[{"name":"a"}],"casks":[]}"#) }, recorder: rec)
-        t.check("brew: cached metadata → pending 1, dated by the newest cache entry",
-                SecurityStatus.homebrew(ok) == .pending(source: "Homebrew", total: 1, security: nil, asOf: now.addingTimeInterval(-60)))
-        let bad = fake(mac: true, dirs: [api: ["x"]], binaries: brew, result: { _ in (1, "") }, recorder: rec)
-        t.check("brew: failing command → unknown", SecurityStatus.homebrew(bad) == .unknown(source: "Homebrew", reason: "brew outdated failed"))
-        t.check("brew: only the read-only outdated query ran", rec.commands.count == 2 && rec.commands.allSatisfy(readOnly), "\(rec.commands)")
+        let cellar = ["/opt/homebrew/Cellar": ["openssl@3", "python@3.14", "ffmpeg", "sometap-tool", "bun", ".DS_Store"],
+                      "/opt/homebrew/Cellar/openssl@3": ["3.5.9", "3.6.4"], "/opt/homebrew/Cellar/python@3.14": ["3.14.9"],
+                      "/opt/homebrew/Cellar/ffmpeg": ["8.1"], "/opt/homebrew/Cellar/sometap-tool": ["1.0"], "/opt/homebrew/Cellar/bun": ["1.3.11"]]
+        // bun shares a core formula's name but came from another tap: not compared.
+        let receipts = ["/opt/homebrew/Cellar/bun/1.3.11/INSTALL_RECEIPT.json": Data(#"{"source":{"tap":"oven-sh/bun"}}"#.utf8),
+                        "/opt/homebrew/Cellar/python@3.14/3.14.9/INSTALL_RECEIPT.json": Data(#"{"source":{"tap":"homebrew/core"}}"#.utf8)]
+        func mac(_ files: [String: Data], _ internalNames: [String], mtime: Date?) -> SecurityStatus.Probe {
+            let files = files.merging(receipts) { a, _ in a }
+            var dirs = cellar
+            if !internalNames.isEmpty { dirs[api + "/internal"] = internalNames }
+            var m: [String: Date] = [:]
+            if let mtime { for n in internalNames { m[api + "/internal/" + n] = mtime }; m[api + "/formula.jws.json"] = mtime }
+            return fake(mac: true, files: files, dirs: dirs, mtimes: m, binaries: brew, recorder: rec)
+        }
+        t.check("brew: not installed → omitted (nothing to report)", SecurityStatus.homebrew(fake(mac: true, recorder: rec)) == nil)
+        t.check("brew: no cached catalogue → unknown",
+                SecurityStatus.homebrew(mac([:], [], mtime: nil)) == .unknown(source: "Homebrew formulae", reason: "no cached catalogue (run `brew update` once)"))
+        let pkg = api + "/internal/packages.arm64_x.jws.json"
+        t.check("brew: an unrelated file in the API directory is not a catalogue → unknown",
+                { if case .unknown = SecurityStatus.homebrew(mac([api + "/internal/sentinel.txt": Data()], ["sentinel.txt"], mtime: now)) { return true }; return false }())
+        t.check("brew: python@3.14 keg 3.14.9 vs catalogue 3.14.9_1 → 1 differs; same-name formula from another tap, other-tap formula and dotfiles ignored; dated by the catalogue",
+                SecurityStatus.homebrew(mac([pkg: modern], ["packages.arm64_x.jws.json"], mtime: now.addingTimeInterval(-60)))
+                == .pending(source: "Homebrew formulae", total: 1, security: nil, asOf: now.addingTimeInterval(-60)))
+        t.check("brew: corrupt catalogue → unknown (format not recognised)",
+                SecurityStatus.homebrew(mac([pkg: Data("{".utf8)], ["packages.arm64_x.jws.json"], mtime: now))
+                == .unknown(source: "Homebrew formulae", reason: "the cached catalogue's format is not recognised"))
+        t.check("brew: legacy layout read when no internal catalogue exists",
+                SecurityStatus.homebrew(mac([api + "/formula.jws.json": legacy], [], mtime: now)) == .none(source: "Homebrew formulae", asOf: now))
+        t.check("brew: no child process was ever started (brew is never run)", rec.commands.isEmpty, "\(rec.commands)")
+
+        let old = now.addingTimeInterval(-30 * 86_400)
+        let staleMac = SecurityStatus.hostReport(fake(mac: true, files: ["/Library/Preferences/com.apple.SoftwareUpdate.plist":
+            try! PropertyListSerialization.data(fromPropertyList: ["LastSuccessfulDate": old, "RecommendedUpdates": []], format: .binary, options: 0)],
+            recorder: rec))
+        t.check("freshness: a 30-day-old macOS record → stale, named, and the line/menu need attention",
+                staleMac.stale && staleMac.staleSources == ["macOS"]
+                && SecurityStatus.summaryLine(components: [], host: staleMac, now: now).contains("update information more than 7 days old (macOS)")
+                && ((SecurityStatus.menuPayload(components: [], host: staleMac, binary: nil)["attention_it"] as? [String])?.first?.contains("più vecchie di 7 giorni") ?? false),
+                "\(staleMac)")
+        let staleBrew = SecurityStatus.hostReport(mac([pkg: modern, "/Library/Preferences/com.apple.SoftwareUpdate.plist":
+            try! PropertyListSerialization.data(fromPropertyList: ["LastSuccessfulDate": now, "RecommendedUpdates": []], format: .binary, options: 0)],
+            ["packages.arm64_x.jws.json"], mtime: old))
+        t.check("freshness: a 30-day-old Homebrew catalogue → stale (Homebrew formulae)", staleBrew.staleSources == ["Homebrew formulae"], "\(staleBrew)")
+        let undated = SecurityStatus.dateChecked(SecurityStatus.HostReport(updates: [.none(source: "Homebrew formulae", asOf: nil)], rebootRequired: false, stale: false), now: now)
+        t.check("freshness: an undated result is unknown, never 'none'",
+                undated.updates == [.unknown(source: "Homebrew formulae", reason: "the information has no date")])
 
         let when = Date(timeIntervalSince1970: 1_792_690_000)
         t.check("macOS: no successful-check record → unknown (missing keys are not 'none')",
@@ -199,7 +243,7 @@ struct SecurityStatusSelftest: ParsableCommand {
                 !line.contains("needs attention") && !line.lowercased().contains("up to date") && line.contains("2 h ago"), line)
         let behind = [SecurityStatus.Component(name: "AgentMail CLI", state: .differs, detail: "")]
         t.check("a copy behind its pin → needs attention, named",
-                SecurityStatus.summaryLine(components: behind, host: clean, now: now).contains("needs attention (behind this build's pin: AgentMail CLI)"))
+                SecurityStatus.summaryLine(components: behind, host: clean, now: now).contains("needs attention (differs from this build's pin: AgentMail CLI)"))
         let sec = SecurityStatus.HostReport(updates: [.pending(source: "apt", total: 4, security: 1, asOf: now)], rebootRequired: false, stale: false)
         let nonSec = SecurityStatus.HostReport(updates: [.pending(source: "apt", total: 4, security: 0, asOf: now)], rebootRequired: false, stale: false)
         t.check("apt security updates → attention; non-security only → no attention",
@@ -232,6 +276,16 @@ struct SecurityStatusSelftest: ParsableCommand {
                 SecurityStatus.parseTrust(trust(#"{"schema":1,"sequence":5}"#), domain: domain).unreadable
                 && SecurityStatus.parseTrust(trust("{"), domain: domain).unreadable
                 && SecurityStatus.parseTrust(trust(#"{"schema":2,"domains":{"a":0}}"#), domain: domain).unreadable)
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("sec-selftest-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let asDir = dir.appendingPathComponent("release_trust.json")
+        try? FileManager.default.createDirectory(at: asDir, withIntermediateDirectories: true)
+        let missing = SecurityStatus.readTrust(path: dir.appendingPathComponent("absent.json").path, domain: domain)
+        let notAFile = SecurityStatus.readTrust(path: asDir.path, domain: domain)
+        try? FileManager.default.removeItem(at: dir)
+        t.check("trust: nothing at the path → none recorded; a directory there → unreadable (not 'none recorded')",
+                missing == (nil, false) && notAFile == (nil, true), "\(missing) \(notAFile)")
 
         let clean = SecurityStatus.HostReport(updates: [.none(source: "apt", asOf: now)], rebootRequired: false, stale: false)
         let same = SecurityStatus.BinaryInfo(version: "0.2.60", sequence: 120, floor: 120, trustUnreadable: false)

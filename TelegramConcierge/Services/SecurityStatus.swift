@@ -3,10 +3,10 @@ import Foundation
 /// Read-only "Security" status (security auto-update plan, Phase 0): what
 /// Briglia's own dependencies are pinned to, and whether the host has OS
 /// updates waiting. Never installs, upgrades, deletes or writes anything; the
-/// only child processes are read-only queries (`apt-get -s`, `brew outdated`,
-/// `node --version`), each bounded by a timeout, and none of them goes to the
-/// network (`brew` runs with auto-update off and is skipped when Homebrew has
-/// never downloaded its metadata; `apt-get -s` reads the cached lists).
+/// only child processes are read-only queries (`apt-get -s` against the cached
+/// lists, `node --version`), each bounded by a timeout, and none of them goes
+/// to the network. Homebrew is never launched: its cached catalogue and the
+/// Cellar are read as files.
 /// Anything it cannot establish is reported as unknown, never as fine. It has
 /// no advisory data: "pinned" means pinned, not "known safe".
 enum SecurityStatus {
@@ -24,7 +24,7 @@ enum SecurityStatus {
         var label: String {
             switch self {
             case .pinned: return "pinned"
-            case .differs: return "behind this build's pin"
+            case .differs: return "differs from this build's pin"
             case .unpinned: return "not pinned"
             case .osRepo: return "from the device's package sources"
             case .userOwned: return "yours / the OS's"
@@ -48,8 +48,10 @@ enum SecurityStatus {
     struct HostReport: Equatable {
         var updates: [Updates]
         var rebootRequired: Bool
-        /// The cached package metadata is older than `staleAfter`.
+        /// Some update information is older than `staleAfter`.
         var stale: Bool
+        /// Which sources are stale (for the wording).
+        var staleSources: [String] = []
     }
 
     static let staleAfter: TimeInterval = 7 * 24 * 3600
@@ -96,6 +98,29 @@ enum SecurityStatus {
     // MARK: - Host OS updates
 
     static func hostReport(_ probe: Probe) -> HostReport {
+        dateChecked(rawHostReport(probe), now: probe.now())
+    }
+
+    /// Freshness per source: a result without a date is unknown (never
+    /// "none"/"pending" on undated evidence), and one older than `staleAfter`
+    /// makes the report stale, naming the source.
+    static func dateChecked(_ report: HostReport, now: Date) -> HostReport {
+        var out = report
+        out.updates = report.updates.map { u in
+            switch u {
+            case .none(let source, let asOf), .pending(let source, _, _, let asOf):
+                guard let asOf else { return .unknown(source: source, reason: "the information has no date") }
+                if now.timeIntervalSince(asOf) > staleAfter, !out.staleSources.contains(source) { out.staleSources.append(source) }
+                return u
+            case .unknown:
+                return u
+            }
+        }
+        if !out.staleSources.isEmpty { out.stale = true }
+        return out
+    }
+
+    static func rawHostReport(_ probe: Probe) -> HostReport {
         if probe.isMacOS {
             return HostReport(updates: [macSoftwareUpdate(probe)] + (homebrew(probe).map { [$0] } ?? []),
                               rebootRequired: false, stale: false)
@@ -108,7 +133,7 @@ enum SecurityStatus {
         let reboot = probe.fileExists("/var/run/reboot-required") || probe.fileExists("/run/reboot-required")
         if let apt = probe.findBinary("apt-get") {
             let (updates, stale) = aptUpdates(probe, aptGet: apt)
-            return HostReport(updates: [updates], rebootRequired: reboot, stale: stale)
+            return HostReport(updates: [updates], rebootRequired: reboot, stale: stale, staleSources: stale ? ["apt"] : [])
         }
         for manager in ["dnf", "pacman"] where probe.findBinary(manager) != nil {
             return HostReport(updates: [.unknown(source: manager, reason: "pending-update check not supported yet")],
@@ -125,7 +150,7 @@ enum SecurityStatus {
         let script = "LC_ALL=C exec \"$0\" -s -o Debug::NoLocking=true dist-upgrade"
         let (status, output) = probe.run("/bin/sh", ["-c", script, aptGet], probeTimeout)
         guard status == 0 else {
-            return (.unknown(source: "apt", reason: status == 124 ? "the check timed out" : "apt-get -s failed (exit \(status))"), stale)
+            return (.unknown(source: "apt", reason: status == 124 ? "the check timed out" : "apt-get -s failed (exit \(status))"), false)
         }
         guard asOf != nil else {
             return (.unknown(source: "apt", reason: "no cached package lists (apt update has never run)"), true)
@@ -185,37 +210,89 @@ enum SecurityStatus {
         return .unknown(source: "macOS", reason: "Software Update record has no update list")
     }
 
-    /// `brew outdated` with auto-update off, only when Homebrew already has
-    /// its formula metadata cached (otherwise brew would download it).
-    /// Verified 2026-10-23: with every proxy pointed at a dead port it still
-    /// answers, i.e. it makes no network request.
-    /// nil when Homebrew is not installed (nothing to report).
+    /// Homebrew formulae whose installed kegs do not include the version in
+    /// Homebrew's cached catalogue. brew itself is never run (even
+    /// `brew outdated` can download or regenerate its API cache): the
+    /// catalogue file and the Cellar are read as files, nothing else. Dated by
+    /// the catalogue file. A layout this code does not recognise is unknown.
+    /// Casks are not checked. nil when Homebrew is not installed.
     static func homebrew(_ probe: Probe) -> Updates? {
         guard let brew = probe.findBinary("brew") else { return nil }
+        let prefix = probe.environment["HOMEBREW_PREFIX"]
+            ?? ((brew as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+        let cellar = probe.environment["HOMEBREW_CELLAR"] ?? prefix + "/Cellar"
         let cache = probe.environment["HOMEBREW_CACHE"] ?? probe.home + "/Library/Caches/Homebrew"
-        // Homebrew's API cache layout varies by version (formula.jws.json,
-        // formula_names.txt, internal/…): any entry means metadata exists;
-        // the newest entry dates it.
-        let apiDir = cache + "/api"
-        let entries = probe.listDirectory(apiDir)
-        guard !entries.isEmpty else {
-            return .unknown(source: "Homebrew", reason: "metadata never downloaded (run `brew update` once)")
+        let source = "Homebrew formulae"
+        guard let path = brewCataloguePath(probe, cache: cache), let data = probe.readData(path) else {
+            return .unknown(source: source, reason: "no cached catalogue (run `brew update` once)")
         }
-        let asOf = entries.compactMap { probe.modificationDate(apiDir + "/" + $0) }.max()
-        let script = "HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_ENV_HINTS=1 "
-            + "exec \"$0\" outdated --json=v2 2>/dev/null"
-        let (status, output) = probe.run("/bin/sh", ["-c", script, brew], probeTimeout)
-        guard status == 0, let count = parseBrewOutdated(output) else {
-            return .unknown(source: "Homebrew", reason: status == 124 ? "the check timed out" : "brew outdated failed")
+        guard let catalogue = parseBrewCatalogue(data) else {
+            return .unknown(source: source, reason: "the cached catalogue's format is not recognised")
         }
-        return count == 0 ? .none(source: "Homebrew", asOf: asOf)
-                          : .pending(source: "Homebrew", total: count, security: nil, asOf: asOf)
+        var differ = 0
+        for name in probe.listDirectory(cellar) where !name.hasPrefix(".") {
+            guard let current = catalogue[name] else { continue }   // other taps: not in the catalogue
+            let kegs = probe.listDirectory(cellar + "/" + name).filter { !$0.hasPrefix(".") }
+            // A formula of the same name from another tap is not this one.
+            if kegs.contains(where: { brewTap(probe, keg: cellar + "/" + name + "/" + $0).map { $0 != "homebrew/core" } ?? false }) { continue }
+            if !kegs.contains(current) { differ += 1 }
+        }
+        let asOf = probe.modificationDate(path)
+        return differ == 0 ? .none(source: source, asOf: asOf)
+                           : .pending(source: source, total: differ, security: nil, asOf: asOf)
     }
 
-    static func parseBrewOutdated(_ text: String) -> Int? {
-        guard let data = text.data(using: .utf8),
+    /// The tap a keg was installed from (its INSTALL_RECEIPT.json), nil when
+    /// the receipt does not say.
+    static func brewTap(_ probe: Probe, keg: String) -> String? {
+        guard let data = probe.readData(keg + "/INSTALL_RECEIPT.json"),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let formulae = json["formulae"] as? [Any], let casks = json["casks"] as? [Any] else { return nil }
-        return formulae.count + casks.count
+              let source = json["source"] as? [String: Any] else { return nil }
+        return source["tap"] as? String
+    }
+
+    /// The newest `api/internal/packages.*.jws.json` (Homebrew 5+), else the
+    /// older `api/formula.jws.json`.
+    static func brewCataloguePath(_ probe: Probe, cache: String) -> String? {
+        let internalDir = cache + "/api/internal"
+        let candidates = probe.listDirectory(internalDir)
+            .filter { $0.hasPrefix("packages.") && $0.hasSuffix(".jws.json") }
+            .map { internalDir + "/" + $0 }
+        if let newest = candidates.max(by: { (probe.modificationDate($0) ?? .distantPast) < (probe.modificationDate($1) ?? .distantPast) }) {
+            return newest
+        }
+        let legacy = cache + "/api/formula.jws.json"
+        return probe.fileExists(legacy) ? legacy : nil
+    }
+
+    /// name → current package version ("3.5.9", or "3.14.9_1" with a
+    /// revision) from a JWS catalogue: `{"payload": "<json>"}` whose payload
+    /// is either `{"formulae": {name: {stable_version, revision?}}}` or a list
+    /// of `{name, versions: {stable}, revision?}`. nil when unrecognised.
+    static func parseBrewCatalogue(_ data: Data) -> [String: String]? {
+        guard let outer = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payloadText = outer["payload"] as? String, let payloadData = payloadText.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: payloadData) else { return nil }
+        func version(_ stable: Any?, _ revision: Any?) -> String? {
+            guard let stable = stable as? String, !stable.isEmpty else { return nil }
+            let rev = (revision as? Int) ?? 0
+            return rev > 0 ? "\(stable)_\(rev)" : stable
+        }
+        var out: [String: String] = [:]
+        if let dict = payload as? [String: Any], let formulae = dict["formulae"] as? [String: Any] {
+            for (name, raw) in formulae {
+                guard let f = raw as? [String: Any], let v = version(f["stable_version"], f["revision"]) else { return nil }
+                out[name] = v
+            }
+        } else if let list = payload as? [Any] {
+            for raw in list {
+                guard let f = raw as? [String: Any], let name = f["name"] as? String,
+                      let v = version((f["versions"] as? [String: Any])?["stable"], f["revision"]) else { return nil }
+                out[name] = v
+            }
+        } else {
+            return nil
+        }
+        return out.isEmpty ? nil : out
     }
 }
