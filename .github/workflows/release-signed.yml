@@ -93,7 +93,7 @@ jobs:
           VERSION: ${{ needs.authorize.outputs.version }}
         run: ./.github/scripts/stamp-version.sh "$VERSION"
       - name: Build
-        run: swift build -c release
+        run: swift build -c release --force-resolved-versions
       - name: Release-artifact checks (development-only commands refuse; migration path answers)
         run: ./.github/scripts/check-release-artifact.sh .build/release/briglia
       - name: Package
@@ -119,7 +119,7 @@ jobs:
           VERSION: ${{ needs.authorize.outputs.version }}
         run: ./.github/scripts/stamp-version.sh "$VERSION"
       - name: Build (static Swift stdlib)
-        run: swift build -c release --static-swift-stdlib
+        run: swift build -c release --static-swift-stdlib --force-resolved-versions
       - name: Release-artifact checks (development-only commands refuse; migration path answers)
         run: ./.github/scripts/check-release-artifact.sh .build/release/briglia
       - name: Package
@@ -147,7 +147,7 @@ jobs:
           VERSION: ${{ needs.authorize.outputs.version }}
         run: ./.github/scripts/stamp-version.sh "$VERSION"
       - name: Build (static Swift stdlib)
-        run: swift build -c release --static-swift-stdlib
+        run: swift build -c release --static-swift-stdlib --force-resolved-versions
       - name: Release-artifact checks (development-only commands refuse; migration path answers)
         run: ./.github/scripts/check-release-artifact.sh .build/release/briglia
       - name: Package
