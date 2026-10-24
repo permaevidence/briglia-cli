@@ -17,7 +17,8 @@ user's own tools), end to end and hermetic:
      exists (Linux CI), and the pruning validity mirror against the client
      (§9.5.12, every platform);
   7. static: every development-only command refuses in stamped builds; the
-     compiled advisory key set is still the marked placeholder.
+     compiled advisory key set is exactly the provisioned key, equal to the
+     committed (tracked, not ignored) security/advisory-signing-pubkey.pem.
 
 Every step runs with temporary HOME/XDG roots. Usage: security_phase3_test.py <briglia>
 """
@@ -503,8 +504,16 @@ def static():
           raw.hex() == PINNED_ADVISORY_KEY_HEX, raw.hex())
     check("static: the pinned key ID is briglia-advisories-v1- + SHA-256(raw key)[:16]",
           PINNED_ADVISORY_KEY_ID == "briglia-advisories-v1-" + hashlib.sha256(raw).hexdigest()[:16])
-    ign = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-q", "security/advisory-signing-pubkey.pem"])
-    check("static: .gitignore does not hide the committed advisory public key (*.pem exception)", ign.returncode == 1, ign.returncode)
+    # --no-index: judge the ignore rules themselves, not the tracked state (a
+    # tracked file is never reported as ignored). safe.directory: Linux CI runs
+    # as root on a checkout owned by another user.
+    git = ["git", "-c", "safe.directory=*", "-C", str(ROOT)]
+    pem_rel = "security/advisory-signing-pubkey.pem"
+    ign = subprocess.run(git + ["check-ignore", "--no-index", "-q", pem_rel], capture_output=True, text=True)
+    check("static: .gitignore does not hide the committed advisory public key (*.pem exception)",
+          ign.returncode == 1, (ign.returncode, ign.stderr))
+    tracked = subprocess.run(git + ["ls-files", "--error-unmatch", pem_rel], capture_output=True, text=True)
+    check("static: the advisory public key is tracked by git", tracked.returncode == 0, (tracked.returncode, tracked.stderr))
     # v18-v20 §9.5.11: the publish job is separate, in its own environment,
     # with only the scoped token; the signing job never sees that token.
     wf = (ROOT / ".github/workflows/advisory-publish.yml").read_text()
