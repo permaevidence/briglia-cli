@@ -411,8 +411,18 @@ def build(watchlist_path, bundle, prev, now):
     if not isinstance(results, list):
         raise Refuse("bundle has no results list")
     kev_src = (bundle.get("sources") or {}).get("cisa-kev") or {}
-    kev_ok = kev_src.get("status") == "ok" and isinstance(kev_src.get("cves"), dict)
-    kev = {k: v for k, v in (kev_src.get("cves") or {}).items() if isinstance(k, str)} if kev_ok else {}
+    # The KEV map counts only when it is complete and well-formed: CVE keys,
+    # dateAdded strings (or null); anything else makes KEV coverage failed.
+    cves = kev_src.get("cves")
+    kev_ok = (kev_src.get("status") == "ok" and type(cves) is dict and bool(cves)
+              and all(type(k) is str and re.fullmatch(r"CVE-[0-9]{4}-[0-9]{4,}", k, re.ASCII)
+                      and (v is None or (type(v) is str and len(v.encode()) <= 32 and v.isprintable())) for k, v in cves.items()))
+    try:
+        if kev_ok:
+            parse_iso(kev_src.get("checkedAt"))
+    except (ValueError, TypeError):
+        kev_ok = False
+    kev = dict(cves) if kev_ok else {}
     prev_rows, prev_adv = previous_rows(prev)
     by_row = {}
     for r in results:

@@ -66,7 +66,8 @@ def rec(n, fixed="7:5.1.7-0+deb12u1", published="2026-01-01T00:00:00Z", eco="Deb
 
 def bundle(rows, kev_ok=True, kev=None):
     return {"schema": 1, "fetchedAt": "2026-10-24T00:00:00Z",
-            "sources": {"cisa-kev": {"status": "ok", "checkedAt": "2026-10-24T00:00:00Z", "cves": kev or {}} if kev_ok
+            "sources": {"cisa-kev": {"status": "ok", "checkedAt": "2026-10-24T00:00:00Z",
+                                     "cves": kev or {"CVE-2000-0001": "2000-01-01"}} if kev_ok
                         else {"status": "failed"}},
             "results": rows}
 
@@ -115,6 +116,8 @@ def run_tests(m, tmp, only=None, fetch=None):
     t("a missing bundle row is failed", cov(d) == ["failed"])
     d = build(bundle([row([rec(1)])], kev_ok=False))
     t("KEV feed failure → KEV coverage failed", cov(d, "cisa-kev") == ["failed"])
+    t("a malformed KEV map (non-string dateAdded) → KEV coverage failed, document still signable",
+      cov(build(bundle([row([rec(1)])], kev={"CVE-2099-0001": {"x": 1}})), "cisa-kev") == ["failed"])
     d = build(bundle([row([rec(1)])], kev={"CVE-2099-0001": "2026-10-20"}))
     a = d["entries"][0]["advisories"][0]
     t("KEV-listed advisory: kev, kevAdded, critical", a["kev"] and a["kevAdded"] == "2026-10-20" and a["severity"] == "critical")
