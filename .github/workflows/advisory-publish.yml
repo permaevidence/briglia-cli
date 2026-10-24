@@ -62,7 +62,7 @@ jobs:
           LIST_URL: ${{ vars.ADVISORY_LIST_URL || 'https://briglia.dev/advisories/v1/local-tools.sig.json' }}
         run: |
           set +e
-          curl -fsS --max-time 30 --max-filesize 368640 -o "$RUNNER_TEMP/prev.sig.json" "$LIST_URL" \
+          curl -fsS --max-time 30 --max-filesize 2949120 -o "$RUNNER_TEMP/prev.sig.json" "$LIST_URL" \
             && .github/scripts/verify-advisory.sh "$RUNNER_TEMP/prev.sig.json" security/advisory-signing-pubkey.pem "$RUNNER_TEMP/prev.json"
           [ $? -eq 0 ] || { echo "::notice::no verified previous list (first run, or unavailable)"; rm -f "$RUNNER_TEMP/prev.json"; }
           exit 0

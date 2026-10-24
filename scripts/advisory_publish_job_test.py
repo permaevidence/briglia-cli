@@ -7,6 +7,7 @@ else skipped). No network. Deliberate breaks must each fail a test.
 Usage: advisory_publish_job_test.py
 """
 import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -71,29 +72,48 @@ class Resp(io.BytesIO):
         return False
 
 
+def blob(content):
+    return hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest()
+
+
 class FakeGitHub:
-    """GET/PUT /repos/<repo>/contents/<path>; records every request."""
-    def __init__(self, content=None, sha="sha-1", get_status=None, put_status=None, not_found_body=True):
-        self.content, self.sha = content, sha
+    """GET/PUT /repos/<repo>/contents/<path>; records every request. GET with
+    the object media type inlines base64 content only up to `inline_max`
+    bytes (GitHub: 1 MB), else `encoding: none` + empty content; GET with the
+    raw media type returns the bytes. The SHA is the real git blob SHA unless
+    a test overrides it."""
+    def __init__(self, content=None, sha=None, get_status=None, put_status=None, not_found_body=True,
+                 inline_max=1_000_000, raw_status=None, raw_override=None):
+        self.content = content
+        self.sha = sha if sha is not None else (blob(content) if content is not None else None)
         self.get_status, self.put_status, self.not_found_body = get_status, put_status, not_found_body
+        self.inline_max, self.raw_status, self.raw_override = inline_max, raw_status, raw_override
         self.requests = []
 
     def __call__(self, req, timeout=30):
-        self.requests.append((req.get_method(), req.full_url, req.data))
+        accept = req.get_header("Accept")
+        self.requests.append((req.get_method(), req.full_url, req.data, accept))
         if req.get_method() == "GET":
             if self.get_status:
                 raise urllib.error.HTTPError(req.full_url, self.get_status, "x", {}, io.BytesIO(b"{}"))
             if self.content is None:
                 body = json.dumps({"message": "Not Found"} if self.not_found_body else {}).encode()
                 raise urllib.error.HTTPError(req.full_url, 404, "nf", {}, io.BytesIO(body))
-            return Resp(200, json.dumps({"type": "file", "encoding": "base64", "sha": self.sha,
-                                         "content": base64.b64encode(self.content).decode()}).encode())
+            if accept == "application/vnd.github.raw+json":
+                if self.raw_status:
+                    raise urllib.error.HTTPError(req.full_url, self.raw_status, "x", {}, io.BytesIO(b"{}"))
+                return Resp(200, self.raw_override if self.raw_override is not None else self.content)
+            inline = len(self.content) <= self.inline_max
+            return Resp(200, json.dumps({"type": "file", "sha": self.sha, "size": len(self.content),
+                                         "encoding": "base64" if inline else "none",
+                                         "content": base64.b64encode(self.content).decode() if inline else ""}).encode())
         body = json.loads(req.data)
         if self.put_status:
             raise urllib.error.HTTPError(req.full_url, self.put_status, "x", {}, io.BytesIO(b"{}"))
         if body.get("sha") != (self.sha if self.content is not None else None):
             raise urllib.error.HTTPError(req.full_url, 409, "conflict", {}, io.BytesIO(b"{}"))
-        self.content, self.sha = base64.b64decode(body["content"]), "sha-2"
+        self.content = base64.b64decode(body["content"])
+        self.sha = blob(self.content)
         return Resp(201, b"{}")
 
     def puts(self):
@@ -125,7 +145,7 @@ def run_tests(m, env, only=None):
     def higher():
         gh = FakeGitHub(content=open(env["c100"], "rb").read())
         r = m.publish(env["c101"], env["pub"], REPO, "t", opener=gh)
-        return r.startswith("published") and json.loads(gh.puts()[0][2]).get("sha") == "sha-1", r
+        return r.startswith("published") and json.loads(gh.puts()[0][2]).get("sha") == blob(open(env["c100"], "rb").read()), r
     t("publish: a higher sequence replaces the file with compare-and-swap on the read SHA", higher)
 
     def lower_equal():
@@ -174,7 +194,6 @@ def run_tests(m, env, only=None):
 
     def conflict():
         gh = FakeGitHub(content=open(env["c100"], "rb").read())
-        gh.sha = "sha-1"
         orig = gh.__call__
 
         class Racing(FakeGitHub):
@@ -193,6 +212,42 @@ def run_tests(m, env, only=None):
         finally:
             del orig, Racing
     t("publish: a concurrent writer makes the PUT fail; it is not retried with a new SHA", conflict)
+
+    def large_current():
+        # L1: a published file above GitHub's 1 MB inline limit is read with
+        # the raw media type; its bytes must hash to the reported blob SHA.
+        c100 = open(env["c100"], "rb").read()
+        gh = FakeGitHub(content=c100, inline_max=16)
+        r = m.publish(env["c101"], env["pub"], REPO, "t", opener=gh)
+        accepts = [q[3] for q in gh.requests if q[0] == "GET"]
+        return (r.startswith("published") and accepts == ["application/vnd.github.object+json", "application/vnd.github.raw+json"]
+                and json.loads(gh.puts()[0][2]).get("sha") == blob(c100)), (r, accepts)
+    t("publish: a file GitHub does not inline is read raw and CAS uses the blob SHA of the verified bytes", large_current)
+
+    def mismatched_bytes():
+        c100, c101 = open(env["c100"], "rb").read(), open(env["c101"], "rb").read()
+        out = []
+        for gh in (FakeGitHub(content=c100, inline_max=16, raw_override=c101),       # changed between the two reads
+                   FakeGitHub(content=c100, sha="0" * 40),                            # inline bytes, wrong SHA
+                   FakeGitHub(content=c100, inline_max=16, raw_status=500)):          # raw read fails
+            try:
+                m.publish(env["c101"], env["pub"], REPO, "t", opener=gh)
+                out.append("published")
+            except m.Stop:
+                out.append("stop" if not gh.puts() else "wrote")
+        return out == ["stop"] * 3, out
+    t("publish: bytes that do not match the blob SHA, or an unreadable raw body, stop before any write", mismatched_bytes)
+
+    def oversized():
+        big = os.path.join(os.path.dirname(env["c101"]), "big.sig.json")
+        open(big, "wb").write(b" " * (m.MAX_BYTES + 1))
+        gh = FakeGitHub(content=None)
+        try:
+            m.publish(big, env["pub"], REPO, "t", opener=gh)
+            return False, "published"
+        except m.Stop as e:
+            return m.MAX_BYTES == 2949120 and not gh.requests and "too large" in str(e), str(e)
+    t("publish: the envelope cap is 2,949,120 bytes (2 MiB payload, L1); a larger candidate is refused before any request", oversized)
 
     def wrong_repo():
         try:
@@ -213,6 +268,12 @@ BREAKS = [
     ("publish: a 5xx, a 403 or a bare 404 is never treated as 'first publication'", '        if msg == "Not Found":', '        if True:'),
     ("publish: a concurrent writer makes the PUT fail; it is not retried with a new SHA", "        if status == 409 or status == 422:", "        if False:"),
     ("publish: refuses any repository but the dedicated one", "    if repo != REPO_RE:", "    if False:"),
+    ("publish: a file GitHub does not inline is read raw and CAS uses the blob SHA of the verified bytes",
+     '        status, content = api("GET", url, token, opener=opener, accept=RAW)', '        status, content = 200, b""'),
+    ("publish: bytes that do not match the blob SHA, or an unreadable raw body, stop before any write",
+     "    if len(content) != size or blob_sha(content) != sha:", "    if False:"),
+    ("publish: the envelope cap is 2,949,120 bytes (2 MiB payload, L1); a larger candidate is refused before any request",
+     "MAX_BYTES = 2949120", "MAX_BYTES = 2949121"),
 ]
 
 

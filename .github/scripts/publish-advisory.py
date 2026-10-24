@@ -8,8 +8,13 @@ the signing key and never signs anything.
 Steps, all fail-closed:
  1. verify the candidate envelope with the committed public key
     (verify-advisory.sh) AND its payload (advisory_publish.py check);
- 2. read the currently published file through the contents API of `main`
-    (one response: its bytes and its blob SHA); a positive 404 means "first
+ 2. read the currently published file through the contents API of `main`:
+    its metadata (object media type: blob SHA and size, plus the bytes when
+    GitHub inlines them, files up to 1 MB) and, when GitHub does not inline
+    them (1-100 MB, the 2 MiB list of owner decision L1), the bytes through
+    the raw media type; the bytes must have exactly that size and hash to
+    exactly that git blob SHA, so the SHA used for compare-and-swap is the
+    one of the bytes that were verified. A positive 404 means "first
     publication"; any other failure stops; an existing file that does not
     verify stops (recovery is a separate manual step);
  3. refuse a candidate whose sequence is not strictly higher than the
@@ -24,6 +29,7 @@ Exit:  0 published (or nothing to do in --dry-run), 1 refused/failed.
 """
 import argparse
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -35,7 +41,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 PATH = "v1/local-tools.sig.json"
-MAX_BYTES = 368640
+MAX_BYTES = 2949120
 REPO_RE = "permaevidence/briglia-advisories"
 
 
@@ -64,21 +70,36 @@ def verify(envelope_bytes, pubkey, work):
     return seq
 
 
-def api(method, url, token, body=None, opener=None):
+OBJECT = "application/vnd.github.object+json"
+RAW = "application/vnd.github.raw+json"
+
+
+def api(method, url, token, body=None, opener=None, accept="application/vnd.github+json"):
     req = urllib.request.Request(url, method=method, data=None if body is None else json.dumps(body).encode(),
-                                 headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                                 headers={"Authorization": f"Bearer {token}", "Accept": accept,
                                           "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "briglia-advisory-publish"})
     try:
         with (opener or urllib.request.urlopen)(req, timeout=30) as r:
-            raw = r.read(2 * MAX_BYTES)
+            # Base64 in a JSON object is 4/3 of the file plus the metadata:
+            # 2 * MAX_BYTES bounds every legitimate response; one byte more
+            # than that is read so an over-long one is detected, not cut.
+            raw = r.read(2 * MAX_BYTES + 1)
+            if len(raw) > 2 * MAX_BYTES:
+                raise Stop("response too large")
             return r.status, raw
     except urllib.error.HTTPError as e:
         return e.code, e.read(65536)
 
 
+def blob_sha(content):
+    """The git blob SHA-1 of these bytes (what the contents API reports)."""
+    return hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest()
+
+
 def current(base, repo, token, opener=None):
     """→ (bytes, sha) of the published file, or (None, None) on a positive 404."""
-    status, raw = api("GET", f"{base}/repos/{repo}/contents/{PATH}?ref=main", token, opener=opener)
+    url = f"{base}/repos/{repo}/contents/{PATH}?ref=main"
+    status, raw = api("GET", url, token, opener=opener, accept=OBJECT)
     if status == 404:
         try:
             msg = json.loads(raw).get("message", "")
@@ -91,14 +112,26 @@ def current(base, repo, token, opener=None):
         raise Stop(f"reading the published file failed: HTTP {status}")
     try:
         d = json.loads(raw)
-        if d.get("type") != "file" or d.get("encoding") != "base64" or type(d.get("sha")) is not str:
+        sha, size, enc = d.get("sha"), d.get("size"), d.get("encoding")
+        if d.get("type") != "file" or type(sha) is not str or type(size) is not int or size < 0:
             raise ValueError
-        content = base64.b64decode(d["content"].replace("\n", ""), validate=True)
+        if enc == "base64" and d.get("content"):
+            content = base64.b64decode(d["content"].replace("\n", ""), validate=True)
+        elif enc == "none" and d.get("content") == "":
+            content = None                  # not inlined (1-100 MB): read raw below
+        else:
+            raise ValueError
     except (ValueError, KeyError, AttributeError, TypeError):
         raise Stop("the contents API response is malformed")
-    if len(content) > MAX_BYTES:
+    if size > MAX_BYTES:
         raise Stop("the published file is too large")
-    return content, d["sha"]
+    if content is None:
+        status, content = api("GET", url, token, opener=opener, accept=RAW)
+        if status != 200:
+            raise Stop(f"reading the published file's bytes failed: HTTP {status}")
+    if len(content) != size or blob_sha(content) != sha:
+        raise Stop("the published file's bytes do not match its blob SHA (changed while reading?)")
+    return content, sha
 
 
 def publish(candidate, pubkey, repo, token, base="https://api.github.com", dry_run=False, opener=None):

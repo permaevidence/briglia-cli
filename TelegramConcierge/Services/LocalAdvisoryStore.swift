@@ -15,9 +15,19 @@ import Darwin
 /// Both are written only under the shared `update-check.lock` (ordered with
 /// the shared notice generation in `update-check.json`) and atomically.
 enum LocalAdvisoryStore {
-    static let maxObservationBytes = 1024 * 1024
-    static let maxLocalVulnBytes = 512 * 1024
     static let maxDomains = 4
+    /// Owner decision L1 (2026-10-24): each domain record holds one verified
+    /// payload (≤ 2 MiB) as base64 (written without slash escaping) plus
+    /// small fields, which is under the envelope cap; `maxDomains` of them
+    /// plus the cadence fields. (The old 1 MiB value could not hold four
+    /// 256 KiB payloads either.)
+    static let maxObservationBytes = maxDomains * LocalAdvisory.maxEnvelopeBytes + 64 * 1024
+    /// The send-once rows (≤ 256), one attempt and the last evaluation: up
+    /// to one report per watched tool, each with up to 512 matched advisories
+    /// of ≤ 16 IDs (`LocalTools.maxReportIds`). The selftest checks a
+    /// maximal report for every watched tool fits; above it the write is
+    /// refused and the check shows "cannot be saved" (nothing sent).
+    static let maxLocalVulnBytes = 16 * 1024 * 1024
 
     struct Paths {
         var notice: UpdateNoticeStore.Paths
@@ -129,7 +139,11 @@ enum LocalAdvisoryStore {
 
     // MARK: - Coding / files
 
-    static func encoder() -> JSONEncoder { UpdateNoticeStore.encoder() }
+    static func encoder() -> JSONEncoder {
+        let e = UpdateNoticeStore.encoder()
+        e.outputFormatting.insert(.withoutEscapingSlashes)   // base64 payloads: no "\/" growth
+        return e
+    }
     static func decoder() -> JSONDecoder { UpdateNoticeStore.decoder() }
 
     static func read<T: Decodable>(_ type: T.Type, at url: URL, maxBytes: Int, quarantine: Bool, now: Date) -> T? {

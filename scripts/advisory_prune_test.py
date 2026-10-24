@@ -228,13 +228,13 @@ def run_tests(m, f, tmp, only=None):
       and rep["pruned"].get("deb:ubuntu:24.04:ffmpeg osv:Ubuntu:Pro:24.04:LTS") == 1, (u["advisories"], rep))
     t("build: Ubuntu coverage stays ok", fx.cov(d, "osv:Ubuntu:24.04:LTS", "deb:ubuntu:24.04:ffmpeg") == ["ok"]
       and fx.cov(d, "osv:Ubuntu:Pro:24.04:LTS", "deb:ubuntu:24.04:ffmpeg") == ["ok"])
-    many = [fx.rec(100 + i, fixed="7:4.0-1") for i in range(70)] + [fx.rec(200 + i, published=f"2026-0{1 + i % 9}-01T00:00:00Z") for i in range(10)]
+    many = [fx.rec(1000 + i, fixed="7:4.0-1") for i in range(m.MAX_ADVISORIES + 6)] + [fx.rec(200 + i, published=f"2026-0{1 + i % 9}-01T00:00:00Z") for i in range(10)]
     d = build(fx.bundle([fx.row(many)]))
-    t("build: 70 pruned + 10 live → 10 published and the source stays ok (pruning is not a size cut)",
+    t("build: 518 pruned + 10 live → 10 published and the source stays ok (pruning is not a size cut)",
       len(d["entries"][0]["advisories"]) == 10 and fx.cov(d) == ["ok"])
     dn = build(fx.bundle([fx.row(many)]), fl=None)
-    t("build: control — without floors the same input is cut to 64 and partial",
-      len(dn["entries"][0]["advisories"]) == 64 and fx.cov(dn) == ["partial"])
+    t("build: control — without floors the same input is cut to 512 and partial",
+      len(dn["entries"][0]["advisories"]) == m.MAX_ADVISORIES and fx.cov(dn) == ["partial"])
     d = build(fx.bundle([fx.row([old, new])]))
     t("build: the entry carries its floor (the client gate) whenever a floor is in force", d["entries"][0].get("floor") == FLOOR)
     d = build(fx.bundle([fx.row([new])]))

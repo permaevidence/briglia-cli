@@ -25,14 +25,18 @@ enum LocalAdvisory {
     static let domainString = "briglia-local-tool-advisories-v1"
     static let schemaVersion = 1
 
-    static let maxPayloadBytes = 256 * 1024
-    /// Base64 of the payload plus the small envelope fields.
-    static let maxEnvelopeBytes = 360 * 1024
-    static let maxIdentities = 64
-    static let maxAdvisoriesPerIdentity = 64
+    /// Owner decision L1 (Matteo, 2026-10-24; §9.5.3): raised from 256 KiB /
+    /// 64 identities / 64 advisories / 16 IDs so every Linux identity the
+    /// pruned list carries fits without a size cut (about 0.9 MB today).
+    static let maxPayloadBytes = 2 * 1024 * 1024
+    /// Base64 of the payload (4/3) plus the small envelope fields.
+    static let maxEnvelopeBytes = 2_880 * 1024
+    static let maxIdentities = 128
+    static let maxAdvisoriesPerIdentity = 512
     static let maxStringBytes = 512
-    static let maxIdsPerAdvisory = 16
-    static let maxCoverageRows = 512
+    static let maxIdsPerAdvisory = 128
+    /// One row per (identity, declared source): maxIdentities × maxSourcesPerEcosystem.
+    static let maxCoverageRows = 1024
     static let maxDeclaredEcosystems = 64
     static let maxSourcesPerEcosystem = 8
     static let maxEventsPerRange = 64

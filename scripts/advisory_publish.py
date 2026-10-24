@@ -9,8 +9,10 @@ Rules implemented here (the client re-checks every bound):
   * document {schema, sequence, published, expires, declared, coverage,
     entries}; expires = published + 72 h - 60 s; sequence =
     max(previous + 1, minutes since 1970);
-  * ≤ 256 KiB, ≤ 64 identities, ≤ 64 advisories per identity, strings ≤ 512
-    bytes, IDs ^[A-Za-z0-9][A-Za-z0-9._:-]{2,63}$, ≤ 16 IDs per advisory;
+  * ≤ 2 MiB, ≤ 128 identities, ≤ 512 advisories per identity, strings ≤ 512
+    bytes, IDs ^[A-Za-z0-9][A-Za-z0-9._:-]{2,63}$, ≤ 128 IDs per advisory
+    (§9.5.3 limits raised by owner decision L1, 2026-10-24; were 256 KiB /
+    64 / 64 / 16);
   * coverage: one row per (identity, declared source); `ok` only for a
     source fetched and parsed completely in this run; `failed` otherwise
     (with the last good checkedAt from the previous list, never "now");
@@ -51,11 +53,12 @@ from advisory_fetch import DEFAULT_WATCHLIST, load_watchlist, withdrawn_valid  #
 import advisory_node  # noqa: E402
 import advisory_libreoffice  # noqa: E402
 
-MAX_PAYLOAD = 256 * 1024
-MAX_IDENTITIES = 64
-MAX_ADVISORIES = 64
+MAX_PAYLOAD = 2 * 1024 * 1024
+MAX_IDENTITIES = 128
+MAX_ADVISORIES = 512
 MAX_STRING = 512
-MAX_IDS = 16
+MAX_IDS = 128
+MAX_COVERAGE = 1024        # MAX_IDENTITIES x 8 sources per ecosystem
 MAX_RANGES = 16
 MAX_EVENTS = 64
 MAX_VERSIONS = 256
@@ -820,7 +823,7 @@ def check_payload(data):
             raise Refuse("declared sources empty or repeated")
         declared[eco] = srcs
     pairs = set()
-    for c in _clist(d.get("coverage"), "coverage", 512):
+    for c in _clist(d.get("coverage"), "coverage", MAX_COVERAGE):
         if type(c) is not dict:
             raise Refuse("coverage row is not an object")
         st = c.get("status")

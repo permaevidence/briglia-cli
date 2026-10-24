@@ -17,7 +17,7 @@ resolve_openssl
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 SIZE="$(wc -c < "$ENVELOPE")"
-[ "$SIZE" -le 368640 ] || { echo "✖ envelope is $SIZE bytes"; exit 1; }
+[ "$SIZE" -le 2949120 ] || { echo "✖ envelope is $SIZE bytes"; exit 1; }
 "$OPENSSL" pkey -pubin -in "$PUB" -pubout -outform DER > "$WORK/pub.der"
 tail -c 32 "$WORK/pub.der" > "$WORK/pub.raw"
 FP="$("$OPENSSL" dgst -sha256 -hex < "$WORK/pub.raw" | awk '{print $NF}')"
@@ -42,7 +42,7 @@ def b64(s):
         sys.exit("✖ non-canonical base64")
     return d
 payload, sig = b64(env["payload"]), b64(env["signature"])
-if len(sig) != 64 or len(payload) > 262144:
+if len(sig) != 64 or len(payload) > 2097152:
     sys.exit("✖ bad sizes")
 open(f"{work}/payload", "wb").write(payload)
 open(f"{work}/sig", "wb").write(sig)

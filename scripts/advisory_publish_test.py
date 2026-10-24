@@ -146,17 +146,17 @@ def run_tests(m, tmp, only=None, fetch=None):
     d = build(bundle([bad]))
     t("a malformed record makes the row failed (not partial, not ok)", cov(d) == ["failed"])
     # Size bounds → partial (F3), trim order KEV, critical, newest.
-    many = [rec(i, published=f"2026-{1 + i % 12:02d}-01T00:00:00Z") for i in range(70)]
+    many = [rec(i, published=f"2026-{1 + i % 12:02d}-01T00:00:00Z") for i in range(m.MAX_ADVISORIES + 6)]
     many[5]["database_specific"] = {"severity": "CRITICAL"}
     many[5]["published"] = "2026-12-31T00:00:00Z"
     d = build(bundle([row(many)], kev={"CVE-2099-0003": "2026-01-01"}))
     advs = d["entries"][0]["advisories"]
-    t("more than 64 advisories → 64 kept, source partial", len(advs) == 64 and cov(d) == ["partial"])
+    t("more than 512 advisories → 512 kept, source partial", len(advs) == m.MAX_ADVISORIES and cov(d) == ["partial"])
     t("trimming keeps KEV first", advs[0]["ids"][1] == "CVE-2099-0003")
-    t("then critical, then the newest", advs[1]["ids"][1] == "CVE-2099-0005" and advs[2]["ids"][1] in ("CVE-2099-0011", "CVE-2099-0023", "CVE-2099-0035", "CVE-2099-0047", "CVE-2099-0059"))
+    t("then critical, then the newest", advs[1]["ids"][1] == "CVE-2099-0005" and int(advs[2]["ids"][1][-4:]) % 12 == 11 and int(advs[2]["ids"][1][-4:]) != 5)
     t("only size trimming produces partial (KEV source stays ok)", cov(d, "cisa-kev") == ["ok"])
-    d = build(bundle([row([rec(1, extra_ids=20)])]))
-    t("an advisory over 16 IDs is dropped and the source marked partial", d["entries"][0]["advisories"] == [] and cov(d) == ["partial"])
+    d = build(bundle([row([rec(1, extra_ids=m.MAX_IDS + 4)])]))
+    t("an advisory over 128 IDs is dropped and the source marked partial", d["entries"][0]["advisories"] == [] and cov(d) == ["partial"])
     # Withdrawn.
     prev = build(bundle([row([rec(1), rec(2)])]))
     d = build(bundle([row([rec(1)])]), prev)
@@ -190,12 +190,28 @@ def run_tests(m, tmp, only=None, fetch=None):
     d = build(bundle([row([two])]))
     t("several fixed events → the highest by dpkg order", d["entries"][0]["advisories"][0]["remediation"]["fixed"][0]["version"] == "7:5.1.10-0+deb12u1")
     # Document size bound.
-    big_w = watchlist(tmp, identities=tuple(("debian", "12", f"pkg{i}") for i in range(60)))
-    rows = [row([rec(i * 100 + j, pkg=f"pkg{i}") for j in range(64)], ident=("debian", "12", f"pkg{i}")) for i in range(60)]
+    big_w = watchlist(tmp, identities=tuple(("debian", "12", f"pkg{i}") for i in range(30)))
+    rows = [row([rec(i * 300 + j, pkg=f"pkg{i}") for j in range(300)], ident=("debian", "12", f"pkg{i}")) for i in range(30)]
     data = m.build(big_w, bundle(rows), None, NOW)
     dd = json.loads(data)
-    t("document over 256 KiB → trimmed to fit, trimmed sources partial",
-      len(data) <= 256 * 1024 and any(c["status"] == "partial" for c in dd["coverage"]))
+    t("document over 2 MiB → trimmed to fit, trimmed sources partial",
+      len(data) <= 2 * 1024 * 1024 and any(c["status"] == "partial" for c in dd["coverage"]))
+    # Owner decision L1 (2026-10-24): the raised limits, and the exact edge.
+    t("L1: limits are 2 MiB / 128 identities / 512 advisories / 128 IDs / 1024 coverage rows",
+      (m.MAX_PAYLOAD, m.MAX_IDENTITIES, m.MAX_ADVISORIES, m.MAX_IDS, m.MAX_COVERAGE) == (2 * 1024 * 1024, 128, 512, 128, 1024))
+    small = m.build(w, bundle([row([rec(1)])]), None, NOW)
+    at_cap = b"{" + b" " * (m.MAX_PAYLOAD - len(small)) + small[1:]
+    try:
+        m.check_payload(at_cap)
+        edge_ok = len(at_cap) == m.MAX_PAYLOAD
+    except m.Refuse:
+        edge_ok = False
+    try:
+        m.check_payload(b"{ " + at_cap[1:])
+        over_refused = False
+    except m.Refuse as e:
+        over_refused = "bytes" in str(e)
+    t("L1: a payload of exactly 2 MiB passes the size gate; one byte more refuses to sign", edge_ok and over_refused)
     # The signing gate's own check.
     dup = json.loads(m.build(w, bundle([row([rec(1)])]), None, NOW))
     dup["coverage"].append(dict(dup["coverage"][0]))
@@ -223,7 +239,7 @@ def run_tests(m, tmp, only=None, fetch=None):
     t("R2: a returned record naming no affected entry fails the row", cov(d) == ["failed"])
     d = build(bundle([row([rec(1), {"id": "CVE-2099-0003", "affected": [], "withdrawn": "2026-10-01T00:00:00Z"}])]))
     t("R2: a withdrawn record naming nothing is skipped (row still ok)", cov(d) == ["ok"])
-    bad2 = rec(2, extra_ids=16)
+    bad2 = rec(2, extra_ids=m.MAX_IDS)
     bad2["affected"] = [{"ranges": [{"type": "ECOSYSTEM", "events": "not-a-list"}]}]
     d = build(bundle([row([rec(1), bad2])]))
     t("R2: a malformed record over the ID cap is failed, not size-partial", cov(d) == ["failed"])
@@ -234,14 +250,14 @@ def run_tests(m, tmp, only=None, fetch=None):
     falsey2 = rec(2)
     falsey2["affected"][0]["versions"] = ""
     t("R2-R2: versions given as an empty string fails the row", cov(build(bundle([row([falsey2])]))) == ["failed"])
-    late = rec(2, extra_ids=16)
+    late = rec(2, extra_ids=m.MAX_IDS)
     late["affected"][0]["ranges"][0]["events"].append({"fixed": "not-a-deb-version!"})
     d = build(bundle([row([rec(1), late])]))
     t("R2-R2: an unorderable fixed version in an over-cap record fails the row (never partial)", cov(d) == ["failed"])
     late2 = rec(2)
     late2["affected"][0]["ranges"][0]["events"].append({"fixed": "not-a-deb-version!"})
     t("R2-R2: …and the same without the ID overflow fails too", cov(build(bundle([row([rec(1), late2])]))) == ["failed"])
-    sevbad = rec(2, extra_ids=16)
+    sevbad = rec(2, extra_ids=m.MAX_IDS)
     sevbad["severity"] = {"score": "critical"}
     t("R2-R2: malformed severity in an over-cap record fails the row",
       cov(build(bundle([row([rec(1), sevbad])]))) == ["failed"])
@@ -284,7 +300,7 @@ def run_tests(m, tmp, only=None, fetch=None):
     t("R3-R2: malformed withdrawn (object, 'false', 1, true, bad dates) fails an ordinary record's row", plain_bad)
     empty_bad = all(cov(build(bundle([row([{"id": "CVE-2099-0030", "affected": [], "withdrawn": v}])]))) == ["failed"] for v in bad_values)
     t("R3-R2: …and with an empty affected list", empty_bad)
-    over_bad = all(cov(build(bundle([row([rec(1), dict(rec(2, extra_ids=16), withdrawn=v)])]))) == ["failed"] for v in bad_values)
+    over_bad = all(cov(build(bundle([row([rec(1), dict(rec(2, extra_ids=m.MAX_IDS), withdrawn=v)])]))) == ["failed"] for v in bad_values)
     t("R3-R2: …and in an over-cap record (never size-partial)", over_bad)
     ctrl = build(bundle([row([rec(2, fixed="2.0")])]))
     t("R3-R2 control: absent withdrawn → published, not withdrawn", cov(ctrl) == ["ok"] and not ctrl["entries"][0]["advisories"][0]["withdrawn"])
@@ -341,7 +357,7 @@ BREAKS = [
      'statuses[source] = ("ok", "2026-10-24T00:00:00Z")\n                complete = False\n                continue'),
     ("a duplicate (identity, source) pair refuses to sign",
      'raise Refuse(f"duplicate (identity, source) coverage pair {k} — refusing to sign")', 'pass'),
-    ("more than 64 advisories → 64 kept, source partial", "mark_partial(statuses, a[\"_source\"])", "pass"),
+    ("more than 512 advisories → 512 kept, source partial", "mark_partial(statuses, a[\"_source\"])", "pass"),
     ("trimming keeps KEV first", 'adv["_order"] = (0 if adv["kev"] else 1,', 'adv["_order"] = (1 if adv["kev"] else 1,'),
     ("an advisory no longer published is carried as withdrawn", "if set(old.get(\"ids\", [])) & present:", "if True:"),
     ("withdrawn advisories are dropped after 30 days",
@@ -350,7 +366,12 @@ BREAKS = [
      'checked = old["checkedAt"] if old and old.get("status") in ("ok", "partial", "failed") else iso(0)', 'checked = iso(0)'),
     ("a malformed record makes the row failed (not partial, not ok)",
      'raise Incomplete("event must have exactly one key")', 'continue'),
-    ("an advisory over 16 IDs is dropped and the source marked partial", 'raise TooLarge(f"{len(out)} IDs")', 'out = out[:MAX_IDS]'),
+    ("an advisory over 128 IDs is dropped and the source marked partial", 'raise TooLarge(f"{len(out)} IDs")', 'out = out[:MAX_IDS]'),
+    ("L1: a payload of exactly 2 MiB passes the size gate; one byte more refuses to sign",
+     "    if len(data) > MAX_PAYLOAD:\n        raise Refuse(f\"payload is {len(data)} bytes\")",
+     "    if len(data) > MAX_PAYLOAD + 1:\n        raise Refuse(f\"payload is {len(data)} bytes\")"),
+    ("L1: limits are 2 MiB / 128 identities / 512 advisories / 128 IDs / 1024 coverage rows",
+     "MAX_ADVISORIES = 512\n", "MAX_ADVISORIES = 64\n"),
     ("validity over 72 h refuses to sign", "if not 0 < exp - pub <= 72 * 3600:", "if False:"),
     ("KEV feed failure → KEV coverage failed", 'statuses[source] = ("ok", kev_src.get("checkedAt")) if kev_ok else ("failed", None)',
      'statuses[source] = ("ok", kev_src.get("checkedAt") or "2026-10-24T00:00:00Z")'),

@@ -25,7 +25,7 @@ DOMAIN="briglia-local-tool-advisories-v1"
 [ -f "$EXPECTED" ] || { echo "✖ $EXPECTED missing: the advisory signing key is not provisioned — refusing"; exit 3; }
 [ -f "$PAYLOAD" ] || { echo "✖ payload not found: $PAYLOAD"; exit 1; }
 SIZE="$(wc -c < "$PAYLOAD")"
-[ "$SIZE" -le 262144 ] || { echo "✖ payload is $SIZE bytes (limit 262144)"; exit 1; }
+[ "$SIZE" -le 2097152 ] || { echo "✖ payload is $SIZE bytes (limit 2097152)"; exit 1; }
 # The payload must pass the publisher's own validation again here: the
 # signer never trusts that an earlier step ran.
 python3 "$ROOT/scripts/advisory_publish.py" check "$PAYLOAD" >/dev/null

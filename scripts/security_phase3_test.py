@@ -121,8 +121,8 @@ def vendor_parity(binary):
         lo_ok = all(cov[("vendor:documentfoundation:libreoffice:darwin:official", s)] == "ok" for s in ("tdf-advisories", "cve-cna", "cisa-kev"))
         check("vendor parity: the real watchlist from the frozen Node/LibreOffice feeds parses in the client",
               r.get("ok") is True and len(r.get("identities", [])) == 59, r)
-        check("vendor parity: vendor coverage ok, deb coverage failed (no deb rows), size within 256 KiB",
-              vendor_ok and lo_ok and all(v == "failed" for (i, src), v in cov.items() if i.startswith("deb:") and src.startswith("osv:")) and len(data) <= 262144,
+        check("vendor parity: vendor coverage ok, deb coverage failed (no deb rows), size within 2 MiB",
+              vendor_ok and lo_ok and all(v == "failed" for (i, src), v in cov.items() if i.startswith("deb:") and src.startswith("osv:")) and len(data) <= 2097152,
               (len(data), [k for k, v in cov.items() if not k[0].startswith("deb:") and v != "ok"]))
 
 

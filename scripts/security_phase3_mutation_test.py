@@ -125,6 +125,22 @@ MUTATIONS = [
     ("B38 (§9.5.12) a malformed floor is accepted", S + "LocalAdvisoryParse.swift",
      "guard scheme == \"deb\", identity.kind == .deb, LocalToolsVersion.parseDeb(s) != nil, s == s.trimmingCharacters(in: .whitespaces) else {",
      "guard scheme == \"deb\" || true else {"),
+    # Owner decision L1 (2026-10-24): raised list limits and the files sized to match.
+    ("B39 (L1) the client payload cap left at 256 KiB", LIST,
+     "    static let maxPayloadBytes = 2 * 1024 * 1024", "    static let maxPayloadBytes = 256 * 1024"),
+    ("B40 (L1) the client per-identity cap left at 64", LIST,
+     "    static let maxAdvisoriesPerIdentity = 512", "    static let maxAdvisoriesPerIdentity = 64"),
+    ("B41 (L1) the payload size check skipped (an oversized payload parsed)", LIST,
+     "        guard payload.count <= maxPayloadBytes else {", "        guard payload.count <= maxPayloadBytes + 1 else {"),
+    ("B42 (L1) the observation file left at 1 MiB (a full list cannot be stored)", STORE,
+     "    static let maxObservationBytes = maxDomains * LocalAdvisory.maxEnvelopeBytes + 64 * 1024",
+     "    static let maxObservationBytes = 1024 * 1024"),
+    ("B43 (L1) localvuln.json left at 512 KiB (a full report cannot be stored)", STORE,
+     "    static let maxLocalVulnBytes = 16 * 1024 * 1024", "    static let maxLocalVulnBytes = 512 * 1024"),
+    ("B44 (L1) the persisted report keeps every alias", MATCH,
+     "AdvisoryResult(ids: Array(a.ids.prefix(LocalTools.maxReportIds)), primaryId:", "AdvisoryResult(ids: a.ids, primaryId:"),
+    ("B45 (L1) stored base64 written with escaped slashes", STORE,
+     "        e.outputFormatting.insert(.withoutEscapingSlashes)   // base64 payloads: no \"\\/\" growth\n", ""),
 ]
 
 

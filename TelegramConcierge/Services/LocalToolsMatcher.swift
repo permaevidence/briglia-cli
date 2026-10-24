@@ -94,6 +94,9 @@ enum LocalTools {
         case unknown(Text)
     }
 
+    /// IDs kept per advisory in a persisted report (owner decision L1).
+    static let maxReportIds = 16
+
     struct AdvisoryResult: Codable, Equatable {
         var ids: [String]
         var primaryId: String
@@ -216,8 +219,11 @@ enum LocalTools {
             }
             // Step 4: remediation.
             let (fixed, fix) = remediation(a, instance: i, scheme: scheme, now: now)
-            let result = AdvisoryResult(ids: a.ids, primaryId: a.primaryId, severity: a.severity, kev: a.kev,
-                                        fixedVersion: fixed, fix: fix)
+            // The report is a persisted display copy (localvuln.json): its ID
+            // list is bounded (L1 raised the list's own cap to 128 aliases);
+            // nothing decides on `ids` — wording uses `primaryId`.
+            let result = AdvisoryResult(ids: Array(a.ids.prefix(LocalTools.maxReportIds)), primaryId: a.primaryId,
+                                        severity: a.severity, kev: a.kev, fixedVersion: fixed, fix: fix)
             if a.kind == .release { r.releases.append(result) } else { r.affected.append(result) }
         }
         // v17: a version on a line the vendor no longer maintains is never

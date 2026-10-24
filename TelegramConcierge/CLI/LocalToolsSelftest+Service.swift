@@ -82,8 +82,8 @@ extension LocalToolsSelftest {
             t.check("store: a corrupt localvuln.json is quarantined, fresh state", aside)
             var huge = LocalVulnState()
             huge.report = LocalToolsSnapshot(evaluatedAt: LTF.now, listSequence: 1, listContentId: "c",
-                                             reports: (0..<3000).map { _ in report() })
-            t.check("store: writer refuses above the 512 KiB cap",
+                                             reports: (0..<60_000).map { _ in report() })
+            t.check("store: writer refuses above the 16 MiB cap",
                     (try? LocalAdvisoryStore.write(huge, to: p.localvuln, maxBytes: LocalAdvisoryStore.maxLocalVulnBytes)) == nil)
             // /deleteuserdata: notice.json, localvuln.json and the observation file.
             try PrivateStorage.ensureDirectoryScoped(p.notice.state.deletingLastPathComponent())

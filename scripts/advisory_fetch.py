@@ -83,8 +83,8 @@ def load_watchlist(path):
                 raise ValueError(f"{key}: OSV ecosystem {o} is not a declared source")
         ecos[key] = e
     ids = w["identities"]
-    if len(ids) > 64:
-        raise ValueError("more than 64 identities")
+    if len(ids) > 128:   # the list cap (§9.5.3, owner decision L1)
+        raise ValueError("more than 128 identities")
     seen = set()
     for i in ids:
         if i.get("kind") == "vendor":

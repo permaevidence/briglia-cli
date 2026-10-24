@@ -62,12 +62,12 @@ extension LocalToolsSelftest {
         let cov = LTF.covAll("deb:debian:12:ffmpeg")
         parseFails(t, "parse: two entries for one identity rejected",
                    LTF.payload(coverage: cov, entries: [LTF.debEntry([]), LTF.debEntry([])]), contains: "two entries")
-        parseFails(t, "parse: more than 64 identities rejected",
-                   LTF.payload(coverage: [], entries: (0..<65).map { LTF.debEntry("pkg\($0)", []) }), contains: "64")
-        parseFails(t, "parse: more than 64 advisories per identity rejected",
-                   LTF.payload(coverage: cov, entries: [LTF.debEntry((0..<65).map { LTF.adv(["CVE-2099-\(1000 + $0)"]) })]), contains: "64")
-        parseFails(t, "parse: more than 16 IDs per advisory rejected",
-                   LTF.payload(coverage: cov, entries: [LTF.debEntry([LTF.adv((0..<17).map { "CVE-2099-\(2000 + $0)" })])]), contains: "16")
+        parseFails(t, "parse: more than 128 identities rejected",
+                   LTF.payload(coverage: [], entries: (0..<129).map { LTF.debEntry("pkg\($0)", []) }), contains: "128")
+        parseFails(t, "parse: more than 512 advisories per identity rejected",
+                   LTF.payload(coverage: cov, entries: [LTF.debEntry((0..<513).map { LTF.adv(["CVE-2099-\(1000 + $0)"]) })]), contains: "512")
+        parseFails(t, "parse: more than 128 IDs per advisory rejected",
+                   LTF.payload(coverage: cov, entries: [LTF.debEntry([LTF.adv((0..<129).map { "CVE-2099-\(2000 + $0)" })])]), contains: "128")
         parseFails(t, "parse: malformed advisory ID rejected",
                    LTF.payload(coverage: cov, entries: [LTF.debEntry([LTF.adv(["<script>"])])]), contains: "ID pattern")
         parseFails(t, "parse: string over 512 bytes rejected",

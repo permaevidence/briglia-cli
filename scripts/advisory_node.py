@@ -217,7 +217,8 @@ def wg_advisory(key, v, platform, released):
         elif "all" not in toks and platform not in toks:
             return None                  # another platform only
     cves = [c for c in (v.get("cve") or []) if type(c) is str and CVE_RE.fullmatch(c)] if type(v.get("cve")) is list else []
-    ids = sorted(set(cves))[:16] or [f"NSWG-CORE-{key}"]
+    # Bounded by the list's per-advisory ID cap (§9.5.3, owner decision L1).
+    ids = sorted(set(cves))[:128] or [f"NSWG-CORE-{key}"]
     sev = "critical" if v.get("severity") == "critical" else "recommended"
     adv = {"ids": ids, "severity": sev, "kev": False, "kevAdded": None, "withdrawn": False,
            "_wg": True, "_key": int(key)}
