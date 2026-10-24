@@ -92,7 +92,7 @@ MUTATIONS = [
     ("B26 unreadable argv is ignored", BR,
      [('                return .unreadable("the arguments of process \\(p.pid) could not be read")', "                continue")], ["S8"], None),
     ("B27 SIGKILL without a fresh scan", BR,
-     [("        case .found(let left): for p in left { signal(p.pid, SIGKILL) }", "        case .found: for p in initial { signal(p.pid, SIGKILL) }")], ["S11"], None),
+     [("        case .found(let left): for p in left { signal(p.pid, SIGKILL) }", "        case .found: for p in initial { signal(p.pid, SIGKILL) }")], ["S13"], None),
     ("B28 queued retired alerts are kept", AR,
      [("        let kept = store.undelivered.filter { alert in !retiredAlertPrefixes.contains { alert.hasPrefix($0) } }",
        "        let kept = store.undelivered")], ["A1", "A2"], None),

@@ -61,6 +61,15 @@ extension MidturnHarness {
         }
         check("S11 pid reused by a non-bridge after SIGTERM → never SIGKILLed",
               o == .clear && t.signals.map(\.1) == [SIGTERM])
+        // S13: the bridge ignores SIGTERM, then its pid is reused by a
+        // non-bridge right before the SIGKILL decision (read 3 with no TERM
+        // wait): the fresh scan must stop the escalation.
+        (o, t) = run([RIUnits.proc(23, ["/usr/bin/node", script])]) {
+            $0.termWait = 0
+            $0.replaceAtRead = [3: RIUnits.proc(23, ["/bin/zsh"])]
+        }
+        check("S13 pid reused between SIGTERM and the SIGKILL decision → never SIGKILLed",
+              o == .clear && t.signals.map(\.1) == [SIGTERM], "signals \(t.signals.map(\.1))")
         check("S12 shape rules: exact arities only",
               BridgeScanner.scriptArgument(["node", "a", "b"]) == nil && BridgeScanner.scriptArgument(["node"]) == nil
                 && BridgeScanner.scriptArgument(["/b", "__setsid-exec", "--", "node", "s", "extra"]) == nil

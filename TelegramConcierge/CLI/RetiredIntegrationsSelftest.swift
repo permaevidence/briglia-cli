@@ -84,10 +84,21 @@ enum RIUnits {
         var immortal: Set<Int32> = []
         /// pid → replacement row after the first SIGTERM (pid reuse).
         var replaceAfterTerm: [Int32: BridgeScanner.Proc] = [:]
+        /// table read number (1-based) → replacement row for its pid.
+        var replaceAtRead: [Int: BridgeScanner.Proc] = [:]
+        var reads = 0
+        var termWait: TimeInterval = 3
 
         func scanner(resolve: @escaping (String) -> String?) -> BridgeScanner {
             BridgeScanner(
-                table: { self.unreadable ? nil : self.rows },
+                table: {
+                    self.reads += 1
+                    if let r = self.replaceAtRead.removeValue(forKey: self.reads) {
+                        self.rows.removeAll { $0.pid == r.pid }
+                        self.rows.append(r)
+                    }
+                    return self.unreadable ? nil : self.rows
+                },
                 signal: { pid, sig in
                     self.signals.append((pid, sig))
                     if let replacement = self.replaceAfterTerm.removeValue(forKey: pid) {
@@ -101,7 +112,7 @@ enum RIUnits {
                 reap: { _ in },
                 sleep: { _ in },
                 resolve: resolve,
-                uid: 501, selfPid: 1)
+                uid: 501, selfPid: 1, termWait: termWait)
         }
     }
 
