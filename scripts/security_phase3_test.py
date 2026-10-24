@@ -148,6 +148,15 @@ def parity(binary):
             open(p, "wb").write(pub.build(w, b, None, fx.NOW))
             r = parse_payload(binary, env, p)
             check(f"parity: publisher payload {i} parses in the client", r.get("ok") is True, r)
+        # §9.5.12: a pruned payload carries entry floors; the client parses them.
+        p = f"{tmp}/pfloor.json"
+        data = pub.build(w, fx.bundle([fx.row([fx.rec(1), fx.rec(2, fixed="7:4.0-1")])]), None, fx.NOW,
+                         floors={"deb:debian:12:ffmpeg": "7:5.1.2-3", "deb:debian:12:curl": "7.74.0-1.3"})
+        open(p, "wb").write(data)
+        r = parse_payload(binary, env, p)
+        d = json.loads(data)
+        check("parity: a pruned payload with entry floors parses in the client",
+              r.get("ok") is True and all(e.get("floor") for e in d["entries"]) and len(d["entries"][0]["advisories"]) == 1, (r, d["entries"]))
         # Structural fuzz: whenever the publisher's check still accepts a
         # mutated payload, the client must parse it too.
         base = json.loads(pub.build(w, bundles[0], None, fx.NOW))

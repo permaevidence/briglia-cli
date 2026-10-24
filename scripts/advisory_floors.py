@@ -1,32 +1,28 @@
 #!/usr/bin/env python3
 """Generate security/deb-floors.json: for every deb identity of the
-local-tools watchlist, the LOWEST source version that a client of that
-release could ever have installed from an origin it accepts (security plan
+local-tools watchlist, a release floor: (an estimate of) the lowest source
+version ever published under that release's codename (security plan
 §9.5.12, lossless pruning). The advisory publisher drops an advisory of that
 identity only when every affected range closes strictly below this floor
-(scripts/advisory_publish.py `prunable`). Run by hand, the output is
+(scripts/advisory_publish.py `prunable`) and writes the floor into the
+entry; the client never reports "no known issue" for an installed version
+below the floor or not comparable with it (LocalToolsMatcher). So a floor
+that is too HIGH costs a rare "unknown", never a false "no known issue";
+a floor that is too low only prunes less. Run by hand, the output is
 reviewed and committed like the watchlist; the daily jobs never fetch it.
 
-Why the floor is not just "the version on release day": the client accepts
-an installed version only when its own apt index lists it under an
-accepted origin (Origin Debian/Ubuntu, codename or codename-*, not
--backports/-proposed; LocalToolsInventoryDeb.originPocket). A machine that
-installed a pre-release and never ran `apt update` again still has that
-pre-release index, and its /etc/os-release already names the release once
-base-files carries VERSION_ID. So the floor covers that window too:
-
-  * Ubuntu: Launchpad's publishing history for the series (every pocket,
-    every status, including the whole development cycle), minimum by dpkg
-    order. ESM builds sit on top of archive versions and are never lower.
+  * Ubuntu: Launchpad's complete publishing history for the series (every
+    pocket and status, the development cycle included), minimum by dpkg
+    order. Every page must be well formed and the entry count must equal
+    the collection's total_size, otherwise no floor.
   * Debian: snapshot.debian.org `dists/<codename>/main/source/Sources.xz`
-    sampled from before base-files first set VERSION_ID for the release
-    (the "release candidate for <codename> as stable" upload) through
-    release day, plus today's `<codename>`, `-updates` and `-security`.
-    Each Sources file is checked against its Release file's SHA256. The
-    sampled versions must be non-decreasing in time (dak and britney only
-    ever move a suite to a newer version); any decrease, a missing sample or
-    a version the client could not parse leaves that identity WITHOUT a
-    floor, and the publisher then prunes nothing for it.
+    sampled monthly from the day the codename became testing (the previous
+    release day) through the day after its own release, plus today's
+    `<codename>`, `-updates` and `-security`; each file checked against its
+    Release file's SHA256; floor = the minimum over every sample. Versions
+    between samples may be lower (removals, old snapshots): the client gate
+    above keeps that safe. A source absent from the release-day sample, or
+    any version the client could not parse, leaves no floor.
 
 Usage: advisory_floors.py --out security/deb-floors.json [--watchlist PATH]
 Exit: 0 written, 2 error. Network: public archives only, no credentials.
@@ -47,14 +43,25 @@ from advisory_publish import client_deb_valid, deb_compare  # noqa: E402
 
 UA = "briglia-security (release floor generator)"
 MAX_FILE = 64 * 1024 * 1024
-# Reviewed sampling plan. The first Debian sample is before the base-files
-# "release candidate ... as stable" upload that added VERSION_ID (12.4 on
-# 2023-03-02, 13.8 on 2025-05-12); the last is the day after release.
+
+
+def monthly(first, last_month, release_day):
+    """first (YYYYMMDD), then the 1st of every month up to last_month
+    (YYYYMM), then release_day; as snapshot timestamps."""
+    out = [first + "T120000Z"]
+    y, m = int(first[:4]), int(first[4:6]) + 1
+    while (y, m) <= (int(last_month[:4]), int(last_month[4:])):
+        out.append(f"{y:04d}{m:02d}01T000000Z")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out + [release_day + "T120000Z"]
+
+
+# Reviewed sampling plan: from the day the codename became testing (the
+# previous release: 2021-08-14, 2023-06-10) to the day after its release
+# (2023-06-10, 2025-08-09).
 DEBIAN = {
-    "12": {"codename": "bookworm",
-           "samples": ["20230301T000000Z", "20230401T000000Z", "20230501T000000Z", "20230601T000000Z", "20230611T000000Z"]},
-    "13": {"codename": "trixie",
-           "samples": ["20250511T000000Z", "20250601T000000Z", "20250701T000000Z", "20250801T000000Z", "20250810T000000Z"]},
+    "12": {"codename": "bookworm", "samples": monthly("20210815", "202306", "20230611")},
+    "13": {"codename": "trixie", "samples": monthly("20230611", "202508", "20250810")},
 }
 UBUNTU = {"24.04": {"codename": "noble"}}
 LP = "https://api.launchpad.net/devel/ubuntu"
@@ -139,28 +146,17 @@ def debian_floors(release, sources):
 
 
 def debian_one(src, series, current):
-    """Floor for one source, or {"floor": None, "reason": ...}."""
-    prev = None
-    lows = []
-    for i, idx in enumerate(series):
-        vs = idx.get(src)
-        if not vs:
-            return {"floor": None, "reason": f"absent from sample {i + 1}"}
-        for v in vs:
-            if not client_deb_valid(v) or deb_compare(v, v) is None:
-                return {"floor": None, "reason": f"unparsable version {v!r}"}
-        low = min_version(vs)
-        if prev is not None and deb_compare(low, prev) < 0:
-            return {"floor": None, "reason": f"version decreased between samples ({prev} → {low})"}
-        prev = low
-        lows.append(low)
-    for idx in current:
+    """Floor for one source (minimum over every sample and today's pockets),
+    or {"floor": None, "reason": ...}. `series[-1]` is the release-day sample."""
+    if not series or not series[-1].get(src):
+        return {"floor": None, "reason": "absent from the release-day sample"}
+    seen = []
+    for idx in list(series) + list(current):
         for v in idx.get(src, []):
             if not client_deb_valid(v) or deb_compare(v, v) is None:
-                return {"floor": None, "reason": f"unparsable current version {v!r}"}
-            if deb_compare(v, lows[0]) < 0:
-                return {"floor": None, "reason": f"a current version {v} is below the first sample"}
-    return {"floor": lows[0], "observations": len(lows)}
+                return {"floor": None, "reason": f"unparsable version {v!r}"}
+            seen.append(v)
+    return {"floor": min_version(seen), "observations": len(seen)}
 
 
 def min_version(vs):
@@ -177,20 +173,42 @@ def ubuntu_floors(release, sources):
     for src in sources:
         url = (f"{LP}/+archive/primary?ws.op=getPublishedSources&exact_match=true&ws.size=300"
                f"&source_name={src}&distro_series={LP}/{cn}")
-        versions, pockets, pages = [], set(), 0
-        while url:
+        versions, pockets, pages, total, count, problem = [], set(), 0, None, 0, None
+        while url and problem is None:
             raw, _ = get(url, 16 * 1024 * 1024)
-            d = json.loads(raw)
-            for e in d.get("entries", []):
-                if e.get("source_package_name") != src:
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                d = None
+            entries = d.get("entries") if type(d) is dict else None
+            link = d.get("next_collection_link") if type(d) is dict else None
+            if type(entries) is not list or (link is not None and type(link) is not str):
+                problem = f"malformed Launchpad page {pages + 1}"
+                break
+            if pages == 0:
+                total = d.get("total_size")
+                if type(total) is not int or total < 0:
+                    problem = "Launchpad collection without a total_size"
+                    break
+            for e in entries:
+                if type(e) is not dict or type(e.get("source_package_name")) is not str \
+                        or type(e.get("source_package_version")) is not str or type(e.get("pocket")) is not str:
+                    problem = "malformed Launchpad publication"
+                    break
+                count += 1
+                if e["source_package_name"] != src:
                     continue
                 versions.append(e["source_package_version"])
-                pockets.add(e.get("pocket"))
-            url = d.get("next_collection_link")
+                pockets.add(e["pocket"])
+            url = link
             pages += 1
             if pages > 50:
                 raise ValueError(f"{src}: too many Launchpad pages")
-        if "Release" not in pockets:
+        if problem is None and count != total:
+            problem = f"Launchpad returned {count} publications, total_size says {total}"
+        if problem is not None:
+            out[src] = {"floor": None, "reason": problem}
+        elif "Release" not in pockets:
             out[src] = {"floor": None, "reason": "never published in the release pocket"}
         elif any(not client_deb_valid(v) or deb_compare(v, v) is None for v in versions):
             out[src] = {"floor": None, "reason": "an unparsable version in the publishing history"}

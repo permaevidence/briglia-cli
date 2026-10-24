@@ -235,6 +235,21 @@ def run_tests(m, f, tmp, only=None):
     dn = build(fx.bundle([fx.row(many)]), fl=None)
     t("build: control — without floors the same input is cut to 64 and partial",
       len(dn["entries"][0]["advisories"]) == 64 and fx.cov(dn) == ["partial"])
+    d = build(fx.bundle([fx.row([old, new])]))
+    t("build: the entry carries its floor (the client gate) whenever a floor is in force", d["entries"][0].get("floor") == FLOOR)
+    d = build(fx.bundle([fx.row([new])]))
+    t("build: the floor is written even when nothing was pruned", d["entries"][0].get("floor") == FLOOR)
+    t("build: no floor in force → no floor field", "floor" not in build(fx.bundle([fx.row([old, new])]), fl=None)["entries"][0])
+    good = json.loads(m.build(w, fx.bundle([fx.row([new])]), None, NOW, floors=floors))
+    def refuses(mut):
+        x = json.loads(json.dumps(good)); mut(x)
+        try:
+            m.check_payload(m.encode(x)); return False
+        except m.Refuse:
+            return True
+    t("check: a floor the client cannot parse, a non-string floor, or a floor on a non-deb entry refuses to sign",
+      refuses(lambda x: x["entries"][0].update(floor="1:x")) and refuses(lambda x: x["entries"][0].update(floor=5))
+      and refuses(lambda x: x["entries"][0].update(scheme="semver")) and not refuses(lambda x: None))
     # ---- floors file
     p = os.path.join(tmp, "floors.json")
     json.dump({"schema": 1, "floors": {"deb:debian:12:ffmpeg": {"floor": FLOOR}, "deb:debian:12:zip": {"floor": None},
@@ -253,7 +268,7 @@ def run_tests(m, f, tmp, only=None):
       sorted(debs - set(repo or {})))
     # main() uses the committed floors by default
     bpath, out, rpath = os.path.join(tmp, "b.json"), os.path.join(tmp, "o.json"), os.path.join(tmp, "r.json")
-    json.dump(fx.bundle([fx.row([old, new])]), open(bpath, "w"))
+    json.dump(fx.bundle([fx.row([fx.rec(9, fixed="1:0.5-1"), new])]), open(bpath, "w"))
     rc = m.main(["build", "--input", bpath, "--out", out, "--watchlist", w, "--now", "2026-10-24T00:00:00Z", "--report", rpath])
     r = json.load(open(rpath)) if rc == 0 else {}
     t("main: prunes with the committed floors by default and writes the report", rc == 0 and r.get("floorsLoaded")
@@ -267,13 +282,20 @@ def run_tests(m, f, tmp, only=None):
     s2 = {"ffmpeg": ["7:5.1.3-1", "7:5.1.2-9"], "zip": ["3.0-11"]}
     s3 = {"ffmpeg": ["7:5.1.3-1"], "zip": ["3.0-13"]}
     cur = [{"ffmpeg": ["7:5.1.6-0+deb12u1"]}, {}]
-    t("generator: the first sample's lowest version is the floor", f.debian_one("ffmpeg", [s1, s2, s3], cur) ==
-      {"floor": "7:5.1.2-3", "observations": 3})
-    t("generator: a decrease between samples leaves no floor", f.debian_one("zip", [s1, s2, s3], cur)["floor"] is None)
-    t("generator: a source missing from a sample leaves no floor", f.debian_one("ffmpeg", [s1, {}, s3], cur)["floor"] is None)
-    t("generator: a current version below the first sample leaves no floor",
-      f.debian_one("ffmpeg", [s1, s3], [{"ffmpeg": ["7:5.1.1-1"]}])["floor"] is None)
-    t("generator: an unparsable version leaves no floor", f.debian_one("ffmpeg", [{"ffmpeg": ["1:x"]}, s3], cur)["floor"] is None)
+    t("generator: the floor is the lowest version over every sample and today's pockets",
+      f.debian_one("ffmpeg", [s1, s2, s3], cur) == {"floor": "7:5.1.2-3", "observations": 5}
+      and f.debian_one("ffmpeg", [s1, s3], [{"ffmpeg": ["7:5.1.1-1"]}])["floor"] == "7:5.1.1-1")
+    t("generator: a decrease between samples lowers the floor (never disqualifies)", f.debian_one("zip", [s1, s2, s3], cur)["floor"] == "3.0-11")
+    t("generator: a source absent from some samples still gets the minimum of the others",
+      f.debian_one("ffmpeg", [{}, s2, s3], cur)["floor"] == "7:5.1.2-9")
+    t("generator: a source absent from the release-day sample has no floor", f.debian_one("ffmpeg", [s1, s2, {}], cur)["floor"] is None)
+    t("generator: an unparsable version (sample or today's pockets) leaves no floor",
+      f.debian_one("ffmpeg", [{"ffmpeg": ["1:x"]}, s3], cur)["floor"] is None
+      and f.debian_one("ffmpeg", [s1, s3], [{"ffmpeg": ["6.0-"]}])["floor"] is None)
+    t("generator: Debian sampling runs monthly from the codename's first testing day to the day after release",
+      f.DEBIAN["12"]["samples"][0] == "20210815T120000Z" and f.DEBIAN["12"]["samples"][-1] == "20230611T120000Z"
+      and f.DEBIAN["13"]["samples"][0] == "20230611T120000Z" and f.DEBIAN["13"]["samples"][-1] == "20250810T120000Z"
+      and len(f.DEBIAN["12"]["samples"]) == 24 and "20220101T000000Z" in f.DEBIAN["12"]["samples"])
     t("generator: Sources stanzas parse (several versions per source)",
       f.parse_sources("Package: a\nVersion: 1.0-1\nBinary: a\n\nPackage: a\nVersion: 0.9-1\n\nPackage: b\nVersion: 2\n")
       == {"a": ["1.0-1", "0.9-1"], "b": ["2"]})
@@ -289,20 +311,39 @@ def run_tests(m, f, tmp, only=None):
     saved, err = f.get, sys.stderr
     sys.stderr = open(os.devnull, "w")     # the generator's progress lines
     try:
-        f.get = fake_lp([{"entries": [{"source_package_name": "ffmpeg", "source_package_version": "7:6.1.1-3ubuntu5", "pocket": "Release"},
+        P1 = {"source_package_name": "ffmpeg", "source_package_version": "7:6.1.1-3ubuntu5", "pocket": "Release"}
+        f.get = fake_lp([{"total_size": 4, "entries": [P1,
                                       {"source_package_name": "ffmpeg", "source_package_version": "7:6.0-6ubuntu1", "pocket": "Proposed"}],
                           "next_collection_link": "https://x/page2"},
                          {"entries": [{"source_package_name": "ffmpeg", "source_package_version": "7:6.0-5ubuntu1", "pocket": "Release"},
                                       {"source_package_name": "ffmpeg-other", "source_package_version": "1:0", "pocket": "Release"}]}])
         out, _ = f.ubuntu_floors("24.04", ["ffmpeg"])
         t("generator: Ubuntu floor = lowest over every page, pocket and status of the series", out["ffmpeg"]["floor"] == "7:6.0-5ubuntu1", out)
-        f.get = fake_lp([{"entries": [{"source_package_name": "ffmpeg", "source_package_version": "7:6.0-6ubuntu1", "pocket": "Proposed"}]}])
+        f.get = fake_lp([{"total_size": 1, "entries": [{"source_package_name": "ffmpeg", "source_package_version": "7:6.0-6ubuntu1", "pocket": "Proposed"}]}])
         out, _ = f.ubuntu_floors("24.04", ["ffmpeg"])
         t("generator: a source never in the Ubuntu release pocket has no floor", out["ffmpeg"]["floor"] is None, out)
-        f.get = fake_lp([{"entries": [{"source_package_name": "ffmpeg", "source_package_version": "7:6.0-6ubuntu1", "pocket": "Release"},
+        f.get = fake_lp([{"total_size": 2, "entries": [{"source_package_name": "ffmpeg", "source_package_version": "7:6.0-6ubuntu1", "pocket": "Release"},
                                       {"source_package_name": "ffmpeg", "source_package_version": "6.0-", "pocket": "Updates"}]}])
         out, _ = f.ubuntu_floors("24.04", ["ffmpeg"])
         t("generator: an unparsable Ubuntu version leaves no floor", out["ffmpeg"]["floor"] is None, out)
+        # Codex round 1 R2: incomplete or malformed collection evidence.
+        def lp(pages):
+            f.get = fake_lp(pages)
+            return f.ubuntu_floors("24.04", ["ffmpeg"])[0]["ffmpeg"]["floor"]
+        first = {"total_size": 2, "next_collection_link": "https://x/page2", "entries": [P1]}
+        t("generator: a malformed later Launchpad page ({}) leaves no floor", lp([first, {}]) is None)
+        t("generator: a later page with a non-list entries leaves no floor", lp([first, {"entries": {}}]) is None)
+        t("generator: fewer publications than total_size leaves no floor",
+          lp([{"total_size": 3, "entries": [P1, dict(P1, source_package_version="7:6.0-1")]}]) is None)
+        t("generator: more publications than total_size leaves no floor",
+          lp([{"total_size": 1, "entries": [P1, dict(P1, source_package_version="7:6.0-1")]}]) is None)
+        t("generator: a first page without total_size leaves no floor", lp([{"entries": [P1]}]) is None)
+        t("generator: a malformed publication (missing pocket or version) leaves no floor",
+          lp([{"total_size": 1, "entries": [{"source_package_name": "ffmpeg", "source_package_version": "7:6.0-1"}]}]) is None
+          and lp([{"total_size": 1, "entries": [{"source_package_name": "ffmpeg", "pocket": "Release"}]}]) is None)
+        t("generator: a non-string next link leaves no floor", lp([{"total_size": 1, "entries": [P1], "next_collection_link": 5}]) is None)
+        t("generator: control — a complete two-page collection gives the floor",
+          lp([first, {"entries": [dict(P1, source_package_version="7:6.0-1")]}]) == "7:6.0-1")
     finally:
         f.get = saved
         sys.stderr.close()
@@ -364,19 +405,34 @@ BREAKS = [
      '    b.add_argument("--floors", default=DEFAULT_FLOORS)', '    b.add_argument("--floors", default="/nonexistent")'),
     ("build: an advisory fixed below the floor is not published, the others are",
      "        floor = (floors or {}).get(ikey)", "        floor = None"),
-    ("generator: the first sample's lowest version is the floor", '    return {"floor": lows[0], "observations": len(lows)}',
-     '    return {"floor": lows[-1], "observations": len(lows)}', "floors"),
-    ("generator: a decrease between samples leaves no floor", "        if prev is not None and deb_compare(low, prev) < 0:",
-     "        if False:", "floors"),
-    ("generator: a source missing from a sample leaves no floor", '        if not vs:\n            return {"floor": None, "reason": f"absent from sample {i + 1}"}',
-     "        if not vs:\n            continue", "floors"),
-    ("generator: a current version below the first sample leaves no floor", "            if deb_compare(v, lows[0]) < 0:",
-     "            if False:", "floors"),
-    ("generator: an unparsable version leaves no floor", "            if not client_deb_valid(v) or deb_compare(v, v) is None:\n                return {\"floor\": None, \"reason\": f\"unparsable version {v!r}\"}",
+    ("generator: the floor is the lowest version over every sample and today's pockets",
+     "    for idx in list(series) + list(current):", "    for idx in list(series):", "floors"),
+    ("generator: a source absent from the release-day sample has no floor",
+     "    if not series or not series[-1].get(src):", "    if not series:", "floors"),
+    ("generator: an unparsable version (sample or today's pockets) leaves no floor",
+     "            if not client_deb_valid(v) or deb_compare(v, v) is None:\n                return {\"floor\": None, \"reason\": f\"unparsable version {v!r}\"}",
      "            if deb_compare(v, v) is None:\n                return {\"floor\": None, \"reason\": f\"unparsable version {v!r}\"}", "floors"),
+    ("generator: a malformed later Launchpad page ({}) leaves no floor",
+     "            if type(entries) is not list or (link is not None and type(link) is not str):",
+     "            entries = entries or []\n            if False:", "floors"),
+    ("generator: fewer publications than total_size leaves no floor",
+     "        if problem is None and count != total:", "        if problem is None and count > total:", "floors"),
+    ("generator: more publications than total_size leaves no floor",
+     "        if problem is None and count != total:", "        if problem is None and count < total:", "floors"),
+    ("generator: a first page without total_size leaves no floor",
+     "                if type(total) is not int or total < 0:", "                if False:", "floors",
+     ("        if problem is None and count != total:", "        if problem is None and total is not None and count != total:")),
+    ("generator: a malformed publication (missing pocket or version) leaves no floor",
+     '                        or type(e.get("source_package_version")) is not str or type(e.get("pocket")) is not str:',
+     '                        or False:', "floors"),
+    ("build: the entry carries its floor (the client gate) whenever a floor is in force",
+     '            entry["floor"] = floor', "            pass"),
+    ("check: a floor the client cannot parse, a non-string floor, or a floor on a non-deb entry refuses to sign",
+     '            if sc != "deb" or e["identity"].get("kind") != "deb" or not client_deb_valid(_cstr(e["floor"], "floor")):',
+     '            if not _cstr(e["floor"], "floor"):'),
     ("generator: Ubuntu floor = lowest over every page, pocket and status of the series",
-     "            url = d.get(\"next_collection_link\")", "            url = None", "floors"),
-    ("generator: a source never in the Ubuntu release pocket has no floor", '        if "Release" not in pockets:', "        if False:", "floors"),
+     "            url = link\n", "            url = None\n", "floors"),
+    ("generator: a source never in the Ubuntu release pocket has no floor", '        elif "Release" not in pockets:', "        elif False:", "floors"),
     ("generator: an unparsable Ubuntu version leaves no floor",
      "        elif any(not client_deb_valid(v) or deb_compare(v, v) is None for v in versions):",
      "        elif any(deb_compare(v, v) is None for v in versions):", "floors"),

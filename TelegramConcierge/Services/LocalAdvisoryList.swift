@@ -182,6 +182,11 @@ enum LocalAdvisory {
         /// v17 (§9.5.10.1): release lines the vendor still maintains (Node).
         /// An installed version on another line is never "no known issue".
         var maintainedLines: [String]? = nil
+        /// §9.5.12 (deb entries): the release floor the publisher pruned
+        /// against. Advisories that close strictly below it were not
+        /// published, so an installed version below it, or one that cannot
+        /// be compared with it, is never "no known issue".
+        var floor: String? = nil
     }
 
     struct Document: Codable, Equatable {

@@ -228,6 +228,15 @@ enum LocalTools {
             unmaintained = Text("\(LocalTools.tool(i.toolId)?.name ?? i.toolId) \(major) no longer receives security fixes from its vendor",
                                 "\(LocalTools.tool(i.toolId)?.name ?? i.toolId) \(major) non riceve più correzioni di sicurezza dal produttore")
         }
+        // §9.5.12: below the release floor (or not comparable with it) the
+        // pruned advisories would have been needed, so never "no known
+        // issue" (positive advisories still count).
+        var belowFloor: Text? = nil
+        if let floor = entry?.floor, scheme == .deb,
+           (LocalToolsVersion.compare(i.compareVersion, floor, scheme: .deb) ?? -1) < 0 {
+            belowFloor = Text("this version is older than the oldest one this release ever shipped, so not every advisory was checked",
+                              "questa versione è più vecchia della più vecchia mai distribuita per questa release, quindi non tutti gli avvisi sono stati controllati")
+        }
         if !r.affected.isEmpty {
             if r.hasInstallableFix { r.state = .affectedFixInstallable }
             else if r.affected.contains(where: { if case .noFix = $0.fix { return false }; return true }) { r.state = .affectedNotInstallable }
@@ -241,6 +250,9 @@ enum LocalTools {
         } else if let unmaintained {
             r.state = .unknown
             r.reason = unmaintained
+        } else if let belowFloor {
+            r.state = .unknown
+            r.reason = belowFloor
         } else if r.unknownAdvisories > 0 {
             r.state = .unknown
             r.reason = Text("some advisories could not be evaluated for this version",

@@ -116,6 +116,15 @@ MUTATIONS = [
     ("B24 consume after the send (not before)", SVC,
      "                LocalVuln.consume(&v, fresh, reports: reports, text: text, listContentId: contentId, noticeGeneration: setting.generation,\n                                  destination: destination, now: now)\n",
      ""),
+    ("B36 (§9.5.12) the floor gate ignored: below the floor reads 'no known issue'", MATCH,
+     "           (LocalToolsVersion.compare(i.compareVersion, floor, scheme: .deb) ?? -1) < 0 {",
+     "           (LocalToolsVersion.compare(i.compareVersion, floor, scheme: .deb) ?? -1) < 0, false {"),
+    ("B37 (§9.5.12) a version not comparable with the floor passes the gate", MATCH,
+     "(LocalToolsVersion.compare(i.compareVersion, floor, scheme: .deb) ?? -1) < 0 {",
+     "(LocalToolsVersion.compare(i.compareVersion, floor, scheme: .deb) ?? 0) < 0 {"),
+    ("B38 (§9.5.12) a malformed floor is accepted", S + "LocalAdvisoryParse.swift",
+     "guard scheme == \"deb\", identity.kind == .deb, LocalToolsVersion.parseDeb(s) != nil, s == s.trimmingCharacters(in: .whitespaces) else {",
+     "guard scheme == \"deb\" || true else {"),
 ]
 
 

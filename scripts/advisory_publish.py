@@ -23,10 +23,12 @@ Rules implemented here (the client re-checks every bound):
     checked identity carried as withdrawn for 30 days, then dropped;
   * lossless pruning (§9.5.12): a deb advisory whose every affected range
     closes strictly below the identity's release floor
-    (security/deb-floors.json, the lowest version a client of that release
-    could have installed from an accepted origin) is not published. It can
-    never match on a client, so it changes no verdict and is never "cut for
-    size" (F3 is untouched). Never pruned: KEV, no fix, withdrawn,
+    (security/deb-floors.json, the lowest version ever published under that
+    release's codename, as far as the archives show) is not published, and the
+    floor is written into the entry: the client never says "no known issue"
+    for an installed version below the floor or not comparable with it, so
+    a pruned advisory can never turn a real match into a false clean. It is
+    never "cut for size" (F3 is untouched). Never pruned: KEV, no fix, withdrawn,
     `affected: unknown`, a non-ECOSYSTEM range, any version the client could
     not parse, any identity without a floor, vendor identities.
 
@@ -639,7 +641,13 @@ def build(watchlist_path, bundle, prev, now, platforms_path=None, floors=None, r
         # Trim to the per-identity cap: KEV, critical, newest first.
         advs = cap_advisories(advs, statuses)
         coverage += coverage_rows(ikey, eco["sources"], statuses, prev_rows)
-        entries.append({"identity": dict(ident, kind="deb"), "scheme": "deb", "advisories": advs})
+        entry = {"identity": dict(ident, kind="deb"), "scheme": "deb", "advisories": advs}
+        if floor is not None:
+            # §9.5.12 client gate: below (or not comparable with) the floor the
+            # client never reports "no known issue". Written whenever a floor
+            # was in force, pruned or not.
+            entry["floor"] = floor
+        entries.append(entry)
 
     payload = {"schema": 1, "published": iso(now), "expires": iso(now + VALIDITY),
                "sequence": max(int((prev or {}).get("sequence", -1)) + 1, int(now // 60)),
@@ -842,6 +850,9 @@ def check_payload(data):
             ml = _clist(e["maintainedLines"], "maintainedLines", 32)
             if not ml or any(type(x) is not str or not re.fullmatch(r"[1-9][0-9]{0,3}", x) for x in ml) or len(set(ml)) != len(ml):
                 raise Refuse("maintainedLines must be distinct line numbers")
+        if e.get("floor") is not None:
+            if sc != "deb" or e["identity"].get("kind") != "deb" or not client_deb_valid(_cstr(e["floor"], "floor")):
+                raise Refuse("floor must be a client-parsable Debian version on a deb entry")
     return d
 
 

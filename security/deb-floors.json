@@ -3,6 +3,120 @@
  "evidence": {
   "debian:12": [
    {
+    "releaseDate": "Sun, 15 Aug 2021 07:57:17 UTC",
+    "sample": "20210815T120000Z",
+    "sha256": "6d7f6c0d9528470c0665875bf06463b3db2fa3fdabaa4bc691537b1a136a1e4f",
+    "url": "https://snapshot.debian.org/file/03025ea2054005cfcf1a5388db7ab3d331d7d45b/6d7f6c0d9528470c0665875bf06463b3db2fa3fdabaa4bc691537b1a136a1e4f"
+   },
+   {
+    "releaseDate": "Tue, 31 Aug 2021 14:12:41 UTC",
+    "sample": "20210901T000000Z",
+    "sha256": "36e09d457a9921472b52f6c7ff6d1a31dc9c05830bcfe5db6a26d67c022e11bc",
+    "url": "https://snapshot.debian.org/file/52d4da96baf163e5decd55b45c9fef99f6215689/36e09d457a9921472b52f6c7ff6d1a31dc9c05830bcfe5db6a26d67c022e11bc"
+   },
+   {
+    "releaseDate": "Thu, 30 Sep 2021 20:18:30 UTC",
+    "sample": "20211001T000000Z",
+    "sha256": "13939e88f2091d688e8455ebb26b33a67fc117e053ce283a759d87135e4f4c77",
+    "url": "https://snapshot.debian.org/file/c066390ae989e368bc25e1f8243c000052edfebf/13939e88f2091d688e8455ebb26b33a67fc117e053ce283a759d87135e4f4c77"
+   },
+   {
+    "releaseDate": "Sun, 31 Oct 2021 20:14:25 UTC",
+    "sample": "20211101T000000Z",
+    "sha256": "189acfa879286871e3b82f8a534291c3af67dd841faa74c78619f83aad7fe4c0",
+    "url": "https://snapshot.debian.org/file/41967c500d57661ddf68526c089ac9ee714b022b/189acfa879286871e3b82f8a534291c3af67dd841faa74c78619f83aad7fe4c0"
+   },
+   {
+    "releaseDate": "Tue, 30 Nov 2021 20:19:00 UTC",
+    "sample": "20211201T000000Z",
+    "sha256": "3a14cf03c9ee8e323f77b065a13f38e383fdd258fe530db27b1532ababf4d644",
+    "url": "https://snapshot.debian.org/file/4a27947eea18acec068c0f7fe31742f9a0d75753/3a14cf03c9ee8e323f77b065a13f38e383fdd258fe530db27b1532ababf4d644"
+   },
+   {
+    "releaseDate": "Fri, 31 Dec 2021 20:11:31 UTC",
+    "sample": "20220101T000000Z",
+    "sha256": "e15bf3b861d66fa04ec099af405cfa652af45217ec4e953f28bf0353820a8f41",
+    "url": "https://snapshot.debian.org/file/e9b087e231a52e088b18a3910e4f3ef4cf5102c5/e15bf3b861d66fa04ec099af405cfa652af45217ec4e953f28bf0353820a8f41"
+   },
+   {
+    "releaseDate": "Mon, 31 Jan 2022 20:14:32 UTC",
+    "sample": "20220201T000000Z",
+    "sha256": "b5fecfc1f00c36e813330b2cdcb4f7cf9a1bea9432e9eb7853d2d4317da888f4",
+    "url": "https://snapshot.debian.org/file/d271251fb553b070910f8ec8222ea8785e9b1ab8/b5fecfc1f00c36e813330b2cdcb4f7cf9a1bea9432e9eb7853d2d4317da888f4"
+   },
+   {
+    "releaseDate": "Mon, 28 Feb 2022 20:14:47 UTC",
+    "sample": "20220301T000000Z",
+    "sha256": "f7e8dc38c906c82cd8f6f6437afbd39dcc53ea3db277bf0e58d1dc0242ab2f80",
+    "url": "https://snapshot.debian.org/file/ae97b7a0ea5f93e518378cc0afa4336402cedc7a/f7e8dc38c906c82cd8f6f6437afbd39dcc53ea3db277bf0e58d1dc0242ab2f80"
+   },
+   {
+    "releaseDate": "Thu, 31 Mar 2022 20:20:53 UTC",
+    "sample": "20220401T000000Z",
+    "sha256": "ff09a33b953f6291bba231e1a42d217880ac464523c82ede7b5629cce49e663e",
+    "url": "https://snapshot.debian.org/file/5ec5378965a768b9dc8d24dcfb218814e8c76225/ff09a33b953f6291bba231e1a42d217880ac464523c82ede7b5629cce49e663e"
+   },
+   {
+    "releaseDate": "Sat, 30 Apr 2022 20:13:30 UTC",
+    "sample": "20220501T000000Z",
+    "sha256": "ab101ae4bac2ecede8c67cfbbc97800e5a2a9c0c10b2bf112444dded983f0d83",
+    "url": "https://snapshot.debian.org/file/1bde8265118f3d0752f58c9ef120dcd0e98d8db3/ab101ae4bac2ecede8c67cfbbc97800e5a2a9c0c10b2bf112444dded983f0d83"
+   },
+   {
+    "releaseDate": "Tue, 31 May 2022 20:22:37 UTC",
+    "sample": "20220601T000000Z",
+    "sha256": "cf54774f72d3114341badca43c1c72bd25d545dfe62aafc8decd3aae9fc21724",
+    "url": "https://snapshot.debian.org/file/cd0dc3d68bb49b2930d7fc982952450e4a67da1c/cf54774f72d3114341badca43c1c72bd25d545dfe62aafc8decd3aae9fc21724"
+   },
+   {
+    "releaseDate": "Thu, 30 Jun 2022 20:21:22 UTC",
+    "sample": "20220701T000000Z",
+    "sha256": "9d6ea9028b3871dfb6a2caf9c1cd93b256b3f55a072df5b7410ff62715a542ec",
+    "url": "https://snapshot.debian.org/file/a6e862824903e1310f1128c6cf80aaa3e48b15c6/9d6ea9028b3871dfb6a2caf9c1cd93b256b3f55a072df5b7410ff62715a542ec"
+   },
+   {
+    "releaseDate": "Sun, 31 Jul 2022 20:30:31 UTC",
+    "sample": "20220801T000000Z",
+    "sha256": "dc02b83dec590ce507c8ac690d06b122a74dd801535dad5420ed54feb63dafed",
+    "url": "https://snapshot.debian.org/file/5ee16c94bb05e8f4ba33b3333d8af9c94e7eecac/dc02b83dec590ce507c8ac690d06b122a74dd801535dad5420ed54feb63dafed"
+   },
+   {
+    "releaseDate": "Wed, 31 Aug 2022 08:15:53 UTC",
+    "sample": "20220901T000000Z",
+    "sha256": "4d3c6ca3dd0430b438a21edde6036463ca5f18cf4cc3079c68d0066ab60ddb2e",
+    "url": "https://snapshot.debian.org/file/4c71d9fcd3fe3fc9dfdeece44d33412adb7aa051/4d3c6ca3dd0430b438a21edde6036463ca5f18cf4cc3079c68d0066ab60ddb2e"
+   },
+   {
+    "releaseDate": "Fri, 30 Sep 2022 20:25:31 UTC",
+    "sample": "20221001T000000Z",
+    "sha256": "1038398f0d1101f27c2be4ef6b06002ed59182f3fe31332f5b24a6504c1e34ff",
+    "url": "https://snapshot.debian.org/file/db75a29ffcd5cbd380882ad79e7482e04c3c6e35/1038398f0d1101f27c2be4ef6b06002ed59182f3fe31332f5b24a6504c1e34ff"
+   },
+   {
+    "releaseDate": "Mon, 31 Oct 2022 14:26:57 UTC",
+    "sample": "20221101T000000Z",
+    "sha256": "4a38568e507eca0e1ee8c6ae06b2bc26adc10d5f2f0608a7bdb6353c507ddcc6",
+    "url": "https://snapshot.debian.org/file/58cacea6bb47d4493fa5961950c924c83f99677f/4a38568e507eca0e1ee8c6ae06b2bc26adc10d5f2f0608a7bdb6353c507ddcc6"
+   },
+   {
+    "releaseDate": "Wed, 30 Nov 2022 20:27:55 UTC",
+    "sample": "20221201T000000Z",
+    "sha256": "8c982974fc24e6436689dc58ab4962ab81927e9d219d8e3d0ccee3154b09ddbb",
+    "url": "https://snapshot.debian.org/file/f164c6ce3da61462c9b4cb33e6ea8cf71c2c9921/8c982974fc24e6436689dc58ab4962ab81927e9d219d8e3d0ccee3154b09ddbb"
+   },
+   {
+    "releaseDate": "Sat, 31 Dec 2022 08:17:56 UTC",
+    "sample": "20230101T000000Z",
+    "sha256": "e08cfc95572e0966658b8f17315efe866b06bfd7794a67363a628366c1b660e4",
+    "url": "https://snapshot.debian.org/file/ea9af0fb4d340256c36418480f67c3527d3ddfb6/e08cfc95572e0966658b8f17315efe866b06bfd7794a67363a628366c1b660e4"
+   },
+   {
+    "releaseDate": "Tue, 31 Jan 2023 02:16:14 UTC",
+    "sample": "20230201T000000Z",
+    "sha256": "a27efdb0de964ffa378e4d2c5df34d25059c83a886eb7cb2c1c2780fa0c9a34a",
+    "url": "https://snapshot.debian.org/file/5c662c9e075d830d75815ee7138d89a224409394/a27efdb0de964ffa378e4d2c5df34d25059c83a886eb7cb2c1c2780fa0c9a34a"
+   },
+   {
     "releaseDate": "Tue, 28 Feb 2023 14:25:10 UTC",
     "sample": "20230301T000000Z",
     "sha256": "8ff5e2580cdd8cf7b4be98610b0758f1ed84aa601c1dfaa6409ea09728709f6f",
@@ -28,7 +142,7 @@
    },
    {
     "releaseDate": "Sat, 10 Jun 2023 08:51:17 UTC",
-    "sample": "20230611T000000Z",
+    "sample": "20230611T120000Z",
     "sha256": "d1d5103c4ddd76196acc292e90fd0ffece1fe0d04408ab544633f25568e6cb19",
     "url": "https://snapshot.debian.org/file/054d298857955a2542fccbf2646402cd8e22a2bd/d1d5103c4ddd76196acc292e90fd0ffece1fe0d04408ab544633f25568e6cb19"
    },
@@ -53,10 +167,148 @@
   ],
   "debian:13": [
    {
-    "releaseDate": "Sat, 10 May 2025 20:18:44 UTC",
-    "sample": "20250511T000000Z",
-    "sha256": "7f8732d8d7abc7b4a15af7784fccbff58b114419f98239a2cc60b75884a1d08b",
-    "url": "https://snapshot.debian.org/file/d6b2edfbce66bf98fd90e78627b82a41be37a1c1/7f8732d8d7abc7b4a15af7784fccbff58b114419f98239a2cc60b75884a1d08b"
+    "releaseDate": "Sun, 11 Jun 2023 09:50:17 UTC",
+    "sample": "20230611T120000Z",
+    "sha256": "d9276c989350a5d4fb349fa68c91cdf55937cd511344453c74e65ed53e49d13e",
+    "url": "https://snapshot.debian.org/file/602efa7f4269b8718797aea88b35b439b8055279/d9276c989350a5d4fb349fa68c91cdf55937cd511344453c74e65ed53e49d13e"
+   },
+   {
+    "releaseDate": "Fri, 30 Jun 2023 20:17:01 UTC",
+    "sample": "20230701T000000Z",
+    "sha256": "175abf0b8fa6a18ffb0b97ce47fd95b3bb6d20f1d6be68512c8e7bf7d96581e4",
+    "url": "https://snapshot.debian.org/file/cf79875c78befc71264300f8d185fe7233ef8add/175abf0b8fa6a18ffb0b97ce47fd95b3bb6d20f1d6be68512c8e7bf7d96581e4"
+   },
+   {
+    "releaseDate": "Mon, 31 Jul 2023 20:13:24 UTC",
+    "sample": "20230801T000000Z",
+    "sha256": "19c0ad2669df4d7e6a63c08c6d1e7e50f9ebdb0f2096f994a3f308429a8300e5",
+    "url": "https://snapshot.debian.org/file/59a1e190fd01a7b954d2c225a7fb8a17f8dad94b/19c0ad2669df4d7e6a63c08c6d1e7e50f9ebdb0f2096f994a3f308429a8300e5"
+   },
+   {
+    "releaseDate": "Thu, 31 Aug 2023 20:12:23 UTC",
+    "sample": "20230901T000000Z",
+    "sha256": "eab7ba8fc7971e8a4bef027c95bb14043547f67916bffb3bc63c5268df716b90",
+    "url": "https://snapshot.debian.org/file/c097bd60bf37acec1a1e0010e006cb0c63222c59/eab7ba8fc7971e8a4bef027c95bb14043547f67916bffb3bc63c5268df716b90"
+   },
+   {
+    "releaseDate": "Sat, 30 Sep 2023 14:30:47 UTC",
+    "sample": "20231001T000000Z",
+    "sha256": "9ac95448d3ac48b4df0917bc13401e814495cad566cf5f3b0231c6c61d9a6af8",
+    "url": "https://snapshot.debian.org/file/c604cd3ede59383c06fff4cfdebb3bd4c0727fc0/9ac95448d3ac48b4df0917bc13401e814495cad566cf5f3b0231c6c61d9a6af8"
+   },
+   {
+    "releaseDate": "Tue, 31 Oct 2023 14:12:59 UTC",
+    "sample": "20231101T000000Z",
+    "sha256": "b82fe52588c13389491090a7d46898b2d68474dae34ad0e9ddf4d02f45bac99e",
+    "url": "https://snapshot.debian.org/file/37ede1fe86ba5509926db5ea0e03670b879c64d6/b82fe52588c13389491090a7d46898b2d68474dae34ad0e9ddf4d02f45bac99e"
+   },
+   {
+    "releaseDate": "Thu, 30 Nov 2023 02:17:46 UTC",
+    "sample": "20231201T000000Z",
+    "sha256": "c33674dad7e624afb83d9c05ea1979637936ac90fa87ed9c0e57848a511f4521",
+    "url": "https://snapshot.debian.org/file/459cc3f8f2fa6e3cb364c712603bb17f33e3f623/c33674dad7e624afb83d9c05ea1979637936ac90fa87ed9c0e57848a511f4521"
+   },
+   {
+    "releaseDate": "Sun, 31 Dec 2023 08:11:44 UTC",
+    "sample": "20240101T000000Z",
+    "sha256": "c24ca6254f5253cf2bb3591e8a54c20ad0aceb27a90fea9db3dfe73a656265c2",
+    "url": "https://snapshot.debian.org/file/547152404027b057774d28476812805804465d9a/c24ca6254f5253cf2bb3591e8a54c20ad0aceb27a90fea9db3dfe73a656265c2"
+   },
+   {
+    "releaseDate": "Wed, 31 Jan 2024 14:25:59 UTC",
+    "sample": "20240201T000000Z",
+    "sha256": "79301f3c2d179b06f166377bbfba351779220ef15026c73fae6644e94455396b",
+    "url": "https://snapshot.debian.org/file/e429e50472e111295df96c28092571bf47c324a6/79301f3c2d179b06f166377bbfba351779220ef15026c73fae6644e94455396b"
+   },
+   {
+    "releaseDate": "Thu, 29 Feb 2024 03:08:20 UTC",
+    "sample": "20240301T000000Z",
+    "sha256": "00339ded5827687e816c2cb8552ce630f96c09e9b5b5331794a50de93c6ce81a",
+    "url": "https://snapshot.debian.org/file/095bf30b589c918177cfe3fe4720c23f93421612/00339ded5827687e816c2cb8552ce630f96c09e9b5b5331794a50de93c6ce81a"
+   },
+   {
+    "releaseDate": "Sun, 31 Mar 2024 20:25:02 UTC",
+    "sample": "20240401T000000Z",
+    "sha256": "7b9c6ae19839d45e0da77434d90c15a42da9620a4fbc5940b1fe913a2e096794",
+    "url": "https://snapshot.debian.org/file/5d96af90726ac8f02ed58ed7473d43e4794e9ad0/7b9c6ae19839d45e0da77434d90c15a42da9620a4fbc5940b1fe913a2e096794"
+   },
+   {
+    "releaseDate": "Tue, 30 Apr 2024 20:11:09 UTC",
+    "sample": "20240501T000000Z",
+    "sha256": "124af92c9014efd99a20cb2661cb4c345781833c4284aabeeff135d281da5f61",
+    "url": "https://snapshot.debian.org/file/da0403eb96b0a0236dc3fc1b773e10359a869382/124af92c9014efd99a20cb2661cb4c345781833c4284aabeeff135d281da5f61"
+   },
+   {
+    "releaseDate": "Fri, 31 May 2024 14:16:32 UTC",
+    "sample": "20240601T000000Z",
+    "sha256": "1c6025ad4649e4c4334e3f6453abc11b4f40b5edd43ad22cee0b95893799a1eb",
+    "url": "https://snapshot.debian.org/file/0c230a17a317c9279ba50212dddd8d5c3d09dbd8/1c6025ad4649e4c4334e3f6453abc11b4f40b5edd43ad22cee0b95893799a1eb"
+   },
+   {
+    "releaseDate": "Sun, 30 Jun 2024 20:19:21 UTC",
+    "sample": "20240701T000000Z",
+    "sha256": "ed9dc964d48428bec79840690d4f942c16612e5e8029e7475eb7af0ae2c35516",
+    "url": "https://snapshot.debian.org/file/fb27681caab815ca2b0f78129b405089a9dd7165/ed9dc964d48428bec79840690d4f942c16612e5e8029e7475eb7af0ae2c35516"
+   },
+   {
+    "releaseDate": "Wed, 31 Jul 2024 20:23:42 UTC",
+    "sample": "20240801T000000Z",
+    "sha256": "678c39d8a4c8b58ba1cfb2f5e09ff16a7c1fa7f89a2ed7c1017514efba21c87e",
+    "url": "https://snapshot.debian.org/file/6e9db8b8ca9a93bdf80bc8b7ab85471b2235bb9f/678c39d8a4c8b58ba1cfb2f5e09ff16a7c1fa7f89a2ed7c1017514efba21c87e"
+   },
+   {
+    "releaseDate": "Sat, 31 Aug 2024 20:22:02 UTC",
+    "sample": "20240901T000000Z",
+    "sha256": "b81f9aaaf1693ca79d8f6d8d7c2b7df008a3ff5c10ed21d12fa92269a27b7394",
+    "url": "https://snapshot.debian.org/file/30f7f2b7cdaa29eb972ee8c2d84ad8bcb3fd1489/b81f9aaaf1693ca79d8f6d8d7c2b7df008a3ff5c10ed21d12fa92269a27b7394"
+   },
+   {
+    "releaseDate": "Mon, 30 Sep 2024 20:11:41 UTC",
+    "sample": "20241001T000000Z",
+    "sha256": "19f8e4191b652a0fb28606412639ef8ed4cd3e68edc9a0fbbfa957b2bf631127",
+    "url": "https://snapshot.debian.org/file/d1bc0445103c2601506127158e0e4613ce63b739/19f8e4191b652a0fb28606412639ef8ed4cd3e68edc9a0fbbfa957b2bf631127"
+   },
+   {
+    "releaseDate": "Thu, 31 Oct 2024 20:56:01 UTC",
+    "sample": "20241101T000000Z",
+    "sha256": "5febf9757428f93d1645ccc2e28c4ab5b9fd93cbd9379ee851aaa9a9af73a6cb",
+    "url": "https://snapshot.debian.org/file/d8d7671f71ba66f02f1544126b5692fd9011c67e/5febf9757428f93d1645ccc2e28c4ab5b9fd93cbd9379ee851aaa9a9af73a6cb"
+   },
+   {
+    "releaseDate": "Sat, 30 Nov 2024 20:17:33 UTC",
+    "sample": "20241201T000000Z",
+    "sha256": "9f298409ef02707a48c7f52ce46141174bf34688ba442ba796d5b7012f494651",
+    "url": "https://snapshot.debian.org/file/234355d808b511104654ee614324ea49c47f2687/9f298409ef02707a48c7f52ce46141174bf34688ba442ba796d5b7012f494651"
+   },
+   {
+    "releaseDate": "Tue, 31 Dec 2024 20:33:52 UTC",
+    "sample": "20250101T000000Z",
+    "sha256": "92dffbc8459c98cb885548eff690cb1ec4741f6927dc8d59e6d15c4e920f3851",
+    "url": "https://snapshot.debian.org/file/bea825d270c11df3825e3ffe31e6d10c9a4ddbce/92dffbc8459c98cb885548eff690cb1ec4741f6927dc8d59e6d15c4e920f3851"
+   },
+   {
+    "releaseDate": "Fri, 31 Jan 2025 20:14:00 UTC",
+    "sample": "20250201T000000Z",
+    "sha256": "48e7904b0f531f00b85edb15d0788fb2b61cb4f482a01ee8ce8b31a6d4252c2b",
+    "url": "https://snapshot.debian.org/file/5274e5e1a33894f0119e34921f3169bda9bed2af/48e7904b0f531f00b85edb15d0788fb2b61cb4f482a01ee8ce8b31a6d4252c2b"
+   },
+   {
+    "releaseDate": "Fri, 28 Feb 2025 20:24:23 UTC",
+    "sample": "20250301T000000Z",
+    "sha256": "225c0806c8dce1bc6ff74f66ff84d3f94753844c12b3fbd7680bf2865c2d7b37",
+    "url": "https://snapshot.debian.org/file/48db2b41d941db6661b0737c11f73d08f10def52/225c0806c8dce1bc6ff74f66ff84d3f94753844c12b3fbd7680bf2865c2d7b37"
+   },
+   {
+    "releaseDate": "Mon, 31 Mar 2025 20:18:30 UTC",
+    "sample": "20250401T000000Z",
+    "sha256": "0949f72045804bebb731f87e9ce200fe54299e273cdd1580cd335a0f8e0d63cd",
+    "url": "https://snapshot.debian.org/file/817bc4df3f4ad3127d7e3b9d06ef92e742613563/0949f72045804bebb731f87e9ce200fe54299e273cdd1580cd335a0f8e0d63cd"
+   },
+   {
+    "releaseDate": "Wed, 30 Apr 2025 20:13:10 UTC",
+    "sample": "20250501T000000Z",
+    "sha256": "f78b84a8ad5674ad710be4a62973eee7c4214edbdd31be6d3eadf07f79c462ce",
+    "url": "https://snapshot.debian.org/file/e35115ce68070e18f3a004a0a95dfc8a5a8c2836/f78b84a8ad5674ad710be4a62973eee7c4214edbdd31be6d3eadf07f79c462ce"
    },
    {
     "releaseDate": "Sat, 31 May 2025 20:20:00 UTC",
@@ -78,7 +330,7 @@
    },
    {
     "releaseDate": "Sat, 09 Aug 2025 10:59:34 UTC",
-    "sample": "20250810T000000Z",
+    "sample": "20250810T120000Z",
     "sha256": "bbf0ca1b794a8b9d717dd67e91de32831c88d295fbb39c6e83ee9bd48d721eb5",
     "url": "https://snapshot.debian.org/file/d3c2f88d08b54e715c40b6bff1c59e6bfe9daa86/bbf0ca1b794a8b9d717dd67e91de32831c88d295fbb39c6e83ee9bd48d721eb5"
    },
@@ -279,156 +531,156 @@
  },
  "floors": {
   "deb:debian:12:cairo": {
-   "floor": "1.16.0-6",
-   "observations": 5
+   "floor": "1.16.0-5",
+   "observations": 33
   },
   "deb:debian:12:chromium": {
-   "floor": "110.0.5481.77-2",
-   "observations": 5
+   "floor": "90.0.4430.212-1",
+   "observations": 25
   },
   "deb:debian:12:curl": {
-   "floor": "7.87.0-2",
-   "observations": 5
+   "floor": "7.74.0-1.3",
+   "observations": 26
   },
   "deb:debian:12:ffmpeg": {
-   "floor": "7:5.1.2-3",
-   "observations": 5
+   "floor": "7:4.3.2-0+deb11u2",
+   "observations": 30
   },
   "deb:debian:12:gdk-pixbuf": {
-   "floor": "2.42.9+dfsg-1",
-   "observations": 5
+   "floor": "2.42.2+dfsg-1",
+   "observations": 46
   },
   "deb:debian:12:ghostscript": {
-   "floor": "10.0.0~dfsg-9",
-   "observations": 5
+   "floor": "9.53.3~dfsg-7",
+   "observations": 26
   },
   "deb:debian:12:git": {
-   "floor": "1:2.39.2-1",
-   "observations": 5
+   "floor": "1:2.30.2-1",
+   "observations": 26
   },
   "deb:debian:12:imagemagick": {
-   "floor": "8:6.9.11.60+dfsg-1.6",
-   "observations": 5
+   "floor": "8:6.9.11.60+dfsg-1.3",
+   "observations": 26
   },
   "deb:debian:12:libreoffice": {
-   "floor": "4:7.4.5-2",
-   "observations": 5
+   "floor": "1:7.0.4-4",
+   "observations": 26
   },
   "deb:debian:12:libxml2": {
-   "floor": "2.9.14+dfsg-1.1",
-   "observations": 5
+   "floor": "2.9.10+dfsg-6.7",
+   "observations": 26
   },
   "deb:debian:12:nodejs": {
-   "floor": "18.13.0+dfsg1-1",
-   "observations": 5
+   "floor": "12.21.0~dfsg-5",
+   "observations": 26
   },
   "deb:debian:12:openssl": {
-   "floor": "3.0.5-2",
-   "observations": 5
+   "floor": "1.1.1k-1",
+   "observations": 54
   },
   "deb:debian:12:pandoc": {
-   "floor": "2.17.1.1-1.1",
-   "observations": 5
+   "floor": "2.9.2.1-1",
+   "observations": 25
   },
   "deb:debian:12:pango1.0": {
-   "floor": "1.50.9+ds-1",
-   "observations": 5
+   "floor": "1.46.2-3",
+   "observations": 46
   },
   "deb:debian:12:poppler": {
-   "floor": "22.12.0-2",
-   "observations": 5
+   "floor": "20.09.0-3.1",
+   "observations": 31
   },
   "deb:debian:12:python3.11": {
-   "floor": "3.11.2-4",
-   "observations": 5
+   "floor": "3.11.0~b4-2",
+   "observations": 14
   },
   "deb:debian:12:tar": {
    "floor": "1.34+dfsg-1",
-   "observations": 5
+   "observations": 25
   },
   "deb:debian:12:unzip": {
-   "floor": "6.0-27",
-   "observations": 5
+   "floor": "6.0-26",
+   "observations": 26
   },
   "deb:debian:12:zip": {
    "floor": "3.0-12",
-   "observations": 5
+   "observations": 26
   },
   "deb:debian:13:cairo": {
-   "floor": "1.18.2-2",
-   "observations": 5
+   "floor": "1.16.0-7",
+   "observations": 50
   },
   "deb:debian:13:chromium": {
-   "floor": "135.0.7049.95-1",
-   "observations": 5
+   "floor": "113.0.5672.126-1",
+   "observations": 31
   },
   "deb:debian:13:curl": {
-   "floor": "8.13.0-1",
-   "observations": 5
+   "floor": "7.88.1-10",
+   "observations": 47
   },
   "deb:debian:13:ffmpeg": {
-   "floor": "7:7.1.1-1",
-   "observations": 5
+   "floor": "7:5.1.3-1",
+   "observations": 33
   },
   "deb:debian:13:gdk-pixbuf": {
-   "floor": "2.42.12+dfsg-1",
-   "observations": 5
+   "floor": "2.42.10+dfsg-1",
+   "observations": 52
   },
   "deb:debian:13:ghostscript": {
-   "floor": "10.05.0~dfsg-1",
-   "observations": 5
+   "floor": "10.0.0~dfsg-11",
+   "observations": 30
   },
   "deb:debian:13:git": {
-   "floor": "1:2.47.2-0.1",
-   "observations": 5
+   "floor": "1:2.39.2-1.1",
+   "observations": 29
   },
   "deb:debian:13:imagemagick": {
-   "floor": "8:7.1.1.43+dfsg1-1",
-   "observations": 5
+   "floor": "8:6.9.11.60+dfsg-1.6",
+   "observations": 31
   },
   "deb:debian:13:libreoffice": {
-   "floor": "4:25.2.2-3",
-   "observations": 5
+   "floor": "4:7.4.5-3",
+   "observations": 30
   },
   "deb:debian:13:libxml2": {
-   "floor": "2.12.7+dfsg+really2.9.14-0.4",
-   "observations": 5
+   "floor": "2.9.14+dfsg-1.2",
+   "observations": 30
   },
   "deb:debian:13:nodejs": {
-   "floor": "20.19.0+dfsg-2",
-   "observations": 5
+   "floor": "18.13.0+dfsg1-1",
+   "observations": 32
   },
   "deb:debian:13:openssl": {
-   "floor": "3.3.2-2",
-   "observations": 5
+   "floor": "3.0.9-1",
+   "observations": 70
   },
   "deb:debian:13:pandoc": {
-   "floor": "3.1.11.1+ds-2",
-   "observations": 5
+   "floor": "2.17.1.1-1.1",
+   "observations": 29
   },
   "deb:debian:13:pango1.0": {
-   "floor": "1.55.0+ds-3",
-   "observations": 5
+   "floor": "1.50.12+ds-1",
+   "observations": 54
   },
   "deb:debian:13:poppler": {
-   "floor": "25.03.0-4",
-   "observations": 5
+   "floor": "22.12.0-2",
+   "observations": 32
   },
   "deb:debian:13:python3.13": {
-   "floor": "3.13.3-2",
-   "observations": 5
+   "floor": "3.13.0~b1-2",
+   "observations": 17
   },
   "deb:debian:13:tar": {
-   "floor": "1.35+dfsg-3.1",
-   "observations": 5
+   "floor": "1.34+dfsg-1.2",
+   "observations": 29
   },
   "deb:debian:13:unzip": {
-   "floor": "6.0-29",
-   "observations": 5
+   "floor": "6.0-28",
+   "observations": 30
   },
   "deb:debian:13:zip": {
-   "floor": "3.0-15",
-   "observations": 5
+   "floor": "3.0-13",
+   "observations": 30
   },
   "deb:ubuntu:24.04:cairo": {
    "floor": "1.18.0-1",
@@ -503,6 +755,6 @@
    "observations": 7
   }
  },
- "generated": "2026-10-24T15:55:35Z",
+ "generated": "2026-10-24T16:23:04Z",
  "schema": 1
 }

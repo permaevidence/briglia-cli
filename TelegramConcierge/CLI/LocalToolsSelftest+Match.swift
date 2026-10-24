@@ -215,4 +215,43 @@ extension LocalToolsSelftest {
         t.check("states: never 'safe' anywhere in the wording",
                 !LocalToolsText.stateText(m(LTF.debInstance(), LTF.listFor([])), lang: "en").lowercased().contains("safe"))
     }
+
+    /// §9.5.12: the entry `floor` gate for lossless pruning.
+    static func debFloorGroup(_ t: Tally) {
+        func doc(floor: Any?, advisories: [[String: Any]] = [LTF.adv(["CVE-2099-1201"], events: [["introduced": "7:5.1.0-1"], ["fixed": "7:5.2-1"]], fixed: "7:5.2-1")]) -> LocalAdvisory.Document? {
+            var e = LTF.debEntry(advisories)
+            if let floor { e["floor"] = floor }
+            return try? LocalAdvisory.parseDocument(LTF.payload(coverage: LTF.covAll("deb:debian:12:ffmpeg"), entries: [e]))
+        }
+        func state(_ v: String, floor: Any? = "7:5.1.2-3") -> LocalTools.ToolReport? {
+            guard let d = doc(floor: floor) else { return nil }
+            return LocalTools.match(LTF.debInstance(version: v), list: d, now: LTF.now)
+        }
+        let below = state("7:4.4.1-2")
+        t.check("floor: an installed version below the floor is never 'no known issue' (unknown, with the reason)",
+                below?.state == .unknown && below?.reason?.en.contains("older than the oldest one this release ever shipped") == true)
+        t.check("floor: control — the same version without a floor reads 'no known issue'", state("7:4.4.1-2", floor: nil)?.state == .noKnownIssue)
+        t.check("floor: at the floor and above, the verdict is the same as without a floor",
+                ["7:5.1.2-3", "7:5.1.2-3+deb12u1", "7:9.0-1"].allSatisfy { v in
+                    state(v)?.state == state(v, floor: nil)?.state && state(v)?.state != nil && state(v)?.reason == state(v, floor: nil)?.reason })
+        t.check("floor: epoch and tilde ordering apply (5.9.9 and 7:5.1.0~rc1 are below 7:5.1.2-3)",
+                state("5.9.9-1")?.state == .unknown && state("7:5.1.0~rc1-1")?.state == .unknown
+                && state("5.9.9-1", floor: nil)?.state == .noKnownIssue)
+        t.check("floor: a version that cannot be compared with the floor is unknown", state("x1.0")?.state == .unknown)
+        let empty = doc(floor: "7:5.1.2-3", advisories: []).map { d in
+            ["x1.0", "7:4.4.1-2", "7:5.1.2-3"].map { LocalTools.match(LTF.debInstance(version: $0), list: d, now: LTF.now).state } }
+        t.check("floor: with no advisories left, an uncomparable or below-floor version is unknown, the floor itself clean",
+                empty == [.unknown, .unknown, .noKnownIssue])
+        let pos = doc(floor: "7:5.1.2-3", advisories: [LTF.adv(["CVE-2099-1202"])]).map {
+            LocalTools.match(LTF.debInstance(version: "7:4.4.1-2"), list: $0, now: LTF.now) }
+        t.check("floor: a positive advisory below the floor still counts (affected, not unknown)", pos?.state == .affectedFixInstallable)
+        t.check("floor: a malformed floor rejects the document (not a version, wrong type, padded)",
+                doc(floor: "1:x") == nil && doc(floor: 5) == nil && doc(floor: " 7:5.1.2-3") == nil && doc(floor: "") == nil)
+        let vendor: [String: Any] = ["identity": ["kind": "vendor", "vendor": "nodejs.org", "product": "node", "platform": "darwin", "flavour": "official"],
+                                     "scheme": "semver", "advisories": [[String: Any]](), "floor": "1.0"]
+        t.check("floor: a floor on a non-deb entry rejects the document",
+                (try? LocalAdvisory.parseDocument(LTF.payload(declared: ["vendor:nodejs.org:node": ["nodejs-security-wg", "nodejs-dist", "nodejs-schedule", "cisa-kev"]],
+                                                              coverage: LTF.covAll("vendor:nodejs.org:node:darwin:official", sources: ["nodejs-security-wg", "nodejs-dist", "nodejs-schedule", "cisa-kev"]),
+                                                              entries: [vendor]))) == nil)
+    }
 }

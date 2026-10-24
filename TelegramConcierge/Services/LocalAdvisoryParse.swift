@@ -63,7 +63,15 @@ extension LocalAdvisory {
             }
             lines = raw
         }
-        return Entry(identity: identity, scheme: scheme, advisories: advisories, maintainedLines: lines)
+        var floor: String? = nil
+        if let f = e["floor"], !f.isNullValue {
+            let s = try string(f, "floor")
+            guard scheme == "deb", identity.kind == .deb, LocalToolsVersion.parseDeb(s) != nil, s == s.trimmingCharacters(in: .whitespaces) else {
+                throw Invalid(reason: "floor must be a Debian version on a deb entry")
+            }
+            floor = s
+        }
+        return Entry(identity: identity, scheme: scheme, advisories: advisories, maintainedLines: lines, floor: floor)
     }
 
     static func parseIdentity(_ raw: JSONValue?) throws -> Identity {
