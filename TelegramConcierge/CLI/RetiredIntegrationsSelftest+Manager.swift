@@ -1,5 +1,9 @@
-import Combine
 import Foundation
+#if canImport(Combine)
+import Combine
+#else
+import OpenCombine
+#endif
 
 extension MidturnHarness {
 
