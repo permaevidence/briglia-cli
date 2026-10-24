@@ -20,10 +20,19 @@ Rules implemented here (the client re-checks every bound):
   * advisories carried separately with their affected ranges (OSV events),
     remediation (fixed version, Ubuntu pocket) or null + noFixReason, KEV
     flag and date; withdrawn or no-longer-published advisories of a fully
-    checked identity carried as withdrawn for 30 days, then dropped.
+    checked identity carried as withdrawn for 30 days, then dropped;
+  * lossless pruning (§9.5.12): a deb advisory whose every affected range
+    closes strictly below the identity's release floor
+    (security/deb-floors.json, the lowest version a client of that release
+    could have installed from an accepted origin) is not published. It can
+    never match on a client, so it changes no verdict and is never "cut for
+    size" (F3 is untouched). Never pruned: KEV, no fix, withdrawn,
+    `affected: unknown`, a non-ECOSYSTEM range, any version the client could
+    not parse, any identity without a floor, vendor identities.
 
 Usage:
   advisory_publish.py build --input BUNDLE --out PAYLOAD [--previous PAYLOAD] [--watchlist PATH] [--now ISO]
+                           [--floors PATH | --no-prune] [--report PATH]
   advisory_publish.py check PAYLOAD        (validate an existing payload)
 Exit: 0 written/valid, 2 refused (nothing to sign).
 """
@@ -55,6 +64,7 @@ ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{2,63}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9@+._:/-]{0,127}")
 RANGE_TYPES = ("ECOSYSTEM", "SEMVER", "GIT")
 EVENTS = ("introduced", "fixed", "last_affected", "limit")
+DEFAULT_FLOORS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "security", "deb-floors.json")
 
 
 class Refuse(Exception):
@@ -394,6 +404,101 @@ def deb_compare(a, b):
     return 0 if c == 0 else (-1 if c < 0 else 1)
 
 
+_DEB_UP = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.+~-:")
+_DEB_REV = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.+~")
+
+
+def client_deb_valid(v):
+    """True only for a version the CLIENT parses (LocalToolsVersion.parseDeb)
+    AND this module parses, written without surrounding whitespace. Pruning
+    compares only such versions, so a pruned advisory is one the client would
+    have evaluated to a definite "not affected", never to "cannot compare"."""
+    if type(v) is not str or not v or len(v.encode("utf-8")) > 256 or not v.isascii():
+        return False
+    if any(c.isspace() for c in v):
+        return False
+    rest = v
+    if ":" in rest:
+        e, rest = rest.split(":", 1)
+        if not e or not all(c in "0123456789" for c in e) or int(e) >= 1_000_000:
+            return False
+    up, rev = rest, None
+    if "-" in rest:
+        up, rev = rest.rsplit("-", 1)
+        if not rev:
+            return False
+    if not up or up[0] not in "0123456789":
+        return False
+    if not all(c in _DEB_UP for c in up) or (rev is not None and not all(c in _DEB_REV for c in rev)):
+        return False
+    return deb_compare(v, v) == 0
+
+
+def load_floors(path):
+    """identity key → floor version, from security/deb-floors.json. A missing
+    or malformed file disables pruning entirely (lossless by default); an
+    entry whose floor is null or not a client-parsable version has no floor."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except (OSError, ValueError) as e:
+        return None, f"floors unavailable ({e.__class__.__name__}): pruning disabled"
+    if type(d) is not dict or d.get("schema") != 1 or type(d.get("floors")) is not dict:
+        return None, "floors file malformed: pruning disabled"
+    out = {}
+    for k, v in d["floors"].items():
+        if type(k) is str and type(v) is dict and client_deb_valid(v.get("floor")):
+            out[k] = v["floor"]
+    return out, None
+
+
+def prunable(adv, floor):
+    """True only when `adv` provably matches no client version >= `floor`
+    (the client's isAffected would return a definite false for every one of
+    them), and it is not one of the advisories kept for other reasons."""
+    if not client_deb_valid(floor):
+        return False
+    if adv.get("withdrawn") or adv.get("kev") or adv.get("remediation") is None or adv.get("noFixReason") is not None:
+        return False
+    if adv.get("kind") is not None or adv.get("unknownOutside"):
+        return False
+    af = adv.get("affected")
+    if type(af) is not dict or not (af.get("ranges") or af.get("versions")):
+        return False
+    for v in af.get("versions") or []:
+        if not client_deb_valid(v) or deb_compare(v, floor) >= 0:
+            return False
+    for r in af.get("ranges") or []:
+        if r.get("type") != "ECOSYSTEM" or not r.get("events"):
+            return False
+        evs = []
+        for e in r["events"]:
+            if type(e) is not dict or len(e) != 1:
+                return False
+            (k, x), = e.items()
+            if k not in EVENTS or not client_deb_valid(x):
+                return False
+            if k == "introduced" and x == "0":
+                continue
+            if deb_compare(x, floor) >= 0:
+                return False          # every event strictly below the floor
+            evs.append((k, x))
+        if not evs:
+            return False              # "introduced 0" alone: always affected
+        # The highest event(s) must all close the range (fixed, last_affected
+        # or limit), whatever the tie order: every event applies to any
+        # v >= floor, so the last one decides and it is "not affected".
+        top = evs[0][1]
+        for _, x in evs[1:]:
+            if deb_compare(x, top) > 0:
+                top = x
+        if any(k == "introduced" for k, x in evs if deb_compare(x, top) == 0):
+            return False
+        if deb_in_range(floor, r["events"]) is not False:
+            return False              # belt and braces: the mirror agrees
+    return True
+
+
 # ---------------------------------------------------------------- build
 
 def previous_rows(prev):
@@ -407,7 +512,12 @@ def previous_rows(prev):
     return rows, advisories
 
 
-def build(watchlist_path, bundle, prev, now, platforms_path=None):
+def build(watchlist_path, bundle, prev, now, platforms_path=None, floors=None, report=None):
+    """floors: identity key → floor (load_floors); None prunes nothing.
+    report: a dict filled with per-source pruned counts (builder report only;
+    nothing about pruning is written into the payload)."""
+    if report is not None:
+        report.setdefault("pruned", {})
     platforms_path = platforms_path or advisory_libreoffice.DEFAULT_PLATFORMS
     ecos, ids = load_watchlist(watchlist_path)
     if not isinstance(bundle, dict) or bundle.get("schema") != 1:
@@ -461,6 +571,8 @@ def build(watchlist_path, bundle, prev, now, platforms_path=None):
         ikey = identity_key(ident)
         eco = ecos[f"deb:{ident['distro']}:{ident['release']}"]
         advs, statuses, complete = [], {}, True
+        floor = (floors or {}).get(ikey)
+        pruned, pruned_ids = [], set()
         for source in eco["sources"]:
             if source == "cisa-kev":
                 statuses[source] = ("ok", kev_src.get("checkedAt")) if kev_ok else ("failed", None)
@@ -489,6 +601,10 @@ def build(watchlist_path, bundle, prev, now, platforms_path=None):
                         a["withdrawnAt"] = since
                         a["_order"] = (2, 2, 0)
                     a["_source"] = source
+                    if floor is not None and prunable(a, floor):
+                        pruned.append(a)          # lossless: never "cut for size"
+                        pruned_ids.update(a["ids"])
+                        continue
                     converted.append(a)
                 advs += converted
                 statuses[source] = ("partial" if dropped else "ok", row["checkedAt"])
@@ -498,7 +614,9 @@ def build(watchlist_path, bundle, prev, now, platforms_path=None):
         # Withdrawn carry: advisories of the previous list that no source
         # still publishes, for an identity fully checked in this run.
         if complete and all(s[0] in ("ok", "partial") for s in statuses.values()):
-            present = {i for a in advs for i in a["ids"]}
+            # A pruned advisory is still published by its source: it must not
+            # be carried as withdrawn.
+            present = {i for a in advs for i in a["ids"]} | pruned_ids
             for old in prev_adv.get(ikey, []):
                 if set(old.get("ids", [])) & present:
                     continue
@@ -508,6 +626,16 @@ def build(watchlist_path, bundle, prev, now, platforms_path=None):
                 w = {k: old[k] for k in ("ids", "severity", "kev", "kevAdded", "affected", "remediation", "noFixReason") if k in old}
                 w.update({"withdrawn": True, "withdrawnAt": since, "_order": (2, 2, 0), "_source": None})
                 advs.append(w)
+        # Sentinel: when pruning would leave no live advisory at all, keep the
+        # first pruned one, so a client version it cannot parse still reads
+        # "cannot be evaluated" exactly as before (never "no known issue").
+        if pruned and not any(not a.get("withdrawn") for a in advs):
+            pruned.sort(key=lambda a: a["_order"])
+            advs.append(pruned.pop(0))
+        if report is not None:
+            for a in pruned:
+                key = f"{ikey} {a['_source']}"
+                report["pruned"][key] = report["pruned"].get(key, 0) + 1
         # Trim to the per-identity cap: KEV, critical, newest first.
         advs = cap_advisories(advs, statuses)
         coverage += coverage_rows(ikey, eco["sources"], statuses, prev_rows)
@@ -808,6 +936,9 @@ def main(argv=None):
     b.add_argument("--previous")
     b.add_argument("--watchlist", default=DEFAULT_WATCHLIST)
     b.add_argument("--now")
+    b.add_argument("--floors", default=DEFAULT_FLOORS)
+    b.add_argument("--no-prune", action="store_true")
+    b.add_argument("--report")
     c = sub.add_parser("check")
     c.add_argument("payload")
     args = p.parse_args(argv)
@@ -824,7 +955,11 @@ def main(argv=None):
                 raw = f.read()
             prev = check_payload(raw)   # the previous list must itself be valid
         now = parse_iso(args.now) if args.now else datetime.datetime.now(datetime.timezone.utc).timestamp()
-        data = build(args.watchlist, bundle, prev, now)
+        floors, why = (None, "pruning disabled (--no-prune)") if args.no_prune else load_floors(args.floors)
+        if why:
+            print(f"⚠ {why}", file=sys.stderr)
+        report = {}
+        data = build(args.watchlist, bundle, prev, now, floors=floors, report=report)
         with open(args.out, "wb") as f:
             f.write(data)
         d = json.loads(data)
@@ -833,6 +968,14 @@ def main(argv=None):
             st[c["status"]] = st.get(c["status"], 0) + 1
         print(f"✔ advisory list payload: sequence {d['sequence']}, {len(d['entries'])} identities, "
               f"{sum(len(e['advisories']) for e in d['entries'])} advisories, {len(data)} bytes, coverage {st}")
+        pr = report.get("pruned", {})
+        print(f"  lossless pruning: {sum(pr.values())} advisories below their release floor not published"
+              + ("" if floors is not None else " (disabled)")
+              + "".join(f"\n    {k}: {v}" for k, v in sorted(pr.items())))
+        if args.report:
+            with open(args.report, "w") as f:
+                json.dump({"bytes": len(data), "coverage": st, "pruned": pr,
+                           "floorsLoaded": floors is not None, "floorIdentities": len(floors or {})}, f, indent=1, sort_keys=True)
         return 0
     except (Refuse, ValueError, KeyError, TypeError, OSError) as e:
         print(f"✖ refused: {e}", file=sys.stderr)

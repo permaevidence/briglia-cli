@@ -14,7 +14,8 @@ user's own tools), end to end and hermetic:
      no repeat, one identical GET with no query and no package names,
      `upgradecheck off` making ZERO requests;
   6. the native Debian ordering against `dpkg --compare-versions` when dpkg
-     exists (Linux CI);
+     exists (Linux CI), and the pruning validity mirror against the client
+     (§9.5.12, every platform);
   7. static: every development-only command refuses in stamped builds; the
      compiled advisory key set is still the marked placeholder.
 
@@ -77,7 +78,8 @@ def selftests(binary):
     # v17-v20 (§9.5.10, §9.5.11): Node and LibreOffice sources, publish job.
     for script, label in (("advisory_node_test.py", "Node.js vendor advisories"),
                           ("advisory_libreoffice_test.py", "LibreOffice CNA adapter + platform disposition"),
-                          ("advisory_publish_job_test.py", "separate publish job (fake contents API)")):
+                          ("advisory_publish_job_test.py", "separate publish job (fake contents API)"),
+                          ("advisory_prune_test.py", "lossless pruning below the release floor (§9.5.12)")):
         rc, out = run([sys.executable, str(ROOT / "scripts" / script)])
         check(f"publisher: {label}", rc == 0, out)
         print("    " + (out.strip().splitlines() or ["?"])[-1])
@@ -390,6 +392,33 @@ def e2e(binary):
         ch.srv.shutdown()
 
 
+def prune_parity(binary):
+    """§9.5.12: every version the publisher treats as client-parsable for
+    pruning parses in the REAL client, and orders exactly as the publisher's
+    mirror does (otherwise a pruned advisory might have been "cannot
+    compare" on the client). Runs on every platform (the binary is native)."""
+    floors = json.loads((ROOT / "security/deb-floors.json").read_text())["floors"]
+    vs = [v["floor"] for v in floors.values() if v.get("floor")]
+    vs += ["0", "1.0", "1.0-1", "1.0~rc1", "1:1.0", "999999:1", "1:2:3-4", "1.0-a-b", "1.0+dfsg-1.1", "1.0~~", "7:5.1.2-3",
+           "1:x", "1.0-", "x1", ":1", "1.0 ", "1000000:1", "\u0661:1", "1.0-1_2", "1.0-a:b", "1" * 257, "2.30-2", "1.0a"]
+    rnd = random.Random(1024)
+    parts = ["0", "1", "2", "9", "a", "Z", "~", "+", ".", "-", ":", "_"]
+    for _ in range(400):
+        vs.append(rnd.choice(["1", "0", "2:", "x"]) + "".join(rnd.choice(parts) for _ in range(rnd.randrange(1, 7))))
+    pairs = [(a, a) for a in vs] + [(rnd.choice(vs), rnd.choice(vs)) for _ in range(1500)]
+    pairs = [(a, b) for a, b in pairs if "\n" not in a + b and " " not in a + b]
+    rc, out = run([binary, "__local-tools-version-compare", "--scheme", "deb"], stdin="\n".join(f"{a} {b}" for a, b in pairs) + "\n")
+    ours = out.strip().splitlines()
+    bad = []
+    for (a, b), swift in zip(pairs, ours):
+        if pub.client_deb_valid(a) and pub.client_deb_valid(b):
+            want = str(pub.deb_compare(a, b))
+            if swift != want:
+                bad.append((a, b, swift, want))
+    check(f"prune parity: client-valid versions parse and order identically in the client ({len(pairs)} pairs)",
+          rc == 0 and not bad and len(ours) == len(pairs), bad[:10])
+
+
 def dpkg_parity(binary):
     if not shutil.which("dpkg"):
         print("· dpkg ordering cross-check skipped: no dpkg on this machine (runs on Linux CI)")
@@ -461,6 +490,7 @@ def main():
     vendor_parity(binary)
     signing(binary)
     e2e(binary)
+    prune_parity(binary)
     dpkg_parity(binary)
     static()
     print(f"\n{'ALL SECURITY PHASE 3 CHECKS PASSED' if failed == 0 else f'{failed} FAILED'} ({passed} passed)")
