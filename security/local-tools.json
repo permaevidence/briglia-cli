@@ -1,5 +1,5 @@
 {
- "_comment": "Watchlist of the signed local-tools advisory list (security plan v16 \u00a79.5.2 S1, \u00a79.5.3). Read by scripts/advisory_fetch.py (watch job, no secrets) and scripts/advisory_publish.py (publisher). At most 64 identities per list. Not covered yet (clients show 'unknown'): Ubuntu 22.04, Raspbian 32-bit, Homebrew formulae/casks (OSV's Homebrew data is too thin to say 'no known issues'), vendor builds (Node, Python, Chrome, LibreOffice.app).",
+ "_comment": "Watchlist of the signed local-tools advisory list (security plan v16 \u00a79.5.2 S1, \u00a79.5.3; v17-v19 \u00a79.5.10 vendor builds). Read by scripts/advisory_fetch.py (watch job, no secrets) and scripts/advisory_publish.py (publisher). At most 64 identities per list. Vendor identities: official Node.js builds (macOS, Linux) and the LibreOffice website build (macOS). Not covered (clients show 'unknown'): Ubuntu 22.04, Raspbian 32-bit, Homebrew formulae/casks (owner decision H2: macOS gets a weekly 'update waiting' message instead), python.org Python, Chrome.",
  "ecosystems": [
   {
    "ecosystem": "deb:debian:12",
@@ -30,6 +30,23 @@
    "sources": [
     "osv:Ubuntu:24.04:LTS",
     "osv:Ubuntu:Pro:24.04:LTS",
+    "cisa-kev"
+   ]
+  },
+  {
+   "ecosystem": "vendor:nodejs.org:node",
+   "sources": [
+    "nodejs-security-wg",
+    "nodejs-dist",
+    "nodejs-schedule",
+    "cisa-kev"
+   ]
+  },
+  {
+   "ecosystem": "vendor:documentfoundation:libreoffice",
+   "sources": [
+    "tdf-advisories",
+    "cve-cna",
     "cisa-kev"
    ]
   }
@@ -370,6 +387,27 @@
    "kind": "deb",
    "release": "24.04",
    "source": "python3.12"
+  },
+  {
+   "kind": "vendor",
+   "vendor": "nodejs.org",
+   "product": "node",
+   "platform": "darwin",
+   "flavour": "official"
+  },
+  {
+   "kind": "vendor",
+   "vendor": "nodejs.org",
+   "product": "node",
+   "platform": "linux",
+   "flavour": "official"
+  },
+  {
+   "kind": "vendor",
+   "vendor": "documentfoundation",
+   "product": "libreoffice",
+   "platform": "darwin",
+   "flavour": "official"
   }
  ],
  "schema": 1

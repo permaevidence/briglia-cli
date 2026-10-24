@@ -1,0 +1,1915 @@
+<!DOCTYPE html>
+<html class="x86 no-js" lang="en-us" dir="ltr" data-donateurl="/donate/">
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="content-type">
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1" name="viewport">
+<meta name="description" content="List of security advisories related to LibreOffice.">
+<meta
+    name="translations"
+    data-credits-name="Name"
+    data-credits-commits="Commits"
+    data-credits-joined="Joined"
+    data-credits-edits="Edits"
+    data-donate-monthly="Monthly donation to The Document Foundation"
+    data-donate-quarterly="Quarterly donation to The Document Foundation"
+    data-donate-yearly="Yearly donation to The Document Foundation"
+>
+<title>Security advisories — LibreOffice</title>
+<link href="/favicon.ico" rel="shortcut icon">
+<link rel="stylesheet" type="text/css" href="/css/normalize.580818700724d42d7fcc4979b0197971fca1c6d2e0286769237a0ac897df5512.css">
+<link rel="stylesheet" type="text/css" href="/css/default.bd4e79ba00efd3ffc1f80dbe4ad1f132f24edb5987334570ed4fdfc6ffb9afdf.css">
+
+
+    <link rel="alternate" hreflang="en-us" href="https://www.libreoffice.org/security/">
+    <link rel="alternate" href="https://www.libreoffice.org/security/" hreflang="x-default">
+</head>
+<body class="html-ltr grid-wrapper">
+    <div id="header-lang" class="full-width">
+    <div class="fullWidth-center">
+        <div class="lang-fallback-container hide" aria-hidden="true">
+<label for="languages-site-header-fallback-nav" class="lang-fallback">Language:</label>
+<select id="languages-site-header-fallback-nav" class="lang-fallback">
+    <option value="English (US)" data-lang="en-us" data-url="https://www.libreoffice.org/security/">English (US)</option></select>
+</div>
+<div class="lang-container">
+    <label for="languages-site-header-input">Language:</label>
+    <input class="keepDatalist" type="text" list="languages-site-header" id="languages-site-header-input" autocomplete="off">
+    <datalist id="languages-site-header">
+        <option value="English (US)" data-lang="en-us" href="https://www.libreoffice.org/security/"></option></datalist>
+</div>
+
+    </div>
+</div>
+<div id="nav-search-wrapper" class="full-width">
+    <div id="nav-wrapper" class="full-width">
+        <nav class="nav-main fullWidth-center">
+            <h2>
+                <a href='/' title="LibreOffice">
+                    <img class="logo" alt="LibreOffice" src="/media/libreoffice-tdf-logo.svg">
+                </a>
+            </h2>
+            <ul>
+                <li><a href='/download/'>Download</a></li>
+                <li><a href='/who-are-we/'>About Us</a></li>
+                <li><a href='/get-help/'>Get Help</a></li>
+                <li><a href='/improve-it/'>Community</a></li>
+                <li><a href="https://blog.documentfoundation.org/">Blog</a></li>
+                <li><button class="search-button" tabindex="0" aria-label="Search"></button></li>
+                
+                <li><a class="button donate-button" href='/donate/'>Donate</a></li>
+                
+            </ul>
+        </nav>
+    </div>
+    <div class="fastSearch hide full-width">
+        <search class="fullWidth-center">
+            <div class="magnifying"></div>
+            <input id="searchInput" tabindex="0" type="search">
+            <div class="close">x</div>
+            <ul id="searchResults"></ul>
+        </search>
+    </div>
+</div>
+
+<section class="content">
+    <h1>Security Advisories</h1>
+<h2>Addressed in LibreOffice 26.2.5/26.8.0</h2>
+<details id="cve-2026-63266">
+<summary>
+CVE-2026-63266 Arbitrary file write via calcext:data-mappings, sql provider and Firebird backup functionality
+</summary>
+<p><strong>Announced</strong>: Oct 5, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5/26.8.0</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice Calc can link a cell range to an external data source, and the link is saved in the document.</p>
+<p>Through such a link a document could open an embedded Firebird database that wrote a file to any location the user could write to.</p>
+<p>In fixed versions an embedded Firebird database can open or create files only inside its own private directory.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 or &gt;= 26.8.0 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Thomas Rinsma and Edoardo Geraci from Codean Labs for reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63266" title="CVE-2026-63266" target="_blank">CVE-2026-63266</a></p>
+
+</details>
+
+<details id="cve-2026-63267">
+<summary>
+CVE-2026-63267 LFI and GET SSRF via calcext:data-mappings and csv provider
+</summary>
+<p><strong>Announced</strong>: Oct 5, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5/26.8.0</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice Calc can link a cell range to an external csv data source, and the link is saved in the document.</p>
+<p>Such a link was fetched while the document loaded, so opening a document could read a local file into the sheet, or make a request to a host of the document&rsquo;s choosing.</p>
+<p>In fixed versions external data links are updated under the same link update control as other links in a spreadsheet.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 or &gt;= 26.8.0 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Thomas Rinsma and Edoardo Geraci from Codean Labs for reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63267" title="CVE-2026-63267" target="_blank">CVE-2026-63267</a></p>
+
+</details>
+
+<details id="cve-2026-63268">
+<summary>
+CVE-2026-63268 LFI via calcext:data-mappings, sql provider and sdbc:flat:file:// db href
+</summary>
+<p><strong>Announced</strong>: Oct 5, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5/26.8.0</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice Calc can link a cell range to an external data source, and the link is saved in the document.</p>
+<p>A link of the sql type could name a folder of local text files as a database, so opening a document could read a local text file into the sheet.</p>
+<p>In fixed versions only the csv, html and xml data providers are restored when a document is loaded.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 or &gt;= 26.8.0 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Thomas Rinsma and Edoardo Geraci from Codean Labs for reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63268" title="CVE-2026-63268" target="_blank">CVE-2026-63268</a></p>
+
+</details>
+
+<details id="cve-2026-63269">
+<summary>
+CVE-2026-63269 LFI and GET SSRF via GStreamer and HLS playlists
+</summary>
+<p><strong>Announced</strong>: Oct 5, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5/26.8.0</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice can link to audio and video files from a document, and on Linux it plays them with GStreamer.</p>
+<p>A linked media file could be an HLS playlist that made GStreamer read the local files and remote URLs it listed while the document loaded, and their contents could end up in the document.</p>
+<p>In fixed versions LibreOffice does not follow playlists that name further resources, and linked media is under link update control.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 or &gt;= 26.8.0 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Thomas Rinsma and Edoardo Geraci from Codean Labs for reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63269" title="CVE-2026-63269" target="_blank">CVE-2026-63269</a></p>
+
+</details>
+
+<details id="cve-2026-63270">
+<summary>
+CVE-2026-63270 Environment/ini-file leaks
+</summary>
+<p><strong>Announced</strong>: Oct 5, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5/26.8.0</p>
+<p><strong>Description</strong>:</p>
+<p>URLs could be constructed which expanded environment variable or INI file values, so potentially sensitive information could be exfiltrated to a remote server on opening a document containing such links.</p>
+<p>The check added for CVE-2024-12426 did not cover every place a document can supply a URL. XForms instance data and the Calc csv and sql data providers still reached the expansion.</p>
+<p>In fixed versions these places refuse URLs with internal schemes when the URL comes from the document.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 or &gt;= 26.8.0 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Thomas Rinsma and Edoardo Geraci from Codean Labs for reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63270" title="CVE-2026-63270" target="_blank">CVE-2026-63270</a></p>
+
+</details>
+
+<details id="cve-2026-63277">
+<summary>
+CVE-2026-63277 RCE via calcext:data-mappings, sql provider and jdbc connector
+</summary>
+<p><strong>Announced</strong>: Oct 5, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5/26.8.0</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice Calc can link a cell range to an external data source, and the link is saved in the document.</p>
+<p>A document could name a Java database driver for such a link to be loaded from a remote location, so opening the document could run Java code from that location.</p>
+<p>In fixed versions an entry in a Java class path has to be a file URL.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 or &gt;= 26.8.0 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Rick de Jager of the V12 security team, and to Thomas Rinsma and Edoardo Geraci from Codean Labs, for independently reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63277" title="CVE-2026-63277" target="_blank">CVE-2026-63277</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 26.2.5</h2>
+<details id="cve-2026-63272">
+<summary>
+CVE-2026-63272 Heap buffer overflow in WMF text record import
+</summary>
+<p><strong>Announced</strong>: Sep 21, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice can import WMF graphics, which may be embedded in documents.</p>
+<p>A heap buffer overflow existed when importing a text record that carries its own character advance widths.
+The count of advance values and the length of the text were read separately from the file and were not required to agree, so drawing the text walked the advance array by character position and ran past its end when the array was the shorter of the two.</p>
+<p>In fixed versions an advance array shorter than its text is ignored.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Claude and Ada Logics &ndash; found by Anthropic using agents to study the security of open-source projects, with Ada Logics validating and reporting.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63272" title="CVE-2026-63272" target="_blank">CVE-2026-63272</a></p>
+
+</details>
+
+<details id="cve-2026-63273">
+<summary>
+CVE-2026-63273 Heap buffer overflow in PDF import encryption handling
+</summary>
+<p><strong>Announced</strong>: Sep 21, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice Draw can import PDF documents.</p>
+<p>A heap buffer overflow existed when importing an encrypted document.
+The length of the decryption key was taken from the document&rsquo;s own encryption dictionary and was used to fill a fixed size key buffer without being checked against it, so a length larger than that buffer wrote past its end.</p>
+<p>In fixed versions a declared key length larger than the buffer is rejected.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Claude and Ada Logics &ndash; found by Anthropic using agents to study the security of open-source projects, with Ada Logics validating and reporting.</p>
+<p>Thanks also to Anonymous working with TrendAI Zero Day Initiative for reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63273" title="CVE-2026-63273" target="_blank">CVE-2026-63273</a></p>
+
+</details>
+
+<details id="cve-2026-63274">
+<summary>
+CVE-2026-63274 Heap buffer overflow in PDF import stream handling
+</summary>
+<p><strong>Announced</strong>: Sep 21, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice Draw can import PDF documents.</p>
+<p>A heap buffer overflow existed when importing a stream object.
+The length of the stream was taken from the object&rsquo;s own dictionary and was not checked against the number of bytes actually present, so copying the stream read and wrote past the end of the buffer holding it.</p>
+<p>In fixed versions the declared length is clamped to the bytes actually read.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Claude and Ada Logics &ndash; found by Anthropic using agents to study the security of open-source projects, with Ada Logics validating and reporting.</p>
+<p>Thanks also to Anonymous working with TrendAI Zero Day Initiative for reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63274" title="CVE-2026-63274" target="_blank">CVE-2026-63274</a></p>
+
+</details>
+
+<details id="cve-2026-63275">
+<summary>
+CVE-2026-63275 Stack buffer overflow in CFF font hint handling
+</summary>
+<p><strong>Announced</strong>: Sep 21, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice can read CFF fonts, which may be embedded in documents.</p>
+<p>A stack buffer overflow existed when reading the hints of a glyph.
+The number of hints was checked against the wrong bound, so a glyph declaring more hints than the array can hold wrote past its end.</p>
+<p>In fixed versions the hint count is checked against the capacity the array really has.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Claude and Ada Logics &ndash; found by Anthropic using agents to study the security of open-source projects, with Ada Logics validating and reporting.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63275" title="CVE-2026-63275" target="_blank">CVE-2026-63275</a></p>
+
+</details>
+
+<details id="cve-2026-63276">
+<summary>
+CVE-2026-63276 Stack buffer overflow in CFF to Type 1 font conversion
+</summary>
+<p><strong>Announced</strong>: Sep 21, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice converts CFF fonts to Type 1 when it subsets a font, which happens when a document is exported to PDF, and CFF fonts may be embedded in documents.</p>
+<p>A stack buffer overflow existed in that conversion. The converted operators were written into a fixed size buffer with no check that they still fit, so a glyph emitting many operators wrote past the end of the buffer.</p>
+<p>In fixed versions the remaining capacity is tracked and the conversion stops when it is used up.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Claude and Ada Logics &ndash; found by Anthropic using agents to study the security of open-source projects, with Ada Logics validating and reporting.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63276" title="CVE-2026-63276" target="_blank">CVE-2026-63276</a></p>
+
+</details>
+
+<details id="cve-2026-63278">
+<summary>
+CVE-2026-63278 Package URLs can be used to exfiltrate arbitrary INI file values and environment variables
+</summary>
+<p><strong>Announced</strong>: Sep 21, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5</p>
+<p><strong>Description</strong>:</p>
+<p>URLs could be constructed which expanded environment variable or INI file values, so potentially sensitive information could be exfiltrated to a remote server on opening a document containing such links.</p>
+<p>The check added for CVE-2024-12426 did not recognise every way of naming the package content provider, so a URL that named it differently still reached the expansion.</p>
+<p>In fixed versions the package content provider is matched when the URL is checked.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Darren Xuan of Tanto Security for reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63278" title="CVE-2026-63278" target="_blank">CVE-2026-63278</a></p>
+
+</details>
+
+<details id="cve-2026-63279">
+<summary>
+CVE-2026-63279 Out of bounds read in PICT image import
+</summary>
+<p><strong>Announced</strong>: Sep 21, 2026</p>
+<p><strong>Fixed in</strong>: LibreOffice 26.2.5</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice can import PICT images, which may be embedded in documents.</p>
+<p>An out of bounds read existed when importing an image that uses a colour palette.
+The palette index held in the image data was used without being checked against the number of entries the palette has, so an index past the last entry read memory outside the palette.</p>
+<p>In fixed versions the palette index is limited to the entries present.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.5 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Himanshu Anand for reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-63279" title="CVE-2026-63279" target="_blank">CVE-2026-63279</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 26.2.4</h2>
+<details id="cve-2026-8356">
+<summary>
+CVE-2026-8356 Stack buffer overflow in PPT presentation import
+</summary>
+<p><strong>Announced:</strong> Jun 15, 2026</p>
+<p><strong>Fixed in:</strong> LibreOffice 26.2.4</p>
+<p><strong>Description</strong>:</p>
+<p>A stack buffer overflow existed when importing a colour-replacement record. Two fixed-size colour tables were filled from the file, but the write position was not reset between the two passes over the record, so a file whose combined colour counts exceeded the table size wrote past the end of the tables on the stack.</p>
+<p>In fixed versions the unused second pass is no longer read into those tables.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.4 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Anthropic for discovering this issue using automated analysis with Claude.</p>
+<p>Thanks to Arthur Chan of Ada Logics for validating and reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-8356" title="CVE-2026-8356" target="_blank">CVE-2026-8356</a></p>
+
+</details>
+
+<details id="cve-2026-8357">
+<summary>
+CVE-2026-8357 Heap buffer overflow in Calc formula compilation
+</summary>
+<p><strong>Announced:</strong> Jun 15, 2026</p>
+<p><strong>Fixed in:</strong> LibreOffice 26.2.4</p>
+<p><strong>Description</strong>:</p>
+<p>A heap buffer overflow existed when compiling a very long formula made up of many opening tokens. The array that tracks nesting depth was allocated one element too small for that worst case, so such a formula wrote one element past its end.</p>
+<p>In fixed versions the array is sized to hold the largest possible nesting.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.4 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Anthropic for discovering this issue using automated analysis with Claude.</p>
+<p>Thanks to Trail of Bits for triaging and validating this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-8357" title="CVE-2026-8357" target="_blank">CVE-2026-8357</a></p>
+
+</details>
+
+<details id="cve-2026-8358">
+<summary>
+CVE-2026-8358 Heap buffer overflow in spreadsheet tracked-changes import
+</summary>
+<p><strong>Announced:</strong> Jun 15, 2026</p>
+<p><strong>Fixed in:</strong> LibreOffice 26.2.4</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice Calc can import tracked changes from a spreadsheet document.</p>
+<p>A heap buffer overflow existed when a document reused the same change identifier for two different kinds of change. The importer then treated one change object as a different, larger type and wrote past the end of its allocation.</p>
+<p>In fixed versions records with a duplicate identifier are rejected.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.4 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Anthropic for discovering this issue using automated analysis with Claude.</p>
+<p>Thanks to Arthur Chan of Ada Logics for validating and reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-8358" title="CVE-2026-8358" target="_blank">CVE-2026-8358</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 26.2.3/25.8.7</h2>
+<details id="cve-2026-6040">
+<summary>
+CVE-2026-6040 Heap use-after-free in ODF number-format blank-width parsing
+</summary>
+<p><strong>Announced:</strong> Jun 15, 2026</p>
+<p><strong>Fixed in:</strong> LibreOffice 26.2.3 and LibreOffice 25.8.7</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports a number format option that pads a number with blank space as wide as a chosen character.</p>
+<p>A heap use-after-free existed when importing these blank-width characters from an ODF number format. A position value read from the document was not checked against the length of the format-code string, so a malformed number format could be processed against memory outside that string.</p>
+<p>In fixed versions the position is bounds-checked before use.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.3 or &gt;= 25.8.7 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Anthropic for discovering this issue using automated analysis with Claude.</p>
+<p>Thanks to Trail of Bits for triaging and validating this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-6040" title="CVE-2026-6040" target="_blank">CVE-2026-6040</a></p>
+
+</details>
+
+<details id="cve-2026-6039">
+<summary>
+CVE-2026-6039 Heap buffer overflow in DXF polyline import
+</summary>
+<p><strong>Announced:</strong> Jun 15, 2026</p>
+<p><strong>Fixed in:</strong> LibreOffice 26.2.3 and LibreOffice 25.8.7</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice can import drawings in the DXF format used by CAD software.</p>
+<p>A heap buffer overflow existed when importing a DXF polyline. The point count taken from the file was truncated to a 16-bit value when the point buffer was sized, while the full count was used to fill it, so a polyline whose point count exceeded the 16-bit range was written past the end of the buffer.</p>
+<p>In fixed versions such oversized polylines are rejected.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.3 or &gt;= 25.8.7 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Anthropic for discovering this issue using automated analysis with Claude.</p>
+<p>Thanks to Trail of Bits for triaging and validating this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-6039" title="CVE-2026-6039" target="_blank">CVE-2026-6039</a></p>
+
+</details>
+
+<details id="cve-2026-6045">
+<summary>
+CVE-2026-6045 Heap buffer overflow in EMF&#43; gradient brush import
+</summary>
+<p><strong>Announced:</strong> Jun 15, 2026</p>
+<p><strong>Fixed in:</strong> LibreOffice 26.2.3 and LibreOffice 25.8.7</p>
+<p><strong>Description</strong>:</p>
+<p>A heap buffer overflow existed when importing an EMF+ gradient brush. The number of gradient blend points was read from the file and used to compute an allocation size, but that multiplication could overflow, so a small buffer was allocated and then filled as if it were large, writing past its end.</p>
+<p>In fixed versions the blend-point count is checked against the data actually available before allocating.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.3 or &gt;= 25.8.7 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Anthropic for discovering this issue using automated analysis with Claude.</p>
+<p>Thanks to Trail of Bits for triaging and validating this issue.</p>
+<p>Thanks also to Anonymous working with TrendAI Zero Day Initiative for reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-6045" title="CVE-2026-6045" target="_blank">CVE-2026-6045</a></p>
+
+</details>
+
+<details id="cve-2026-6047">
+<summary>
+CVE-2026-6047 Heap buffer overflow in OOXML text box element import
+</summary>
+<p><strong>Announced:</strong> Jun 15, 2026</p>
+<p><strong>Fixed in:</strong> LibreOffice 26.2.3 and LibreOffice 25.8.7</p>
+<p><strong>Description</strong>:</p>
+<p>A heap buffer overflow existed when replaying deferred parser events for a text box element. A handler object was assumed to be of one type and written to at that type&rsquo;s field layout, but it could be a smaller object, so the write landed past the end of the allocation.</p>
+<p>In fixed versions the type is checked before the write.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.3 or &gt;= 25.8.7 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Anthropic for discovering this issue using automated analysis with Claude.</p>
+<p>Thanks to Trail of Bits for triaging and validating this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-6047" title="CVE-2026-6047" target="_blank">CVE-2026-6047</a></p>
+
+</details>
+
+<details id="cve-2026-4430">
+<summary>
+CVE-2026-4430 Heap Buffer Overflow in AgileEngine
+</summary>
+<p><strong>Announced:</strong> May 06, 2026</p>
+<p><strong>Fixed in:</strong> LibreOffice 26.2.3 and LibreOffice 25.8.7</p>
+<p><strong>Description</strong>:</p>
+<p>Out-of-bounds write vulnerability in The Document Foundation LibreOffice via crafted OOXML documents with mismatched encryption salt parameters.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 26.2.3 or &gt;= 25.8.7 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Duc Anh Nguyen (@Danzation) for finding and reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2026-4430" title="CVE-2026-4430" target="_blank">CVE-2026-4430</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 25.2.4/25.8.0</h2>
+<details id="cve-2025-14714">
+<summary>
+CVE-2025-14714 TCC Bypass via Inherited Permissions in Bundled Interpreter
+</summary>
+<p><strong>Announced:</strong> Dec 15, 2025</p>
+<p><strong>Fixed in:</strong> LibreOffice 25.2.4</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice typically bundles python to provide scripting support</p>
+<p>On macOS, an Authentication Bypass vulnerability existed where the bundled python launcher inheritd the Transparency, Consent, and Control (TCC) permissions granted by the user to the main application bundle.</p>
+<p>By executing the bundled interpreter directly the attacker&rsquo;s scripts run with the application&rsquo;s TCC privileges.</p>
+<p>In fixed versions parent-constraints are used to allow only the main application to launch interpreter with those permissions.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 25.2.4 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Karol Mazurek of AFINE for reporting this issue.</p>
+<p>Thanks to Christian Lohmaier of TDF for providing the fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2025-14714" title="CVE-2025-14714" target="_blank">CVE-2025-14714</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 24.8.6/25.2.2</h2>
+<details id="cve-2025-2866">
+<summary>
+CVE-2025-2866 PDF signature forgery with adbe.pkcs7.sha1 SubFilter
+</summary>
+<p><strong>Announced:</strong> Apr 27, 2025</p>
+<p><strong>Fixed in:</strong> LibreOffice 24.8.6 and 25.2.2</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports digital signatures when opening PDF documents, presenting information if the signature is valid or not.</p>
+<p>In the affected versions of LibreOffice a flaw in the verification code for adbe.pkcs7.sha1 signatures could cause invalid signatures to be accepted as valid</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 24.8.6 or 25.2.2 to avoid this problem.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Juraj Šarinay for discovering this issue and for providing a fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2025-2866" title="CVE-2025-2866" target="_blank">CVE-2025-2866</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 24.8.5/25.2.1</h2>
+<details id="cve-2025-1080">
+<summary>
+CVE-2025-1080 Macro URL arbitrary script execution
+</summary>
+<p><strong>Announced:</strong> March 4, 2025</p>
+<p><strong>Fixed in:</strong> LibreOffice 24.8.5 and 25.2.1</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports Office URI Schemes to enable browser integration of LibreOffice with MS SharePoint server. An additional scheme &lsquo;vnd.libreoffice.command&rsquo; specific to LibreOffice was added.</p>
+<p>In the affected versions of LibreOffice a link in a browser using that scheme could be constructed with an embedded inner URL that when passed to LibreOffice could call internal macros with arbitrary arguments.</p>
+<p>In the fixed versions this circumvention has been blocked. All users are recommended to upgrade to LibreOffice &gt;= 24.8.5 or 25.2.1</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Amel Bouziane-Leblond for finding and reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2025-1080" title="CVE-2025-1080" target="_blank">CVE-2025-1080</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 24.8.5</h2>
+<details id="cve-2025-0514">
+<summary>
+CVE-2025-0514 Executable hyperlink Windows path targets executed unconditionally on activation
+</summary>
+<p><strong>Announced:</strong> February 25, 2025</p>
+<p><strong>Fixed in:</strong> LibreOffice 24.8.5</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice has a feature where hyperlinks in a document can be activated by CTRL+click. Under Windows the link can be passed to the system ShellExecute function for handling. LibreOffice uses a mechanism to block paths to executable targets to ShellExecute to avoid attempting to launch executables.</p>
+<p>In versious &lt; 24.8.5 this mechanism could be bypassed by use of non-file URLs that could be interpreted by ShellExecute as Windows file paths.</p>
+<p>In the fixed versions this circumvention has been blocked. All Windows users are recommended to upgrade to LibreOffice &gt;= 24.8.5.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Amel Bouziane-Leblond for finding and reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity and Stephen Bergman of allotropia for providing a fix.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2025-0514" title="CVE-2025-0514" target="_blank">CVE-2025-0514</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 24.8.4</h2>
+<details id="cve-2024-12425">
+<summary>
+CVE-2024-12425 Path traversal leading to arbitrary .ttf file write
+</summary>
+<p><strong>Announced:</strong> Jan 7, 2025</p>
+<p><strong>Fixed in:</strong> LibreOffice 24.8.4</p>
+<p><strong>Description:</strong></p>
+<p>Various file formats can contain embedded font files which are extracted to temporary files which are added to LibreOffice&rsquo;s font lists.</p>
+<p>Prior to this fix, an attacker could craft a document with embedded font file path names which could cause LibreOffice to write the contents of the embedded font to a filename in an arbitrary location the user has permission to write to. Albeit always with a &ldquo;.ttf&rdquo; suffix.</p>
+<p>Users are recommended to upgrade to 24.8.4 to avoid this issue.</p>
+<p><strong>Credit:</strong></p>
+<p>Thanks to Thomas Rinsma of Codean Labs for finding and reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-12425" title="CVE-2024-12425" target="_blank">CVE-2024-12425</a></p>
+
+</details>
+
+<details id="cve-2024-12426">
+<summary>
+CVE-2024-12426 URL fetching can be used to exfiltrate arbitrary INI file values and environment variables
+</summary>
+<p><strong>Announced:</strong> Jan 7, 2025</p>
+<p><strong>Fixed in:</strong> LibreOffice 24.8.4</p>
+<p><strong>Description:</strong></p>
+<p>URLs could be constructed which expanded environmental variables or INI file values, so potentially sensitive information could be exfiltrated to a remote server on opening a document containing such links.</p>
+<p>Prior to this fix, documents could include links that made use of an internal feature that expands environmental variables and INI file values in URLS. In the fixed version, the expansion feature is not available in document hosted urls.</p>
+<p>Users are recommended to upgrade to 24.8.4 to avoid this issue.</p>
+<p><strong>Credit:</strong></p>
+<p>Thanks to Thomas Rinsma of Codean Labs for finding and reporting this issue.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-12426" title="CVE-2024-12426" target="_blank">CVE-2024-12426</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 24.8.0/24.2.5</h2>
+<details id="cve-2024-7788">
+<summary>
+CVE-2024-7788 Signatures in &#34;repair mode&#34; should not be trusted
+</summary>
+<p><strong>Announced:</strong> Sep 17, 2024</p>
+<p><strong>Fixed in:</strong> LibreOffice 24.2.5 and 24.8.0</p>
+<p><strong>Description:</strong></p>
+<p>Various file formats are based on the zip file format. In cases of corruption of the underlying zip&rsquo;s central directory, LibreOffice offers a &ldquo;repair mode&rdquo; which will attempt to recover the zip file structure by scanning for secondary local file headers in the zip to reconstruct the document.</p>
+<p>Prior to this fix, in the case of digitally signed zip files, an attacker could construct a document which, when repaired, reported a signature status not valid for the recovered file.</p>
+<p>Previously if verification failed the user could choose to ignore the failure and enable the macros anyway.</p>
+<p>Repair document mode has to be inherently tolerant, so now in fixed versions all signatures are implied to be invalid in recovery mode.</p>
+<p>Users are recommended to upgrade to 24.2.5 or 24.8.0 to gain this enhacement.</p>
+<p><strong>Credit:</strong></p>
+<p>Thanks to Yufan You for finding and reporting this issue.</p>
+<p>Thanks to Michael Stahl of allotropia for providing a fix.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-7788" title="CVE-2024-7788" target="_blank">CVE-2024-7788</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 24.2.5</h2>
+<details id="cve-2024-6472">
+<summary>
+CVE-2024-6472 Ability to trust not validated macro signatures removed in high security mode
+</summary>
+<p><strong>Announced:</strong> Aug 05, 2024</p>
+<p><strong>Fixed in:</strong> LibreOffice 24.2.5</p>
+<p><strong>Description:</strong></p>
+<p>Signed macros are scripts that have been digitally signed by the developer using a cryptographic signature. When a document with a signed macro is opened a warning is displayed by LibreOffice before the macro is executed.</p>
+<p>Previously if verification failed the user could choose to ignore the failure and enable the macros anyway.</p>
+<p>Now in High Macro Security mode (the default) LibreOffice automatically disables macros that fail the certificate check.</p>
+<p>Users are recommended to upgrade to 24.2.5 to gain this enhacement.</p>
+<p><strong>Credit:</strong></p>
+<p>Thanks to OpenSource Security GmbH on behalf of the German Federal Office for Information Security for finding and reporting this issue.</p>
+<p>Thanks to Sarper Akdemir of allotropia for providing a fix.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-6472" title="CVE-2024-6472" target="_blank">CVE-2024-6472</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 24.2.4</h2>
+<details id="cve-2024-5261">
+<summary>
+CVE-2024-5261 TLS certificate are not properly verified when utilizing LibreOfficeKit
+</summary>
+<p><strong>Announced:</strong> Jun 25, 2024</p>
+<p><strong>Fixed in:</strong> LibreOffice 24.2.4</p>
+<p><strong>Description:</strong></p>
+<p>LibreOfficeKit can be used for accessing LibreOffice functionality through C/C++. Typically this is used by third party components to reuse LibreOffice as a library to convert, view or otherwise interact with documents.</p>
+<p>LibreOffice internally makes use of &ldquo;curl&rdquo; to fetch remote resources such as images hosted on webservers.</p>
+<p>In affected versions of LibreOffice, when used in LibreOfficeKit mode only, then curl&rsquo;s TLS certification verification was disabled (CURLOPT_SSL_VERIFYPEER of false)</p>
+<p>In the fixed versions curl operates in LibreOfficeKit mode the same as in standard mode with CURLOPT_SSL_VERIFYPEER of true.</p>
+<p>Users are recommended to upgrade to 24.2.4 to avoid this flaw.</p>
+<p><strong>Credit:</strong></p>
+<p>Thanks to OpenSource Security GmbH on behalf of the German Federal Office for Information Security for finding and reporting this issue.</p>
+<p>Thanks to Thorsten Behrens of allotropia for providing a fix.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-5261" title="CVE-2024-5261" target="_blank">CVE-2024-5261</a></p>
+<p>Curl <a href="https://curl.se/docs/sslcerts.html" target="_blank">SSL Certificate Verification</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.6.7/24.2.3</h2>
+<details id="cve-2024-3044">
+<summary>
+CVE-2024-3044 Graphic on-click binding allows unchecked script execution
+</summary>
+<p><strong>Announced:</strong> May 14, 2024</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.6.7/24.2.3</p>
+<p><strong>Description:</strong></p>
+<p>LibreOffice supports binding scripts to click events on graphics. In affected version of LibreOffice there are scenarios where built-in scripts can be executed without warning if the user clicks on a document with such on-click handlers.</p>
+<p>In early versions of LibreOffice these scripts were deemed trusted, but are now deemed untrusted.</p>
+<p>In the fixed versions the user&rsquo;s explicit macro execution permissions for the document, determined at load time, are used for these handlers.</p>
+<p>Users are recommended to upgrade to 7.6.7 or 24.2.3 to avoid this flaw.</p>
+<p><strong>Credit:</strong></p>
+<p>Thanks to Amel Bouziane-Leblond for finding and reporting this issue.</p>
+<p>Thanks to Collabora Productivity for providing a fix.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2024-3044" title="CVE-2024-3044" target="_blank">CVE-2024-3044</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.6.4/7.5.9</h2>
+<details id="cve-2023-6186">
+<summary>
+CVE-2023-6186 Link targets allow arbitrary script execution
+</summary>
+<p><strong>Announced:</strong> December 11, 2023</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.5.9/7.6.4</p>
+<p><strong>Description:</strong></p>
+<p>LibreOffice supports hyperlinks. In addition to the typical common protocols such as http/https hyperlinks can also have target URLs that can launch built-in macros or dispatch built-in internal commands. In affected version of LibreOffice there are scenarios where these can be executed without warning if the user activates such hyperlinks. In later versions the users&rsquo;s explicit macro execution permissions for the document are now consulted if these non-typical hyperlinks can be executed. The possibility to use these variants of hyperlink targets for floating frames has been removed.</p>
+<p>Users are recommended to upgrade to 7.5.9 or 7.6.4 to avoid this flaw.</p>
+<p><strong>Credit:</strong></p>
+<p>Thanks to Reginaldo Silva of ubercomp.com for finding and reporting this issue.</p>
+<p>Thanks to Collabora Productivity for providing a fix.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2023-6186" title="CVE-2023-6186" target="_blank">CVE-2023-6186</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.6.3/7.5.9</h2>
+<details id="cve-2023-6185">
+<summary>
+CVE-2023-6185 Improper input validation enabling arbitrary Gstreamer pipeline injection
+</summary>
+<p><strong>Announced:</strong> December 11, 2023</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.5.9/7.6.3</p>
+<p><strong>Description:</strong></p>
+<p>LibreOffice supports embedded videos in file formats via platform audio/video support. Typically under Linux this is via gstreamer. In affected version of LibreOffice the filename of the embedded video is not sufficiently escaped when passed to gstreamer enabling an attacker to run arbitrary gstreamer plugins depending on what plugins are installed on the target system.</p>
+<p>Linux Users are recommended to upgrade to 7.5.9 or 7.6.3 to avoid this flaw.</p>
+<p><strong>Credit:</strong></p>
+<p>Thanks to Reginaldo Silva of ubercomp.com for finding and reporting this issue.</p>
+<p>Thanks to Collabora Productivity for providing a fix.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2023-6185" title="CVE-2023-6185" target="_blank">CVE-2023-6185</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.4.7/7.5.3</h2>
+<details id="cve-2023-2255">
+<summary>
+CVE-2023-2255 Remote documents loaded without prompt via IFrame
+</summary>
+<p><strong>Announced:</strong> May 24, 2023</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.4.7/7.5.3</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports &ldquo;Floating Frames&rdquo;, similar to a html IFrame. The frames display their linked document in a floating frame inside the host document.</p>
+<p>In affected versions of LibreOffice these floating frames fetch and display their linked document without prompt on loading the host document. This was inconsistent with the behavior of other linked document content such as OLE objects, Writer linked sections or Calc WEBSERVICE formulas which warn the user that there are linked documents and prompts if they should be allowed to update.</p>
+<p>In versions &gt;= 7.4.7 (and &gt;= 7.5.3) the existing &ldquo;update link&rdquo; manager has been expanded to additionally control the update of the content of IFrames, so such IFrames will not automatically refresh their content unless the user agrees via the prompts.</p>
+<p>Thanks to Amel Bouziane-Leblond for discovering this flaw.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2023-2255" target="_blank">CVE-2023-2255</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.4.6/7.5.1</h2>
+<details id="cve-2023-0950">
+<summary>
+CVE-2023-0950 Array Index UnderFlow in Calc Formula Parsing
+</summary>
+<p><strong>Announced:</strong> May 24, 2023</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.4.6/7.5.2</p>
+<p><strong>Description</strong>:</p>
+<p>The Spreadsheet module of LibreOffice supports various formulas that take multiple parameters. The formulas are interpreted by &lsquo;ScInterpreter&rsquo; which extract the required parameters for a given formula off a stack.</p>
+<p>In the affected versions of LibreOffice certain malformed spreadsheet formulas, such as AGGREGATE, could be created with less parameters passed to the formula interpreter than it expected, leading to an array index underflow, in which case there is a risk that the arbitrary code could be executed.</p>
+<p>In versions &gt;= 7.4.6 (and &gt;= 7.5.2) the count of parameters is validated</p>
+<p><strong>Credits</strong>:</p>
+<p>Secusmart GmbH for discovering and reporting the issue.</p>
+<p>Eike Rathke of Red Hat, Inc. for a solution.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2023-0950" target="_blank">CVE-2023-0950</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.3.6/7.4.1</h2>
+<details id="cve-2022-3140">
+<summary>
+CVE-2022-3140 Macro URL arbitrary script execution
+</summary>
+<p><strong>Announced:</strong> October 11, 2022</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.3.6/7.4.1</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports Office URI Schemes to enable browser integration of LibreOffice with MS SharePoint server. An additional scheme &lsquo;vnd.libreoffice.command&rsquo; specific to LibreOffice was added.</p>
+<p>In the affected versions of LibreOffice links using that scheme could be constructed to call internal macros with arbitrary arguments. Which when clicked on, or activated by document events, could result in arbitrary script execution without warning.</p>
+<p>In versions &gt;= 7.3.6 (and &gt;= 7.4.1) such unwanted command URIs are blocked from execution.</p>
+<p><strong>Credits</strong>:</p>
+<p>TheSecurityDev working with Trend Micro Zero Day Initiative</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-3140" target="_blank">CVE-2022-3140</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.2.7/7.3.3</h2>
+<details id="cve-2022-26306">
+<summary>
+CVE-2022-26306 Static Initialization Vector Allows to Recover Passwords for Web Connections Without Knowing the Master Password
+</summary>
+<p><strong>Announced:</strong> July 25, 2022</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.2.7/7.3.3</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports the storage of passwords for web connections in the user’s configuration database. The stored passwords are encrypted with a single master key provided by the user.</p>
+<p>A flaw in LibreOffice existed where the required initialization vector for encryption was always the same which weakens the security of the encryption making them vulnerable if an attacker has access to the user&rsquo;s configuration data.</p>
+<p>In versions &gt;= 7.2.7 (and &gt;= 7.3.3) unique initialization vectors are used when the passwords are stored and the user is prompted via an infobar to reenter their master password in order to reencrypt old existing vulnerable stored config data if it exists.</p>
+<p><strong>Credits</strong>:</p>
+<p>OpenSource Security GmbH on behalf of the German Federal Office for Information Security.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-26306" target="_blank">CVE-2022-26306</a></p>
+
+</details>
+
+<details id="cve-2022-26307">
+<summary>
+CVE-2022-26307 Weak Master Keys
+</summary>
+<p><strong>Announced:</strong> July 25, 2022</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.2.7/7.3.3</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports the storage of passwords for web connections in the user’s configuration database. The stored passwords are encrypted with a single master key provided by the user.</p>
+<p>A flaw in LibreOffice existed where master key was poorly encoded resulting in weakening its entropy from 128 to 43 bits making the stored passwords vulnerable to a brute force attack if an attacker has access to the users stored config.</p>
+<p>In versions &gt;= 7.2.7 (and &gt;= 7.3.3) the poor encoding is fixed and the user is prompted via an infobar to reenter their master password in order to reencrypt old existing vulnerable stored config data if it exists.</p>
+<p><strong>Credits</strong>:</p>
+<p>OpenSource Security GmbH on behalf of the German Federal Office for Information Security.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-26307" target="_blank">CVE-2022-26307</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.2.7/7.3.2</h2>
+<details id="cve-2022-26305">
+<summary>
+CVE-2022-26305 Execution of Untrusted Macros Due to Improper Certificate Validation
+</summary>
+<p><strong>Announced:</strong> July 25, 2022</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.2.7/7.3.2</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports the execution of macros. By default LibreOffice executes macros only if they are stored in a trusted file location or if they are signed by a trusted certificate.</p>
+<p>To determine whether a macro is signed by a trusted author, LibreOffice matches the used certificate with the list of trusted certificates stored in the user&rsquo;s configuration database.</p>
+<p>An Improper Certificate Validation vulnerability in LibreOffice existed where determining if a macro was signed by a trusted author was done by only matching the serial number and issuer string of the used certificate with that of a trusted certificate. This is not sufficient to verify that the macro was actually signed with the certificate. An adversary could therefore create an arbitrary certificate with a serial number and an issuer string identical to a trusted certificate which LibreOffice would present as belonging to the trusted author, potentially leading to the user to execute arbitrary code contained in macros improperly trusted.</p>
+<p>In versions &gt;= 7.2.7 (and &gt;= 7.3.2) certificate matching is amended to ensure the certificates match correctly.</p>
+<p>This vulnerability is not exploitable if macro security level is set to very high or if the user has no trusted certificates.</p>
+<p><strong>Credits</strong>:</p>
+<p>OpenSource Security GmbH on behalf of the German Federal Office for Information Security.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-26305" target="_blank">CVE-2022-26305</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.2.6/7.3.1</h2>
+<details id="cve-2022-38745">
+<summary>
+CVE-2022-38745 Empty entry in Java class path risks arbitrary code execution
+</summary>
+<p><strong>Announced:</strong> March 24, 2023</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.2.6/7.3.1</p>
+<p><strong>Description</strong>:</p>
+<p>Most versions of LibreOffice support and contain components written in Java. LibreOffice extends the existing Java class path with its own internal classes.</p>
+<p>In the affected versions of LibreOffice if the existing class path was empty, then when Java class files are loaded, the current working directory is searched for valid classes before using the embedded versions. If an attacker sends a zip file containing a class file alongside a document then, depending on the file manager or other tool used to open the zip file, when on navigating to the document and launching LibreOffice to open it, the current working directory of LibreOffice may be the directory in which the class file exists, in which case there is a risk that the arbitrary code of the class file could be executed.</p>
+<p>In versions &gt;= 7.2.6 (and &gt;= 7.3.1) such unwanted empty paths are not appended to the classpath</p>
+<p><strong>Credits</strong>:</p>
+<p>European Commission&rsquo;s Open Source Programme Office for sponsoring a security bug bounty <a href="https://commission.europa.eu/news/european-commissions-open-source-programme-office-starts-bug-bounties-2022-01-19_en" target="_blank">for LibreOffice</a>.</p>
+<p>Stephan Bergmann of Red Hat, Inc. for a solution.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-38745" target="_blank">CVE-2022-38745</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.2.5/7.3.0</h2>
+<details id="cve-2021-25636">
+<summary>
+CVE-2021-25636 Incorrect trust validation of signature with ambiguous KeyInfo children
+</summary>
+<p><strong>Announced:</strong> February 22, 2022</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.2.5/7.3.0</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports digital signatures of ODF documents and macros within documents, presenting visual aids that no alteration of the document occurred since the last signing and that the signature is valid.</p>
+<p>An Improper Certificate Validation vulnerability in LibreOffice allowed an attacker to create a digitally signed ODF document, by manipulating the documentsignatures.xml or macrosignatures.xml stream within the document to contain both &ldquo;X509Data&rdquo; and &ldquo;KeyValue&rdquo; children of the &ldquo;KeyInfo&rdquo; tag[1], which when opened caused LibreOffice to verify using the &ldquo;KeyValue&rdquo; but to report verification with the unrelated &ldquo;X509Data&rdquo; value.</p>
+<p>In versions &gt;= 7.2.5 (and &gt;= 7.3.0) certificate validation is configured to only consider X509Data children to limit validation to X509 certificates only.</p>
+<p>[1] <a href="https://www.w3.org/TR/xmldsig-core1/#sec-KeyInfo" target="_blank">https://www.w3.org/TR/xmldsig-core1/#sec-KeyInfo</a></p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to NDS of Ruhr University Bochum for discovering and reporting this problem.</p>
+<p>Thanks to Aleksey Sanin for advice on a solution.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-25636" target="_blank">CVE-2021-25636</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.0.6/7.1.3</h2>
+<details id="cve-2021-25632">
+<summary>
+CVE-2021-25632 fileloc extension added to macOS executable denylist
+</summary>
+<p><strong>Announced:</strong> May 18, 2021</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.0.6/7.1.3</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice has a feature where hyperlinks in a document can be activated by CTRL+click. Under macOS the link can be passed to the system ‘open’ utility for handling. LibreOffice contains a denylist of extensions that it blocks from passing to ‘open’ to avoid attempting to launch executables.</p>
+<p>In versions of LibreOffice without this fix the denylist didn’t include the .fileloc extension which could be used to launch an executable on the system.</p>
+<p>In the fixed versions this extension has been blocked. All macOS users are recommended to upgrade to LibreOffice &gt;= 7.0.6 or 7.1.3</p>
+<p><strong>References</strong>:</p>
+<p>Thanks to Hou JingYi (@hjy79425575) of Qihoo 360 for discovering and reporting this problem</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-25632" target="_blank">CVE-2021-25632</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.0.6/7.1.2</h2>
+<details id="cve-2021-25633">
+<summary>
+CVE-2021-25633 Content Manipulation with Double Certificate Attack
+</summary>
+<p><strong>Announced:</strong> October 11, 2021</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.0.6/7.1.2</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports digital signatures of ODF documents and macros within documents, presenting visual aids that no alteration of the document occurred since the last signing and that the signature is valid.</p>
+<p>An Improper Certificate Validation vulnerability in LibreOffice allowed an attacker to create a digitally signed ODF document, by manipulating the documentsignatures.xml or macrosignatures.xml stream within the document to combine multiple certificate data, which when opened caused LibreOffice to display a validly signed indicator but whose content was unrelated to the signature shown.</p>
+<p><strong>References</strong>:</p>
+<p>NDS of Ruhr University Bochum for discovering and reporting this problem.</p>
+<p>Thanks to Michael Stahl of allotropia software GmbH for solving this problem.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-25633" target="_blank">CVE-2021-25633</a></p>
+
+</details>
+
+<details id="cve-2021-25634">
+<summary>
+CVE-2021-25634 Timestamp Manipulation with Signature Wrapping
+</summary>
+<p><strong>Announced:</strong> October 11, 2021</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.0.6/7.1.2</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports digital signatures of ODF documents and macros within documents, presenting visual aids that no alteration of the document occurred since the last signing and that the signature is valid.</p>
+<p>An Improper Certificate Validation vulnerability in LibreOffice allowed an attacker to modify a digitally signed ODF document to insert an additional signing time timestamp which LibreOffice would incorrectly present as a valid signature signed at the bogus signing time.</p>
+<p><strong>References</strong>:</p>
+<p>Thanks to NDS of Ruhr University Bochum for discovering and reporting this problem.</p>
+<p>Thanks to Michael Stahl of allotropia software GmbH for solving this problem.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-25634" target="_blank">CVE-2021-25634</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.0.5/7.1.2</h2>
+<details id="cve-2021-25631">
+<summary>
+CVE-2021-25631 Denylist of executable filename extensions possible to bypass under windows
+</summary>
+<p><strong>Announced:</strong> April 15, 2021</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.0.5/7.1.2</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice has a feature where hyperlinks in a document can be activated by CTRL+click. Under Windows the link can be passed to the system ShellExecute function for handling. LibreOffice contains a denylist of extensions that it blocks from passing to ShellExecute to avoid attempting to launch executables.</p>
+<p>In the LibreOffice 7-1 series in versions prior to 7.1.2, and in the 7-0 series in versions prior to 7.0.5, the denylist can be circumvented by manipulating the link so it doesn&rsquo;t match the denylist but results in ShellExecute attempting to launch an executable type.</p>
+<p>In the fixed versions this circumvention has been blocked. All Windows users are recommended to upgrade to LibreOffice &gt;= 7.0.5 or &gt;= 7.1.2</p>
+<p><strong>References</strong>:</p>
+<p>Thanks to Lukas Euler of Positive Security for discovering and reporting this problem</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-25631" target="_blank">CVE-2021-25631</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 7.0.5/7.1.1</h2>
+<details id="cve-2021-25635">
+<summary>
+CVE-2021-25635 Content Manipulation with Certificate Validation Attack
+</summary>
+<p><strong>Announced:</strong> October 11, 2021</p>
+<p><strong>Fixed in:</strong> LibreOffice 7.0.5/7.1.1</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice supports digital signatures of ODF documents and macros within documents, presenting visual aids that no alteration of the document occurred since the last signing and that the signature is valid.</p>
+<p>An Improper Certificate Validation vulnerability in LibreOffice allowed an attacker to self sign an ODF document, with a signature untrusted by the target, then modify it to change the signature algorithm to an invalid (or unknown to LibreOffice) algorithm and LibreOffice would incorrectly present such a signature with an unknown algorithm as a valid signature issued by a trusted person.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to NDS of Ruhr University Bochum for discovering and reporting this problem.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-25635" target="_blank">CVE-2021-25635</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 6.4.4</h2>
+<details id="cve-2020-12802">
+<summary>
+CVE-2020-12802 remote graphics contained in docx format retrieved in &#39;stealth mode&#39;
+</summary>
+<p><strong>Announced:</strong> Jun 08, 2020</p>
+<p><strong>Fixed in:</strong> 6.4.4</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice has a &lsquo;stealth mode&rsquo; in which only documents from locations deemed &rsquo;trusted&rsquo; are allowed to retrieve remote resources. This mode is not the default mode, but can be enabled by users who want to disable LibreOffice&rsquo;s ability to include remote resources within a document. A flaw existed where remote graphic links loaded from docx documents were omitted from this protection prior to version 6.4.4.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Jens Müller of Ruhr University Bochum for discovering and reporting this problem</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2020-12802" target="_blank">CVE-2020-12802</a></p>
+
+</details>
+
+<details id="cve-2020-12803">
+<summary>
+CVE-2020-12803 XForms submissions could overwrite local files
+</summary>
+<p><strong>Announced:</strong> June 09, 2020</p>
+<p><strong>Fixed in:</strong> LibreOffice 6.4.4</p>
+<p><strong>Description</strong>:</p>
+<p>ODF documents can contain forms to be filled out by the user. Similar to HTML forms, the contained form data can be submitted to a URI, for example, to an external web server. To create submittable forms, ODF implements the XForms W3C standard, which allows data to be submitted without the need for macros or other active scripting</p>
+<p>Prior to version 6.4.4 LibreOffice allowed forms to be submitted to any URI, including file: URIs, enabling form submissions to overwrite local files. User-interaction is required to submit the form, but to avoid the possibility of malicious documents engineered to maximize the possibility of inadvertent user submission this feature has now been limited to http[s] URIs, removing the possibility to overwrite local files.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 6.4.4</p>
+<p><strong>References</strong>:</p>
+<p>Thanks to Jens Müller of Ruhr University Bochum for discovering and reporting this problem</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2020-12803" target="_blank">CVE-2020-12803</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 6.3.6/6.4.3</h2>
+<details id="cve-2020-12801">
+<summary>
+CVE-2020-12801 Crash-recovered MSOffice encrypted documents defaulted to not to using encryption on next save
+</summary>
+<p><strong>Announced:</strong> May 28, 2020</p>
+<p><strong>Fixed in:</strong> 6.3.6/6.4.3</p>
+<p><strong>Description</strong>:</p>
+<p>If LibreOffice has an encrypted document open and crashes, that document is auto-saved encrypted. On restart, LibreOffice offers to restore the document and prompts for the password to decrypt it. If the recovery is successful, and if the file format of the recovered document was not LibreOffice&rsquo;s default ODF file format, then affected versions of LibreOffice default that subsequent saves of the document are unencrypted.</p>
+<p>This may lead to a user accidentally saving a MSOffice file format document unencrypted while believing it to be encrypted.</p>
+<p>In the fixed versions, encrypted recovered MSOffice format documents default to encrypted save.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Tomas Florian <a href="mailto:tomas@armoreye.ca">tomas@armoreye.ca</a> for raising awareness of the issue</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2020-12801" target="_blank">CVE-2020-12801</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 6.2.7/6.3.1</h2>
+<details id="cve-2019-9854">
+<summary>
+CVE-2019-9854 Unsafe URL assembly flaw in allowed script location check
+</summary>
+<p><strong>Announced:</strong> September 6, 2019</p>
+<p><strong>Fixed in:</strong> 6.2.7/6.3.1</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice has a feature where documents can specify that pre-installed macros can be executed on various script events such as mouse-over, document-open etc.</p>
+<p>Access is intended to be restricted to scripts under the share/Scripts/python, user/Scripts/python sub-directories of the LibreOffice install.</p>
+<p>Protection was added, to address CVE-2019-9852, to avoid a directory traversal attack where scripts in arbitrary locations on the file system could be executed by employing a URL encoding attack to defeat the path verification step.</p>
+<p>However this protection could be bypassed by taking advantage of a flaw in how LibreOffice assembled the final script URL location directly from components of the passed in path as opposed to solely from the sanitized output of the path verification step.</p>
+<p>In the fixed versions, the parsed url describing the script location is assembled from the output of the verification step.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to RiceX(@ricex_cc) for reporting this issue</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-9854" target="_blank">CVE-2019-9854</a></p>
+
+</details>
+
+<details id="cve-2019-9855">
+<summary>
+CVE-2019-9855 Windows 8.3 path equivalence handling flaw allows LibreLogo script execution
+</summary>
+<p><strong>Announced:</strong> September 6, 2019</p>
+<p><strong>Fixed in:</strong> 6.2.7/6.3.1</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice is typically bundled with LibreLogo, a programmable turtle vector graphics script, which can execute arbitrary python commands contained with the document it is launched from.</p>
+<p>LibreOffice also has a feature where documents can specify that pre-installed scripts can be executed on various document script events such as mouse-over, etc</p>
+<p>Protection was added to block calling LibreLogo from script event handers. However a Windows 8.3 path equivalence handling flaw left LibreOffice vulnerable under Windows that a document could trigger executing LibreLogo via a Windows filename pseudonym</p>
+<p>In the fixed versions, such paths are rejected</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to alex (@insertscript) for reporting this issue</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-9855" target="_blank">CVE-2019-9855</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 6.2.6/6.3.1</h2>
+<details id="cve-2019-9853">
+<summary>
+CVE-2019-9853 Insufficient URL decoding flaw in categorizing macro location
+</summary>
+<p><strong>Announced:</strong> September 27, 2019</p>
+<p><strong>Fixed in:</strong> 6.2.6/6.3.1</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice documents can contain macros. The execution of those macros is controlled by the document security settings, typically execution of macros are blocked by default.</p>
+<p>A URL decoding flaw existed in how the urls to the macros within the document were processed and categorized, resulting in the possibility to construct a document where macro execution bypassed the security settings.</p>
+<p>The documents were correctly detected as containing macros, and prompted the user to their existence within the documents, but macros within the document were subsequently not controlled by the security settings allowing arbitrary macro execution</p>
+<p>In the fixed versions, the parsed url describing the script location is correctly decoded before further processing.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Nils Emmerich of ERNW Research GmbH for discovering and reporting this issue</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-9853" target="_blank">CVE-2019-9853</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 6.2.6/6.3.0</h2>
+<details id="cve-2019-9850">
+<summary>
+CVE-2019-9850 Insufficient url validation allowing LibreLogo script execution
+</summary>
+<p><strong>Announced:</strong> August 15, 2019</p>
+<p><strong>Fixed in:</strong> 6.2.6/6.3.0</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice is typically bundled with LibreLogo, a programmable turtle vector graphics script, which can execute arbitrary python commands contained with the document it is launched from.</p>
+<p>LibreOffice also has a feature where documents can specify that pre-installed scripts can be executed on various document script events such as mouse-over, etc</p>
+<p>Protection was added, to address CVE-2019-9848, to block calling LibreLogo from script event handers. However an insufficient url validation vulnerability in LibreOffice allowed malicious to bypass that protection and again trigger calling LibreLogo from script event handlers.</p>
+<p>In the fixed versions, script urls are correctly decoded before validation</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to alex (@insertscript) for reporting this issue</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-9850" target="_blank">CVE-2019-9850</a></p>
+
+</details>
+
+<details id="cve-2019-9851">
+<summary>
+CVE-2019-9851 LibreLogo global-event script execution
+</summary>
+<p><strong>Announced:</strong> August 15, 2019</p>
+<p><strong>Fixed in:</strong> 6.2.6/6.3.0</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice is typically bundled with LibreLogo, a programmable turtle vector graphics script, which can execute arbitrary python commands contained with the document it is launched from.</p>
+<p>Protection was added, to address CVE-2019-9848, to block calling LibreLogo from <strong>document</strong> event script handers, e.g. mouse over. However LibreOffice also has a separate feature where documents can specify that pre-installed scripts can be executed on various <strong>global</strong> script events such as document-open, etc</p>
+<p>In the fixed versions, global script event handlers are validated equivalently to document script event handlers.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Gabriel Masei of 1&amp;1 for discovering and reporting this issue</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-9851" target="_blank">CVE-2019-9851</a></p>
+
+</details>
+
+<details id="cve-2019-9852">
+<summary>
+CVE-2019-9852 Insufficient URL encoding flaw in allowed script location check
+</summary>
+<p><strong>Announced:</strong> August 15, 2019</p>
+<p><strong>Fixed in:</strong> 6.2.6/6.3.0</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice has a feature where documents can specify that pre-installed macros can be executed on various script events such as mouse-over, document-open etc.</p>
+<p>Access is intended to be restricted to scripts under the share/Scripts/python, user/Scripts/python sub-directories of the LibreOffice install.</p>
+<p>Protection was added, to address CVE-2018-16858, to avoid a directory traversal attack where scripts in arbitrary locations on the file system could be executed. However this new protection could be bypassed by a URL encoding attack.</p>
+<p>In the fixed versions, the parsed url describing the script location is correctly encoded before further processing.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Nils Emmerich of ERNW Research GmbH for discovering and reporting this issue</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-9852" target="_blank">CVE-2019-9852</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 6.2.5</h2>
+<details id="cve-2019-9848">
+<summary>
+CVE-2019-9848 LibreLogo arbitrary script execution
+</summary>
+<p><strong>Announced:</strong> July 16, 2019</p>
+<p><strong>Fixed in:</strong> 6.2.5</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice has a feature where documents can specify that pre-installed scripts can be executed on various document events such as mouse-over, etc.</p>
+<p>LibreOffice is typically also bundled with LibreLogo, a programmable turtle vector graphics script, which can be manipulated into executing arbitrary python commands.</p>
+<p>By using the document event feature to trigger LibreLogo to execute python contained within a document a malicious document could be constructed which would execute arbitrary python commands silently without warning.</p>
+<p>In the fixed versions, LibreLogo cannot be called from a document event handler..</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Nils Emmerich of ERNW Research GmbH for discovering and reporting this issue</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-9848" target="_blank">CVE-2019-9848</a></p>
+
+</details>
+
+<details id="cve-2019-9849">
+<summary>
+CVE-2019-9849 remote bullet graphics retrieved in &#39;stealth mode&#39;
+</summary>
+<p><strong>Announced:</strong> July 16, 2019</p>
+<p><strong>Fixed in:</strong> 6.2.5</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice has a &lsquo;stealth mode&rsquo; in which only documents from locations deemed &rsquo;trusted&rsquo; are allowed to retrieve remote resources. This mode is not the default mode, but can be enabled by users who want to disable LibreOffice&rsquo;s ability to include remote resources within a document. A flaw existed where bullet graphics were omitted from this protection prior to version 6.2.5.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Matei &ldquo;Mal&rdquo; Badanoiu for discovering and reporting this problem</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-9849" target="_blank">CVE-2019-9849</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 6.1.6/6.2.3</h2>
+<details id="cve-2019-9847">
+<summary>
+CVE-2019-9847 Executable hyperlink targets executed unconditionally on activation
+</summary>
+<p><strong>Announced:</strong> May 8, 2019</p>
+<p><strong>Fixed in:</strong> 6.1.6/6.2.3</p>
+<p><strong>Description</strong>:</p>
+<p>Before 6.1.6/6.2.3 under Windows and macOS when processing a hyperlink target explicitly activated by the user there was no judgment made on whether the target was an executable file, so such executable targets were launched unconditionally.</p>
+<p>In the fixed versions, such executables are not executed on hyperlink activation.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Zhongcheng Li(CK01) of Pox Security Team for reporting this issue</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2019-9847" target="_blank">CVE-2019-9847</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 6.0.7/6.1.3</h2>
+<details id="cve-2018-16858">
+<summary>
+CVE-2018-16858 Directory traversal flaw in script execution
+</summary>
+<p><strong>Announced:</strong> Feb 1, 2019</p>
+<p><strong>Fixed in:</strong> 6.0.7/6.1.3</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice has a feature where documents can specify that pre-installed macros can be executed on various document events such as mouse-over, etc.</p>
+<p>Prior to 6.0.7/6.1.3 LibreOffice was vulnerable to a directory traversal attack where it was possible to craft a document which when opened by LibreOffice would, when such common document events occur, execute a python method from a script in any arbitrary file system location, specified relative to the LibreOffice install location.</p>
+<p>Typically LibreOffice is bundled with python, so an attacker has a set of known scripts at a known relative file system location to work with.</p>
+<p>In the 6.1 series, the problem was compounded by an additional feature which enables specifying in the document arguments to pass to the python method (Earlier series only allow a method to be called with no argument). The bundled python happens to include a method which executes via os.system one of its arguments, providing a simple route in 6.1 to execute arbitrary commands via such a crafted document.</p>
+<p>In the fixed versions, the relative directory flaw is fixed, and access is restricted to scripts under the share/Scripts/python, user/Scripts/python sub-directories of the LibreOffice install</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to alex (@insertscript) for reporting this issue</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-16858" target="_blank">CVE-2018-16858</a></p>
+
+</details>
+
+<h2>Addressed in LibreOffice 5.4.7/6.0.4</h2>
+<details id="cve-2018-10583">
+<summary>
+CVE-2018-10583 Information disclosure via SMB link embedded in ODF document
+</summary>
+<p><strong>Announced:</strong> May 24, 2018</p>
+<p><strong>Addressed in:</strong> LibreOffice 5.4.7/6.0.4</p>
+<p><strong>Description</strong>:</p>
+<p>A LibreOffice document with a linked image, which is on a samba share, will cause LibreOffice to automatically initiate a samba connection to retrieve the image. This is analogous to how opening HTML documents which contain links to images on remote web sites are automatically fetched by web browsers.</p>
+<p>Since LibreOffice 5.4.7, and 6.0.4 in the 6.X series, end users or administrators can disable this functionality to automatically fetch such linked images via &ldquo;tools-&gt;options-&gt;security-&gt;options-&gt;block any links from documents not among the trusted locations&rdquo;</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-10583" target="_blank">CVE-2018-10583</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 5.4.6/6.0.2</h2>
+<details id="cve-2018-10120">
+<summary>
+CVE-2018-10120 Heap Buffer Overflow in MSWord Customizations parsing
+</summary>
+<p><strong>Announced:</strong> April 18, 2018</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.4.6/6.0.2</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice before 5.4.6 and 6.x before 6.0.2 have a flaw in an edge case in processing a specific uncommon Microsoft Word record. An index into a dynamically allocated buffer is used without bounds checking.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 5.4.6 or &gt;= 6.0.2</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-10120" target="_blank">CVE-2018-10120</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 5.4.5/6.0.1</h2>
+<details id="cve-2018-1055">
+<summary>
+CVE-2018-1055 Remote arbitrary file disclosure vulnerability via WEBSERVICE formula
+</summary>
+<p><strong>Announced:</strong> February 9, 2018</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.4.5/6.0.1</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice before 5.4.5 and 6.x before 6.0.1 allows remote attackers to read arbitrary files via =WEBSERVICE calls in a document, which use the COM.MICROSOFT.WEBSERVICE function.</p>
+<p>LibreOffice Calc supports a WEBSERVICE function to obtain data by URL. Vulnerable versions of LibreOffice allow WEBSERVICE to take a local file URL (e.g file://) which can be used to inject local files into the spreadsheet without warning the user. Subsequent formulas can operate on that inserted data and construct a remote URL whose path leaks the local data to a remote attacker.</p>
+<p>In later versions of LibreOffice without this flaw, WEBSERVICE has now been limited to accessing http and https URLs along with bringing WEBSERVICE URLs under LibreOffice Calc&rsquo;s link management infrastructure.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 5.4.5 or &gt;= 6.0.1</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-6871" target="_blank">CVE-2018-6871</a></p>
+
+</details>
+
+<details id="cve-2018-10119">
+<summary>
+CVE-2018-10119 Use After Free in Structured Storage parser
+</summary>
+<p><strong>Announced:</strong> April 18, 2018</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.4.5/6.0.1</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice before 5.4.5 and 6.x before 6.0.1 have a flaw in an edge case in processing the structured storage ole2 wrapper file format. A short datatype is used which can overflow resulting in a write to recently freed data</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 5.4.5 or &gt;= 6.0.1</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-10119" target="_blank">CVE-2018-10119</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 5.2.5/5.3.0</h2>
+<details id="cve-2017-7870">
+<summary>
+CVE-2017-7870 Heap-buffer-overflow in WMF filter
+</summary>
+<p><strong>Announced:</strong> April 21, 2017</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.2.5/5.3.0</p>
+<p><strong>Description</strong>:</p>
+<p>Windows Metafiles (WMF) can contain polygons which under certain circumstances when processed (split) can result in output polygons which have too many points to be represented by LibreOffice&rsquo;s internal polygon class.</p>
+<p>Prior to versions 5.2.5/5.3.0 this failure was undetected and a heap buffer overflow could occur as the attempt to split the polygon was assumed to succeed.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 5.2.5 or &gt;= 5.3.0.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-7870" target="_blank">CVE-2017-7870</a></p>
+
+</details>
+
+<details id="cve-2016-10327">
+<summary>
+CVE-2016-10327 Heap-buffer-overflow in EMF filter
+</summary>
+<p><strong>Announced:</strong> April 21, 2017</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.2.5/5.3.0</p>
+<p><strong>Description</strong>:</p>
+<p>Enhanced Metafiles (EMF) can contain bitmap data preceded by a header and a field with in that header which states the offset from the start of the header to the bitmap data. An emf can be crafted to provide an illegal offset which if not tested for validity can trigger a heap buffer overflow.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 5.2.5 or &gt;= 5.3.0 which sanity test the offset before use.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2016-10327" target="_blank">CVE-2017-10327</a></p>
+
+</details>
+
+<h2>Fixed during development</h2>
+<details id="cve-2017-7856">
+<summary>
+CVE-2017-7856 Heap-buffer-overflow in SVM filter
+</summary>
+<p><strong>Announced:</strong> April 21, 2017</p>
+<p><strong>Fixed in:</strong> All versions of LibreOffice</p>
+<p><strong>Description</strong>:</p>
+<p>A bug existed in an unreleased version of LibreOffice between 19 Jan 2017 and 11 March 2017 and was detected by oss-fuzz and a CVE was filed for the bug. The specific problem tracked by CVE-2017-7856 was not present in any release.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-7856" target="_blank">CVE-2017-7856</a></p>
+
+</details>
+
+<details id="cve-2017-7882">
+<summary>
+CVE-2017-7882 Heap-buffer-overflow in HWP filter
+</summary>
+<p><strong>Announced:</strong> April 21, 2017</p>
+<p><strong>Fixed in:</strong> All versions of LibreOffice</p>
+<p><strong>Description</strong>:</p>
+<p>A bug existed in an unreleased version of LibreOffice between 2 Jan 2017 and 14 March 2017 and was detected by oss-fuzz and a CVE was filed for the bug. The specific problem tracked by CVE-2017-7882 was not present in any release.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-7882" target="_blank">CVE-2017-7882</a></p>
+
+</details>
+
+<details id="cve-2017-8358">
+<summary>
+CVE-2017-8358 Heap-buffer-overflow in JPG filter
+</summary>
+<p><strong>Announced:</strong> April 30, 2017</p>
+<p><strong>Fixed in:</strong> All versions of LibreOffice</p>
+<p><strong>Description</strong>:</p>
+<p>LibreOffice before 2017-03-17 had an out-of-bounds write caused by a heap-based buffer overflow related to the ReadJPEG function in vcl/source/filter/jpeg/jpegc.cxx.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-8358" target="_blank">CVE-2017-8358</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 5.1.6/5.2.2/5.3.0</h2>
+<details id="cve-2017-3157">
+<summary>
+CVE-2017-3157 Arbitrary file disclosure in Calc and Writer
+</summary>
+<p><strong>Announced:</strong> February 22, 2017</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.1.6/5.2.2/5.3.0</p>
+<p><strong>Description</strong>:</p>
+<p>Embedded Objects in writer and calc can contain previews of their content. A document can be crafted which contains an embedded object that is a link to an existing file on the targets system. On load the preview of the embedded object will be updated to reflect the content of the file on the target system. In the case of LibreOffice used as an online service that preview of data on the target system could be used to expose details of the environment LibreOffice is running in. In the case of LibreOffice as a standard desktop application, the preview could be concealed in hidden sections and retrieved by the attacker if the document is saved and returned to sender.</p>
+<p>In later version of LibreOffice without this flaw the LinkUpdateMode feature has been expanded to additionally control the update of previews of embedded objects as well as its prior function to control the update of embedded object contents.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 5.1.6 or &gt;= 5.2.5 or &gt;= 5.3.0</p>
+<p>Thanks to Ben Hayak for discovering this flaw.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-3157" target="_blank">CVE-2017-3157</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 5.1.4/5.2.0</h2>
+<details id="cve-2016-4324">
+<summary>
+CVE-2016-4324 Dereference of invalid STL iterator on processing RTF file
+</summary>
+<p><strong>Announced:</strong> June 28th, 2016</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.1.4/5.2.0</p>
+<p><strong>Description</strong>:</p>
+<p>Parsing the Rich Text Format character style index was insufficiently checked for validity. Documents can be constructed which dereference an iterator to the first entry of an empty STL container.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 5.1.4</p>
+<p>Thanks to the researchers working with Cisco Talos Security Intelligence and Research Group for discovering this flaw.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2016-4324" target="_blank">CVE-2016-4324</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 5.0.5/5.1.0</h2>
+<details id="cve-2016-0795">
+<summary>
+CVE-2016-0795 LotusWordPro Bounds overflows in LwpTocSuperLayout processing
+</summary>
+<p><strong>Announced:</strong> February 17, 2016</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.0.5/5.1.0</p>
+<p><strong>Description</strong>:</p>
+<p>Parsing the LwpTocSuperLayout record was insufficiently checked for validity. Documents can be constructed which cause memory corruption by overflowing the LwpTocSuperLayout buffer..</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 5.0.5 or &gt;= 5.1.0</p>
+<p>Thanks to the researchers working with VeriSign iDefense Labs for discovering this flaw.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2016-0795" target="_blank">CVE-2016-0795</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 5.0.4/5.1.0</h2>
+<details id="cve-2016-0794">
+<summary>
+CVE-2016-0794 LotusWordPro Multiple bounds overflows in lwp filter
+</summary>
+<p><strong>Announced:</strong> February 17, 2016</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.0.4/5.1.0</p>
+<p><strong>Description</strong>:</p>
+<p>Multiple offsets in parsing lwp documents were insufficiently checked for validity. Documents can be constructed which cause memory corruption by overflowing various buffer bounds.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 5.0.4 or &gt;= 5.1.0</p>
+<p>Thanks to the researchers working with VeriSign iDefense Labs for discovering this flaw.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2016-0794" target="_blank">CVE-2016-0794</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 5.0.2/5.1.0</h2>
+<details id="cve-2017-12607">
+<summary>
+CVE-2017-12607 Out-of-Bounds Write in Impress&#39; PPT Filter
+</summary>
+<p><strong>Announced:</strong> October 27, 2017</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.0.2/5.1.0</p>
+<p><strong>Description</strong>:</p>
+<p>Prior to version 5.0.2/5.1.0 a vulnerability exists in the PPT stylesheet parser, allows attackers to craft malicious documents that cause denial of service (memory corruption and application crash) potentially resulting in arbitrary code execution. Users should already have upgraded to versions &gt;= 5.0.2/5.1.0 due to earlier advisories.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-12607" target="_blank">CVE-2017-12607</a></p>
+
+</details>
+
+<details id="cve-2017-12608">
+<summary>
+CVE-2017-12608 Out-of-Bounds Write in Writer&#39;s ImportOldFormatStyles
+</summary>
+<p><strong>Announced:</strong> October 27, 2017</p>
+<p><strong>Fixed in:</strong> LibreOffice 5.0.2/5.1.0</p>
+<p><strong>Description</strong>:</p>
+<p>Prior to version 5.0.2/5.1.0 a vulnerability exists in the DOC style parser, allows attackers to craft malicious documents that cause denial of service (memory corruption and application crash) potentially resulting in arbitrary code execution. Users should already have upgraded to versions &gt;= 5.0.2/5.1.0 due to earlier advisories.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-12608" target="_blank">CVE-2017-12608</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 4.4.6/5.0.1</h2>
+<details id="cve-2015-5214">
+<summary>
+CVE-2015-5214 DOC Bookmark Status Memory Corruption
+</summary>
+<p><strong>Announced:</strong> November 5, 2015</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.4.6/5.0.1</p>
+<p><strong>Description</strong>:</p>
+<p>The indexes into the bookmark array were insufficiently checked for validity. A document can be constructed which refers to bookmarks that don&rsquo;t exist, causing memory corruption.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 4.4.6 or &gt;= 5.0.1</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2015-5214" target="_blank">CVE-2015-5214</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 4.4.5/5.0.0</h2>
+<details id="cve-2015-4551">
+<summary>
+CVE-2015-4551 Arbitrary file disclosure in Calc and Writer
+</summary>
+<p><strong>Announced:</strong> November 5, 2015</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.4.5/5.0.0</p>
+<p><strong>Description</strong>:</p>
+<p>The LinkUpdateMode feature controls whether documents inserted into Writer or Calc via links will either not get updated, or prompt to update, or automatically update, when the parent document is loaded. The configuration of this option was stored in the document. That flawed approach enabled documents to be crafted with links to plausible targets on the victims host computer. The contents of those automatically inserted after load links can be concealed in hidden sections and retrieved by the attacker if the document is saved and returned to sender, or via http requests if the user has selected lower security settings for that document.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 4.4.5 or &gt;= 5.0.0</p>
+<p>Thanks to Federico &ldquo;fox&rdquo; Scrinzi for discovering this flaw.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2015-4551" target="_blank">CVE-2015-4551</a></p>
+
+</details>
+
+<details id="cve-2015-5212">
+<summary>
+CVE-2015-5212 ODF Integer Underflow (PrinterSetup Length)
+</summary>
+<p><strong>Announced:</strong> November 5, 2015</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.4.5/5.0.0</p>
+<p><strong>Description</strong>:</p>
+<p>The PrinterSetup data stored in ODF files can be of attacker controlled variable legnth, but is coped into a fixed length buffer without sufficient size checks.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 4.4.5 or &gt;= 5.0.0</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2015-5212" target="_blank">CVE-2015-5212</a></p>
+
+</details>
+
+<details id="cve-2015-5213">
+<summary>
+CVE-2015-5213 DOC piecetable Integer Overflow
+</summary>
+<p><strong>Announced:</strong> November 5, 2015</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.4.5/5.0.0</p>
+<p><strong>Description</strong>:</p>
+<p>The number of pieces in a Microsoft Word .doc file is counted via an unsigned 16 bit number. A sufficiently long document can be constructed which causes that count to overflow and insufficient memory to be allocated for the number of pieces that are copied into it.</p>
+<p>All users are recommended to upgrade to LibreOffice &gt;= 4.4.5 or &gt;= 5.0.0</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2015-5213" target="_blank">CVE-2015-5213</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 4.3.7/4.4.2</h2>
+<details id="cve-2015-1774">
+<summary>
+CVE-2015-1774 Out of bounds write in HWP file filter
+</summary>
+<p><strong>Announced:</strong> April 27, 2015</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.3.7/4.4.2</p>
+<p><strong>Description</strong>:</p>
+<p>Certain crafted HWP documents can allow attackers to cause a denial of service or possibly the execution of arbitrary code by writing past the end of buffers.</p>
+<p>All users are recommended to upgrade to LibreOffice 4.3.7 or 4.4.2.</p>
+<p>Thanks to the researchers working with VeriSign iDefense Labs for discovering this flaw.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2015-1774" target="_blank">CVE-2015-1774</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 4.2.7/4.3.3</h2>
+<details id="cve-2014-3693">
+<summary>
+CVE-2014-3693 Use-After-Free in socket manager of Impress Remote
+</summary>
+<p><strong>Announced:</strong> November 05, 2014</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.2.7/4.3.3</p>
+<p><strong>Description</strong>:</p>
+<p>In LibreOffice 4.0.0 and later, a new feature was added for remote control capabilities in Impress. Users can run a smart phone application to communicate with Impress over a custom protocol to switch slides and the like. By default whenever Impress is started, it immediately began listening on TCP port 1599 on all interfaces.</p>
+<p>But there was a use after free bug in the code managing that port leaving LibreOffice vulnerable to external attackers with access to that port where those external attackers could cause the deleted port manager to continue to process attacker supplied data.</p>
+<p>All users are recommended to upgrade to LibreOffice 4.2.7 or 4.3.3.</p>
+<p>The impress remote can be disabled by:</p>
+<ol>
+<li>Open LibreOffice, go to &ldquo;Tools -&gt; Options&hellip;&rdquo;</li>
+<li>Select &ldquo;LibreOffice Impress -&gt; General&rdquo;</li>
+<li>Uncheck &ldquo;Presentation -&gt; Enable remote control&rdquo;</li>
+</ol>
+<p>Thanks to the researchers at the SecuriTeam Secure Disclosure project for discovering this flaw.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-3693" target="_blank">CVE-2014-3693</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 4.2.6-secfix/4.3.1</h2>
+<details id="cve-2014-3524">
+<summary>
+CVE-2014-3524 CSV Command Injection and DDE formulas
+</summary>
+<p><strong><span data-mce-mark="1">Announced:</strong> August 21, 2014</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.2.6-secfix/4.3.1</p>
+<p><strong>Description:</strong></p>
+<p>The vulnerability allows command injection when loading Calc spreadsheets under Windows. Specially crafted documents can be used for command-injection attacks. Other operating systems are not affected.</p>
+<p>Windows users are recommended to upgrade their LibreOffice to 4.2.6-secfix or 4.3.1</p>
+<p>Thanks to Rohan Durve and James Kettle of Context Information Security for discovering this flaw.</p>
+<p>References:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-3524" target="_blank">CVE-2014-3524</a></p>
+
+</details>
+
+<details id="cve-2014-3575">
+<summary>
+CVE-2014-3575 Arbitrary File Disclosure using crafted OLE objects
+</summary>
+<p><strong><span data-mce-mark="1">Announced:</strong> August 21, 2014</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.2.6-secfix/4.3.1</p>
+<p><strong>Description:</strong></p>
+<p>The vulnerability allows an attacker to send a document which when opened will trigger the prompt to &ldquo;Update Links&rdquo; but if the user cancels that prompt may still generate and insert into the document an OLE2 preview image of a file on the victims filesystem, Data exposure is possible if the updated document is then distributed to other parties.</p>
+<p>All users are recommended to upgrade to LibreOffice 4.2.6-secfix or 4.3.1.</p>
+<p>Thanks to Malte Timmermann of Open-Xchange for discovering this flaw.</p>
+<p>References:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-3575" target="_blank">CVE-2014-3575</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 4.2.5</h2>
+<details id="cve-2014-0247">
+<summary>
+CVE-2014-0247 Microsoft Office VBA Macro Execution
+</summary>
+<p><strong><span data-mce-mark="1">Announced:</strong> July 10, 2014</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.2.5</p>
+<p><strong>Description:</strong></p>
+<p>It was discovered during routine code review that LibreOffice &gt;= 4.1.4/4.2.0 unconditionally executed certain VBA macros on loading Microsoft Office documents, contrary to user expectations.</p>
+<p>Users are recommended to upgrade to 4.2.5.</p>
+<p>Thanks to Stephen Bergmann of Red Hat, Inc. for discovering this flaw.</p>
+<p>References:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-0247" target="_blank">CVE-2014-0247</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 3.6.7</h2>
+<details id="cve-2013-4156">
+<summary>
+CVE-2013-4156 Microsoft .docm Denial Of Service
+</summary>
+<p><strong>Announced:</strong> July 26 2013</p>
+<p><strong>Fixed in:</strong> LibreOffice 3.6.7/4.0.4</p>
+<p><strong>Description:</strong></p>
+<p>A denial of service flaw was found in the .docm import filter of LibreOffice. An attacker cound create a specially-crafted file in the .docm file format which when loaded would immediately terminate the application through a NULL dereference.</p>
+<p>Thanks to Jeremy Brown of Microsoft Vulnerability Research for reporting this flaw. Users are recommended to upgrade to 3.6.7, 4.0.4 or 4.1.0 to avoid this flaw.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-4156" target="_blank">CVE-2013-4156</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 3.5.7</h2>
+<details id="cve-2012-4233">
+<summary>
+CVE-2012-4233 Multiple file format denial of service vulnerabilities
+</summary>
+<p><strong>Announced:</strong> October 31 2012</p>
+<p><strong>Fixed in:</strong> LibreOffice 3.5.7/3.6.1</p>
+<p><strong>Description:</strong></p>
+<p>Multiple denial of service flaws were found in various import filters of LibreOffice. An attacker could create a specially-crafted file in the .xls (Excel), .wmf (Window Meta File) or Open Document Format for Office Applications formats which when loaded would immediately terminate the application.</p>
+<p>Thanks to High-Tech Bridge for reporting these flaws. Users are recommended to upgrade to 3.5.7 or 3.6.1 to avoid these flaws</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2012-4233" target="_blank">CVE-2012-4233</a></p>
+<p><a href="https://www.htbridge.com/advisory/HTB23106" target="_blank">HTB23106</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 3.5.5</h2>
+<details id="cve-2012-2665">
+<summary>
+CVE-2012-2665 Multiple heap-based buffer overflows in the XML manifest encryption handling code
+</summary>
+<p><strong>Announced:</strong> August 01 2012</p>
+<p><strong>Fixed in:</strong> LibreOffice 3.5.5/3.6.0</p>
+<p><strong>Description:</strong></p>
+<p>Multiple heap-based buffer overflow flaws were found in the XML manifest encryption tag parsing code of LibreOffice. An attacker could create a specially-crafted file in the Open Document Format for Office Applications (ODF) format which when opened could cause arbitrary code execution.</p>
+<p>Thanks to Timo Warns of PRE-CERT for reporting this flaw. Users are recommended to upgrade to 3.5.5 or 3.6.0 to avoid this flaw</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2012-2665" target="_blank">CVE-2012-2665</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 3.5.3</h2>
+<details id="cve-2012-1149">
+<summary>
+CVE-2012-1149 Integer overflows in graphic object loading
+</summary>
+<p><strong>Announced:</strong> May 16 2012</p>
+<p><strong>Fixed in:</strong> LibreOffice 3.5.3</p>
+<p><strong>Description:</strong></p>
+<p>An integer overflow vulnerability in LibreOffice graphic loading code could allow a remote attacker to cause a denial of service (application crash) or potentially execute arbitrary code on vulnerable installations of LibreOffice.</p>
+<p>Thanks to Tielei Wang via Secunia SVCRP for reporting this flaw. Users are recommended to upgrade to 3.5.3 to avoid this flaw</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2012-1149" target="_blank">CVE-2012-1149</a></p>
+
+</details>
+
+<details id="cve-2012-2334">
+<summary>
+CVE-2012-2334 Integer overflow flaw with malformed PPT files
+</summary>
+<p><strong>Announced:</strong> May 16 2012</p>
+<p><strong>Updated:</strong> May 29 2012</p>
+<p><strong>Fixed in:</strong> LibreOffice 3.5.3</p>
+<p><strong>Description:</strong></p>
+<p>An integer overflow flaw, leading to buffer overflow, was found in the way LibreOffice processed invalid Escher graphics records length in PowerPoint documents. An attacker could provide a specially-crafted PowerPoint document that, when opened, would cause LibreOffice to crash or, potentially, execute arbitrary code with the privileges of the user running LibreOffice.</p>
+<p>Thanks to Sven Jacobi for reporting the initial flaw. Thanks to Florian Weimer, Red Hat Product Security Team, for identifying the possibility integer overflow. Users are recommended to upgrade to 3.5.3 to avoid this flaw</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2012-2334" target="_blank">CVE-2012-2334</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 3.4.6/3.5.1</h2>
+<details id="cve-2012-0037">
+<summary>
+CVE-2012-0037 XML Entity Expansion flaw by processing RDF file
+</summary>
+<p><strong>Announced:</strong> March 22 2012</p>
+<p><strong>Fixed in:</strong> LibreOffice 3.4.6/3.5.1</p>
+<p><strong>Description:</strong></p>
+<p>An XML Entity Expansion flaw was found in the way embedded Raptor library processed certain RDF and other XML-based format files. An attacker could create a specially-crafted file in an affected LibreOffice format which when opened could cause arbitrary code execution or local file inclusion.</p>
+<p>Thanks to Timothy D. Morgan of VSR for reporting this flaw. Users are recommended to upgrade to 3.4.6 or 3.5.1 to avoid this flaw</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2012-0037" target="_blank">CVE-2012-0037</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 3.4.3:</h2>
+<details id="cve-2011-2713">
+<summary>
+CVE-2011-2713 Multiple vulnerabilities in the &#39;Microsoft Word&#39; (doc) binary file format importer
+</summary>
+<p><strong>Announced:</strong> October 05, 2011</p>
+<p><strong>Fixed in:</strong> LibreOffice 3.4.3</p>
+<p><strong>Description:</strong></p>
+<p>Red Hat, Inc. security researcher Huzaifa Sidhpurwala reported multiple vulnerabilities in the binary Microsoft Word (doc) file format importer where custom crafted documents trigger out of bounds behaviour.</p>
+<p>Thanks to Huzaifa Sidhpurwala of Red Hat Security Team for reporting this vulnerability. Users are recommended to upgrade to 3.4.3 to avoid this flaw.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2011-2713" target="_blank">CVE-2011-2713</a></p>
+
+</details>
+
+<details id="cve-2013-2189">
+<summary>
+CVE-2013-2189 Microsoft .doc Memory Corruption Vulnerability
+</summary>
+<p><strong>Announced:</strong> July 26 2013</p>
+<p><strong>Fixed in:</strong> LibreOffice 3.4.3</p>
+<p><strong>Description:</strong></p>
+<p>Prior to version 3.4.3 a vulnerability exists where parsing a malformed Microsoft .doc file can operate on invalid PLCF (Plex of Character Positions in File) data. Users should already have upgraded to versions &gt;= 3.4.3 due to earlier advisories.</p>
+<p>Thanks to Jeremy Brown of Microsoft Vulnerability Research for reporting this flaw.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-2189" target="_blank">CVE-2013-2189</a></p>
+
+</details>
+
+<details id="cve-2017-9806">
+<summary>
+CVE-2017-9806 Out-of-Bounds Write in Writer&#39;s WW8Fonts Constructor
+</summary>
+<p><strong>Announced:</strong> October 27, 2017</p>
+<p><strong>Fixed in:</strong> LibreOffice 3.4.3</p>
+<p><strong>Description:</strong></p>
+<p>Prior to version 3.4.3 a vulnerability exists in the DOC font descriptor parser, allowing attackers to craft malicious documents that cause denial of service (memory corruption and application crash) potentially resulting in arbitrary code execution. Users should already have upgraded to versions &gt;= 3.4.3 due to earlier advisories.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-9806" target="_blank">CVE-2017-9806</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 3.3.3/3.4.0:</h2>
+<details id="cve-2011-2685">
+<summary>
+CVE-2011-2685 Multiple vulnerabilities in the &#39;Lotus Word Pro&#39; (lwp) file format importer
+</summary>
+<p><strong>Announced:</strong> June 06, 2011</p>
+<p><strong>Fixed in:</strong> LibreOffice 3.3.3/3.4.0</p>
+<p><strong>Description:</strong></p>
+<p>CERT/CC security researchers Will Dormann and Jared Allar reported multiple
+vulnerabilities in the &lsquo;Lotus Word Pro&rsquo; (lwp) file format importer.</p>
+<p>Thanks to Will Dormann and Jared Allar of the CERT/CC for reporting these
+vulnerabilities.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2011-2685" target="_blank">CVE-2011-2685</a></p>
+<p>US-CERT: <a href="https://www.kb.cert.org/vuls/id/953183" target="_blank">VU#953183</a></p>
+
+</details>
+
+<h1>Third Party Advisories</h1>
+<h2>Fixed in LibreOffice 25.8.5/26.2.1</h2>
+<details id="cve-2022-30190">
+<summary>
+CVE-2022-30190 Hyperlinks to Microsoft shell handler schemes are no longer passed to the system
+</summary>
+<p><strong>Announced:</strong> August 21, 2026</p>
+<p><strong>Fixed in:</strong> LibreOffice 25.8.5/26.2.1</p>
+<p><strong>Description:</strong></p>
+<p>A hyperlink in a document can name a scheme that LibreOffice does not handle itself. LibreOffice passes such a scheme to the operating system to open.
+On Windows this let a document reach the ms-msdt: handler of the Microsoft Support Diagnostic Tool, which had a code execution flaw known as Follina, reported as CVE-2022-30190.
+Microsoft fixed that flaw in June 2022.
+LibreOffice was one way to reach the handler, not the source of the flaw.</p>
+<p>LibreOffice now treats ms-msdt: and the Microsoft Office URI schemes as protocols that a document may not follow without the user agreeing.</p>
+<p>Clicking such a link shows a warning naming the resolved target, and the default answer is not to open it.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Alasdair Gorniak of Adversify for reporting that LibreOffice would pass these schemes to the system.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-30190" title="CVE-2022-30190" target="_blank">CVE-2022-30190</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 4.2.3</h2>
+<details id="cve-2014-0160">
+<summary>
+CVE-2014-0160 &amp; more (a set of vulnerabilities) TLS heartbeat read overrun (4.1 line not affected)
+</summary>
+<p><strong><span data-mce-mark="1">Announced:</strong> April 7, 2014</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.2.3</p>
+<p><strong>Description:</strong></p>
+<p>The TLS and DTLS implementations in OpenSSL 1.0.1 before 1.0.1g do not properly handle Heartbeat Extension packets, which allows remote attackers to obtain sensitive information from process memory via crafted packets that trigger a buffer over-read, aka the Heartbleed bug.</p>
+<p><strong>Other related vulnerabilites, also fixed:</strong></p>
+<p>CVE-2010-5298 CVE-2014-0224 CVE-2013-4353 CVE-2014-0195 CVE-2014-3470 CVE-2013-6449 CVE-2014-0198 CVE-2013-6450 CVE-2014-0221</p>
+<p>Users are recommended to upgrade to 4.2.3 to avoid this flaw when using the packages provided from <a href="https://www.libreoffice.org" target="_blank">www.libreoffice.org</a> which include a bundled copy of openssl.</p>
+<p>LibreOffice 4.1 line uses an older copy of openssl that is not vulnerable.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://www.openssl.org/news/secadv_20140407.txt" target="_blank">Openssl Security Advisory</a></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2010-5298" target="_blank">CVE-2010-5298</a></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-4353" target="_blank">CVE-2013-4353</a></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-0195" target="_blank">CVE-2014-0195</a></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-3470" target="_blank">CVE-2014-3470</a></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-6449" target="_blank">CVE-2013-6449</a></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-0198" target="_blank">CVE-2014-0198</a></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-6450" target="_blank">CVE-2013-6450</a></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2014-0221" target="_blank">CVE-2014-0221</a></p>
+
+</details>
+
+<h2>Fixed in LibreOffice 4.1.5/4.2.0</h2>
+<details id="cve-2013-1752">
+<summary>
+CVE-2013-1752 &amp;CVE-2013-4238 Python Multiple Vulnerabilities
+</summary>
+<p><strong>Announced:</strong> March 20, 2014</p>
+<p><strong>Fixed in:</strong> LibreOffice 4.1.5/4.2.0</p>
+<p><strong>Description:</strong></p>
+<p>A security issue and multiple vulnerabilities have been reported in Python, which can be exploited by malicious people to conduct spoofing attacks and cause a DoS (Denial of Service).</p>
+<p>Users are recommended to upgrade to 4.1.5 or 4.2.0 to avoid this flaw when using the packages provided from <a href="https://www.libreoffice.org" target="_blank">www.libreoffice.org</a> which include a bundled copy of python.</p>
+<p><strong>References:</strong></p>
+<p><a href="https://secunia.com/advisories/56226" target="_blank">CVE-2013-1752</a></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-4238" target="_blank">CVE-2013-4238</a></p>
+
+</details>
+
+<h2>Fixed in all versions</h2>
+<details id="cve-2018-14939">
+<summary>
+CVE-2018-14939 overflow at realpath, not a bug in LibreOffice
+</summary>
+<p><strong>Announced:</strong> Aug 13, 2018</p>
+<p><strong>Fixed in:</strong> Not a Bug</p>
+<p><strong>Description</strong>:</p>
+<p>CVE-2018-14939 was assigned to address an apparent buffer overflow in the get_app_path function with the suggestion that it is possible for attackers to cause a denial of service (buffer overflow and application crash) or possibly have unspecified other impact if LibreOffice is automatically launched during web browsing with pathnames controlled by a remote web site.</p>
+<p>Our analysis is that this is not the case. get_app_path is only called with argv[0] of LO&rsquo;s oosplash helper executable (installed at /usr/lib&hellip;/libreoffice/program/oosplash, called during the LO start-up sequence), so an attack would need launch that executable with a suitably long argv[0] which is not under the control of an attacker.</p>
+<p><strong>References</strong>:</p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-14939" target="_blank">CVE-2018-14939</a></p>
+
+</details>
+
+<details id="cve-2012-2149">
+<summary>
+CVE-2012-2149 libwpd: Memory overwrite flaw by processing certain WordPerfect (WPD). No version of LibreOffice is affected by this.
+</summary>
+<p><strong>References</strong>:</p>
+<p><a href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=2012-2149" target="_blank">CVE-2012-2149</a></p>
+
+</details>
+
+<h1>Highlighted Pre-release Discoveries</h1>
+<h2>Addressed in LibreOffice 26.8.0.0.alpha0+</h2>
+<details id="LO-26-1">
+<summary>
+Stack-buffer-overflow in locale key construction
+</summary>
+<p><strong>Fixed in:</strong> LibreOffice 26.8.0.0.alpha0+</p>
+<p><strong>Description</strong>:</p>
+<p>Stack-buffer-overflow in locale key construction.</p>
+<p><strong>Credits</strong>:</p>
+<p>Thanks to Jake Lamberson for detecting and reporting this during development before release.</p>
+<p>Thanks to Caolán McNamara of Collabora Productivity for providing a fix.</p>
+
+</details>
+
+
+</section>
+<footer class="colophon full-width">
+<div class="fullWidth-center">
+    <h2>
+        <a href="/" title="LibreOffice">
+            <img class="logo" alt="LibreOffice" src="/media/libreoffice-tdf-logo.svg">
+        </a>
+    </h2>
+    <div class="ft-main-item"><h3>Download</h3>
+<ul>
+<li><a href="/download/">Personal Use</a></li>
+<li><a href="/for-business/">Business Use</a></li>
+<li><a href="/download-other/">Other Versions</a></li>
+<li><a href="/release-notes/">Release Notes</a></li>
+<li><a href="https://extensions.libreoffice.org/en-us" target="_blank">Templates &amp; Extensions</a></li>
+</ul>
+</div>
+    
+    <div class="ft-main-item"><h3>About Us</h3>
+<ul>
+<li><a href="/who-are-we/">Who Are We?</a></li>
+<li><a href="https://www.documentfoundation.org/" target="_blank">The Document Foundation</a></li>
+<li><a href="/who-uses-libreoffice/">Who uses LibreOffice?</a></li>
+<li><a href="/libreoffice-timeline/">LibreOffice Timeline</a></li>
+<li><a href="/libreoffice-vs-openoffice/">LibreOffice vs OpenOffice</a></li>
+<li><a href="/libreoffice-technology/">LibreOffice Technology</a></li>
+<li><a href="https://wiki.documentfoundation.org/ODF" target="_blank">What is OpenDocument?</a></li>
+<li>Merchandise: <a href="https://www.freewear.org/LibreOffice" target="_blank">FreeWear</a>, <a href="https://documentfoundation.myspreadshop.de/" target="_blank">Spreadshop</a></li>
+<li><a href="/security-info/">Security</a></li>
+<li><a href="/credits/">Credits</a></li>
+</ul>
+</div>
+    
+    <div class="ft-main-item"><h3>Get Help</h3>
+<ul>
+<li><a href="/faq/">FAQ</a></li>
+<li><a href="/get-help/">Community Assistance</a></li>
+<li><a href="https://books.libreoffice.org/" target="_blank">Documentation</a></li>
+<li><a href="/installation-instructions/">Installation Instructions</a></li>
+<li><a href="/system-requirements/">System Requirements</a></li>
+<li><a href="https://www.documentfoundation.org/professional-support/" target="_blank">Professional Support</a></li>
+<li><a href="https://wiki.documentfoundation.org/Special:MyLanguage/Accessibility/Accessibility-dev" target="_blank">Accessibility</a></li>
+</ul>
+</div>
+    
+    <div class="ft-main-item"><h3>Community</h3>
+<ul>
+<li><a href="/improve-it/">Join Us - Start Here!</a></li>
+<li><a href="https://wiki.documentfoundation.org/Events" target="_blank">Events</a></li>
+</ul>
+<h3>Blog</h3>
+<ul>
+<li><a href="https://blog.documentfoundation.org" target="_blank">Read Our Blog</a></li>
+</ul>
+</div>
+    <div class="ft-donate-lang-social">
+        <p>
+            <a class="button" href='/donate/'>Donate</a>
+            </p>
+        <div class="lang-fallback-container hide" aria-hidden="true">
+<label for="languages-site-footer-fallback-nav" class="lang-fallback">Language:</label>
+<select id="languages-site-footer-fallback-nav" class="lang-fallback">
+    <option value="English (US)" data-lang="en-us" data-url="https://www.libreoffice.org/security/">English (US)</option></select>
+</div>
+<div class="lang-container">
+    <label for="languages-site-footer-input">Language:</label>
+    <input class="keepDatalist" type="text" list="languages-site-footer" id="languages-site-footer-input" autocomplete="off">
+    <datalist id="languages-site-footer">
+        <option value="English (US)" data-lang="en-us" href="https://www.libreoffice.org/security/"></option></datalist>
+</div>
+
+        <h3>Follow us!</h3>
+        <div class="sm-container">
+            <a href="https://fosstodon.org/@libreoffice" class="sm-icon"><img src="/media/mastodon.svg" alt="Mastodon"></a>
+            <a href="https://bsky.app/profile/libreoffice.bsky.social" class="sm-icon"><img src="/media/bluesky.svg" alt="Bluesky"></a>
+            <a href="https://www.reddit.com/r/libreoffice/" class="sm-icon"><img src="/media/reddit.svg" alt="Reddit"></a>
+            <a href="https://www.youtube.com/c/LibreOfficeTheDocumentFoundation" class="sm-icon"><img src="/media/youtube.svg" alt="YouTube"></a>
+            <a href="https://www.facebook.com/libreoffice.org" class="sm-icon"><img src="/media/facebook.svg" alt="Facebook"></a>
+            <a href="https://floss.fund"><img src="/media/flossfund-badge.svg" alt="FLOSS/fund"></a>
+        </div>
+    </div>
+    <div class="ft-strip">
+        <hr>
+<ul>
+<li><a href="https://www.documentfoundation.org/get-in-touch/" target="_blank">Contact Us</a></li>
+<li><a href="https://www.libreoffice.org/privacy-policy/" target="_blank">Datenschutzerklärung (Privacy Policy)</a></li>
+<li><a href="https://www.libreoffice.org/imprint/" target="_blank">Impressum (Legal Info)</a></li>
+<li><a href="https://wiki.documentfoundation.org/Special:MyLanguage/TradeMark_Policy" target="_blank">Trademarks</a></li>
+<li><a href="https://www.documentfoundation.org/media/statutes.pdf" target="_blank">Statutes (non-binding English translation)</a></li>
+<li><a href="https://www.documentfoundation.org/media/satzung.pdf" target="_blank">Satzung (binding German version)</a></li>
+</ul>
+<p>Copyright information: Unless otherwise specified, all text and images on this website are licensed under the <a href="https://creativecommons.org/licenses/by-sa/3.0/" target="_blank">Creative Commons Attribution-Share Alike 3.0 License</a>. This does not include the source code of LibreOffice, which is licensed under the <a href="https://www.libreoffice.org/download/license/" target="_blank">Mozilla Public License v2.0</a>. “LibreOffice” and “The Document Foundation” are registered trademarks of their corresponding registered owners or are in actual use as trademarks in one or more countries. Their respective logos and icons are also subject to international copyright laws. Use thereof is explained in our <a href="https://wiki.documentfoundation.org/Special:MyLanguage/TradeMark_Policy" target="_blank">trademark policy</a>. LibreOffice was based on OpenOffice.org.</p>
+    </div>
+</div>
+</footer>
+<script type="text/javascript" src="/js/flexsearch.7fc53e069e01cafac1bbbde7d28a73f821a3f59b9004356ef0daf5162b416268.js" defer></script>
+<script type="text/javascript" src="/js/fastsearch.b2bd7c7ad21cb7299fb447a824210b5e1c118539daeb1bae79a341a30089ff24.js" defer></script>
+<script type="text/javascript" src="/js/libreoffice.1d7c5eab8ff543eed177288784f350001b5942c005c81e11a3ccbfe937a3da07.js" defer></script>
+<script type="text/javascript" src="/js/matomo.1bd55be21a871fb6bd574923b716ca916ef371f07ab784c10c26156072933e24.js" defer></script>
+
+    </body>
+</html>

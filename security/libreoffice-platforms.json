@@ -1,0 +1,481 @@
+{
+ "_comment": "Reviewed platform disposition of The Document Foundation's LibreOffice CVE records (security plan v19 \u00a79.5.10.2, R18-1). An entry counts only while descriptionSha256 equals the SHA-256 of the record's English CNA description. 'all'/'macos' \u2192 the advisory may apply to the macOS website build; a list without them \u2192 never published for macOS; no entry \u2192 unknown. Records with structured platforms (CVE-2021-25631 Windows, CVE-2025-14714 MacOS) need no entry. Deliberately unresolved (unknown): CVE-2023-6185 (GStreamer integration, platform not stated), CVE-2024-5261 (LibreOfficeKit mode only). Change only by a reviewed commit naming the reviewer.",
+ "absentRecords": [
+  {
+   "evidence": "named on https://www.libreoffice.org/about-us/security/advisories/ but https://cveawg.mitre.org/api/cve/CVE-2021-25632 answers CVE_RECORD_DNE and cvelistV5 has no file (checked 2026-10-24)",
+   "id": "CVE-2021-25632"
+  }
+ ],
+ "entries": {
+  "CVE-2019-9847": {
+   "descriptionSha256": "3c576d5bcf8b727e7a04435e15ef5b5427cbb5cb6e344fafc5c92e9ec6cfc99b",
+   "evidence": "Under Windows and macOS when processing a hyperlink target",
+   "platforms": [
+    "windows",
+    "macos"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2019-9848": {
+   "descriptionSha256": "fbaf46abe3a9a3c91ee8e2880bab50219e80da562a55a7ada4916c8fe045e373",
+   "evidence": "LibreOffice has a feature where documents can specify that pre-installed scripts can be executed on various document events such as mouse-over, etc. LibreOffice is typically also bundled with LibreLog",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2019-9849": {
+   "descriptionSha256": "f12e352b70412ff97be45fa194e45fd68da1f6ccc4a3dadb5fb3c81d38bdea01",
+   "evidence": "LibreOffice has a 'stealth mode' in which only documents from locations deemed 'trusted' are allowed to retrieve remote resources. This mode is not the default mode, but can be enabled by users who wa",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2019-9850": {
+   "descriptionSha256": "70d847045b8608fd12a4b2f7f01add39104a821a6f2a8d5f2577834f896b64ef",
+   "evidence": "LibreOffice is typically bundled with LibreLogo, a programmable turtle vector graphics script, which can execute arbitrary python commands contained with the document it is launched from. LibreOffice",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2019-9851": {
+   "descriptionSha256": "3614be168ff08085bfa41d36fb60a892b613b70a668aa581e2231f3790753b55",
+   "evidence": "LibreOffice is typically bundled with LibreLogo, a programmable turtle vector graphics script, which can execute arbitrary python commands contained with the document it is launched from. Protection w",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2019-9852": {
+   "descriptionSha256": "d93939d51f6d0687d4c000c5e1ceb210fc2d8024e54f53a31ad90b356de8c916",
+   "evidence": "LibreOffice has a feature where documents can specify that pre-installed macros can be executed on various script events such as mouse-over, document-open etc. Access is intended to be restricted to s",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2019-9853": {
+   "descriptionSha256": "4883039ec277ee49f234f4de0af1a50367c7e31d58b44be5e3624666dc43b59e",
+   "evidence": "LibreOffice documents can contain macros. The execution of those macros is controlled by the document security settings, typically execution of macros are blocked by default. A URL decoding flaw exist",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2019-9854": {
+   "descriptionSha256": "063a39d09d67e929136e1b0c1a47601f7b23a23917cff8ea3a3e29181d0c9109",
+   "evidence": "LibreOffice has a feature where documents can specify that pre-installed macros can be executed on various script events such as mouse-over, document-open etc. Access is intended to be restricted to s",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2019-9855": {
+   "descriptionSha256": "14c0df917d6dca0b4c17ee7bf61c2ba3ea2105022b607785853e16ef89dfd1a5",
+   "evidence": "a Windows 8.3 path equivalence handling flaw left LibreOffice vulnerable under Windows",
+   "platforms": [
+    "windows"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2020-12801": {
+   "descriptionSha256": "9d1d7ffd8344a4843313a99b0f4b50c969c7e324e1c2aac3c94cad3dd123f70f",
+   "evidence": "If LibreOffice has an encrypted document open and crashes, that document is auto-saved encrypted. On restart, LibreOffice offers to restore the document and prompts for the password to decrypt it. If",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2020-12802": {
+   "descriptionSha256": "9adfdf1b771f3235c10793f9771c330d54132393d32630311f72637c8be1a56d",
+   "evidence": "LibreOffice has a 'stealth mode' in which only documents from locations deemed 'trusted' are allowed to retrieve remote resources. This mode is not the default mode, but can be enabled by users who wa",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2020-12803": {
+   "descriptionSha256": "7d7aa717663e071c1136880e65e430f2b7665acc5de73a09e4cd0322cb4bc11b",
+   "evidence": "ODF documents can contain forms to be filled out by the user. Similar to HTML forms, the contained form data can be submitted to a URI, for example, to an external web server. To create submittable fo",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2021-25633": {
+   "descriptionSha256": "7de960a77cc120406a55f658cfd7982d6eb97965d033df03aa9d7ba28d70806a",
+   "evidence": "LibreOffice supports digital signatures of ODF documents and macros within documents, presenting visual aids that no alteration of the document occurred since the last signing and that the signature i",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2021-25634": {
+   "descriptionSha256": "102d1271ea8fc5a6b3a718b0ee44f25bc9754e5c79cba03b7251ccc9f59b6cb3",
+   "evidence": "LibreOffice supports digital signatures of ODF documents and macros within documents, presenting visual aids that no alteration of the document occurred since the last signing and that the signature i",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2021-25635": {
+   "descriptionSha256": "43b7bc1b7d2f559fb5c9ae25fa72eeb58d0030cddaa48ab933632f91e72ff808",
+   "evidence": "An Improper Certificate Validation vulnerability in LibreOffice allowed",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2021-25636": {
+   "descriptionSha256": "0fec4b6f4337177e169bcbb052ad038b00b438f57f13f3cc20df7007c531d41b",
+   "evidence": "LibreOffice supports digital signatures of ODF documents and macros within documents, presenting visual aids that no alteration of the document occurred since the last signing and that the signature i",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2022-26305": {
+   "descriptionSha256": "699ea93ea16c8204bf102069f00b7a1b1bb9180168f882aba610d188a54ff0d6",
+   "evidence": "An Improper Certificate Validation vulnerability in LibreOffice existed where determining if a macro was signed by a trusted author was done by only matching the serial number and issuer string of the",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2022-26306": {
+   "descriptionSha256": "971507bd64e86b2af0adee42c5ff3d8bb950509133194ac26ae63cec75fdc650",
+   "evidence": "LibreOffice supports the storage of passwords for web connections in the user\u2019s configuration database. The stored passwords are encrypted with a single master key provided by the user. A flaw in Libr",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2022-26307": {
+   "descriptionSha256": "adffb07ab89889fc9073800569d846e7fdc84ae2db828103172885a83e67ad6f",
+   "evidence": "LibreOffice supports the storage of passwords for web connections in the user\u2019s configuration database. The stored passwords are encrypted with a single master key provided by the user. A flaw in Libr",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2022-3140": {
+   "descriptionSha256": "2df3a8eda436fc55b059211b6aa6a941af6e86140340b5782baaad086f569bdb",
+   "evidence": "LibreOffice supports Office URI Schemes to enable browser integration of LibreOffice with MS SharePoint server. An additional scheme 'vnd.libreoffice.command' specific to LibreOffice was added. In the",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2023-0950": {
+   "descriptionSha256": "a759e5a69a06bb8ff3305da5e9d9b27a18b7d5f3cd5df0055f2554fb03d10343",
+   "evidence": "Improper Validation of Array Index vulnerability in the spreadsheet component of The Document Foundation LibreOffice allows an attacker to craft a spreadsheet document that will cause an array index u",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2023-2255": {
+   "descriptionSha256": "28f89e98f175fce95b8240f375b0ad6f02ebc3229ae62dad250045a453b21335",
+   "evidence": "Improper access control in editor components of The Document Foundation LibreOffice allowed an attacker to craft a document that would cause external links to be loaded without prompt. In the affected",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2023-6186": {
+   "descriptionSha256": "07a19de7eb09d77c178aee1296172eb57cbb2ea50ee88f5c56a73fe478ab5f8a",
+   "evidence": "Insufficient macro permission validation of The Document Foundation LibreOffice allows an attacker to execute built-in macros without warning.",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2024-12425": {
+   "descriptionSha256": "36f5398acd98637b508ca8c77dd3998e387ad98be669b16a64c302f8a10ea7d7",
+   "evidence": "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal') vulnerability in The Document Foundation LibreOffice allows Absolute Path Traversal.",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2024-12426": {
+   "descriptionSha256": "68296a8370b106a2d9186789f2051ec657c1a9c267df70dc34afa787a02c7f77",
+   "evidence": "Exposure of Environmental Variables and arbitrary INI file values to an Unauthorized Actor vulnerability in The Document Foundation LibreOffice.",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2024-3044": {
+   "descriptionSha256": "8868b124400d4e97145cceb1bbecb6a7103d155595b0aa209e391ccdf7d3525b",
+   "evidence": "Unchecked script execution in Graphic on-click binding in affected LibreOffice versions allows an attacker to create a document which without prompt will execute scripts built-into LibreOffice on clic",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2024-6472": {
+   "descriptionSha256": "0671881324938f7d9cd2512cd416950a41c076463ebe62d12e90823315003d96",
+   "evidence": "Certificate Validation user interface in LibreOffice allows potential vulnerability.",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2024-7788": {
+   "descriptionSha256": "ccf4e00f56b54f1b69200db2f4d60307607ff5c514ba392072edd62782234f4e",
+   "evidence": "Improper Digital Signature Invalidation\u00a0 vulnerability in Zip Repair Mode of The Document Foundation LibreOffice allows Signature forgery vulnerability in LibreOfficeThis issue affects LibreOffice: fr",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2025-0514": {
+   "descriptionSha256": "755bbfa7a05837ac5dbaa74cbf67ed30dbf67cfc9532852dd134d2d2052a5fd9",
+   "evidence": "allows Windows Executable hyperlink targets to be executed",
+   "platforms": [
+    "windows"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2025-1080": {
+   "descriptionSha256": "eba469e6e55b8e82a3068a98a11529b2d7907b0334f85eec3d2080a2642da256",
+   "evidence": "LibreOffice supports Office URI Schemes to enable browser integration of LibreOffice with MS SharePoint server. An additional scheme 'vnd.libreoffice.command' specific to LibreOffice was added. In the",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2025-2866": {
+   "descriptionSha256": "125bf19d706642728ee8e048e9ec8010cd29a43d860cf89e72806f8c5fe5126a",
+   "evidence": "Improper Verification of Cryptographic Signature vulnerability in LibreOffice allows PDF Signature Spoofing by Improper Validation.",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-4430": {
+   "descriptionSha256": "9555b92d9e8764ec8b19476278446cc71dcbcca35ac544341b91da36c1723cba",
+   "evidence": "Out-of-bounds write vulnerability in The Document Foundation LibreOffice via crafted OOXML documents with mismatched encryption salt parameters.",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-6039": {
+   "descriptionSha256": "6205a88814b54e3a3abe21f2a06e3ca1d62f5a5e8dcf971da3c692e00e900b46",
+   "evidence": "LibreOffice can import drawings in the DXF format used by CAD software. A heap buffer overflow existed when importing a DXF polyline. The point count taken from the file was truncated to a 16-bit valu",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-6040": {
+   "descriptionSha256": "e92adf2da574d0cecb8fe86415d86ebba49a3630f83d8cd02db5315da0fcc3b8",
+   "evidence": "A heap use-after-free existed when importing the blank-width characters of an ODF number format. A position value read from the document was not checked against the length of the format-code string, s",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-6045": {
+   "descriptionSha256": "2bbdad38cfd843178858bbb77092fc16009b06a0f2ee721abc67e48f0277c15d",
+   "evidence": "LibreOffice can import EMF+ graphics, which may be embedded in documents. A heap buffer overflow existed when importing an EMF+ gradient brush. The number of gradient blend points was read from the fi",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-6047": {
+   "descriptionSha256": "0542bb7ee83f193b1e5718446700dd164bb3ef4a395e626e3912904bd6305699",
+   "evidence": "LibreOffice can import documents in the OOXML format (DOCX). A heap buffer overflow existed when replaying deferred parser events for a text box element. A handler object was assumed to be of one type",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63266": {
+   "descriptionSha256": "22b244497cf3e6f787e1b631f4bb24f6403fb0ff386e6e858706635d0c4f0b50",
+   "evidence": "LibreOffice Calc can link a cell range to an external data source, and the link is saved in the document. Through such a link a document could open an embedded Firebird database that wrote a file to a",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63267": {
+   "descriptionSha256": "ddeb020fcae6e58393a8c60efeacbb69420869d3f540b50fbb1f2e7ccb4efe81",
+   "evidence": "LibreOffice Calc can link a cell range to an external csv data source, and the link is saved in the document. Such a link was fetched while the document loaded, so opening a document could read a loca",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63268": {
+   "descriptionSha256": "ad13b34f4f190b2d534ff70c98ef507523f0dd1720875262f2397271b40d1f20",
+   "evidence": "LibreOffice Calc can link a cell range to an external data source, and the link is saved in the document. A link of the sql type could name a folder of local text files as a database, so opening a doc",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63269": {
+   "descriptionSha256": "25410941b4abe164d3d14b9f9c5b1795d35babc9cf78d1cc1303e8de61d95caf",
+   "evidence": "on Linux it plays them with GStreamer",
+   "platforms": [
+    "linux"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63270": {
+   "descriptionSha256": "71455c8f5100a24973a625c80528bab6496d29173f62e9ae378b1964c6f4c5ab",
+   "evidence": "URLs could be constructed which expanded environment variable or INI file values, so potentially sensitive information could be exfiltrated to a remote server on opening a document containing such lin",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63272": {
+   "descriptionSha256": "c8fb27fa7563c6b39b5bfe6371b0b39b22b023dc9e00f82140b68ac53b35a861",
+   "evidence": "LibreOffice can import WMF graphics, which may be embedded in documents. A heap buffer overflow existed when importing a text record that carries its own character advance widths. The count of advance",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63273": {
+   "descriptionSha256": "81dad7873fa870fad33a95454acd4b5be913c7cb5a8560896ce6fa02fe2becfe",
+   "evidence": "LibreOffice Draw can import PDF documents. A heap buffer overflow existed when importing an encrypted document. The length of the decryption key was taken from the document's own encryption dictionary",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63274": {
+   "descriptionSha256": "9c11c08f53a8a2eed3af05d1cc7d569d356fa00f3cf80820c62ac747e5912a78",
+   "evidence": "LibreOffice Draw can import PDF documents. A heap buffer overflow existed when importing a stream object. The length of the stream was taken from the object's own dictionary and was not checked agains",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63275": {
+   "descriptionSha256": "8e51c49ba8ff680e15767aebdd4e3b7c43ab22952aca62503162e05f8b1d0621",
+   "evidence": "LibreOffice can read CFF fonts, which may be embedded in documents. A stack buffer overflow existed when reading the hints of a glyph. The number of hints was checked against the wrong bound, so a gly",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63276": {
+   "descriptionSha256": "e7f7a8e3ab85dae56a68f73751f55da6a469eee3f943a14ddcb38b799c020da7",
+   "evidence": "LibreOffice converts CFF fonts to Type 1 when it subsets a font, which happens when a document is exported to PDF, and CFF fonts may be embedded in documents. A stack buffer overflow existed in that c",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63277": {
+   "descriptionSha256": "a9764a87f9133ead4c302a6457681562e50b77476c52353b8daa56be0eb2094d",
+   "evidence": "LibreOffice Calc can link a cell range to an external data source, and the link is saved in the document. A document could name a Java database driver for such a link to be loaded from a remote locati",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63278": {
+   "descriptionSha256": "f6d6f4af2166beba8563d493d454e9807f096e9bf76ac96d98bbc08e8077e6b0",
+   "evidence": "URLs could be constructed which expanded environment variable or INI file values, so potentially sensitive information could be exfiltrated to a remote server on opening a document containing such lin",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-63279": {
+   "descriptionSha256": "99b8869c77272070149c625a26ba7fc823610f112e9d8126bf9138783651d212",
+   "evidence": "LibreOffice can import PICT images, which may be embedded in documents. An out of bounds read existed when importing an image that uses a colour palette. The palette index held in the image data was u",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-8356": {
+   "descriptionSha256": "2e8dc7e601f5d079c4a36cd303998f709ce84ef5fefd7017a35d158300f05f42",
+   "evidence": "LibreOffice can import presentations in the legacy binary PPT format. A stack buffer overflow existed when importing a colour-replacement record. Two fixed-size colour tables were filled from the file",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-8357": {
+   "descriptionSha256": "d11743af0f88abb5b7d33a234b9738b9170c42c8a99a294a6c2d454666ccc159",
+   "evidence": "LibreOffice Calc compiles cell formulas when opening a spreadsheet. A heap buffer overflow existed when compiling a very long formula made up of many opening tokens. The array that tracks nesting dept",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  },
+  "CVE-2026-8358": {
+   "descriptionSha256": "2b2f011d254b6a1637b2c7fb40536bde1db6af14548e570c42266743b1a1b230",
+   "evidence": "LibreOffice Calc can import tracked changes from a spreadsheet document. A heap buffer overflow existed when a document reused the same change identifier for two different kinds of change. The importe",
+   "platforms": [
+    "all"
+   ],
+   "reviewedAt": "2026-10-24",
+   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+  }
+ },
+ "schema": 1
+}

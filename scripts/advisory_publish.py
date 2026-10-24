@@ -37,6 +37,8 @@ import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from advisory_fetch import DEFAULT_WATCHLIST, load_watchlist, withdrawn_valid  # noqa: E402
+import advisory_node  # noqa: E402
+import advisory_libreoffice  # noqa: E402
 
 MAX_PAYLOAD = 256 * 1024
 MAX_IDENTITIES = 64
@@ -89,6 +91,8 @@ def clean_string(s, what):
 
 
 def identity_key(i):
+    if i.get("kind") == "vendor":
+        return f"vendor:{i['vendor']}:{i['product']}:{i['platform']}:{i['flavour']}"
     return f"deb:{i['distro']}:{i['release']}:{i['source']}"
 
 
@@ -403,7 +407,8 @@ def previous_rows(prev):
     return rows, advisories
 
 
-def build(watchlist_path, bundle, prev, now):
+def build(watchlist_path, bundle, prev, now, platforms_path=None):
+    platforms_path = platforms_path or advisory_libreoffice.DEFAULT_PLATFORMS
     ecos, ids = load_watchlist(watchlist_path)
     if not isinstance(bundle, dict) or bundle.get("schema") != 1:
         raise Refuse("bundle schema must be 1")
@@ -432,6 +437,27 @@ def build(watchlist_path, bundle, prev, now):
 
     coverage, entries = [], []
     for ident in ids:
+        if ident.get("kind") == "vendor":
+            ikey = identity_key(ident)
+            eco_key = f"vendor:{ident['vendor']}:{ident['product']}"
+            if ident["vendor"] == "nodejs.org":
+                advs, statuses, lines = advisory_node.node_identity(ident["platform"], bundle.get("sources") or {}, kev, now)
+            else:
+                advs, statuses = advisory_libreoffice.libreoffice_identity(bundle.get("sources") or {}, kev,
+                                                                          advisory_libreoffice.load_platforms(platforms_path))
+                lines = None
+            statuses["cisa-kev"] = ("ok", kev_src.get("checkedAt")) if kev_ok else ("failed", None)
+            for source, (status, checked) in list(statuses.items()):
+                if status != "failed" and not wire_time(checked):
+                    statuses[source] = ("failed", None)
+            advs = cap_advisories(advs, statuses)
+            coverage += coverage_rows(ikey, ecos[eco_key]["sources"], statuses, prev_rows)
+            entry = {"identity": {k: ident[k] for k in ("kind", "vendor", "product", "platform", "flavour")},
+                     "scheme": "semver" if ident["vendor"] == "nodejs.org" else "dotted", "advisories": advs}
+            if lines is not None:
+                entry["maintainedLines"] = lines
+            entries.append(entry)
+            continue
         ikey = identity_key(ident)
         eco = ecos[f"deb:{ident['distro']}:{ident['release']}"]
         advs, statuses, complete = [], {}, True
@@ -483,17 +509,8 @@ def build(watchlist_path, bundle, prev, now):
                 w.update({"withdrawn": True, "withdrawnAt": since, "_order": (2, 2, 0), "_source": None})
                 advs.append(w)
         # Trim to the per-identity cap: KEV, critical, newest first.
-        advs.sort(key=lambda a: a["_order"])
-        if len(advs) > MAX_ADVISORIES:
-            for a in advs[MAX_ADVISORIES:]:
-                mark_partial(statuses, a["_source"])
-            advs = advs[:MAX_ADVISORIES]
-        for source in eco["sources"]:
-            status, checked = statuses[source]
-            if status == "failed":
-                old = prev_rows.get((ikey, source))
-                checked = old["checkedAt"] if old and old.get("status") in ("ok", "partial", "failed") else iso(0)
-            coverage.append({"identity": ikey, "source": source, "status": status, "checkedAt": checked})
+        advs = cap_advisories(advs, statuses)
+        coverage += coverage_rows(ikey, eco["sources"], statuses, prev_rows)
         entries.append({"identity": dict(ident, kind="deb"), "scheme": "deb", "advisories": advs})
 
     payload = {"schema": 1, "published": iso(now), "expires": iso(now + VALIDITY),
@@ -508,6 +525,30 @@ def build(watchlist_path, bundle, prev, now):
     data = encode(payload)
     check_payload(data)
     return data
+
+
+def cap_advisories(advs, statuses):
+    """Trim to the per-identity cap: KEV, critical, newest first; the source
+    of every dropped advisory becomes partial (F3)."""
+    advs.sort(key=lambda a: a["_order"])
+    if len(advs) > MAX_ADVISORIES:
+        for a in advs[MAX_ADVISORIES:]:
+            mark_partial(statuses, a["_source"])
+        advs = advs[:MAX_ADVISORIES]
+    return advs
+
+
+def coverage_rows(ikey, sources, statuses, prev_rows):
+    """One row per declared source; a failed source keeps the previous
+    list's last good checkedAt (never "now")."""
+    rows = []
+    for source in sources:
+        status, checked = statuses[source]
+        if status == "failed":
+            old = prev_rows.get((ikey, source))
+            checked = old["checkedAt"] if old and old.get("status") in ("ok", "partial", "failed") else iso(0)
+        rows.append({"identity": ikey, "source": source, "status": status, "checkedAt": checked})
+    return rows
 
 
 def withdrawn_since(previous, ids, now):
@@ -669,6 +710,10 @@ def check_payload(data):
             raise Refuse("entry scheme missing")
         for a in _clist(e.get("advisories"), "advisories", MAX_ADVISORIES):
             _check_advisory(a)
+        if "maintainedLines" in e:
+            ml = _clist(e["maintainedLines"], "maintainedLines", 32)
+            if not ml or any(type(x) is not str or not re.fullmatch(r"[1-9][0-9]{0,3}", x) for x in ml) or len(set(ml)) != len(ml):
+                raise Refuse("maintainedLines must be distinct line numbers")
     return d
 
 
@@ -733,6 +778,11 @@ def _check_advisory(a):
             _cname(b, "binary")
     if "withdrawn" in a and type(a["withdrawn"]) is not bool:
         raise Refuse("withdrawn is not a bool")
+    # v17-v19 additive fields (the client parses them strictly too).
+    if a.get("kind") is not None and a.get("kind") != "release":
+        raise Refuse("advisory kind must be absent or 'release'")
+    if a.get("unknownOutside") is not None and type(a.get("unknownOutside")) is not bool:
+        raise Refuse("unknownOutside is not a bool")
 
 
 def _check_range(r):

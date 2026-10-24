@@ -26,6 +26,7 @@ import time
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_WATCHLIST = os.path.join(ROOT, "security", "local-tools.json")
 OSV_API = "https://api.osv.dev"
@@ -36,6 +37,8 @@ MAX_RECORDS = 2000
 MAX_BUNDLE = 64 * 1024 * 1024
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@+._:/-]{0,127}$")
 UA = "briglia-security-watch (advisory-list fetch)"
+NODE_SOURCES = ["nodejs-security-wg", "nodejs-dist", "nodejs-schedule", "cisa-kev"]
+LIBREOFFICE_SOURCES = ["tdf-advisories", "cve-cna", "cisa-kev"]
 
 
 class FeedError(Exception):
@@ -84,8 +87,26 @@ def load_watchlist(path):
         raise ValueError("more than 64 identities")
     seen = set()
     for i in ids:
+        if i.get("kind") == "vendor":
+            # v17-v19 §9.5.10: the only vendor identities are official Node.js
+            # builds (macOS, Linux) and the LibreOffice website build (macOS),
+            # each with exactly its declared sources.
+            vp = (i.get("vendor"), i.get("product"), i.get("platform"), i.get("flavour"))
+            allowed = {("nodejs.org", "node", "darwin", "official"), ("nodejs.org", "node", "linux", "official"),
+                       ("documentfoundation", "libreoffice", "darwin", "official")}
+            if vp not in allowed:
+                raise ValueError(f"unsupported vendor identity {i}")
+            key = "vendor:" + ":".join(vp)
+            eco = f"vendor:{vp[0]}:{vp[1]}"
+            want = NODE_SOURCES if vp[0] == "nodejs.org" else LIBREOFFICE_SOURCES
+            if eco in ecos and ecos[eco]["sources"] != want:
+                raise ValueError(f"{eco} must declare exactly {want}")
+            if key in seen or eco not in ecos:
+                raise ValueError(f"duplicate or undeclared identity {key}")
+            seen.add(key)
+            continue
         if i.get("kind") != "deb":
-            raise ValueError("only deb identities are supported by this fetcher")
+            raise ValueError("only deb and Node.js vendor identities are supported by this fetcher")
         for f in ("distro", "release", "source"):
             if not isinstance(i.get(f), str) or not NAME_RE.match(i[f]):
                 raise ValueError(f"identity field {f} invalid: {i}")
@@ -199,7 +220,19 @@ def run(args):
         bundle["sources"]["cisa-kev"] = {"status": "ok", "checkedAt": now_iso(), "cves": k}
     except FeedError as e:
         bundle["sources"]["cisa-kev"] = {"status": "failed", "problem": str(e)[:300]}
+    if any(i.get("kind") == "vendor" and i.get("vendor") == "nodejs.org" for i in ids):
+        import advisory_node
+        for name, src in advisory_node.fetch_all(now_iso()).items():
+            bundle["sources"][name] = src
+            print(f"  {name}: {src['status']}")
+    if any(i.get("kind") == "vendor" and i.get("vendor") == "documentfoundation" for i in ids):
+        import advisory_libreoffice
+        for name, src in advisory_libreoffice.fetch_all(now_iso()).items():
+            bundle["sources"][name] = src
+            print(f"  {name}: {src['status']}")
     for i in ids:
+        if i.get("kind") == "vendor":
+            continue
         eco = ecos[f"deb:{i['distro']}:{i['release']}"]
         for o in eco.get("osv", []):
             row = {"identity": i, "source": f"osv:{o}"}
@@ -219,7 +252,8 @@ def run(args):
     with open(os.path.join(args.out, "advisory-input.json"), "w") as f:
         f.write(data)
     failed = sum(1 for r in bundle["results"] if r["status"] != "ok")
-    print(f"advisory fetch: {len(bundle['results'])} rows, {failed} failed, KEV {bundle['sources']['cisa-kev']['status']}")
+    print(f"advisory fetch: {len(bundle['results'])} rows, {failed} failed, KEV {bundle['sources']['cisa-kev']['status']}"
+          + "".join(f", {k} {v['status']}" for k, v in sorted(bundle["sources"].items()) if k.startswith(("nodejs-", "tdf-", "cve-cna"))))
     return 0
 
 
