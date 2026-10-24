@@ -7,6 +7,8 @@ final class FakeMachine {
     var dirs: [String: [String]] = [:]
     var links: [String: String] = [:]
     var bins: [String: String] = [:]
+    /// PATH-only names (`shutil.which`); defaults to `bins`.
+    var pathBins: [String: String]?
     var mtimes: [String: Date] = [:]
     var outputs: [String: (Int32, String)] = [:]
     var commands: [String] = []
@@ -20,6 +22,7 @@ final class FakeMachine {
             readData: { self.files[$0] }, listDirectory: { self.dirs[$0] }, modificationDate: { self.mtimes[$0] },
             resolve: { p in self.links[p] ?? (self.files[p] != nil || self.dirs[p] != nil ? p : nil) },
             findBinary: { self.bins[$0] },
+            findOnPath: { (self.pathBins ?? self.bins)[$0] },
             run: { exe, args, _ in
                 let key = ([exe] + args).joined(separator: " ")
                 self.commands.append(key)
@@ -89,9 +92,20 @@ extension LocalToolsSelftest {
         t.check("policy: per-package installed/candidate and version table",
                 p["ffmpeg"]?.candidate == "7:5.1.7-0+deb12u1" && p["ffmpeg"]?.versions.count == 2
                     && p["ffmpeg"]?.versions.first(where: { $0.installed })?.files.contains("/var/lib/dpkg/status") == true)
-        let show = LocalTools.parseShowSources("Package: libavcodec59\nVersion: 7:5.1.7-0+deb12u1+b1\nSource: ffmpeg (7:5.1.7-0+deb12u1)\n\nPackage: ffmpeg\nVersion: 7:5.1.7-0+deb12u1\n")
-        t.check("show: candidate source versions normalised",
-                show["libavcodec59=7:5.1.7-0+deb12u1+b1"] == "7:5.1.7-0+deb12u1" && show["ffmpeg=7:5.1.7-0+deb12u1"] == "7:5.1.7-0+deb12u1")
+        let recs = LocalTools.parseShowRecords("Package: libavcodec59\nArchitecture: amd64\nVersion: 7:5.1.7-0+deb12u1+b1\nSource: ffmpeg (7:5.1.7-0+deb12u1)\n\nPackage: ffmpeg\nArchitecture: amd64\nVersion: 7:5.1.7-0+deb12u1\n")
+        t.check("show: candidate source name and version normalised",
+                LocalTools.candidateSource(recs, binary: "libavcodec59:amd64", version: "7:5.1.7-0+deb12u1+b1", nativeArch: "amd64")! == ("ffmpeg", "7:5.1.7-0+deb12u1")
+                    && LocalTools.candidateSource(recs, binary: "ffmpeg", version: "7:5.1.7-0+deb12u1", nativeArch: "amd64")! == ("ffmpeg", "7:5.1.7-0+deb12u1"))
+        let other = LocalTools.parseShowRecords("Package: libfoo1\nArchitecture: amd64\nVersion: 9.0-1\nSource: unrelated-source (9.0-1)\n")
+        t.check("R3: the candidate record keeps ITS source name (another source is visible as such)",
+                LocalTools.candidateSource(other, binary: "libfoo1", version: "9.0-1", nativeArch: "amd64")?.0 == "unrelated-source")
+        let multi = LocalTools.parseShowRecords("Package: libfoo1\nArchitecture: amd64\nVersion: 2.0-1\nSource: foo (2.0-1)\n\nPackage: libfoo1\nArchitecture: i386\nVersion: 2.0-1\nSource: foo (1.9-1)\n")
+        t.check("R3: the architecture selects the record (qualified)",
+                LocalTools.candidateSource(multi, binary: "libfoo1:i386", version: "2.0-1", nativeArch: "amd64")?.1 == "1.9-1")
+        t.check("R3: unqualified → native architecture's record",
+                LocalTools.candidateSource(multi, binary: "libfoo1", version: "2.0-1", nativeArch: "amd64")?.1 == "2.0-1")
+        t.check("R3: unknown native architecture and disagreeing records → ambiguous (nil)",
+                LocalTools.candidateSource(multi, binary: "libfoo1", version: "2.0-1", nativeArch: nil) == nil)
         let osr = LocalTools.parseOSRelease(Data("ID=debian\nVERSION_ID=\"12\"\nVERSION_CODENAME=bookworm\n".utf8))
         t.check("os-release parsed", osr == os)
         let maps = "7f00-7f01 r-xp 0 08:01 12 /usr/lib/x86_64-linux-gnu/libssl.so.3\n7f02-7f03 r-xp 0 08:01 13 /usr/lib/libxml2.so.2 (deleted)\n"
@@ -104,8 +118,10 @@ extension LocalToolsSelftest {
         m.text("/etc/os-release", "ID=debian\nVERSION_ID=\"12\"\nVERSION_CODENAME=bookworm\n")
         m.bins = ["dpkg-query": "/usr/bin/dpkg-query", "apt-cache": "/usr/bin/apt-cache", "ffmpeg": "/usr/bin/ffmpeg"]
         m.text("/usr/bin/ffmpeg", "ELF")
-        m.dirs["/var/lib/apt/lists"] = ["deb.debian.org_debian_dists_bookworm_InRelease"]
+        m.dirs["/var/lib/apt/lists"] = ["deb.debian.org_debian_dists_bookworm_InRelease",
+                                         "security.debian.org_debian-security_dists_bookworm-security_InRelease"]
         m.mtimes["/var/lib/apt/lists/deb.debian.org_debian_dists_bookworm_InRelease"] = LTF.now.addingTimeInterval(-86_400)
+        m.mtimes["/var/lib/apt/lists/security.debian.org_debian-security_dists_bookworm-security_InRelease"] = LTF.now.addingTimeInterval(-3600)
         m.outputs["/usr/bin/dpkg-query -W -f ${binary:Package}\t${Version}\t${Source}\t${db:Status-Abbrev}\n"] =
             (0, "ffmpeg\t7:5.1.6-0+deb12u1\t\tii \nlibavcodec59:amd64\t7:5.1.6-0+deb12u1+b1\tffmpeg (7:5.1.6-0+deb12u1)\tii \n")
         m.outputs["/usr/bin/dpkg-query -S /usr/bin/ffmpeg"] = (0, "ffmpeg: /usr/bin/ffmpeg\n")
@@ -115,7 +131,9 @@ extension LocalToolsSelftest {
             pkgPolicy("ffmpeg", installed: "7:5.1.6-0+deb12u1", candidate: "7:5.1.7-0+deb12u1", installedFrom: installedFrom, candidateFrom: cand)
             + pkgPolicy("libavcodec59:amd64", installed: "7:5.1.6-0+deb12u1+b1", candidate: "7:5.1.7-0+deb12u1", installedFrom: installedFrom, candidateFrom: cand))
         m.outputs["\(aptPrefix) show ffmpeg=7:5.1.7-0+deb12u1 libavcodec59:amd64=7:5.1.7-0+deb12u1"] = (0,
-            "Package: ffmpeg\nVersion: 7:5.1.7-0+deb12u1\n\nPackage: libavcodec59\nVersion: 7:5.1.7-0+deb12u1\nSource: ffmpeg\n")
+            "Package: ffmpeg\nArchitecture: amd64\nVersion: 7:5.1.7-0+deb12u1\n\nPackage: libavcodec59\nArchitecture: amd64\nVersion: 7:5.1.7-0+deb12u1\nSource: ffmpeg\n")
+        m.bins["dpkg"] = "/usr/bin/dpkg"
+        m.outputs["/usr/bin/dpkg --print-architecture"] = (0, "amd64\n")
         return m
     }
 
@@ -129,14 +147,15 @@ extension LocalToolsSelftest {
         t.check("deb inventory: binaries = owner + same-source installed binaries", ff.binaries == ["ffmpeg", "libavcodec59:amd64"])
         t.check("deb inventory: origin from the Debian archive accepted", ff.originProblem == nil)
         if case .deb(let c, _, let problem) = ff.candidates {
-            t.check("deb inventory: candidates with normalised source versions",
-                    problem == nil && c.first?.sourceVersion == "7:5.1.7-0+deb12u1" && c.first?.pocket == .archive)
+            t.check("deb inventory: candidates with normalised source name and version",
+                    problem == nil && c.first?.sourceVersion == "7:5.1.7-0+deb12u1" && c.first?.sourceName == "ffmpeg" && c.first?.pocket == .archive
+                        && c.count == 2 && c.allSatisfy { $0.sourceName == "ffmpeg" })
         } else { t.check("deb inventory: candidates with normalised source versions", false) }
         t.check("deb inventory: tools not installed → absent (dpkg readable)", inv.first(where: { $0.toolId == "pandoc" }).map { $0 == .absent(toolId: "pandoc") } == true)
         let report = LocalTools.match(.present(ff), list: LTF.listFor([LTF.debEntry([LTF.adv(["CVE-2099-0001"])])]), now: LTF.now)
         t.check("deb inventory → match: affected, fix installable", report.state == .affectedFixInstallable)
         t.check("deb inventory: only read-only commands ran (dpkg-query -W/-S, apt-cache policy/show with caches off)",
-                m.commands.allSatisfy { $0.hasPrefix("/usr/bin/dpkg-query -W") || $0.hasPrefix("/usr/bin/dpkg-query -S") || $0.hasPrefix(aptPrefix + " policy") || $0.hasPrefix(aptPrefix + " show") },
+                m.commands.allSatisfy { $0.hasPrefix("/usr/bin/dpkg-query -W") || $0.hasPrefix("/usr/bin/dpkg-query -S") || $0.hasPrefix(aptPrefix + " policy") || $0.hasPrefix(aptPrefix + " show") || $0 == "/usr/bin/dpkg --print-architecture" },
                 m.commands.joined(separator: " ; "))
         let ppa = debMachine(installedFrom: "https://ppa.example.org/ffmpeg bookworm/main amd64 Packages")
         if case .present(let p)? = LocalTools.inventory(ppa.probe(.linux)).first(where: { $0.toolId == "ffmpeg" }) {
@@ -150,17 +169,36 @@ extension LocalToolsSelftest {
         if case .unknown(_, let why)? = tcr {
             t.check("deb inventory: toolchain wrapper → never a localvuln instance (§9.5.6)", why.en.contains("Briglia's own copy"))
         } else { t.check("deb inventory: toolchain wrapper → never a localvuln instance (§9.5.6)", false, "\(String(describing: tcr))") }
+        let br = debMachine()
+        br.bins["chromium"] = "/usr/bin/chromium"; br.bins["google-chrome"] = "/usr/bin/google-chrome"
+        br.text("/usr/bin/chromium", "ELF"); br.text("/usr/bin/google-chrome", "ELF")
+        _ = LocalTools.inventory(br.probe(.linux))
+        t.check("R7 (Linux): with chromium and google-chrome on PATH, the renderer's chromium is the one resolved",
+                br.commands.contains("/usr/bin/dpkg-query -S /usr/bin/chromium") && !br.commands.contains("/usr/bin/dpkg-query -S /usr/bin/google-chrome"))
         let ut = debMachine()
         if case .present(let u)? = LocalTools.inventory(ut.probe(.ubuntuTouch)).first(where: { $0.toolId == "ffmpeg" }) {
             t.check("deb inventory: Ubuntu Touch rootfs packages are status-only (OTA)", u.statusOnly != nil
                     && !LocalTools.match(u, list: LTF.listFor([LTF.debEntry([LTF.adv(["CVE-2099-0001"])])]), now: LTF.now).messageable)
         } else { t.check("deb inventory: Ubuntu Touch rootfs packages are status-only (OTA)", false) }
+        func candProblem(_ m: FakeMachine) -> LocalTools.Text?? {
+            guard case .present(let o)? = LocalTools.inventory(m.probe(.linux)).first(where: { $0.toolId == "ffmpeg" }),
+                  case .deb(let c, _, _) = o.candidates, let first = c.first else { return nil }
+            return .some(first.indexProblem)
+        }
         let old = debMachine()
-        old.mtimes["/var/lib/apt/lists/deb.debian.org_debian_dists_bookworm_InRelease"] = LTF.now.addingTimeInterval(-9 * 86_400)
-        if case .present(let o)? = LocalTools.inventory(old.probe(.linux)).first(where: { $0.toolId == "ffmpeg" }),
-           case .deb(_, _, let problem) = o.candidates {
-            t.check("deb inventory: package lists older than 7 days → candidate evidence unusable", problem?.en.contains("9 days") == true)
-        } else { t.check("deb inventory: package lists older than 7 days → candidate evidence unusable", false) }
+        old.mtimes["/var/lib/apt/lists/security.debian.org_debian-security_dists_bookworm-security_InRelease"] = LTF.now.addingTimeInterval(-9 * 86_400)
+        old.mtimes["/var/lib/apt/lists/deb.debian.org_debian_dists_bookworm_InRelease"] = LTF.now.addingTimeInterval(-60)
+        t.check("N2: the candidate's own index is 9 days old while an unrelated index is fresh → candidate unusable",
+                candProblem(old)??.en.contains("9 days") == true)
+        let edge = debMachine()
+        edge.mtimes["/var/lib/apt/lists/security.debian.org_debian-security_dists_bookworm-security_InRelease"] = LTF.now.addingTimeInterval(-(7 * 86_400 + 23 * 3600))
+        t.check("N2: 7 days 23 hours is stale (no truncation to whole days)", candProblem(edge)??.en.contains("7 days") == true)
+        let fresh = debMachine()
+        t.check("N2: a fresh candidate index → no problem", candProblem(fresh).map { $0 == nil } == true)
+        t.check("N2: list-file name mangling",
+                LocalTools.releaseFileName(forPackageFile: "http://security.debian.org/debian-security bookworm-security/main amd64 Packages")
+                    == "security.debian.org_debian-security_dists_bookworm-security"
+                    && LocalTools.releaseFileName(forPackageFile: "/var/lib/dpkg/status") == nil)
         let broken = debMachine()
         broken.outputs.removeValue(forKey: "/usr/bin/dpkg-query -W -f ${binary:Package}\t${Version}\t${Source}\t${db:Status-Abbrev}\n")
         t.check("deb inventory: unreadable package database → every tool unknown (never absent)",
@@ -227,6 +265,30 @@ extension LocalToolsSelftest {
             t.check("mac inventory: Chrome.app → vendor identity with its bundle version",
                     c.identity.key == "vendor:google:chrome:darwin:stable" && c.installedVersion == "130.0.6723.58")
         } else { t.check("mac inventory: Chrome.app → vendor identity with its bundle version", false) }
+        // R7: the browser in the PDF renderer's order.
+        let both = macMachine()
+        both.files["/Applications/Google Chrome.app/Contents/Info.plist"] = try! PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleShortVersionString": "130.0.6723.58"], format: .xml, options: 0)
+        both.files["/Applications/Chromium.app/Contents/Info.plist"] = try! PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleShortVersionString": "131.0.6778.1"], format: .xml, options: 0)
+        if case .present(let c)? = LocalTools.inventory(both.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
+            t.check("R7: with Chromium.app and Chrome.app both installed, the renderer's choice (Chromium) is checked",
+                    c.identity.key == "vendor:chromium.org:chromium:darwin:official")
+        } else { t.check("R7: with Chromium.app and Chrome.app both installed, the renderer's choice (Chromium) is checked", false) }
+        let pathFirst = macMachine()
+        pathFirst.files["/Applications/Google Chrome.app/Contents/Info.plist"] = both.files["/Applications/Google Chrome.app/Contents/Info.plist"]
+        pathFirst.bins["google-chrome"] = "/usr/local/bin/google-chrome"
+        pathFirst.links["/usr/local/bin/google-chrome"] = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        pathFirst.files["/Applications/Microsoft Edge.app/Contents/Info.plist"] = try! PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleShortVersionString": "131.0.2903.1"], format: .xml, options: 0)
+        if case .present(let c)? = LocalTools.inventory(pathFirst.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
+            t.check("R7: a PATH browser comes before the app bundles (and maps to its bundle)", c.identity.key == "vendor:google:chrome:darwin:stable")
+        } else { t.check("R7: a PATH browser comes before the app bundles (and maps to its bundle)", false) }
+        let edgeOnly = macMachine()
+        edgeOnly.files["/Applications/Microsoft Edge.app/Contents/Info.plist"] = pathFirst.files["/Applications/Microsoft Edge.app/Contents/Info.plist"]
+        if case .present(let c)? = LocalTools.inventory(edgeOnly.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
+            t.check("R7: Edge alone is the renderer's fallback and is checked", c.identity.key == "vendor:microsoft:edge:darwin:stable")
+        } else { t.check("R7: Edge alone is the renderer's fallback and is checked", false) }
         let unreadable = macMachine()
         unreadable.dirs.removeValue(forKey: "/opt/homebrew/Cellar")
         t.check("mac inventory: unreadable Cellar → missing tools unknown, not absent",

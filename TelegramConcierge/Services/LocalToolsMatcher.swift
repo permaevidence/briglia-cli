@@ -16,12 +16,21 @@ enum LocalTools {
     struct DebCandidate: Codable, Equatable {
         var binary: String
         var version: String
-        /// Normalised source version of the candidate record (§9.5.4 step 3).
+        /// Normalised source name and version of the EXACT candidate record
+        /// (§9.5.4 step 3); nil when the record is missing or ambiguous.
+        var sourceName: String? = nil
         var sourceVersion: String?
         /// The candidate comes from the identity's own distribution/release
         /// archive (incl. -security/-updates, ESM) per `apt-cache policy`.
+        /// The candidate is listed under an accepted origin: the Release
+        /// fields `o=` / `n=` apt reports for its package file match the
+        /// identity's distribution and release (incl. -security, -updates,
+        /// Ubuntu ESM). This is apt's labelling, not an independent check of
+        /// signing keys or of Ubuntu Pro attachment (N2).
         var originOK: Bool
         var pocket: LocalAdvisory.Pocket?
+        /// Why the candidate's own index cannot count as fresh (N2), if so.
+        var indexProblem: Text? = nil
     }
 
     enum Candidates: Codable, Equatable {
@@ -303,7 +312,16 @@ enum LocalTools {
                 return (fixed, .unknown(Text("no candidate information for this package", "nessuna informazione sul candidato per questo pacchetto")))
             }
             let esm = rem.pocket == .esmApps || rem.pocket == .esmInfra
-            if cand.originOK, let src = cand.sourceVersion, fixes(src) == true,
+            // The candidate must be a record of the SAME source package: a
+            // larger version of another source proves nothing (R3).
+            guard let srcName = cand.sourceName, let src = cand.sourceVersion else {
+                return (fixed, .unknown(Text("the candidate's source package could not be identified", "non si riesce a identificare il pacchetto sorgente del candidato")))
+            }
+            if let why = cand.indexProblem { return (fixed, .unknown(why)) }
+            guard srcName == i.identity.source else {
+                return (fixed, .unknown(Text("the candidate is built from another source package", "il candidato è compilato da un altro pacchetto sorgente")))
+            }
+            if cand.originOK, fixes(src) == true,
                !esm || cand.pocket == .esmApps || cand.pocket == .esmInfra {
                 return (fixed, .installable)
             }

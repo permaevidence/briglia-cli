@@ -16,6 +16,25 @@ enum LocalToolsText {
 
     static func toolName(_ id: String) -> String { LocalTools.tool(id)?.name ?? id }
 
+    /// The name shown for a report; the renderer's browser is named by what
+    /// was actually found (Chromium, Google Chrome, Edge, a deb source).
+    static func displayName(_ r: LocalTools.ToolReport) -> String {
+        guard LocalTools.tool(r.toolId)?.rendererBrowser == true, let key = r.identityKey else { return toolName(r.toolId) }
+        let p = key.split(separator: ":").map(String.init)
+        switch p.first {
+        case "vendor"? where p.count >= 3:
+            switch (p[1], p[2]) {
+            case ("google", "chrome"): return "Google Chrome"
+            case ("chromium.org", _): return "Chromium"
+            case ("microsoft", "edge"): return "Microsoft Edge"
+            default: return p[2]
+            }
+        case "deb"? where p.count >= 4: return p[3]
+        case "brew"? where p.count >= 3: return p[p.count - 2]
+        default: return toolName(r.toolId)
+        }
+    }
+
     static func vendorName(_ vendor: String, _ product: String) -> (String, String) {
         switch (vendor, product) {
         case ("nodejs.org", _): return ("Node.js", "nodejs.org")
@@ -48,36 +67,77 @@ enum LocalToolsText {
         }
     }
 
-    static func ids(_ r: LocalTools.ToolReport, kevOnly: Bool = false) -> String {
-        let list = r.affected.filter { !kevOnly || $0.kev }.map(\.primaryId)
+    static func idList(_ results: [LocalTools.AdvisoryResult]) -> String {
         var unique: [String] = []
-        for i in list where !unique.contains(i) { unique.append(i) }
+        for i in results.map(\.primaryId) where !unique.contains(i) { unique.append(i) }
         let shown = unique.prefix(3).joined(separator: ", ")
         return unique.count > 3 ? shown + ", …" : shown
+    }
+
+    static func ids(_ r: LocalTools.ToolReport, kevOnly: Bool = false) -> String {
+        idList(r.affected.filter { !kevOnly || $0.kev })
     }
 
     static func mitigation(_ r: LocalTools.ToolReport, lang: String) -> String {
         T(lang, LocalTools.tool(r.toolId)?.mitigation ?? LocalTools.noWorkaround)
     }
 
+    /// Advisories an update fixes / KEV advisories it does not (R5: a fix
+    /// for one advisory never implies the others are fixed).
+    static func fixable(_ r: LocalTools.ToolReport) -> [LocalTools.AdvisoryResult] { r.affected.filter { $0.fix == .installable } }
+    static func kevUnfixed(_ r: LocalTools.ToolReport) -> [LocalTools.AdvisoryResult] { r.affected.filter { $0.kev && $0.fix != .installable } }
+
+    /// "To fix it, run: …" when the update fixes every applicable
+    /// advisory, else "To fix CVE-…, run: …".
+    static func fixSentence(_ r: LocalTools.ToolReport, only: [LocalTools.AdvisoryResult]? = nil, lang: String) -> String? {
+        guard let instr = fixInstruction(r.action, lang: lang) else { return nil }
+        let covered = only ?? fixable(r)
+        guard !covered.isEmpty else { return nil }
+        if covered.count == r.affected.count && only == nil { return instr }
+        let scoped = idList(covered)
+        return instr
+            .replacingOccurrences(of: "To fix it, run:", with: "To fix \(scoped), run:")
+            .replacingOccurrences(of: "Per correggerlo, esegui:", with: "Per correggere \(scoped), esegui:")
+            .replacingOccurrences(of: "Update ", with: "To fix \(scoped), update ", options: .anchored)
+            .replacingOccurrences(of: "Aggiorna ", with: "Per correggere \(scoped), aggiorna ", options: .anchored)
+    }
+
+    /// The compiled mitigation for KEV advisories still without an
+    /// installable fix (N16-3: combined with any independently useful fix).
+    static func kevMitigationSentence(_ r: LocalTools.ToolReport, lang: String, also: Bool) -> String? {
+        let open = kevUnfixed(r)
+        guard !open.isEmpty else { return nil }
+        let lead = also
+            ? L(lang, "\(idList(open)) is also actively exploited and has no installable fix yet.",
+                "anche \(idList(open)) è sfruttato attivamente e non ha ancora una correzione installabile.")
+            : L(lang, "\(idList(open)) is actively exploited and has no installable fix yet.",
+                "\(idList(open)) è sfruttato attivamente e non ha ancora una correzione installabile.")
+        return lead + " " + mitigation(r, lang: lang)
+    }
+
     /// One message line for one proposal.
     static func line(_ p: LocalVuln.Proposal, lang: String) -> String {
         let r = p.report
-        let name = toolName(r.toolId), ver = r.installedVersion ?? "?"
-        let fix = fixInstruction(r.action, lang: lang)
+        let name = displayName(r), ver = r.installedVersion ?? "?"
         let noFix = L(lang, "Briglia does not update it for you.", "Briglia non lo aggiorna per te.")
         switch p.kind {
         case .followUp:
-            return L(lang, "A fix is now available for the actively exploited security problem in \(name) \(ver).",
-                     "Ora è disponibile una correzione per il problema di sicurezza sfruttato attivamente in \(name) \(ver).")
-                + (fix.map { " " + $0 } ?? "")
+            // Only the KEV advisories that gained an installable fix are
+            // named as fixed; any other exploited one keeps its mitigation.
+            let kevFixed = r.affected.filter { $0.kev && $0.fix == .installable }
+            var s = L(lang, "A fix is now available for the actively exploited security problem \(idList(kevFixed)) in \(name) \(ver).",
+                      "Ora è disponibile una correzione per il problema di sicurezza sfruttato attivamente \(idList(kevFixed)) in \(name) \(ver).")
+            if let fix = fixSentence(r, only: kevFixed.count == r.affected.count ? nil : fixable(r), lang: lang) { s += " " + fix }
+            if let m = kevMitigationSentence(r, lang: lang, also: true) { s += " " + m }
+            return s
         case .escalation:
             let what = r.kevAffected
                 ? L(lang, "is now known to be actively exploited", "risulta ora sfruttato attivamente")
                 : L(lang, "is now rated critical", "è ora classificato come critico")
             var s = L(lang, "Update on \(name) \(ver) on \(machineEN): its known security problem (\(ids(r))) \(what).",
                       "Aggiornamento su \(name) \(ver) su \(machineIT): il suo problema di sicurezza noto (\(ids(r))) \(what).")
-            if let fix { s += " " + fix } else if r.kevWithoutFix { s += " " + mitigation(r, lang: lang) }
+            if let fix = fixSentence(r, lang: lang) { s += " " + fix }
+            if let m = kevMitigationSentence(r, lang: lang, also: !fixable(r).isEmpty) { s += " " + m }
             return s
         case .initial:
             if r.hasInstallableFix {
@@ -89,12 +149,12 @@ enum LocalToolsText {
                         "\(name) \(ver) su \(machineIT) ha un problema di sicurezza noto (\(ids(r))).")
                 if r.kevAffected { s += " " + L(lang, "It is being actively exploited.", "È sfruttato attivamente.") }
                 s += " " + noFix
-                if let fix { s += " " + fix }
-                if r.kevWithoutFix { s += " " + mitigation(r, lang: lang) }
+                if let fix = fixSentence(r, lang: lang) { s += " " + fix }
+                if let m = kevMitigationSentence(r, lang: lang, also: true) { s += " " + m }
                 return s
             }
             let detail: String
-            if let unfixable = r.affected.first(where: { $0.kev && $0.fix != .installable }) {
+            if let unfixable = kevUnfixed(r).first {
                 switch unfixable.fix {
                 case .noFix:
                     detail = L(lang, "No fix is available from the distribution or vendor yet.", "Non è ancora disponibile una correzione dalla distribuzione o dal produttore.")
@@ -202,13 +262,13 @@ enum LocalToolsText {
         let expired = record.map { $0.expires <= now } ?? true
         for r in reports {
             let state = expired && r.state != .unknown ? "unknown — the advisory list has expired" : stateText(r, lang: "en")
-            details.append("\(toolName(r.toolId)) \(r.installedVersion ?? "")".trimmingCharacters(in: .whitespaces)
+            details.append("\(displayName(r)) \(r.installedVersion ?? "")".trimmingCharacters(in: .whitespaces)
                            + (r.identityKey.map { " [\($0)]" } ?? "") + ": " + state
                            + (r.statusOnly.map { " (" + $0.en + ")" } ?? ""))
         }
         if !expired {
             for r in reports where [.affectedFixInstallable, .affectedNotInstallable, .affectedNoFix].contains(r.state) {
-                let name = "\(toolName(r.toolId)) \(r.installedVersion ?? "")"
+                let name = "\(displayName(r)) \(r.installedVersion ?? "")"
                 reasons.append(SecurityStatus.Reason(en: "\(name) has a known security problem (\(ids(r)))" + (fixInstruction(r.action, lang: "en").map { ": " + $0 } ?? ""),
                                                      it: "\(name) ha un problema di sicurezza noto (\(ids(r)))" + (fixInstruction(r.action, lang: "it").map { ": " + $0 } ?? "")))
             }

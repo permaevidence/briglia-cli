@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from advisory_fetch import DEFAULT_WATCHLIST, load_watchlist  # noqa: E402
@@ -48,8 +49,8 @@ MAX_VERSIONS = 256
 VALIDITY = 72 * 3600 - 60
 WITHDRAWN_DAYS = 30
 FRESH = 48 * 3600
-ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,63}$")
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@+._:/-]{0,127}$")
+ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{2,63}")
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9@+._:/-]{0,127}")
 RANGE_TYPES = ("ECOSYSTEM", "SEMVER", "GIT")
 EVENTS = ("introduced", "fixed", "last_affected", "limit")
 
@@ -96,10 +97,13 @@ def identity_key(i):
 def advisory_ids(rec):
     raw = [rec.get("id")] + list(rec.get("aliases") or []) + list(rec.get("upstream") or [])
     out = []
+    for k in ("aliases", "upstream"):
+        if rec.get(k) is not None and not isinstance(rec.get(k), list):
+            raise Incomplete(f"{k} is not a list")
     for i in raw:
         if not isinstance(i, str):
             raise Incomplete("an advisory ID is not a string")
-        if not ID_RE.match(i):
+        if not ID_RE.fullmatch(i):
             continue          # foreign ID shapes are not ours to publish
         u = i.upper()
         if u not in out:
@@ -127,52 +131,79 @@ def pocket_of(source, purl):
     return "archive"
 
 
+RANGE_TYPE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,31}$")
+
+
 def convert(rec, source, kev):
-    """One OSV record → one advisory dict, or None when it does not apply
-    to this package/ecosystem."""
-    if not isinstance(rec, dict):
-        raise Incomplete("record is not an object")
+    """One OSV record → one advisory dict, or None for a withdrawn record
+    that names no affected entry. The WHOLE record is validated first (R2):
+    only a fully interpreted record may be dropped for size (TooLarge →
+    partial); anything uninterpretable is Incomplete (→ the row is failed)."""
+    if not isinstance(rec, dict) or not isinstance(rec.get("id"), str):
+        raise Incomplete("record is not an object with an id")
     aff = rec.get("affected")
     if not isinstance(aff, list):
         raise Incomplete("record without an affected list")
     if not aff:
-        return None
-    ids = advisory_ids(rec)
+        if rec.get("withdrawn"):
+            return None
+        raise Incomplete("a record returned for this package names no affected entry")
     ranges, versions, fixed, purl = [], [], [], None
     for a in aff:
         if not isinstance(a, dict):
             raise Incomplete("affected entry is not an object")
+        if a.get("purl") is not None and not isinstance(a.get("purl"), str):
+            raise Incomplete("purl is not a string")
         purl = purl or a.get("purl")
-        for r in a.get("ranges") or []:
+        rl = a.get("ranges") or []
+        vl = a.get("versions") or []
+        if not isinstance(rl, list) or not isinstance(vl, list):
+            raise Incomplete("ranges/versions are not lists")
+        for r in rl:
             if not isinstance(r, dict) or not isinstance(r.get("events"), list):
                 raise Incomplete("range without events")
             rtype = r.get("type")
-            if not isinstance(rtype, str) or len(rtype) > 32:
-                raise Incomplete("range without a type")
+            if not isinstance(rtype, str) or not RANGE_TYPE_RE.match(rtype):
+                raise Incomplete("range type is not a plain OSV type")
             events = []
             for e in r["events"]:
                 if not isinstance(e, dict) or len(e) != 1:
                     raise Incomplete("event must have exactly one key")
                 (k, v), = e.items()
+                if not isinstance(k, str) or len(k.encode()) > 32:
+                    raise Incomplete("event key")
                 v = clean_string(v, "event version")
                 if not v:
                     raise Incomplete("empty event version")
                 events.append({k: v})
                 if k == "fixed":
                     fixed.append(v)
-            if len(events) > MAX_EVENTS:
-                raise TooLarge("too many events")
+            if not events:
+                raise Incomplete("range without events")
             ranges.append({"type": rtype, "events": events})
-        for v in a.get("versions") or []:
-            versions.append(clean_string(v, "version"))
-    if len(ranges) > MAX_RANGES:
-        raise TooLarge("too many ranges")
-    if ranges:
-        affected = {"ranges": ranges}
-    elif versions:
-        if len(versions) > MAX_VERSIONS:
-            raise TooLarge("too many versions")
-        affected = {"versions": versions}
+        for v in vl:
+            v = clean_string(v, "version")
+            if not v:
+                raise Incomplete("empty version")
+            versions.append(v)
+    ids = advisory_ids(rec)          # may raise TooLarge, only after full validation
+    # R1: the union of ranges and explicitly listed versions. A listed
+    # version already inside a range adds nothing and is omitted (only when
+    # that is PROVEN with dpkg ordering); everything else is kept.
+    if ranges and versions and source.startswith(("osv:Debian", "osv:Ubuntu")):
+        versions = [v for v in versions if not any(deb_in_range(v, r["events"]) is True for r in ranges if r["type"] == "ECOSYSTEM")]
+    seen = set()
+    versions = [v for v in versions if not (v in seen or seen.add(v))]
+    if len(ranges) > MAX_RANGES or any(len(r["events"]) > MAX_EVENTS for r in ranges):
+        raise TooLarge("too many ranges/events")
+    if len(versions) > MAX_VERSIONS:
+        raise TooLarge("too many versions")
+    if ranges or versions:
+        affected = {}
+        if ranges:
+            affected["ranges"] = ranges
+        if versions:
+            affected["versions"] = versions
     else:
         affected = "unknown"
     kev_hit = [i for i in ids if i in kev]
@@ -197,6 +228,66 @@ def convert(rec, source, kev):
     adv["_order"] = (0 if adv["kev"] else 1, 0 if adv["severity"] == "critical" else 1,
                      -(_ts(rec.get("published")) or _ts(rec.get("modified")) or 0))
     return adv
+
+
+def deb_in_range(v, events):
+    """OSV evaluation with dpkg ordering (mirrors the client); None when a
+    comparison is impossible."""
+    def key(e):
+        (k, x), = e.items()
+        return k, x
+    evs = [key(e) for e in events]
+    if any(k not in EVENTS for k, _ in evs):
+        return None
+    # insertion sort with "introduced: 0" first, introduced before others on ties
+    out = []
+    for k, x in evs:
+        i = len(out)
+        for j, (k2, x2) in enumerate(out):
+            if k == "introduced" and x == "0":
+                c = 0 if (k2 == "introduced" and x2 == "0") else -1
+            elif k2 == "introduced" and x2 == "0":
+                c = 1
+            else:
+                c = deb_compare(x, x2)
+                if c is None:
+                    return None
+                if c == 0 and k != k2:
+                    c = -1 if k == "introduced" else (1 if k2 == "introduced" else 0)
+            if c < 0:
+                i = j
+                break
+        out.insert(i, (k, x))
+    affected = False
+    for k, x in out:
+        if k == "introduced":
+            if x == "0":
+                affected = True
+                continue
+            c = deb_compare(v, x)
+            if c is None:
+                return None
+            if c >= 0:
+                affected = True
+        elif k == "fixed":
+            c = deb_compare(v, x)
+            if c is None:
+                return None
+            if c >= 0:
+                affected = False
+        elif k == "last_affected":
+            c = deb_compare(v, x)
+            if c is None:
+                return None
+            if c > 0:
+                affected = False
+        elif k == "limit":
+            c = deb_compare(v, x)
+            if c is None:
+                return None
+            if c >= 0:
+                return False
+    return affected
 
 
 def _ts(s):
@@ -431,64 +522,186 @@ def strip(payload):
 
 # ---------------------------------------------------------------- validation
 
+def _is_int(v):
+    return type(v) is int
+
+
+def _cstr(v, what):
+    """The client's `string()`: a JSON string of ≤ 512 UTF-8 bytes with no
+    Unicode control or format character (CharacterSet.controlCharacters)."""
+    if type(v) is not str:
+        raise Refuse(f"{what} is not a string")
+    if len(v.encode("utf-8")) > MAX_STRING:
+        raise Refuse(f"{what} is longer than {MAX_STRING} bytes")
+    if any(unicodedata.category(c) in ("Cc", "Cf") for c in v):
+        raise Refuse(f"{what} contains control characters")
+    return v
+
+
+def _cname(v, what):
+    s = _cstr(v, what)
+    if not NAME_RE.fullmatch(s):
+        raise Refuse(f"{what} is not a valid name")
+    return s
+
+
+def _clist(v, what, mx):
+    if type(v) is not list:
+        raise Refuse(f"{what} is not a list")
+    if len(v) > mx:
+        raise Refuse(f"{what} has more than {mx} entries")
+    return v
+
+
+def _cdate(v, what):
+    # ISO8601DateFormatter .withInternetDateTime: no fractional seconds.
+    if type(v) is not str or len(v.encode()) > 40 or not ISO_RE.fullmatch(v):
+        raise Refuse(f"{what} is not an ISO 8601 timestamp")
+    try:
+        return parse_iso(v)
+    except ValueError:
+        raise Refuse(f"{what} is not an ISO 8601 timestamp")
+
+
+ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})")
+
+
 def check_payload(data):
-    """Independent re-check of every bound the client enforces; any
-    violation refuses to sign."""
+    """The client's structural parse (LocalAdvisoryParse.swift), mirrored
+    rule for rule, plus the verifier's validity/sequence bounds; any
+    violation refuses to sign. Signing something the client rejects would
+    turn every state unknown (N1)."""
     if len(data) > MAX_PAYLOAD:
         raise Refuse(f"payload is {len(data)} bytes")
-    d = json.loads(data)
-    if d.get("schema") != 1 or not isinstance(d.get("sequence"), int) or not 0 <= d["sequence"] < 2 ** 53:
-        raise Refuse("schema/sequence")
-    pub, exp = parse_iso(d["published"]), parse_iso(d["expires"])
+    try:
+        d = json.loads(data)
+    except ValueError:
+        raise Refuse("payload is not JSON")
+    if type(d) is not dict:
+        raise Refuse("payload is not a JSON object")
+    if d.get("schema") != 1 or not _is_int(d.get("schema")):
+        raise Refuse("unsupported schema")
+    if not _is_int(d.get("sequence")) or not 0 <= d["sequence"] < 2 ** 53:
+        raise Refuse("sequence")
+    pub, exp = _cdate(d.get("published"), "published"), _cdate(d.get("expires"), "expires")
     if not 0 < exp - pub <= 72 * 3600:
         raise Refuse("validity must be within 72 h")
     declared = {}
-    for x in d["declared"]:
-        if x["ecosystem"] in declared or not x["sources"] or len(set(x["sources"])) != len(x["sources"]):
-            raise Refuse("declared ecosystems")
-        declared[x["ecosystem"]] = x["sources"]
+    for x in _clist(d.get("declared"), "declared", 64):
+        if type(x) is not dict:
+            raise Refuse("declared entry is not an object")
+        eco = _cname(x.get("ecosystem"), "declared.ecosystem")
+        if eco in declared:
+            raise Refuse("ecosystem declared twice")
+        srcs = [_cname(v, "source") for v in _clist(x.get("sources"), "declared.sources", 8)]
+        if not srcs or len(set(srcs)) != len(srcs):
+            raise Refuse("declared sources empty or repeated")
+        declared[eco] = srcs
     pairs = set()
-    for c in d["coverage"]:
-        k = (c["identity"], c["source"])
+    for c in _clist(d.get("coverage"), "coverage", 512):
+        if type(c) is not dict:
+            raise Refuse("coverage row is not an object")
+        st = c.get("status")
+        if type(st) is not str or len(st.encode()) > 32:
+            raise Refuse("coverage status missing")
+        if st not in ("ok", "failed", "not-covered", "partial"):
+            raise Refuse("coverage status not in the enum (publisher never writes others)")
+        k = (_cstr(c.get("identity"), "coverage.identity"), _cname(c.get("source"), "coverage.source"))
         if k in pairs:
             raise Refuse(f"duplicate (identity, source) coverage pair {k} — refusing to sign")
         pairs.add(k)
-        if c["status"] not in ("ok", "failed", "not-covered", "partial"):
-            raise Refuse("coverage status")
-        parse_iso(c["checkedAt"])
-    if len(d["entries"]) > MAX_IDENTITIES:
-        raise Refuse("too many identities")
+        _cdate(c.get("checkedAt"), "coverage.checkedAt")
     seen = set()
-    for e in d["entries"]:
-        i = e["identity"]
-        k = identity_key(i)
+    for e in _clist(d.get("entries"), "entries", MAX_IDENTITIES):
+        if type(e) is not dict:
+            raise Refuse("entry is not an object")
+        k = _check_identity(e.get("identity"))
         if k in seen:
             raise Refuse("two entries for one identity")
         seen.add(k)
-        for f in ("distro", "release", "source"):
-            if not NAME_RE.match(i[f]):
-                raise Refuse("identity name")
-        if len(e["advisories"]) > MAX_ADVISORIES:
-            raise Refuse("too many advisories")
-        for a in e["advisories"]:
-            if not a["ids"] or len(a["ids"]) > MAX_IDS or not all(ID_RE.match(x) for x in a["ids"]):
-                raise Refuse("advisory IDs")
-            if a["severity"] not in ("recommended", "critical") or not isinstance(a["kev"], bool):
-                raise Refuse("severity/kev")
-            walk_strings(a)
+        sc = e.get("scheme")
+        if type(sc) is not str or len(sc.encode()) > 32:
+            raise Refuse("entry scheme missing")
+        for a in _clist(e.get("advisories"), "advisories", MAX_ADVISORIES):
+            _check_advisory(a)
     return d
 
 
-def walk_strings(v):
-    if isinstance(v, str):
-        if len(v.encode()) > MAX_STRING or any(ord(c) < 32 for c in v):
-            raise Refuse("string bound")
-    elif isinstance(v, dict):
-        for x in v.values():
-            walk_strings(x)
-    elif isinstance(v, list):
-        for x in v:
-            walk_strings(x)
+def _check_identity(i):
+    if type(i) is not dict or i.get("kind") not in ("deb", "brew", "cask", "vendor"):
+        raise Refuse("identity kind missing or unknown")
+    need = {"deb": ("distro", "release", "source"), "brew": ("tap", "formula"), "cask": ("token",),
+            "vendor": ("vendor", "product", "platform", "flavour")}[i["kind"]]
+    vals = [_cname(i.get(f), f"identity.{f}") for f in need]
+    if i["kind"] == "deb" and vals[0] not in ("debian", "ubuntu"):
+        raise Refuse("deb distro not debian|ubuntu")
+    if i["kind"] == "brew" and not (_is_int(i.get("versionScheme")) and 0 <= i["versionScheme"] < 1000):
+        raise Refuse("brew versionScheme missing")
+    return i["kind"] + ":" + ":".join(vals)
+
+
+def _check_advisory(a):
+    if type(a) is not dict:
+        raise Refuse("advisory is not an object")
+    ids = []
+    for v in _clist(a.get("ids"), "ids", MAX_IDS):
+        if type(v) is not str or not ID_RE.fullmatch(v):
+            raise Refuse("advisory ID does not match the ID pattern")
+        if v.upper() not in ids:
+            ids.append(v.upper())
+    if not ids:
+        raise Refuse("advisory without IDs")
+    if a.get("severity") not in ("recommended", "critical") or type(a.get("severity")) is not str:
+        raise Refuse("severity")
+    if type(a.get("kev")) is not bool:
+        raise Refuse("kev is not a bool")
+    if a.get("kevAdded") is not None:
+        _cstr(a["kevAdded"], "kevAdded")
+    af = a.get("affected")
+    if af != "unknown":
+        if type(af) is not dict:
+            raise Refuse("affected missing")
+        rs = [_check_range(r) for r in _clist(af["ranges"], "ranges", MAX_RANGES)] if "ranges" in af else []
+        vs = [_cstr(v, "version") for v in _clist(af["versions"], "versions", MAX_VERSIONS)] if "versions" in af else []
+        if not rs and not vs:
+            raise Refuse("affected has neither ranges nor versions")
+    rem = a.get("remediation")
+    if rem is not None:
+        if type(rem) is not dict:
+            raise Refuse("remediation is not an object")
+        fx = _clist(rem.get("fixed"), "remediation.fixed", 16)
+        if not fx:
+            raise Refuse("remediation without a fixed version")
+        for f in fx:
+            if type(f) is not dict:
+                raise Refuse("fixed entry is not an object")
+            if f.get("line") is not None:
+                _cstr(f["line"], "fixed.line")
+            if not _cstr(f.get("version"), "fixed.version"):
+                raise Refuse("empty fixed version")
+        if rem.get("pocket") is not None and rem.get("pocket") not in ("archive", "esm-infra", "esm-apps"):
+            raise Refuse("unknown pocket")
+    if a.get("noFixReason") is not None and type(a.get("noFixReason")) is not str:
+        raise Refuse("noFixReason is not a string")
+    if a.get("binaries") is not None:
+        for b in _clist(a["binaries"], "binaries", 64):
+            _cname(b, "binary")
+    if "withdrawn" in a and type(a["withdrawn"]) is not bool:
+        raise Refuse("withdrawn is not a bool")
+
+
+def _check_range(r):
+    if type(r) is not dict:
+        raise Refuse("range is not an object")
+    t = r.get("type")
+    if type(t) is not str or len(t.encode()) > 32:
+        raise Refuse("range type missing")
+    for e in _clist(r.get("events"), "events", MAX_EVENTS):
+        if type(e) is not dict or len(e) != 1:
+            raise Refuse("an event must have exactly one key")
+        (k, v), = e.items()
+        if not _cstr(v, "event version"):
+            raise Refuse("empty event version")
 
 
 def main(argv=None):

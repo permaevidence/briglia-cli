@@ -155,12 +155,13 @@ enum LTF {
     static func debInstance(tool: String = "ffmpeg", source: String = "ffmpeg", version: String = "7:5.1.6-0+deb12u1",
                             sourceVersion: String? = nil, release: String = "12", distro: String = "debian",
                             candidate: String? = "7:5.1.7-0+deb12u1", candidateSource: String? = nil,
+                            candidateSourceName: String? = nil,
                             pocket: LocalAdvisory.Pocket? = .archive, originProblem: LocalTools.Text? = nil,
                             binaries: [String]? = nil, asOf: Date = now, problem: LocalTools.Text? = nil) -> LocalTools.Instance {
         let bins = binaries ?? [tool, "libavcodec59"]
         let cands = candidate.map { c in
-            bins.map { LocalTools.DebCandidate(binary: $0, version: c, sourceVersion: candidateSource ?? c,
-                                               originOK: pocket != nil, pocket: pocket) }
+            bins.map { LocalTools.DebCandidate(binary: $0, version: c, sourceName: candidateSourceName ?? source,
+                                               sourceVersion: candidateSource ?? c, originOK: pocket != nil, pocket: pocket) }
         } ?? []
         return LocalTools.Instance(toolId: tool, identity: LocalAdvisory.Identity(kind: .deb, distro: distro, release: release, source: source),
                                    installedVersion: version, compareVersion: sourceVersion ?? version, originProblem: originProblem,

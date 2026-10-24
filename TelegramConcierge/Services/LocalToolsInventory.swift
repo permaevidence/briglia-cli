@@ -34,8 +34,18 @@ extension LocalTools {
         var macApp: MacApp? = nil
         var vendorNode = false
         var vendorPython = false
+        var rendererBrowser = false
         var mitigation: Text
     }
+
+    /// `Resources/BundledSkills/pdf/render_pdf.py` `find_chrome()`, in its
+    /// order: these names on PATH (`shutil.which`), then these app bundles.
+    static let rendererBrowserNames = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"]
+    static let rendererBrowserApps: [(path: String, vendor: String, product: String, flavour: String)] = [
+        ("/Applications/Chromium.app", "chromium.org", "chromium", "official"),
+        ("/Applications/Google Chrome.app", "google", "chrome", "stable"),
+        ("/Applications/Microsoft Edge.app", "microsoft", "edge", "stable"),
+    ]
 
     static let mediaMitigation: (String) -> Text = { tool in
         Text("Until it is updated, avoid processing untrusted files with \(tool).",
@@ -66,11 +76,11 @@ extension LocalTools {
         WatchTool(id: "openssl", name: "OpenSSL", mappedLibrary: "libssl.so", mitigation: noWorkaround),
         WatchTool(id: "libcurl", name: "libcurl", mappedLibrary: "libcurl.so", mitigation: noWorkaround),
         WatchTool(id: "libxml2", name: "libxml2", mappedLibrary: "libxml2.so", mitigation: noWorkaround),
-        WatchTool(id: "chrome", name: "Google Chrome", executables: ["google-chrome", "chromium", "chromium-browser"],
-                  macApp: MacApp(path: "/Applications/Google Chrome.app", vendor: "google", product: "chrome",
-                                 flavour: "stable", caskToken: nil),
-                  mitigation: Text("Until it is updated, avoid opening untrusted websites in this browser.",
-                                   "Finché non è aggiornato, evita di aprire siti non affidabili con questo browser.")),
+        // The browser the PDF renderer falls back to (render_pdf.find_chrome):
+        // resolved in exactly its order by `rendererBrowser`, not here.
+        WatchTool(id: "chrome", name: "the rendering browser", rendererBrowser: true,
+                  mitigation: Text("Until it is updated, avoid opening untrusted websites or documents in this browser.",
+                                   "Finché non è aggiornato, evita di aprire siti o documenti non affidabili con questo browser.")),
         WatchTool(id: "unzip", name: "unzip", executables: ["unzip"], brewFormulae: ["unzip"], mitigation: mediaMitigation("unzip")),
         WatchTool(id: "zip", name: "zip", executables: ["zip"], brewFormulae: ["zip"], mitigation: noWorkaround),
         WatchTool(id: "tar", name: "tar", executables: ["tar"], brewFormulae: ["gnu-tar"], mitigation: mediaMitigation("tar")),
@@ -93,6 +103,8 @@ extension LocalTools {
         /// realpath(3); nil when the path does not exist.
         var resolve: (String) -> String?
         var findBinary: (String) -> String?
+        /// PATH only, like Python's `shutil.which` (the renderer's lookup).
+        var findOnPath: (String) -> String?
         var run: (String, [String], TimeInterval) -> (Int32, String)
         /// Briglia's own copies (the managed Node root, the userdata
         /// toolchain): never a user tool here (§9.5.6, Phase 1).
@@ -117,6 +129,10 @@ extension LocalTools {
                     return String(cString: r)
                 },
                 findBinary: { PlatformBinary.find($0) },
+                findOnPath: { name in
+                    (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":")
+                        .map { "\($0)/\(name)" }.first { fm.isExecutableFile(atPath: $0) }
+                },
                 run: { exe, args, timeout in
                     let r = UserdataToolchain.run(exe, args, timeout: timeout)
                     return (r.exitCode, r.output)

@@ -99,18 +99,27 @@ def load_watchlist(path):
 
 def slim(record, package, ecosystem):
     """Only what the publisher needs; affected entries for exactly this
-    package and ecosystem."""
-    aff = []
-    for a in record.get("affected") or []:
+    package and ecosystem. A record OSV returned for this package that is
+    malformed or does not name it is an incomplete source (R2), never an
+    empty result; a withdrawn one may name nothing."""
+    aff = record.get("affected")
+    if not isinstance(aff, list):
+        raise FeedError(f"{record.get('id')}: affected is missing or not a list")
+    kept = []
+    for a in aff:
         if not isinstance(a, dict):
-            raise FeedError("affected entry is not an object")
-        p = a.get("package") or {}
-        if p.get("name") == package and p.get("ecosystem") == ecosystem:
-            aff.append({k: a.get(k) for k in ("ranges", "versions", "ecosystem_specific", "database_specific") if k in a}
-                       | {"purl": p.get("purl")})
+            raise FeedError(f"{record.get('id')}: affected entry is not an object")
+        p = a.get("package")
+        if not isinstance(p, dict) or not isinstance(p.get("name"), str) or not isinstance(p.get("ecosystem"), str):
+            raise FeedError(f"{record.get('id')}: affected package is malformed")
+        if p["name"] == package and p["ecosystem"] == ecosystem:
+            kept.append({k: a.get(k) for k in ("ranges", "versions", "ecosystem_specific", "database_specific") if k in a}
+                        | {"purl": p.get("purl")})
+    if not kept and not record.get("withdrawn"):
+        raise FeedError(f"{record.get('id')}: returned for {package} ({ecosystem}) but names no such affected entry")
     out = {k: record.get(k) for k in ("id", "aliases", "upstream", "withdrawn", "modified", "published", "severity",
                                        "database_specific") if k in record}
-    out["affected"] = aff
+    out["affected"] = kept
     return out
 
 

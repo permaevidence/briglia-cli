@@ -118,6 +118,73 @@ def parity(binary):
                 mismatches += 1
         check(f"parity fuzz: every payload the publisher accepts parses in the client ({accepted} accepted of 150)",
               mismatches == 0 and accepted > 10, f"{mismatches} mismatches")
+        # N1: boundary cases decided identically by the signing gate and the
+        # client (both accept or both reject).
+        cases = boundary_cases(base)
+        disagree = []
+        for label, d in cases:
+            data = json.dumps(d, ensure_ascii=False).encode()
+            try:
+                pub.check_payload(data)
+                gate = True
+            except Exception:
+                gate = False
+            p = f"{tmp}/b.json"
+            open(p, "wb").write(data)
+            client = parse_payload(binary, env, p).get("ok") is True
+            if gate != client:
+                disagree.append((label, gate, client))
+        check(f"parity boundaries: signing gate and client agree on {len(cases)} byte/type/control cases", not disagree, disagree)
+
+
+def boundary_cases(base):
+    def with_(path_fn, value, label):
+        d = json.loads(json.dumps(base))
+        path_fn(d, value)
+        return label, d
+
+    def rtype(d, v):
+        d["entries"][0]["advisories"][0]["affected"]["ranges"][0]["type"] = v
+
+    def ev(d, v):
+        d["entries"][0]["advisories"][0]["affected"]["ranges"][0]["events"][0] = {"introduced": v}
+
+    def kevadded(d, v):
+        d["entries"][0]["advisories"][0]["kevAdded"] = v
+
+    def ident(d, v):
+        d["coverage"][0]["identity"] = v
+
+    def idv(d, v):
+        d["entries"][0]["advisories"][0]["ids"][0] = v
+
+    def kev(d, v):
+        d["entries"][0]["advisories"][0]["kev"] = v
+
+    def seq(d, v):
+        d["sequence"] = v
+
+    out = [
+        with_(rtype, "é" * 16, "range type 32 UTF-8 bytes"),
+        with_(rtype, "é" * 17, "range type 34 UTF-8 bytes (Codex N1)"),
+        with_(rtype, "é" * 20, "range type 40 UTF-8 bytes"),
+        with_(ev, "1" * 512, "event version 512 bytes"),
+        with_(ev, "1" * 513, "event version 513 bytes"),
+        with_(ev, "é" * 256, "event version 512 UTF-8 bytes"),
+        with_(ev, "é" * 257, "event version 514 UTF-8 bytes"),
+        with_(ev, "1.0\n", "event version with a newline"),
+        with_(ev, "1.0\u200b", "event version with a format character"),
+        with_(ev, "", "empty event version"),
+        with_(kevadded, "2026-01-01\t", "kevAdded with a tab"),
+        with_(ident, "x" * 513, "coverage identity 513 bytes"),
+        with_(idv, "CVE-2099-0001\n", "ID with a trailing newline"),
+        with_(idv, "C", "ID too short"),
+        with_(kev, 1, "kev as an integer"),
+        with_(seq, True, "sequence as a bool"),
+        with_(seq, 2 ** 53, "sequence 2^53"),
+        with_(seq, 2 ** 53 - 1, "sequence 2^53 - 1"),
+    ]
+    return out
 
 
 def mutate(d, rnd):
@@ -219,7 +286,7 @@ def fixture_inventory(version):
     inst = {"toolId": "ffmpeg",
             "identity": {"kind": "deb", "distro": "debian", "release": "12", "source": "ffmpeg"},
             "installedVersion": version, "compareVersion": version, "binaries": ["ffmpeg", "libavcodec59"],
-            "candidates": {"deb": {"list": [{"binary": b, "version": "7:5.1.7-0+deb12u1", "sourceVersion": "7:5.1.7-0+deb12u1",
+            "candidates": {"deb": {"list": [{"binary": b, "version": "7:5.1.7-0+deb12u1", "sourceName": "ffmpeg", "sourceVersion": "7:5.1.7-0+deb12u1",
                                              "originOK": True, "pocket": "archive"} for b in ("ffmpeg", "libavcodec59")],
                                    "asOf": fx.NOW + 600}},
             "usedPath": "/usr/bin/ffmpeg"}

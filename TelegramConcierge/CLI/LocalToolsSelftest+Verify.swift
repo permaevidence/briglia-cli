@@ -84,11 +84,11 @@ extension LocalToolsSelftest {
         t.check("parse: an unknown coverage status is kept as 'not ok' (nil)", unknownStatus.coverage.first?.status == nil)
         let gitRange = LTF.doc(LTF.payload(coverage: cov, entries: [LTF.debEntry([LTF.adv(["CVE-2099-0001"],
             affected: ["ranges": [["type": "GIT", "events": [["introduced": "abc123"]]]]])])]))
-        if case .ranges(let r)? = gitRange.entries.first?.advisories.first?.affected {
+        if let r = gitRange.entries.first?.advisories.first?.affected.ranges {
             t.check("parse: unsupported range type → that range is unsupported (advisory unknown)", r.first?.unsupported == true)
         } else { t.check("parse: unsupported range type → that range is unsupported (advisory unknown)", false) }
         let oddEvent = LTF.doc(LTF.payload(coverage: cov, entries: [LTF.debEntry([LTF.adv(["CVE-2099-0001"], events: [["introduced": "0"], ["mystery": "1"]])])]))
-        if case .ranges(let r)? = oddEvent.entries.first?.advisories.first?.affected {
+        if let r = oddEvent.entries.first?.advisories.first?.affected.ranges {
             t.check("parse: unknown event kind → range unsupported", r.first?.unsupported == true)
         } else { t.check("parse: unknown event kind → range unsupported", false) }
         let additive = LTF.doc(LTF.payload(coverage: cov, entries: [LTF.debEntry([LTF.adv(["CVE-2099-0001"])])],

@@ -190,6 +190,22 @@ extension LocalToolsSelftest {
         t.check("service: accepted retry ends the attempt", rf.sent.count == 2 && rf.vuln()?.attempt == nil)
         rf.cleanup()
 
+        // R4: refused, then the candidate stops fixing it (still messageable
+        // as KEV without a fix): the stored fix command is never resent.
+        let kevList = LTF.envelope(LTF.payload(coverage: LTF.covAll("deb:debian:12:ffmpeg"),
+                                               entries: [LTF.debEntry([LTF.adv(["CVE-2099-0001"], kev: true)])]))
+        let r4 = LTWorld("r4", list: kevList, resolutions: [.present(LTF.debInstance())])
+        r4.outcome = .refused(retryAfter: 1)
+        let r4s = r4.service()
+        await r4s.tick(afterCheck: true)
+        r4.now = r4.now.addingTimeInterval(2)
+        r4.resolutions = [.present(LTF.debInstance(candidate: "7:5.1.6-0+deb12u1", asOf: r4.now))]
+        r4.outcome = .accepted
+        await r4s.tick(afterCheck: false)
+        t.check("R4: a refused notice whose fix is gone is dropped, its command never resent",
+                r4.sent.count == 1 && r4.vuln()?.attempt == nil, "\(r4.sent)")
+        r4.cleanup()
+
         // Refused, then the version changed: the retry is dropped.
         let rv = LTWorld("refused-changed", list: affectedList, resolutions: [.present(LTF.debInstance())])
         rv.outcome = .refused(retryAfter: 1)

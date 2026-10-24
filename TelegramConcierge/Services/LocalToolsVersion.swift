@@ -235,28 +235,21 @@ enum LocalToolsVersion {
     /// past `limit`); nil = cannot be decided (unsupported range type or
     /// event, a version the comparator rejects).
     static func isAffected(_ version: String, _ affected: LocalAdvisory.Affected, scheme: Scheme) -> Bool? {
-        switch affected {
-        case .unknown:
-            return nil
-        case .versions(let list):
-            var unknown = false
-            for v in list {
-                guard let c = compare(version, v, scheme: scheme) else { unknown = true; continue }
-                if c == 0 { return true }
-            }
-            return unknown ? nil : false
-        case .ranges(let ranges):
-            guard !ranges.isEmpty else { return nil }
-            var anyUnknown = false
-            for r in ranges {
-                switch inRange(version, r, scheme: scheme) {
-                case true?: return true
-                case nil: anyUnknown = true
-                case false?: break
-                }
-            }
-            return anyUnknown ? nil : false
+        guard !affected.unknown, !(affected.ranges.isEmpty && affected.versions.isEmpty) else { return nil }
+        var anyUnknown = false
+        // The union: a listed version OR any range (OSV `affected` semantics).
+        for v in affected.versions {
+            guard let c = compare(version, v, scheme: scheme) else { anyUnknown = true; continue }
+            if c == 0 { return true }
         }
+        for r in affected.ranges {
+            switch inRange(version, r, scheme: scheme) {
+            case true?: return true
+            case nil: anyUnknown = true
+            case false?: break
+            }
+        }
+        return anyUnknown ? nil : false
     }
 
     static func inRange(_ v: String, _ range: LocalAdvisory.Range, scheme: Scheme) -> Bool? {

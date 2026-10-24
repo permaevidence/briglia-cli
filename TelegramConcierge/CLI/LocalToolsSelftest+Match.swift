@@ -65,8 +65,13 @@ extension LocalToolsSelftest {
             "7:5.1.6-0+deb12u2", ranges([["introduced": "0"], ["fixed": "7:5.1.6-0+deb12u2"]]), .deb, false)
         aff(t, "explicit version list: listed → affected", "1.4", .versions(["1.3", "1.4"]), .dotted, true)
         aff(t, "explicit version list: not listed → not affected", "1.5", .versions(["1.3", "1.4"]), .dotted, false)
-        aff(t, "affected: unknown → unknown", "1.0", .unknown, .dotted, nil)
+        aff(t, "affected: unknown → unknown", "1.0", .unknownValue, .dotted, nil)
         aff(t, "comparator cannot parse → unknown", "7:5.1.6-0+deb12u1", one, .semver, nil)
+        let union = LocalAdvisory.Affected(ranges: [LocalAdvisory.Range(type: "ECOSYSTEM", events: [.init(kind: .introduced, version: "0"), .init(kind: .fixed, version: "2.0")], unsupported: false)],
+                                           versions: ["3.0"], unknown: false)
+        aff(t, "R1: an explicitly listed version outside the ranges is affected (union)", "3.0", union, .dotted, true)
+        aff(t, "R1: inside the ranges is affected", "1.5", union, .dotted, true)
+        aff(t, "R1: neither listed nor in a range → not affected", "2.5", union, .dotted, false)
         aff(t, "unsupported range → unknown", "1.0", .ranges([LocalAdvisory.Range(type: "GIT", events: [], unsupported: true)]), .dotted, nil)
     }
 
@@ -137,6 +142,15 @@ extension LocalToolsSelftest {
                 ok.state == .affectedFixInstallable && ok.action == .apt(["ffmpeg", "libavcodec59"]))
         t.check("remediation: binary candidate built from an OLDER source (binNMU) → not a fix",
                 m(LTF.debInstance(candidate: "7:5.1.6-0+deb12u1+b1", candidateSource: "7:5.1.6-0+deb12u1")).state == .affectedNotInstallable)
+        t.check("R3: a candidate of ANOTHER source with a larger version is never a fix",
+                !m(LTF.debInstance(candidate: "9:9.0-1", candidateSource: "9:9.0-1", candidateSourceName: "unrelated-source")).hasInstallableFix)
+        t.check("R3: a candidate whose source cannot be identified is never a fix",
+                !m({ var i = LTF.debInstance(); if case .deb(var l, let a, let p) = i.candidates { l = l.map { var c = $0; c.sourceName = nil; return c }; i.candidates = .deb(list: l, asOf: a, problem: p) }; return i }()).hasInstallableFix)
+        let listedVersion = LTF.listFor([LTF.debEntry([LTF.adv(["CVE-2099-0011"], fixed: "7:5.1.7-0+deb12u1",
+            affected: ["ranges": [["type": "ECOSYSTEM", "events": [["introduced": "0"], ["fixed": "7:5.1.7-0+deb12u1"]]]],
+                       "versions": ["7:5.1.8-0+deb12u1"]])])])
+        t.check("R1: a candidate explicitly listed as affected is not a fix",
+                !m(LTF.debInstance(candidate: "7:5.1.8-0+deb12u1"), listedVersion).hasInstallableFix)
         t.check("remediation: candidate equal to installed → not installable here",
                 m(LTF.debInstance(candidate: "7:5.1.6-0+deb12u1")).state == .affectedNotInstallable)
         t.check("remediation: candidate from another origin → not installable",

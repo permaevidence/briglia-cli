@@ -80,7 +80,7 @@ def cov(doc, source="osv:Debian:12", ident="deb:debian:12:ffmpeg"):
     return [c["status"] for c in doc["coverage"] if c["identity"] == ident and c["source"] == source]
 
 
-def run_tests(m, tmp, only=None):
+def run_tests(m, tmp, only=None, fetch=None):
     """Returns {test name: ok}."""
     res = {}
 
@@ -90,6 +90,7 @@ def run_tests(m, tmp, only=None):
             if only is None:
                 check(name, ok, detail)
 
+    fetch = fetch or sys.modules.get("advisory_fetch")
     w = watchlist(tmp)
     build = lambda b, prev=None, wl=w: json.loads(m.build(wl, b, prev, NOW))
 
@@ -192,6 +193,51 @@ def run_tests(m, tmp, only=None):
         t("validity over 72 h refuses to sign", False)
     except m.Refuse:
         t("validity over 72 h refuses to sign", True)
+    # R1: explicit versions are part of the applicability union.
+    r1 = rec(2, fixed="2.0")
+    r1["affected"][0]["versions"] = ["3.0", "1.0"]
+    a = build(bundle([row([r1])]))["entries"][0]["advisories"][0]
+    t("R1: a listed version outside the ranges is published (union)", a["affected"].get("versions") == ["3.0"])
+    t("R1: a listed version already inside a range is omitted (proven by dpkg order)", "1.0" not in a["affected"].get("versions", []))
+    t("R1: ranges kept alongside versions", a["affected"]["ranges"][0]["events"] == [{"introduced": "0"}, {"fixed": "2.0"}])
+    # R2: incomplete interpretation is failed, never ok/partial.
+    d = build(bundle([row([rec(1), {"id": "CVE-2099-0002", "affected": []}])]))
+    t("R2: a returned record naming no affected entry fails the row", cov(d) == ["failed"])
+    d = build(bundle([row([rec(1), {"id": "CVE-2099-0003", "affected": [], "withdrawn": "2026-10-01T00:00:00Z"}])]))
+    t("R2: a withdrawn record naming nothing is skipped (row still ok)", cov(d) == ["ok"])
+    bad2 = rec(2, extra_ids=16)
+    bad2["affected"] = [{"ranges": [{"type": "ECOSYSTEM", "events": "not-a-list"}]}]
+    d = build(bundle([row([rec(1), bad2])]))
+    t("R2: a malformed record over the ID cap is failed, not size-partial", cov(d) == ["failed"])
+    weird = rec(3)
+    weird["affected"][0]["ranges"][0]["type"] = "é" * 20
+    d = build(bundle([row([weird])]))
+    t("N1: a range type the client would reject fails the row (never signed)", cov(d) == ["failed"])
+    long = json.loads(m.build(w, bundle([row([rec(1)])]), None, NOW))
+    long["entries"][0]["advisories"][0]["affected"]["ranges"][0]["type"] = "é" * 17
+    try:
+        m.check_payload(json.dumps(long, ensure_ascii=False).encode())
+        t("N1: the signing gate counts UTF-8 bytes like the client", False)
+    except m.Refuse:
+        t("N1: the signing gate counts UTF-8 bytes like the client", True)
+    # Fetcher (R2): records OSV returned for this package.
+    try:
+        fetch.slim({"id": "CVE-2099-0004"}, "ffmpeg", "Debian:12")
+        t("R2 fetch: a record without affected is an incomplete source", False)
+    except fetch.FeedError:
+        t("R2 fetch: a record without affected is an incomplete source", True)
+    try:
+        fetch.slim({"id": "CVE-2099-0005", "affected": [{"package": {"name": "other", "ecosystem": "Debian:12"}}]}, "ffmpeg", "Debian:12")
+        t("R2 fetch: a record that does not name the package is an incomplete source", False)
+    except fetch.FeedError:
+        t("R2 fetch: a record that does not name the package is an incomplete source", True)
+    try:
+        fetch.slim({"id": "CVE-2099-0006", "affected": [{"package": "ffmpeg"}]}, "ffmpeg", "Debian:12")
+        t("R2 fetch: malformed package metadata is an incomplete source", False)
+    except fetch.FeedError:
+        t("R2 fetch: malformed package metadata is an incomplete source", True)
+    ok_w = fetch.slim({"id": "CVE-2099-0007", "withdrawn": "x", "affected": []}, "ffmpeg", "Debian:12")
+    t("R2 fetch: a withdrawn record may name nothing", ok_w["affected"] == [])
     # dpkg ordering fixtures (same table as the Swift selftest).
     table = [("1.0", "1.0-1", -1), ("1.0~rc1", "1.0", -1), ("1:0.9", "2.0", 1), ("1.0-1", "1.0-1+b1", -1),
              ("1.2.3", "1.2.3-0", 0), ("1.0a", "1.0", 1), ("2.30-2", "2.3-9", 1), ("1.0~~", "1.0~", -1)]
@@ -201,6 +247,20 @@ def run_tests(m, tmp, only=None):
 
 
 BREAKS = [
+    ("R1: a listed version outside the ranges is published (union)",
+     '        if versions:\n            affected["versions"] = versions', ''),
+    ("R2: a returned record naming no affected entry fails the row",
+     '        raise Incomplete("a record returned for this package names no affected entry")', '        return None'),
+    ("R2: a malformed record over the ID cap is failed, not size-partial",
+     '    ranges, versions, fixed, purl = [], [], [], None\n    for a in aff:',
+     '    advisory_ids(rec)\n    ranges, versions, fixed, purl = [], [], [], None\n    for a in aff:'),
+    ("N1: the signing gate counts UTF-8 bytes like the client",
+     'if type(t) is not str or len(t.encode()) > 32:', 'if type(t) is not str or len(t) > 32:'),
+    ("R2 fetch: a record that does not name the package is an incomplete source",
+     '    if not kept and not record.get("withdrawn"):', '    if False:', "fetch"),
+    ("R2 fetch: a record without affected is an incomplete source",
+     '        raise FeedError(f"{record.get(\'id\')}: affected is missing or not a list")',
+     '        return {"id": record.get("id"), "affected": []}', "fetch"),
     ("a failed fetch is published as failed, never ok",
      'statuses[source] = ("failed", None)\n                complete = False\n                continue',
      'statuses[source] = ("ok", "2026-10-24T00:00:00Z")\n                complete = False\n                continue'),
@@ -229,17 +289,25 @@ def main():
         m = load(SRC, "advisory_publish_under_test")
         run_tests(m, tmp)
         caught = 0
-        for name, old, new in BREAKS:
-            src = open(SRC).read()
+        for brk in BREAKS:
+            name, old, new = brk[:3]
+            target = brk[3] if len(brk) > 3 else "publish"
+            src_path = SRC if target == "publish" else os.path.join(HERE, "advisory_fetch.py")
+            src = open(src_path).read()
             if old not in src:
                 check(f"break anchor present: {name}", False, old)
                 continue
-            p = os.path.join(tmp, "advisory_publish.py")
-            open(p, "w").write(src.replace(old, new, 1))
-            shutil.copy(os.path.join(HERE, "advisory_fetch.py"), os.path.join(tmp, "advisory_fetch.py"))
             try:
-                mm = load(p, f"broken_{caught}_{len(name)}")
-                res = run_tests(mm, tmp, only={name})
+                if target == "publish":
+                    p = os.path.join(tmp, "advisory_publish.py")
+                    open(p, "w").write(src.replace(old, new, 1))
+                    shutil.copy(os.path.join(HERE, "advisory_fetch.py"), os.path.join(tmp, "advisory_fetch.py"))
+                    mm, ff = load(p, f"broken_{caught}_{len(name)}"), None
+                else:
+                    p = os.path.join(tmp, "advisory_fetch_broken.py")
+                    open(p, "w").write(src.replace(old, new, 1))
+                    mm, ff = m, load(p, f"brokenfetch_{caught}_{len(name)}")
+                res = run_tests(mm, tmp, only={name}, fetch=ff)
                 ok = res.get(name) is False
             except Exception:
                 ok = True     # a break that crashes is also caught

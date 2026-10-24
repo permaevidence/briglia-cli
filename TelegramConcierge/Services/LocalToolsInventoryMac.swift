@@ -36,7 +36,8 @@ struct MacInventory {
     }
 
     func resolve(_ tool: T.WatchTool, cellar: String?, catalogue: (versions: [String: String], asOf: Date?)?) -> T.Resolution {
-        // Apps first (LibreOffice cask / bundle, Chrome).
+        if tool.rendererBrowser { return resolveRendererBrowser(tool, cellar: cellar, catalogue: catalogue) }
+        // Apps first (LibreOffice cask / bundle).
         if let app = tool.macApp, let r = resolveApp(tool, app, cellar: cellar) { return r }
         var path: String? = nil
         for exe in tool.executables { if let p = probe.findBinary(exe) { path = p; break } }
@@ -137,6 +138,41 @@ struct MacInventory {
             return .unknown(toolId: tool.id, reason: T.Text("the app's version cannot be compared", "la versione dell'app non si può confrontare"))
         }
         return vendorInstance(tool, vendor: app.vendor, product: app.product, flavour: app.flavour, version: version, path: app.path)
+    }
+
+    /// The renderer's order (R7): PATH names first (a Cellar keg, or an app
+    /// bundle the PATH entry points into), then the three app bundles.
+    func resolveRendererBrowser(_ tool: T.WatchTool, cellar: String?,
+                                catalogue: (versions: [String: String], asOf: Date?)?) -> T.Resolution {
+        for name in T.rendererBrowserNames {
+            guard let p = probe.findOnPath(name) else { continue }
+            let real = probe.resolve(p) ?? p
+            if let cellar, real.hasPrefix(cellar + "/") { return brewInstance(tool, path: real, cellar: cellar, catalogue: catalogue) }
+            if let r = real.range(of: ".app/Contents/") {
+                let bundle = String(real[..<r.lowerBound]) + ".app"
+                if let app = T.rendererBrowserApps.first(where: { $0.path == bundle }),
+                   let v = bundleVersion(bundle) {
+                    return vendorInstance(tool, vendor: app.vendor, product: app.product, flavour: app.flavour, version: v, path: bundle)
+                }
+            }
+            return .unknown(toolId: tool.id, reason: T.Text("\(p) (the browser the PDF renderer uses) is not a recognised build",
+                                                           "\(p) (il browser usato per i PDF) non è una build riconosciuta"))
+        }
+        for app in T.rendererBrowserApps where probe.readData(app.path + "/Contents/Info.plist") != nil {
+            guard let v = bundleVersion(app.path) else {
+                return .unknown(toolId: tool.id, reason: T.Text("the browser's version cannot be read", "la versione del browser non si può leggere"))
+            }
+            return vendorInstance(tool, vendor: app.vendor, product: app.product, flavour: app.flavour, version: v, path: app.path)
+        }
+        return .absent(toolId: tool.id)
+    }
+
+    func bundleVersion(_ bundle: String) -> String? {
+        guard let data = probe.readData(bundle + "/Contents/Info.plist"),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let v = plist["CFBundleShortVersionString"] as? String ?? plist["CFBundleVersion"] as? String,
+              LocalToolsVersion.dottedCompare(v, v) != nil else { return nil }
+        return v
     }
 
     func vendorInstance(_ tool: T.WatchTool, vendor: String, product: String, flavour: String, version: String,

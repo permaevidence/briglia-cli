@@ -172,9 +172,18 @@ extension LocalTools {
         }
     }
 
-    /// `apt-cache show a=1 b=2`: (package, version) → normalised source version.
-    static func parseShowSources(_ text: String) -> [String: String] {
-        var out: [String: String] = [:]
+    struct ShowRecord: Equatable {
+        var package: String
+        var architecture: String?
+        var version: String
+        var sourceName: String
+        var sourceVersion: String
+    }
+
+    /// `apt-cache show a=1 b:arm64=2`: every stanza with its package,
+    /// architecture, version and normalised source name and version.
+    static func parseShowRecords(_ text: String) -> [ShowRecord] {
+        var out: [ShowRecord] = []
         for stanza in text.components(separatedBy: "\n\n") {
             var f: [String: String] = [:]
             for line in stanza.split(separator: "\n") {
@@ -182,10 +191,27 @@ extension LocalTools {
                 f[String(line[..<c])] = line[line.index(after: c)...].trimmingCharacters(in: .whitespaces)
             }
             guard let p = f["Package"], let v = f["Version"],
-                  let (_, sv) = normaliseSource(binary: p, version: v, source: f["Source"] ?? "") else { continue }
-            if out["\(p)=\(v)"] == nil { out["\(p)=\(v)"] = sv }
+                  let (sn, sv) = normaliseSource(binary: p, version: v, source: f["Source"] ?? "") else { continue }
+            out.append(ShowRecord(package: p, architecture: f["Architecture"], version: v, sourceName: sn, sourceVersion: sv))
         }
         return out
+    }
+
+    /// The source of the EXACT candidate record for `binary` (possibly
+    /// arch-qualified, as dpkg prints it) at `version`: the architecture
+    /// must match (the qualifier, else the native one, or `all`); several
+    /// matching records that disagree → nil (ambiguous, never a guess).
+    static func candidateSource(_ records: [ShowRecord], binary: String, version: String,
+                                nativeArch: String?) -> (String, String)? {
+        let parts = binary.split(separator: ":", maxSplits: 1).map(String.init)
+        let name = parts[0], arch = parts.count == 2 ? parts[1] : nativeArch
+        let matches = records.filter { r in
+            r.package == name && r.version == version
+                && (arch == nil || r.architecture == arch || r.architecture == "all")
+        }
+        let distinct = Set(matches.map { "\($0.sourceName)\u{0}\($0.sourceVersion)" })
+        guard distinct.count == 1, let m = matches.first else { return nil }
+        return (m.sourceName, m.sourceVersion)
     }
 
     /// Paths of mapped shared objects (`/proc/self/maps`), deleted mappings excluded.
@@ -249,9 +275,14 @@ struct DebInventory {
         }
         var showKeys: [String] = []
         for b in allBinaries { if let c = policy?[b]?.candidate { showKeys.append("\(b)=\(c)") } }
-        var sources: [String: String]? = nil
-        if !showKeys.isEmpty, let (s3, show) = aptCache(["show"] + showKeys), s3 == 0 { sources = T.parseShowSources(show) }
-        let listsProblem = listsAgeProblem(now: now)
+        var records: [T.ShowRecord]? = nil
+        if !showKeys.isEmpty, let (s3, show) = aptCache(["show"] + showKeys), s3 == 0 { records = T.parseShowRecords(show) }
+        let nativeArch: String? = {
+            guard let dpkg = probe.findBinary("dpkg") else { return nil }
+            let (st, out) = probe.run(dpkg, ["--print-architecture"], T.probeTimeout)
+            let a = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            return st == 0 && a.range(of: "^[a-z0-9-]{1,32}$", options: .regularExpression) != nil ? a : nil
+        }()
 
         return owners.map { o in
             guard let owner = o.owner, let pkg = installed[owner] else {
@@ -277,11 +308,14 @@ struct DebInventory {
                     guard let p = policy[b], let c = p.candidate, let line = p.versions.first(where: { $0.version == c }) else { continue }
                     let pockets = line.files.compactMap { T.originPocket(global[$0], os: os) }
                     let pocket: LocalAdvisory.Pocket? = pockets.contains(.esmApps) ? .esmApps : pockets.contains(.esmInfra) ? .esmInfra : pockets.first
-                    cands.append(T.DebCandidate(binary: b, version: c, sourceVersion: sources?["\(b.split(separator: ":").first.map(String.init) ?? b)=\(c)"],
-                                                originOK: pocket != nil, pocket: pocket))
+                    let src = records.flatMap { T.candidateSource($0, binary: b, version: c, nativeArch: nativeArch) }
+                    let accepted = line.files.filter { T.originPocket(global[$0], os: os) != nil }
+                    cands.append(T.DebCandidate(binary: b, version: c, sourceName: src?.0, sourceVersion: src?.1,
+                                                originOK: pocket != nil, pocket: pocket,
+                                                indexProblem: indexProblem(fileKeys: accepted, now: now)))
                 }
             }
-            let problem = listsProblem ?? (policy == nil ? T.Text("apt's package information could not be read", "le informazioni dei pacchetti di apt non si possono leggere") : nil)
+            let problem: T.Text? = (policy == nil ? T.Text("apt's package information could not be read", "le informazioni dei pacchetti di apt non si possono leggere") : nil)
             let statusOnly = probe.platform == .ubuntuTouch
                 ? T.Text("system packages on Ubuntu Touch are updated by the UBports OTA (System Settings → Updates)",
                          "su Ubuntu Touch i pacchetti di sistema si aggiornano con l'OTA di UBports (Impostazioni di sistema → Aggiornamenti)")
@@ -298,6 +332,9 @@ struct DebInventory {
                maps: String?) -> (tool: T.WatchTool, owner: String?, path: String?, reason: T.Text?) {
         var path: String? = nil
         for exe in tool.executables { if let p = probe.findBinary(exe) { path = p; break } }
+        if tool.rendererBrowser {
+            path = T.rendererBrowserNames.lazy.compactMap { probe.findOnPath($0) }.first
+        }
         if path == nil, let lib = tool.mappedLibrary, let maps { path = T.mappedLibrary(maps, prefix: lib) }
         if let p = path {
             let real = probe.resolve(p) ?? p
@@ -321,17 +358,44 @@ struct DebInventory {
         return (tool, nil, nil, nil)
     }
 
-    /// Candidate evidence needs package lists ≤ 7 days old.
-    func listsAgeProblem(now: Date) -> T.Text? {
-        let dir = "/var/lib/apt/lists"
-        guard let names = probe.listDirectory(dir) else {
-            return T.Text("apt's package lists cannot be read", "gli elenchi dei pacchetti di apt non si possono leggere")
+    /// N2: freshness of the candidate's OWN index. The package-file key
+    /// ("http://host/path suite/component arch Packages") names the
+    /// Release file apt downloaded for that suite
+    /// (`/var/lib/apt/lists/host_path_dists_suite_InRelease`); its age must
+    /// be ≤ 7 days (exact seconds). Any other layout (flat repositories,
+    /// file: URIs) or a missing file → no freshness evidence.
+    func indexProblem(fileKeys: [String], now: Date) -> T.Text? {
+        var ages: [TimeInterval] = []
+        for key in fileKeys {
+            guard let date = T.releaseFileName(forPackageFile: key).flatMap({ name -> Date? in
+                ["_InRelease", "_Release"].lazy.compactMap { self.probe.modificationDate("/var/lib/apt/lists/" + name + $0) }.first
+            }) else { continue }
+            ages.append(now.timeIntervalSince(date))
         }
-        let newest = names.filter { $0.hasSuffix("_InRelease") || $0.hasSuffix("_Release") }
-            .compactMap { probe.modificationDate(dir + "/" + $0) }.max()
-        guard let newest else { return T.Text("apt has no package lists (run `sudo apt update`)", "apt non ha elenchi dei pacchetti (esegui `sudo apt update`)") }
-        let days = Int(now.timeIntervalSince(newest) / 86_400)
-        return days > 7 ? T.Text("apt's package lists are \(days) days old (run `sudo apt update`)",
-                                 "gli elenchi dei pacchetti di apt hanno \(days) giorni (esegui `sudo apt update`)") : nil
+        guard let youngest = ages.min() else {
+            return T.Text("the age of this package's index cannot be established", "non si riesce a stabilire l'età dell'indice di questo pacchetto")
+        }
+        guard youngest <= 7 * 86_400 else {
+            let days = Int(youngest / 86_400)
+            return T.Text("this package's index is \(days) days old (run `sudo apt update`)",
+                          "l'indice di questo pacchetto ha \(days) giorni (esegui `sudo apt update`)")
+        }
+        return nil
+    }
+}
+
+extension LocalTools {
+    /// apt's list-file stem for a `http(s)://host/path suite/component …`
+    /// package-file key; nil for any other shape.
+    static func releaseFileName(forPackageFile key: String) -> String? {
+        let parts = key.split(separator: " ")
+        guard parts.count >= 2 else { return nil }
+        let uri = String(parts[0]), suite = parts[1].split(separator: "/").first.map(String.init) ?? ""
+        guard let scheme = uri.range(of: "://"), ["http", "https"].contains(String(uri[..<scheme.lowerBound])),
+              !suite.isEmpty, suite.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil else { return nil }
+        var rest = String(uri[scheme.upperBound...])
+        while rest.hasSuffix("/") { rest.removeLast() }
+        guard !rest.isEmpty, !rest.contains("@") else { return nil }
+        return rest.replacingOccurrences(of: "/", with: "_") + "_dists_" + suite
     }
 }

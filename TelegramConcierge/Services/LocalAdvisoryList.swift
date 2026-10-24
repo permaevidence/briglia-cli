@@ -117,10 +117,17 @@ enum LocalAdvisory {
         var unsupported: Bool
     }
 
-    enum Affected: Codable, Equatable {
-        case ranges([Range])
-        case versions([String])
-        case unknown
+    /// OSV applicability: the UNION of every range and every explicitly
+    /// listed version (a version is affected if any range contains it or it
+    /// is listed). `unknown` when the source gives neither.
+    struct Affected: Codable, Equatable {
+        var ranges: [Range]
+        var versions: [String]
+        var unknown: Bool
+
+        static let unknownValue = Affected(ranges: [], versions: [], unknown: true)
+        static func ranges(_ r: [Range]) -> Affected { Affected(ranges: r, versions: [], unknown: false) }
+        static func versions(_ v: [String]) -> Affected { Affected(ranges: [], versions: v, unknown: false) }
     }
 
     enum Pocket: String, Codable { case archive, esmInfra = "esm-infra", esmApps = "esm-apps" }

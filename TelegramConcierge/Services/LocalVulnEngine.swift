@@ -36,7 +36,9 @@ struct LocalVulnCommunicated: Codable, Equatable {
 struct LocalVulnRow: Codable, Equatable {
     var key: String
     var identityKey: String
-    var toolId: String
+    /// Every watched tool seen at this (identity, installed version), e.g.
+    /// curl and libcurl from source `curl` (R6).
+    var toolIds: [String]
     var installedVersion: String
     var firstAt: Date
     var communicated: LocalVulnCommunicated
@@ -57,6 +59,9 @@ struct LocalVulnAttempt: Codable, Equatable {
         var kind: LocalVuln.LineKind
         var toolId: String
         var installedVersion: String
+        /// What the stored text claims (R4): a retry is sent only while the
+        /// fresh evaluation still yields exactly this condition.
+        var condition: String
     }
     var lines: [Line]
     var listContentId: String
@@ -89,18 +94,34 @@ enum LocalVuln {
         ReleaseSecurity.hex(SHA256.hash(data: Data("\(identityKey)\n\(installedVersion)".utf8)))
     }
 
-    /// Rows leave only on POSITIVE evidence: the same identity now runs a
-    /// different installed version, or the tool is positively absent. An
-    /// unknown resolution (failed probe) keeps every row.
+    /// Rows leave only on POSITIVE evidence (R6: identity-wide): no running
+    /// instance is at this (identity, installed version) any more, and every
+    /// tool that was seen at it is now positively absent or runs the same
+    /// identity at another version. An unknown resolution, a missing one, or
+    /// a tool that now resolves to a different identity keeps the row.
     static func reconcile(_ s: inout LocalVulnState, _ resolutions: [LocalTools.Resolution]) {
-        s.rows.removeAll { row in
-            guard let r = resolutions.first(where: { $0.toolId == row.toolId }) else { return false }
-            switch r {
-            case .absent: return true
-            case .unknown: return false
-            case .present(let i): return i.identity.key == row.identityKey && i.installedVersion != row.installedVersion
+        var kept: [LocalVulnRow] = []
+        for var row in s.rows {
+            let matching = resolutions.compactMap { r -> String? in
+                if case .present(let i) = r, i.identity.key == row.identityKey, i.installedVersion == row.installedVersion { return i.toolId }
+                return nil
             }
+            if !matching.isEmpty {
+                for t in matching where !row.toolIds.contains(t) { row.toolIds.append(t) }
+                kept.append(row)
+                continue
+            }
+            let evidence = row.toolIds.map { tool -> Bool in
+                guard let r = resolutions.first(where: { $0.toolId == tool }) else { return false }
+                switch r {
+                case .absent: return true
+                case .unknown: return false
+                case .present(let i): return i.identity.key == row.identityKey   // same identity, other version
+                }
+            }
+            if evidence.isEmpty || evidence.contains(false) { kept.append(row) }
         }
+        s.rows = kept
         if s.rows.count < maxRows { s.saturated = nil }
     }
 
@@ -123,7 +144,9 @@ enum LocalVuln {
                 out.append(Proposal(key: key, kind: .initial, report: r))
                 continue
             }
-            if row.communicated.kevNoFix, r.hasInstallableFix, !row.fixFollowUpSent {
+            // R5: the follow-up needs a KEV advisory that itself gained an
+            // installable fix (another advisory's fix is no such evidence).
+            if row.communicated.kevNoFix, r.affected.contains(where: { $0.kev && $0.fix == .installable }), !row.fixFollowUpSent {
                 out.append(Proposal(key: key, kind: .followUp, report: r))
                 continue
             }
@@ -142,7 +165,7 @@ enum LocalVuln {
             switch p.kind {
             case .initial:
                 s.rows.append(LocalVulnRow(
-                    key: p.key, identityKey: r.identityKey ?? "?", toolId: r.toolId, installedVersion: r.installedVersion ?? "?",
+                    key: p.key, identityKey: r.identityKey ?? "?", toolIds: [r.toolId], installedVersion: r.installedVersion ?? "?",
                     firstAt: now,
                     communicated: LocalVulnCommunicated(floor: false, level: r.level, kev: r.kevAffected,
                                                         kevNoFix: r.kevWithoutFix && !r.hasInstallableFix),
@@ -166,7 +189,9 @@ enum LocalVuln {
             }
         }
         s.attempt = LocalVulnAttempt(
-            lines: lines.map { .init(key: $0.key, kind: $0.kind, toolId: $0.report.toolId, installedVersion: $0.report.installedVersion ?? "?") },
+            lines: lines.map { .init(key: $0.key, kind: $0.kind, toolId: $0.report.toolId,
+                                     installedVersion: $0.report.installedVersion ?? "?",
+                                     condition: condition($0.report, kind: $0.kind)) },
             listContentId: listContentId, noticeGeneration: noticeGeneration, channelKind: destination.channelKind,
             chatId: destination.chatId, channelGeneration: destination.channelGeneration, text: text,
             attempt: 1, firstAttemptAt: now, deadline: now.addingTimeInterval(UpdateNotice.retryWindow),
@@ -220,13 +245,31 @@ enum LocalVuln {
         s.attempt = a
     }
 
-    /// Every consumed line must still describe the same messaged condition.
+    /// The message-relevant condition of a line: every applicable advisory
+    /// with its severity, KEV flag and fix class, plus the fix action.
+    static func condition(_ r: LocalTools.ToolReport, kind: LineKind) -> String {
+        func fixClass(_ f: LocalTools.FixState) -> String {
+            switch f {
+            case .installable: return "installable"
+            case .notInstallable: return "not-installable"
+            case .noFix: return "no-fix"
+            case .unknown: return "unknown"
+            }
+        }
+        let adv = r.affected.map { "\($0.primaryId)|\($0.severity.rawValue)|\($0.kev)|\(fixClass($0.fix))|\($0.fixedVersion ?? "")" }.sorted()
+        let action = (try? JSONEncoder().encode(r.action)).map { String(decoding: $0, as: UTF8.self) } ?? "none"
+        return ([kind.rawValue, r.identityKey ?? "", r.installedVersion ?? "", action] + adv).joined(separator: "\n")
+    }
+
+    /// Every consumed line must still describe EXACTLY the consumed
+    /// condition (R4): same key, same advisories and fix classes, same
+    /// action; otherwise the stored text is obsolete and is never resent.
     static func linesStillValid(_ a: LocalVulnAttempt, reports: [LocalTools.ToolReport]) -> Bool {
         a.lines.allSatisfy { line in
             guard let r = reports.first(where: { $0.toolId == line.toolId }), r.messageable,
                   r.installedVersion == line.installedVersion, let id = r.identityKey else { return false }
             if rowKey(identityKey: id, installedVersion: line.installedVersion) != line.key { return false }
-            return line.kind != .followUp || r.hasInstallableFix
+            return condition(r, kind: line.kind) == line.condition
         }
     }
 }

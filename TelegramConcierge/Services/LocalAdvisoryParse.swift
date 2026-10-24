@@ -84,7 +84,9 @@ extension LocalAdvisory {
         guard case .object(let a) = raw else { throw Invalid(reason: "advisory is not an object") }
         var ids: [String] = []
         for v in try array(a["ids"], "ids", max: maxIdsPerAdvisory) {
-            guard case .string(let s) = v, s.range(of: idPattern, options: .regularExpression) != nil else {
+            // string() first: no control characters (ICU's `$` would accept a
+            // trailing newline).
+            guard let s = try? string(v, "id"), s.range(of: idPattern, options: .regularExpression) != nil else {
                 throw Invalid(reason: "advisory ID does not match the ID pattern")
             }
             let u = s.uppercased()
@@ -121,15 +123,12 @@ extension LocalAdvisory {
     static func parseAffected(_ raw: JSONValue?) throws -> Affected {
         switch raw {
         case .string("unknown")?:
-            return .unknown
+            return .unknownValue
         case .object(let o)?:
-            if let r = o["ranges"] {
-                return .ranges(try array(r, "ranges", max: maxRangesPerAdvisory).map(parseRange))
-            }
-            if let v = o["versions"] {
-                return .versions(try array(v, "versions", max: maxVersionsPerAdvisory).map { try string($0, "version") })
-            }
-            throw Invalid(reason: "affected has neither ranges nor versions")
+            let ranges = try o["ranges"].map { try array($0, "ranges", max: maxRangesPerAdvisory).map(parseRange) } ?? []
+            let versions = try o["versions"].map { try array($0, "versions", max: maxVersionsPerAdvisory).map { try string($0, "version") } } ?? []
+            guard !ranges.isEmpty || !versions.isEmpty else { throw Invalid(reason: "affected has neither ranges nor versions") }
+            return Affected(ranges: ranges, versions: versions, unknown: false)
         default:
             throw Invalid(reason: "affected missing")
         }
