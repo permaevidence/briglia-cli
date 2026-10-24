@@ -111,6 +111,8 @@ MUTATIONS = [
     ("B34 (R2-R5) the Security line uses the unscoped fix instruction", S + "LocalToolsText.swift",
      "                + (fixSentence(r, lang: lang).map { \" — \" + $0 } ?? \"\")\n                + (kevMitigationSentence(r, lang: lang, also: true).map { \" \" + $0 } ?? \"\")",
      "                + (fixInstruction(r.action, lang: lang).map { \" — \" + $0 } ?? \"\")"),
+    ("B35 (R7) relative PATH entries probed against the checker's directory", INV,
+     '            if dir.isEmpty || !dir.hasPrefix("/") { return .ambiguous }', '            if dir.isEmpty { return .ambiguous }'),
     ("B24 consume after the send (not before)", SVC,
      "                LocalVuln.consume(&v, fresh, reports: reports, text: text, listContentId: contentId, noticeGeneration: setting.generation,\n                                  destination: destination, now: now)\n",
      ""),

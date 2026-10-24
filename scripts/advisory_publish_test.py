@@ -9,6 +9,9 @@ Usage: advisory_publish_test.py
 """
 import importlib.util
 import json
+import sys as _sys
+_sys.dont_write_bytecode = True   # mutated copies must never load a stale .pyc
+
 import os
 import shutil
 import sys
@@ -254,8 +257,28 @@ def run_tests(m, tmp, only=None, fetch=None):
         t("R2 fetch: malformed package metadata is an incomplete source", False)
     except fetch.FeedError:
         t("R2 fetch: malformed package metadata is an incomplete source", True)
-    ok_w = fetch.slim({"id": "CVE-2099-0007", "withdrawn": "x", "affected": []}, "ffmpeg", "Debian:12")
+    ok_w = fetch.slim({"id": "CVE-2099-0007", "withdrawn": "2026-10-01T00:00:00Z", "affected": []}, "ffmpeg", "Debian:12")
     t("R2 fetch: a withdrawn record may name nothing", ok_w["affected"] == [])
+    # R3-R2: withdrawal evidence must be a real RFC 3339 timestamp.
+    bad_values = [{"unexpected": True}, "false", 1, True, "2026-13-01T00:00:00Z", "yesterday"]
+    plain_bad = all(cov(build(bundle([row([dict(rec(2), withdrawn=v)])]))) == ["failed"] for v in bad_values)
+    t("R3-R2: malformed withdrawn (object, 'false', 1, true, bad dates) fails an ordinary record's row", plain_bad)
+    empty_bad = all(cov(build(bundle([row([{"id": "CVE-2099-0030", "affected": [], "withdrawn": v}])]))) == ["failed"] for v in bad_values)
+    t("R3-R2: …and with an empty affected list", empty_bad)
+    over_bad = all(cov(build(bundle([row([rec(1), dict(rec(2, extra_ids=16), withdrawn=v)])]))) == ["failed"] for v in bad_values)
+    t("R3-R2: …and in an over-cap record (never size-partial)", over_bad)
+    ctrl = build(bundle([row([rec(2, fixed="2.0")])]))
+    t("R3-R2 control: absent withdrawn → published, not withdrawn", cov(ctrl) == ["ok"] and not ctrl["entries"][0]["advisories"][0]["withdrawn"])
+    good = build(bundle([row([dict(rec(2), withdrawn="2026-10-01T00:00:00.123Z")])]))
+    t("R3-R2 control: a valid timestamp (fractional seconds) withdraws", good["entries"][0]["advisories"][0]["withdrawn"] and cov(good) == ["ok"])
+    fetch_bad = 0
+    for v in bad_values:
+        try:
+            fetch.slim({"id": "CVE-2099-0031", "affected": [{"package": {"name": "ffmpeg", "ecosystem": "Debian:12"}}], "withdrawn": v},
+                       "ffmpeg", "Debian:12")
+        except fetch.FeedError:
+            fetch_bad += 1
+    t("R3-R2 fetch: malformed withdrawn fails the source", fetch_bad == len(bad_values))
     # dpkg ordering fixtures (same table as the Swift selftest).
     table = [("1.0", "1.0-1", -1), ("1.0~rc1", "1.0", -1), ("1:0.9", "2.0", 1), ("1.0-1", "1.0-1+b1", -1),
              ("1.2.3", "1.2.3-0", 0), ("1.0a", "1.0", 1), ("2.30-2", "2.3-9", 1), ("1.0~~", "1.0~", -1)]
@@ -276,10 +299,14 @@ BREAKS = [
      "        rl = [] if rl is None else rl", "        rl = rl or []"),
     ("R2-R2: an unorderable fixed version in an over-cap record fails the row (never partial)",
      "    best = None\n    for v in fixed:", "    advisory_ids(rec)\n    best = None\n    for v in fixed:"),
+    ("R3-R2: malformed withdrawn (object, 'false', 1, true, bad dates) fails an ordinary record's row",
+     '    if not withdrawn_valid(rec.get("withdrawn")):\n        raise Incomplete', '    if False:\n        raise Incomplete'),
+    ("R3-R2 fetch: malformed withdrawn fails the source",
+     '    if not withdrawn_valid(record.get("withdrawn")):', '    if False:', "fetch"),
     ("N1: the signing gate counts UTF-8 bytes like the client",
      'if type(t) is not str or len(t.encode()) > 32:', 'if type(t) is not str or len(t) > 32:'),
     ("R2 fetch: a record that does not name the package is an incomplete source",
-     '    if not kept and not record.get("withdrawn"):', '    if False:', "fetch"),
+     '    if not kept and record.get("withdrawn") is None:', '    if False:', "fetch"),
     ("R2 fetch: a record without affected is an incomplete source",
      '        raise FeedError(f"{record.get(\'id\')}: affected is missing or not a list")',
      '        return {"id": record.get("id"), "affected": []}', "fetch"),
@@ -326,7 +353,7 @@ def main():
                     shutil.copy(os.path.join(HERE, "advisory_fetch.py"), os.path.join(tmp, "advisory_fetch.py"))
                     mm, ff = load(p, f"broken_{caught}_{len(name)}"), None
                 else:
-                    p = os.path.join(tmp, "advisory_fetch_broken.py")
+                    p = os.path.join(tmp, f"advisory_fetch_broken_{len(name)}_{abs(hash(name)) % 10**8}.py")
                     open(p, "w").write(src.replace(old, new, 1))
                     mm, ff = m, load(p, f"brokenfetch_{caught}_{len(name)}")
                 res = run_tests(mm, tmp, only={name}, fetch=ff)

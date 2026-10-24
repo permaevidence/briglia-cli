@@ -97,11 +97,31 @@ def load_watchlist(path):
     return ecos, ids
 
 
+RFC3339_RE = re.compile(r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d{1,9})?([Zz]|[+-]\d{2}:\d{2})")
+
+
+def withdrawn_valid(v):
+    """True for absent/null or a real RFC 3339 date-time string."""
+    if v is None:
+        return True
+    if type(v) is not str or not RFC3339_RE.fullmatch(v):
+        return False
+    try:
+        datetime.datetime.fromisoformat(v[:19])
+    except ValueError:
+        return False
+    return True
+
+
 def slim(record, package, ecosystem):
     """Only what the publisher needs; affected entries for exactly this
     package and ecosystem. A record OSV returned for this package that is
     malformed or does not name it is an incomplete source (R2), never an
     empty result; a withdrawn one may name nothing."""
+    # R3-R2: `withdrawn` is an RFC 3339 timestamp or absent (OSV schema);
+    # anything else is not withdrawal evidence and fails the source.
+    if not withdrawn_valid(record.get("withdrawn")):
+        raise FeedError(f"{record.get('id')}: withdrawn is not an RFC 3339 timestamp")
     aff = record.get("affected")
     if not isinstance(aff, list):
         raise FeedError(f"{record.get('id')}: affected is missing or not a list")
@@ -115,7 +135,7 @@ def slim(record, package, ecosystem):
         if p["name"] == package and p["ecosystem"] == ecosystem:
             kept.append({k: a.get(k) for k in ("ranges", "versions", "ecosystem_specific", "database_specific") if k in a}
                         | {"purl": p.get("purl")})
-    if not kept and not record.get("withdrawn"):
+    if not kept and record.get("withdrawn") is None:
         raise FeedError(f"{record.get('id')}: returned for {package} ({ecosystem}) but names no such affected entry")
     out = {k: record.get(k) for k in ("id", "aliases", "upstream", "withdrawn", "modified", "published", "severity",
                                        "database_specific") if k in record}

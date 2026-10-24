@@ -36,7 +36,7 @@ import sys
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from advisory_fetch import DEFAULT_WATCHLIST, load_watchlist  # noqa: E402
+from advisory_fetch import DEFAULT_WATCHLIST, load_watchlist, withdrawn_valid  # noqa: E402
 
 MAX_PAYLOAD = 256 * 1024
 MAX_IDENTITIES = 64
@@ -141,11 +141,15 @@ def convert(rec, source, kev):
     partial); anything uninterpretable is Incomplete (→ the row is failed)."""
     if not isinstance(rec, dict) or not isinstance(rec.get("id"), str):
         raise Incomplete("record is not an object with an id")
+    # R3-R2: withdrawal evidence is validated before it can omit, filter or
+    # mark anything (and before any size exit).
+    if not withdrawn_valid(rec.get("withdrawn")):
+        raise Incomplete("withdrawn is not an RFC 3339 timestamp")
     aff = rec.get("affected")
     if not isinstance(aff, list):
         raise Incomplete("record without an affected list")
     if not aff:
-        if rec.get("withdrawn"):
+        if rec.get("withdrawn") is not None:
             return None
         raise Incomplete("a record returned for this package names no affected entry")
     ranges, versions, fixed, purl = [], [], [], None
@@ -238,7 +242,7 @@ def convert(rec, source, kev):
     kev_hit = [i for i in ids if i in kev]
     adv = {"ids": ids, "kev": bool(kev_hit), "kevAdded": kev.get(kev_hit[0]) if kev_hit else None,
            "severity": "critical" if kev_hit or severity_critical(rec) else "recommended",
-           "affected": affected, "withdrawn": bool(rec.get("withdrawn"))}
+           "affected": affected, "withdrawn": rec.get("withdrawn") is not None}
     if fixed:
         adv["remediation"] = {"fixed": [{"line": None, "version": best}], "pocket": pocket_of(source, purl)}
         adv["noFixReason"] = None

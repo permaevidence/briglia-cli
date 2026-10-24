@@ -316,8 +316,14 @@ extension LocalToolsSelftest {
         emptyPath.pathEntries = ["", "/usr/bin"]
         addApp(emptyPath, "Google Chrome", exe: "Google Chrome", version: "130.0.6723.58")
         if case .unknown(_, let why)? = LocalTools.inventory(emptyPath.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
-            t.check("R7: an empty PATH entry (renderer's cwd) → unknown", why.en.contains("empty entry"))
+            t.check("R7: an empty PATH entry (renderer's cwd) → unknown", why.en.contains("empty or relative entry"))
         } else { t.check("R7: an empty PATH entry (renderer's cwd) → unknown", false) }
+        let relPath = macMachine()
+        relPath.pathEntries = [".", "/usr/bin"]
+        addApp(relPath, "Google Chrome", exe: "Google Chrome", version: "130.0.6723.58")
+        if case .unknown(_, let why)? = LocalTools.inventory(relPath.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
+            t.check("R7: a relative PATH entry (.) → unknown", why.en.contains("relative entry"))
+        } else { t.check("R7: a relative PATH entry (.) → unknown", false) }
         let unreadable = macMachine()
         unreadable.dirs.removeValue(forKey: "/opt/homebrew/Cellar")
         t.check("mac inventory: unreadable Cellar → missing tools unknown, not absent",

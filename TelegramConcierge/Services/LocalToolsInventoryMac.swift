@@ -149,8 +149,8 @@ struct MacInventory {
                                 catalogue: (versions: [String: String], asOf: Date?)?) -> T.Resolution {
         switch T.rendererPathBrowser(probe) {
         case .ambiguous:
-            return .unknown(toolId: tool.id, reason: T.Text("PATH has an empty entry, so the browser the PDF renderer uses depends on its working directory",
-                                                           "il PATH ha una voce vuota: il browser usato per i PDF dipende dalla sua cartella di lavoro"))
+            return .unknown(toolId: tool.id, reason: T.Text("PATH has an empty or relative entry, so the browser the PDF renderer uses depends on its working directory",
+                                                           "il PATH ha una voce vuota o relativa: il browser usato per i PDF dipende dalla sua cartella di lavoro"))
         case .found(let p):
             let real = probe.resolve(p) ?? p
             if let cellar, real.hasPrefix(cellar + "/") { return brewInstance(tool, path: real, cellar: cellar, catalogue: catalogue) }

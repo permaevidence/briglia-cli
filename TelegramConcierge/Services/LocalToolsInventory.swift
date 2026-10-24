@@ -49,12 +49,14 @@ extension LocalTools {
 
     enum PathLookup: Equatable { case found(String), notFound, ambiguous }
 
-    /// Python's `shutil.which` as the renderer uses it: PATH entries in
-    /// order; an EMPTY entry means the renderer's current directory, which
-    /// Briglia cannot know here → ambiguous (the browser is then unknown).
+    /// Python's `shutil.which` as the renderer uses it, for absolute PATH
+    /// entries in order; an empty or relative entry depends on the
+    /// renderer's current directory → ambiguous (the browser is unknown).
     static func rendererWhich(_ p: Probe, _ name: String) -> PathLookup {
         for dir in p.pathEntries {
-            if dir.isEmpty { return .ambiguous }
+            // Empty and RELATIVE entries ("", ".", "bin") resolve against the
+            // renderer's working directory, which Briglia cannot know here.
+            if dir.isEmpty || !dir.hasPrefix("/") { return .ambiguous }
             let candidate = (dir.hasSuffix("/") ? dir : dir + "/") + name
             if p.isExecutable(candidate) { return .found(candidate) }
         }
