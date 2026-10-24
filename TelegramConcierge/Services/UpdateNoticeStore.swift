@@ -191,6 +191,9 @@ enum UpdateNoticeStore {
             if unlink(paths.state.path) != 0 && errno != ENOENT {
                 throw StoreError(message: "could not delete \(paths.state.path): \(String(cString: strerror(errno)))")
             }
+            // §9.5.5: the local-tools table and the advisory-list
+            // observation go with it, under the same lock and generation.
+            try LocalAdvisoryStore.unlinkDerived(.under(paths))
         }
     }
 

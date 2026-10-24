@@ -17,7 +17,7 @@ struct UpgradeCheck: ParsableCommand {
     func run() throws {
         switch value?.lowercased() {
         case nil:
-            print(ConversationManager.upgradeCheckReply(status: UpdateNoticeService.liveStatus()))
+            print(ConversationManager.upgradeCheckReply(status: UpdateNoticeService.liveStatus(), tools: LocalToolsText.liveStatus()))
         case "on"?, "off"?:
             try IdentityMigration.gateMutatingEntry()
             try UpdateNoticeStore.setEnabled(value!.lowercased() == "on", paths: .live, now: Date())

@@ -107,13 +107,18 @@ final class UpdateNoticeService {
         loop?.cancel()
         loop = nil
         if Self.current === self { Self.current = nil }
+        LocalToolsService.current?.stop()
     }
 
     // MARK: - One tick
 
     func tick() async {
-        if shouldCheckNow() { await runCheck() }
+        let checked = shouldCheckNow()
+        if checked { await runCheck() }
         await deliverDue()
+        // The local-tools check (§9.5) shares this window and this loop:
+        // its daily list fetch happens only right after a release check.
+        await LocalToolsService.current?.tick(afterCheck: checked)
     }
 
     func shouldCheckNow() -> Bool {

@@ -42,6 +42,37 @@ extension ConversationManager {
                 return await self.sendUpdateNoticeOnce(record)
             },
             log: { print("[UpdateNotice] \($0)") }))
+        startLocalToolsService()
+    }
+
+    /// The known-vulnerability check of the user's own tools (§9.5): same
+    /// process, same loop, same switch. Not started while the advisory key
+    /// is a placeholder (nothing to verify against, so nothing is fetched).
+    func startLocalToolsService() {
+        let policy = AdvisoryPolicy.effective
+        guard LocalToolsService.current == nil, policy.isProvisioned else { return }
+        LocalToolsService.launch(deps: LocalToolsService.Deps(
+            paths: .live,
+            now: { Date() },
+            policy: policy,
+            fetch: { try await BoundedHTTP.fetchData(url: policy.url, maxBytes: LocalAdvisory.maxEnvelopeBytes, timeout: 30) },
+            inventory: { await Task.detached(priority: .utility) { LocalTools.inventory(.live) }.value },
+            language: { MenuEnvironment.defaultLanguage() },
+            isIdle: { [weak self] in
+                guard let self else { return false }
+                return self.activeRunId == nil && self.activeProcessingTask == nil && !self.isTurnActive
+                    && !self.browserSettingsMutation
+            },
+            destination: { [weak self] in self?.updateNoticeDestination() ?? UpdateNotice.Destination(channelKind: nil, chatId: nil, channelGeneration: 0) },
+            channelGeneration: { kind in
+                guard let kind, let k = ChannelKind(rawValue: kind) else { return 0 }
+                return NoticeChannelGenerations.current(k)
+            },
+            send: { [weak self] kind, chat, generation, text in
+                guard let self else { return .ambiguous }
+                return await self.sendNoticeOnce(channelKind: kind, chatId: chat, channelGeneration: generation, text: text)
+            },
+            log: { print("[ToolAdvisories] \($0)") }))
     }
 
     /// The ambient destination (the user's last messaging channel, else
@@ -62,16 +93,24 @@ extension ConversationManager {
     /// ambiguous; app and terminal a local emit. Never parked, never routed
     /// through `NoticeSeries` (its retries would duplicate these).
     func sendUpdateNoticeOnce(_ record: AttemptRecord) async -> UpdateNotice.SendOutcome {
-        guard let kindName = record.channelKind, let kind = ChannelKind(rawValue: kindName), kind != .app,
-              let chatId = record.chatId else {
-            stopNoticeEvents.send(record.text)
+        await sendNoticeOnce(channelKind: record.channelKind, chatId: record.chatId,
+                             channelGeneration: record.channelGeneration, text: record.text)
+    }
+
+    /// The one-attempt transport shared by the update notice and the
+    /// local-tool messages (§5.5, §9.5.5).
+    func sendNoticeOnce(channelKind: String?, chatId: String?, channelGeneration: UInt64,
+                        text: String) async -> UpdateNotice.SendOutcome {
+        guard let kindName = channelKind, let kind = ChannelKind(rawValue: kindName), kind != .app,
+              let chatId else {
+            stopNoticeEvents.send(text)
             return .accepted
         }
-        guard NoticeChannelGenerations.current(kind) == record.channelGeneration,
+        guard NoticeChannelGenerations.current(kind) == channelGeneration,
               let channel = channels[kind] else { return .dropped }
         if let telegram = channel as? TelegramBotService {
-            switch await telegram.sendNoticeOnce(chatId: chatId, text: record.text,
-                                                 expectedGeneration: record.channelGeneration) {
+            switch await telegram.sendNoticeOnce(chatId: chatId, text: text,
+                                                 expectedGeneration: channelGeneration) {
             case .accepted: return .accepted
             case .refused(let after, _): return .refused(retryAfter: TimeInterval(after ?? 60))
             case .ambiguous: return .ambiguous
@@ -79,7 +118,7 @@ extension ConversationManager {
             }
         }
         do {
-            try await channel.sendText(chatId: chatId, text: record.text)
+            try await channel.sendText(chatId: chatId, text: text)
             return .accepted
         } catch {
             return .ambiguous
@@ -93,7 +132,8 @@ extension ConversationManager {
         let arg = argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch arg {
         case "":
-            try? await sendText(Self.upgradeCheckReply(status: UpdateNoticeService.current?.status() ?? UpdateNoticeService.liveStatus()))
+            try? await sendText(Self.upgradeCheckReply(status: UpdateNoticeService.current?.status() ?? UpdateNoticeService.liveStatus(),
+                                                        tools: LocalToolsText.liveStatus()))
         case "on", "off":
             do {
                 try UpdateNoticeStore.setEnabled(arg == "on", paths: .live, now: Date())
@@ -107,12 +147,13 @@ extension ConversationManager {
         }
     }
 
-    nonisolated static let upgradeCheckOnText = "✔ Update checks are on. Briglia checks for new versions every 6 hours and tells you once; it never installs anything by itself — /upgrade does. Each check is one HTTPS request to GitHub, which sees this machine's IP address and the time."
-    nonisolated static let upgradeCheckOffText = "✔ Update checks are off: Briglia makes no update requests and sends no update notices. /upgrade still works whenever you send it. /upgradecheck on turns them back on."
+    nonisolated static let upgradeCheckOnText = "✔ Update checks are on. Briglia checks for new versions and for known security problems in the tools it uses, and tells you once; it never installs anything by itself — /upgrade does. A version check is one HTTPS request to GitHub every 6 hours, and once a day one download of the same signed advisory list for everyone; both see this machine's IP address and the time, never a list of your tools."
+    nonisolated static let upgradeCheckOffText = "✔ Update checks are off: Briglia makes no update or advisory requests and sends no update or tool-security notices. /upgrade still works whenever you send it. /upgradecheck on turns them back on."
 
-    nonisolated static func upgradeCheckReply(status: UpdateNoticeText.Status) -> String {
+    nonisolated static func upgradeCheckReply(status: UpdateNoticeText.Status, tools: LocalToolsText.Status? = nil) -> String {
         (["🔔 " + status.part] + status.details + status.reasons.map { "⚠ " + $0.en }).joined(separator: "\n")
-            + "\nScope: Briglia checks for new versions every 6 hours and tells you once; it never installs anything by itself. /upgradecheck on|off"
+            + (tools.map { "\n🧰 " + $0.part + $0.reasons.map { "\n⚠ " + $0.en }.joined() } ?? "")
+            + "\nScope: Briglia checks for new versions and for known security problems in the tools it uses, and tells you once; it never installs anything by itself. /upgradecheck on|off"
     }
 
     // MARK: - /upgrade display (§5.6)
