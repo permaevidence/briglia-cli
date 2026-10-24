@@ -98,6 +98,10 @@ jobs:
         run: python3 scripts/security_phase2_test.py .build/debug/briglia
       - name: Security Phase 3 (known-vulnerability check of your own tools, signed advisory list, local matching, send-once messages)
         run: python3 scripts/security_phase3_test.py .build/debug/briglia
+      - name: gws / WhatsApp removal (retirement migration selftest, wire-migration negative tests)
+        run: |
+          python3 scripts/drop_gws_whatsapp_migration_test.py
+          .build/debug/briglia __retired-integrations-selftest
 
   linux-gates-a:
     name: Linux gates A (wire, lifecycle, Responses)
@@ -224,6 +228,10 @@ jobs:
         run: python3 scripts/security_phase2_test.py .build/debug/briglia
       - name: Security Phase 3 (known-vulnerability check of your own tools, signed advisory list, local matching, send-once messages)
         run: python3 scripts/security_phase3_test.py .build/debug/briglia
+      - name: gws / WhatsApp removal (retirement migration selftest, wire-migration negative tests)
+        run: |
+          python3 scripts/drop_gws_whatsapp_migration_test.py
+          .build/debug/briglia __retired-integrations-selftest
 
   macos-gates:
     name: macOS gates

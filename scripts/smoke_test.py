@@ -639,7 +639,7 @@ def main():
     result = run_selftest([os.path.abspath(ADA), "__diff-pipe-selftest"], capture_output=True, text=True, timeout=300)
     check("diff pipe selftest", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
-    # Same pipe deadlock in the unzip / gws / shortcuts process helpers: a
+    # Same pipe deadlock in the unzip / installer / shortcuts process helpers: a
     # 3,000-entry zip listed and extracted by the real unzip, ~100 KB and 1 MB
     # of stdout complete through each helper, stderr floods cannot block,
     # error strings and small outputs unchanged, timeouts fire and reap.
@@ -881,14 +881,22 @@ def main():
     check("parked-outbound-selftest (overlapping flushes deliver once, never trap)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
-    # 3c9. Email/calendar providers: resolution (explicit choice wins, unset
-    # falls back to legacy gws-if-installed inference), the manage_calendar
+    # 3c9. Email/calendar providers: resolution (a valid explicit choice wins;
+    # unset, the retired "gws" and garbage read as none), the manage_calendar
     # tool gate (agentmail only), provider-aware prompt strings (guidance
     # bullet + new-mail envelope hint never name an absent CLI), AgentMail
     # wire parsing/formatting, and the local calendar store roundtrip with
     # short-id resolution. XDG-isolated; provider reads use test seams.
     result = run_selftest([ADA, "__emailcal-selftest"], capture_output=True, text=True, timeout=120)
     check("emailcal-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
+    # 3c9b. gws / WhatsApp retirement (2026-10-24): crash-safe migration,
+    # ownership-verified bridge stop, descriptor remover with mount checks,
+    # retired alerts, at-most-once notices, manager routing. Re-executes
+    # itself in a private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__retired-integrations-selftest"], capture_output=True, text=True, timeout=300)
+    check("retired-integrations-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
     # 3c-bis. Web agent plumbing: tool-calling request/response encoding for

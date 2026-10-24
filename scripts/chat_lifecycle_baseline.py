@@ -176,10 +176,18 @@ def instrument(tree):
 # `ada.keepSummaries` is read and written through one accessor in the new
 # PruneSummaryComposition.swift; redirected like every other access (fixtures
 # never set it, so every scenario composes with the default 3).
+# gws / WhatsApp removal (DROP_GWS_WHATSAPP_PLAN v3 §4, 2026-10-24): the
+# deleted WhatsAppChannelService.swift took its two accesses with it (the key
+# is DELETED, not set to None); the new RetiredIntegrations.swift reads and
+# removes the retired `whatsapp_enabled` / last-channel values through one
+# UserDefaults.standard default in its Env. No access was added to or removed
+# from the ConversationManager family.
 REVIEWED_DEFAULTS_DELTAS = {
     "TelegramConcierge/Services/ConversationArchiveService.swift:defaults": (4, 1),
     "TelegramConcierge/Services/UserContextMaintenance.swift:defaults": (None, 1),
     "TelegramConcierge/Services/PruneSummaryComposition.swift:defaults": (None, 1),
+    "TelegramConcierge/Services/WhatsAppChannelService.swift:defaults": (2, None),
+    "TelegramConcierge/Services/RetiredIntegrations.swift:defaults": (None, 1),
 }
 
 
@@ -188,7 +196,10 @@ def reviewed_defaults_delta(evidence):
     for key, (old, new) in REVIEWED_DEFAULTS_DELTAS.items():
         if adjusted.get(key) != old:
             raise RuntimeError(f"Reviewed defaults delta no longer matches the reference: {key} = {adjusted.get(key)!r}, expected {old!r}")
-        adjusted[key] = new
+        if new is None:
+            adjusted.pop(key)   # the file no longer exists in the candidate
+        else:
+            adjusted[key] = new
     return adjusted
 
 
@@ -364,6 +375,9 @@ def main():
             from output_cap_removal_migration import migrate_lifecycle as migrate_output_cap_removal_lifecycle, verify_candidate as verify_no_output_cap
             from summary_retention_lifecycle_migration import migrate_candidate as migrate_summary_retention_candidate
             from keep_summaries_lifecycle_migration import migrate_candidate as migrate_keep_summaries_candidate
+            from drop_gws_whatsapp_migration import reverse_candidate as reverse_drop_gws_whatsapp_candidate
+            # drop-gws-wa step (gws / WhatsApp removed, 2026-10-24) restores
+            # exactly the three reviewed texts on the candidate before r14.
             # r14 (/keepsummaries) removes exactly the validated summary
             # pointers (stubs) from the candidate before r13 runs.
             # r13 (summary retention) removes exactly the reviewed persisted
@@ -373,7 +387,7 @@ def main():
             # send), r10 (AGENTS.md bullet), r9 (runtime identity), r8 (reply
             # policy) and r7 (chronology) restore the candidate; earlier gates
             # remain unchanged.
-            verify_migration(migrate_output_cap_removal_lifecycle(migrate_subagent_dialogue_lifecycle(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"])))), verify_no_output_cap(migrate_summary_retention_candidate(migrate_keep_summaries_candidate(results["candidate"]))), compare)
+            verify_migration(migrate_output_cap_removal_lifecycle(migrate_subagent_dialogue_lifecycle(migrate_reasoning_history_removal_lifecycle(migrate_lifecycle(results["reference"])))), verify_no_output_cap(migrate_summary_retention_candidate(migrate_keep_summaries_candidate(reverse_drop_gws_whatsapp_candidate(results["candidate"])))), compare)
             # New-binary export MUST open with the pinned release's actual importer.
             imported = root / "cross-import"
             env = dict(os.environ, SWIFT_DETERMINISTIC_HASHING="1", LC_ALL="C", TZ="UTC")

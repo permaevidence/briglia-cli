@@ -9,11 +9,10 @@ Generated FROM THE SOURCES so it cannot silently drift:
   * Package.resolved                         Swift packages (compiled in)
   * Resources/MCPBundles/playwright lockfile  managed Playwright npm tree (transitive)
   * AgentMailInstaller.swift                  pinned AgentMail CLI version + hashes
-  * Resources/WhatsAppBridge/package.json     WhatsApp bridge npm ranges (no lockfile)
   * ToolchainService.swift installSpecs       Homebrew formulae + shared-pip packages
   * UserdataToolchain.swift packages          userdata (apt-sourced) toolchain
   * .github/workflows/*.yml                   pinned GitHub Actions + build containers
-plus a short list of hand-written entries (Node, gws, OS tools, browsers,
+plus a short list of hand-written entries (Node, OS tools, browsers,
 skill-only Python packages) that each name an EVIDENCE anchor: a string that
 must still exist in a named source file. If the code behind an entry changes
 (the anchor disappears) generation fails, so the entry gets reviewed.
@@ -153,22 +152,6 @@ def agentmail():
         exposure="binary and key-broker wrapper live in ~/.local/bin (a shared entry point); parses email from the network; updated only by `briglia agentmail upgrade`")]
 
 
-def whatsapp():
-    rel = f"{SRC}/Resources/WhatsAppBridge/package.json"
-    pkg = json.loads(read(rel))
-    lock = os.path.join(ROOT, f"{SRC}/Resources/WhatsAppBridge/package-lock.json")
-    out = []
-    for name, rng in sorted((pkg.get("dependencies") or {}).items()):
-        out.append(entry(
-            id=f"npm:whatsapp:{name}", group="U3 WhatsApp bridge (npm)",
-            ecosystem="npm", name=name, version=None, pin=rng, pin_kind="range",
-            owner=PRIVATE, scope="runtime-managed", source=rel, watch="gap",
-            gap=("version range, no lockfile: the installed version is whatever npm resolved at deploy time"
-                 if not os.path.exists(lock) else "lockfile present but not yet inventoried"),
-            exposure="opt-in channel; `npm install --omit=dev` WITH install scripts into ~/.local/share/briglia/whatsapp-bridge"))
-    return out
-
-
 def toolchain_specs():
     rel = f"{SRC}/Services/ToolchainService.swift"
     text = read(rel)
@@ -269,7 +252,6 @@ def workflows():
 
 def hand_written():
     mcp = f"{SRC}/Services/MCPRegistry.swift"
-    gws = f"{SRC}/Services/GoogleWorkspaceService.swift"
     pdf = f"{SRC}/Resources/BundledSkills/pdf/SKILL.md"
     get = "scripts/get-briglia.sh"
     tc = f"{SRC}/Services/ToolchainService.swift"
@@ -286,13 +268,7 @@ def hand_written():
               pin_kind="unpinned", owner=SHARED, scope="runtime-managed",
               source=need(mcp, "https://nodejs.org/dist/index.json"), watch="node-releases",
               gap="unpinned at install, then never updated (the installed version is per machine, unknown here); ~/.local/node and its ~/.local/bin links are shared entry points; libraries bundled inside Node (OpenSSL, llhttp, zlib, …) are not inventoried separately",
-              exposure="runs the Playwright MCP, the WhatsApp bridge and user MCP/LSP servers"),
-        entry(id="runtime:gws", group="U2 gws (Google Workspace CLI)", ecosystem=None,
-              name="googleworkspace/cli", version=None, pin="GitHub releases/latest at install time (same-origin .sha256)",
-              pin_kind="unpinned", owner=SHARED, scope="runtime-managed",
-              source=need(gws, "github.com/googleworkspace/cli/releases/latest/download/"), watch="github-repo-advisories",
-              gap="unpinned; self-heal re-installs `latest` automatically; installed at ~/.local/bin/gws (shared); its embedded dependencies are not inventoried",
-              exposure="optional email/calendar provider; parses mail and calendar data"),
+              exposure="runs the Playwright MCP and user MCP/LSP servers"),
         entry(id="pypi:weasyprint", group="Skill-only Python dependencies (installed by the agent, not by Briglia)",
               ecosystem="PyPI", name="weasyprint", version=None, pin="none (skill instructions: `pip install weasyprint`)",
               pin_kind="unpinned", owner=HOST, scope="runtime-host", source=need(pdf, "python3 -m pip install weasyprint"),
@@ -337,7 +313,7 @@ def hand_written():
 
 
 def generate():
-    comps = (swift_packages() + playwright_tree() + agentmail() + whatsapp() + toolchain_specs()
+    comps = (swift_packages() + playwright_tree() + agentmail() + toolchain_specs()
              + userdata_toolchain() + workflows() + hand_written())
     ids = [c["id"] for c in comps]
     dup = sorted({i for i in ids if ids.count(i) > 1})

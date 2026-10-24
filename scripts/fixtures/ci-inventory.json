@@ -84,6 +84,24 @@
         "name": "Security Phase 3 (known-vulnerability check of your own tools, signed advisory list, local matching, send-once messages)",
         "run": "python3 scripts/security_phase3_test.py .build/debug/briglia"
       }
+    },
+    {
+      "op": "add",
+      "platform": "linux",
+      "reason": "gws / WhatsApp removal (owner decision 2026-10-24; DROP_GWS_WHATSAPP_PLAN v3, Codex plan round 3 accepted): the r12 wire / lifecycle drop-gws-wa migration's negative tests (three exact edits, fail-closed inventories) and the retirement selftest (crash-safe provider conversion, ownership-verified bridge stop, descriptor remover with mount checks, retired alerts, at-most-once notices, manager routing) on this platform. No network; isolated scratch home and preferences.",
+      "step": {
+        "name": "gws / WhatsApp removal (retirement migration selftest, wire-migration negative tests)",
+        "run": "python3 scripts/drop_gws_whatsapp_migration_test.py\n.build/debug/briglia __retired-integrations-selftest\n"
+      }
+    },
+    {
+      "op": "add",
+      "platform": "macos",
+      "reason": "gws / WhatsApp removal (owner decision 2026-10-24; DROP_GWS_WHATSAPP_PLAN v3, Codex plan round 3 accepted): the r12 wire / lifecycle drop-gws-wa migration's negative tests (three exact edits, fail-closed inventories) and the retirement selftest (crash-safe provider conversion, ownership-verified bridge stop, descriptor remover with mount checks, retired alerts, at-most-once notices, manager routing) on this platform. No network; isolated scratch home and preferences.",
+      "step": {
+        "name": "gws / WhatsApp removal (retirement migration selftest, wire-migration negative tests)",
+        "run": "python3 scripts/drop_gws_whatsapp_migration_test.py\n.build/debug/briglia __retired-integrations-selftest\n"
+      }
     }
   ],
   "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove|replace|job-setup, platform, step, reason}).",

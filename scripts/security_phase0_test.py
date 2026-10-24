@@ -48,9 +48,11 @@ def inventory():
     comps = inv["components"]
     ids = {c["id"] for c in comps}
     want = {"swift:swift-crypto", "npm:playwright-tree:@playwright/mcp", "github-release:agentmail-cli", "runtime:node",
-            "runtime:gws", "npm:whatsapp:baileys", "pypi:pillow", "deb:userdata:ffmpeg", "brew:ffmpeg", "pypi:weasyprint",
+            "pypi:pillow", "deb:userdata:ffmpeg", "brew:ffmpeg", "pypi:weasyprint",
             "host:pdf-renderer-browser", "host:os-tools"}
     check("inventory: covers every component class the plan names", want <= ids, sorted(want - ids))
+    retired = sorted(i for i in ids if i == "runtime:gws" or i.startswith("npm:whatsapp:"))
+    check("inventory: the removed gws provider and WhatsApp bridge are gone (owner decision 2026-10-24)", not retired, retired)
     check("inventory: every OSV-watched entry has an exact version",
           all(c["version"] for c in comps if c["watch"] in ("osv", "osv-package")))
     check("inventory: unpinned/range/os entries are never marked OSV-watched",
