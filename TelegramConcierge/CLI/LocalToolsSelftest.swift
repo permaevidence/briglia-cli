@@ -43,6 +43,12 @@ struct LocalToolsSelftest: AsyncParsableCommand {
             ("wording", Self.wordingGroup),
             ("toolchain", Self.toolchainGroup),
             ("store", Self.storeGroup),
+            ("mac-updates-rules", Self.macUpdatesRulesGroup),
+            ("mac-updates-evaluate", Self.macUpdatesEvaluationGroup),
+            ("mac-updates-wording", Self.macUpdatesWordingGroup),
+            ("vendor-node", Self.vendorNodeGroup),
+            ("node-list", Self.nodeListGroup),
+            ("libreoffice-list", Self.libreOfficeListGroup),
         ]
         for (name, run) in groups where only.map({ name.contains($0) }) ?? true {
             print("— \(name) —")
@@ -51,6 +57,10 @@ struct LocalToolsSelftest: AsyncParsableCommand {
         if only.map({ "service".contains($0) }) ?? true {
             print("— service —")
             await Self.serviceGroup(t)
+        }
+        if only.map({ "mac-updates-service".contains($0) }) ?? true {
+            print("— mac-updates-service —")
+            await Self.macUpdatesServiceGroup(t)
         }
         print(t.failures == 0 ? "\nALL \(t.total) LOCAL TOOLS CHECKS PASSED" : "\n\(t.failures) of \(t.total) FAILED")
         if t.failures > 0 { throw ExitCode(1) }

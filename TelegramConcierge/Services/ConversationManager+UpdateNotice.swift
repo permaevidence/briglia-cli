@@ -43,6 +43,35 @@ extension ConversationManager {
             },
             log: { print("[UpdateNotice] \($0)") }))
         startLocalToolsService()
+        #if os(macOS)
+        startMacUpdatesService()
+        #endif
+    }
+
+    /// The macOS weekly "updates are waiting" message (§9.5.9): same process,
+    /// same loop and switch; needs no advisory key.
+    func startMacUpdatesService() {
+        guard MacUpdatesService.current == nil else { return }
+        MacUpdatesService.launch(deps: MacUpdatesService.Deps(
+            paths: .live,
+            now: { Date() },
+            evaluate: { await Task.detached(priority: .utility) { MacUpdates.liveEvaluation(.live, now: Date()) }.value },
+            language: { MenuEnvironment.defaultLanguage() },
+            isIdle: { [weak self] in
+                guard let self else { return false }
+                return self.activeRunId == nil && self.activeProcessingTask == nil && !self.isTurnActive
+                    && !self.browserSettingsMutation
+            },
+            destination: { [weak self] in self?.updateNoticeDestination() ?? UpdateNotice.Destination(channelKind: nil, chatId: nil, channelGeneration: 0) },
+            channelGeneration: { kind in
+                guard let kind, let k = ChannelKind(rawValue: kind) else { return 0 }
+                return NoticeChannelGenerations.current(k)
+            },
+            send: { [weak self] kind, chat, generation, text in
+                guard let self else { return .ambiguous }
+                return await self.sendNoticeOnce(channelKind: kind, chatId: chat, channelGeneration: generation, text: text)
+            },
+            log: { print("[MacUpdates] \($0)") }))
     }
 
     /// The known-vulnerability check of the user's own tools (§9.5): same

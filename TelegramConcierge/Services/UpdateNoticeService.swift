@@ -108,6 +108,7 @@ final class UpdateNoticeService {
         loop = nil
         if Self.current === self { Self.current = nil }
         LocalToolsService.current?.stop()
+        MacUpdatesService.current?.stop()
     }
 
     // MARK: - One tick
@@ -119,6 +120,9 @@ final class UpdateNoticeService {
         // The local-tools check (§9.5) shares this window and this loop:
         // its daily list fetch happens only right after a release check.
         await LocalToolsService.current?.tick(afterCheck: checked)
+        // The macOS weekly "updates are waiting" message (§9.5.9): local
+        // files only, independent of the advisory key.
+        await MacUpdatesService.current?.tick()
     }
 
     func shouldCheckNow() -> Bool {

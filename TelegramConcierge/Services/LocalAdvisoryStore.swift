@@ -187,7 +187,8 @@ enum LocalAdvisoryStore {
     /// `/deleteuserdata` part (called by `UpdateNoticeStore.wipeDerivedState`
     /// while it holds the lock and after it bumped the generation).
     static func unlinkDerived(_ p: Paths) throws {
-        for url in [p.observation, p.localvuln] where unlink(url.path) != 0 && errno != ENOENT {
+        // v17 §9.5.9: the macOS weekly-updates state goes with them.
+        for url in [p.observation, p.localvuln, MacUpdatesStore.url(p.notice)] where unlink(url.path) != 0 && errno != ENOENT {
             throw UpdateNoticeStore.StoreError(message: "could not delete \(url.path): \(String(cString: strerror(errno)))")
         }
     }
