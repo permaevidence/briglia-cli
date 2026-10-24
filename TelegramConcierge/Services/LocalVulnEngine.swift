@@ -8,7 +8,8 @@ import Crypto
 /// `localvuln.json` (security plan v16 §9.5.5): the send-once table keyed by
 /// (identity, installed version), its single attempt record, and the last
 /// evaluation (for display only). Bounded: ≤ 256 rows with quiet overflow
-/// (§5.4.4), ≤ 512 KiB on disk.
+/// (§5.4.4), ≤ 16 MiB on disk (a resource budget: a larger state is refused
+/// and nothing is sent; owner decision L1, §9.5.13).
 struct LocalVulnState: Codable, Equatable {
     var schema = 1
     var rows: [LocalVulnRow] = []

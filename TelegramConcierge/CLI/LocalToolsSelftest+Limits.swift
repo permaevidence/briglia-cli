@@ -48,7 +48,7 @@ extension LocalToolsSelftest {
                         && docs[2].entries.count == 128 && docs[3].coverage.count == 1024)
         } catch { t.check("L1: 128 IDs, 512 advisories, 128 identities and 1024 coverage rows are each accepted", false, "\(error)") }
         parseFails(t, "L1: 1025 coverage rows rejected",
-                   LTF.payload(coverage: (0..<513).flatMap { LTF.covAll("deb:debian:12:pkg\($0)") }, entries: []), contains: "1024")
+                   LTF.payload(coverage: Array((0..<513).flatMap { LTF.covAll("deb:debian:12:pkg\($0)") }.prefix(1025)), entries: []), contains: "1024")
         // A full-size signed list: accepted at exactly 2 MiB, refused one byte above, before parsing.
         guard let (full, expected) = fullPayload(bytes: LocalAdvisory.maxPayloadBytes),
               let (over, _) = fullPayload(bytes: LocalAdvisory.maxPayloadBytes + 1) else {
@@ -90,7 +90,8 @@ extension LocalToolsSelftest {
             t.check("L1: the observation file holds \(LocalAdvisoryStore.maxDomains) full-size domains and reads back",
                     wrote && size <= LocalAdvisoryStore.maxObservationBytes && back?.domains.count == LocalAdvisoryStore.maxDomains
                         && back?.domains.allSatisfy { $0.payload == full } == true, "\(size) bytes")
-            // A report per watched tool, each a full identity of maximal IDs: fits localvuln.json.
+            // A large all-tools fixture (not a proven maximum: the 16 MiB cap is a resource
+            // budget; above it the write is refused and nothing is sent).
             let maxIds = (0..<LocalTools.maxReportIds).map { "ID-" + String(repeating: "\($0 % 10)", count: 61) }
             var rep = report(ids: maxIds)
             rep.affected = Array(repeating: rep.affected[0], count: LocalAdvisory.maxAdvisoriesPerIdentity)
@@ -101,7 +102,7 @@ extension LocalToolsSelftest {
             do { try LocalAdvisoryStore.write(state, to: p.localvuln, maxBytes: LocalAdvisoryStore.maxLocalVulnBytes) }
             catch { vw = false }
             let vsize = ((try? FileManager.default.attributesOfItem(atPath: p.localvuln.path))?[.size] as? Int) ?? 0
-            t.check("L1: a maximal report for every watched tool fits localvuln.json", vw, "\(vsize) bytes")
+            t.check("L1: a large report (512 advisories × 16 long IDs) for every watched tool fits localvuln.json", vw, "\(vsize) bytes")
         } catch {
             t.check("L1: a signed list of exactly 2 MiB verifies and parses (full) well under 10 s", false, "\(error)")
         }

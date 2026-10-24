@@ -24,9 +24,10 @@ enum LocalAdvisoryStore {
     static let maxObservationBytes = maxDomains * LocalAdvisory.maxEnvelopeBytes + 64 * 1024
     /// The send-once rows (≤ 256), one attempt and the last evaluation: up
     /// to one report per watched tool, each with up to 512 matched advisories
-    /// of ≤ 16 IDs (`LocalTools.maxReportIds`). The selftest checks a
-    /// maximal report for every watched tool fits; above it the write is
-    /// refused and the check shows "cannot be saved" (nothing sent).
+    /// of ≤ 16 IDs (`LocalTools.maxReportIds`). A resource budget, not a
+    /// proven maximum (Codex L1 note): the selftest writes a large all-tools
+    /// report under it; above it the write is refused and the check shows
+    /// "cannot be saved" (nothing sent).
     static let maxLocalVulnBytes = 16 * 1024 * 1024
 
     struct Paths {
