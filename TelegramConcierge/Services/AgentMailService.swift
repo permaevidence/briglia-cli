@@ -8,8 +8,19 @@ import CryptoKit
 import Crypto
 #endif
 
+/// One unread email row for the ambient inbox snapshot and the new-email
+/// envelope (moved from the removed GoogleWorkspaceService, 2026-10-24).
+struct UnreadEmail: Codable, Sendable, Equatable {
+    let id: String
+    let threadId: String?
+    let from: String
+    let subject: String
+    let date: String
+    let snippet: String
+}
+
 /// AgentMail-backed data source for ambient email context and the unread-mail
-/// poller — the `agentmail` provider's counterpart to GoogleWorkspaceService.
+/// poller for the `agentmail` provider.
 ///
 /// The harness talks to the REST API (api.agentmail.to) directly over
 /// URLSession — no CLI subprocess, no Node — so polling and system-prompt
@@ -17,16 +28,15 @@ import Crypto
 /// installed. The CLI exists for the MODEL's follow-up actions via bash
 /// (read/reply/send), with AGENTMAIL_API_KEY preset in its environment.
 ///
-/// Emits the same `GoogleWorkspaceService.UnreadEmail` rows and the same
-/// formatted context block shape as the gws path, so ConversationManager's
-/// frozen-context cache and `processNewUnreadEmails` pipeline are shared
-/// verbatim between providers.
+/// Emits `UnreadEmail` rows and the formatted context block shape the
+/// removed gws provider used, so ConversationManager's frozen-context cache
+/// and `processNewUnreadEmails` pipeline are unchanged.
 actor AgentMailService {
     static let shared = AgentMailService()
 
     // MARK: - State
 
-    private var cachedUnread: [GoogleWorkspaceService.UnreadEmail] = []
+    private var cachedUnread: [UnreadEmail] = []
 
     /// Watermark for the arrival poll (`after=` is an ISO-8601 instant).
     /// Advanced only after a successful fetch so a failed tick widens the
@@ -55,7 +65,7 @@ actor AgentMailService {
     /// the mirrored ambient queue). The persisted checkpoint advances only
     /// on true — a crash after a false return redelivers instead of losing
     /// the notification behind an advanced cursor (Codex round 6).
-    private var newEmailHandler: (@Sendable ([GoogleWorkspaceService.UnreadEmail]) async -> Bool)?
+    private var newEmailHandler: (@Sendable ([UnreadEmail]) async -> Bool)?
 
     /// Inbox ids for this key, discovered once per process (a key is usually
     /// inbox-scoped, so this is a single address).
@@ -100,9 +110,9 @@ actor AgentMailService {
     // The one-time cost at the upgrade: arrivals during that restart get no
     // proactive notice; they still show in the unread snapshot.
 
-    // MARK: - Public API — polling lifecycle (mirrors GoogleWorkspaceService)
+    // MARK: - Public API — polling lifecycle
 
-    func setNewEmailHandler(_ handler: @escaping @Sendable ([GoogleWorkspaceService.UnreadEmail]) async -> Bool) {
+    func setNewEmailHandler(_ handler: @escaping @Sendable ([UnreadEmail]) async -> Bool) {
         newEmailHandler = handler
     }
 
@@ -257,7 +267,7 @@ actor AgentMailService {
     func pollTick(
         generation: UInt64,
         fetch: @Sendable (Date, Date) async -> ArrivalFetchResult?,
-        handler: (@Sendable ([GoogleWorkspaceService.UnreadEmail]) async -> Bool)?
+        handler: (@Sendable ([UnreadEmail]) async -> Bool)?
     ) async {
         guard generation == pollGeneration else { return }
         // In-flight accounting for resetForWipe's quiescence poll. The
@@ -353,7 +363,7 @@ actor AgentMailService {
 
     // MARK: - Fetch (with retry)
 
-    private func fetchUnreadSnapshotWithRetry() async -> [GoogleWorkspaceService.UnreadEmail]? {
+    private func fetchUnreadSnapshotWithRetry() async -> [UnreadEmail]? {
         let generation = pollGeneration
         var delayNs: UInt64 = 1_000_000_000
         for attempt in 1...3 {
@@ -421,7 +431,7 @@ actor AgentMailService {
     }
 
     struct ArrivalFetchResult {
-        let emails: [GoogleWorkspaceService.UnreadEmail]
+        let emails: [UnreadEmail]
         /// Where the watermark may advance to, or nil to hold (a drain is
         /// still in progress — progress is carried by the persisted page
         /// cursors; rewinding timestamps cannot make progress through >cap
@@ -497,7 +507,7 @@ actor AgentMailService {
         return decoded.inboxes.map { $0.inboxId }
     }
 
-    private func fetchUnreadSnapshotOnce() async -> [GoogleWorkspaceService.UnreadEmail]? {
+    private func fetchUnreadSnapshotOnce() async -> [UnreadEmail]? {
         guard let inboxes = await fetchInboxIds() else { return nil }
         var all: [(row: MessageRow, date: Date)] = []
         for inbox in inboxes {
@@ -607,7 +617,7 @@ actor AgentMailService {
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
         let after = iso.string(from: since)
-        var all: [GoogleWorkspaceService.UnreadEmail] = []
+        var all: [UnreadEmail] = []
         var advanceTo: Date? = pollStartedAt
         for inbox in inboxes {
             let existingDrain = drainStates[inbox]
@@ -720,7 +730,7 @@ actor AgentMailService {
         return plain.date(from: string)
     }
 
-    static func toUnreadEmail(_ row: MessageRow) -> GoogleWorkspaceService.UnreadEmail {
+    static func toUnreadEmail(_ row: MessageRow) -> UnreadEmail {
         let dateDisplay: String
         if let date = parseTimestamp(row.timestamp) {
             let formatter = DateFormatter()
@@ -729,7 +739,7 @@ actor AgentMailService {
         } else {
             dateDisplay = row.timestamp ?? ""
         }
-        return GoogleWorkspaceService.UnreadEmail(
+        return UnreadEmail(
             id: row.messageId,
             threadId: row.threadId,
             from: row.from ?? "(unknown sender)",
@@ -741,7 +751,7 @@ actor AgentMailService {
 
     /// Same block shape as the gws formatter so the frozen-context cache and
     /// prompt layout are provider-independent; only the follow-up hint differs.
-    static func formatUnreadEmails(_ emails: [GoogleWorkspaceService.UnreadEmail]) -> String {
+    static func formatUnreadEmails(_ emails: [UnreadEmail]) -> String {
         guard !emails.isEmpty else { return "" }
         var lines: [String] = ["📧 **Your Inbox** (last \(emails.count) unread emails):", ""]
         for email in emails {

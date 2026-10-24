@@ -8,20 +8,19 @@ import Foundation
 /// - `agentmail` — a dedicated agent inbox on AgentMail (api.agentmail.to,
 ///                 key in secrets.json) plus Briglia's local calendar store with
 ///                 the `manage_calendar` tool. The recommended easy path.
-/// - `gws`       — the user's own Gmail/Google Calendar via the `gws` CLI
-///                 with a user-provided Google Cloud OAuth client. Calendar
-///                 context comes from Google Calendar; no local calendar tool.
+///
+/// The former `gws` provider (the user's Gmail through Google's `gws` CLI) was
+/// removed on 2026-10-24 (owner decision, attack surface). A stored "gws" —
+/// or any value this build does not know — reads as `none` everywhere;
+/// `RetiredIntegrations` rewrites it durably and tells the user once.
 enum EmailCalendarProvider: String, CaseIterable {
     case none
     case agentmail
-    case gws
 
     /// Test seam: when set, `current` uses the returned raw value (nil =
     /// simulate "no stored choice") instead of reading secrets.json. Selftests
     /// set and clear this; production never does.
     nonisolated(unsafe) static var storedOverrideForTesting: (() -> String?)?
-    /// Test seam for the legacy-inference path (gws binary presence probe).
-    nonisolated(unsafe) static var gwsInstalledOverrideForTesting: (() -> Bool)?
 
     /// Single source of truth for the active provider. Every reader — the
     /// startup poller wiring, the frozen-context builders, the calendar tool
@@ -29,11 +28,8 @@ enum EmailCalendarProvider: String, CaseIterable {
     /// the wizard, and doctor — must go through this so they can never
     /// disagree.
     ///
-    /// Resolution: an explicitly stored choice wins. When unset (installs
-    /// predating the provider setting), fall back to the legacy behavior,
-    /// which was "gws when the binary is installed, nothing otherwise" — so
-    /// existing gws users keep working without reconfiguration and fresh
-    /// installs default to none.
+    /// Resolution: a valid stored choice wins; anything else (unset, the
+    /// retired "gws", garbage) is `none`.
     static var current: EmailCalendarProvider {
         let stored: String?
         if let override = storedOverrideForTesting {
@@ -41,18 +37,13 @@ enum EmailCalendarProvider: String, CaseIterable {
         } else {
             stored = KeychainHelper.load(key: KeychainHelper.emailCalendarProviderKey)
         }
-        if let stored, let provider = EmailCalendarProvider(rawValue: stored) {
-            return provider
-        }
-        let gwsPresent = gwsInstalledOverrideForTesting?() ?? GoogleWorkspaceService.gwsInstalled()
-        return gwsPresent ? .gws : .none
+        return stored.flatMap(EmailCalendarProvider.init(rawValue:)) ?? .none
     }
 
     var displayName: String {
         switch self {
         case .none: return "none"
         case .agentmail: return "AgentMail + local calendar"
-        case .gws: return "Google Workspace (gws)"
         }
     }
 
@@ -74,8 +65,6 @@ enum EmailCalendarProvider: String, CaseIterable {
             let inboxNote = inbox.isEmpty ? "" : " (\(inbox))"
             let msgs = AgentMailService.messagesResource
             return "- You have a dedicated email inbox\(inboxNote) on AgentMail. Use the `agentmail` CLI via `bash` for email actions — it authenticates itself automatically (e.g. `agentmail \(msgs) list --inbox-id \(inbox.isEmpty ? "<inbox>" : inbox) --limit 10`, `… get --message-id '<id>'`, `… reply`, `… send`; `agentmail --help` lists the rest). For raw API calls, `briglia __agentmail-key` prints the key. Use `manage_calendar` for the calendar."
-        case .gws:
-            return "- Use `gws` for Google Workspace actions."
         }
     }
 
@@ -91,27 +80,23 @@ enum EmailCalendarProvider: String, CaseIterable {
             let inboxArg = inbox.isEmpty ? "<inbox>" : inbox
             let msgs = AgentMailService.messagesResource
             return "Use the `agentmail` CLI via `bash` for follow-up actions when needed (e.g. `agentmail \(msgs) get --inbox-id \(inboxArg) --message-id '<id>'`, `… reply --inbox-id \(inboxArg) --message-id '<id>' --text \"…\"`)."
-        case .gws:
-            return "Use `gws` via `bash` for follow-up actions when needed (e.g. `gws gmail +read --id <id>`, `gws gmail +reply`)."
         }
     }
 }
 
 /// Email-credential wipe for /deleteuserdata (user decision, 2026-08-22): a
-/// handoff wipe must sever email ACCESS, not just local memory — otherwise
-/// the machine's next owner can read the old owner's inbox through the
-/// surviving credentials. Deletes the AgentMail key + inbox address, the
-/// user-provided gws OAuth client id/secret, and the whole ~/.config/gws
-/// directory (client_secret.json plus gws's own OAuth token store), then
-/// resets the provider to an EXPLICIT "none" — leaving it unset would let
-/// the legacy "gws if installed" inference resurrect a token-less gws
-/// configuration and spam maintenance alerts. Server-side mailboxes are
-/// deliberately untouched: deleting the key severs Briglia's access, and remote
-/// mail belongs to the account owner (an AgentMail key is inbox-scoped, so a
-/// new owner's key cannot see the old inbox anyway).
+/// handoff wipe must sever email ACCESS, not just local memory. Deletes the
+/// AgentMail key + inbox address and any leftover copy of the retired gws
+/// OAuth client id/secret in secrets.json, then resets the provider to an
+/// explicit "none". Since gws was removed (2026-10-24) Briglia never runs gws
+/// and never touches ~/.config/gws or the gws binary — they may be the
+/// user's own; the /deleteuserdata warning tells the user how to sign gws out
+/// when that directory exists. Server-side mailboxes are deliberately
+/// untouched: deleting the key severs Briglia's access, and remote mail
+/// belongs to the account owner.
 enum EmailCredentialWipe {
     /// Returns wipe failures in the same format deleteAllMemory reports.
-    static func execute(gwsConfigDir: URL = GoogleWorkspaceService.gwsConfigDirectory) -> [String] {
+    static func execute() -> [String] {
         var failures: [String] = []
         func deleteSecret(_ key: String, _ label: String) {
             do { try KeychainHelper.delete(key: key) }
@@ -119,17 +104,13 @@ enum EmailCredentialWipe {
         }
         deleteSecret(KeychainHelper.agentMailApiKeyKey, "AgentMail API key")
         deleteSecret(KeychainHelper.agentMailInboxAddressKey, "AgentMail inbox address")
-        deleteSecret(KeychainHelper.gwsOAuthClientIDKey, "gws OAuth client id")
-        deleteSecret(KeychainHelper.gwsOAuthClientSecretKey, "gws OAuth client secret")
+        deleteSecret(KeychainHelper.retiredGwsOAuthClientIDKey, "retired gws OAuth client id")
+        deleteSecret(KeychainHelper.retiredGwsOAuthClientSecretKey, "retired gws OAuth client secret")
         do {
             try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey,
                                     value: EmailCalendarProvider.none.rawValue)
         } catch {
             failures.append("email provider reset: \(error.localizedDescription)")
-        }
-        if FileManager.default.fileExists(atPath: gwsConfigDir.path),
-           let failure = UserDataWipe.remove(gwsConfigDir.path, label: "gws config/token directory") {
-            failures.append(failure)
         }
         return failures
     }

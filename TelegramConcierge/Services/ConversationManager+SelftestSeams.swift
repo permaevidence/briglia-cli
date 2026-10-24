@@ -35,8 +35,6 @@ extension ConversationManager {
     }
     /// The production Telegram update handler (media, voice, safety net).
     func _testProcessUpdate(_ update: TelegramUpdate) async { await processUpdate(update) }
-    /// The production WhatsApp inbound handler.
-    func _testProcessWhatsApp(_ inbound: WhatsAppInboundMessage) async { await processWhatsAppInbound(inbound) }
     var _testPendingDocumentCount: Int { pendingDocuments.count }
     var _testPendingAttachmentNotes: [String] { pendingAttachmentNotes }
     func _testSeedHistory(_ history: [Message]) {
@@ -50,7 +48,7 @@ extension ConversationManager {
         startActiveProcessing(for: message)
     }
     func _testDispatchUser(_ message: Message) async { await dispatchUserTurn(message) }
-    func _testProcessEmails(_ emails: [GoogleWorkspaceService.UnreadEmail]) async -> Bool {
+    func _testProcessEmails(_ emails: [UnreadEmail]) async -> Bool {
         await processNewUnreadEmails(emails)
     }
     func _testQueueAmbient(_ message: Message) {

@@ -85,7 +85,7 @@ struct ChatLifecycleSelftest: AsyncParsableCommand {
             KeychainHelper.openAICompatibleModelKey: "glm-5.3",
             KeychainHelper.openAICompatibleReasoningEffortKey: "high",
             KeychainHelper.assistantNameKey: "Fixture Assistant", KeychainHelper.userNameKey: "Fixture User",
-            KeychainHelper.emailCalendarProviderKey: EmailCalendarProvider.gws.rawValue,
+            KeychainHelper.emailCalendarProviderKey: "gws",  // literal: builds on the pinned release and on gws-free builds
             KeychainHelper.maxContextTokensKey: "10000", KeychainHelper.targetContextTokensKey: "5000",
             KeychainHelper.archiveChunkSizeKey: "1000000", KeychainHelper.textOnlyModelEnabledKey: "false"
         ]

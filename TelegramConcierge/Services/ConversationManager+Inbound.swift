@@ -26,8 +26,8 @@ extension ConversationManager {
         OpenRouterPinMap.ensureMigrated()
         let currentLLMProvider = LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey))
         // No messaging channel is required: the app's own chat window is
-        // always a valid transport. Telegram/WhatsApp remain optional
-        // remotes for using the agent away from this Mac.
+        // always a valid transport. Telegram remains the optional remote
+        // for using the agent away from this machine.
         let apiKey = (KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         switch currentLLMProvider {
@@ -80,11 +80,6 @@ extension ConversationManager {
                 await self?.appendAppChannelDocument(data: data, filename: filename, caption: caption)
             }
         )
-
-        // WhatsApp is optional — when enabled in Settings, the Baileys sidecar
-        // starts and the channel becomes routable. Disabled = not registered,
-        // so routed sends silently skip it.
-        await updateWhatsAppChannelRegistration()
 
         await openRouterService.configure(apiKey: apiKey)
         
@@ -176,6 +171,10 @@ extension ConversationManager {
         isStartingPolling = true
         defer { isStartingPolling = false }
 
+        // gws / WhatsApp retirement (2026-10-24): settings and Briglia's own
+        // leftovers, before configure() reads them; notices come later.
+        applyRetiredIntegrationsMigration()
+
         await configure()
 
         guard error == nil else { return }
@@ -189,6 +188,7 @@ extension ConversationManager {
         // Update-available notice (security plan v8 §5): detached, one
         // signed-manifest check every 6 h, never installs anything.
         startUpdateNoticeService()
+        startRetiredIntegrationsNotices()
 
         // Crash-recovery passes, in dependency order, before the first poll
         // tick: buffered attachments first (a recovered turn may reference
@@ -346,13 +346,6 @@ extension ConversationManager {
                         }
                     }
 
-                    // Drain inbound WhatsApp messages (pushed by the Baileys
-                    // sidecar, buffered in the channel service).
-                    for inbound in WhatsAppChannelService.shared.drainInboundMessages() {
-                        await processWhatsAppInbound(inbound)
-                        persistPendingInboundBuffers()
-                    }
-
                     statusMessage = "Listening... (Last check: \(formattedTime()))"
 
                     // A tick succeeded — end any polling-degraded episode and
@@ -445,9 +438,7 @@ extension ConversationManager {
 
         let telegramReady = !stored(KeychainHelper.telegramBotTokenKey).isEmpty
             && !stored(KeychainHelper.telegramChatIdKey).isEmpty
-        let whatsappReady = WhatsAppChannelService.shared.isEnabled
-            && !stored(KeychainHelper.whatsappOwnerPhoneKey).isEmpty
-        guard telegramReady || whatsappReady else { return false }
+        guard telegramReady else { return false }
 
         // The LLM credential requirement depends on the chosen provider —
         // local servers need no key, OpenAI-compatible has its own key.
@@ -1036,183 +1027,6 @@ extension ConversationManager {
         pendingAttachmentNotes.removeAll()
         
         await dispatchUserTurn(userMessage, telegramMessageId: telegramMessage.messageId)
-    }
-
-    // MARK: - WhatsApp inbound
-
-    /// WhatsApp counterpart of `processUpdate`. The Baileys sidecar has already
-    /// enforced the owner-only allowlist and downloaded media to its spool; this
-    /// normalizes the event into the same pending-buffer + trigger-text flow the
-    /// Telegram path uses, tagging the resulting Message with its origin so the
-    /// turn's replies route back to WhatsApp.
-    func processWhatsAppInbound(_ inbound: WhatsAppInboundMessage) async {
-        error = nil
-        let address = ChannelAddress(kind: .whatsapp, chatId: inbound.from)
-        noteUserActivity(on: address)
-
-        // Control commands work identically on every channel.
-        if let text = inbound.text, await handleControlCommandIfNeeded(text) {
-            return
-        }
-
-        // NOTE: messages arriving during an active turn are no longer dropped
-        // here. They flow through the normal media/voice pipeline below and
-        // dispatchUserTurn() queues them for mid-turn delivery to the model.
-
-        // Quoted-reply context (user replied to an earlier message)
-        if let quoted = inbound.quoted {
-            let sender = quoted.fromMe ? "your previous message" : "their previous message"
-            let newReplyContext = "[Replying to \(sender): \"\(quoted.text)\"]"
-            pendingReplyContext = pendingReplyContext.map { $0 + "\n" + newReplyContext } ?? newReplyContext
-        }
-
-        if let mediaError = inbound.mediaError {
-            await noteUnavailableAttachment(
-                name: inbound.media?.filename ?? "WhatsApp attachment",
-                detail: "the download from WhatsApp failed (\(mediaError)).",
-                notifyUser: "⚠️ I couldn't download the attachment from WhatsApp: \(mediaError)"
-            )
-        }
-
-        var triggerText: String? = inbound.text
-
-        if let media = inbound.media {
-            let spoolURL = URL(fileURLWithPath: media.path)
-            defer { try? FileManager.default.removeItem(at: spoolURL) }
-
-            switch media.kind {
-            case "image":
-                do {
-                    let imageData = try Data(contentsOf: spoolURL)
-                    let ext = spoolURL.pathExtension.isEmpty ? "jpg" : spoolURL.pathExtension
-                    let fileName = "\(UUID().uuidString.prefix(8)).\(ext)"
-                    try PrivateStorage.writeAtomically(imageData, to: imagesDirectory.appendingPathComponent(fileName))
-                    // Mirror the Telegram path: also keep a copy with the documents
-                    // so the file can ride along as an email attachment.
-                    try? PrivateStorage.writeAtomically(imageData, to: documentsDirectory.appendingPathComponent(fileName))
-                    pendingImages.append((fileName: fileName, fileSize: imageData.count))
-                    print("[ConversationManager] Buffered WhatsApp image: \(fileName) (\(imageData.count) bytes)")
-                } catch {
-                    await noteFailedAttachmentDownload(name: media.filename, error: error, referenced: false)
-                }
-
-            case "voice":
-                let transcriptionProvider = currentVoiceTranscriptionProvider()
-                statusMessage = transcriptionProvider == .openAI
-                    ? "Transcribing audio with \(MediaRouting.transcription.viaOpenRouter ? "OpenRouter" : "OpenAI")..."
-                    : "Transcribing audio locally..."
-
-                // Tell the sender on every failure path — same fix as the
-                // Telegram voice pipeline; silent drops look like being ignored.
-                let transcription: String?
-                var transcriptionFailureReason: String?
-                switch transcriptionProvider {
-                case .openAI:
-                    let transcriptionRoute = MediaRouting.transcription
-                    let apiKey = transcriptionRoute.key
-                    guard !apiKey.isEmpty else {
-                        self.error = "OpenAI API key not set. Run `briglia setup` (section 2) to add it."
-                        statusMessage = "OpenAI API key missing"
-                        try? await sendText("⚠️ I couldn't process your voice message: the OpenAI transcription key isn't configured (run `briglia setup`, step 2). Type the message as text, or fix the key.", to: address)
-                        return
-                    }
-                    do {
-                        transcription = try await OpenAITranscriptionService.shared.transcribeAudioFile(url: spoolURL, apiKey: apiKey, prompt: TranscriptionVocabulary.chatHint(), endpoint: .init(transcriptionRoute))
-                    } catch {
-                        transcription = nil
-                        transcriptionFailureReason = error.localizedDescription
-                    }
-                case .local:
-                    guard WhisperKitService.shared.isModelReady else {
-                        self.error = "Voice model not ready. Please download it in Settings."
-                        statusMessage = "Voice model not ready"
-                        try? await sendText("⚠️ I couldn't process your voice message: local transcription isn't available in Briglia CLI — switch to OpenAI transcription (run `briglia setup`, step 2), or type the message as text.", to: address)
-                        return
-                    }
-                    transcription = await WhisperKitService.shared.transcribeAudioFile(url: spoolURL)
-                }
-
-                if let transcription {
-                    triggerText = transcription
-                    print("[ConversationManager] Transcribed WhatsApp voice: \(transcription)")
-                } else {
-                    self.error = "Failed to transcribe audio"
-                    statusMessage = "Transcription failed"
-                    try? await sendText("⚠️ I couldn't transcribe your voice message (\(transcriptionFailureReason ?? "transcription failed")). Try again, or type it as text.", to: address)
-                    return
-                }
-
-            default: // document, video, anything else file-like
-                do {
-                    let documentData = try Data(contentsOf: spoolURL)
-                    let ext = URL(fileURLWithPath: media.filename).pathExtension.isEmpty
-                        ? (spoolURL.pathExtension.isEmpty ? "bin" : spoolURL.pathExtension)
-                        : URL(fileURLWithPath: media.filename).pathExtension
-                    let fileName = "\(UUID().uuidString.prefix(8)).\(ext)"
-                    try PrivateStorage.writeAtomically(documentData, to: documentsDirectory.appendingPathComponent(fileName))
-                    pendingDocuments.append((fileName: fileName, fileSize: documentData.count))
-                    if media.kind == "audio" {
-                        // An ordinary audio file (not a recorded voice note):
-                        // a file, never transcribed automatically.
-                        pendingAttachmentNotes.append("[Audio file '\(MarkerNeutralizer.escape(media.filename))' received as a file: \(documentsDirectory.appendingPathComponent(fileName).path) — not transcribed; use transcribe_media if the user asks about its content]")
-                    }
-                    print("[ConversationManager] Buffered WhatsApp \(media.kind): \(fileName) (\(media.filename), \(documentData.count) bytes)")
-                } catch {
-                    await noteFailedAttachmentDownload(name: media.filename, error: error, referenced: false)
-                }
-            }
-
-            // Caption triggers processing; bare media is buffered until text arrives.
-            if let caption = inbound.caption, !caption.isEmpty {
-                triggerText = caption
-            }
-        }
-
-        guard let promptText = triggerText else {
-            let imageCount = pendingImages.count
-            let docCount = pendingDocuments.count
-            if imageCount > 0 || docCount > 0 {
-                var parts: [String] = []
-                if imageCount > 0 { parts.append("\(imageCount) image\(imageCount > 1 ? "s" : "")") }
-                if docCount > 0 { parts.append("\(docCount) file\(docCount > 1 ? "s" : "")") }
-                statusMessage = "📎 \(parts.joined(separator: ", ")) waiting for your message..."
-            }
-            return
-        }
-
-        var messageContent = promptText
-        if let fwdContext = pendingForwardContext {
-            messageContent = fwdContext + "\n\n" + messageContent
-        }
-        if let replyCtx = pendingReplyContext {
-            messageContent = replyCtx + "\n\n" + messageContent
-        }
-        if !pendingAttachmentNotes.isEmpty {
-            messageContent = pendingAttachmentNotes.joined(separator: "\n") + "\n\n" + messageContent
-        }
-
-        let userMessage = Message(
-            role: .user,
-            content: messageContent,
-            imageFileNames: pendingImages.map { $0.fileName },
-            documentFileNames: pendingDocuments.map { $0.fileName },
-            imageFileSizes: pendingImages.map { $0.fileSize },
-            documentFileSizes: pendingDocuments.map { $0.fileSize },
-            referencedImageFileNames: pendingReferencedImages.map { $0.fileName },
-            referencedDocumentFileNames: pendingReferencedDocuments.map { $0.fileName },
-            referencedDocumentFileSizes: pendingReferencedDocuments.map { $0.fileSize },
-            originChannel: address
-        )
-
-        pendingImages.removeAll()
-        pendingDocuments.removeAll()
-        pendingReferencedImages.removeAll()
-        pendingReferencedDocuments.removeAll()
-        pendingForwardContext = nil
-        pendingReplyContext = nil
-        pendingAttachmentNotes.removeAll()
-
-        await dispatchUserTurn(userMessage)
     }
 
     /// Route a fully-built user message: start a turn when idle, or queue it

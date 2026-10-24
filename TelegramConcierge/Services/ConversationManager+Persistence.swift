@@ -461,8 +461,6 @@ extension ConversationManager {
         switch EmailCalendarProvider.current {
         case .agentmail:
             await AgentMailService.shared.startBackgroundPoll()
-        case .gws:
-            await GoogleWorkspaceService.shared.startBackgroundPoll()
         case .none:
             break
         }
@@ -557,16 +555,6 @@ extension ConversationManager {
             // the anti-flood seed.
             await restartEmailPollingAfterAbortedWipe()
             return ["ABORTED: an AgentMail poll tick is still in flight after 10s — nothing was deleted, and email polling was restarted; try again in a minute"]
-        }
-
-        //     …and the gws service the same way (Codex, 2026-08-22): its
-        //     subprocesses ignore Swift task cancellation, so a poll or
-        //     context fetch already in flight could finish AFTER the wipe
-        //     deletes ~/.config/gws — repopulating caches or recreating
-        //     token-cache artifacts. Genuine quiescence or abort.
-        guard await GoogleWorkspaceService.shared.resetForWipe() else {
-            await restartEmailPollingAfterAbortedWipe()
-            return ["ABORTED: a gws email/calendar operation is still running after 10s — nothing was deleted, and email polling was restarted; try again in a minute"]
         }
 
         // Past the last abort point: only now discard the cancelled
@@ -690,17 +678,14 @@ extension ConversationManager {
         deleteSecret(KeychainHelper.userNameKey, label: "stored user name")
 
         // Email credentials (user decision, 2026-08-22): a handoff wipe must
-        // sever email ACCESS too — AgentMail key + inbox address, the
-        // user-provided gws OAuth client, and gws's on-disk config/token
-        // store all go, and the provider resets to an explicit "none" (the
-        // gws inference must not resurrect a token-less config). Both
-        // pollers are already quiescent (step 0d, abort-guarded), so no
-        // in-flight gws process can recreate what's deleted here. `gws auth
-        // logout` runs first to release the OS-keyring encryption key that
-        // directory deletion alone can't reach; the frozen system-prompt
-        // context is cleared too — it holds pre-wipe inbox snippets that
-        // would otherwise survive until the next day-roll.
-        await GoogleWorkspaceService.authLogoutForWipe()
+        // sever email ACCESS too — AgentMail key + inbox address (and any
+        // leftover copy of the retired gws OAuth client) go, and the provider
+        // resets to an explicit "none". The poller is already quiescent
+        // (step 0d, abort-guarded). Briglia no longer runs or touches gws
+        // (removed 2026-10-24); the warning text tells the user how to sign
+        // it out when ~/.config/gws exists. The frozen system-prompt context
+        // is cleared too — it holds pre-wipe inbox snippets that would
+        // otherwise survive until the next day-roll.
         failures.append(contentsOf: EmailCredentialWipe.execute())
         frozenEmailContext = nil
         frozenCalendarContext = nil
@@ -1096,25 +1081,15 @@ extension ConversationManager {
         let state = AppliedEmailState.current
         appliedEmailState = state
         // Ambient inbox + calendar awareness, routed by the email/calendar
-        // provider setting: gws (user's Gmail via the CLI), agentmail
-        // (dedicated agent inbox via REST), or none (no polling, no context).
-        // Both services retry + fail gracefully when unconfigured, so startup
-        // never blocks on them.
+        // provider setting: agentmail (dedicated agent inbox via REST) or
+        // none (no polling, no context). The service retries + fails
+        // gracefully when unconfigured, so startup never blocks on it.
         switch state.provider {
-        case .gws:
-            await GoogleWorkspaceService.shared.setNewEmailHandler { [weak self] newEmails in
+        case .agentmail:
+            await AgentMailService.shared.setNewEmailHandler { [weak self] newEmails in
                 // nil self = manager gone (shutdown race) → NOT durable:
                 // fail-safe false holds the checkpoint so the mail redelivers
                 // on the next launch instead of being silently skipped.
-                // A Gmail arrival reaches the agent only while gws is still
-                // the selected provider (belt and braces behind the
-                // service's own epoch guard).
-                guard EmailCalendarProvider.current == .gws else { return false }
-                return await self?.processNewUnreadEmails(newEmails) ?? false
-            }
-            await GoogleWorkspaceService.shared.startBackgroundPoll()
-        case .agentmail:
-            await AgentMailService.shared.setNewEmailHandler { [weak self] newEmails in
                 guard EmailCalendarProvider.current == .agentmail else { return false }
                 return await self?.processNewUnreadEmails(newEmails) ?? false
             }
@@ -1142,15 +1117,6 @@ extension ConversationManager {
             // A failed removal is safe: checkpoints are account-stamped and
             // the new account never restores the old one's.
             _ = await AgentMailService.shared.discardPersistedPollState()
-        }
-        if previous == nil || previous?.provider == .gws || current.provider == .gws {
-            // A gws subprocess can outlive this wait (they ignore
-            // cancellation); the reset bumps the service's epoch, so such an
-            // operation finishes inertly: no cache write, no retry, no
-            // delivery. The handler also re-checks the selected provider.
-            if !(await GoogleWorkspaceService.shared.resetForWipe()) {
-                print("[ConversationManager] gws still finishing an operation at provider change — its result will be discarded (epoch guard)")
-            }
         }
         frozenEmailContext = nil
         frozenCalendarContext = nil

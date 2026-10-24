@@ -50,7 +50,8 @@ struct AdaCLI: AsyncParsableCommand {
                       StageMarkersCommand.self, StageMarkersSelftest.self, SecurityStatusSelftest.self,
                       UpgradeCheck.self, UpdateCheckOnceCommand.self, UpdateNoticeSendOnceCommand.self, UpdateNoticeSelftest.self, ReleaseSecurityParseCommand.self,
                       LocalToolsSelftest.self, TestSignAdvisoryCommand.self, AdvisoryListParseCommand.self,
-                      LocalToolsInventoryCommand.self, LocalToolsCheckOnceCommand.self, LocalToolsVersionCompareCommand.self],
+                      LocalToolsInventoryCommand.self, LocalToolsCheckOnceCommand.self, LocalToolsVersionCompareCommand.self,
+                      RetiredIntegrationsSelftest.self],
         defaultSubcommand: Chat.self
     )
 }
@@ -122,7 +123,7 @@ struct SetsidExec: ParsableCommand {
 
         // Optional file-creation mask for the target (and everything it
         // spawns): children that write under Briglia's storage roots — the
-        // WhatsApp bridge and its npm install — run with 077 so their files
+        // detached tool children — run with 077 so their files
         // are owner-only from creation. The variable is consumed here and
         // not passed on. Malformed values are ignored (umask unchanged).
         if let raw = ProcessInfo.processInfo.environment["BRIGLIA_CHILD_UMASK"] {
@@ -451,7 +452,7 @@ struct AgentMailCommand: AsyncParsableCommand {
 }
 
 /// Hidden installer smoke test: verify the SwiftPM resource bundle
-/// (briglia-cli_briglia.bundle — bundled skills, WhatsApp bridge, toolchain scripts)
+/// (briglia-cli_briglia.bundle — bundled skills, MCP bundles, toolchain scripts)
 /// is deployed next to this executable. `--version` alone cannot catch a
 /// missing bundle, and Bundle.module TRAPS (SIGTRAP, exit 133) on first
 /// resource access — so this probes for the bundle manually before touching
@@ -486,7 +487,7 @@ struct BundleCheck: ParsableCommand {
             ✖ resource bundle missing: \(bundleURL.path)
               The installer must copy \(Self.bundleName) next to the briglia binary
               (scripts/install.sh does this). Without it, skills and the
-              WhatsApp bridge are unavailable and Briglia crashes on first use.
+              bundled resources are unavailable and Briglia crashes on first use.
             """)
             throw ExitCode(1)
         }

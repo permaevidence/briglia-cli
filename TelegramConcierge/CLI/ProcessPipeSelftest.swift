@@ -11,7 +11,7 @@ import Darwin
 ///
 /// - `ProjectsZipAutoExtractor.runProcess` (`unzip -Z1` / extraction): a zip
 ///   of ~1,500+ entries hung the extractor queue forever (no timeout at all).
-/// - `GoogleWorkspaceService.runBlockingProcess` / `runProcessAsync` (gws,
+/// - `ProcessRunner.runBlockingProcess` / `runProcessAsync` (gws,
 ///   brew/pip toolchain installs, skills doctor): > 64 KB of output stalled
 ///   until the timeout and was reported as "timed out".
 /// - `ToolExecutor.runShortcutProcess` (shortcuts CLI, its `| cat` fallback,

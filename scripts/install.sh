@@ -20,7 +20,7 @@ echo "Building Briglia CLI (release)…"
 swift build -c release
 
 BIN=".build/release/briglia"
-# SwiftPM puts bundled resources (skills, WhatsApp bridge, toolchain scripts)
+# SwiftPM puts bundled resources (skills, MCP bundles, toolchain scripts)
 # in a separate artifact that MUST travel with the binary — without it the
 # installed executable traps (exit 133) on first resource access. The
 # artifact name is platform-specific: .bundle on macOS, .resources on Linux.

@@ -369,18 +369,6 @@ struct StorageSelftest: AsyncParsableCommand {
             check("7.6 trampoline umask (skipped: executable path unresolved)", true)
         }
 
-        // WhatsApp bundled sources land owner-only.
-        let bundledSrc = tempRoot.appendingPathComponent("bundled")
-        try plant(bundledSrc.appendingPathComponent("index.js").path, "console.log(1)", 0o644)
-        try plant(bundledSrc.appendingPathComponent("package.json").path, "{}", 0o644)
-        let bridgeDir = dataRoot.appendingPathComponent("whatsapp-bridge")
-        try PrivateStorage.ensureDirectory(bridgeDir)
-        try WhatsAppChannelService.installBundledFiles(from: bundledSrc, into: bridgeDir)
-        check("7.9 WhatsApp bundled index.js / package.json copied 0600 (source was 0644)",
-              mode(bridgeDir.appendingPathComponent("index.js").path) == 0o600
-              && mode(bridgeDir.appendingPathComponent("package.json").path) == 0o600
-              && contents(bridgeDir.appendingPathComponent("index.js").path) == "console.log(1)")
-
         // MARK: 8. Streaming copy, mid-copy failure, non-directory roots
         print("\n[8] streaming copy, mid-copy failure, non-directory roots")
         do {

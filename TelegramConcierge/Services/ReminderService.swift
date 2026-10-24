@@ -825,7 +825,7 @@ actor ReminderService {
     /// so PATH augmentation, secret redaction, and process-tree cleanup match
     /// agent-run bash exactly. Note deliberately absent: `service_key_env` —
     /// watcher scripts always run without injected secrets and must rely on
-    /// persistent auth (gh/gws logins, files on disk).
+    /// persistent auth (gh login, files on disk).
     private struct ScriptRunResult {
         let exitCode: Int
         let timedOut: Bool

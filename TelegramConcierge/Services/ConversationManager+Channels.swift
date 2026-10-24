@@ -24,16 +24,6 @@ extension ConversationManager {
         pairedChatId.map { ChannelAddress(kind: .telegram, chatId: String($0)) }
     }
 
-    /// The owner's WhatsApp DM address, derivable from settings alone — the
-    /// ambient fallback when no Telegram pairing exists (WhatsApp-only setup).
-    private var whatsappAddress: ChannelAddress? {
-        guard WhatsAppChannelService.shared.isEnabled else { return nil }
-        let digits = (KeychainHelper.load(key: KeychainHelper.whatsappOwnerPhoneKey) ?? "")
-            .filter(\.isNumber)
-        guard !digits.isEmpty else { return nil }
-        return ChannelAddress(kind: .whatsapp, chatId: "\(digits)@s.whatsapp.net")
-    }
-
     /// Destination for output not tied to a specific turn. Inside an open
     /// command-capture window the app channel is returned so command handlers
     /// work (and their `replyAddress != nil` guards pass) even on a setup with
@@ -41,7 +31,7 @@ extension ConversationManager {
     /// wired.
     var replyAddress: ChannelAddress? {
         if Self.commandCapture?.isOpen == true { return Self.appChannelAddress }
-        return lastUserChannelAddress ?? telegramAddress ?? whatsappAddress
+        return lastUserChannelAddress ?? telegramAddress
     }
 
     func noteUserActivity(on address: ChannelAddress) {
@@ -71,7 +61,7 @@ extension ConversationManager {
         // Local command window: collect command responses for the REPL/app to
         // render instead of sending them over a wire (the .app channel has
         // none). Only replies destined for the command surface are captured —
-        // an explicit Telegram/WhatsApp-addressed send inside a handler still
+        // an explicit Telegram-addressed send inside a handler still
         // goes out for real, and a closed capture (straggler task) falls
         // through to normal delivery.
         if let capture = Self.commandCapture,
@@ -126,7 +116,7 @@ extension ConversationManager {
     /// call arguments) and backs the in-memory park queue's durability
     /// assumption if the wire send fails. The REPL and app window render new
     /// history messages, so the append IS the delivery for terminal/app-origin
-    /// turns; wire channels (Telegram/WhatsApp) additionally get a real send
+    /// turns; wire channels (Telegram) additionally get a real send
     /// with the standard retry/park behavior. Answers route to the channel the
     /// latest mid-turn user message arrived on when there is one; progress
     /// updates fall back to the turn's origin. Throws when the turn is no
@@ -186,9 +176,6 @@ extension ConversationManager {
         try await channel.sendDocument(chatId: address.chatId, documentData: documentData, filename: filename, caption: caption, mimeType: mimeType)
     }
 
-    /// (Un)register the WhatsApp channel to match the Settings toggle. Called
-    /// from configure() at startup and from Settings when the toggle changes,
-    /// so enabling WhatsApp mid-session takes effect without a restart.
     /// (Re)register the Telegram channel from the current Keychain values.
     /// Since the app window became a transport of its own, Telegram can be
     /// added, corrected, or removed while the agent is already running —
@@ -226,26 +213,10 @@ extension ConversationManager {
             channels.removeValue(forKey: .telegram)
             // Don't leave ambient output pointed at a removed channel.
             if lastUserChannelAddress?.kind == .telegram {
-                lastUserChannelAddress = whatsappAddress
+                lastUserChannelAddress = nil
             }
         }
         isTelegramConfigured = telegramConfigured
-    }
-
-    func updateWhatsAppChannelRegistration() async {
-        if WhatsAppChannelService.shared.isEnabled {
-            channels[.whatsapp] = WhatsAppChannelService.shared
-            Task { @MainActor in
-                await WhatsAppChannelService.shared.startIfEnabled()
-            }
-        } else {
-            channels.removeValue(forKey: .whatsapp)
-            WhatsAppChannelService.shared.stop()
-            // Don't leave ambient output pointed at a disabled channel.
-            if lastUserChannelAddress?.kind == .whatsapp {
-                lastUserChannelAddress = telegramAddress
-            }
-        }
     }
 
     func sendFromApp(text: String, attachments: [URL],

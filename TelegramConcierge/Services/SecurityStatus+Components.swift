@@ -51,18 +51,6 @@ extension SecurityStatus {
         return Component(name: "Node.js", state: .userOwned, detail: "\(path)\(v); Briglia only needs ≥ \(ManagedPlaywright.minimumNodeMajor) and never replaces it")
     }
 
-    static func classifyGws(path: String?, home: String) -> Component? {
-        guard let path else { return nil }
-        if path == home + "/.local/bin/gws" {
-            return Component(name: "gws", state: .unpinned, detail: "~/.local/bin/gws — installed as GitHub `latest`, no pin")
-        }
-        return Component(name: "gws", state: .userOwned, detail: path)
-    }
-
-    static func classifyWhatsApp(deployed: Bool) -> Component? {
-        deployed ? Component(name: "WhatsApp bridge", state: .unpinned, detail: "npm version ranges, no lockfile") : nil
-    }
-
     /// This binary's own release identity and the anti-rollback floor an
     /// earlier update check recorded for this channel.
     struct BinaryInfo: Equatable {
@@ -129,12 +117,6 @@ extension SecurityStatus {
         }
         out.append(classifyNode(path: node, resolved: node.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
                                 managedRoot: NodeInstaller.installRoot.resolvingSymlinksInPath().path, version: version))
-        let gwsPath = ["/opt/homebrew/bin/gws", "/usr/local/bin/gws", NSHomeDirectory() + "/.cargo/bin/gws",
-                       NSHomeDirectory() + "/.local/bin/gws", "/usr/bin/gws"]
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
-        if let gws = classifyGws(path: gwsPath, home: NSHomeDirectory()) { out.append(gws) }
-        let bridge = StoragePaths.dataRoot.appendingPathComponent("whatsapp-bridge/node_modules").path
-        if let wa = classifyWhatsApp(deployed: FileManager.default.fileExists(atPath: bridge)) { out.append(wa) }
         if let tc = classifyToolchain(manifest: UserdataToolchain.loadManifest()) { out.append(tc) }
         return out
     }

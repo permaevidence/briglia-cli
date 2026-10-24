@@ -61,7 +61,7 @@ enum CredentialCatalog {
         // Telegram pairing
         Entry(key: KeychainHelper.telegramBotTokenKey, treatment: .redact),
         Entry(key: KeychainHelper.telegramChatIdKey, treatment: .notSecret),
-        Entry(key: KeychainHelper.whatsappOwnerPhoneKey, treatment: .notSecret),
+        Entry(key: KeychainHelper.retiredWhatsappOwnerPhoneKey, treatment: .notSecret),  // retired 2026-10-24, until migrated
 
         Entry(key: ProviderProfiles.subscriptionModelKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.subscriptionEffortKey, treatment: .notSecret),
@@ -90,8 +90,8 @@ enum CredentialCatalog {
 
         // Email / calendar
         Entry(key: KeychainHelper.agentMailApiKeyKey, treatment: .visible),
-        Entry(key: KeychainHelper.gwsOAuthClientIDKey, treatment: .visible),
-        Entry(key: KeychainHelper.gwsOAuthClientSecretKey, treatment: .visible),
+        Entry(key: KeychainHelper.retiredGwsOAuthClientIDKey, treatment: .visible),  // retired 2026-10-24, until migrated
+        Entry(key: KeychainHelper.retiredGwsOAuthClientSecretKey, treatment: .visible),  // retired 2026-10-24, until migrated
         Entry(key: KeychainHelper.agentMailInboxAddressKey, treatment: .notSecret),
         Entry(key: KeychainHelper.emailCalendarProviderKey, treatment: .notSecret),
 

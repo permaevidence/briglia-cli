@@ -24,7 +24,6 @@ let package = Package(
             path: "TelegramConcierge",
             resources: [
                 .copy("Resources/BundledSkills"),
-                .copy("Resources/WhatsAppBridge"),
                 .copy("Resources/MCPBundles"),
                 .copy("Resources/QuickSetup"),
             ],

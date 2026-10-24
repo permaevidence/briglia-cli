@@ -381,10 +381,11 @@ extension ConversationManager {
     /// `/deleteuserdata` — two-step remote wipe of everything Ada.app's
     /// "Delete All Data" button erases (conversation, archives, user context,
     /// reminders/watchers, documents, ledger, todos, subagent histories)
-    /// plus the stored user name AND email access: the AgentMail key, the
-    /// gws OAuth client, and gws's config/token store are deleted (with a
-    /// best-effort `gws auth logout`) so a machine handoff can't read the
-    /// old owner's inbox (user decision, 2026-08-22). The bare command
+    /// plus the stored user name AND email access: the AgentMail key is
+    /// deleted so a machine handoff can't read the old owner's inbox (user
+    /// decision, 2026-08-22). Since gws was removed (2026-10-24) Briglia never
+    /// runs or deletes gws; the warning tells the user how to sign it out
+    /// when ~/.config/gws exists. The bare command
     /// deletes NOTHING — it replies with the exact confirmation form
     /// (`/deleteuserdata <stored name>`, or the literal CONFIRM when no name
     /// is stored), so a fat-fingered or half-remembered send can't erase
@@ -397,7 +398,7 @@ extension ConversationManager {
     /// "Kept: API keys" after the wipe started deleting email credentials;
     /// irreversible removals must be disclosed BEFORE the confirmation
     /// token, never discovered in the completion message.
-    nonisolated static func deleteUserDataWarningText(token: String) -> String {
+    nonisolated static func deleteUserDataWarningText(token: String, gwsConfigPresent: Bool = false) -> String {
         """
         ⚠️ This permanently erases ALL of Briglia's memory:
         • conversation history, images and attachments
@@ -407,7 +408,7 @@ extension ConversationManager {
         • saved documents, files ledger and todo list
         • subagent session histories
         • ChatGPT subscription login (signed out locally; your subscription itself is unchanged)
-        • the local calendar and EMAIL ACCESS: the AgentMail API key and the gws OAuth client + token store are deleted and the gws CLI on this machine is logged out of Google (server-side mailboxes are untouched; rerun `briglia setup` to reconnect email)
+        • the local calendar and EMAIL ACCESS: the AgentMail API key is deleted (server-side mailboxes are untouched; set up AgentMail again in `briglia menu` to reconnect email)\(gwsConfigPresent ? "\n• NOT touched: Google's gws program. Briglia no longer uses it; if Google email was connected through it earlier, run `gws auth logout` and delete ~/.config/gws yourself" : "")
 
         Also stopped and discarded: running background jobs and subagents, their pending notifications, buffered attachments, pending replies, calendar/contacts caches, logs, and temporary tool outputs.
 
@@ -426,7 +427,8 @@ extension ConversationManager {
         )
         switch decision {
         case .instructions(let token):
-            try? await sendText(Self.deleteUserDataWarningText(token: token))
+            try? await sendText(Self.deleteUserDataWarningText(
+                token: token, gwsConfigPresent: RetiredIntegrations.gwsConfigDirectoryExists()))
         case .mismatch:
             try? await sendText("✖ Confirmation doesn't match — nothing was deleted. Send /deleteuserdata (no argument) to see the exact confirmation command.")
         case .confirmed:
@@ -450,7 +452,7 @@ extension ConversationManager {
             if let first = failures.first, first.hasPrefix("ABORTED: ") {
                 try? await sendText("✖ " + first)
             } else if failures.isEmpty {
-                try? await sendText("🗑️ All user data deleted: conversation, archives, user context, stored name, reminders and watchers, background jobs and their pending notifications, documents, files ledger, todos, subagent histories, logs, temporary tool outputs, the local calendar, and email access (AgentMail key, gws OAuth client and token store — the email/calendar provider is reset to none; server-side mailboxes are untouched, rerun `briglia setup` to reconnect email). Other API keys, settings and pairing were kept. /restart is recommended for a completely fresh session, and /setname <name> re-stores your name whenever you like.")
+                try? await sendText("🗑️ All user data deleted: conversation, archives, user context, stored name, reminders and watchers, background jobs and their pending notifications, documents, files ledger, todos, subagent histories, logs, temporary tool outputs, the local calendar, and email access (AgentMail key — the email/calendar provider is reset to none; server-side mailboxes are untouched, set up AgentMail again in `briglia menu` to reconnect email). Other API keys, settings and pairing were kept. /restart is recommended for a completely fresh session, and /setname <name> re-stores your name whenever you like.")
             } else {
                 let list = failures.map { "• \($0)" }.joined(separator: "\n")
                 try? await sendText("""
@@ -1082,7 +1084,7 @@ extension ConversationManager {
     /// cancel out (the earlier pause stands); a recovery already on the wire
     /// or attempted is followed by this pause. The chat and channel
     /// generation are captured when the series is created (right even when
-    /// the last user channel was WhatsApp; never migrates to a replacement
+    /// the last user channel was not Telegram; never migrates to a replacement
     /// bot). Not awaited; polling, confirmations and write retries are
     /// unchanged.
     func noteDurabilityStallBegan() {
@@ -1134,7 +1136,7 @@ extension ConversationManager {
         guard !botSwitchCutoverInProgress else { return }
         guard let pending = pendingBotSwitch, pending.readyForCutover,
               let discovered = pending.discovered else { return }
-        // The confirm was idle-guarded; if a turn slipped in since (WhatsApp,
+        // The confirm was idle-guarded; if a turn slipped in since (app,
         // ambient), wait for a later tick instead of re-routing under it.
         guard activeRunId == nil, activeProcessingTask == nil else { return }
         // Freeze the state machine for the whole cutover: from here to the

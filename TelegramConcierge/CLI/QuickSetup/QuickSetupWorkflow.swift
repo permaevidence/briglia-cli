@@ -200,7 +200,7 @@ struct QuickSetupEnvironment {
     }
     var openSettingsPane: () -> Void = {
         #if os(macOS)
-        _ = GoogleWorkspaceService.runBlockingProcess(
+        _ = ProcessRunner.runBlockingProcess(
             executable: "/usr/bin/open",
             args: ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"], timeoutSeconds: 10)
         #endif

@@ -45,7 +45,7 @@ enum NoticeTransportError: Error {
 @MainActor
 final class NoticeSeries {
     enum Target: Hashable {
-        /// Telegram/WhatsApp chat.
+        /// Telegram chat.
         case wire(ChannelAddress)
         /// Terminal and app socket: an undeduplicated local event stream.
         case local

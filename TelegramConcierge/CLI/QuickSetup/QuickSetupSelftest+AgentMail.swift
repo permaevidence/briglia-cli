@@ -57,7 +57,7 @@ extension SelftestContext {
     }
 
     func wrapperAnswers(_ dir: URL, _ version: String) -> Bool {
-        let r = GoogleWorkspaceService.runBlockingProcess(executable: dir.appendingPathComponent("agentmail").path, args: ["--version"], timeoutSeconds: 10)
+        let r = ProcessRunner.runBlockingProcess(executable: dir.appendingPathComponent("agentmail").path, args: ["--version"], timeoutSeconds: 10)
         return (r.stdout ?? "").contains("agentmail \(version)")
     }
 
@@ -157,10 +157,10 @@ extension SelftestContext {
             var lines: [String] = []
             failure = await AgentMailService.installAgentMailBinary(progress: { lines.append($0) })
             check("LIVE: pinned \(AgentMailService.pinnedVersion) downloads, verifies and installs", failure == nil, failure ?? "")
-            let r = GoogleWorkspaceService.runBlockingProcess(executable: dir.appendingPathComponent("agentmail").path, args: ["--version"], timeoutSeconds: 20)
+            let r = ProcessRunner.runBlockingProcess(executable: dir.appendingPathComponent("agentmail").path, args: ["--version"], timeoutSeconds: 20)
             check("LIVE: wrapper answers `agentmail \(AgentMailService.pinnedVersion)`", (r.stdout ?? "").contains("agentmail \(AgentMailService.pinnedVersion)"), r.stdout ?? r.failureDetail ?? "")
             check("LIVE: installed version parsed", AgentMailService.installedCLIVersion() == AgentMailService.pinnedVersion)
-            let nested = GoogleWorkspaceService.runBlockingProcess(executable: dir.appendingPathComponent("agentmail").path, args: ["inboxes", "messages", "--help"], timeoutSeconds: 20)
+            let nested = ProcessRunner.runBlockingProcess(executable: dir.appendingPathComponent("agentmail").path, args: ["inboxes", "messages", "--help"], timeoutSeconds: 20)
             check("LIVE: the pinned CLI has the nested `inboxes messages` resource", (nested.stdout ?? "").contains("List Messages"), nested.stdout ?? nested.failureDetail ?? "")
         }
     }

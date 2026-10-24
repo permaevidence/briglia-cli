@@ -3,6 +3,9 @@ import Foundation
 /// Which messaging transport a conversation message travelled over.
 enum ChannelKind: String, Codable, CaseIterable {
     case telegram
+    /// Retired with the WhatsApp bridge (2026-10-24). Kept so saved
+    /// conversations (`Message.originChannel`) still decode; no channel is
+    /// ever registered for it, so a send to it is a no-op.
     case whatsapp
     /// The app's own chat window. The conversation history IS the UI, so this
     /// transport has no wire: text replies need no delivery, and media sends

@@ -54,11 +54,6 @@ extension ConversationManager {
             let freshCal: String
             let freshEml: String
             switch EmailCalendarProvider.current {
-            case .gws:
-                async let cal = GoogleWorkspaceService.shared.getCalendarContextForSystemPrompt(forceRefresh: forceRefresh || dayRolled)
-                async let eml = GoogleWorkspaceService.shared.getEmailContextForSystemPrompt()
-                freshCal = await cal
-                freshEml = await eml
             case .agentmail:
                 // Calendar is Briglia's local store (day-cached internally);
                 // email is the AgentMail unread snapshot.
@@ -160,7 +155,7 @@ extension ConversationManager {
             return "🎨 Generating image..."
         }
 
-        // Reminders / calendar (now via gws CLI, but reminders tool still exists).
+        // Reminders.
         if toolNames.contains("manage_reminders") {
             return "⏰ Managing reminders..."
         }
@@ -187,7 +182,7 @@ extension ConversationManager {
         }
 
         // Bash (catch-all for shell). Check AFTER more specific patterns so
-        // "bash gws gmail" etc. falls here only if no other match applied.
+        // a shell call falls here only if no other match applied.
         if toolNames.contains("bash")
             || toolNames.contains("bash_manage") {
             return "💻 Running command..."
@@ -1373,7 +1368,7 @@ extension ConversationManager {
     /// return redelivers the emails on the next poll instead of losing them
     /// behind an advanced checkpoint (Codex round 6, 2026-08-22).
     @discardableResult
-    func processNewUnreadEmails(_ emails: [GoogleWorkspaceService.UnreadEmail]) async -> Bool {
+    func processNewUnreadEmails(_ emails: [UnreadEmail]) async -> Bool {
         // Unreadable history (1a round 4): not durable — the poller keeps its
         // checkpoint and re-delivers these once history loads.
         if let workHeldReason {
@@ -1423,7 +1418,7 @@ extension ConversationManager {
         }
     }
 
-    private func newEmailsUserMessage(_ emails: [GoogleWorkspaceService.UnreadEmail]) -> Message {
+    private func newEmailsUserMessage(_ emails: [UnreadEmail]) -> Message {
         Message(role: .user, content: Self.newEmailsEnvelope(
             emails: emails,
             followUpHint: EmailCalendarProvider.current.emailFollowUpHint
@@ -1453,7 +1448,7 @@ extension ConversationManager {
     /// per AgentMail tick) must not explode a single model turn's context
     /// (Codex, 2026-08-22). Static + pure so the selftest can pin the cap.
     nonisolated static func newEmailsEnvelope(
-        emails: [GoogleWorkspaceService.UnreadEmail],
+        emails: [UnreadEmail],
         followUpHint: String,
         detailCap: Int = 20
     ) -> String {

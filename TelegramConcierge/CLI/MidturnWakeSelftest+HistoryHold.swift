@@ -128,7 +128,7 @@ extension MidturnHarness {
             let (manager, _, marker, _) = try await unreadableWithInterruptedTurn()
             server.clear()
             // Email: not durable → the poller keeps its checkpoint.
-            let email = GoogleWorkspaceService.UnreadEmail(id: "m1", threadId: nil, from: "a@example.com",
+            let email = UnreadEmail(id: "m1", threadId: nil, from: "a@example.com",
                                                            subject: "s", date: "d", snippet: "")
             let durable = await manager._testProcessEmails([email])
             check("HH4a email while unreadable: reported not durable, nothing appended",

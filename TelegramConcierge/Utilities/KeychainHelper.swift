@@ -384,7 +384,9 @@ extension KeychainHelper {
 
     static let telegramBotTokenKey = "telegram_bot_token"
     static let telegramChatIdKey = "telegram_chat_id"
-    static let whatsappOwnerPhoneKey = "whatsapp_owner_phone"
+    /// Retired with the WhatsApp bridge (2026-10-24): read and deleted only by
+    /// RetiredIntegrations' one-time migration.
+    static let retiredWhatsappOwnerPhoneKey = "whatsapp_owner_phone"
     static let openRouterApiKeyKey = "openrouter_api_key"
     
     // Web Search Tool Keys
@@ -397,16 +399,14 @@ extension KeychainHelper {
     static let balanceThresholdSerperCreditsKey = "balance_threshold_serper_credits"
     static let balanceThresholdJinaTokensKey = "balance_threshold_jina_tokens"
     
-    // Google Workspace (Gmail / Calendar / Contacts / Drive) is reached through
-    // the `gws` CLI — auth tokens live in gws's own keyring, not here. The
-    // former imap/smtp/gmail-OAuth keys were removed as part of that migration.
-    // The user-provided OAuth client (Briglia no longer ships one embedded) is
-    // stored here so the wizard can rewrite ~/.config/gws/client_secret.json
-    // if it's ever deleted.
-    static let gwsOAuthClientIDKey = "gws_oauth_client_id"
-    static let gwsOAuthClientSecretKey = "gws_oauth_client_secret"
+    // Retired with the gws provider (2026-10-24): Briglia's own copy of the
+    // user-provided Google OAuth client. Only deleted (one-time migration,
+    // /deleteuserdata); never read for use. gws's own files are never touched.
+    static let retiredGwsOAuthClientIDKey = "gws_oauth_client_id"
+    static let retiredGwsOAuthClientSecretKey = "gws_oauth_client_secret"
 
-    // Email/calendar provider selection: "none" (default), "agentmail", "gws".
+    // Email/calendar provider selection: "none" (default) or "agentmail"
+    // (a stored "gws" from before 2026-10-24 reads as "none").
     // Read through EmailCalendarProvider.current — never directly.
     static let emailCalendarProviderKey = "email_calendar_provider"
     // AgentMail: dedicated agent inbox (api.agentmail.to). The inbox address

@@ -243,13 +243,13 @@ struct SecurityStatusSelftest: ParsableCommand {
                 SecurityStatus.classifyNode(path: "/home/u/.local/bin/node", resolved: root + "/bin/node", managedRoot: root, version: "v22.1.0").state == .unpinned
                 && SecurityStatus.classifyNode(path: "/x/node", resolved: "/home/u/.local/node-evil/bin/node", managedRoot: root, version: nil).state == .userOwned
                 && SecurityStatus.classifyNode(path: nil, resolved: nil, managedRoot: root, version: nil).state == .notInstalled)
-        t.check("gws: ~/.local/bin/gws → unpinned; Homebrew's → userOwned; none → omitted",
-                SecurityStatus.classifyGws(path: "/home/u/.local/bin/gws", home: "/home/u")?.state == .unpinned
-                && SecurityStatus.classifyGws(path: "/opt/homebrew/bin/gws", home: "/home/u")?.state == .userOwned
-                && SecurityStatus.classifyGws(path: nil, home: "/home/u") == nil)
-        t.check("whatsapp / toolchain: reported only when present",
-                SecurityStatus.classifyWhatsApp(deployed: false) == nil && SecurityStatus.classifyWhatsApp(deployed: true)?.state == .unpinned
-                && SecurityStatus.classifyToolchain(manifest: [:]) == nil
+        // gws and the WhatsApp bridge were removed (2026-10-24): never a
+        // Briglia component any more (read-only listing, no version probes).
+        let names = SecurityStatus.components(probeVersions: false).map(\.name)
+        t.check("retired gws / WhatsApp bridge: never listed as Briglia components",
+                !names.contains("gws") && !names.contains("WhatsApp bridge"), names.joined(separator: ", "))
+        t.check("toolchain: reported only when present",
+                SecurityStatus.classifyToolchain(manifest: [:]) == nil
                 && SecurityStatus.classifyToolchain(manifest: ["ffmpeg": "7:6.1"])?.state == .osRepo)
     }
 

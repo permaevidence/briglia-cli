@@ -149,7 +149,7 @@ enum ToolchainService {
 
     /// Absolute path to the python3 the agent's bash tool would resolve.
     static func python3Path() -> String? {
-        let result = GoogleWorkspaceService.runBlockingProcess(
+        let result = ProcessRunner.runBlockingProcess(
             executable: "/usr/bin/which", args: ["python3"], timeoutSeconds: 5
         )
         guard let out = result.stdout?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -177,7 +177,7 @@ enum ToolchainService {
     /// pip itself decides: the EXTERNALLY-MANAGED marker file next to stdlib.
     static func pipStatus() -> PipStatus {
         guard let python = python3Path() else { return .pythonMissing }
-        let probe = GoogleWorkspaceService.runBlockingProcess(
+        let probe = ProcessRunner.runBlockingProcess(
             executable: python,
             args: ["-c", "import sysconfig, os; print(os.path.exists(os.path.join(sysconfig.get_paths()['stdlib'], 'EXTERNALLY-MANAGED')))"],
             timeoutSeconds: 10
@@ -233,7 +233,7 @@ enum ToolchainService {
             .appendingPathComponent("BundledSkills/pdf/skills_doctor.py").path,
               FileManager.default.fileExists(atPath: script) else { return nil }
 
-        let result = GoogleWorkspaceService.runBlockingProcess(
+        let result = ProcessRunner.runBlockingProcess(
             executable: python, args: [script], timeoutSeconds: 120
         )
         guard let stdout = result.stdout,
@@ -277,7 +277,7 @@ enum ToolchainService {
             guard let python = python3Path() else { return "python3 non trovato" }
             var args = ["-m", "pip", "install", spec.package]
             if pipBreakSystemPackages, pipBreakSystemPackagesSupported(python: python) { args.append("--break-system-packages") }
-            let result = await GoogleWorkspaceService.runProcessAsync(
+            let result = await ProcessRunner.runProcessAsync(
                 executable: python, args: args, timeoutSeconds: spec.timeoutSeconds
             )
             return result.failureDetail
@@ -292,7 +292,7 @@ enum ToolchainService {
             let args = spec.manager == "brewCask"
                 ? ["install", "--cask", spec.package]
                 : ["install", spec.package]
-            let result = await GoogleWorkspaceService.runProcessAsync(
+            let result = await ProcessRunner.runProcessAsync(
                 executable: brew, args: args, timeoutSeconds: spec.timeoutSeconds
             )
             return result.failureDetail
@@ -311,7 +311,7 @@ enum ToolchainService {
         return linuxInstall(LinuxPackageMap.package("libreoffice", manager: manager.name), manager: manager)
         #else
         guard let brew = brewPath() else { return "Homebrew non trovato" }
-        let result = await GoogleWorkspaceService.runProcessAsync(
+        let result = await ProcessRunner.runProcessAsync(
             executable: brew, args: ["install", "--cask", "libreoffice"], timeoutSeconds: 2400
         )
         return result.failureDetail

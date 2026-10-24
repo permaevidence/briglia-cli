@@ -2,9 +2,8 @@ import ArgumentParser
 import Foundation
 
 /// Hidden deterministic test of the email/calendar provider system.
-/// Pins (a) provider resolution — explicit choice wins, unset falls back to
-/// the legacy "gws if installed" inference so pre-provider installs keep
-/// working, (b) the manage_calendar tool gate — present ONLY for the
+/// Pins (a) provider resolution — a valid explicit choice wins, anything
+/// else (unset, the retired "gws", garbage) is none, (b) the manage_calendar tool gate — present ONLY for the
 /// agentmail provider, (c) the provider-aware prompt strings (guidance
 /// bullet, new-mail envelope hint) so the model is never told to use a CLI
 /// it doesn't have, (d) AgentMail wire-format parsing and formatting, and
@@ -37,24 +36,22 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
 
         defer {
             EmailCalendarProvider.storedOverrideForTesting = nil
-            EmailCalendarProvider.gwsInstalledOverrideForTesting = nil
         }
 
         // 1. Provider resolution.
         EmailCalendarProvider.storedOverrideForTesting = { "agentmail" }
         check("stored 'agentmail' wins", EmailCalendarProvider.current == .agentmail)
+        // gws was removed (2026-10-24): a stored "gws" reads as none in
+        // every process, before and independently of the migration.
         EmailCalendarProvider.storedOverrideForTesting = { "gws" }
-        check("stored 'gws' wins", EmailCalendarProvider.current == .gws)
+        check("stored retired 'gws' reads as none", EmailCalendarProvider.current == .none)
         EmailCalendarProvider.storedOverrideForTesting = { "none" }
-        EmailCalendarProvider.gwsInstalledOverrideForTesting = { true }
-        check("stored 'none' wins even with gws installed", EmailCalendarProvider.current == .none)
+        check("stored 'none' wins", EmailCalendarProvider.current == .none)
         EmailCalendarProvider.storedOverrideForTesting = { nil }
-        EmailCalendarProvider.gwsInstalledOverrideForTesting = { true }
-        check("unset + gws installed → legacy gws inference", EmailCalendarProvider.current == .gws)
-        EmailCalendarProvider.gwsInstalledOverrideForTesting = { false }
-        check("unset + no gws → none (fresh-install default)", EmailCalendarProvider.current == .none)
+        check("unset → none (no legacy gws inference any more)", EmailCalendarProvider.current == .none)
         EmailCalendarProvider.storedOverrideForTesting = { "imap" }
-        check("unknown stored value falls back to inference", EmailCalendarProvider.current == .none)
+        check("unknown stored value → none", EmailCalendarProvider.current == .none)
+        check("the provider set is exactly none|agentmail", EmailCalendarProvider.allCases.map(\.rawValue) == ["none", "agentmail"])
 
         // 2. manage_calendar tool gate — present only for agentmail.
         func toolNames() -> [String] {
@@ -63,9 +60,8 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
         EmailCalendarProvider.storedOverrideForTesting = { "agentmail" }
         check("agentmail → manage_calendar in the tool array", toolNames().contains("manage_calendar"))
         EmailCalendarProvider.storedOverrideForTesting = { "gws" }
-        check("gws → no manage_calendar tool", !toolNames().contains("manage_calendar"))
+        check("retired gws → no manage_calendar tool", !toolNames().contains("manage_calendar"))
         EmailCalendarProvider.storedOverrideForTesting = { "none" }
-        EmailCalendarProvider.gwsInstalledOverrideForTesting = { false }
         check("none → no manage_calendar tool", !toolNames().contains("manage_calendar"))
 
         // With provider none, no serialized schema may reference the email
@@ -76,8 +72,7 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
 
         // 3. Guidance bullet.
         EmailCalendarProvider.storedOverrideForTesting = { "gws" }
-        check("gws bullet names gws",
-              EmailCalendarProvider.current.toolGuidanceBullet == "- Use `gws` for Google Workspace actions.")
+        check("retired gws → no guidance bullet", EmailCalendarProvider.current.toolGuidanceBullet == nil)
         EmailCalendarProvider.storedOverrideForTesting = { "agentmail" }
         let amBullet = EmailCalendarProvider.current.toolGuidanceBullet ?? ""
         check("agentmail bullet names the agentmail CLI", amBullet.contains("`agentmail`"))
@@ -85,13 +80,11 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
         check("agentmail bullet says the CLI self-authenticates", amBullet.contains("authenticates itself"))
         check("agentmail bullet points at the key broker for raw calls", amBullet.contains("__agentmail-key"))
         EmailCalendarProvider.storedOverrideForTesting = { "none" }
-        EmailCalendarProvider.gwsInstalledOverrideForTesting = { false }
         check("none → no guidance bullet at all", EmailCalendarProvider.current.toolGuidanceBullet == nil)
 
         // 4. New-mail envelope hint.
         EmailCalendarProvider.storedOverrideForTesting = { "gws" }
-        check("gws envelope hint teaches gws gmail",
-              EmailCalendarProvider.current.emailFollowUpHint.contains("gws gmail +read"))
+        check("retired gws → no envelope hint", EmailCalendarProvider.current.emailFollowUpHint.isEmpty)
         EmailCalendarProvider.storedOverrideForTesting = { "agentmail" }
         // Prompt syntax follows the INSTALLED CLI: the pinned 1.x Rust CLI
         // nests resources (`inboxes messages`); a device still on the 0.7.x
@@ -257,7 +250,7 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
         // 20 emails and summarizes the rest, so one poll can never explode a
         // single model turn.
         let burst = (1...30).map { i in
-            GoogleWorkspaceService.UnreadEmail(
+            UnreadEmail(
                 id: "<m\(i)@x>", threadId: nil, from: "s\(i)@x", subject: "Subject \(i)",
                 date: "2026-08-22 10:0\(i % 10)", snippet: "")
         }
@@ -314,7 +307,7 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
         }
 
         // 6. Unread formatting.
-        let sample = GoogleWorkspaceService.UnreadEmail(
+        let sample = UnreadEmail(
             id: "<abc-123@mail.example>", threadId: "t-1",
             from: "Alice <alice@example.com>", subject: "Ciao",
             date: "2026-08-22 15:41", snippet: "Hello there")
@@ -390,7 +383,7 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
         // everything — no delivery, no watermark, no recreated checkpoint
         // file. Gates park the tick at a chosen suspension point while the
         // wipe runs, then release it.
-        let raceEmail = GoogleWorkspaceService.UnreadEmail(
+        let raceEmail = UnreadEmail(
             id: "race-msg-1", threadId: nil, from: "codex@example.com",
             subject: "race probe", date: "2026-08-22 13:00", snippet: "boo")
         let stateURL = AgentMailService.pollStateURLForTesting
@@ -743,49 +736,51 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
                 isRestoringMind: false, providerActive: true, hasReplyChannel: true, emailCount: 3, turnActive: false) == Route.startTurn)
 
         // 11. Email-credential wipe (/deleteuserdata must sever email access,
-        // not just local memory — user decision 2026-08-22). Isolated secret
-        // store + a temp stand-in for ~/.config/gws.
+        // not just local memory — user decision 2026-08-22). Since gws was
+        // removed (2026-10-24, D1 recommended branch) the wipe deletes only
+        // Briglia's own keys (incl. the old gws OAuth copies) and never a gws
+        // config directory.
         do {
             try KeychainHelper.save(key: KeychainHelper.agentMailApiKeyKey, value: "am_wipe_dummy")
             try KeychainHelper.save(key: KeychainHelper.agentMailInboxAddressKey, value: "x@agentmail.to")
-            try KeychainHelper.save(key: KeychainHelper.gwsOAuthClientIDKey, value: "cid.apps.googleusercontent.com")
-            try KeychainHelper.save(key: KeychainHelper.gwsOAuthClientSecretKey, value: "GOCSPX-dummy")
+            try KeychainHelper.save(key: KeychainHelper.retiredGwsOAuthClientIDKey, value: "cid.apps.googleusercontent.com")
+            try KeychainHelper.save(key: KeychainHelper.retiredGwsOAuthClientSecretKey, value: "GOCSPX-dummy")
             try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: "agentmail")
             try KeychainHelper.save(key: KeychainHelper.serperApiKeyKey, value: "unrelated-survives")
-            let fakeGws = tempRoot.appendingPathComponent("fake-gws-config", isDirectory: true)
-            try FileManager.default.createDirectory(at: fakeGws, withIntermediateDirectories: true)
-            try "tokens".write(to: fakeGws.appendingPathComponent("credentials.json"), atomically: true, encoding: .utf8)
 
-            let wipeFailures = EmailCredentialWipe.execute(gwsConfigDir: fakeGws)
+            let wipeFailures = EmailCredentialWipe.execute()
             check("credential wipe reports no failures", wipeFailures.isEmpty,
                   wipeFailures.joined(separator: "; "))
             check("AgentMail key deleted", KeychainHelper.load(key: KeychainHelper.agentMailApiKeyKey) == nil)
             check("AgentMail inbox address deleted", KeychainHelper.load(key: KeychainHelper.agentMailInboxAddressKey) == nil)
-            check("gws OAuth client id deleted", KeychainHelper.load(key: KeychainHelper.gwsOAuthClientIDKey) == nil)
-            check("gws OAuth client secret deleted", KeychainHelper.load(key: KeychainHelper.gwsOAuthClientSecretKey) == nil)
-            check("provider reset to explicit none (inference can't resurrect gws)",
+            check("old gws OAuth client id copy deleted", KeychainHelper.load(key: KeychainHelper.retiredGwsOAuthClientIDKey) == nil)
+            check("old gws OAuth client secret copy deleted", KeychainHelper.load(key: KeychainHelper.retiredGwsOAuthClientSecretKey) == nil)
+            check("provider reset to explicit none",
                   KeychainHelper.load(key: KeychainHelper.emailCalendarProviderKey) == "none")
-            check("gws config/token directory removed",
-                  !FileManager.default.fileExists(atPath: fakeGws.path))
             check("unrelated key survives the credential wipe",
                   KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) == "unrelated-survives")
             // Idempotent: a second wipe on the already-clean state is silent.
-            check("credential wipe is idempotent",
-                  EmailCredentialWipe.execute(gwsConfigDir: fakeGws).isEmpty)
+            check("credential wipe is idempotent", EmailCredentialWipe.execute().isEmpty)
             try? KeychainHelper.delete(key: KeychainHelper.serperApiKeyKey)
             try? KeychainHelper.delete(key: KeychainHelper.emailCalendarProviderKey)
         }
 
         // 12. Pre-wipe warning honesty (Codex, 2026-08-22): the confirmation
         // text must disclose the irreversible email-credential removals
-        // BEFORE showing the token — it previously still promised "Kept:
-        // API keys" while the confirmed wipe deleted them.
+        // BEFORE showing the token. Since 2026-10-24 it names only the
+        // AgentMail key, and — only when a gws config directory exists —
+        // says Briglia did NOT touch gws and how to sign it out by hand,
+        // never claiming Google access was revoked.
         do {
             let warning = ConversationManager.deleteUserDataWarningText(token: "Sofia")
             check("warning names the AgentMail API key", warning.contains("AgentMail API key"))
-            check("warning names the gws OAuth client + token store",
-                  warning.contains("gws OAuth client + token store"))
-            check("warning discloses the gws logout", warning.contains("logged out of Google"))
+            check("warning no longer claims a gws logout or token deletion",
+                  !warning.contains("logged out of Google") && !warning.contains("token store"))
+            check("warning has no gws line without a gws config directory", !warning.contains("gws"))
+            let withGws = ConversationManager.deleteUserDataWarningText(token: "Sofia", gwsConfigPresent: true)
+            check("with ~/.config/gws: warning says gws is NOT touched and how to sign it out",
+                  withGws.contains("NOT touched") && withGws.contains("gws auth logout")
+                  && withGws.contains("~/.config/gws") && !withGws.contains("revoked"))
             check("warning no longer promises bare 'API keys' kept",
                   !warning.contains("Kept: API keys"))
             check("warning says OTHER API keys are kept", warning.contains("Kept: other API keys"))
@@ -793,29 +788,6 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
                   warning.contains("server-side mailboxes are untouched"))
             check("warning ends with the confirmation token", warning.contains("/deleteuserdata Sofia"))
             check("warning says it cannot be undone", warning.contains("cannot be undone"))
-        }
-
-        // 13. gws wipe quiescence (Codex, 2026-08-22): gws subprocesses
-        // ignore Swift task cancellation, so resetForWipe must wait for the
-        // whole in-flight OPERATION (retry ladders included) — counter-based,
-        // deadline-bounded, reporting false when quiescence wasn't reached
-        // so the wipe aborts before deleting ~/.config/gws.
-        do {
-            let svc = GoogleWorkspaceService()
-            let gate = RaceGate()
-            let op = Task { await svc.performTrackedOpForTesting { await gate.wait() } }
-            check("gws quiesce: op reached its suspension point", await awaitParked(gate))
-            check("gws quiesce: op counted in flight", await svc.opsInFlightForTesting() == 1)
-            let began = Date()
-            let quiesced = await svc.resetForWipe(timeoutSeconds: 0.3)
-            check("gws quiesce: stuck op → NOT quiesced", quiesced == false)
-            check("gws quiesce: returned near the deadline",
-                  Date().timeIntervalSince(began) < 5)
-            await gate.open()
-            await op.value
-            check("gws quiesce: counter returns to zero", await svc.opsInFlightForTesting() == 0)
-            check("gws quiesce: reset with no op in flight quiesces",
-                  await svc.resetForWipe(timeoutSeconds: 0.3))
         }
 
         print(failures == 0 ? "\nAll email/calendar checks passed." : "\n\(failures) email/calendar check(s) FAILED.")

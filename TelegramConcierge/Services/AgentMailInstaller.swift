@@ -99,7 +99,7 @@ extension AgentMailService {
         var run: (_ command: [String], _ timeoutSeconds: Int, _ label: String) async -> (ok: Bool, stdout: String?, detail: String?)
 
         static let plain = ChildRunner { command, timeout, _ in
-            let r = await GoogleWorkspaceService.runProcessAsync(
+            let r = await ProcessRunner.runProcessAsync(
                 executable: command[0], args: Array(command.dropFirst()), timeoutSeconds: timeout)
             return (r.failureDetail == nil, r.stdout, r.failureDetail)
         }
@@ -797,7 +797,7 @@ extension AgentMailService {
         }
         let archive: Data
         do {
-            archive = try await GoogleWorkspaceService.downloadReportingProgress(
+            archive = try await ProcessRunner.downloadReportingProgress(
                 from: pin.url, label: "Downloading the agentmail CLI \(pinnedVersion)", progress: progress)
         } catch {
             throw NSError(domain: "briglia.agentmail", code: 11, userInfo: [NSLocalizedDescriptionKey:

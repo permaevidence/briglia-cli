@@ -735,7 +735,7 @@ actor MCPRegistry {
 /// links node/npm/npx into ~/.local/bin — a directory every Briglia subprocess
 /// PATH already covers (MCPRegistry.baseEnvironment, BashTools.augmentedPath).
 /// No Homebrew, no admin password. Mirrors
-/// GoogleWorkspaceService.installGwsBinary().
+/// the AgentMail installer.
 enum NodeInstaller {
     static var installRoot: URL {
         URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".local/node", isDirectory: true)
@@ -797,7 +797,7 @@ enum NodeInstaller {
                 return "internal error: malformed download URL"
             }
 
-            let tarData = try await GoogleWorkspaceService.downloadReportingProgress(
+            let tarData = try await ProcessRunner.downloadReportingProgress(
                 from: tarURL, label: "Downloading Node.js \(version)", progress: progress)
             let (shaData, shaResp) = try await URLSession.shared.data(from: shaURL)
             if let code = (shaResp as? HTTPURLResponse)?.statusCode, code != 200 {
@@ -824,7 +824,7 @@ enum NodeInstaller {
             let tarPath = tmpDir.appendingPathComponent(file)
             try tarData.write(to: tarPath)
 
-            let untar = await GoogleWorkspaceService.runProcessAsync(
+            let untar = await ProcessRunner.runProcessAsync(
                 executable: "/usr/bin/tar",
                 args: ["-xzf", tarPath.path, "-C", tmpDir.path],
                 timeoutSeconds: 120
@@ -845,7 +845,7 @@ enum NodeInstaller {
 
             #if os(macOS)
             // Belt-and-braces: quarantined unnotarized binaries won't exec.
-            _ = await GoogleWorkspaceService.runProcessAsync(
+            _ = await ProcessRunner.runProcessAsync(
                 executable: "/usr/bin/xattr",
                 args: ["-dr", "com.apple.quarantine", installRoot.path],
                 timeoutSeconds: 60
@@ -860,14 +860,14 @@ enum NodeInstaller {
 
             // Smoke tests through the symlinks. npx runs via `#!/usr/bin/env node`,
             // so this also proves ~/.local/bin is on the subprocess PATH.
-            let nodeProbe = await GoogleWorkspaceService.runProcessAsync(
+            let nodeProbe = await ProcessRunner.runProcessAsync(
                 executable: binDir.appendingPathComponent("node").path,
                 args: ["--version"], timeoutSeconds: 15
             )
             guard nodeProbe.stdout != nil else {
                 return "installed node failed to run: \(nodeProbe.failureDetail ?? "unknown error")"
             }
-            let npxProbe = await GoogleWorkspaceService.runProcessAsync(
+            let npxProbe = await ProcessRunner.runProcessAsync(
                 executable: binDir.appendingPathComponent("npx").path,
                 args: ["--version"], timeoutSeconds: 30
             )

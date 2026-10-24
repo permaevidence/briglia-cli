@@ -54,6 +54,9 @@ final class AppChatSocketServer {
     private var listenerFD: Int32 = -1
     private var clients: [ClientHandle] = []
     private var nextClientId = 0
+    /// A connected app window receives `stopNoticeEvents` (retirement notices
+    /// are sent locally only while one is attached).
+    var hasConnectedClients: Bool { !clients.isEmpty }
 
     /// Message ids already broadcast as final history entries.
     private var broadcastFinalIds = Set<UUID>()

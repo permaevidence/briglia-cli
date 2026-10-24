@@ -418,7 +418,7 @@ class ConversationManager: ObservableObject {
     let lastUserChannelDefaultsKey = "last_user_channel_address"
 
     /// Whether the Telegram channel was configured at the last configure().
-    /// False in a WhatsApp-only setup — the poll loop then skips getUpdates.
+    /// False without a Telegram pairing — the poll loop then skips getUpdates.
     var isTelegramConfigured = false
 
     /// Replies whose delivery failed after retries, awaiting redelivery.

@@ -577,38 +577,53 @@ struct SetupAPISelftest: AsyncParsableCommand {
                   && KeychainHelper.load(key: ProviderProfiles.opencodeApiKeyKey) == nil)
 
             // remove_credentials severs email access via the canonical
-            // EmailCredentialWipe — including the gws config/token
-            // DIRECTORY, exercised against the seam (the real one is
-            // HOME-derived and must never be touched by a selftest).
+            // EmailCredentialWipe: Briglia's own keys only. Since gws was
+            // removed (2026-10-24, D1 recommended branch) nothing under a gws
+            // config directory is touched; the old OAuth copies still go.
             try? KeychainHelper.saveBatch([
                 KeychainHelper.agentMailApiKeyKey: "am-test-key-123456",
                 KeychainHelper.agentMailInboxAddressKey: "ada@agentmail.to",
-                KeychainHelper.gwsOAuthClientIDKey: "id-123",
-                KeychainHelper.gwsOAuthClientSecretKey: "secret-123",
+                KeychainHelper.retiredGwsOAuthClientIDKey: "id-123",
+                KeychainHelper.retiredGwsOAuthClientSecretKey: "secret-123",
             ])
             let fakeGwsDir = tempRoot.appendingPathComponent("gws-config", isDirectory: true)
             try? FileManager.default.createDirectory(at: fakeGwsDir, withIntermediateDirectories: true)
-            FileManager.default.createFile(
-                atPath: fakeGwsDir.appendingPathComponent("client_secret.json").path,
-                contents: Data("{}".utf8))
-            SetupAPICore.gwsConfigDirectoryOverride = fakeGwsDir
-            defer { SetupAPICore.gwsConfigDirectoryOverride = nil }
+            let fakeSecret = fakeGwsDir.appendingPathComponent("client_secret.json")
+            FileManager.default.createFile(atPath: fakeSecret.path, contents: Data("{}".utf8))
+            let before = try? FileManager.default.attributesOfItem(atPath: fakeSecret.path)
 
             let kept = await SetupAPICore.apply(["email_calendar": ["provider": "none"]])
-            check("email none: credentials + gws directory kept without remove_credentials",
+            check("email none: credentials kept without remove_credentials",
                   isOK(kept)
-                  && KeychainHelper.load(key: KeychainHelper.agentMailApiKeyKey) == "am-test-key-123456"
-                  && FileManager.default.fileExists(atPath: fakeGwsDir.path))
+                  && KeychainHelper.load(key: KeychainHelper.agentMailApiKeyKey) == "am-test-key-123456")
             let forgotten = await SetupAPICore.apply(
                 ["email_calendar": ["provider": "none", "remove_credentials": true]])
-            check("email none + remove_credentials: agentmail + gws credentials AND gws directory deleted",
+            let after = try? FileManager.default.attributesOfItem(atPath: fakeSecret.path)
+            check("email none + remove_credentials: agentmail key + old gws OAuth copies deleted, provider none",
                   isOK(forgotten)
                   && KeychainHelper.load(key: KeychainHelper.agentMailApiKeyKey) == nil
                   && KeychainHelper.load(key: KeychainHelper.agentMailInboxAddressKey) == nil
-                  && KeychainHelper.load(key: KeychainHelper.gwsOAuthClientIDKey) == nil
-                  && KeychainHelper.load(key: KeychainHelper.gwsOAuthClientSecretKey) == nil
-                  && KeychainHelper.load(key: KeychainHelper.emailCalendarProviderKey) == "none"
-                  && !FileManager.default.fileExists(atPath: fakeGwsDir.path))
+                  && KeychainHelper.load(key: KeychainHelper.retiredGwsOAuthClientIDKey) == nil
+                  && KeychainHelper.load(key: KeychainHelper.retiredGwsOAuthClientSecretKey) == nil
+                  && KeychainHelper.load(key: KeychainHelper.emailCalendarProviderKey) == "none")
+            check("remove_credentials never touches a gws config directory (contents and mtime unchanged)",
+                  (try? String(contentsOf: fakeSecret, encoding: .utf8)) == "{}"
+                  && (before?[.modificationDate] as? Date) == (after?[.modificationDate] as? Date))
+
+            // gws was removed: setup-api refuses it with a clear message and
+            // leaves the stored provider unchanged; status has no gws fields.
+            try? KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: "none")
+            let refused = await SetupAPICore.apply(["email_calendar": ["provider": "gws"]])
+            let refusedText = String(describing: refused)
+            check("email gws: refused (invalid_value) with the removal message, provider unchanged",
+                  !isOK(refused) && refusedText.contains("invalid_value")
+                  && refusedText.contains("Google email via gws was removed from Briglia")
+                  && KeychainHelper.load(key: KeychainHelper.emailCalendarProviderKey) == "none")
+            let statusDoc = await SetupAPICore.status()
+            let emailStatus = statusDoc["email_calendar"] as? [String: Any] ?? [:]
+            check("status: no gws fields any more",
+                  emailStatus["gws_installed"] == nil && emailStatus["gws_client_secret_present"] == nil
+                  && emailStatus["provider"] as? String == "none")
         }
 
         print(failures == 0 ? "\nsetup-api selftest: all checks passed"

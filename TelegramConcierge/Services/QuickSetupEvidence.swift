@@ -9,7 +9,7 @@ import Darwin
 /// in `setup-api status` (plan §3.1, §4.5–4.7, §6.2). Every reader here is
 /// side-effect free; the mutating steps live in the workflow.
 enum QuickSetupEvidence {
-    /// Silent process runner for evidence probes. `GoogleWorkspaceService.runBlockingProcess`
+    /// Silent process runner for evidence probes. `ProcessRunner.runBlockingProcess`
     /// prints a diagnostic line to STDOUT on a non-zero exit — fatal for
     /// `setup-api status`, whose stdout must stay pure JSON (CI, 2026-09-04:
     /// `python3 -m pip --version` failing broke every status parse).

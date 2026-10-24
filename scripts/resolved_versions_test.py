@@ -141,7 +141,7 @@ def live_checks():
     def prep(name, manifest_edit=None, resolved_edit=None):
         d = os.path.join(base, name)
         os.makedirs(os.path.join(d, "TelegramConcierge", "Resources"))
-        for r in ("BundledSkills", "WhatsAppBridge", "MCPBundles", "QuickSetup"):
+        for r in ("BundledSkills", "MCPBundles", "QuickSetup"):
             os.makedirs(os.path.join(d, "TelegramConcierge", "Resources", r))
         with open(os.path.join(d, "TelegramConcierge", "main.swift"), "w") as f:
             f.write("print(1)\n")

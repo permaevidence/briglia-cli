@@ -105,7 +105,10 @@ struct ChatWireSelftest: AsyncParsableCommand {
         try KeychainHelper.save(key: KeychainHelper.openAICompatibleReasoningEffortKey, value: "high")
         try KeychainHelper.save(key: KeychainHelper.textOnlyModelEnabledKey, value: "false")
         // Do not let the installed gws binary change the prompt on different hosts.
-        try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: EmailCalendarProvider.gws.rawValue)
+        // Literal "gws": this driver also builds against the pinned release,
+        // where it selects the gws provider; on a build without gws (removed
+        // 2026-10-24) the same stored value reads as none.
+        try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: "gws")
         let fixedState = SessionAffinity.State(version: 1, installSalt: Data((0..<32).map(UInt8.init)).base64EncodedString(),
                                               mainConversationId: "33333333-3333-4333-8333-333333333333")
         try FileManager.default.createDirectory(at: StoragePaths.dataRoot, withIntermediateDirectories: true,
@@ -249,7 +252,8 @@ struct ChatWireSelftest: AsyncParsableCommand {
                           && rendered.contains("fixture-skill") && rendered.contains("Fixture User studies astronomy")
                           && rendered.contains("fixture appointment") && rendered.contains("fixture inbox")
                           && rendered.contains("Earlier fixture findings") && rendered.contains("Fixture tail system note"))
-                    check("\(fixtureName): configured email/calendar guidance", rendered.contains("Use `gws` for Google Workspace actions."))
+                    check("\(fixtureName): configured email/calendar guidance",
+                          rendered.contains("Use `gws` for Google Workspace actions.") == (EmailCalendarProvider(rawValue: "gws") != nil))
                     check("\(fixtureName): subagent switch", toolNames.contains("Agent") == (index != 7))
                     check("\(fixtureName): hostile context neutralized", !rendered.contains(hostile))
                     if index == 8 { check("\(fixtureName): deferred MCP", toolNames.contains("tool_search") && rendered.contains("fixture-server")) }

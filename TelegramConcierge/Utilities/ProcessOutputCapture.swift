@@ -38,7 +38,7 @@ import Darwin
 /// (so the child never blocks) but dropped, and the stream is flagged as
 /// truncated.
 final class ProcessOutputCapture: @unchecked Sendable {
-    /// Far above any real output of these helpers (gws JSON, unzip listings,
+    /// Far above any real output of these helpers (JSON, unzip listings,
     /// brew/pip logs, shortcut results).
     static let defaultLimit = 64 * 1024 * 1024
     static var defaultLimitLabel: String { "\(defaultLimit / 1_048_576) MB" }

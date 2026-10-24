@@ -341,7 +341,7 @@ struct Doctor: AsyncParsableCommand {
         #endif
         switch EmailCalendarProvider.current {
         case .none:
-            note("email/calendar: none (default) — enable AgentMail or gws via `briglia setup`, toolchain step")
+            note("email/calendar: none (default) — enable AgentMail via `briglia menu` or `briglia setup`, toolchain step")
         case .agentmail:
             if AgentMailService.isConfigured() {
                 let inbox = EmailCalendarProvider.agentMailInboxAddress
@@ -363,15 +363,8 @@ struct Doctor: AsyncParsableCommand {
             if !foreign.isEmpty {
                 note("foreign agentmail install at \(foreign.joined(separator: ", ")) — no access to Briglia's key; may shadow Briglia's wrapper depending on PATH order")
             }
-        case .gws:
-            if !GoogleWorkspaceService.gwsInstalled() {
-                note("email/calendar: gws selected but the binary is not installed — `briglia setup`, toolchain step")
-            } else if await GoogleWorkspaceService.shared.gwsUsable() {
-                note("gws (Google Workspace) installed and authorized — email/calendar context enabled")
-            } else {
-                note("gws (Google Workspace) installed but NOT authorized — email/calendar context stays disabled until `gws auth login` + Briglia restart")
-            }
         }
+        for line in RetiredIntegrations.doctorLines() { note(line) }
 
         // Security (auto-update plan, Phase 0): read-only, never a failing
         // check — Briglia's own pins and the host's pending OS updates.
@@ -412,10 +405,6 @@ struct Doctor: AsyncParsableCommand {
                 check("Telegram bot reachable", ok: failure == nil, hint: failure)
             }
             switch EmailCalendarProvider.current {
-            case .gws where GoogleWorkspaceService.gwsInstalled():
-                let authorized = await GoogleWorkspaceService.shared.verifyGwsAccess()
-                check("gws authorized", ok: authorized,
-                      hint: "run `gws auth login` — until then email/calendar context is empty")
             case .agentmail where AgentMailService.isConfigured():
                 let reachable = await AgentMailService.shared.verifyAccess()
                 check("AgentMail key valid", ok: reachable,

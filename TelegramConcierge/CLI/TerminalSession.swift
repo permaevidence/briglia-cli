@@ -240,6 +240,10 @@ final class TerminalSession {
             .receive(on: mainScheduler)
             .sink { print("\n· \($0)") }
             .store(in: &cancellables)
+        // An interactive terminal now shows local notices (the one-time
+        // retirement notices wait for a ready sink; a headless daemon's
+        // stdout is not one).
+        if !headless { RetiredNoticeSinks.terminalAttached = true }
 
         // Agent-initiated mid-turn messages (mid_turn_message_user tool) need
         // no dedicated pipe: delivery appends a durable assistant message to

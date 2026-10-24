@@ -975,7 +975,7 @@ enum AvailableTools {
                     ),
                     "script": ParameterProperty(
                         type: "string",
-                        description: "Optional for action='set': \(PlatformShell.name) source of a check script, making this a condition-watching reminder (requires a recurrence — the polling interval). BEFORE writing the script, verify the source actually returns FRESH data (check the newest item's date/id against reality) — an endpoint serving stale data yields a watcher that runs clean but never fires; prefer signals that match what a human sees on the page. CONTRACT: the script runs at each due time with a 60s timeout; print ONLY newly-observed events (one per line) and print NOTHING when there is no news — empty output means silent reschedule (no message, no cost); any output makes the reminder fire with that output attached; nonzero exit or timeout counts as a failure, and 3 consecutive failures PAUSE the watcher with an error message (script and seen-state kept — re-arm with action='resume' when the cause was transient; a watcher paused twice without a successful run in between should be reported to the user, not resumed again). Persist seen-state in the file at $WATCHER_STATE — a per-watcher path the harness provides in the environment and deletes with the reminder; never invent your own state path. BASELINE RULE: on the first run ($WATCHER_STATE absent/empty), record the current state and exit silently — the first fire must contain only events newer than that baseline, never a dump of what already exists. Reference skeleton (same shape for every watcher, only the fetch changes): (1) touch \"$WATCHER_STATE\", noting FIRST=1 if it was missing/empty; (2) fetch current items from the source; (3) for each item whose id is not in $WATCHER_STATE: append the id and print one line about it UNLESS FIRST is set; (4) exit 0. If a burst exceeds ~20 new events, print one summary line with the count instead of the full list (output beyond 4000 chars is truncated but still marked seen). AUTH: the script runs WITHOUT service_key_env — rely on persistent auth (gh auth, gws login, config files), never on injected secrets, or it will fail in production. Registration ENFORCES validation: the harness runs the script twice against the real state file (first seeds the baseline, second must exit 0 and print nothing) and rejects the reminder otherwise. To pre-test via bash while iterating, export WATCHER_STATE yourself to a scratch path (e.g. WATCHER_STATE=/tmp/wtest.txt \(PlatformShell.name) script.sh) — registration and production always provide the real one. The stored script is hash-verified before every run — never edit the .sh file in place (the watcher would stop with a tamper error); to change it, delete the reminder and re-create it. Only allowed in turns the user started by typing (not ambient turns or subagents); creation is announced to the user automatically."
+                        description: "Optional for action='set': \(PlatformShell.name) source of a check script, making this a condition-watching reminder (requires a recurrence — the polling interval). BEFORE writing the script, verify the source actually returns FRESH data (check the newest item's date/id against reality) — an endpoint serving stale data yields a watcher that runs clean but never fires; prefer signals that match what a human sees on the page. CONTRACT: the script runs at each due time with a 60s timeout; print ONLY newly-observed events (one per line) and print NOTHING when there is no news — empty output means silent reschedule (no message, no cost); any output makes the reminder fire with that output attached; nonzero exit or timeout counts as a failure, and 3 consecutive failures PAUSE the watcher with an error message (script and seen-state kept — re-arm with action='resume' when the cause was transient; a watcher paused twice without a successful run in between should be reported to the user, not resumed again). Persist seen-state in the file at $WATCHER_STATE — a per-watcher path the harness provides in the environment and deletes with the reminder; never invent your own state path. BASELINE RULE: on the first run ($WATCHER_STATE absent/empty), record the current state and exit silently — the first fire must contain only events newer than that baseline, never a dump of what already exists. Reference skeleton (same shape for every watcher, only the fetch changes): (1) touch \"$WATCHER_STATE\", noting FIRST=1 if it was missing/empty; (2) fetch current items from the source; (3) for each item whose id is not in $WATCHER_STATE: append the id and print one line about it UNLESS FIRST is set; (4) exit 0. If a burst exceeds ~20 new events, print one summary line with the count instead of the full list (output beyond 4000 chars is truncated but still marked seen). AUTH: the script runs WITHOUT service_key_env — rely on persistent auth (gh auth, config files), never on injected secrets, or it will fail in production. Registration ENFORCES validation: the harness runs the script twice against the real state file (first seeds the baseline, second must exit 0 and print nothing) and rejects the reminder otherwise. To pre-test via bash while iterating, export WATCHER_STATE yourself to a scratch path (e.g. WATCHER_STATE=/tmp/wtest.txt \(PlatformShell.name) script.sh) — registration and production always provide the real one. The stored script is hash-verified before every run — never edit the .sh file in place (the watcher would stop with a tamper error); to change it, delete the reminder and re-create it. Only allowed in turns the user started by typing (not ambient turns or subagents); creation is announced to the user automatically."
                     ),
                     "delete_after_fire": ParameterProperty(
                         type: "boolean",
@@ -1190,7 +1190,7 @@ enum AvailableTools {
     static let sendDocumentToChat = ToolDefinition(
         function: FunctionDefinition(
             name: "send_document_to_chat",
-            description: "Send a document or file directly to the user's chat — it is delivered on whichever channel the user is currently messaging from (Telegram or WhatsApp). Use when the user asks you to send/share a file, document, or image. Or when you think it's appropriate.",
+            description: "Send a document or file directly to the user's chat — it is delivered on whichever channel the user is currently messaging from. Use when the user asks you to send/share a file, document, or image. Or when you think it's appropriate.",
             parameters: FunctionParameters(
                 properties: [
                     "file_path": ParameterProperty(
@@ -2035,8 +2035,7 @@ enum AvailableTools {
     // MARK: - Calendar Tool (agentmail provider only)
 
     /// Briglia's local calendar (calendar.json via CalendarService). Exposed only
-    /// when the email/calendar provider is `agentmail` — the gws provider
-    /// reaches Google Calendar through bash, and provider `none` has no
+    /// when the email/calendar provider is `agentmail`; provider `none` has no
     /// calendar at all.
     static let manageCalendar = ToolDefinition(
         function: FunctionDefinition(
@@ -2111,11 +2110,11 @@ enum AvailableTools {
     /// Non-email tools that do not depend on web search credentials.
     ///
     /// Email has no dedicated tools — the agent uses the active provider's
-    /// CLI via bash (`gws …` or `agentmail …`). Ambient inbox snapshot +
+    /// CLI via bash (`agentmail …`). Ambient inbox snapshot +
     /// calendar context are injected into the system prompt by the provider's
     /// service. The one calendar exception: the `agentmail` provider exposes
-    /// `manage_calendar` for Briglia's local calendar store (gws reaches Google
-    /// Calendar via bash instead; provider `none` has neither).
+    /// `manage_calendar` for Briglia's local calendar store (provider `none`
+    /// has neither).
     ///
     /// Test seam for the subagents flag: when set, `subagentsEnabled` uses the
     /// returned value (nil = simulate "no stored flag") instead of touching the
@@ -2186,7 +2185,8 @@ enum AvailableTools {
     /// All available tools. `includeWebSearch` toggles whether the four web tools
     /// are added; `hasDeferredMCPs` adds the `tool_search` and `mcp_call` proxy
     /// tools for on-demand MCP discovery. Email/calendar/contacts tools have
-    /// been fully removed from the agent surface in favor of the gws CLI.
+    /// been fully removed from the agent surface (email goes through the
+    /// AgentMail CLI via bash).
     static func all(includeWebSearch: Bool, hasDeferredMCPs: Bool = false) -> [ToolDefinition] {
         // Web switch on (and web search available): the two research tools
         // leave the main agent's list — research goes through Agent(Web) —

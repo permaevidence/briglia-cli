@@ -25,8 +25,10 @@ actor MaintenanceAlertCenter {
         case userContextRestructure
         case metaSummary
         case channelPolling
-        case whatsappBridge
-        case googleWorkspace
+        // `whatsappBridge` and `googleWorkspace` were removed with those
+        // integrations (2026-10-24). Episodes are stored under raw-string
+        // keys, so an old store still decodes; RetiredIntegrations drops
+        // the two keys without a "recovered" message.
         case agentMail
         case webSearch
         case webFetch
@@ -50,8 +52,6 @@ actor MaintenanceAlertCenter {
             case .userContextRestructure: return "user-context reorganization"
             case .metaSummary: return "historical meta-summary generation"
             case .channelPolling: return "Telegram message polling"
-            case .whatsappBridge: return "WhatsApp bridge"
-            case .googleWorkspace: return "Google Workspace (gws) access"
             case .agentMail: return "AgentMail inbox access"
             case .webSearch: return "web search (serper.dev)"
             case .webFetch: return "web page fetching (jina.ai)"
@@ -73,10 +73,6 @@ actor MaintenanceAlertCenter {
                 return "No data has been lost — the summary is saved and the original messages stay in the conversation; I'll retry at the next message, without another summary."
             case .channelPolling:
                 return "I can't fetch incoming Telegram messages until this recovers, so I may seem unresponsive there."
-            case .whatsappBridge:
-                return "WhatsApp messages won't be received until this is fixed; Telegram still works."
-            case .googleWorkspace:
-                return "Email alerts and calendar context are unavailable. If this persists, the OAuth token likely expired — run `gws auth login` in a terminal."
             case .agentMail:
                 return "Email alerts and inbox context are unavailable. If this persists, check the AgentMail API key (rerun `briglia setup`, email step) and the agentmail.to service status."
             case .webSearch:
@@ -136,7 +132,35 @@ actor MaintenanceAlertCenter {
                 for key in stale { store.episodes.removeValue(forKey: key) }
                 save()
             }
+            // Retired integrations (gws, WhatsApp; 2026-10-24): their episodes
+            // and queued alerts are dropped before any flush can deliver them.
+            if Self.purgeRetired(&store) { save() }
         }
+    }
+
+    /// Episode keys and exact harness-built alert prefixes of the removed
+    /// gws and WhatsApp integrations. Nothing else is filtered.
+    static let retiredSubsystemKeys = ["googleWorkspace", "whatsappBridge"]
+    static let retiredAlertPrefixes: [String] = ["Google Workspace (gws) access", "WhatsApp bridge"].flatMap { name in
+        ["⚠️ Maintenance issue: \(name) is failing.",
+         "⚠️ Still failing: \(name) — ",
+         "✅ Recovered: \(name) is working again"]
+    }
+
+    /// Returns whether anything was removed.
+    private static func purgeRetired(_ store: inout Store) -> Bool {
+        var changed = false
+        for key in retiredSubsystemKeys where store.episodes.removeValue(forKey: key) != nil { changed = true }
+        let kept = store.undelivered.filter { alert in !retiredAlertPrefixes.contains { alert.hasPrefix($0) } }
+        if kept.count != store.undelivered.count { store.undelivered = kept; changed = true }
+        return changed
+    }
+
+    /// Selftest seam: the purge on a store document (JSON in, JSON out).
+    static func _testPurgeRetired(_ data: Data) -> Data? {
+        guard var store = try? JSONDecoder().decode(Store.self, from: data) else { return nil }
+        _ = purgeRetired(&store)
+        return try? JSONEncoder().encode(store)
     }
 
     func setDeliveryHandler(_ handler: @escaping @Sendable (String) async -> Bool) {

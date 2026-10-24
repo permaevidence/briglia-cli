@@ -655,7 +655,7 @@ struct SetupWizard {
                  `briglia setup` again; it offers to resume from this step,
                  keeping everything you already entered.
             """)
-            _ = await GoogleWorkspaceService.runProcessAsync(
+            _ = await ProcessRunner.runProcessAsync(
                 executable: "/usr/bin/open",
                 args: ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"],
                 timeoutSeconds: 10
@@ -878,10 +878,9 @@ struct SetupWizard {
         }
     }
 
-    /// Optional email + calendar. Three providers: AgentMail (dedicated agent
-    /// inbox + Briglia's local calendar, recommended), Google Workspace via the
-    /// `gws` CLI (user's own Gmail/Calendar, user-provided OAuth client), or
-    /// none (the default — no email/calendar context, polling, or tool).
+    /// Optional email + calendar: AgentMail (dedicated agent inbox + Briglia's
+    /// local calendar) or none (the default — no email/calendar context,
+    /// polling, or tool). Google email via gws was removed on 2026-10-24.
     private func configureEmailCalendar() async {
         let current = EmailCalendarProvider.current
         print("""
@@ -891,28 +890,23 @@ struct SetupWizard {
           1) AgentMail — a dedicated inbox for Briglia (recommended, easy):
              sign up at https://agentmail.to, create an inbox + API key,
              paste the key here. Includes Briglia's own calendar tool.
-          2) Google Workspace — YOUR Gmail/Calendar via Google's `gws` CLI
-             (advanced: requires your own Google Cloud OAuth client).
-          3) None — no email or calendar context.
+          2) None — no email or calendar context.
           Current: \(current.displayName)
         """)
         let defaultChoice: String
         switch current {
         case .agentmail: defaultChoice = "1"
-        case .gws: defaultChoice = "2"
-        case .none: defaultChoice = "3"
+        case .none: defaultChoice = "2"
         }
         var choice = ""
         while true {
-            choice = WizardIO.ask("Choose [1/2/3]", default: defaultChoice)
-            if ["1", "2", "3"].contains(choice) { break }
-            print("  Enter 1, 2 or 3.")
+            choice = WizardIO.ask("Choose [1/2]", default: defaultChoice)
+            if ["1", "2"].contains(choice) { break }
+            print("  Enter 1 or 2.")
         }
         switch choice {
         case "1":
             await configureAgentMail()
-        case "2":
-            await configureGoogleWorkspace()
         default:
             save(KeychainHelper.emailCalendarProviderKey, EmailCalendarProvider.none.rawValue)
             if current != .none {
@@ -974,81 +968,6 @@ struct SetupWizard {
             """)
         }
         print("  ✔ AgentMail + calendar configured — activates the next time Briglia starts")
-    }
-
-    private func configureGoogleWorkspace() async {
-        // 1. OAuth client: Briglia no longer ships one — the user provides their own.
-        let secretFileExists = FileManager.default.fileExists(atPath: GoogleWorkspaceService.clientSecretFileURL.path)
-        if secretFileExists {
-            print("  ✔ found existing ~/.config/gws/client_secret.json — keeping it")
-        } else {
-            print("""
-              gws needs YOUR OWN Google OAuth client (Briglia does not ship one):
-                1. console.cloud.google.com → create or select a project
-                2. Enable the Gmail API and the Google Calendar API
-                3. OAuth consent screen → External → add yourself as a test user
-                4. Credentials → Create credentials → OAuth client ID → Desktop app
-                5. Paste the client ID and client secret here.
-            """)
-            let currentID = KeychainHelper.load(key: KeychainHelper.gwsOAuthClientIDKey) ?? ""
-            var clientID = ""
-            while true {
-                clientID = WizardIO.ask(
-                    currentID.isEmpty ? "OAuth client ID" : "OAuth client ID [\(currentID)]",
-                    default: currentID.isEmpty ? nil : currentID
-                )
-                if !clientID.isEmpty { break }
-                print("  A value is required.")
-            }
-            let clientSecret = await WizardIO.askSecretValidated(
-                "OAuth client secret",
-                current: KeychainHelper.load(key: KeychainHelper.gwsOAuthClientSecretKey),
-                probe: { _ in nil }  // no offline validation exists; gws auth login is the real probe
-            )
-            save(KeychainHelper.gwsOAuthClientIDKey, clientID)
-            save(KeychainHelper.gwsOAuthClientSecretKey, clientSecret)
-            installClientSecret()
-        }
-
-        // 2. Binary + authorization.
-        if GoogleWorkspaceService.gwsInstalled() {
-            if await GoogleWorkspaceService.shared.verifyGwsAccess() {
-                print("  ✔ Google Workspace (gws) installed and authorized — email/calendar context enabled")
-            } else {
-                print("""
-                  ⚠ Google Workspace (gws) is installed but not authorized.
-                    Run `gws auth login` in another terminal to enable
-                    email/calendar context, or ignore this to go without.
-                """)
-            }
-        } else if WizardIO.askYesNo("Install gws now (~6 MB)?", default: true) {
-            if let failure = await GoogleWorkspaceService.installGwsBinary() {
-                print("  ✖ gws install failed: \(failure)")
-                print("    Briglia will run without email/calendar context until it's installed.")
-            } else {
-                print("""
-                  ✔ gws installed. To authorize it, run `gws auth login` in
-                    another terminal (opens a browser). Email/calendar context
-                    activates the next time Briglia starts.
-                """)
-            }
-        } else {
-            print("  Skipped the gws install — rerun `briglia setup` any time.")
-        }
-        save(KeychainHelper.emailCalendarProviderKey, EmailCalendarProvider.gws.rawValue)
-    }
-
-    /// Returns true when the OAuth client file is in place (pre-existing or
-    /// freshly written from the stored user-provided credentials).
-    @discardableResult
-    private func installClientSecret() -> Bool {
-        do {
-            try GoogleWorkspaceService.installAdaClientSecretIfMissing()
-            return true
-        } catch {
-            print("  ⚠ could not write the gws OAuth client (\(error.localizedDescription)) — `gws auth login` will fail until ~/.config/gws/client_secret.json exists")
-            return false
-        }
     }
 
     // MARK: Step 8 — Telegram (optional)

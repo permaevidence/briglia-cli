@@ -132,8 +132,8 @@ enum BashTools {
     /// PATH for agent-spawned shells. The GUI app inherits launchd's minimal
     /// PATH, and `zsh -l` only restores Homebrew/user dirs if the user's
     /// dotfiles do — so prepend the places Briglia actually installs and expects
-    /// tools (notably ~/.local/bin, where the onboarding installs `gws` and
-    /// the `agentmail` key-broker wrapper). ~/.local/bin comes FIRST —
+    /// tools (notably ~/.local/bin, where the onboarding installs the
+    /// `agentmail` key-broker wrapper). ~/.local/bin comes FIRST —
     /// standard XDG/systemd user-session order — so Briglia-installed wrappers
     /// win over a same-named Homebrew/system binary (a foreign `agentmail`
     /// has no key broker and can only fail auth). path_helper in

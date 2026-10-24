@@ -407,64 +407,15 @@ extension MenuSelftestContext {
             await manager.reloadBrowserSettings()
             let stoppedAt = await service.currentGenerationForTesting()
             check("email: turning email off stops the checker", stoppedAt > before)
-            // gws before (as on an existing install), then AgentMail.
+            // A stored retired "gws" (an install from before 2026-10-24) reads
+            // as none; switching to AgentMail then starts AgentMail.
             try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: "gws")
             await manager.reloadBrowserSettings()
+            check("email: a stored retired gws reads as none", EmailCalendarProvider.current == .none)
             try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: "agentmail")
             before = await service.currentGenerationForTesting()
             await manager.reloadBrowserSettings()
-            check("email: switching from Google Workspace to AgentMail starts AgentMail", await service.currentGenerationForTesting() > before)
-
-            // Codex round 3, R2: a Google check still running when the
-            // provider changes. The transition doesn't wait it out; the
-            // reset voids it, so its late result is dropped: nothing reaches
-            // the agent, no watermark or cache is written, no retry starts.
-            let gws = GoogleWorkspaceService.shared
-            let delivered = MenuCount(), fetches = MenuCount()
-            let sample = GoogleWorkspaceService.UnreadEmail(id: "m-late", threadId: nil, from: "a@example.com", subject: "late", date: "", snippet: "")
-            func gwsSelected() async throws {
-                try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: "gws")
-                await manager.reloadBrowserSettings()
-                await gws.setNewEmailHandler { emails in delivered.add(emails.count); return true }
-            }
-            try await gwsSelected()
-            await gws.setArrivalFetchForTesting { _ in fetches.add(1); return [sample] }
-            await gws.pollOnceForTesting()
-            check("email: control — a Google check that finishes normally is delivered", delivered.value == 1 && fetches.value == 1)
-            for target in ["agentmail", "none"] {
-                try await gwsSelected()
-                delivered.reset(); fetches.reset()
-                let gate = MenuGate()
-                // "agentmail": the late fetch returns mail; "none": it fails,
-                // which would normally start the retry ladder.
-                let late = target == "agentmail"
-                let fresh = GoogleWorkspaceService.UnreadEmail(id: "m-late-\(target)", threadId: nil, from: "a@example.com", subject: "late", date: "", snippet: "")
-                await gws.setArrivalFetchForTesting { _ in fetches.add(1); await gate.wait(); return late ? [fresh] : nil }
-                let tick = Task { await gws.pollOnceForTesting() }
-                while !gate.hasArrived { try? await Task.sleep(nanoseconds: 5_000_000) }
-                let epoch = await gws.stateEpochForTesting()
-                try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: target)
-                let started = Date()
-                let switching = Task { await manager.reloadBrowserSettings() }
-                // Let the switch reach its wait for the old check (bounded:
-                // without the epoch bump this would otherwise never change).
-                for _ in 0..<200 where await gws.stateEpochForTesting() == epoch { try? await Task.sleep(nanoseconds: 5_000_000) }
-                let voided = await gws.stateEpochForTesting() != epoch
-                gate.open()
-                await switching.value; await tick.value
-                try? await Task.sleep(nanoseconds: 1_300_000_000)   // past the first retry delay
-                check("email: Google → \(target) with a check still running: its result never reaches the agent",
-                      voided && delivered.value == 0, "voided \(voided) delivered \(delivered.value)")
-                let wm = await gws.arrivalWatermarkForTesting()
-                check("email: Google → \(target): the late check writes no watermark and starts no retry",
-                      wm == nil && fetches.value == 1, "fetches \(fetches.value)")
-                let elapsed = Date().timeIntervalSince(started)
-                let inFlight = await gws.opsInFlightForTesting()
-                check("email: Google → \(target): the switch finishes once the old check returns (no 10 s stall)",
-                      elapsed < 5 && inFlight == 0, "elapsed \(elapsed) in flight \(inFlight)")
-                check("email: Google → \(target): the selected provider is applied", EmailCalendarProvider.current.rawValue == target)
-            }
-            await gws.setArrivalFetchForTesting(nil)
+            check("email: switching from a retired gws setting to AgentMail starts AgentMail", await service.currentGenerationForTesting() > before)
             try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: "agentmail")
             await manager.reloadBrowserSettings()
 

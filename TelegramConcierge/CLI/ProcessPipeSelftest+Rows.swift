@@ -57,12 +57,12 @@ extension ProcessPipeSelftest {
         check("Z6d production deadline is 30 minutes", ProjectsZipAutoExtractor.unzipTimeout == 1_800, "")
     }
 
-    // MARK: - G1-G6: GoogleWorkspaceService.runBlockingProcess / runProcessAsync
+    // MARK: - G1-G6: ProcessRunner.runBlockingProcess / runProcessAsync
 
-    typealias GwsResult = GoogleWorkspaceService.ProcessRunResult
+    typealias GwsResult = ProcessRunner.ProcessRunResult
 
     static func gwsRun(_ exe: String, timeout: Int = 10) async -> (value: GwsResult?, elapsed: TimeInterval) {
-        await bounded { GoogleWorkspaceService.runBlockingProcess(executable: exe, args: [], timeoutSeconds: timeout) }
+        await bounded { ProcessRunner.runBlockingProcess(executable: exe, args: [], timeoutSeconds: timeout) }
     }
 
     static func gwsLargeOutput(_ check: Check, dir: URL) async {
@@ -76,7 +76,7 @@ extension ProcessPipeSelftest {
         check("G2 1 MB of stdout comes back complete (\(secs(r2.elapsed)) s)",
               r2.value?.stdout == String(repeating: "g", count: megabyte) && r2.elapsed < promptBound,
               "\(r2.value?.stdout?.utf8.count ?? -1) bytes, \(r2.value?.failureDetail ?? "")")
-        let r3 = await bounded { await GoogleWorkspaceService.runProcessAsync(executable: big, args: [], timeoutSeconds: 10) }
+        let r3 = await bounded { await ProcessRunner.runProcessAsync(executable: big, args: [], timeoutSeconds: 10) }
         check("G3 runProcessAsync: 1 MB complete (\(secs(r3.elapsed)) s)",
               r3.value?.stdout?.utf8.count == megabyte && r3.elapsed < promptBound, r3.value?.failureDetail ?? "")
         let noisy = script(dir, "gws-noisy", flood(megabyte, "n", toStderr: true) + "\nprintf '{\"ok\":true}'")

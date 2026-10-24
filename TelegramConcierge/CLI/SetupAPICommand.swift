@@ -113,12 +113,6 @@ enum SetupAPICore {
     /// defer-based restore of real keys does not survive a watchdog exit).
     nonisolated(unsafe) static var defaults: UserDefaults = .standard
 
-    /// gws-directory seam: EmailCredentialWipe deletes ~/.config/gws, which
-    /// is HOME-derived — the selftest's XDG redirect does NOT cover it, so
-    /// without this seam a selftest run would wipe the machine's REAL gws
-    /// tokens. Production leaves it nil (canonical directory).
-    nonisolated(unsafe) static var gwsConfigDirectoryOverride: URL?
-
     struct APIError: Error {
         let code: String
         let message: String
@@ -311,9 +305,6 @@ enum SetupAPICore {
         email["agentmail_broker_installed"] = AgentMailService.agentMailBrokerInstalled()
         let foreign = AgentMailService.foreignAgentMailInstalls()
         if !foreign.isEmpty { email["agentmail_foreign_installs"] = foreign }
-        email["gws_installed"] = GoogleWorkspaceService.gwsInstalled()
-        email["gws_client_secret_present"] = FileManager.default.fileExists(
-            atPath: GoogleWorkspaceService.clientSecretFileURL.path)
         payload["email_calendar"] = email
 
         var telegram: [String: Any] = ["configured": TelegramConfig.isConfigured]
@@ -1244,24 +1235,26 @@ enum SetupAPICore {
     private static func applyEmailCalendar(
         _ section: [String: Any], warnings: inout [String], checkpoint: () throws -> Void = {}
     ) async throws {
-        guard let raw = nonEmptyString(section["provider"]),
-              let provider = EmailCalendarProvider(rawValue: raw) else {
+        guard let raw = nonEmptyString(section["provider"]) else {
             throw APIError(code: "invalid_value",
-                           message: "email_calendar.provider must be none|agentmail|gws")
+                           message: "email_calendar.provider must be none|agentmail")
+        }
+        guard let provider = EmailCalendarProvider(rawValue: raw) else {
+            throw APIError(code: "invalid_value",
+                           message: raw == "gws"
+                           ? "Google email via gws was removed from Briglia; use agentmail or none"
+                           : "email_calendar.provider must be none|agentmail")
         }
         switch provider {
         case .none:
             // remove_credentials severs email ACCESS via the canonical
             // /deleteuserdata wipe (EmailCredentialWipe): AgentMail key +
-            // inbox, gws OAuth client fields, AND the whole ~/.config/gws
-            // directory (client_secret.json + gws's OAuth token store —
-            // Codex, 2026-08-27: deleting only Briglia's stored fields left the
-            // live Google tokens behind). Plain provider:none keeps
-            // credentials so re-enabling is one tap.
+            // inbox and any leftover copy of the retired gws OAuth client.
+            // Since gws was removed (2026-10-24) Briglia never touches
+            // ~/.config/gws. Plain provider:none keeps credentials so
+            // re-enabling is one tap.
             if section["remove_credentials"] as? Bool == true {
-                let failures = EmailCredentialWipe.execute(
-                    gwsConfigDir: gwsConfigDirectoryOverride
-                        ?? GoogleWorkspaceService.gwsConfigDirectory)
+                let failures = EmailCredentialWipe.execute()
                 guard failures.isEmpty else {
                     throw APIError(code: "remove_failed",
                                    message: "credential removal incomplete: "
@@ -1309,41 +1302,6 @@ enum SetupAPICore {
                 }
             }
 
-        case .gws:
-            let providedID = nonEmptyString(section["gws_client_id"])
-            let providedSecret = nonEmptyString(section["gws_client_secret"])
-            if let providedID, let providedSecret {
-                do {
-                    try KeychainHelper.saveBatch([
-                        KeychainHelper.gwsOAuthClientIDKey: providedID,
-                        KeychainHelper.gwsOAuthClientSecretKey: providedSecret,
-                    ])
-                } catch { throw saveFailed(error) }
-            }
-            let secretFilePresent = FileManager.default.fileExists(
-                atPath: GoogleWorkspaceService.clientSecretFileURL.path)
-            let storedID = nonEmptyString(KeychainHelper.load(key: KeychainHelper.gwsOAuthClientIDKey))
-            if !secretFilePresent && storedID == nil {
-                throw APIError(code: "missing_field",
-                               message: "gws needs your own Google OAuth client — provide "
-                               + "gws_client_id and gws_client_secret")
-            }
-            if !secretFilePresent {
-                do { try GoogleWorkspaceService.installAdaClientSecretIfMissing() } catch {
-                    warnings.append("could not write ~/.config/gws/client_secret.json "
-                                    + "(\(error.localizedDescription)) — `gws auth login` will "
-                                    + "fail until it exists")
-                }
-            }
-            if section["install_cli"] as? Bool == true, !GoogleWorkspaceService.gwsInstalled() {
-                if let failure = await GoogleWorkspaceService.installGwsBinary() {
-                    warnings.append("gws install failed: \(failure)")
-                }
-            }
-            do {
-                try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey,
-                                        value: EmailCalendarProvider.gws.rawValue)
-            } catch { throw saveFailed(error) }
         }
     }
 

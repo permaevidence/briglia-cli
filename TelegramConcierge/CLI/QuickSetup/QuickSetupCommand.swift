@@ -609,7 +609,7 @@ enum QuickSetupSession {
     static func openBrowser(_ url: String) {
         if ProcessInfo.processInfo.environment["BRIGLIA_QUICKSETUP_NO_BROWSER"] == "1" { return }
         #if os(macOS)
-        _ = GoogleWorkspaceService.runBlockingProcess(executable: "/usr/bin/open", args: [url], timeoutSeconds: 10)
+        _ = ProcessRunner.runBlockingProcess(executable: "/usr/bin/open", args: [url], timeoutSeconds: 10)
         #else
         if let xdg = PlatformBinary.find("xdg-open") {
             let p = Process()

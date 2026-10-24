@@ -76,7 +76,7 @@ extension ConversationManager {
     }
 
     /// The ambient destination (the user's last messaging channel, else
-    /// Telegram, else WhatsApp), never a command-capture window. A
+    /// Telegram), never a command-capture window. A
     /// terminal-only setup has none: the line is printed locally once.
     func updateNoticeDestination() -> UpdateNotice.Destination {
         let address = lastUserChannelAddress ?? telegramAddress
@@ -89,7 +89,7 @@ extension ConversationManager {
     }
 
     /// ONE transport attempt for a consumed notice (§5.5): Telegram through
-    /// the one-request classifier; WhatsApp (bridge IPC) one call, any error
+    /// the one-request classifier; any other wire channel one call, any error
     /// ambiguous; app and terminal a local emit. Never parked, never routed
     /// through `NoticeSeries` (its retries would duplicate these).
     func sendUpdateNoticeOnce(_ record: AttemptRecord) async -> UpdateNotice.SendOutcome {
