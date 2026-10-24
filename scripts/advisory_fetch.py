@@ -97,18 +97,29 @@ def load_watchlist(path):
     return ecos, ids
 
 
-RFC3339_RE = re.compile(r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d{1,9})?([Zz]|[+-]\d{2}:\d{2})")
+RFC3339_RE = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]{1,9})?"
+    r"(?:([Zz])|([+-])([0-9]{2}):([0-9]{2}))", re.ASCII)
 
 
 def withdrawn_valid(v):
-    """True for absent/null or a real RFC 3339 date-time string."""
+    """True for absent/null or a complete, real RFC 3339 date-time (§5.6):
+    ASCII digits only, a real calendar date and clock time, and an offset
+    of Z or ±HH:MM with HH ≤ 23 and MM ≤ 59. Everything else is not
+    withdrawal evidence (R3-R2, R4-R2)."""
     if v is None:
         return True
-    if type(v) is not str or not RFC3339_RE.fullmatch(v):
+    if type(v) is not str:
         return False
+    m = RFC3339_RE.fullmatch(v)
+    if not m:
+        return False
+    y, mo, d, h, mi, sec = (int(m.group(i)) for i in range(1, 7))
     try:
-        datetime.datetime.fromisoformat(v[:19])
+        datetime.datetime(y, mo, d, h, mi, sec)
     except ValueError:
+        return False
+    if m.group(8) is None and (int(m.group(10)) > 23 or int(m.group(11)) > 59):
         return False
     return True
 

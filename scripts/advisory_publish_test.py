@@ -260,7 +260,11 @@ def run_tests(m, tmp, only=None, fetch=None):
     ok_w = fetch.slim({"id": "CVE-2099-0007", "withdrawn": "2026-10-01T00:00:00Z", "affected": []}, "ffmpeg", "Debian:12")
     t("R2 fetch: a withdrawn record may name nothing", ok_w["affected"] == [])
     # R3-R2: withdrawal evidence must be a real RFC 3339 timestamp.
-    bad_values = [{"unexpected": True}, "false", 1, True, "2026-13-01T00:00:00Z", "yesterday"]
+    bad_values = [{"unexpected": True}, "false", 1, True, "2026-13-01T00:00:00Z", "yesterday",
+                  "2026-10-01T00:00:00+24:00", "2026-10-01T00:00:00+00:60", "2026-10-01T00:00:00+99:99",
+                  "2026-10-01T00:00:00-24:00", "2026-10-01T00:00:00-00:60", "2026-10-01T00:00:00-99:99",
+                  "2026-10-01T00:00:00+\uff10\uff11:00", "\uff12026-10-01T00:00:00Z", "2026-10-01T00:00:00.\uff11Z",
+                  "2026-10-01T24:00:00Z", "2026-02-30T00:00:00Z", "2026-10-01T00:00:00"]
     plain_bad = all(cov(build(bundle([row([dict(rec(2), withdrawn=v)])]))) == ["failed"] for v in bad_values)
     t("R3-R2: malformed withdrawn (object, 'false', 1, true, bad dates) fails an ordinary record's row", plain_bad)
     empty_bad = all(cov(build(bundle([row([{"id": "CVE-2099-0030", "affected": [], "withdrawn": v}])]))) == ["failed"] for v in bad_values)
@@ -271,6 +275,9 @@ def run_tests(m, tmp, only=None, fetch=None):
     t("R3-R2 control: absent withdrawn → published, not withdrawn", cov(ctrl) == ["ok"] and not ctrl["entries"][0]["advisories"][0]["withdrawn"])
     good = build(bundle([row([dict(rec(2), withdrawn="2026-10-01T00:00:00.123Z")])]))
     t("R3-R2 control: a valid timestamp (fractional seconds) withdraws", good["entries"][0]["advisories"][0]["withdrawn"] and cov(good) == ["ok"])
+    valid_offsets = all(fetch.withdrawn_valid(v) for v in ("2026-10-01T00:00:00+05:30", "2026-10-01T00:00:00-23:59",
+                                                          "2026-10-01T00:00:00+00:00", "2026-10-01t00:00:00z"))
+    t("R4-R2 control: real offsets (+05:30, -23:59, +00:00) and lower-case t/z are valid", valid_offsets)
     fetch_bad = 0
     for v in bad_values:
         try:
@@ -303,6 +310,8 @@ BREAKS = [
      '    if not withdrawn_valid(rec.get("withdrawn")):\n        raise Incomplete', '    if False:\n        raise Incomplete'),
     ("R3-R2 fetch: malformed withdrawn fails the source",
      '    if not withdrawn_valid(record.get("withdrawn")):', '    if False:', "fetch"),
+    ("R3-R2 fetch: malformed withdrawn fails the source",
+     "    if m.group(8) is None and (int(m.group(10)) > 23 or int(m.group(11)) > 59):", "    if False:", "fetch"),
     ("N1: the signing gate counts UTF-8 bytes like the client",
      'if type(t) is not str or len(t.encode()) > 32:', 'if type(t) is not str or len(t) > 32:'),
     ("R2 fetch: a record that does not name the package is an incomplete source",
