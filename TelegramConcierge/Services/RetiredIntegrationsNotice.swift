@@ -57,9 +57,12 @@ extension ConversationManager {
         guard case .ok(let state) = RetiredIntegrations.load(env.stateURL) else { return false }
         let stillOwed = state.gws?.notice == .pending || state.whatsapp?.notice == .pending
         guard stillOwed else { return false }
-        let idle = isPolling && activeRunId == nil && activeProcessingTask == nil && !isTurnActive && !browserSettingsMutation
-        guard idle, let destination = retiredNoticeDestination() else { return true }
         for which in RetiredIntegrations.dueNotices(state, now: now) {
+            // Polling, idleness and the destination are re-checked in the
+            // same main-actor step as EACH consume: a send may suspend, and
+            // polling can stop or a turn start in the meantime.
+            let idle = isPolling && activeRunId == nil && activeProcessingTask == nil && !isTurnActive && !browserSettingsMutation
+            guard idle, let destination = retiredNoticeDestination() else { break }
             let attempt = RetiredIntegrations.Attempt(channelKind: destination.channelKind, chatId: destination.chatId,
                                                       channelGeneration: destination.channelGeneration, at: now)
             guard let text = RetiredIntegrations.consume(which, destination: attempt,

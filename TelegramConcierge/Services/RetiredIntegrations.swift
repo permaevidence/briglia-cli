@@ -246,43 +246,61 @@ enum RetiredIntegrations {
             report.settingsFailed = error.localizedDescription
         }
 
-        // WhatsApp steps 2–3: stop any bridge, then remove the folder (every
-        // start: a folder that reappears is removed again, silently).
+        // WhatsApp steps 2–3: stop any bridge of this install — also when its
+        // folder is gone (a running Node need not keep its script on disk) —
+        // then remove the folder. Every start while a WhatsApp record exists
+        // or the folder is present; a folder that reappears reopens the work
+        // (its notice state is never touched here).
         let bridgeDir = env.dataRoot.appendingPathComponent("whatsapp-bridge")
         var lst = stat()
-        let present = lstat(bridgeDir.path, &lst) == 0
-        if present || state.whatsapp?.folder == .pending {
-            var outcome: FolderOutcome = .absent
-            if present {
-                let target = BridgeScanner.Target(
-                    configured: bridgeDir.appendingPathComponent("index.js").path,
-                    canonical: env.bridge.resolve(bridgeDir.appendingPathComponent("index.js").path))
-                let stop = env.bridge.stopBridges(target: target)
-                report.bridge = stop
-                if case .clear = stop {
-                    outcome = BridgeFolderRemover.remove(name: "whatsapp-bridge", under: env.dataRoot, seams: env.remover) { kind in
-                        guard var wa = state.whatsapp else { return true }   // silent re-clean: nothing owed
-                        guard wa.folder == .pending else { return true }
-                        wa.topKind = kind
-                        state.whatsapp = wa
-                        return persist(state, env, &report)
-                    }
-                } else {
-                    outcome = .deferred("a WhatsApp bridge process may still be running: \(stop.detail)")
+        var present = false
+        var lstatProblem: String?
+        if lstat(bridgeDir.path, &lst) == 0 {
+            present = true
+        } else if errno != ENOENT {
+            present = true
+            lstatProblem = String(cString: strerror(errno))
+        }
+        if present || state.whatsapp != nil {
+            if present, var wa = state.whatsapp, wa.folder != .pending {
+                wa.folder = .pending; wa.topKind = nil; wa.folderDetail = nil
+                state.whatsapp = wa
+                if !persist(state, env, &report) { return report }
+            }
+            let index = bridgeDir.appendingPathComponent("index.js").path
+            let stop = env.bridge.stopBridges(target: BridgeScanner.Target(configured: index, canonical: env.bridge.resolve(index)))
+            report.bridge = stop
+            let outcome: FolderOutcome
+            if case .unknown(let why) = stop {
+                outcome = .deferred("a WhatsApp bridge process may still be running: \(why)")
+            } else if let problem = lstatProblem {
+                outcome = .failed("cannot inspect \(bridgeDir.path) (\(problem))")
+            } else if present {
+                outcome = BridgeFolderRemover.remove(name: "whatsapp-bridge", under: env.dataRoot, seams: env.remover) { kind in
+                    guard var wa = state.whatsapp else { return true }   // untracked leftover: silent clean
+                    wa.topKind = kind
+                    state.whatsapp = wa
+                    return persist(state, env, &report)
                 }
+            } else {
+                outcome = .absent
             }
             report.folder = outcome
-            if var wa = state.whatsapp, wa.folder == .pending {
+            if var wa = state.whatsapp {
                 switch outcome {
                 case .removed:
                     wa.folder = .done; wa.folderDetail = nil
                 case .absent:
-                    // ENOENT after a recorded removal = a crash between the
-                    // unlink and `done`; without a record Briglia deleted nothing.
-                    wa.folder = wa.topKind == nil ? .absent : .done
+                    if wa.folder == .pending {
+                        // ENOENT after a recorded removal = a crash between the
+                        // unlink and `done`; without a record Briglia deleted nothing.
+                        wa.folder = wa.topKind == nil ? .absent : .done
+                    }
                     wa.folderDetail = nil
                 case .deferred(let why), .failed(let why):
-                    wa.folderDetail = why
+                    // Unfinished cleanup is always visible, also when it was
+                    // complete before (an orphan bridge found later).
+                    wa.folder = .pending; wa.folderDetail = why
                 }
                 if wa != state.whatsapp {
                     state.whatsapp = wa
@@ -374,8 +392,8 @@ enum RetiredIntegrations {
             let headIT = "Il collegamento WhatsApp è stato rimosso da Briglia; Telegram continua a funzionare come prima."
             if wa?.folder == .pending {
                 return italian
-                    ? headIT + " Briglia non è ancora riuscita a cancellare la sua cartella privata del bridge WhatsApp (\(path)); riprova a ogni avvio e `briglia doctor` ne mostra lo stato." + phoneIT
-                    : headEN + " Briglia could not finish deleting its private WhatsApp bridge folder yet (\(path)); it retries at each start and `briglia doctor` shows the state." + phoneEN
+                    ? headIT + " Briglia non è ancora riuscita a rimuovere del tutto il suo bridge WhatsApp privato (cartella \(path)); riprova a ogni avvio e `briglia doctor` ne mostra lo stato." + phoneIT
+                    : headEN + " Briglia could not finish removing its private WhatsApp bridge yet (folder \(path)); it retries at each start and `briglia doctor` shows the state." + phoneEN
             }
             if wa?.folder == .absent {
                 return italian

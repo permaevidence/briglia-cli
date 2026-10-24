@@ -88,6 +88,8 @@ enum RIUnits {
         var replaceAtRead: [Int: BridgeScanner.Proc] = [:]
         var reads = 0
         var termWait: TimeInterval = 3
+        /// Called after each recorded signal (mid-batch table changes).
+        var afterSignal: ((Int32, Int32, Table) -> Void)?
 
         func scanner(resolve: @escaping (String) -> String?) -> BridgeScanner {
             BridgeScanner(
@@ -106,6 +108,7 @@ enum RIUnits {
                         self.rows.append(replacement)
                         return
                     }
+                    defer { self.afterSignal?(pid, sig, self) }
                     guard !self.immortal.contains(pid) else { return }
                     if sig == SIGKILL || self.dieOnTerm.contains(pid) { self.rows.removeAll { $0.pid == pid } }
                 },
@@ -463,7 +466,7 @@ extension MidturnHarness {
         check("W6 a bridge that will not die → folder kept, pending with a reason, notice due with text B",
               FileManager.default.fileExists(atPath: kept.path) && s?.whatsapp?.folder == .pending && s?.whatsapp?.folderDetail != nil
                 && RetiredIntegrations.dueNotices(s!, now: Date()) == [.whatsapp]
-                && RetiredIntegrations.text(.whatsapp, state: s!, language: "en", dataRoot: busy.dataRoot).contains("could not finish deleting")
+                && RetiredIntegrations.text(.whatsapp, state: s!, language: "en", dataRoot: busy.dataRoot).contains("could not finish removing")
                 && RetiredIntegrations.doctorLines(busy).contains { $0.contains("not deleted yet") })
         table.immortal = []
         RetiredIntegrations.migrate(busy)
@@ -505,6 +508,63 @@ extension MidturnHarness {
                 && FileManager.default.fileExists(atPath: outside.appendingPathComponent("keep.txt").path)
                 && s?.whatsapp?.topKind == .link
                 && RetiredIntegrations.text(.whatsapp, state: s!, language: "en", dataRoot: env.dataRoot).contains("was not touched"))
+
+        // W9 folder already gone, record pending: an orphan bridge (its script
+        // deleted, so only the literal path identifies it) is still stopped.
+        RIUnits.resetStore(env)
+        try? RetiredIntegrations.save(RetiredIntegrations.State(version: 1, evaluated: true, gws: nil,
+            whatsapp: .init(wasEnabled: true, settings: .done, folder: .pending, topKind: nil, folderDetail: nil, notice: .pending)), to: env.stateURL)
+        let orphanScript = env.dataRoot.appendingPathComponent("whatsapp-bridge/index.js").path
+        let t9 = RIUnits.Table()
+        t9.rows = [RIUnits.proc(90, ["node", orphanScript])]
+        t9.dieOnTerm = [90]
+        let r9 = RetiredIntegrations.migrate(RIUnits.env(root: scratch, table: t9))
+        check("W9 folder absent: an orphan bridge with the literal path is still stopped (TERM), then the folder is absent",
+              t9.signals.map(\.0) == [90] && r9.bridge == .clear && RIUnits.state(env)?.whatsapp?.folder == .absent,
+              "signals \(t9.signals) bridge \(String(describing: r9.bridge))")
+
+        // W10 cleanup was done, then an orphan that cannot be stopped is found:
+        // the folder work reopens (pending, reason) and the notice is untouched.
+        var dn = RIUnits.state(env)!; dn.whatsapp?.folder = .done; dn.whatsapp?.notice = .done
+        try? RetiredIntegrations.save(dn, to: env.stateURL)
+        let t10 = RIUnits.Table()
+        t10.rows = [RIUnits.proc(91, ["node", orphanScript])]
+        t10.immortal = [91]
+        RetiredIntegrations.migrate(RIUnits.env(root: scratch, table: t10))
+        s = RIUnits.state(env)
+        check("W10 an unstoppable orphan after done → pending with a reason, doctor shows it, notice stays done",
+              s?.whatsapp?.folder == .pending && s?.whatsapp?.folderDetail?.contains("may still be running") == true
+                && s?.whatsapp?.notice == .done && RetiredIntegrations.doctorLines(env).contains { $0.contains("not deleted yet") })
+
+        // W11 a folder that reappears after done and cannot be removed: the
+        // record reopens truthfully (doctor and a still-pending notice say so).
+        RIUnits.resetStore(env)
+        try? RetiredIntegrations.save(RetiredIntegrations.State(version: 1, evaluated: true, gws: nil,
+            whatsapp: .init(wasEnabled: true, settings: .done, folder: .done, topKind: .dir, folderDetail: nil, notice: .pending)), to: env.stateURL)
+        let back = RIUnits.plantBridge(env)
+        mkfifo(back.appendingPathComponent("special").path, 0o600)
+        RetiredIntegrations.migrate(env)
+        s = RIUnits.state(env)
+        check("W11 a reappeared folder that cannot be removed → pending with the reason, text B, doctor 'not deleted yet'",
+              s?.whatsapp?.folder == .pending && s?.whatsapp?.folderDetail?.contains("special file") == true
+                && RetiredIntegrations.text(.whatsapp, state: s!, language: "en", dataRoot: env.dataRoot).contains("could not finish removing")
+                && RetiredIntegrations.doctorLines(env).contains { $0.contains("not deleted yet") } && s?.whatsapp?.notice == .pending)
+        try? FileManager.default.removeItem(at: back.appendingPathComponent("special"))
+        RetiredIntegrations.migrate(env)
+        check("W11b once removable it is done again; the notice is still owed exactly once",
+              RIUnits.state(env)?.whatsapp?.folder == .done && RIUnits.state(env)?.whatsapp?.notice == .pending)
+
+        // W12 after absent, a symlink appears: removed as a link, kind recorded.
+        RIUnits.resetStore(env)
+        try? RetiredIntegrations.save(RetiredIntegrations.State(version: 1, evaluated: true, gws: nil,
+            whatsapp: .init(wasEnabled: true, settings: .done, folder: .absent, topKind: nil, folderDetail: nil, notice: .pending)), to: env.stateURL)
+        try? FileManager.default.createSymbolicLink(at: env.dataRoot.appendingPathComponent("whatsapp-bridge"), withDestinationURL: outside)
+        RetiredIntegrations.migrate(env)
+        s = RIUnits.state(env)
+        check("W12 a link appearing after absent → done with kind link, text A-link, target kept",
+              s?.whatsapp?.folder == .done && s?.whatsapp?.topKind == .link
+                && FileManager.default.fileExists(atPath: outside.appendingPathComponent("keep.txt").path)
+                && RetiredIntegrations.text(.whatsapp, state: s!, language: "en", dataRoot: env.dataRoot).contains("removed the link"))
         RIUnits.resetStore(env)
     }
 }

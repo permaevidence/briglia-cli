@@ -70,6 +70,31 @@ extension MidturnHarness {
         }
         check("S13 pid reused between SIGTERM and the SIGKILL decision → never SIGKILLed",
               o == .clear && t.signals.map(\.1) == [SIGTERM], "signals \(t.signals.map(\.1))")
+        // S14/S15: a shim and its child; signalling the shim retires the
+        // child and its pid is reused mid-batch → the reused pid is never hit.
+        let shim = RIUnits.proc(100, ["/x/briglia", "__setsid-exec", "--", "/usr/bin/node", script])
+        let child = RIUnits.proc(101, ["/usr/bin/node", script], ppid: 100)
+        (o, t) = run([shim, child]) { tb in
+            tb.afterSignal = { pid, sig, table in
+                guard pid == 100, sig == SIGTERM else { return }
+                table.rows.removeAll { $0.pid == 100 }
+                table.rows = table.rows.map { $0.pid == 101 ? RIUnits.proc(101, ["unrelated", "work"]) : $0 }
+            }
+        }
+        check("S14 TERM batch: a pid retired and reused mid-batch is never signalled",
+              !t.signals.contains { $0.0 == 101 } && o == .clear, "signals \(t.signals)")
+        (o, t) = run([shim, child]) { tb in
+            tb.termWait = 0
+            tb.immortal = [100, 101]
+            tb.afterSignal = { pid, sig, table in
+                guard pid == 100, sig == SIGKILL else { return }
+                table.immortal.remove(100)
+                table.rows.removeAll { $0.pid == 100 }
+                table.rows = table.rows.map { $0.pid == 101 ? RIUnits.proc(101, ["unrelated", "work"]) : $0 }
+            }
+        }
+        check("S15 KILL batch: a pid retired and reused mid-batch is never SIGKILLed",
+              !t.signals.contains { $0.0 == 101 && $0.1 == SIGKILL }, "signals \(t.signals)")
         check("S12 shape rules: exact arities only",
               BridgeScanner.scriptArgument(["node", "a", "b"]) == nil && BridgeScanner.scriptArgument(["node"]) == nil
                 && BridgeScanner.scriptArgument(["/b", "__setsid-exec", "--", "node", "s", "extra"]) == nil

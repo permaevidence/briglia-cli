@@ -121,9 +121,42 @@ extension MidturnHarness {
         check("M9 Telegram registered → sent there once (not locally)",
               !owed && tgChannel.delivered.filter(Self.isGwsNotice).count == 1 && emitted.isEmpty,
               "owed \(owed) delivered \(tgChannel.delivered) emitted \(emitted)")
+
+        // M10: polling stops while the first of two notices is being sent →
+        // the second is not consumed (re-checked before each consume).
+        clear()
+        try RetiredIntegrations.save(RetiredIntegrations.State(version: 1, evaluated: true,
+            gws: .init(legacyUnset: false, conversion: .done, notice: .pending),
+            whatsapp: .init(wasEnabled: true, settings: .done, folder: .absent, topKind: nil, folderDetail: nil, notice: .pending)),
+                                     to: env.stateURL)
+        let flip = RIFlipChannel(kind: .telegram) { await MainActor.run { manager.isPolling = false } }
+        manager._svRegisterChannel(flip)
+        manager._svSetLastUserAddress(tg)
+        manager.isPolling = true
+        _ = await manager.retiredNoticeTick()
+        let s10 = RIUnits.state(env)
+        check("M10 polling stops during the first send → one send, the second notice still pending",
+              flip.sent.count == 1 && s10?.gws?.notice == .done && s10?.whatsapp?.notice == .pending,
+              "sent \(flip.sent.count) gws \(String(describing: s10?.gws?.notice)) wa \(String(describing: s10?.whatsapp?.notice))")
         manager.isPolling = false
         manager._svUnregisterChannel(.telegram)
         bag.removeAll()
         clear()
     }
+}
+
+/// A channel that runs `onSend` (e.g. stops polling) inside each send.
+final class RIFlipChannel: ChatChannel, @unchecked Sendable {
+    let kind: ChannelKind
+    private let onSend: @Sendable () async -> Void
+    private let lock = NSLock()
+    private var _sent: [String] = []
+    var sent: [String] { lock.lock(); defer { lock.unlock() }; return _sent }
+    init(kind: ChannelKind, onSend: @escaping @Sendable () async -> Void) { self.kind = kind; self.onSend = onSend }
+    func sendText(chatId: String, text: String) async throws {
+        lock.lock(); _sent.append(text); lock.unlock()
+        await onSend()
+    }
+    func sendPhoto(chatId: String, imageData: Data, caption: String?, mimeType: String) async throws {}
+    func sendDocument(chatId: String, documentData: Data, filename: String, caption: String?, mimeType: String) async throws {}
 }

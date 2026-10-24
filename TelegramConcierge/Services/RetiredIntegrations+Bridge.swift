@@ -126,16 +126,28 @@ struct BridgeScanner {
             return .unknown("the process table could not be read")
         }
         if initial.isEmpty { return .clear }
-        // Signals go only to processes the scan JUST confirmed (fresh read
-        // before each signal), so a stale or reused pid is never hit.
-        for p in initial { signal(p.pid, SIGTERM) }
+        // Every single signal goes to a pid the table was JUST re-read for
+        // and that is still a bridge invocation of this install (a shim's
+        // exit can retire its child mid-batch; a pid can be reused).
+        if let why = signalEach(initial, SIGTERM, target) { return .unknown(why) }
         if waitGone(target, within: termWait) { return finish(target, initial) }
-        switch scan(target) {
-        case .unreadable(let why): return .unknown(why)
-        case .found(let left): for p in left { signal(p.pid, SIGKILL) }
-        }
+        if let why = signalEach(initial, SIGKILL, target) { return .unknown(why) }
         _ = waitGone(target, within: killWait)
         return finish(target, initial)
+    }
+
+    /// Signals each pid of `candidates` after a fresh scan confirms it is
+    /// still a bridge invocation of this install; returns a reason when the
+    /// table or a same-user process cannot be read (nothing more is sent).
+    private func signalEach(_ candidates: [Proc], _ sig: Int32, _ target: Target) -> String? {
+        for p in candidates {
+            switch scan(target) {
+            case .unreadable(let why): return why
+            case .found(let now):
+                if now.contains(where: { $0.pid == p.pid }) { signal(p.pid, sig) }
+            }
+        }
+        return nil
     }
 
     private func waitGone(_ target: Target, within seconds: TimeInterval) -> Bool {
