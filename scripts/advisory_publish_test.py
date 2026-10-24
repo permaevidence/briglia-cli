@@ -116,6 +116,18 @@ def run_tests(m, tmp, only=None, fetch=None):
     t("a missing bundle row is failed", cov(d) == ["failed"])
     d = build(bundle([row([rec(1)])], kev_ok=False))
     t("KEV feed failure → KEV coverage failed", cov(d, "cisa-kev") == ["failed"])
+    def kev_checked(v):
+        b = bundle([row([rec(1)])], kev={"CVE-2099-0001": "2026-10-20"})
+        b["sources"]["cisa-kev"]["checkedAt"] = v
+        return cov(build(b), "cisa-kev")
+    t("N5-1: an unsupported KEV checkedAt (date only, fraction, +00:60, +24:00) → KEV failed, never a refusal",
+      all(kev_checked(v) == ["failed"] for v in ("2026-10-24", "2026-10-24T00:00:00.123Z",
+                                                 "2026-10-24T00:00:00+00:60", "2026-10-24T00:00:00+24:00")))
+    t("N5-1 control: a wire timestamp (Z or a real offset) keeps KEV ok",
+      kev_checked("2026-10-24T00:00:00Z") == ["ok"] and kev_checked("2026-10-24T01:00:00+01:00") == ["ok"])
+    frac = row([rec(1)])
+    frac["checkedAt"] = "2026-10-24T00:00:00.5Z"
+    t("N5-1: an unsupported row checkedAt fails that row, never a refusal", cov(build(bundle([frac]))) == ["failed"])
     t("a malformed KEV map (non-string dateAdded) → KEV coverage failed, document still signable",
       cov(build(bundle([row([rec(1)])], kev={"CVE-2099-0001": {"x": 1}})), "cisa-kev") == ["failed"])
     d = build(bundle([row([rec(1)])], kev={"CVE-2099-0001": "2026-10-20"}))
@@ -315,6 +327,8 @@ BREAKS = [
      '    if not withdrawn_valid(record.get("withdrawn")):', '    if False:', "fetch"),
     ("R3-R2 fetch: malformed withdrawn fails the source",
      "    if m.group(8) is None and (int(m.group(10)) > 23 or int(m.group(11)) > 59):", "    if False:", "fetch"),
+    ("N5-1: an unsupported KEV checkedAt (date only, fraction, +00:60, +24:00) → KEV failed, never a refusal",
+     "    return m.group(7) is not None or (int(m.group(8)) <= 23 and int(m.group(9)) <= 59)", "    return True"),
     ("N1: the signing gate counts UTF-8 bytes like the client",
      'if type(t) is not str or len(t.encode()) > 32:', 'if type(t) is not str or len(t) > 32:'),
     ("R2 fetch: a record that does not name the package is an incomplete source",

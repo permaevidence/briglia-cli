@@ -417,11 +417,8 @@ def build(watchlist_path, bundle, prev, now):
     kev_ok = (kev_src.get("status") == "ok" and type(cves) is dict and bool(cves)
               and all(type(k) is str and re.fullmatch(r"CVE-[0-9]{4}-[0-9]{4,}", k, re.ASCII)
                       and (v is None or (type(v) is str and len(v.encode()) <= 32 and v.isprintable())) for k, v in cves.items()))
-    try:
-        if kev_ok:
-            parse_iso(kev_src.get("checkedAt"))
-    except (ValueError, TypeError):
-        kev_ok = False
+    if kev_ok and not wire_time(kev_src.get("checkedAt")):
+        kev_ok = False            # N5-1: one wire-compatible rule, never a refusal
     kev = dict(cves) if kev_ok else {}
     prev_rows, prev_adv = previous_rows(prev)
     by_row = {}
@@ -448,7 +445,8 @@ def build(watchlist_path, bundle, prev, now):
                 complete = False
                 continue
             try:
-                parse_iso(row.get("checkedAt"))
+                if not wire_time(row.get("checkedAt")):
+                    raise Incomplete("checkedAt is not a wire timestamp")
                 converted, dropped = [], False
                 for rec in row["records"]:
                     try:
@@ -587,17 +585,30 @@ def _clist(v, what, mx):
     return v
 
 
-def _cdate(v, what):
-    # ISO8601DateFormatter .withInternetDateTime: no fractional seconds.
-    if type(v) is not str or len(v.encode()) > 40 or not ISO_RE.fullmatch(v):
-        raise Refuse(f"{what} is not an ISO 8601 timestamp")
+WIRE_TIME_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:(Z)|[+-]([0-9]{2}):([0-9]{2}))",
+                          re.ASCII)
+
+
+def wire_time(v):
+    """The one timestamp form the publisher writes and the client parses
+    (ISO8601DateFormatter .withInternetDateTime): ASCII digits, a real date
+    and time, no fraction, Z or ±HH:MM with HH ≤ 23 and MM ≤ 59 (N5-1)."""
+    if type(v) is not str:
+        return False
+    m = WIRE_TIME_RE.fullmatch(v)
+    if not m:
+        return False
     try:
-        return parse_iso(v)
+        datetime.datetime(*(int(m.group(i)) for i in range(1, 7)))
     except ValueError:
+        return False
+    return m.group(7) is not None or (int(m.group(8)) <= 23 and int(m.group(9)) <= 59)
+
+
+def _cdate(v, what):
+    if not wire_time(v):
         raise Refuse(f"{what} is not an ISO 8601 timestamp")
-
-
-ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})")
+    return parse_iso(v)
 
 
 def check_payload(data):
