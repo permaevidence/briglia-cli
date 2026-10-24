@@ -517,7 +517,7 @@ def previous_rows(prev):
 def build(watchlist_path, bundle, prev, now, platforms_path=None, floors=None, report=None):
     """floors: identity key → floor (load_floors); None prunes nothing.
     report: a dict filled with per-source pruned counts (builder report only;
-    nothing about pruning is written into the payload)."""
+    the payload carries only each deb entry's `floor`, the client gate)."""
     if report is not None:
         report.setdefault("pruned", {})
     platforms_path = platforms_path or advisory_libreoffice.DEFAULT_PLATFORMS

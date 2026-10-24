@@ -234,8 +234,8 @@ enum LocalTools {
         var belowFloor: Text? = nil
         if let floor = entry?.floor, scheme == .deb,
            (LocalToolsVersion.compare(i.compareVersion, floor, scheme: .deb) ?? -1) < 0 {
-            belowFloor = Text("this version is older than the oldest one this release ever shipped, so not every advisory was checked",
-                              "questa versione è più vecchia della più vecchia mai distribuita per questa release, quindi non tutti gli avvisi sono stati controllati")
+            belowFloor = Text("this version is older than the versions the advisory list covers for this release (or cannot be compared with them), so not every advisory could be checked",
+                              "questa versione è più vecchia di quelle coperte dall'elenco di avvisi per questa release (o non si può confrontare), quindi non tutti gli avvisi si sono potuti controllare")
         }
         if !r.affected.isEmpty {
             if r.hasInstallableFix { r.state = .affectedFixInstallable }

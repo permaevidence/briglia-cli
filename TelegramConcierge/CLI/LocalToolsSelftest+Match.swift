@@ -229,7 +229,7 @@ extension LocalToolsSelftest {
         }
         let below = state("7:4.4.1-2")
         t.check("floor: an installed version below the floor is never 'no known issue' (unknown, with the reason)",
-                below?.state == .unknown && below?.reason?.en.contains("older than the oldest one this release ever shipped") == true)
+                below?.state == .unknown && below?.reason?.en.contains("older than the versions the advisory list covers") == true)
         t.check("floor: control — the same version without a floor reads 'no known issue'", state("7:4.4.1-2", floor: nil)?.state == .noKnownIssue)
         t.check("floor: at the floor and above, the verdict is the same as without a floor",
                 ["7:5.1.2-3", "7:5.1.2-3+deb12u1", "7:9.0-1"].allSatisfy { v in
