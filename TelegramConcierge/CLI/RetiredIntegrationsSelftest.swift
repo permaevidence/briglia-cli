@@ -467,7 +467,7 @@ extension MidturnHarness {
               FileManager.default.fileExists(atPath: kept.path) && s?.whatsapp?.folder == .pending && s?.whatsapp?.folderDetail != nil
                 && RetiredIntegrations.dueNotices(s!, now: Date()) == [.whatsapp]
                 && RetiredIntegrations.text(.whatsapp, state: s!, language: "en", dataRoot: busy.dataRoot).contains("could not finish removing")
-                && RetiredIntegrations.doctorLines(busy).contains { $0.contains("not deleted yet") })
+                && RetiredIntegrations.doctorLines(busy).contains { $0.contains("is not finished") })
         table.immortal = []
         RetiredIntegrations.migrate(busy)
         check("W6b once the bridge can be stopped the next start removes the folder (done, notice still owed once)",
@@ -534,7 +534,7 @@ extension MidturnHarness {
         s = RIUnits.state(env)
         check("W10 an unstoppable orphan after done → pending with a reason, doctor shows it, notice stays done",
               s?.whatsapp?.folder == .pending && s?.whatsapp?.folderDetail?.contains("may still be running") == true
-                && s?.whatsapp?.notice == .done && RetiredIntegrations.doctorLines(env).contains { $0.contains("not deleted yet") })
+                && s?.whatsapp?.notice == .done && RetiredIntegrations.doctorLines(env).contains { $0.contains("is not finished") })
 
         // W11 a folder that reappears after done and cannot be removed: the
         // record reopens truthfully (doctor and a still-pending notice say so).
@@ -548,7 +548,7 @@ extension MidturnHarness {
         check("W11 a reappeared folder that cannot be removed → pending with the reason, text B, doctor 'not deleted yet'",
               s?.whatsapp?.folder == .pending && s?.whatsapp?.folderDetail?.contains("special file") == true
                 && RetiredIntegrations.text(.whatsapp, state: s!, language: "en", dataRoot: env.dataRoot).contains("could not finish removing")
-                && RetiredIntegrations.doctorLines(env).contains { $0.contains("not deleted yet") } && s?.whatsapp?.notice == .pending)
+                && RetiredIntegrations.doctorLines(env).contains { $0.contains("is not finished") } && s?.whatsapp?.notice == .pending)
         try? FileManager.default.removeItem(at: back.appendingPathComponent("special"))
         RetiredIntegrations.migrate(env)
         check("W11b once removable it is done again; the notice is still owed exactly once",

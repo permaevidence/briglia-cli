@@ -488,7 +488,7 @@ enum RetiredIntegrations {
             if let w = state.whatsapp {
                 switch w.folder {
                 case .pending:
-                    lines.append("WhatsApp was removed from Briglia — its private bridge folder \(env.dataRoot.appendingPathComponent("whatsapp-bridge").path) is not deleted yet\(w.folderDetail.map { " (\($0))" } ?? ""); Briglia retries at each start")
+                    lines.append("WhatsApp was removed from Briglia — cleanup of its private bridge (folder \(env.dataRoot.appendingPathComponent("whatsapp-bridge").path)) is not finished\(w.folderDetail.map { " (\($0))" } ?? ""); Briglia retries at each start")
                 case .absent:
                     lines.append("WhatsApp was removed from Briglia — no bridge folder was found")
                 case .done:
