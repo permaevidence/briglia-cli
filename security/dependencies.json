@@ -251,7 +251,7 @@
    "pin": "commit 08c6903cd8c0fde910a37f88322edcfb5dd907a8",
    "pin_kind": "exact",
    "scope": "build",
-   "source": ".github/workflows/ci.yml",
+   "source": ".github/workflows/advisory-publish.yml",
    "version": "5.0.0",
    "watch": "osv-package"
   },
@@ -281,7 +281,7 @@
    "pin": "commit ea165f8d65b6e75b540449e92b4886f43607fa02",
    "pin_kind": "exact",
    "scope": "build",
-   "source": ".github/workflows/ci.yml",
+   "source": ".github/workflows/advisory-publish.yml",
    "version": "4.6.2",
    "watch": "osv-package"
   },

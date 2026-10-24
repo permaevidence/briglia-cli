@@ -1,0 +1,96 @@
+name: Advisory list
+
+# Builds, validates and signs the local-tools advisory list (security plan
+# v16 §9.5.3, owner decision V7: signed daily in CI with its own key, no
+# phone approval, no Briglia build). It consumes the Security watch's
+# `advisory-input` artifact (public data fetched without secrets), parses it
+# (never executes it), and signs only the payload it validated. The signing
+# key is an ENVIRONMENT secret of `advisory-sign` and appears in exactly one
+# step's environment. Publication to briglia.dev / the GitHub mirror is NOT
+# armed: it needs the owner's provisioning decision (see
+# docs/LOCAL_TOOLS_KEY_PROVISIONING.md in private-docs); until then the
+# signed list is only kept as a workflow artifact.
+on:
+  workflow_run:
+    workflows: ["Security watch"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Security watch run whose advisory-input to use (default: the triggering run)"
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: advisory-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, validate and sign the advisory list
+    if: github.repository == 'permaevidence/briglia-cli-private' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'cancelled')
+    runs-on: ubuntu-latest
+    environment: advisory-sign
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Signing key provisioned?
+        id: gate
+        run: |
+          if [ -f security/advisory-signing-pubkey.pem ]; then
+            echo "armed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::advisory signing key not provisioned (security/advisory-signing-pubkey.pem missing) — nothing is signed"
+            echo "armed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download the watch job's advisory input
+        if: steps.gate.outputs.armed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
+        run: |
+          case "$RUN_ID" in ''|*[!0-9]*) echo "✖ no watch run id"; exit 1;; esac
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name advisory-input --dir "$RUNNER_TEMP/in"
+      - name: Fetch and verify the previously published list (optional)
+        if: steps.gate.outputs.armed == 'true'
+        env:
+          LIST_URL: ${{ vars.ADVISORY_LIST_URL || 'https://briglia.dev/advisories/v1/local-tools.sig.json' }}
+        run: |
+          set +e
+          curl -fsS --max-time 30 --max-filesize 368640 -o "$RUNNER_TEMP/prev.sig.json" "$LIST_URL" \
+            && .github/scripts/verify-advisory.sh "$RUNNER_TEMP/prev.sig.json" security/advisory-signing-pubkey.pem "$RUNNER_TEMP/prev.json"
+          [ $? -eq 0 ] || { echo "::notice::no verified previous list (first run, or unavailable)"; rm -f "$RUNNER_TEMP/prev.json"; }
+          exit 0
+      - name: Build and validate (parsers only, no secret in this step)
+        if: steps.gate.outputs.armed == 'true'
+        run: |
+          PREV=()
+          [ -f "$RUNNER_TEMP/prev.json" ] && PREV=(--previous "$RUNNER_TEMP/prev.json")
+          python3 scripts/advisory_publish.py build --input "$RUNNER_TEMP/in/advisory-input.json" \
+            --out "$RUNNER_TEMP/payload.json" "${PREV[@]}"
+      - name: Sign (the only step that sees the key)
+        if: steps.gate.outputs.armed == 'true'
+        env:
+          SIGNING_KEY_B64: ${{ secrets.BRIGLIA_ADVISORY_SIGNING_KEY }}
+        run: |
+          umask 077
+          KEY="$(mktemp)"
+          trap 'rm -f "$KEY"' EXIT
+          printf '%s' "$SIGNING_KEY_B64" | base64 -d > "$KEY"
+          .github/scripts/sign-advisory.sh "$KEY" "$RUNNER_TEMP/payload.json" "$RUNNER_TEMP/local-tools.sig.json"
+          .github/scripts/verify-advisory.sh "$RUNNER_TEMP/local-tools.sig.json" security/advisory-signing-pubkey.pem
+      - name: Keep the signed list
+        if: steps.gate.outputs.armed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: advisory-list
+          path: ${{ runner.temp }}/local-tools.sig.json
+          retention-days: 7
+      - name: Publish (not armed)
+        if: steps.gate.outputs.armed == 'true'
+        run: echo "::notice::publication target not armed yet (owner decision pending); the signed list is kept as the 'advisory-list' artifact"

@@ -136,8 +136,15 @@ def watch_workflow_errors(text):
     if not re.search(r"timeout-minutes: \d+", text):
         errs.append("a job timeout is required")
     runs = re.findall(r"run: (.+)", text)
-    if runs != ["python3 scripts/security_inventory.py --check", "python3 scripts/security_watch.py"]:
-        errs.append(f"run steps must be exactly the inventory check and the watch script, got {runs}")
+    # Phase 3 (plan v16 §9.5.3): the watch also fetches the PUBLIC data of
+    # the local-tools advisory list and uploads it as an artifact; it still
+    # holds no secret and never signs or publishes.
+    if runs != ["python3 scripts/security_inventory.py --check", "python3 scripts/security_watch.py",
+                'python3 scripts/advisory_fetch.py --out "$RUNNER_TEMP/advisory-input"']:
+        errs.append(f"run steps must be exactly the inventory check, the watch script and the advisory fetch, got {runs}")
+    names = [u.split("@")[0] for u in uses]
+    if names != ["actions/checkout", "actions/upload-artifact"]:
+        errs.append(f"actions must be exactly checkout and upload-artifact, got {names}")
     return errs
 
 
@@ -154,6 +161,10 @@ def watch_workflow():
         ("action by tag", text.replace("actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8", "actions/checkout@v5")),
         ("credentials persisted", text.replace("persist-credentials: false", "persist-credentials: true")),
         ("an extra build step", text.replace("        run: python3 scripts/security_watch.py\n", "        run: python3 scripts/security_watch.py\n      - name: x\n        run: swift build\n")),
+        ("the advisory fetch given a signing secret", text.replace('run: python3 scripts/advisory_fetch.py --out "$RUNNER_TEMP/advisory-input"',
+            'run: python3 scripts/advisory_fetch.py --out "$RUNNER_TEMP/advisory-input"\n        env:\n          K: ${{ secrets.BRIGLIA_ADVISORY_SIGNING_KEY }}')),
+        ("a signing step added to the watch", text.replace('run: python3 scripts/advisory_fetch.py --out "$RUNNER_TEMP/advisory-input"',
+            'run: python3 scripts/advisory_fetch.py --out "$RUNNER_TEMP/advisory-input"\n      - name: s\n        run: .github/scripts/sign-advisory.sh k p o')),
     ]
     for label, mutated in breaks:
         check(f"security-watch.yml break caught: {label}", mutated != text and bool(watch_workflow_errors(mutated)))

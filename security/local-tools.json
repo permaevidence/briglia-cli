@@ -1,0 +1,376 @@
+{
+ "_comment": "Watchlist of the signed local-tools advisory list (security plan v16 \u00a79.5.2 S1, \u00a79.5.3). Read by scripts/advisory_fetch.py (watch job, no secrets) and scripts/advisory_publish.py (publisher). At most 64 identities per list. Not covered yet (clients show 'unknown'): Ubuntu 22.04, Raspbian 32-bit, Homebrew formulae/casks (OSV's Homebrew data is too thin to say 'no known issues'), vendor builds (Node, Python, Chrome, LibreOffice.app).",
+ "ecosystems": [
+  {
+   "ecosystem": "deb:debian:12",
+   "osv": [
+    "Debian:12"
+   ],
+   "sources": [
+    "osv:Debian:12",
+    "cisa-kev"
+   ]
+  },
+  {
+   "ecosystem": "deb:debian:13",
+   "osv": [
+    "Debian:13"
+   ],
+   "sources": [
+    "osv:Debian:13",
+    "cisa-kev"
+   ]
+  },
+  {
+   "ecosystem": "deb:ubuntu:24.04",
+   "osv": [
+    "Ubuntu:24.04:LTS",
+    "Ubuntu:Pro:24.04:LTS"
+   ],
+   "sources": [
+    "osv:Ubuntu:24.04:LTS",
+    "osv:Ubuntu:Pro:24.04:LTS",
+    "cisa-kev"
+   ]
+  }
+ ],
+ "identities": [
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "ffmpeg"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "imagemagick"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "poppler"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "pandoc"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "libreoffice"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "ghostscript"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "pango1.0"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "cairo"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "gdk-pixbuf"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "nodejs"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "git"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "curl"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "openssl"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "libxml2"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "unzip"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "zip"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "tar"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "python3.11"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "12",
+   "source": "chromium"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "ffmpeg"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "imagemagick"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "poppler"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "pandoc"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "libreoffice"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "ghostscript"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "pango1.0"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "cairo"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "gdk-pixbuf"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "nodejs"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "git"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "curl"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "openssl"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "libxml2"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "unzip"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "zip"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "tar"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "python3.13"
+  },
+  {
+   "distro": "debian",
+   "kind": "deb",
+   "release": "13",
+   "source": "chromium"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "ffmpeg"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "imagemagick"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "poppler"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "pandoc"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "libreoffice"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "ghostscript"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "pango1.0"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "cairo"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "gdk-pixbuf"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "nodejs"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "git"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "curl"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "openssl"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "libxml2"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "unzip"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "zip"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "tar"
+  },
+  {
+   "distro": "ubuntu",
+   "kind": "deb",
+   "release": "24.04",
+   "source": "python3.12"
+  }
+ ],
+ "schema": 1
+}
