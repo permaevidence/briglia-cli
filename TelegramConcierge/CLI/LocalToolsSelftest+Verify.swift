@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 
 extension LocalToolsSelftest {
     static func rejects(_ t: Tally, _ label: String, _ raw: Data, policy: AdvisoryPolicy = LTF.policy,
@@ -33,10 +38,40 @@ extension LocalToolsSelftest {
             o["domain"] = LocalAdvisory.domainString
             rejects(t, "verify: signature bound to its domain string", try JSONSerialization.data(withJSONObject: o), contains: "bad signature")
         } catch { t.check("verify: signature bound to its domain string", false, "\(error)") }
-        let placeholder = AdvisoryPolicy(keys: AdvisoryKeys.active, domain: LocalAdvisory.domainString, url: LTF.policy.url)
-        t.check("keys: the compiled set is a placeholder that verifies nothing", AdvisoryKeys.active.isEmpty && !AdvisoryPolicy.production.isProvisioned)
+        // Provisioned key set (2026-10-24): exactly the owner's v1 key, parsed
+        // from the compiled block, with an ID derived from its own bytes.
+        let pinnedId = "briglia-advisories-v1-98de778b836305c3"
+        let pinnedHex = "b7bb6f1ae500feab9eb6e5a974466f02124e70431eb93dc97a8be4c80e1eb761"
+        let active = AdvisoryKeys.active
+        t.check("keys: the compiled set is exactly the pinned v1 advisory key",
+                AdvisoryKeys.pinnedKeyHex.count == 1 && active.count == 1 && active.first?.keyId == pinnedId
+                    && active.first?.publicKey == AdvisoryKeys.hexData(pinnedHex)
+                    && AdvisoryPolicy.production.isProvisioned && AdvisoryPolicy.production.keys == active,
+                "\(active.map(\.keyId))")
+        t.check("keys: the pinned key ID is derived from SHA-256 of its raw public key",
+                active.first.map { "briglia-advisories-v1-" + ReleaseSecurity.hex(SHA256.hash(data: $0.publicKey)).prefix(16) == $0.keyId } == true)
+        t.check("keys: the pinned key is a valid Ed25519 public key",
+                active.first.map { (try? Curve25519.Signing.PublicKey(rawRepresentation: $0.publicKey)) != nil } == true)
+        t.check("keys: the production policy fetches the compiled briglia.dev URL and domain",
+                AdvisoryPolicy.production.url == AdvisoryPolicy.productionURL && AdvisoryPolicy.production.domain == LocalAdvisory.domainString)
         t.check("keys: the placeholder key ID is refused as a key", AdvisoryKeys.parse(keyId: AdvisoryKeys.placeholderKeyId, hex: String(repeating: "0", count: 64)) == nil)
-        rejects(t, "verify: not provisioned → refused before parsing", LTF.envelope(base), policy: placeholder, contains: "not provisioned")
+        // A list signed by any other (throwaway) key never verifies under the
+        // production key set, whether it names its own key or claims the
+        // pinned key ID.
+        let prodPolicy = AdvisoryPolicy(keys: AdvisoryKeys.active, domain: LocalAdvisory.domainString, url: LTF.policy.url)
+        rejects(t, "keys: a list signed by a throwaway key is rejected by the production key set",
+                LTF.envelope(base), policy: prodPolicy, contains: "unknown key")
+        do {
+            let (k, _) = LTF.signer(LTF.otherSeed)
+            let sig = try k.signature(for: LocalAdvisory.signatureInput(domain: LocalAdvisory.domainString, keyId: pinnedId, payload: base))
+            let env = ["format": LocalAdvisory.envelopeFormat, "domain": LocalAdvisory.domainString, "keyId": pinnedId,
+                       "payload": base.base64EncodedString(), "signature": sig.base64EncodedString()]
+            rejects(t, "keys: a throwaway-key signature claiming the pinned key ID is rejected",
+                    try JSONSerialization.data(withJSONObject: env, options: [.sortedKeys]), policy: prodPolicy, contains: "bad signature")
+        } catch { t.check("keys: a throwaway-key signature claiming the pinned key ID is rejected", false, "\(error)") }
+        let unprovisioned = AdvisoryPolicy(keys: [], domain: LocalAdvisory.domainString, url: LTF.policy.url)
+        t.check("keys: an empty key set is reported as not provisioned", !unprovisioned.isProvisioned)
+        rejects(t, "verify: not provisioned → refused before parsing", LTF.envelope(base), policy: unprovisioned, contains: "not provisioned")
         rejects(t, "verify: validity > 72 h rejected", LTF.envelope(LTF.payload(validity: 72 * 3600 + 1, coverage: [], entries: [])), contains: "72 h")
         rejects(t, "verify: published > now + 1 h rejected",
                 LTF.envelope(LTF.payload(published: LTF.now.addingTimeInterval(3601), coverage: [], entries: [])), contains: "future")

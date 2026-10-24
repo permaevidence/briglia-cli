@@ -21,6 +21,8 @@ user's own tools), end to end and hermetic:
 
 Every step runs with temporary HOME/XDG roots. Usage: security_phase3_test.py <briglia>
 """
+import base64
+import hashlib
 import http.server
 import json
 import os
@@ -37,6 +39,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import advisory_publish as pub          # noqa: E402
 import advisory_publish_test as fx      # noqa: E402
+
+# The owner-provisioned advisory key (2026-10-24, public half only).
+PINNED_ADVISORY_KEY_ID = "briglia-advisories-v1-98de778b836305c3"
+PINNED_ADVISORY_KEY_HEX = "b7bb6f1ae500feab9eb6e5a974466f02124e70431eb93dc97a8be4c80e1eb761"
 
 SEED = "22" * 32
 passed = failed = 0
@@ -317,6 +323,15 @@ def signing(binary):
         cenv = dict(env, BRIGLIA_ADVISORY_TEST_KEY=f"{keyid}:{raw.hex()}")
         rc5, out5 = run([binary, "__advisory-list-parse", f"{tmp}/sh.sig.json", "--now", str(int(fx.NOW))], env=cenv)
         check("signing parity: sign-advisory.sh envelope verifies in the client", '"ok":true' in out5, out5)
+        # The armed defaults: the committed PEM refuses a throwaway private key,
+        # and the compiled key set rejects a list signed by one.
+        rc6, out6 = run(["bash", str(ROOT / ".github/scripts/sign-advisory.sh"), f"{tmp}/k.pem", payload, f"{tmp}/w.json"], env=venv)
+        check("signing: with the committed key, sign-advisory.sh refuses a throwaway private key",
+              rc6 != 0 and "DIFFERENT" in out6 and not os.path.exists(f"{tmp}/w.json"), out6)
+        penv = {k: v for k, v in env.items() if k not in ("BRIGLIA_ADVISORY_TEST_KEY", "BRIGLIA_ADVISORY_URL")}
+        rc7, out7 = run([binary, "__advisory-list-parse", f"{tmp}/sh.sig.json", "--now", str(int(fx.NOW))], env=penv)
+        check("signing: a list signed by a throwaway key is rejected by the compiled (pinned) key set",
+              '"ok":true' not in out7 and "unknown key" in out7, out7)
 
 
 class Channel:
@@ -469,10 +484,27 @@ def static():
     check(f"static: every development-only driver refuses in stamped builds ({len(cmds)})", gated and len(cmds) == 5, cmds)
     keys = (ROOT / "TelegramConcierge/Services/LocalAdvisoryList.swift").read_text()
     block = keys[keys.index("ADVISORY-KEYS-BEGIN"):keys.index("ADVISORY-KEYS-END")]
-    check("static: the compiled advisory key set is the marked placeholder (not provisioned)",
-          "placeholderKeyId" in block and re.search(r'"[0-9a-f]{64}"', block) is None)
-    check("static: no committed advisory public key yet (publisher stays unarmed)",
-          not (ROOT / "security/advisory-signing-pubkey.pem").exists())
+    # Provisioned 2026-10-24 (owner key, generated on a separate machine): the
+    # compiled set and the committed PEM must be the same single key.
+    hexes = re.findall(r'publicKeyHex: "([0-9a-f]{64})"', block)
+    ids = re.findall(r'keyId: "(briglia-advisories-v[0-9]+-[0-9a-f]{16})"', block)
+    check("static: the compiled advisory key set is exactly one pinned key (no placeholder entry)",
+          len(hexes) == 1 and len(ids) == 1 and "placeholderKeyId" not in block
+          and ids[0] == PINNED_ADVISORY_KEY_ID and hexes[0] == PINNED_ADVISORY_KEY_HEX, (ids, hexes))
+    pem = (ROOT / "security/advisory-signing-pubkey.pem")
+    raw = b""
+    if pem.exists():
+        lines = pem.read_text().strip().splitlines()
+        if lines[:1] == ["-----BEGIN PUBLIC KEY-----"] and lines[-1:] == ["-----END PUBLIC KEY-----"]:
+            der = base64.b64decode("".join(lines[1:-1]), validate=True)
+            prefix = bytes.fromhex("302a300506032b6570032100")
+            raw = der[len(prefix):] if der.startswith(prefix) and len(der) == len(prefix) + 32 else b""
+    check("static: the committed advisory public key (publisher armed) is the compiled Ed25519 key",
+          raw.hex() == PINNED_ADVISORY_KEY_HEX, raw.hex())
+    check("static: the pinned key ID is briglia-advisories-v1- + SHA-256(raw key)[:16]",
+          PINNED_ADVISORY_KEY_ID == "briglia-advisories-v1-" + hashlib.sha256(raw).hexdigest()[:16])
+    ign = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-q", "security/advisory-signing-pubkey.pem"])
+    check("static: .gitignore does not hide the committed advisory public key (*.pem exception)", ign.returncode == 1, ign.returncode)
     # v18-v20 §9.5.11: the publish job is separate, in its own environment,
     # with only the scoped token; the signing job never sees that token.
     wf = (ROOT / ".github/workflows/advisory-publish.yml").read_text()

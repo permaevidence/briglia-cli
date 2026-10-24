@@ -230,15 +230,18 @@ struct AdvisoryKey: Equatable {
 }
 
 enum AdvisoryKeys {
-    /// Marked placeholder: NOT a key. No signature can verify against it, and
-    /// `isProvisioned` is false while it is the only entry, so the client
-    /// makes no request and reports the check as not yet available. The
-    /// owner-approved provisioning replaces this block (key ID + 64 hex).
+    /// The pinned advisory-list key set (provisioned 2026-10-24, owner-generated
+    /// on a separate machine; docs/LOCAL_TOOLS_KEY_PROVISIONING.md in private-docs).
+    /// Must match `security/advisory-signing-pubkey.pem` byte for byte; the key
+    /// ID is "briglia-advisories-v1-" + the first 16 hex of SHA-256(raw key).
+    /// Rotation = a release that changes this set AND the domain string.
     // ADVISORY-KEYS-BEGIN — edited only by the advisory key provisioning
     static let pinnedKeyHex: [(keyId: String, publicKeyHex: String)] = [
-        (keyId: placeholderKeyId, publicKeyHex: String(repeating: "0", count: 64)),
+        (keyId: "briglia-advisories-v1-98de778b836305c3",
+         publicKeyHex: "b7bb6f1ae500feab9eb6e5a974466f02124e70431eb93dc97a8be4c80e1eb761"),
     ]
     // ADVISORY-KEYS-END
+    /// Never a valid key ID (kept so a stray placeholder entry can never parse).
     static let placeholderKeyId = "PLACEHOLDER-advisory-key-not-provisioned"
 
     static func parse(keyId: String, hex: String) -> AdvisoryKey? {
@@ -272,7 +275,7 @@ struct AdvisoryPolicy {
 
     static let productionURL = URL(string: "https://briglia.dev/advisories/v1/local-tools.sig.json")!
 
-    /// Placeholder-only key set: the feature is not available yet.
+    /// An empty key set (no parsable pinned key): the feature is not available.
     var isProvisioned: Bool { !keys.isEmpty }
 
     /// Trust domain of the observation record (key set + domain string).

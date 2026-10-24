@@ -105,7 +105,7 @@ extension LocalToolsSelftest {
     static func serviceGroup(_ t: Tally) async {
         // Not provisioned: nothing fetched.
         let np = LTWorld("np", list: affectedList, resolutions: [.present(LTF.debInstance())])
-        let placeholder = AdvisoryPolicy(keys: AdvisoryKeys.active, domain: LocalAdvisory.domainString, url: LTF.policy.url)
+        let placeholder = AdvisoryPolicy(keys: [], domain: LocalAdvisory.domainString, url: LTF.policy.url)
         let nps = np.service(policy: placeholder)
         await nps.tick(afterCheck: true)
         t.check("service: placeholder key → no fetch, no evaluation, no message", np.fetches == 0 && np.sent.isEmpty && nps.evaluations == 0)

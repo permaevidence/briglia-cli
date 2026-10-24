@@ -18,4 +18,7 @@ regexes = [
     '''^am-test-key-123456$''',
     '''^12345:test-token-abcdef$''',
     '''^sk-proj-SYNTHETICcanaryKEY0123456789abcdefABCDEF$''',
+    # Not a secret: the PUBLIC advisory-list Ed25519 key (security/advisory-signing-pubkey.pem),
+    # pinned as hex in the client and its static test.
+    '''^b7bb6f1ae500feab9eb6e5a974466f02124e70431eb93dc97a8be4c80e1eb761$''',
 ]

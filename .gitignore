@@ -16,6 +16,9 @@ auth.json
 # exception — it is the expected-key pin the signing pipeline checks
 # against (never a private key; sign-envelope.sh derives and compares).
 !.github/release-keys/*.pub.pem
+# Likewise the PUBLIC advisory-list key (security plan §9.5.3): it arms the
+# advisory publisher and must equal the client's compiled ADVISORY-KEYS set.
+!security/advisory-signing-pubkey.pem
 *.p12
 *_ed25519*
 *.minisig

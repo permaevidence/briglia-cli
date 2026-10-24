@@ -141,6 +141,15 @@ MUTATIONS = [
      "AdvisoryResult(ids: Array(a.ids.prefix(LocalTools.maxReportIds)), primaryId:", "AdvisoryResult(ids: a.ids, primaryId:"),
     ("B45 (L1) stored base64 written with escaped slashes", STORE,
      "        e.outputFormatting.insert(.withoutEscapingSlashes)   // base64 payloads: no \"\\/\" growth\n", ""),
+    ("B46 (key) the compiled key set reverts to the placeholder (feature silently off)", LIST,
+     "        (keyId: \"briglia-advisories-v1-98de778b836305c3\",\n         publicKeyHex: \"b7bb6f1ae500feab9eb6e5a974466f02124e70431eb93dc97a8be4c80e1eb761\"),\n",
+     "        (keyId: placeholderKeyId, publicKeyHex: String(repeating: \"0\", count: 64)),\n"),
+    ("B47 (key) a wrong pinned public key (one byte changed)", LIST,
+     "publicKeyHex: \"b7bb6f1ae500feab9eb6e5a974466f02124e70431eb93dc97a8be4c80e1eb761\"",
+     "publicKeyHex: \"b7bb6f1ae500feab9eb6e5a974466f02124e70431eb93dc97a8be4c80e1eb760\""),
+    ("B48 (key) the parsed key loses its pinned key ID", LIST,
+     "AdvisoryKey(keyId: keyId, publicKey: data)",
+     "AdvisoryKey(keyId: \"briglia-advisories-v1-0000000000000000\", publicKey: data)"),
 ]
 
 
