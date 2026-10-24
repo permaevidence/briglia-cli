@@ -206,6 +206,31 @@ extension LocalToolsSelftest {
                 r4.sent.count == 1 && r4.vuln()?.attempt == nil, "\(r4.sent)")
         r4.cleanup()
 
+        // R2-R6 (Codex's trace, no artificial reconcile): curl + libcurl at
+        // one key → one notice; next: curl absent, libcurl unknown; then
+        // libcurl back at the same key → no second notice.
+        let curlList = LTF.envelope(LTF.payload(coverage: LTF.covAll("deb:debian:12:curl"),
+            entries: [LTF.debEntry("curl", [LTF.adv(["CVE-2099-0020"], events: [["introduced": "0"], ["fixed": "8.1.0-1"]], fixed: "8.1.0-1")])]))
+        func ci(_ tool: String, _ at: Date) -> LocalTools.Resolution {
+            var i = LTF.debInstance(tool: tool, source: "curl", version: "8.0.0-1", candidate: "8.1.0-1", binaries: [tool], asOf: at)
+            i.toolId = tool
+            return .present(i)
+        }
+        let sh = LTWorld("shared", list: curlList, resolutions: [ci("curl", LTF.now), ci("libcurl", LTF.now)])
+        let shs = sh.service()
+        await shs.tick(afterCheck: true)
+        t.check("R2-R6 service: one notice for the shared key, row records both tools",
+                sh.sent.count == 1 && sh.vuln()?.rows.first?.toolIds.sorted() == ["curl", "libcurl"], "\(String(describing: sh.vuln()?.rows))")
+        sh.now = sh.now.addingTimeInterval(7 * 3600)
+        sh.resolutions = [.absent(toolId: "curl"), .unknown(toolId: "libcurl", reason: LocalTools.Text("probe failed", "probe failed"))]
+        await shs.tick(afterCheck: false)
+        t.check("R2-R6 service: curl absent + libcurl unknown → row kept", sh.vuln()?.rows.count == 1)
+        sh.now = sh.now.addingTimeInterval(7 * 3600)
+        sh.resolutions = [.absent(toolId: "curl"), ci("libcurl", sh.now)]
+        await shs.tick(afterCheck: false)
+        t.check("R2-R6 service: libcurl back at the same key → no second notice", sh.sent.count == 1, "\(sh.sent)")
+        sh.cleanup()
+
         // Refused, then the version changed: the retry is dropped.
         let rv = LTWorld("refused-changed", list: affectedList, resolutions: [.present(LTF.debInstance())])
         rv.outcome = .refused(retryAfter: 1)

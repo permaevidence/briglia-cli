@@ -16,7 +16,7 @@ extension LocalToolsSelftest {
     static func consumeAll(_ s: inout LocalVulnState, _ reports: [LocalTools.ToolReport], now: Date = LTF.now) -> [LocalVuln.Proposal] {
         let lines = LocalVuln.proposals(s, reports: reports).lines
         if !lines.isEmpty {
-            LocalVuln.consume(&s, lines, text: LocalToolsText.message(lines, lang: "en"), listContentId: "c1",
+            LocalVuln.consume(&s, lines, reports: reports, text: LocalToolsText.message(lines, lang: "en"), listContentId: "c1",
                               noticeGeneration: 0, destination: dest, now: now)
             LocalVuln.recordOutcome(&s, .accepted, now: now)
         }
@@ -71,8 +71,16 @@ extension LocalToolsSelftest {
         let both = [report("curl", version: "8.0.0-1"), { var r = report("libcurl", version: "8.0.0-1"); r.identityKey = "deb:debian:12:curl"; return r }()]
         var curlR = both[0]; curlR.identityKey = "deb:debian:12:curl"
         t.check("R6: two tools at one identity/version → one line", consumeAll(&sh, [curlR, both[1]]).count == 1)
-        LocalVuln.reconcile(&sh, [.present(curlInst("curl", "8.0.0-1")), .present(curlInst("libcurl", "8.0.0-1"))])
-        t.check("R6: the row records both tools", sh.rows.first?.toolIds.sorted() == ["curl", "libcurl"])
+        t.check("R2-R6: the consume itself records every member (no later reconcile needed)", sh.rows.first?.toolIds.sorted() == ["curl", "libcurl"])
+        var immediate = sh
+        LocalVuln.reconcile(&immediate, [.absent(toolId: "curl"), .unknown(toolId: "libcurl", reason: LocalTools.Text("probe failed", "x"))])
+        t.check("R2-R6: next evaluation, one member absent and the other unknown → row kept", immediate.rows.count == 1)
+        var gone = sh
+        LocalVuln.reconcile(&gone, [.absent(toolId: "curl")])
+        t.check("R2-R6: a member missing from the next inventory → row kept", gone.rows.count == 1)
+        var moved = sh
+        LocalVuln.reconcile(&moved, [.absent(toolId: "curl"), .present(LTF.debInstance(tool: "libcurl", source: "other", version: "1-1", binaries: ["libcurl"]))])
+        t.check("R2-R6: a member now on another identity → row kept", moved.rows.count == 1)
         LocalVuln.reconcile(&sh, [.absent(toolId: "curl"), .present(curlInst("libcurl", "8.0.0-1"))])
         t.check("R6: one tool gone while the other still runs that version → row kept", sh.rows.count == 1)
         t.check("R6: …and no second initial notice", consumeAll(&sh, [both[1]]).isEmpty)
@@ -117,6 +125,24 @@ extension LocalToolsSelftest {
         let initMixed = LocalToolsText.message([LocalVuln.Proposal(key: "k", kind: .initial, report: mixed(.noFix(.notYet), .installable))], lang: "en")
         t.check("N16-3: initial message scopes the fix to the advisory it fixes and keeps the KEV mitigation",
                 initMixed.contains("To fix CVE-2099-0002, run:") && initMixed.contains("CVE-2099-0001 is also actively exploited"), initMixed)
+        // R2-R5: status/attention scoped like the messages, both languages.
+        var sv = LocalVulnState()
+        let mixedSnap = { () -> LocalTools.ToolReport in var r = mixed(.noFix(.notYet), .installable); r.state = .affectedFixInstallable; r.checkedAt = LTF.now; return r }()
+        sv.report = LocalToolsSnapshot(evaluatedAt: LTF.now, listSequence: 1, listContentId: "c", reports: [mixedSnap])
+        var obs = LocalAdvisoryStore.ObservationState()
+        obs.lastSuccess = LTF.now
+        obs.domains = [LocalAdvisoryStore.DomainRecord(domain: LTF.policy.trustDomain, sequence: 1, contentId: "c", published: LTF.now,
+                                                        expires: LTF.now.addingTimeInterval(3600), payload: Data(), firstSeenAt: LTF.now,
+                                                        lastConfirmedAt: LTF.now, touchedAt: LTF.now)]
+        let st = LocalToolsText.status(setting: .defaultOn, policy: LTF.policy, observation: obs, vuln: sv, now: LTF.now)
+        let en = st.reasons.first?.en ?? "", it = st.reasons.first?.it ?? ""
+        let detail = st.details.first { $0.contains("ffmpeg") } ?? ""
+        t.check("R2-R5: attention scopes the fix and keeps the outstanding KEV mitigation (EN)",
+                en.contains("To fix CVE-2099-0002, run:") && en.contains("CVE-2099-0001 is also actively exploited") && !en.contains("To fix it"), en)
+        t.check("R2-R5: attention scoped (IT)",
+                it.contains("Per correggere CVE-2099-0002, esegui:") && it.contains("anche CVE-2099-0001 è sfruttato attivamente"), it)
+        t.check("R2-R5: doctor detail scoped too",
+                detail.contains("To fix CVE-2099-0002, run:") && detail.contains("CVE-2099-0001 is also actively exploited"), detail)
         // Not messaged states.
         var unknownRow = report()
         unknownRow.state = .unknown

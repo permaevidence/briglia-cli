@@ -209,6 +209,24 @@ def run_tests(m, tmp, only=None, fetch=None):
     bad2["affected"] = [{"ranges": [{"type": "ECOSYSTEM", "events": "not-a-list"}]}]
     d = build(bundle([row([rec(1), bad2])]))
     t("R2: a malformed record over the ID cap is failed, not size-partial", cov(d) == ["failed"])
+    falsey = rec(2)
+    falsey["affected"] = [{"ranges": {}, "versions": ["1.0"]}]
+    d = build(bundle([row([falsey])]))
+    t("R2-R2: a present but malformed falsey container ({} ranges) fails the row", cov(d) == ["failed"])
+    falsey2 = rec(2)
+    falsey2["affected"][0]["versions"] = ""
+    t("R2-R2: versions given as an empty string fails the row", cov(build(bundle([row([falsey2])]))) == ["failed"])
+    late = rec(2, extra_ids=16)
+    late["affected"][0]["ranges"][0]["events"].append({"fixed": "not-a-deb-version!"})
+    d = build(bundle([row([rec(1), late])]))
+    t("R2-R2: an unorderable fixed version in an over-cap record fails the row (never partial)", cov(d) == ["failed"])
+    late2 = rec(2)
+    late2["affected"][0]["ranges"][0]["events"].append({"fixed": "not-a-deb-version!"})
+    t("R2-R2: …and the same without the ID overflow fails too", cov(build(bundle([row([rec(1), late2])]))) == ["failed"])
+    sevbad = rec(2, extra_ids=16)
+    sevbad["severity"] = {"score": "critical"}
+    t("R2-R2: malformed severity in an over-cap record fails the row",
+      cov(build(bundle([row([rec(1), sevbad])]))) == ["failed"])
     weird = rec(3)
     weird["affected"][0]["ranges"][0]["type"] = "é" * 20
     d = build(bundle([row([weird])]))
@@ -254,6 +272,10 @@ BREAKS = [
     ("R2: a malformed record over the ID cap is failed, not size-partial",
      '    ranges, versions, fixed, purl = [], [], [], None\n    for a in aff:',
      '    advisory_ids(rec)\n    ranges, versions, fixed, purl = [], [], [], None\n    for a in aff:'),
+    ("R2-R2: a present but malformed falsey container ({} ranges) fails the row",
+     "        rl = [] if rl is None else rl", "        rl = rl or []"),
+    ("R2-R2: an unorderable fixed version in an over-cap record fails the row (never partial)",
+     "    best = None\n    for v in fixed:", "    advisory_ids(rec)\n    best = None\n    for v in fixed:"),
     ("N1: the signing gate counts UTF-8 bytes like the client",
      'if type(t) is not str or len(t.encode()) > 32:', 'if type(t) is not str or len(t) > 32:'),
     ("R2 fetch: a record that does not name the package is an incomplete source",
@@ -279,7 +301,7 @@ BREAKS = [
     ("validity over 72 h refuses to sign", "if not 0 < exp - pub <= 72 * 3600:", "if False:"),
     ("KEV feed failure → KEV coverage failed", 'statuses[source] = ("ok", kev_src.get("checkedAt")) if kev_ok else ("failed", None)',
      'statuses[source] = ("ok", kev_src.get("checkedAt") or "2026-10-24T00:00:00Z")'),
-    ("several fixed events → the highest by dpkg order", "            if c > 0:\n                best = v", "            if c < 0:\n                best = v"),
+    ("several fixed events → the highest by dpkg order", "        if c > 0:\n            best = v", "        if c < 0:\n            best = v"),
 ]
 
 

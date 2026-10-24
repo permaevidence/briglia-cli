@@ -158,14 +158,24 @@ enum LocalVuln {
 
     /// Consume: rows and the attempt record change together (the caller
     /// writes them in ONE atomic replacement before the single send).
-    static func consume(_ s: inout LocalVulnState, _ lines: [Proposal], text: String, listContentId: String,
+    /// `reports`: the whole evaluation the lines were derived from. A new
+    /// row records EVERY tool seen at its (identity, version) in it, in this
+    /// same atomic write (R2-R6), so a member's later failure cannot reset
+    /// the send-once guarantee.
+    static func consume(_ s: inout LocalVulnState, _ lines: [Proposal], reports: [LocalTools.ToolReport] = [],
+                        text: String, listContentId: String,
                         noticeGeneration: UInt64, destination: UpdateNotice.Destination, now: Date) {
         for p in lines {
             let r = p.report
             switch p.kind {
             case .initial:
+                var members = [r.toolId]
+                for o in reports where o.identityKey == r.identityKey && o.installedVersion == r.installedVersion
+                    && o.identityKey != nil && !members.contains(o.toolId) {
+                    members.append(o.toolId)
+                }
                 s.rows.append(LocalVulnRow(
-                    key: p.key, identityKey: r.identityKey ?? "?", toolIds: [r.toolId], installedVersion: r.installedVersion ?? "?",
+                    key: p.key, identityKey: r.identityKey ?? "?", toolIds: members, installedVersion: r.installedVersion ?? "?",
                     firstAt: now,
                     communicated: LocalVulnCommunicated(floor: false, level: r.level, kev: r.kevAffected,
                                                         kevNoFix: r.kevWithoutFix && !r.hasInstallableFix),

@@ -105,8 +105,14 @@ MUTATIONS = [
      "        for v in affected.versions {", "        for v in [String]() {"),
     ("B32 (R5/N16-3) an escalation with a fix drops the KEV mitigation", S + "LocalToolsText.swift",
      "            if let m = kevMitigationSentence(r, lang: lang, also: !fixable(r).isEmpty) { s += \" \" + m }", ""),
+    ("B33 (R2-R6) the consume records only the first tool of a shared key", ENGINE,
+     "                for o in reports where o.identityKey == r.identityKey",
+     "                for o in [LocalTools.ToolReport]() where o.identityKey == r.identityKey"),
+    ("B34 (R2-R5) the Security line uses the unscoped fix instruction", S + "LocalToolsText.swift",
+     "                + (fixSentence(r, lang: lang).map { \" — \" + $0 } ?? \"\")\n                + (kevMitigationSentence(r, lang: lang, also: true).map { \" \" + $0 } ?? \"\")",
+     "                + (fixInstruction(r.action, lang: lang).map { \" — \" + $0 } ?? \"\")"),
     ("B24 consume after the send (not before)", SVC,
-     "                LocalVuln.consume(&v, fresh, text: text, listContentId: contentId, noticeGeneration: setting.generation,\n                                  destination: destination, now: now)\n",
+     "                LocalVuln.consume(&v, fresh, reports: reports, text: text, listContentId: contentId, noticeGeneration: setting.generation,\n                                  destination: destination, now: now)\n",
      ""),
 ]
 

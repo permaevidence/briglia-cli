@@ -41,11 +41,37 @@ extension LocalTools {
     /// `Resources/BundledSkills/pdf/render_pdf.py` `find_chrome()`, in its
     /// order: these names on PATH (`shutil.which`), then these app bundles.
     static let rendererBrowserNames = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"]
-    static let rendererBrowserApps: [(path: String, vendor: String, product: String, flavour: String)] = [
-        ("/Applications/Chromium.app", "chromium.org", "chromium", "official"),
-        ("/Applications/Google Chrome.app", "google", "chrome", "stable"),
-        ("/Applications/Microsoft Edge.app", "microsoft", "edge", "stable"),
+    static let rendererBrowserApps: [(path: String, executable: String, vendor: String, product: String, flavour: String)] = [
+        ("/Applications/Chromium.app", "Chromium", "chromium.org", "chromium", "official"),
+        ("/Applications/Google Chrome.app", "Google Chrome", "google", "chrome", "stable"),
+        ("/Applications/Microsoft Edge.app", "Microsoft Edge", "microsoft", "edge", "stable"),
     ]
+
+    enum PathLookup: Equatable { case found(String), notFound, ambiguous }
+
+    /// Python's `shutil.which` as the renderer uses it: PATH entries in
+    /// order; an EMPTY entry means the renderer's current directory, which
+    /// Briglia cannot know here → ambiguous (the browser is then unknown).
+    static func rendererWhich(_ p: Probe, _ name: String) -> PathLookup {
+        for dir in p.pathEntries {
+            if dir.isEmpty { return .ambiguous }
+            let candidate = (dir.hasSuffix("/") ? dir : dir + "/") + name
+            if p.isExecutable(candidate) { return .found(candidate) }
+        }
+        return .notFound
+    }
+
+    /// The first renderer PATH browser, or nil / ambiguous.
+    static func rendererPathBrowser(_ p: Probe) -> PathLookup {
+        for name in rendererBrowserNames {
+            switch rendererWhich(p, name) {
+            case .found(let path): return .found(path)
+            case .ambiguous: return .ambiguous
+            case .notFound: continue
+            }
+        }
+        return .notFound
+    }
 
     static let mediaMitigation: (String) -> Text = { tool in
         Text("Until it is updated, avoid processing untrusted files with \(tool).",
@@ -103,8 +129,10 @@ extension LocalTools {
         /// realpath(3); nil when the path does not exist.
         var resolve: (String) -> String?
         var findBinary: (String) -> String?
-        /// PATH only, like Python's `shutil.which` (the renderer's lookup).
-        var findOnPath: (String) -> String?
+        /// The raw PATH entries (empty entries kept) and an executable test:
+        /// the renderer's `shutil.which` lookup is rebuilt from these.
+        var pathEntries: [String]
+        var isExecutable: (String) -> Bool
         var run: (String, [String], TimeInterval) -> (Int32, String)
         /// Briglia's own copies (the managed Node root, the userdata
         /// toolchain): never a user tool here (§9.5.6, Phase 1).
@@ -129,10 +157,9 @@ extension LocalTools {
                     return String(cString: r)
                 },
                 findBinary: { PlatformBinary.find($0) },
-                findOnPath: { name in
-                    (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":")
-                        .map { "\($0)/\(name)" }.first { fm.isExecutableFile(atPath: $0) }
-                },
+                pathEntries: (ProcessInfo.processInfo.environment["PATH"] ?? "")
+                    .split(separator: ":", omittingEmptySubsequences: false).map(String.init),
+                isExecutable: { fm.isExecutableFile(atPath: $0) },
                 run: { exe, args, timeout in
                     let r = UserdataToolchain.run(exe, args, timeout: timeout)
                     return (r.exitCode, r.output)

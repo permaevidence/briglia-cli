@@ -196,8 +196,11 @@ enum LocalToolsText {
     static func stateText(_ r: LocalTools.ToolReport, lang: String) -> String {
         switch r.state {
         case .affectedFixInstallable:
+            // R2-R5: scoped like the messages — the fix sentence names what
+            // it fixes; outstanding KEV issues keep their mitigation.
             return L(lang, "known security problem (\(ids(r)))", "problema di sicurezza noto (\(ids(r)))")
-                + (fixInstruction(r.action, lang: lang).map { " — " + $0 } ?? "")
+                + (fixSentence(r, lang: lang).map { " — " + $0 } ?? "")
+                + (kevMitigationSentence(r, lang: lang, also: true).map { " " + $0 } ?? "")
         case .affectedNotInstallable:
             let why = r.affected.compactMap { a -> LocalTools.Text? in
                 if case .notInstallable(let t) = a.fix { return t }
@@ -269,8 +272,13 @@ enum LocalToolsText {
         if !expired {
             for r in reports where [.affectedFixInstallable, .affectedNotInstallable, .affectedNoFix].contains(r.state) {
                 let name = "\(displayName(r)) \(r.installedVersion ?? "")"
-                reasons.append(SecurityStatus.Reason(en: "\(name) has a known security problem (\(ids(r)))" + (fixInstruction(r.action, lang: "en").map { ": " + $0 } ?? ""),
-                                                     it: "\(name) ha un problema di sicurezza noto (\(ids(r)))" + (fixInstruction(r.action, lang: "it").map { ": " + $0 } ?? "")))
+                func reason(_ lang: String) -> String {
+                    let head = L(lang, "\(name) has a known security problem (\(ids(r)))", "\(name) ha un problema di sicurezza noto (\(ids(r)))")
+                    let fix = fixSentence(r, lang: lang).map { ": " + $0 } ?? ""
+                    let kev = kevMitigationSentence(r, lang: lang, also: fixSentence(r, lang: lang) != nil).map { " " + $0 } ?? ""
+                    return head + fix + kev
+                }
+                reasons.append(SecurityStatus.Reason(en: reason("en"), it: reason("it")))
             }
         }
         if let o = vuln?.lastOutcome {

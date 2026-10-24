@@ -140,27 +140,39 @@ struct MacInventory {
         return vendorInstance(tool, vendor: app.vendor, product: app.product, flavour: app.flavour, version: version, path: app.path)
     }
 
-    /// The renderer's order (R7): PATH names first (a Cellar keg, or an app
-    /// bundle the PATH entry points into), then the three app bundles.
+    /// The renderer's order (R7): PATH names first (`shutil.which`
+    /// semantics; a Cellar keg, or an app bundle the PATH entry points
+    /// into), then the first app bundle whose EXECUTABLE exists (the
+    /// renderer's own predicate); the selected build's unreadable metadata
+    /// is unknown, never a fall-through to another browser.
     func resolveRendererBrowser(_ tool: T.WatchTool, cellar: String?,
                                 catalogue: (versions: [String: String], asOf: Date?)?) -> T.Resolution {
-        for name in T.rendererBrowserNames {
-            guard let p = probe.findOnPath(name) else { continue }
+        switch T.rendererPathBrowser(probe) {
+        case .ambiguous:
+            return .unknown(toolId: tool.id, reason: T.Text("PATH has an empty entry, so the browser the PDF renderer uses depends on its working directory",
+                                                           "il PATH ha una voce vuota: il browser usato per i PDF dipende dalla sua cartella di lavoro"))
+        case .found(let p):
             let real = probe.resolve(p) ?? p
             if let cellar, real.hasPrefix(cellar + "/") { return brewInstance(tool, path: real, cellar: cellar, catalogue: catalogue) }
             if let r = real.range(of: ".app/Contents/") {
                 let bundle = String(real[..<r.lowerBound]) + ".app"
-                if let app = T.rendererBrowserApps.first(where: { $0.path == bundle }),
-                   let v = bundleVersion(bundle) {
+                if let app = T.rendererBrowserApps.first(where: { $0.path == bundle }) {
+                    guard let v = bundleVersion(bundle) else {
+                        return .unknown(toolId: tool.id, reason: T.Text("the version of the browser the PDF renderer uses cannot be read",
+                                                                       "la versione del browser usato per i PDF non si può leggere"))
+                    }
                     return vendorInstance(tool, vendor: app.vendor, product: app.product, flavour: app.flavour, version: v, path: bundle)
                 }
             }
             return .unknown(toolId: tool.id, reason: T.Text("\(p) (the browser the PDF renderer uses) is not a recognised build",
                                                            "\(p) (il browser usato per i PDF) non è una build riconosciuta"))
+        case .notFound:
+            break
         }
-        for app in T.rendererBrowserApps where probe.readData(app.path + "/Contents/Info.plist") != nil {
+        for app in T.rendererBrowserApps where probe.resolve(app.path + "/Contents/MacOS/" + app.executable) != nil {
             guard let v = bundleVersion(app.path) else {
-                return .unknown(toolId: tool.id, reason: T.Text("the browser's version cannot be read", "la versione del browser non si può leggere"))
+                return .unknown(toolId: tool.id, reason: T.Text("the version of the browser the PDF renderer uses cannot be read",
+                                                               "la versione del browser usato per i PDF non si può leggere"))
             }
             return vendorInstance(tool, vendor: app.vendor, product: app.product, flavour: app.flavour, version: v, path: app.path)
         }

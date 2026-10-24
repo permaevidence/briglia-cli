@@ -155,10 +155,17 @@ def convert(rec, source, kev):
         if a.get("purl") is not None and not isinstance(a.get("purl"), str):
             raise Incomplete("purl is not a string")
         purl = purl or a.get("purl")
-        rl = a.get("ranges") or []
-        vl = a.get("versions") or []
-        if not isinstance(rl, list) or not isinstance(vl, list):
+        # R2-R2: a PRESENT field must have its type; only absence (or JSON
+        # null) means "none". `{}` or "" are malformed, never empty.
+        rl = a.get("ranges")
+        vl = a.get("versions")
+        rl = [] if rl is None else rl
+        vl = [] if vl is None else vl
+        if type(rl) is not list or type(vl) is not list:
             raise Incomplete("ranges/versions are not lists")
+        for opt in ("ecosystem_specific", "database_specific"):
+            if a.get(opt) is not None and type(a.get(opt)) is not dict:
+                raise Incomplete(f"{opt} is not an object")
         for r in rl:
             if not isinstance(r, dict) or not isinstance(r.get("events"), list):
                 raise Incomplete("range without events")
@@ -186,6 +193,28 @@ def convert(rec, source, kev):
             if not v:
                 raise Incomplete("empty version")
             versions.append(v)
+    # Every semantic interpretation BEFORE any size bound (R2-R2): the
+    # fixed versions must be orderable, severity well-formed.
+    best = None
+    for v in fixed:
+        if best is None:
+            best = v
+            if deb_compare(v, v) is None:
+                raise Incomplete("a fixed version cannot be ordered")
+            continue
+        c = deb_compare(v, best)
+        if c is None:
+            raise Incomplete("fixed versions cannot be ordered")
+        if c > 0:
+            best = v
+    sev = rec.get("severity")
+    if sev is not None and (type(sev) is not list or any(type(x) is not dict for x in sev)):
+        raise Incomplete("severity is malformed")
+    if rec.get("database_specific") is not None and type(rec.get("database_specific")) is not dict:
+        raise Incomplete("database_specific is not an object")
+    for k in ("published", "modified"):
+        if rec.get(k) is not None and type(rec.get(k)) is not str:
+            raise Incomplete(f"{k} is not a string")
     ids = advisory_ids(rec)          # may raise TooLarge, only after full validation
     # R1: the union of ranges and explicitly listed versions. A listed
     # version already inside a range adds nothing and is omitted (only when
@@ -211,15 +240,6 @@ def convert(rec, source, kev):
            "severity": "critical" if kev_hit or severity_critical(rec) else "recommended",
            "affected": affected, "withdrawn": bool(rec.get("withdrawn"))}
     if fixed:
-        # Several fixed events in one ecosystem: the highest is recorded
-        # (conservative); versions dpkg's algorithm cannot order → incomplete.
-        best = fixed[0]
-        for v in fixed[1:]:
-            c = deb_compare(v, best)
-            if c is None:
-                raise Incomplete("fixed versions cannot be ordered")
-            if c > 0:
-                best = v
         adv["remediation"] = {"fixed": [{"line": None, "version": best}], "pocket": pocket_of(source, purl)}
         adv["noFixReason"] = None
     else:

@@ -206,7 +206,7 @@ final class LocalToolsService {
                 }
                 let destination = deps.destination()
                 let text = LocalToolsText.message(fresh, lang: deps.language())
-                LocalVuln.consume(&v, fresh, text: text, listContentId: contentId, noticeGeneration: setting.generation,
+                LocalVuln.consume(&v, fresh, reports: reports, text: text, listContentId: contentId, noticeGeneration: setting.generation,
                                   destination: destination, now: now)
                 return (fresh, text, destination)
             }

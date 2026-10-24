@@ -333,7 +333,13 @@ struct DebInventory {
         var path: String? = nil
         for exe in tool.executables { if let p = probe.findBinary(exe) { path = p; break } }
         if tool.rendererBrowser {
-            path = T.rendererBrowserNames.lazy.compactMap { probe.findOnPath($0) }.first
+            switch T.rendererPathBrowser(probe) {
+            case .found(let p): path = p
+            case .notFound: path = nil
+            case .ambiguous:
+                return (tool, nil, nil, T.Text("PATH has an empty entry, so the browser the PDF renderer uses depends on its working directory",
+                                               "il PATH ha una voce vuota: il browser usato per i PDF dipende dalla sua cartella di lavoro"))
+            }
         }
         if path == nil, let lib = tool.mappedLibrary, let maps { path = T.mappedLibrary(maps, prefix: lib) }
         if let p = path {

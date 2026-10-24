@@ -7,8 +7,8 @@ final class FakeMachine {
     var dirs: [String: [String]] = [:]
     var links: [String: String] = [:]
     var bins: [String: String] = [:]
-    /// PATH-only names (`shutil.which`); defaults to `bins`.
-    var pathBins: [String: String]?
+    /// Raw PATH entries for the renderer's `shutil.which` lookup.
+    var pathEntries = ["/usr/local/bin", "/usr/bin"]
     var mtimes: [String: Date] = [:]
     var outputs: [String: (Int32, String)] = [:]
     var commands: [String] = []
@@ -22,7 +22,8 @@ final class FakeMachine {
             readData: { self.files[$0] }, listDirectory: { self.dirs[$0] }, modificationDate: { self.mtimes[$0] },
             resolve: { p in self.links[p] ?? (self.files[p] != nil || self.dirs[p] != nil ? p : nil) },
             findBinary: { self.bins[$0] },
-            findOnPath: { (self.pathBins ?? self.bins)[$0] },
+            pathEntries: pathEntries,
+            isExecutable: { p in self.files[p] != nil || self.links[p] != nil || self.bins.values.contains(p) },
             run: { exe, args, _ in
                 let key = ([exe] + args).joined(separator: " ")
                 self.commands.append(key)
@@ -261,12 +262,22 @@ extension LocalToolsSelftest {
         let app = macMachine()
         app.files["/Applications/Google Chrome.app/Contents/Info.plist"] = try! PropertyListSerialization.data(
             fromPropertyList: ["CFBundleShortVersionString": "130.0.6723.58"], format: .xml, options: 0)
+        app.text("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "MachO")
         if case .present(let c)? = LocalTools.inventory(app.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
             t.check("mac inventory: Chrome.app → vendor identity with its bundle version",
                     c.identity.key == "vendor:google:chrome:darwin:stable" && c.installedVersion == "130.0.6723.58")
         } else { t.check("mac inventory: Chrome.app → vendor identity with its bundle version", false) }
         // R7: the browser in the PDF renderer's order.
+        func addApp(_ m: FakeMachine, _ name: String, exe: String, version: String?, executable: Bool = true) {
+            if let version {
+                m.files["/Applications/\(name).app/Contents/Info.plist"] = try! PropertyListSerialization.data(
+                    fromPropertyList: ["CFBundleShortVersionString": version], format: .xml, options: 0)
+            }
+            if executable { m.text("/Applications/\(name).app/Contents/MacOS/\(exe)", "MachO") }
+        }
         let both = macMachine()
+        addApp(both, "Google Chrome", exe: "Google Chrome", version: "130.0.6723.58")
+        addApp(both, "Chromium", exe: "Chromium", version: "131.0.6778.1")
         both.files["/Applications/Google Chrome.app/Contents/Info.plist"] = try! PropertyListSerialization.data(
             fromPropertyList: ["CFBundleShortVersionString": "130.0.6723.58"], format: .xml, options: 0)
         both.files["/Applications/Chromium.app/Contents/Info.plist"] = try! PropertyListSerialization.data(
@@ -276,19 +287,37 @@ extension LocalToolsSelftest {
                     c.identity.key == "vendor:chromium.org:chromium:darwin:official")
         } else { t.check("R7: with Chromium.app and Chrome.app both installed, the renderer's choice (Chromium) is checked", false) }
         let pathFirst = macMachine()
-        pathFirst.files["/Applications/Google Chrome.app/Contents/Info.plist"] = both.files["/Applications/Google Chrome.app/Contents/Info.plist"]
+        addApp(pathFirst, "Google Chrome", exe: "Google Chrome", version: "130.0.6723.58")
         pathFirst.bins["google-chrome"] = "/usr/local/bin/google-chrome"
         pathFirst.links["/usr/local/bin/google-chrome"] = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        pathFirst.files["/Applications/Microsoft Edge.app/Contents/Info.plist"] = try! PropertyListSerialization.data(
-            fromPropertyList: ["CFBundleShortVersionString": "131.0.2903.1"], format: .xml, options: 0)
+        addApp(pathFirst, "Microsoft Edge", exe: "Microsoft Edge", version: "131.0.2903.1")
         if case .present(let c)? = LocalTools.inventory(pathFirst.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
             t.check("R7: a PATH browser comes before the app bundles (and maps to its bundle)", c.identity.key == "vendor:google:chrome:darwin:stable")
         } else { t.check("R7: a PATH browser comes before the app bundles (and maps to its bundle)", false) }
         let edgeOnly = macMachine()
-        edgeOnly.files["/Applications/Microsoft Edge.app/Contents/Info.plist"] = pathFirst.files["/Applications/Microsoft Edge.app/Contents/Info.plist"]
+        addApp(edgeOnly, "Microsoft Edge", exe: "Microsoft Edge", version: "131.0.2903.1")
         if case .present(let c)? = LocalTools.inventory(edgeOnly.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
             t.check("R7: Edge alone is the renderer's fallback and is checked", c.identity.key == "vendor:microsoft:edge:darwin:stable")
         } else { t.check("R7: Edge alone is the renderer's fallback and is checked", false) }
+        let leftover = macMachine()
+        addApp(leftover, "Chromium", exe: "Chromium", version: "131.0.6778.1", executable: false)
+        addApp(leftover, "Google Chrome", exe: "Google Chrome", version: "130.0.6723.58")
+        if case .present(let c)? = LocalTools.inventory(leftover.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
+            t.check("R7: a leftover Chromium plist without its executable is skipped (renderer's predicate)",
+                    c.identity.key == "vendor:google:chrome:darwin:stable")
+        } else { t.check("R7: a leftover Chromium plist without its executable is skipped (renderer's predicate)", false) }
+        let noPlist = macMachine()
+        addApp(noPlist, "Chromium", exe: "Chromium", version: nil)
+        addApp(noPlist, "Google Chrome", exe: "Google Chrome", version: "130.0.6723.58")
+        if case .unknown? = LocalTools.inventory(noPlist.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
+            t.check("R7: the selected Chromium with unreadable metadata → unknown, no fall-through", true)
+        } else { t.check("R7: the selected Chromium with unreadable metadata → unknown, no fall-through", false) }
+        let emptyPath = macMachine()
+        emptyPath.pathEntries = ["", "/usr/bin"]
+        addApp(emptyPath, "Google Chrome", exe: "Google Chrome", version: "130.0.6723.58")
+        if case .unknown(_, let why)? = LocalTools.inventory(emptyPath.probe(.macOS)).first(where: { $0.toolId == "chrome" }) {
+            t.check("R7: an empty PATH entry (renderer's cwd) → unknown", why.en.contains("empty entry"))
+        } else { t.check("R7: an empty PATH entry (renderer's cwd) → unknown", false) }
         let unreadable = macMachine()
         unreadable.dirs.removeValue(forKey: "/opt/homebrew/Cellar")
         t.check("mac inventory: unreadable Cellar → missing tools unknown, not absent",
