@@ -69,10 +69,7 @@ struct MacInventory {
             return .unknown(toolId: tool.id, reason: T.Text("provided by macOS (Software Update keeps it current); not covered here",
                                                            "fornito da macOS (lo aggiorna Aggiornamento Software); non coperto qui"))
         }
-        if tool.vendorNode, let v = versionOutput(p, ["--version"]), LocalToolsVersion.parseSemver(v) != nil {
-            return vendorInstance(tool, vendor: "nodejs.org", product: "node", flavour: "official",
-                                  version: String(v.drop(while: { $0 == "v" })), path: p)
-        }
+        if tool.vendorNode { return T.officialNode(probe, tool: tool, path: p, real: real) }
         if tool.vendorPython, real.contains("/Library/Frameworks/Python.framework/"),
            let v = versionOutput(p, ["--version"]).map({ $0.replacingOccurrences(of: "Python ", with: "") }),
            LocalToolsVersion.dottedCompare(v, v) != nil {
@@ -117,15 +114,21 @@ struct MacInventory {
     }
 
     func resolveApp(_ tool: T.WatchTool, _ app: T.MacApp, cellar: String?) -> T.Resolution? {
-        if let token = app.caskToken, let cellar {
-            let caskroom = (cellar as NSString).deletingLastPathComponent + "/Caskroom/" + token
-            if let kegs = probe.listDirectory(caskroom)?.filter({ !$0.hasPrefix(".") }) {
+        if let cellar {
+            for token in app.caskTokens {
+                let caskroom = (cellar as NSString).deletingLastPathComponent + "/Caskroom/" + token
+                // v18: an existing but unreadable Caskroom entry is unknown, never
+                // evidence of a website install.
+                if probe.listDirectory(caskroom) == nil, probe.resolve(caskroom) != nil {
+                    return .unknown(toolId: tool.id, reason: T.Text("the Homebrew cask's folder cannot be read", "la cartella del cask di Homebrew non si può leggere"))
+                }
+                guard let kegs = probe.listDirectory(caskroom)?.filter({ !$0.hasPrefix(".") }) else { continue }
                 guard kegs.count == 1, T.validBrewName(token), LocalToolsVersion.dottedCompare(kegs[0], kegs[0]) != nil else {
                     return .unknown(toolId: tool.id, reason: T.Text("the Homebrew cask's installed version is unclear", "la versione installata del cask di Homebrew non è chiara"))
                 }
                 return .present(T.Instance(toolId: tool.id, identity: LocalAdvisory.Identity(kind: .cask, token: token),
                                            installedVersion: kegs[0], compareVersion: kegs[0], originProblem: nil,
-                                           binaries: [token], candidates: .unavailable(T.Text("Homebrew casks are not checked for updates here", "qui non si controllano gli aggiornamenti dei cask di Homebrew")),
+                                           binaries: [token], candidates: .unavailable(T.Text("Homebrew casks are not matched against advisories; Briglia tells you when an update is waiting", "i cask di Homebrew non sono confrontati con gli avvisi; Briglia ti avvisa quando c'è un aggiornamento in attesa")),
                                            usedPath: app.path, statusOnly: nil))
             }
         }
@@ -137,7 +140,9 @@ struct MacInventory {
         guard LocalToolsVersion.dottedCompare(version, version) != nil else {
             return .unknown(toolId: tool.id, reason: T.Text("the app's version cannot be compared", "la versione dell'app non si può confrontare"))
         }
-        return vendorInstance(tool, vendor: app.vendor, product: app.product, flavour: app.flavour, version: version, path: app.path)
+        var r = vendorInstance(tool, vendor: app.vendor, product: app.product, flavour: app.flavour, version: version, path: app.path)
+        if case .present(var i) = r { i.vendorVia = "app"; r = .present(i) }
+        return r
     }
 
     /// The renderer's order (R7): PATH names first (`shutil.which`

@@ -252,7 +252,7 @@ struct DebInventory {
         let maps = probe.platform == .linux ? probe.readData("/proc/self/maps").map { String(decoding: $0, as: UTF8.self) } : nil
 
         // Pass 1: owning package per tool.
-        var owners: [(tool: T.WatchTool, owner: String?, path: String?, reason: T.Text?)] = []
+        var owners: [(tool: T.WatchTool, owner: String?, path: String?, reason: T.Text?, vendor: T.Resolution?)] = []
         for tool in T.watchlist {
             owners.append(owner(of: tool, installed: installed, dpkgQuery: dpkgQuery, maps: maps))
         }
@@ -285,6 +285,7 @@ struct DebInventory {
         }()
 
         return owners.map { o in
+            if let v = o.vendor { return v }
             guard let owner = o.owner, let pkg = installed[owner] else {
                 if let reason = o.reason { return .unknown(toolId: o.tool.id, reason: reason) }
                 return .absent(toolId: o.tool.id)
@@ -329,7 +330,7 @@ struct DebInventory {
 
     /// The package that owns the file the tool would use, or why not.
     func owner(of tool: T.WatchTool, installed: [String: T.DpkgPackage], dpkgQuery: String,
-               maps: String?) -> (tool: T.WatchTool, owner: String?, path: String?, reason: T.Text?) {
+               maps: String?) -> (tool: T.WatchTool, owner: String?, path: String?, reason: T.Text?, vendor: T.Resolution?) {
         var path: String? = nil
         for exe in tool.executables { if let p = probe.findBinary(exe) { path = p; break } }
         if tool.rendererBrowser {
@@ -338,7 +339,7 @@ struct DebInventory {
             case .notFound: path = nil
             case .ambiguous:
                 return (tool, nil, nil, T.Text("PATH has an empty or relative entry, so the browser the PDF renderer uses depends on its working directory",
-                                               "il PATH ha una voce vuota o relativa: il browser usato per i PDF dipende dalla sua cartella di lavoro"))
+                                               "il PATH ha una voce vuota o relativa: il browser usato per i PDF dipende dalla sua cartella di lavoro"), nil)
             }
         }
         if path == nil, let lib = tool.mappedLibrary, let maps { path = T.mappedLibrary(maps, prefix: lib) }
@@ -346,22 +347,55 @@ struct DebInventory {
             let real = probe.resolve(p) ?? p
             if probe.owned(real) || probe.owned(p) || probe.isToolchainWrapper(p) {
                 return (tool, nil, p, T.Text("Briglia's own copy (checked by `briglia toolchain upgrade` / Briglia releases)",
-                                             "copia di Briglia (controllata da `briglia toolchain upgrade` / dalle versioni di Briglia)"))
+                                             "copia di Briglia (controllata da `briglia toolchain upgrade` / dalle versioni di Briglia)"), nil)
             }
+            var positivelyUnowned = true
             for candidate in Array(Set([p, real])).sorted() {
                 let (st, out) = probe.run(dpkgQuery, ["-S", candidate], T.probeTimeout)
-                if st == 0, let pkg = T.parseDpkgSearch(out, path: candidate), installed[pkg] != nil { return (tool, pkg, p, nil) }
+                if st == 0, let pkg = T.parseDpkgSearch(out, path: candidate), installed[pkg] != nil { return (tool, pkg, p, nil, nil) }
+                if !(st == 1 && out.contains("no path found matching pattern")) { positivelyUnowned = false }
             }
-            return (tool, nil, p, T.Text("\(p) is not installed from a system package", "\(p) non è installato da un pacchetto di sistema"))
+            // v18 (R17-2): an official Node.js build only when no package
+            // manager owns the file, positively (a failed probe is unknown).
+            if tool.vendorNode {
+                guard positivelyUnowned else {
+                    return (tool, nil, p, T.Text("whether \(p) belongs to a system package could not be checked",
+                                                 "non si riesce a verificare se \(p) appartiene a un pacchetto di sistema"), nil)
+                }
+                if let why = otherPackageOwner(real) { return (tool, nil, p, why, nil) }
+                return (tool, nil, p, nil, T.officialNode(probe, tool: tool, path: p, real: real))
+            }
+            return (tool, nil, p, T.Text("\(p) is not installed from a system package", "\(p) non è installato da un pacchetto di sistema"), nil)
         }
         for name in tool.debPackages {
-            if installed[name] != nil { return (tool, name, nil, nil) }
-            if let q = installed.keys.first(where: { $0.hasPrefix(name + ":") }) { return (tool, q, nil, nil) }
+            if installed[name] != nil { return (tool, name, nil, nil, nil) }
+            if let q = installed.keys.first(where: { $0.hasPrefix(name + ":") }) { return (tool, q, nil, nil, nil) }
         }
         if tool.mappedLibrary != nil, maps == nil {
-            return (tool, nil, nil, T.Text("the loaded libraries could not be read", "le librerie caricate non si possono leggere"))
+            return (tool, nil, nil, T.Text("the loaded libraries could not be read", "le librerie caricate non si possono leggere"), nil)
         }
-        return (tool, nil, nil, nil)
+        return (tool, nil, nil, nil, nil)
+    }
+
+    /// rpm / pacman ownership of `path` (read-only queries), where those
+    /// tools exist: nil = positively not owned by either (or neither tool
+    /// exists); .some(reason) = owned, or the probe failed.
+    func otherPackageOwner(_ path: String) -> T.Text? {
+        if let rpm = probe.findBinary("rpm") {
+            let (st, out) = probe.run("/usr/bin/env", ["LC_ALL=C", rpm, "-qf", path], T.probeTimeout)
+            if st == 0 { return T.Text("\(path) is packaged by your distribution (rpm)", "\(path) è un pacchetto della tua distribuzione (rpm)") }
+            if !(st == 1 && out.contains("is not owned by any package")) {
+                return T.Text("whether \(path) belongs to an rpm package could not be checked", "non si riesce a verificare se \(path) appartiene a un pacchetto rpm")
+            }
+        }
+        if let pacman = probe.findBinary("pacman") {
+            let (st, out) = probe.run("/usr/bin/env", ["LC_ALL=C", pacman, "-Qo", path], T.probeTimeout)
+            if st == 0 { return T.Text("\(path) is packaged by your distribution (pacman)", "\(path) è un pacchetto della tua distribuzione (pacman)") }
+            if !(st == 1 && out.contains("No package owns")) {
+                return T.Text("whether \(path) belongs to a pacman package could not be checked", "non si riesce a verificare se \(path) appartiene a un pacchetto pacman")
+            }
+        }
+        return nil
     }
 
     /// N2: freshness of the candidate's OWN index. The package-file key

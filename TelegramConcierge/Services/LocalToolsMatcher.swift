@@ -47,6 +47,9 @@ enum LocalTools {
     /// One actually-used instance of a watched tool, as read from the local
     /// package database (§9.5.2: the instance that runs, not any copy).
     struct Instance: Codable, Equatable {
+        /// v17: how a vendor build was installed (`nvm`, `pkg`, `tarball:<dir>`,
+        /// `app`); picks the compiled fix wording. nil for package managers.
+        var vendorVia: String? = nil
         var toolId: String
         var identity: LocalAdvisory.Identity
         /// As the package manager shows it (deb binary version, brew keg).
@@ -101,6 +104,9 @@ enum LocalTools {
     }
 
     enum State: String, Codable {
+        /// v18 (§9.5.10.1): no applicable advisory, but older than the
+        /// vendor's latest security release for its line (Node).
+        case behindSecurityRelease = "behind-security-release"
         case affectedFixInstallable = "affected-fix-installable"
         case affectedNotInstallable = "affected-not-installable"
         case affectedNoFix = "affected-no-fix"
@@ -124,6 +130,12 @@ enum LocalTools {
         case brew(String)
         case cask(String)
         case vendor(vendor: String, product: String, minimum: String)
+        /// v17 (§9.5.10.1): an official Node.js build; `via` = nvm | pkg |
+        /// tarball, `major` from the local version, `root` the tarball
+        /// directory name (validated locally).
+        case node(via: String, major: String, minimum: String, root: String?)
+        /// v18 (§9.5.10.2): LibreOffice.app from libreoffice.org.
+        case libreoffice(minimum: String)
     }
 
     struct ToolReport: Codable, Equatable {
@@ -141,6 +153,9 @@ enum LocalTools {
         var statusOnly: Text?
         var action: FixAction? = nil
         var floor: FloorState? = nil
+        /// v18 (R17-3): `kind: release` records that apply (never part of
+        /// `affected`, never "a known security problem").
+        var releases: [AdvisoryResult] = []
 
         var kevAffected: Bool { affected.contains { $0.kev } }
         var level: ReleaseSecurity.Level {
@@ -150,7 +165,8 @@ enum LocalTools {
         /// A KEV-listed applicable advisory without an installable fix.
         var kevWithoutFix: Bool { affected.contains { $0.kev && $0.fix != .installable } }
         /// V4: messaged states (fix installable; KEV without an installable fix).
-        var messageable: Bool { statusOnly == nil && (hasInstallableFix || kevWithoutFix) }
+        var messageable: Bool { statusOnly == nil && (hasInstallableFix || kevWithoutFix || releaseUpdateInstallable) }
+        var releaseUpdateInstallable: Bool { releases.contains { $0.fix == .installable } }
     }
 
     // MARK: - Matching
@@ -186,16 +202,31 @@ enum LocalTools {
         let entry = list.entry(for: i.identity.key)
         let scheme = entry.flatMap { LocalToolsVersion.Scheme(rawValue: $0.scheme) }
         for a in entry?.advisories ?? [] where !a.withdrawn {
-            guard let scheme else { r.unknownAdvisories += 1; continue }
+            guard let scheme, a.kind != .unsupported else { r.unknownAdvisories += 1; continue }
             // Step 3: applicability on the compare (source) version.
             guard let applies = LocalToolsVersion.isAffected(i.compareVersion, a.affected, scheme: scheme) else {
                 r.unknownAdvisories += 1; continue
             }
-            guard applies else { continue }
+            guard applies else {
+                // v18-v20: the source's default is "unknown" outside its LISTED
+                // SERIES; a version inside a listed series but past its fix is
+                // simply not affected by it.
+                if a.unknownOutside && !inListedSeries(i.compareVersion, a) { r.unknownAdvisories += 1 }
+                continue
+            }
             // Step 4: remediation.
             let (fixed, fix) = remediation(a, instance: i, scheme: scheme, now: now)
-            r.affected.append(AdvisoryResult(ids: a.ids, primaryId: a.primaryId, severity: a.severity, kev: a.kev,
-                                             fixedVersion: fixed, fix: fix))
+            let result = AdvisoryResult(ids: a.ids, primaryId: a.primaryId, severity: a.severity, kev: a.kev,
+                                        fixedVersion: fixed, fix: fix)
+            if a.kind == .release { r.releases.append(result) } else { r.affected.append(result) }
+        }
+        // v17: a version on a line the vendor no longer maintains is never
+        // "no known issue" (positive advisories still count).
+        var unmaintained: Text? = nil
+        if let lines = entry?.maintainedLines, let major = i.compareVersion.split(separator: ".").first.map(String.init),
+           !lines.contains(major) {
+            unmaintained = Text("\(LocalTools.tool(i.toolId)?.name ?? i.toolId) \(major) no longer receives security fixes from its vendor",
+                                "\(LocalTools.tool(i.toolId)?.name ?? i.toolId) \(major) non riceve più correzioni di sicurezza dal produttore")
         }
         if !r.affected.isEmpty {
             if r.hasInstallableFix { r.state = .affectedFixInstallable }
@@ -203,6 +234,13 @@ enum LocalTools {
             else { r.state = .affectedNoFix }
             r.reason = nil
             r.action = action(for: i, report: r, scheme: scheme)
+        } else if !r.releases.isEmpty {
+            r.state = .behindSecurityRelease
+            r.reason = nil
+            r.action = action(for: i, report: r, scheme: scheme)
+        } else if let unmaintained {
+            r.state = .unknown
+            r.reason = unmaintained
         } else if r.unknownAdvisories > 0 {
             r.state = .unknown
             r.reason = Text("some advisories could not be evaluated for this version",
@@ -218,8 +256,17 @@ enum LocalTools {
         return r
     }
 
+    /// The advisory's listed series (its remediation lines, `N.N`) contain
+    /// the version's major.minor.
+    static func inListedSeries(_ version: String, _ a: LocalAdvisory.Advisory) -> Bool {
+        let p = version.split(separator: ".")
+        guard p.count >= 2 else { return false }
+        let mm = "\(p[0]).\(p[1])"
+        return a.remediation?.fixed.contains { $0.line == mm } ?? false
+    }
+
     static func action(for i: Instance, report r: ToolReport, scheme: LocalToolsVersion.Scheme?) -> FixAction? {
-        guard r.hasInstallableFix else { return nil }
+        guard r.hasInstallableFix || r.releaseUpdateInstallable else { return nil }
         switch i.identity.kind {
         case .deb:
             let names = i.binaries.filter(validDebName)
@@ -230,13 +277,25 @@ enum LocalTools {
             return i.binaries.first.flatMap { validBrewName($0) ? .cask($0) : nil }
         case .vendor:
             var minimum: String? = nil
-            for a in r.affected where a.fix == .installable {
+            for a in r.affected + r.releases where a.fix == .installable {
                 guard let v = a.fixedVersion else { continue }
                 if let m = minimum, let scheme, let c = LocalToolsVersion.compare(v, m, scheme: scheme), c <= 0 { continue }
                 minimum = v
             }
             guard let minimum, let vendor = i.identity.vendor, let product = i.identity.product else { return nil }
-            return .vendor(vendor: vendor, product: product, minimum: minimum)
+            // Versions shown in text pass a strict pattern (they come from the list).
+            guard minimum.range(of: "^[0-9]{1,4}(\\.[0-9]{1,4}){1,3}$", options: .regularExpression) != nil else { return nil }
+            switch (vendor, product, i.vendorVia) {
+            case ("nodejs.org", "node", let via?):
+                guard let major = i.compareVersion.split(separator: ".").first.map(String.init),
+                      major.range(of: "^[0-9]{1,4}$", options: .regularExpression) != nil else { return nil }
+                if via.hasPrefix("tarball:") { return .node(via: "tarball", major: major, minimum: minimum, root: String(via.dropFirst(8))) }
+                return [ "nvm", "pkg"].contains(via) ? .node(via: via, major: major, minimum: minimum, root: nil) : nil
+            case ("documentfoundation", "libreoffice", _):
+                return .libreoffice(minimum: minimum)
+            default:
+                return .vendor(vendor: vendor, product: product, minimum: minimum)
+            }
         }
     }
 
@@ -247,6 +306,10 @@ enum LocalTools {
 
     static func coverage(for identity: LocalAdvisory.Identity, in list: LocalAdvisory.Document, now: Date) -> CoverageResult {
         guard let declared = list.declared[identity.ecosystemKey], !declared.isEmpty else {
+            if identity.kind == .brew || identity.kind == .cask {
+                return .unknown(Text("Homebrew tools are not matched against advisories; Briglia tells you when an update is waiting",
+                                     "gli strumenti di Homebrew non sono confrontati con gli avvisi; Briglia ti avvisa quando c'è un aggiornamento in attesa"))
+            }
             return .unknown(Text("this tool is not covered by the advisory list", "questo strumento non è coperto dall'elenco di avvisi"))
         }
         let rows = list.coverage.filter { $0.identity == identity.key }

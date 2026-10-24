@@ -54,7 +54,16 @@ extension LocalAdvisory {
         let identity = try parseIdentity(e["identity"])
         guard case .string(let scheme)? = e["scheme"], scheme.utf8.count <= 32 else { throw Invalid(reason: "entry scheme missing") }
         let advisories = try array(e["advisories"], "advisories", max: maxAdvisoriesPerIdentity).map(parseAdvisory)
-        return Entry(identity: identity, scheme: scheme, advisories: advisories)
+        var lines: [String]? = nil
+        if let ml = e["maintainedLines"], !ml.isNullValue {
+            let raw = try array(ml, "maintainedLines", max: 32).map { try string($0, "maintainedLines") }
+            guard !raw.isEmpty, Set(raw).count == raw.count,
+                  raw.allSatisfy({ $0.range(of: "^[1-9][0-9]{0,3}$", options: .regularExpression) != nil }) else {
+                throw Invalid(reason: "maintainedLines must be distinct line numbers")
+            }
+            lines = raw
+        }
+        return Entry(identity: identity, scheme: scheme, advisories: advisories, maintainedLines: lines)
     }
 
     static func parseIdentity(_ raw: JSONValue?) throws -> Identity {
@@ -116,8 +125,19 @@ extension LocalAdvisory {
             guard case .bool(let flag) = w else { throw Invalid(reason: "withdrawn is not a bool") }
             withdrawn = flag
         }
+        var kind = AdvisoryKind.vulnerability
+        if let k = a["kind"], !k.isNullValue {
+            guard case .string(let s) = k, s.utf8.count <= 32 else { throw Invalid(reason: "kind is not a string") }
+            kind = s == "release" ? .release : .unsupported
+        }
+        var unknownOutside = false
+        if let u = a["unknownOutside"], !u.isNullValue {
+            guard case .bool(let flag) = u else { throw Invalid(reason: "unknownOutside is not a bool") }
+            unknownOutside = flag
+        }
         return Advisory(ids: ids, severity: severity, kev: kev, kevAdded: kevAdded, affected: affected,
-                        remediation: remediation, noFixReason: reason, binaries: binaries, withdrawn: withdrawn)
+                        remediation: remediation, noFixReason: reason, binaries: binaries, withdrawn: withdrawn,
+                        kind: kind, unknownOutside: unknownOutside)
     }
 
     static func parseAffected(_ raw: JSONValue?) throws -> Affected {

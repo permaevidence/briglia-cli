@@ -62,6 +62,25 @@ enum LocalToolsText {
         case .vendor(let vendor, let product, let minimum)?:
             let (p, v) = vendorName(vendor, product)
             return L(lang, "Update \(p) from \(v) (version \(minimum) or later).", "Aggiorna \(p) da \(v) (versione \(minimum) o successiva).")
+        case .node(let via, let major, let minimum, let root)?:
+            guard major.range(of: "^[0-9]{1,4}$", options: .regularExpression) != nil else { return nil }
+            switch via {
+            case "nvm":
+                return L(lang, "To fix it, run: `nvm install \(major)` and `nvm alias default \(major)`, then start Briglia again from a new terminal (version \(minimum) or later).",
+                         "Per correggerlo, esegui: `nvm install \(major)` e `nvm alias default \(major)`, poi riavvia Briglia da un nuovo terminale (versione \(minimum) o successiva).")
+            case "pkg":
+                return L(lang, "To fix it, download the Node.js \(major) installer (version \(minimum) or later) from https://nodejs.org/en/download and run it.",
+                         "Per correggerlo, scarica l'installer di Node.js \(major) (versione \(minimum) o successiva) da https://nodejs.org/en/download ed eseguilo.")
+            case "tarball":
+                guard let root, root.range(of: "^node-v[0-9.]{5,14}-(darwin|linux)-(x64|arm64|armv7l|ppc64le|s390x)$", options: .regularExpression) != nil else { return nil }
+                return L(lang, "To fix it, download Node.js \(minimum) or later from https://nodejs.org/en/download and replace the folder \(root).",
+                         "Per correggerlo, scarica Node.js \(minimum) o successivo da https://nodejs.org/en/download e sostituisci la cartella \(root).")
+            default:
+                return nil
+            }
+        case .libreoffice(let minimum)?:
+            return L(lang, "To fix it, update LibreOffice from libreoffice.org (version \(minimum) or later): in LibreOffice choose Help → Check for Updates, or download it from https://www.libreoffice.org/download/.",
+                     "Per correggerlo, aggiorna LibreOffice da libreoffice.org (versione \(minimum) o successiva): in LibreOffice scegli Aiuto → Controlla aggiornamenti, oppure scaricalo da https://www.libreoffice.org/download/.")
         case nil:
             return nil
         }
@@ -96,8 +115,8 @@ enum LocalToolsText {
         if covered.count == r.affected.count && only == nil { return instr }
         let scoped = idList(covered)
         return instr
-            .replacingOccurrences(of: "To fix it, run:", with: "To fix \(scoped), run:")
-            .replacingOccurrences(of: "Per correggerlo, esegui:", with: "Per correggere \(scoped), esegui:")
+            .replacingOccurrences(of: "To fix it,", with: "To fix \(scoped),")
+            .replacingOccurrences(of: "Per correggerlo,", with: "Per correggere \(scoped),")
             .replacingOccurrences(of: "Update ", with: "To fix \(scoped), update ", options: .anchored)
             .replacingOccurrences(of: "Aggiorna ", with: "Per correggere \(scoped), aggiorna ", options: .anchored)
     }
@@ -140,6 +159,9 @@ enum LocalToolsText {
             if let m = kevMitigationSentence(r, lang: lang, also: !fixable(r).isEmpty) { s += " " + m }
             return s
         case .initial:
+            if !r.hasInstallableFix, kevUnfixed(r).isEmpty, r.releaseUpdateInstallable {
+                return releaseLine(r, lang: lang)
+            }
             if r.hasInstallableFix {
                 let serious = r.level == .critical
                 var s = serious
@@ -172,6 +194,20 @@ enum LocalToolsText {
         }
     }
 
+    /// v18 (R17-3): "older than the latest security release" — never "a
+    /// known security problem"; the update instruction says "To update".
+    static func releaseLine(_ r: LocalTools.ToolReport, lang: String) -> String {
+        let name = displayName(r), ver = r.installedVersion ?? "?"
+        let target = r.releases.compactMap(\.fixedVersion).first ?? "?"
+        var s = L(lang, "\(name) \(ver) on \(machineEN) is older than the latest \(name) security release for its line (\(target)). Briglia does not update it for you.",
+                  "\(name) \(ver) su \(machineIT) è più vecchio dell'ultima versione di sicurezza di \(name) per la sua linea (\(target)). Briglia non lo aggiorna per te.")
+        if let instr = fixInstruction(r.action, lang: lang) {
+            s += " " + instr.replacingOccurrences(of: "To fix it,", with: "To update,")
+                .replacingOccurrences(of: "Per correggerlo,", with: "Per aggiornarlo,")
+        }
+        return s
+    }
+
     /// One message for one check: ≤ 5 named lines, then "and N more".
     static func message(_ lines: [LocalVuln.Proposal], lang: String) -> String {
         guard lines.count > 1 else { return lines.first.map { "⚠️ " + line($0, lang: lang) } ?? "" }
@@ -195,6 +231,11 @@ enum LocalToolsText {
 
     static func stateText(_ r: LocalTools.ToolReport, lang: String) -> String {
         switch r.state {
+        case .behindSecurityRelease:
+            let target = r.releases.compactMap(\.fixedVersion).first ?? "?"
+            return L(lang, "older than the latest security release (\(target))", "più vecchio dell'ultima versione di sicurezza (\(target))")
+                + (fixInstruction(r.action, lang: lang).map { " — " + $0.replacingOccurrences(of: "To fix it,", with: "To update,")
+                    .replacingOccurrences(of: "Per correggerlo,", with: "Per aggiornarlo,") } ?? "")
         case .affectedFixInstallable:
             // R2-R5: scoped like the messages — the fix sentence names what
             // it fixes; outstanding KEV issues keep their mitigation.
@@ -280,6 +321,11 @@ enum LocalToolsText {
                 }
                 reasons.append(SecurityStatus.Reason(en: reason("en"), it: reason("it")))
             }
+            for r in reports where r.state == .behindSecurityRelease {
+                let name = "\(displayName(r)) \(r.installedVersion ?? "")"
+                reasons.append(SecurityStatus.Reason(en: "\(name) is " + stateText(r, lang: "en"),
+                                                     it: "\(name) è " + stateText(r, lang: "it")))
+            }
         }
         if let o = vuln?.lastOutcome {
             details.append("Last tool-security message: " + (o.outcome == .accepted ? "sent" : "may not have arrived (\(o.outcome.rawValue))")
@@ -287,19 +333,31 @@ enum LocalToolsText {
         }
         let affected = expired ? 0 : reports.filter { [.affectedFixInstallable, .affectedNotInstallable, .affectedNoFix].contains($0.state) }.count
         let clean = expired ? 0 : reports.filter { $0.state == .noKnownIssue }.count
-        let unknown = reports.count - affected - clean
+        let behind = expired ? 0 : reports.filter { $0.state == .behindSecurityRelease }.count
+        let unknown = reports.count - affected - clean - behind
         let part: String
         if reports.isEmpty {
             part = "tool advisories: not checked yet"
         } else {
             let at = vuln?.report.map { SecurityStatus.age($0.evaluatedAt, now: now) } ?? "?"
-            part = "tool advisories: \(affected) with known issues, \(clean) none known, \(unknown) unknown (checked \(at))"
+            part = "tool advisories: \(affected) with known issues, " + (behind > 0 ? "\(behind) behind a security release, " : "")
+                + "\(clean) none known, \(unknown) unknown (checked \(at))"
         }
         return Status(part: part, reasons: reasons, details: details)
     }
 
     static func liveStatus(now: Date = Date()) -> Status {
         let (obs, vuln) = LocalAdvisoryStore.snapshot()
-        return status(setting: UpdateNoticeStore.snapshot(.live).0, policy: .effective, observation: obs, vuln: vuln, now: now)
+        let tools = status(setting: UpdateNoticeStore.snapshot(.live).0, policy: .effective, observation: obs, vuln: vuln, now: now)
+        #if os(macOS)
+        return merged(tools, MacUpdatesText.liveStatus(now: now))
+        #else
+        return tools
+        #endif
+    }
+
+    /// The advisory part and the macOS weekly-updates part (§9.5.9) as one.
+    static func merged(_ a: Status, _ b: Status) -> Status {
+        Status(part: a.part + "; " + b.part, reasons: a.reasons + b.reasons, details: a.details + b.details)
     }
 }

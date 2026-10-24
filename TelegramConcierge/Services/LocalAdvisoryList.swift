@@ -147,6 +147,11 @@ enum LocalAdvisory {
         case noDsa = "no-dsa", postponed, willNotFix = "will-not-fix", notYet = "not-yet", unknown
     }
 
+    /// v18 (§9.5.10.1, R17-3): `release` = "older than the latest security
+    /// release of its line" (Node); never a known vulnerability. A kind this
+    /// client does not know makes the advisory unknown.
+    enum AdvisoryKind: String, Codable { case vulnerability, release, unsupported }
+
     struct Advisory: Codable, Equatable {
         var ids: [String]
         var severity: ReleaseSecurity.Level
@@ -157,6 +162,11 @@ enum LocalAdvisory {
         var noFixReason: NoFixReason?
         var binaries: [String]?
         var withdrawn: Bool
+        var kind: AdvisoryKind = .vulnerability
+        /// v18 (§9.5.10.2): the source's default status is "unknown": a
+        /// version outside every range is unknown for this advisory, never
+        /// "not affected".
+        var unknownOutside = false
 
         var primaryId: String {
             ids.first(where: { $0.hasPrefix("CVE-") }) ?? ids.first ?? "?"
@@ -169,6 +179,9 @@ enum LocalAdvisory {
         /// the entry is unknown (unsupported comparator).
         var scheme: String
         var advisories: [Advisory]
+        /// v17 (§9.5.10.1): release lines the vendor still maintains (Node).
+        /// An installed version on another line is never "no known issue".
+        var maintainedLines: [String]? = nil
     }
 
     struct Document: Codable, Equatable {

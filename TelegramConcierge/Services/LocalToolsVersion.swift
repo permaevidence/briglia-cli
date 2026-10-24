@@ -309,6 +309,12 @@ enum LocalToolsVersion {
         case .deb: line = nil
         }
         guard let line else { return nil }
+        // v18 (§9.5.10.2): a `N.N` line (LibreOffice series) is matched on the
+        // installed major.minor first, then a major-only line (Node).
+        if scheme == .dotted {
+            let parts = version.split(separator: ".")
+            if parts.count >= 2, let hit = r.fixed.first(where: { $0.line == "\(parts[0]).\(parts[1])" }) { return hit.version }
+        }
         return r.fixed.first(where: { $0.line == line })?.version
     }
 }

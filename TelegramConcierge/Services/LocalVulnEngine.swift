@@ -267,6 +267,7 @@ enum LocalVuln {
             }
         }
         let adv = r.affected.map { "\($0.primaryId)|\($0.severity.rawValue)|\($0.kev)|\(fixClass($0.fix))|\($0.fixedVersion ?? "")" }.sorted()
+            + r.releases.map { "release:\($0.primaryId)|\(fixClass($0.fix))|\($0.fixedVersion ?? "")" }.sorted()
         let action = (try? JSONEncoder().encode(r.action)).map { String(decoding: $0, as: UTF8.self) } ?? "none"
         return ([kind.rawValue, r.identityKey ?? "", r.installedVersion ?? "", action] + adv).joined(separator: "\n")
     }

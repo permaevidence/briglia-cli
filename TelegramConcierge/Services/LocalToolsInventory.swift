@@ -18,7 +18,8 @@ extension LocalTools {
         var vendor: String
         var product: String
         var flavour: String
-        var caskToken: String?
+        /// Homebrew casks that install this app (Caskroom names).
+        var caskTokens: [String] = []
     }
 
     struct WatchTool {
@@ -91,7 +92,7 @@ extension LocalTools {
         WatchTool(id: "ghostscript", name: "Ghostscript", executables: ["gs"], brewFormulae: ["ghostscript"], mitigation: mediaMitigation("Ghostscript")),
         WatchTool(id: "libreoffice", name: "LibreOffice", executables: ["soffice", "libreoffice"],
                   macApp: MacApp(path: "/Applications/LibreOffice.app", vendor: "documentfoundation", product: "libreoffice",
-                                 flavour: "official", caskToken: "libreoffice"),
+                                 flavour: "official", caskTokens: ["libreoffice", "libreoffice-still"]),
                   mitigation: mediaMitigation("LibreOffice")),
         WatchTool(id: "pango", name: "pango", debPackages: ["libpango-1.0-0"], brewFormulae: ["pango"], mitigation: noWorkaround),
         WatchTool(id: "cairo", name: "cairo", debPackages: ["libcairo2"], brewFormulae: ["cairo"], mitigation: noWorkaround),
@@ -196,5 +197,78 @@ extension LocalTools {
         case .macOS: return MacInventory(probe: p).run()
         case .linux, .ubuntuTouch: return DebInventory(probe: p).run()
         }
+    }
+}
+
+// MARK: - Official Node.js builds (v17/v18 §9.5.10.1)
+
+extension LocalTools {
+    static let nodeTarballDir = "node-v([0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4})-(darwin|linux)-(x64|arm64|armv7l|ppc64le|s390x)"
+
+    /// The node Briglia runs, when it is a POSITIVELY recognised official
+    /// build: nvm, the nodejs.org macOS installer (with a matching receipt),
+    /// or an official tarball directory. Every rule is terminal: a claimed
+    /// provenance whose own check fails is unknown, never a looser rule. The
+    /// caller has already excluded Briglia's copy, Homebrew and packaged
+    /// (dpkg/rpm/pacman) binaries.
+    static func officialNode(_ p: Probe, tool: WatchTool, path: String, real: String) -> Resolution {
+        let platform = p.platform == .macOS ? "darwin" : "linux"
+        func unknown(_ en: String, _ it: String) -> Resolution { .unknown(toolId: tool.id, reason: Text(en, it)) }
+        let notRecognised = unknown("\(path) is not a recognised Node.js installation (nvm, the nodejs.org installer or an official nodejs.org archive)",
+                                    "\(path) non è un'installazione di Node.js riconosciuta (nvm, l'installer di nodejs.org o un archivio ufficiale di nodejs.org)")
+        if real.contains("/Cellar/") || real.hasPrefix("/nix/") || real.hasPrefix("/snap/") { return notRecognised }
+        let (st, out) = p.run(path, ["--version"], 10)
+        let raw = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard st == 0, raw.hasPrefix("v"), raw.count < 32,
+              String(raw.dropFirst()).range(of: "^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}$", options: .regularExpression) != nil else {
+            return unknown("the version of \(path) cannot be read", "la versione di \(path) non si può leggere")
+        }
+        let version = String(raw.dropFirst())
+        func present(_ via: String) -> Resolution {
+            .present(Instance(vendorVia: via, toolId: tool.id,
+                              identity: LocalAdvisory.Identity(kind: .vendor, vendor: "nodejs.org", product: "node",
+                                                               platform: platform, flavour: "official"),
+                              installedVersion: version, compareVersion: version, originProblem: nil, binaries: [],
+                              candidates: .vendor, usedPath: path, statusOnly: nil))
+        }
+        let mismatch = unknown("\(path) reports Node.js \(version), which does not match its installation record",
+                               "\(path) indica Node.js \(version), che non corrisponde ai dati della sua installazione")
+        // nvm: <NVM_DIR>/versions/node/v<X.Y.Z>/bin/node.
+        let nvmEnv = p.environment["NVM_DIR"].flatMap { $0.hasPrefix("/") ? $0 : nil } ?? (p.home + "/.nvm")
+        let nvmDir = p.resolve(nvmEnv) ?? nvmEnv
+        let nvmPrefix = (nvmDir.hasSuffix("/") ? nvmDir : nvmDir + "/") + "versions/node/"
+        if real.hasPrefix(nvmPrefix) {
+            let rest = String(real.dropFirst(nvmPrefix.count))
+            guard let m = rest.range(of: "^v[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}/bin/node$", options: .regularExpression), m.lowerBound == rest.startIndex else {
+                return notRecognised
+            }
+            let pathVersion = String(rest.dropFirst().prefix { $0 != "/" })
+            return pathVersion == version ? present("nvm") : mismatch
+        }
+        // nodejs.org macOS installer: /usr/local/bin/node + its receipt.
+        if p.platform == .macOS, real == "/usr/local/bin/node" {
+            guard let data = p.readData("/var/db/receipts/org.nodejs.node.pkg.plist"),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  let pkgVersion = plist["PackageVersion"] as? String else {
+                return unknown("\(path) has no nodejs.org installer receipt", "\(path) non ha la ricevuta dell'installer di nodejs.org")
+            }
+            return pkgVersion.trimmingCharacters(in: CharacterSet(charactersIn: "v")) == version ? present("pkg") : mismatch
+        }
+        // Official archive directory: …/node-vX.Y.Z-<os>-<arch>/bin/node.
+        guard real.range(of: "/" + nodeTarballDir + "/bin/node$", options: .regularExpression) != nil else { return notRecognised }
+        let rootPath = String(real.dropLast("/bin/node".count))
+        let dirName = (rootPath as NSString).lastPathComponent
+        if rootPath.hasPrefix("/usr/") && !rootPath.hasPrefix("/usr/local/") { return notRecognised }
+        if p.listDirectory(rootPath + "/conda-meta") != nil { return notRecognised }
+        guard dirName.hasPrefix("node-v\(version)-\(platform)-") else { return mismatch }
+        guard let header = p.readData(rootPath + "/include/node/node_version.h").map({ String(decoding: $0.prefix(65_536), as: UTF8.self) }) else {
+            return unknown("\(rootPath) is not a complete nodejs.org archive", "\(rootPath) non è un archivio completo di nodejs.org")
+        }
+        func macro(_ n: String) -> String? {
+            guard let m = header.range(of: "#define NODE_\(n)_VERSION [0-9]{1,4}", options: .regularExpression) else { return nil }
+            return header[m].split(separator: " ").last.map(String.init)
+        }
+        guard let a = macro("MAJOR"), let b = macro("MINOR"), let c = macro("PATCH"), "\(a).\(b).\(c)" == version else { return mismatch }
+        return present("tarball:" + dirName)
     }
 }
