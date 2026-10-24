@@ -577,7 +577,9 @@ def curation_doc(findings):
     fp = fingerprint(rows)
     lines = ["The reviewed LibreOffice platform curation (security/libreoffice-platforms.json) needs a review: until it is "
              "updated, these CVEs stay 'unknown' for the macOS website build (never a guess).", ""]
-    lines += [f"- `{i}` — {'no curation entry' if p == 'missing' else 'its CNA description changed since review'}" for i, p in rows]
+    what = {"missing": "no curation entry", "changed": "its CNA description changed since review",
+            "platform-label": "the CNA record uses a platform label Briglia does not recognise"}
+    lines += [f"- `{i}` — {what[p]}" for i, p in rows]
     lines += ["" if rows else "- (nothing to review)", "",
               f"<!-- briglia-security-watch v1 kind=curation ids=libreoffice-curation fp={fp} -->"]
     return {"kind": "curation", "ids": ["libreoffice-curation"], "fp": fp,
@@ -595,7 +597,7 @@ def load_curation(path):
         return None
     out = []
     for x in d["findings"]:
-        if type(x) is not dict or not valid_id(str(x.get("id"))) or x.get("problem") not in ("missing", "changed"):
+        if type(x) is not dict or not valid_id(str(x.get("id"))) or x.get("problem") not in ("missing", "changed", "platform-label"):
             return None
         out.append({"id": x["id"], "problem": x["problem"]})
     return out[:200]

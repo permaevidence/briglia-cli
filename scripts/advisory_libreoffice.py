@@ -216,8 +216,9 @@ def convert(cve, rec, fixed_on_page, curation=None):
     raw = rec.get("affected")
     # R1 (impl round 1): missing, empty or malformed affected data is NOT
     # "another product": it stays an unknown advisory, never a clean result.
-    if type(raw) is not list or not raw or any(type(a) is not dict or type(a.get("product")) is not str for a in raw):
-        return unknown
+    if type(raw) is not list or not raw or any(type(a) is not dict or type(a.get("product")) is not str
+                                                 or not a["product"].strip() for a in raw):
+        return unknown                       # incl. an empty or blank product name (impl round-2 R2-1)
     entries = [a for a in raw if a["product"] == "LibreOffice"]
     if not entries:
         return None                          # a valid record positively naming only other products
@@ -269,9 +270,11 @@ def convert(cve, rec, fixed_on_page, curation=None):
 
 def curation_findings(sources, curation):
     """R6: deterministic owner findings for the reviewed platform curation:
-    a retrieved TDF LibreOffice record with no structured platforms that has
-    no curation entry ("missing"), or whose description no longer matches the
-    pinned hash ("changed"). Explicitly deferred IDs are not findings."""
+    a retrieved TDF LibreOffice record without definite structured OS
+    platforms that has no curation entry ("missing"), or whose description no
+    longer matches the pinned hash ("changed"); a record with unfamiliar
+    platform labels ("platform-label"). Explicitly deferred IDs are not
+    findings."""
     recs = ((sources or {}).get("cve-cna") or {}).get("data") or {}
     deferred = {d["id"] for d in (curation or {}).get("deferred", [])}
     out = []
@@ -281,8 +284,15 @@ def curation_findings(sources, curation):
             continue
         raw = rec.get("affected")
         entries = [a for a in raw if type(a) is dict and a.get("product") == "LibreOffice"] if type(raw) is list else []
-        if entries and all(type(a.get("platforms")) is list and a["platforms"] for a in entries):
-            continue                         # structured platforms: no curation needed
+        # Impl round-2 R2-2: the same semantic classification as the matcher.
+        # Definite OS platforms need no curation; architecture-only (or no)
+        # labels do; unfamiliar labels are reported for review.
+        kinds = [structured_platforms(a) for a in entries]
+        if "unknown" in kinds:
+            out.append({"id": cve, "problem": "platform-label"})
+            continue
+        if entries and all(k in (True, False) for k in kinds):
+            continue
         e = (curation or {}).get("entries", {}).get(cve)
         if e is None:
             out.append({"id": cve, "problem": "missing"})

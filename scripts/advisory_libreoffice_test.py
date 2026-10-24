@@ -217,7 +217,8 @@ def run_tests(m, only=None):
 
     def missing_affected():
         out = []
-        for aff in ([], None, [{"vendor": "x"}], "LibreOffice"):
+        for aff in ([], None, [{"vendor": "x"}], "LibreOffice", [{"product": ""}], [{"product": "   "}],
+                    [{"product": "LibreOffice Online"}, {"product": ""}]):
             r = {"assigner": "Document Fdn.", "state": "PUBLISHED", "description": D, "affected": aff}
             a = m.convert("CVE-2099-0020", r, ["26.2.5"], cur(m, "CVE-2099-0020", D))
             out.append(a and a["affected"])
@@ -226,7 +227,7 @@ def run_tests(m, only=None):
         src = {"tdf-advisories": {"status": "ok", "checkedAt": "t", "data": {"ids": ["CVE-2099-0020"], "fixed": {"CVE-2099-0020": ["26.2.5"]}}},
                "cve-cna": {"status": "ok", "checkedAt": "t", "data": {"CVE-2099-0020": {"assigner": "Document Fdn.", "state": "PUBLISHED", "description": D, "affected": []}}}}
         advs, st = m.libreoffice_identity(src, {}, cur(m, "CVE-2099-0020", D))
-        return (out == ["unknown"] * 4 and other is None and len(advs) == 1 and advs[0]["affected"] == "unknown"), (out, other, advs)
+        return (out == ["unknown"] * 7 and other is None and len(advs) == 1 and advs[0]["affected"] == "unknown"), (out, other, advs)
     t("R1: missing/empty/malformed affected data → an unknown advisory (only a valid other product is dropped)", missing_affected)
 
     def absent_then_present():
@@ -270,8 +271,14 @@ def run_tests(m, only=None):
                 "CVE-2099-0044": rec([v("26.2", "< 26.2.5")], assigner="mitre")}                  # other CNA: none
         curation = {"schema": 1, "absentRecords": [], "deferred": [{"id": "CVE-2099-0043", "reason": "x"}],
                     "entries": {"CVE-2099-0041": cur(m, "CVE-2099-0041", D)["entries"]["CVE-2099-0041"]}}
+        recs["CVE-2099-0045"] = rec([v("26.2", "< 26.2.5")], platforms=["x86"])                 # arch-only, no entry → missing
+        recs["CVE-2099-0046"] = rec([v("26.2", "< 26.2.5")], platforms=["x64"], desc="New text.")  # arch-only, changed
+        recs["CVE-2099-0047"] = rec([v("26.2", "< 26.2.5")], platforms=["BeOS"])                # unfamiliar label
+        curation["entries"]["CVE-2099-0046"] = cur(m, "CVE-2099-0046", D)["entries"]["CVE-2099-0046"]
         got = m.curation_findings({"cve-cna": {"status": "ok", "data": recs}}, curation)
-        return got == [{"id": "CVE-2099-0040", "problem": "missing"}, {"id": "CVE-2099-0041", "problem": "changed"}], got
+        return got == [{"id": "CVE-2099-0040", "problem": "missing"}, {"id": "CVE-2099-0041", "problem": "changed"},
+                       {"id": "CVE-2099-0045", "problem": "missing"}, {"id": "CVE-2099-0046", "problem": "changed"},
+                       {"id": "CVE-2099-0047", "problem": "platform-label"}], got
     t("R6: curation findings — missing and changed only (structured, deferred, other CNA excluded)", findings)
 
     def real_findings():
@@ -285,11 +292,12 @@ def run_tests(m, only=None):
 
 
 BREAKS = [
-    ("R1: missing/empty/malformed affected data → an unknown advisory (only a valid other product is dropped)",
-     '    if type(raw) is not list or not raw or any(type(a) is not dict or type(a.get("product")) is not str for a in raw):\n        return unknown',
-     '    if type(raw) is not list:\n        return None'),
     ("R5: a formerly absent record that now exists is processed normally (no stale placeholder)",
      '        for cve in sorted((absent & set(page["ids"])) - set(recs)):', '        for cve in sorted(absent & set(page["ids"])):'),
+    ("R1: missing/empty/malformed affected data → an unknown advisory (only a valid other product is dropped)",
+     'or not a["product"].strip() for a in raw):', 'or False for a in raw):'),
+    ("R6: curation findings — missing and changed only (structured, deferred, other CNA excluded)",
+     '        if entries and all(k in (True, False) for k in kinds):', '        if entries and all(type(a.get("platforms")) is list and a["platforms"] for a in entries):'),
     ("curation: duplicate JSON members are refused", '        if len(keys) != len(set(keys)):', '        if False:'),
     ("R6: curation findings — missing and changed only (structured, deferred, other CNA excluded)",
      '        elif e["descriptionSha256"] != description_sha(rec.get("description") or ""):', '        elif False:'),
