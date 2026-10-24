@@ -239,10 +239,13 @@ struct DebInventory {
     func run() -> [T.Resolution] {
         guard let os = T.parseOSRelease(probe.readData("/etc/os-release")), ["debian", "ubuntu"].contains(os.id) else {
             let why = T.Text("this Linux distribution is not covered by the advisory list", "questa distribuzione Linux non è coperta dall'elenco di avvisi")
-            return T.watchlist.map { .unknown(toolId: $0.id, reason: why) }
+            // Impl round-1 R4: an official Node.js build is recognised on any
+            // Linux (ownership checks first); the deb backend is not needed.
+            return T.watchlist.map { $0.vendorNode ? nodeOutsideDeb($0) : .unknown(toolId: $0.id, reason: why) }
         }
         guard let dpkgQuery = probe.findBinary("dpkg-query") else {
-            return T.watchlist.map { .unknown(toolId: $0.id, reason: T.Text("dpkg-query is not available", "dpkg-query non è disponibile")) }
+            return T.watchlist.map { $0.vendorNode ? nodeOutsideDeb($0)
+                                     : .unknown(toolId: $0.id, reason: T.Text("dpkg-query is not available", "dpkg-query non è disponibile")) }
         }
         let (st, listText) = probe.run(dpkgQuery, ["-W", "-f", "${binary:Package}\t${Version}\t${Source}\t${db:Status-Abbrev}\n"], T.probeTimeout)
         guard st == 0 else {
@@ -353,7 +356,9 @@ struct DebInventory {
             for candidate in Array(Set([p, real])).sorted() {
                 let (st, out) = probe.run(dpkgQuery, ["-S", candidate], T.probeTimeout)
                 if st == 0, let pkg = T.parseDpkgSearch(out, path: candidate), installed[pkg] != nil { return (tool, pkg, p, nil, nil) }
-                if !(st == 1 && out.contains("no path found matching pattern")) { positivelyUnowned = false }
+                // dpkg-query documents exit 1 as "nothing found" and 2 as an
+                // error: the status alone decides (no English text, any locale).
+                if st != 1 { positivelyUnowned = false }
             }
             // v18 (R17-2): an official Node.js build only when no package
             // manager owns the file, positively (a failed probe is unknown).
@@ -375,6 +380,19 @@ struct DebInventory {
             return (tool, nil, nil, T.Text("the loaded libraries could not be read", "le librerie caricate non si possono leggere"), nil)
         }
         return (tool, nil, nil, nil, nil)
+    }
+
+    /// The node Briglia runs on a non-Debian Linux (or without dpkg): Briglia's
+    /// copy and Homebrew excluded, rpm/pacman ownership first (a failed probe
+    /// is unknown), then only a positively recognised official build.
+    func nodeOutsideDeb(_ tool: T.WatchTool) -> T.Resolution {
+        guard let p = tool.executables.lazy.compactMap({ self.probe.findBinary($0) }).first else { return .absent(toolId: tool.id) }
+        let real = probe.resolve(p) ?? p
+        if probe.owned(real) || probe.owned(p) || probe.isToolchainWrapper(p) {
+            return .unknown(toolId: tool.id, reason: T.Text("Briglia's own copy (updated with Briglia)", "copia di Briglia (aggiornata con Briglia)"))
+        }
+        if let why = otherPackageOwner(real) { return .unknown(toolId: tool.id, reason: why) }
+        return T.officialNode(probe, tool: tool, path: p, real: real)
     }
 
     /// rpm / pacman ownership of `path` (read-only queries), where those

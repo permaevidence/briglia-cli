@@ -266,14 +266,21 @@ def main():
             if old not in src:
                 check(f"break anchor present: {name}", False, old)
                 continue
-            p = os.path.join(os.path.dirname(SRC), f"_publish_advisory_b{i}.py")
+            # The mutated copy lives in a disposable tree with its helper
+            # scripts (never inside the checkout: it may be read-only).
+            tree = os.path.join(tmp, f"tree{i}")
+            os.makedirs(os.path.join(tree, ".github", "scripts"))
+            os.makedirs(os.path.join(tree, "scripts"))
+            for f in ("verify-advisory.sh", "openssl-resolve.sh"):
+                shutil.copy(os.path.join(ROOT, ".github", "scripts", f), os.path.join(tree, ".github", "scripts", f))
+            for f in ("advisory_publish.py", "advisory_fetch.py", "advisory_node.py", "advisory_libreoffice.py"):
+                shutil.copy(os.path.join(ROOT, "scripts", f), os.path.join(tree, "scripts", f))
+            p = os.path.join(tree, ".github", "scripts", "publish-advisory.py")
             open(p, "w").write(src.replace(old, new, 1))
             try:
                 ok = run_tests(load(p, f"publish_advisory_b{i}"), env, only={name}).get(name) is False
             except Exception:       # noqa: BLE001
                 ok = True
-            finally:
-                os.unlink(p)
             caught += ok
             check(f"deliberate break caught: {name}", ok)
         print(f"\n{passed} passed, {failed} failed ({caught}/{len(BREAKS)} deliberate breaks caught)")

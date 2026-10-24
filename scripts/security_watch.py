@@ -76,7 +76,7 @@ OVERDUE = "triage-overdue"
 TRIAGE_DAYS_URGENT, TRIAGE_DAYS = 7, 30
 
 LABEL = "security-watch"
-MARKER_RE = re.compile(r"<!-- briglia-security-watch v1 kind=(finding|gaps|health|node|heartbeat) ids=([A-Za-z0-9:._,-]*) fp=([0-9a-f]{16}) -->")
+MARKER_RE = re.compile(r"<!-- briglia-security-watch v1 kind=(finding|gaps|health|node|heartbeat|curation) ids=([A-Za-z0-9:._,-]*) fp=([0-9a-f]{16}) -->")
 MAX_BYTES = 32 * 1024 * 1024
 MAX_PAGES = 25
 MAX_VULNS = 400
@@ -570,6 +570,37 @@ def node_doc(latest):
             "body": "\n".join(lines)}
 
 
+def curation_doc(findings):
+    """R6 (plan v20 §9.5.10.2): the LibreOffice platform curation needs a
+    review. Changes only when the list of findings changes."""
+    rows = sorted((f["id"], f["problem"]) for f in findings)
+    fp = fingerprint(rows)
+    lines = ["The reviewed LibreOffice platform curation (security/libreoffice-platforms.json) needs a review: until it is "
+             "updated, these CVEs stay 'unknown' for the macOS website build (never a guess).", ""]
+    lines += [f"- `{i}` — {'no curation entry' if p == 'missing' else 'its CNA description changed since review'}" for i, p in rows]
+    lines += ["" if rows else "- (nothing to review)", "",
+              f"<!-- briglia-security-watch v1 kind=curation ids=libreoffice-curation fp={fp} -->"]
+    return {"kind": "curation", "ids": ["libreoffice-curation"], "fp": fp,
+            "title": f"[security-watch] LibreOffice platform curation needs review ({len(rows)})", "body": "\n".join(lines)}
+
+
+def load_curation(path):
+    """The fetch step's curation findings; None when absent or not complete."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if type(d) is not dict or d.get("schema") != 1 or d.get("complete") is not True or type(d.get("findings")) is not list:
+        return None
+    out = []
+    for x in d["findings"]:
+        if type(x) is not dict or not valid_id(str(x.get("id"))) or x.get("problem") not in ("missing", "changed"):
+            return None
+        out.append({"id": x["id"], "problem": x["problem"]})
+    return out[:200]
+
+
 def heartbeat_doc(now, feeds, run_url, previous_at):
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     fp = fingerprint(sorted(feeds.items()))
@@ -907,6 +938,13 @@ def run(args):
     docs = [finding_doc(g, kev, by_id) for g in groups] + [gaps_doc(components)]
     if node is not None:
         docs.append(node_doc(node))
+    if getattr(args, "curation", None):
+        cur = load_curation(args.curation)
+        if cur is None:
+            feeds["LibreOffice curation"] = "not checked (no complete fetch this run)"
+        else:
+            docs.append(curation_doc(cur))
+            feeds["LibreOffice curation"] = f"ok ({len(cur)} to review)"
 
     print(f"security watch: {len(components)} components, {sum(1 for c in components if c['watch'] in ('osv', 'osv-package'))} OSV-checked, "
           f"{len(groups)} advisory group(s), {len(failures)} feed problem(s)")
@@ -933,6 +971,7 @@ def main(argv=None):
     p.add_argument("--github-api", default=GITHUB_API)
     p.add_argument("--kev-url", default=KEV_URL)
     p.add_argument("--node-index", default=NODE_INDEX)
+    p.add_argument("--curation", help="curation.json from advisory_fetch.py (plan v20 §9.5.10.2)")
     p.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     args = p.parse_args(argv)
     args.token = os.environ.get("GITHUB_TOKEN", "")

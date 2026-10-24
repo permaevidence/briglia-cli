@@ -67,7 +67,8 @@ extension MacUpdates {
         if il == sl { guard let c = cmp(s, inst) else { return nil }; return (c > 0, s) }
         guard let a = cmp(il + ".0", sl + ".0"), let b = cmp(il + ".0", fl + ".0") else { return nil }
         if a < 0 && b < 0 { return (true, s) }      // older than both lines
-        return (false, nil)                          // newer than both, or between: no reference
+        if a > 0 && b > 0 { return (false, nil) }    // newer than both: not waiting
+        return nil                                   // between the lines: no reference (impl round-1 R2)
     }
 
     struct SoftwareUpdate: Equatable {

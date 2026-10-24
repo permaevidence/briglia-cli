@@ -641,6 +641,32 @@ def scenarios(script):
           rc == 0 and len(W.issues) == 3 and issues("gaps") and issues("node") and issues("heartbeat")
           and "runtime:node" in issues("gaps")[0]["body"], out[-600:])
 
+    # 9b. LibreOffice platform curation findings (plan v20 §9.5.10.2, impl round-1 R6)
+    reset(); base_world()
+    cdir = tempfile.mkdtemp(prefix="secwatch-cur-")
+    cur = os.path.join(cdir, "curation.json")
+    with open(cur, "w") as f:
+        json.dump({"schema": 1, "complete": True, "findings": [{"id": "CVE-2099-0101", "problem": "missing"},
+                                                                {"id": "CVE-2099-0102", "problem": "changed"}]}, f)
+    rc, out = run_watch(script, extra=["--curation", cur])
+    ci = issues("curation")
+    check("curation: one owner issue listing missing and changed entries",
+          len(ci) == 1 and "CVE-2099-0101" in ci[0]["body"] and "description changed" in ci[0]["body"] and "(2)" in ci[0]["title"],
+          [i["title"] for i in W.issues])
+    writes = len(W.writes)
+    rc, out = run_watch(script, extra=["--curation", cur])
+    check("curation: an unchanged finding list writes nothing new to the curation issue",
+          len([w for w in W.writes[writes:] if "curation" in json.dumps(w)]) == 0, W.writes[writes:])
+    with open(cur, "w") as f:
+        json.dump({"schema": 1, "complete": False, "findings": []}, f)
+    rc, out = run_watch(script, extra=["--curation", cur])
+    check("curation: an incomplete fetch leaves the issue as it was", "CVE-2099-0101" in issues("curation")[0]["body"])
+    with open(cur, "w") as f:
+        json.dump({"schema": 1, "complete": True, "findings": []}, f)
+    rc, out = run_watch(script, extra=["--curation", cur])
+    check("curation: a complete clean fetch rewrites it to nothing to review", "(0)" in issues("curation")[0]["title"]
+          and "nothing to review" in issues("curation")[0]["body"])
+
     # 10. config errors
     p = subprocess.run([sys.executable, script, "--repo", REPO], capture_output=True, text=True,
                        env={k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"})
@@ -696,6 +722,8 @@ BREAKS = [
     ("malformed vulnerability rows skipped", "            if not all(isinstance(v, dict) and isinstance(v.get(\"vulnerable_version_range\"), (str, type(None)))", "            if False and all(isinstance(v, dict) and isinstance(v.get(\"vulnerable_version_range\"), (str, type(None)))"),
     ("OSV record structure not validated", "    problem = osv_record_problem(data)\n    if problem:", "    problem = None\n    if problem:"),
     ("OSV ranges type not validated", 'or not opt(aff, "ranges", list):', 'or False:'),
+    ("curation findings dropped", "            docs.append(curation_doc(cur))", "            pass"),
+    ("incomplete curation fetch trusted", 'd.get("complete") is not True or ', ''),
     ("triage during incomplete runs", '        if not complete or it["kind"] != "finding" or it["state"] != "open":', '        if it["kind"] != "finding" or it["state"] != "open":'),
 ]
 

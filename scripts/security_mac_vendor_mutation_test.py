@@ -95,6 +95,16 @@ base.MUTATIONS = [
     ("M28 an invalid tarball directory name reaches the text", TEXT,
      "                guard let root, root.range(of: \"^node-v[0-9.]{5,14}-(darwin|linux)-(x64|arm64|armv7l|ppc64le|s390x)$\", options: .regularExpression) != nil else { return nil }",
      "                guard let root else { return nil }"),
+    ("M29 a LibreOffice line between still and fresh resolves the key", MUI,
+     "        return nil                                   // between the lines: no reference (impl round-1 R2)",
+     "        return (false, nil)"),
+    ("M30 an unreadable LibreOffice.app counts as absent", S + "LocalToolsInventoryMac.swift",
+     "            if probe.resolve(app.path) != nil {\n                return .unknown(", "            if false {\n                return .unknown("),
+    ("M31 official Node.js ignored outside Debian/Ubuntu", DEB,
+     "            return T.watchlist.map { $0.vendorNode ? nodeOutsideDeb($0) : .unknown(toolId: $0.id, reason: why) }",
+     "            return T.watchlist.map { .unknown(toolId: $0.id, reason: why) }"),
+    ("M32 a failed dpkg probe (exit 2) counts as 'not owned'", DEB,
+     "                if st != 1 { positivelyUnowned = false }", "                if st == 0 { positivelyUnowned = false }"),
 ]
 
 if __name__ == "__main__":

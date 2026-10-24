@@ -49,6 +49,7 @@ struct LocalToolsSelftest: AsyncParsableCommand {
             ("vendor-node", Self.vendorNodeGroup),
             ("node-list", Self.nodeListGroup),
             ("libreoffice-list", Self.libreOfficeListGroup),
+            ("impl-round1", Self.implRound1Group),
         ]
         for (name, run) in groups where only.map({ name.contains($0) }) ?? true {
             print("— \(name) —")

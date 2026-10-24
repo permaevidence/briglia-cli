@@ -222,3 +222,70 @@ extension LocalToolsSelftest {
         t.check("libreoffice: an unknown advisory never suppresses a separate supported positive", mr.state == .affectedFixInstallable && mr.unknownAdvisories == 1)
     }
 }
+
+/// Impl round-1 corrections (R2, R4) and status notes.
+extension LocalToolsSelftest {
+    static func implRound1Group(_ t: Tally) {
+        // R4: official Node.js on Fedora (rpm) and Arch (pacman), no dpkg.
+        func distro(_ id: String) -> FakeMachine {
+            let m = FakeMachine()
+            m.text("/etc/os-release", "ID=\(id)\nVERSION_ID=42\nVERSION_CODENAME=test\n")
+            return m
+        }
+        func node(_ m: FakeMachine) -> LocalTools.Resolution? { LocalTools.inventory(m.probe(.linux)).first { $0.toolId == "node" } }
+        let nv = "/home/u/.nvm/versions/node/v24.21.0/bin/node"
+        let fedora = distro("fedora")
+        fedora.bins = ["node": nv, "rpm": "/usr/bin/rpm"]; fedora.text(nv, "bin"); nodeVersionOutput(fedora, nv, "24.21.0")
+        fedora.outputs["/usr/bin/env LC_ALL=C /usr/bin/rpm -qf \(nv)"] = (1, "file \(nv) is not owned by any package\n")
+        if case .present(let i)? = node(fedora) { t.check("R4: Fedora + nvm + rpm 'not owned' → official Node.js (linux)", i.identity.key == "vendor:nodejs.org:node:linux:official") }
+        else { t.check("R4: Fedora + nvm + rpm 'not owned' → official Node.js (linux)", false) }
+        let fedoraOwned = distro("fedora")
+        fedoraOwned.bins = ["node": "/usr/bin/node", "rpm": "/usr/bin/rpm"]; fedoraOwned.text("/usr/bin/node", "bin"); nodeVersionOutput(fedoraOwned, "/usr/bin/node", "24.21.0")
+        fedoraOwned.outputs["/usr/bin/env LC_ALL=C /usr/bin/rpm -qf /usr/bin/node"] = (0, "nodejs-24.21.0-1.fc42.x86_64\n")
+        if case .unknown(_, let why)? = node(fedoraOwned) { t.check("R4: Fedora rpm-owned node → unknown (packaged)", why.en.contains("(rpm)")) }
+        else { t.check("R4: Fedora rpm-owned node → unknown (packaged)", false) }
+        let arch = distro("arch")
+        let root = "/home/u/opt/node-v24.21.0-linux-x64"
+        arch.bins = ["node": root + "/bin/node", "pacman": "/usr/bin/pacman"]; arch.text(root + "/bin/node", "bin"); nodeVersionOutput(arch, root + "/bin/node", "24.21.0")
+        arch.text(root + "/include/node/node_version.h", "#define NODE_MAJOR_VERSION 24\n#define NODE_MINOR_VERSION 21\n#define NODE_PATCH_VERSION 0\n")
+        arch.outputs["/usr/bin/env LC_ALL=C /usr/bin/pacman -Qo \(root)/bin/node"] = (1, "error: No package owns \(root)/bin/node\n")
+        if case .present(let i)? = node(arch) { t.check("R4: Arch + official archive + pacman 'no package owns' → via tarball", i.vendorVia == "tarball:node-v24.21.0-linux-x64") }
+        else { t.check("R4: Arch + official archive + pacman 'no package owns' → via tarball", false) }
+        let archFail = distro("arch")
+        archFail.bins = ["node": nv, "pacman": "/usr/bin/pacman"]; archFail.text(nv, "bin"); nodeVersionOutput(archFail, nv, "24.21.0")
+        archFail.outputs["/usr/bin/env LC_ALL=C /usr/bin/pacman -Qo \(nv)"] = (1, "error: could not open database\n")
+        if case .unknown? = node(archFail) { t.check("R4: a failed pacman probe → unknown", true) } else { t.check("R4: a failed pacman probe → unknown", false) }
+        let other = distro("fedora")
+        other.text("/usr/bin/ffmpeg", "bin"); other.bins = ["ffmpeg": "/usr/bin/ffmpeg"]
+        if case .unknown? = LocalTools.inventory(other.probe(.linux)).first(where: { $0.toolId == "ffmpeg" }) {
+            t.check("R4: other tools on a non-Debian Linux stay unknown", true)
+        } else { t.check("R4: other tools on a non-Debian Linux stay unknown", false) }
+        // R2: LibreOffice between the reference lines → no evidence (keeps history).
+        t.check("R2: an installed line between still and fresh → no evidence (nil)",
+                MacUpdates.libreOfficeWaiting(installed: "26.4.0.1", fresh: "26.8.1", still: "26.2.5") == nil)
+        let m = muMachine()
+        addLibreOffice(m, version: "26.4.0.1")
+        let e = MacUpdates.liveEvaluation(m.probe(.macOS), now: LTF.now)
+        var s = MacUpdatesState(); s.notified = [.init(key: "app:libreoffice", at: LTF.now)]
+        MacUpdates.reconcile(&s, e)
+        t.check("R2: …so a recorded LibreOffice key is kept", s.notified.map(\.key) == ["app:libreoffice"] && !e.resolved.contains("app:libreoffice"))
+        let unreadable = muMachine()
+        unreadable.dirs["/Applications/LibreOffice.app"] = ["Contents"]      // the bundle exists, its Info.plist cannot be read
+        let eu = MacUpdates.liveEvaluation(unreadable.probe(.macOS), now: LTF.now)
+        var su = MacUpdatesState(); su.notified = [.init(key: "app:libreoffice", at: LTF.now)]
+        MacUpdates.reconcile(&su, eu)
+        su = try! LocalAdvisoryStore.decoder().decode(MacUpdatesState.self, from: LocalAdvisoryStore.encoder().encode(su))
+        t.check("R2: an existing LibreOffice.app with unreadable metadata is unknown, never absent; history kept across restart",
+                !eu.resolved.contains("app:libreoffice") && su.notified.map(\.key) == ["app:libreoffice"])
+        let gone = muMachine()
+        let eg = MacUpdates.liveEvaluation(gone.probe(.macOS), now: LTF.now)
+        t.check("R2: a positively absent LibreOffice.app resolves its key", eg.resolved.contains("app:libreoffice"))
+        // Status notes.
+        let st = MacUpdatesState(report: muEval([], complete: false))
+        t.check("status: incomplete evidence never reads 'none waiting'",
+                MacUpdatesText.status(setting: .defaultOn, state: st, now: LTF.now).part.contains("some unknown"))
+        let old = MacUpdatesState(report: muEval([], at: LTF.now.addingTimeInterval(-10 * 86_400)))
+        t.check("status: an obsolete evaluation is shown as unknown, not as a current conclusion",
+                MacUpdatesText.status(setting: .defaultOn, state: old, now: LTF.now).part.contains("unknown (last checked"))
+    }
+}

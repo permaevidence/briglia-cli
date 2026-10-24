@@ -96,7 +96,14 @@ enum MacUpdatesText {
                 details.append("\(t.name)\(v)\(src): update waiting" + (t.available.map { " → \($0)" } ?? "") + how)
             case .current:
                 let when = e.catalogueAsOf.map { UpdateNoticeText.day($0) } ?? "?"
-                details.append("\(t.name)\(v)\(src): matches Homebrew's current version (catalogue \(when))" + (t.reason.map { " — \($0.en)" } ?? ""))
+                switch t.kind {
+                case .app?:
+                    details.append("\(t.name)\(v)\(src): no newer release in Homebrew's LibreOffice reference versions (catalogue \(when))")
+                case .cask? where t.reason != nil:
+                    details.append("\(t.name)\(v)\(src): \(t.reason!.en) (Homebrew does not upgrade it)")
+                default:
+                    details.append("\(t.name)\(v)\(src): matches Homebrew's current version (catalogue \(when))")
+                }
             case .pinned:
                 details.append("\(t.name)\(v)\(src): pinned in Homebrew (`brew upgrade` skips it)")
             case .unknown:
@@ -111,7 +118,15 @@ enum MacUpdatesText {
         }
         let n = e.waiting.count
         let age = e.catalogueAsOf.map { SecurityStatus.age($0, now: now) } ?? "no catalogue"
-        let part = n == 0 ? "Homebrew/app updates: none waiting (catalogue \(age))" : "Homebrew/app updates: \(n) waiting (catalogue \(age))"
+        let part: String
+        if now.timeIntervalSince(e.at) > MacUpdates.freshness || e.at.timeIntervalSince(now) > MacUpdates.futureSkew {
+            // Impl round-1 note: an obsolete evaluation is never a current conclusion.
+            part = "Homebrew/app updates: unknown (last checked \(SecurityStatus.age(e.at, now: now)))"
+        } else if !e.complete {
+            part = "Homebrew/app updates: \(n) waiting, some unknown (catalogue \(age))"
+        } else {
+            part = n == 0 ? "Homebrew/app updates: none waiting (catalogue \(age))" : "Homebrew/app updates: \(n) waiting (catalogue \(age))"
+        }
         return .init(part: part, reasons: [], details: details)
     }
 

@@ -225,11 +225,18 @@ def run(args):
         for name, src in advisory_node.fetch_all(now_iso()).items():
             bundle["sources"][name] = src
             print(f"  {name}: {src['status']}")
+    curation = None
     if any(i.get("kind") == "vendor" and i.get("vendor") == "documentfoundation" for i in ids):
         import advisory_libreoffice
         for name, src in advisory_libreoffice.fetch_all(now_iso()).items():
             bundle["sources"][name] = src
             print(f"  {name}: {src['status']}")
+        # R6: findings for the reviewed platform curation, for the watch's
+        # owner issue (only when the records were retrieved completely).
+        complete = bundle["sources"].get("cve-cna", {}).get("status") == "ok"
+        curation = {"schema": 1, "complete": complete,
+                    "findings": advisory_libreoffice.curation_findings(bundle["sources"], advisory_libreoffice.load_platforms())
+                    if complete else []}
     for i in ids:
         if i.get("kind") == "vendor":
             continue
@@ -251,6 +258,10 @@ def run(args):
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "advisory-input.json"), "w") as f:
         f.write(data)
+    if curation is not None:
+        with open(os.path.join(args.out, "curation.json"), "w") as f:
+            json.dump(curation, f, sort_keys=True)
+        print(f"curation: {len(curation['findings'])} finding(s){'' if curation['complete'] else ' (records incomplete: not checked)'}")
     failed = sum(1 for r in bundle["results"] if r["status"] != "ok")
     print(f"advisory fetch: {len(bundle['results'])} rows, {failed} failed, KEV {bundle['sources']['cisa-kev']['status']}"
           + "".join(f", {k} {v['status']}" for k, v in sorted(bundle["sources"].items()) if k.startswith(("nodejs-", "tdf-", "cve-cna"))))

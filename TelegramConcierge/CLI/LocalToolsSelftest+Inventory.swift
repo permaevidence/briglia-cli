@@ -206,8 +206,14 @@ extension LocalToolsSelftest {
                 LocalTools.inventory(broken.probe(.linux)).allSatisfy { if case .unknown = $0 { return true }; return false })
         let other = debMachine()
         other.text("/etc/os-release", "ID=fedora\nVERSION_ID=40\nVERSION_CODENAME=x\n")
-        t.check("deb inventory: an unsupported distribution → unknown",
-                LocalTools.inventory(other.probe(.linux)).allSatisfy { if case .unknown = $0 { return true }; return false })
+        // v20 impl round 1 (R4): only an official Node.js build is looked for
+        // there (this fake machine has none on PATH → positively absent).
+        t.check("deb inventory: an unsupported distribution → unknown (Node.js: its own vendor check)",
+                LocalTools.inventory(other.probe(.linux)).allSatisfy {
+                    if case .unknown = $0 { return true }
+                    if case .absent(let id) = $0, id == "node" { return true }
+                    return false
+                })
     }
 
     static func macMachine() -> FakeMachine {

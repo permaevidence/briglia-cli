@@ -6,6 +6,16 @@
    "id": "CVE-2021-25632"
   }
  ],
+ "deferred": [
+  {
+   "id": "CVE-2023-6185",
+   "reason": "GStreamer integration; the description does not state whether the official macOS build uses it (reviewed: unresolved, stays unknown)"
+  },
+  {
+   "id": "CVE-2024-5261",
+   "reason": "LibreOfficeKit mode only; not an established condition of the desktop app (reviewed: unresolved, stays unknown)"
+  }
+ ],
  "entries": {
   "CVE-2019-9847": {
    "descriptionSha256": "3c576d5bcf8b727e7a04435e15ef5b5427cbb5cb6e344fafc5c92e9ec6cfc99b",
@@ -15,7 +25,7 @@
     "macos"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2019-9848": {
    "descriptionSha256": "fbaf46abe3a9a3c91ee8e2880bab50219e80da562a55a7ada4916c8fe045e373",
@@ -24,7 +34,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2019-9849": {
    "descriptionSha256": "f12e352b70412ff97be45fa194e45fd68da1f6ccc4a3dadb5fb3c81d38bdea01",
@@ -33,7 +43,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2019-9850": {
    "descriptionSha256": "70d847045b8608fd12a4b2f7f01add39104a821a6f2a8d5f2577834f896b64ef",
@@ -42,7 +52,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2019-9851": {
    "descriptionSha256": "3614be168ff08085bfa41d36fb60a892b613b70a668aa581e2231f3790753b55",
@@ -51,7 +61,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2019-9852": {
    "descriptionSha256": "d93939d51f6d0687d4c000c5e1ceb210fc2d8024e54f53a31ad90b356de8c916",
@@ -60,7 +70,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2019-9853": {
    "descriptionSha256": "4883039ec277ee49f234f4de0af1a50367c7e31d58b44be5e3624666dc43b59e",
@@ -69,7 +79,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2019-9854": {
    "descriptionSha256": "063a39d09d67e929136e1b0c1a47601f7b23a23917cff8ea3a3e29181d0c9109",
@@ -78,7 +88,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2019-9855": {
    "descriptionSha256": "14c0df917d6dca0b4c17ee7bf61c2ba3ea2105022b607785853e16ef89dfd1a5",
@@ -87,7 +97,7 @@
     "windows"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2020-12801": {
    "descriptionSha256": "9d1d7ffd8344a4843313a99b0f4b50c969c7e324e1c2aac3c94cad3dd123f70f",
@@ -96,7 +106,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2020-12802": {
    "descriptionSha256": "9adfdf1b771f3235c10793f9771c330d54132393d32630311f72637c8be1a56d",
@@ -105,7 +115,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2020-12803": {
    "descriptionSha256": "7d7aa717663e071c1136880e65e430f2b7665acc5de73a09e4cd0322cb4bc11b",
@@ -114,7 +124,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2021-25633": {
    "descriptionSha256": "7de960a77cc120406a55f658cfd7982d6eb97965d033df03aa9d7ba28d70806a",
@@ -123,7 +133,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2021-25634": {
    "descriptionSha256": "102d1271ea8fc5a6b3a718b0ee44f25bc9754e5c79cba03b7251ccc9f59b6cb3",
@@ -132,7 +142,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2021-25635": {
    "descriptionSha256": "43b7bc1b7d2f559fb5c9ae25fa72eeb58d0030cddaa48ab933632f91e72ff808",
@@ -141,7 +151,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2021-25636": {
    "descriptionSha256": "0fec4b6f4337177e169bcbb052ad038b00b438f57f13f3cc20df7007c531d41b",
@@ -150,7 +160,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2022-26305": {
    "descriptionSha256": "699ea93ea16c8204bf102069f00b7a1b1bb9180168f882aba610d188a54ff0d6",
@@ -159,7 +169,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2022-26306": {
    "descriptionSha256": "971507bd64e86b2af0adee42c5ff3d8bb950509133194ac26ae63cec75fdc650",
@@ -168,7 +178,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2022-26307": {
    "descriptionSha256": "adffb07ab89889fc9073800569d846e7fdc84ae2db828103172885a83e67ad6f",
@@ -177,7 +187,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2022-3140": {
    "descriptionSha256": "2df3a8eda436fc55b059211b6aa6a941af6e86140340b5782baaad086f569bdb",
@@ -186,7 +196,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2023-0950": {
    "descriptionSha256": "a759e5a69a06bb8ff3305da5e9d9b27a18b7d5f3cd5df0055f2554fb03d10343",
@@ -195,7 +205,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2023-2255": {
    "descriptionSha256": "28f89e98f175fce95b8240f375b0ad6f02ebc3229ae62dad250045a453b21335",
@@ -204,7 +214,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2023-6186": {
    "descriptionSha256": "07a19de7eb09d77c178aee1296172eb57cbb2ea50ee88f5c56a73fe478ab5f8a",
@@ -213,7 +223,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2024-12425": {
    "descriptionSha256": "36f5398acd98637b508ca8c77dd3998e387ad98be669b16a64c302f8a10ea7d7",
@@ -222,7 +232,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2024-12426": {
    "descriptionSha256": "68296a8370b106a2d9186789f2051ec657c1a9c267df70dc34afa787a02c7f77",
@@ -231,7 +241,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2024-3044": {
    "descriptionSha256": "8868b124400d4e97145cceb1bbecb6a7103d155595b0aa209e391ccdf7d3525b",
@@ -240,7 +250,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2024-6472": {
    "descriptionSha256": "0671881324938f7d9cd2512cd416950a41c076463ebe62d12e90823315003d96",
@@ -249,7 +259,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2024-7788": {
    "descriptionSha256": "ccf4e00f56b54f1b69200db2f4d60307607ff5c514ba392072edd62782234f4e",
@@ -258,7 +268,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2025-0514": {
    "descriptionSha256": "755bbfa7a05837ac5dbaa74cbf67ed30dbf67cfc9532852dd134d2d2052a5fd9",
@@ -267,7 +277,7 @@
     "windows"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2025-1080": {
    "descriptionSha256": "eba469e6e55b8e82a3068a98a11529b2d7907b0334f85eec3d2080a2642da256",
@@ -276,7 +286,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2025-2866": {
    "descriptionSha256": "125bf19d706642728ee8e048e9ec8010cd29a43d860cf89e72806f8c5fe5126a",
@@ -285,7 +295,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-4430": {
    "descriptionSha256": "9555b92d9e8764ec8b19476278446cc71dcbcca35ac544341b91da36c1723cba",
@@ -294,7 +304,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-6039": {
    "descriptionSha256": "6205a88814b54e3a3abe21f2a06e3ca1d62f5a5e8dcf971da3c692e00e900b46",
@@ -303,7 +313,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-6040": {
    "descriptionSha256": "e92adf2da574d0cecb8fe86415d86ebba49a3630f83d8cd02db5315da0fcc3b8",
@@ -312,7 +322,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-6045": {
    "descriptionSha256": "2bbdad38cfd843178858bbb77092fc16009b06a0f2ee721abc67e48f0277c15d",
@@ -321,7 +331,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-6047": {
    "descriptionSha256": "0542bb7ee83f193b1e5718446700dd164bb3ef4a395e626e3912904bd6305699",
@@ -330,7 +340,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63266": {
    "descriptionSha256": "22b244497cf3e6f787e1b631f4bb24f6403fb0ff386e6e858706635d0c4f0b50",
@@ -339,7 +349,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63267": {
    "descriptionSha256": "ddeb020fcae6e58393a8c60efeacbb69420869d3f540b50fbb1f2e7ccb4efe81",
@@ -348,7 +358,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63268": {
    "descriptionSha256": "ad13b34f4f190b2d534ff70c98ef507523f0dd1720875262f2397271b40d1f20",
@@ -357,7 +367,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63269": {
    "descriptionSha256": "25410941b4abe164d3d14b9f9c5b1795d35babc9cf78d1cc1303e8de61d95caf",
@@ -366,7 +376,7 @@
     "linux"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63270": {
    "descriptionSha256": "71455c8f5100a24973a625c80528bab6496d29173f62e9ae378b1964c6f4c5ab",
@@ -375,7 +385,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63272": {
    "descriptionSha256": "c8fb27fa7563c6b39b5bfe6371b0b39b22b023dc9e00f82140b68ac53b35a861",
@@ -384,7 +394,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63273": {
    "descriptionSha256": "81dad7873fa870fad33a95454acd4b5be913c7cb5a8560896ce6fa02fe2becfe",
@@ -393,7 +403,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63274": {
    "descriptionSha256": "9c11c08f53a8a2eed3af05d1cc7d569d356fa00f3cf80820c62ac747e5912a78",
@@ -402,7 +412,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63275": {
    "descriptionSha256": "8e51c49ba8ff680e15767aebdd4e3b7c43ab22952aca62503162e05f8b1d0621",
@@ -411,7 +421,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63276": {
    "descriptionSha256": "e7f7a8e3ab85dae56a68f73751f55da6a469eee3f943a14ddcb38b799c020da7",
@@ -420,7 +430,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63277": {
    "descriptionSha256": "a9764a87f9133ead4c302a6457681562e50b77476c52353b8daa56be0eb2094d",
@@ -429,7 +439,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63278": {
    "descriptionSha256": "f6d6f4af2166beba8563d493d454e9807f096e9bf76ac96d98bbc08e8077e6b0",
@@ -438,7 +448,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-63279": {
    "descriptionSha256": "99b8869c77272070149c625a26ba7fc823610f112e9d8126bf9138783651d212",
@@ -447,7 +457,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-8356": {
    "descriptionSha256": "2e8dc7e601f5d079c4a36cd303998f709ce84ef5fefd7017a35d158300f05f42",
@@ -456,7 +466,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-8357": {
    "descriptionSha256": "d11743af0f88abb5b7d33a234b9738b9170c42c8a99a294a6c2d454666ccc159",
@@ -465,7 +475,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   },
   "CVE-2026-8358": {
    "descriptionSha256": "2b2f011d254b6a1637b2c7fb40536bde1db6af14548e570c42266743b1a1b230",
@@ -474,7 +484,7 @@
     "all"
    ],
    "reviewedAt": "2026-10-24",
-   "reviewedBy": "claude (draft, 2026-10-24; for Codex implementation review)"
+   "reviewedBy": "claude (drafted 2026-10-24 from the CNA descriptions); Codex implementation review round 1 checked all 52 rows and hashes against the frozen records (no contradiction found)"
   }
  },
  "schema": 1

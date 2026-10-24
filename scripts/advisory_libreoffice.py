@@ -30,6 +30,12 @@ MAX_RECORD = 1024 * 1024
 MAX_IDS = 400
 CVE_RE = re.compile(r"CVE-(\d{4})-(\d{4,7})", re.ASCII)
 TDF = "Document Fdn."
+
+
+class LOFeedError(Exception):
+    """A LibreOffice source is incomplete or malformed (→ failed, never empty)."""
+
+
 DEFAULT_PLATFORMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "security", "libreoffice-platforms.json")
 MAC_SPELLINGS = ("macos", "mac os", "os x", "osx")
 NON_MAC = ("windows", "linux")
@@ -52,10 +58,18 @@ def description_sha(text):
 
 def load_platforms(path=DEFAULT_PLATFORMS):
     """The reviewed platform curation (§9.5.10.2 "Platform disposition")."""
+    def no_duplicates(pairs):
+        keys = [k for k, _ in pairs]
+        if len(keys) != len(set(keys)):
+            raise ValueError("libreoffice-platforms.json: duplicate JSON member")
+        return dict(pairs)
     with open(path) as f:
-        d = json.load(f)
+        d = json.load(f, object_pairs_hook=no_duplicates)
     if d.get("schema") != 1 or type(d.get("entries")) is not dict or type(d.get("absentRecords")) is not list:
         raise ValueError("libreoffice-platforms.json: schema 1 with entries and absentRecords required")
+    if type(d.get("deferred", [])) is not list or any(type(x) is not dict or not CVE_RE.fullmatch(str(x.get("id"))) or not x.get("reason")
+                                                       for x in d.get("deferred", [])):
+        raise ValueError("deferred entries need id and reason")
     if len(d["entries"]) > MAX_CURATION or len(d["absentRecords"]) > 32:
         raise ValueError("libreoffice-platforms.json: too many entries")
     if len({a.get("id") for a in d["absentRecords"] if type(a) is dict}) != len(d["absentRecords"]):
@@ -197,10 +211,16 @@ def convert(cve, rec, fixed_on_page, curation=None):
     record (other CNAs, other products, rejected records)."""
     if type(rec) is not dict or rec.get("assigner") != TDF or rec.get("state") != "PUBLISHED":
         return None
-    entries = [a for a in (rec.get("affected") or []) if type(a) is dict and a.get("product") == "LibreOffice"]
-    if not entries:
-        return None
     adv = {"ids": [cve], "severity": "recommended", "kev": False, "kevAdded": None, "withdrawn": False}
+    unknown = dict(adv, affected="unknown", remediation=None, noFixReason="unknown")
+    raw = rec.get("affected")
+    # R1 (impl round 1): missing, empty or malformed affected data is NOT
+    # "another product": it stays an unknown advisory, never a clean result.
+    if type(raw) is not list or not raw or any(type(a) is not dict or type(a.get("product")) is not str for a in raw):
+        return unknown
+    entries = [a for a in raw if a["product"] == "LibreOffice"]
+    if not entries:
+        return None                          # a valid record positively naming only other products
     dispositions = [mac_disposition(cve, rec, curation, a) for a in entries]
     if all(d is False for d in dispositions):
         return None                          # positively not macOS: not published for darwin
@@ -247,6 +267,30 @@ def convert(cve, rec, fixed_on_page, curation=None):
     return adv
 
 
+def curation_findings(sources, curation):
+    """R6: deterministic owner findings for the reviewed platform curation:
+    a retrieved TDF LibreOffice record with no structured platforms that has
+    no curation entry ("missing"), or whose description no longer matches the
+    pinned hash ("changed"). Explicitly deferred IDs are not findings."""
+    recs = ((sources or {}).get("cve-cna") or {}).get("data") or {}
+    deferred = {d["id"] for d in (curation or {}).get("deferred", [])}
+    out = []
+    for cve in sorted(recs):
+        rec = recs[cve]
+        if type(rec) is not dict or rec.get("assigner") != TDF or rec.get("state") != "PUBLISHED" or cve in deferred:
+            continue
+        raw = rec.get("affected")
+        entries = [a for a in raw if type(a) is dict and a.get("product") == "LibreOffice"] if type(raw) is list else []
+        if entries and all(type(a.get("platforms")) is list and a["platforms"] for a in entries):
+            continue                         # structured platforms: no curation needed
+        e = (curation or {}).get("entries", {}).get(cve)
+        if e is None:
+            out.append({"id": cve, "problem": "missing"})
+        elif e["descriptionSha256"] != description_sha(rec.get("description") or ""):
+            out.append({"id": cve, "problem": "changed"})
+    return out
+
+
 def libreoffice_identity(sources, kev, curation=None):
     """→ (advisories, statuses {source: (status, checkedAt)})."""
     statuses = {}
@@ -265,7 +309,7 @@ def libreoffice_identity(sources, kev, curation=None):
         # A reviewed absent record (named by the vendor, no CVE record) is
         # never dropped: it stays an unknown advisory, so it can never be read
         # as "not affected".
-        for cve in sorted(absent & set(page["ids"])):
+        for cve in sorted((absent & set(page["ids"])) - set(recs)):
             y, n = CVE_RE.fullmatch(cve).groups()
             advs.append({"ids": [cve], "severity": "recommended", "kev": cve in kev, "kevAdded": kev.get(cve),
                          "withdrawn": False, "affected": "unknown", "remediation": None, "noFixReason": "unknown",

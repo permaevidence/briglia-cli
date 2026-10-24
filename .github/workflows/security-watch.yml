@@ -30,12 +30,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Inventory matches the sources
+        id: inventory
         run: python3 scripts/security_inventory.py --check
-      - name: Check advisories and open or update issues
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python3 scripts/security_watch.py
       # Raw public data for the local-tools advisory list (plan v16 §9.5.3).
       # Still no secrets and no signing here: the separate "Advisory list"
       # workflow validates, builds and signs it. A feed failure only marks
@@ -43,6 +39,15 @@ jobs:
       - name: Fetch local-tool advisory data (input for the signed advisory list)
         if: always()
         run: python3 scripts/advisory_fetch.py --out "$RUNNER_TEMP/advisory-input"
+      # Runs after the fetch so the LibreOffice curation findings (plan v20
+      # §9.5.10.2, impl round-1 R6) reach the owner issue; only when the
+      # inventory check passed, as before.
+      - name: Check advisories and open or update issues
+        if: always() && steps.inventory.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/security_watch.py --curation "$RUNNER_TEMP/advisory-input/curation.json"
       - name: Upload the advisory input bundle
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

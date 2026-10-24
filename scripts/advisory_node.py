@@ -210,10 +210,12 @@ def wg_advisory(key, v, platform, released):
         unknown = True
     else:
         toks = set(env)
-        if "all" not in toks and platform not in toks:
-            if toks <= NON_TARGETS | TARGETS:
-                return None              # another platform only
-            unknown = True               # an unknown token: keep, unknown
+        # Impl round-1 R3: the WHOLE token set is validated first; one
+        # unfamiliar token makes the advisory unknown for both identities.
+        if not toks <= NON_TARGETS | TARGETS | {"all"}:
+            unknown = True
+        elif "all" not in toks and platform not in toks:
+            return None                  # another platform only
     cves = [c for c in (v.get("cve") or []) if type(c) is str and CVE_RE.fullmatch(c)] if type(v.get("cve")) is list else []
     ids = sorted(set(cves))[:16] or [f"NSWG-CORE-{key}"]
     sev = "critical" if v.get("severity") == "critical" else "recommended"

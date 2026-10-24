@@ -214,10 +214,85 @@ def run_tests(m, only=None):
             os.unlink(p)
         return bad == 3, bad
     t("curation: malformed files are refused", curation_validation)
+
+    def missing_affected():
+        out = []
+        for aff in ([], None, [{"vendor": "x"}], "LibreOffice"):
+            r = {"assigner": "Document Fdn.", "state": "PUBLISHED", "description": D, "affected": aff}
+            a = m.convert("CVE-2099-0020", r, ["26.2.5"], cur(m, "CVE-2099-0020", D))
+            out.append(a and a["affected"])
+        other = m.convert("CVE-2099-0021", {"assigner": "Document Fdn.", "state": "PUBLISHED", "description": D,
+                                             "affected": [{"product": "LibreOffice Online", "versions": [v("26.2", "< 26.2.5")]}]}, ["26.2.5"], None)
+        src = {"tdf-advisories": {"status": "ok", "checkedAt": "t", "data": {"ids": ["CVE-2099-0020"], "fixed": {"CVE-2099-0020": ["26.2.5"]}}},
+               "cve-cna": {"status": "ok", "checkedAt": "t", "data": {"CVE-2099-0020": {"assigner": "Document Fdn.", "state": "PUBLISHED", "description": D, "affected": []}}}}
+        advs, st = m.libreoffice_identity(src, {}, cur(m, "CVE-2099-0020", D))
+        return (out == ["unknown"] * 4 and other is None and len(advs) == 1 and advs[0]["affected"] == "unknown"), (out, other, advs)
+    t("R1: missing/empty/malformed affected data → an unknown advisory (only a valid other product is dropped)", missing_affected)
+
+    def absent_then_present():
+        c = "CVE-2021-25632"
+        curation = {"schema": 1, "entries": {}, "absentRecords": [{"id": c, "evidence": "x"}]}
+        rec = rec_fixed = {"assigner": "Document Fdn.", "state": "PUBLISHED", "description": D,
+                           "affected": [{"product": "LibreOffice", "defaultStatus": "unaffected", "platforms": ["macOS"], "versions": [v("26.2", "< 26.2.5")]}]}
+        src = {"tdf-advisories": {"status": "ok", "checkedAt": "t", "data": {"ids": [c], "fixed": {c: ["26.2.5"]}}},
+               "cve-cna": {"status": "ok", "checkedAt": "t", "data": {c: rec}}}
+        advs, st = m.libreoffice_identity(src, {}, curation)
+        del rec_fixed
+        return len(advs) == 1 and advs[0]["affected"] != "unknown", advs
+    t("R5: a formerly absent record that now exists is processed normally (no stale placeholder)", absent_then_present)
+
+    def page_record_mismatch():
+        src = {"tdf-advisories": {"status": "ok", "checkedAt": "t", "data": {"ids": ["CVE-2099-0030", "CVE-2099-0031"], "fixed": {}}},
+               "cve-cna": {"status": "ok", "checkedAt": "t", "data": {"CVE-2099-0030": rec([v("26.2", "< 26.2.5")])}}}
+        advs, st = m.libreoffice_identity(src, {}, {"schema": 1, "entries": {}, "absentRecords": []})
+        return advs == [] and st == {"tdf-advisories": ("failed", None), "cve-cna": ("failed", None)}, (advs, st)
+    t("a page ID without a record (not reviewed absent) → both sources failed (LOFeedError, not NameError)", page_record_mismatch)
+
+    def duplicate_members():
+        p = tempfile.mktemp(suffix=".json")
+        open(p, "w").write('{"schema":1,"absentRecords":[],"entries":{"CVE-2099-0001":{"platforms":["all"],"evidence":"x","descriptionSha256":"' + "0" * 64
+                           + '","reviewedBy":"a","reviewedAt":"b"},"CVE-2099-0001":{"platforms":["windows"],"evidence":"x","descriptionSha256":"' + "0" * 64
+                           + '","reviewedBy":"a","reviewedAt":"b"}}}')
+        try:
+            m.load_platforms(p)
+            return False, "accepted"
+        except ValueError:
+            return True, None
+        finally:
+            os.unlink(p)
+    t("curation: duplicate JSON members are refused", duplicate_members)
+
+    def findings():
+        recs = {"CVE-2099-0040": rec([v("26.2", "< 26.2.5")]),                                   # no entry → missing
+                "CVE-2099-0041": rec([v("26.2", "< 26.2.5")], desc="New text."),                  # changed
+                "CVE-2099-0042": rec([v("26.2", "< 26.2.5")], platforms=["Windows"]),             # structured: none
+                "CVE-2099-0043": rec([v("26.2", "< 26.2.5")]),                                    # deferred: none
+                "CVE-2099-0044": rec([v("26.2", "< 26.2.5")], assigner="mitre")}                  # other CNA: none
+        curation = {"schema": 1, "absentRecords": [], "deferred": [{"id": "CVE-2099-0043", "reason": "x"}],
+                    "entries": {"CVE-2099-0041": cur(m, "CVE-2099-0041", D)["entries"]["CVE-2099-0041"]}}
+        got = m.curation_findings({"cve-cna": {"status": "ok", "data": recs}}, curation)
+        return got == [{"id": "CVE-2099-0040", "problem": "missing"}, {"id": "CVE-2099-0041", "problem": "changed"}], got
+    t("R6: curation findings — missing and changed only (structured, deferred, other CNA excluded)", findings)
+
+    def real_findings():
+        recs = json.load(open(os.path.join(FIX, "records.json")))
+        data = {c: {"assigner": r["cveMetadata"]["assignerShortName"], "state": r["cveMetadata"]["state"],
+                    "affected": r["containers"]["cna"].get("affected"), "description": m.description(r["containers"]["cna"])} for c, r in recs.items()}
+        got = m.curation_findings({"cve-cna": {"status": "ok", "data": data}}, m.load_platforms(PLATFORMS))
+        return got == [], got
+    t("R6: the checked-in curation has no findings on the frozen records (no perpetual noise)", real_findings)
     return res
 
 
 BREAKS = [
+    ("R1: missing/empty/malformed affected data → an unknown advisory (only a valid other product is dropped)",
+     '    if type(raw) is not list or not raw or any(type(a) is not dict or type(a.get("product")) is not str for a in raw):\n        return unknown',
+     '    if type(raw) is not list:\n        return None'),
+    ("R5: a formerly absent record that now exists is processed normally (no stale placeholder)",
+     '        for cve in sorted((absent & set(page["ids"])) - set(recs)):', '        for cve in sorted(absent & set(page["ids"])):'),
+    ("curation: duplicate JSON members are refused", '        if len(keys) != len(set(keys)):', '        if False:'),
+    ("R6: curation findings — missing and changed only (structured, deferred, other CNA excluded)",
+     '        elif e["descriptionSha256"] != description_sha(rec.get("description") or ""):', '        elif False:'),
     ("adapter: a 26.2 series record → range, N.N remediation line, unknownOutside", '            unknown_outside = True', '            pass'),
     ("adapter: changed bound syntax, series mismatch, extra fields, other defaults, empty → unknown", '            if vt not in (f"{series} series", "custom"):', '            if False:'),
     ("adapter: changed bound syntax, series mismatch, extra fields, other defaults, empty → unknown", '        elif ds != "unaffected":', '        elif False:'),
@@ -231,7 +306,7 @@ BREAKS = [
     ("fetch: a missing record outside absentRecords fails cve-cna", "                if e.code == 404 and cve in absent:", "                if e.code == 404:"),
     ("fetch: a record for another CVE ID fails cve-cna", '            if meta.get("cveId") != cve:', '            if False:'),
     ("fetch: a page with no recognisable CVE is a failure, not 'no advisories'", '        raise LOFeedError("the advisory page lists no CVE")', '        pass'),
-    ("census (frozen 2026-10-24): 110 IDs, 109 records, Windows/Linux-only excluded, unresolved unknown", "        for cve in sorted(absent & set(page[\"ids\"])):", "        for cve in []:"),
+    ("census (frozen 2026-10-24): 110 IDs, 109 records, Windows/Linux-only excluded, unresolved unknown", "        for cve in sorted((absent & set(page[\"ids\"])) - set(recs)):", "        for cve in []:"),
     ("convert: KEV marks the advisory critical", '                a["kev"], a["kevAdded"], a["severity"] = True, kev.get(cve), "critical"', '                pass'),
     ("curation: malformed files are refused", '            raise ValueError(f"{cve}: {k} required")', '            pass'),
 ]

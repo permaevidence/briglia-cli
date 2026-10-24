@@ -144,8 +144,14 @@ def run_tests(m, only=None):
         d = m.node_identity("darwin", sources(m, w), {}, NOW)[0]
         l = m.node_identity("linux", sources(m, w), {}, NOW)[0]
         unk = [a for a in d if a["ids"] == ["CVE-2099-0006"]]
+        mixed = []
+        for envs in (["all", "future-os"], ["darwin", "future-os"], ["linux", "future-os"]):
+            for plat in ("darwin", "linux"):
+                w2 = wg(**{"9": {"cve": ["CVE-2099-0009"], "vulnerable": "24.x", "patched": "^24.18.1", "affectedEnvironments": envs}})
+                got = [a for a in m.node_identity(plat, sources(m, w2), {}, NOW)[0] if a["ids"] == ["CVE-2099-0009"]]
+                mixed.append(bool(got) and got[0]["affected"] == "unknown")
         return ("CVE-2099-0004" not in ids(d) + ids(l) and "CVE-2099-0005" in ids(l) and "CVE-2099-0005" not in ids(d)
-                and unk and unk[0]["affected"] == "unknown"), (ids(d), ids(l))
+                and unk and unk[0]["affected"] == "unknown" and all(mixed)), (ids(d), ids(l), mixed)
     t("convert: win32-only dropped, linux-only on linux, unknown token kept as unknown", environments)
 
     def no_cve_id():
@@ -252,8 +258,8 @@ BREAKS = [
     ("grammar: every real form parses, everything else is unsupported", "            out.append(((0, 0, 0), (int(m.group(1)) + 1, 0, 0))); continue", "            out.append(((0, 0, 0), (int(m.group(1)), 0, 0))); continue"),
     ("convert: vulnerable minus patched per line, fixed per line, maintained lines", "        affected = subtract(vuln, patched)", "        affected = vuln"),
     ("convert: a line without a patch is affected to its end with no fix for that line", 'end = "limit" if hi == (n + 1, 0, 0) or hi == INF else "fixed"', 'end = "fixed"'),
-    ("convert: win32-only dropped, linux-only on linux, unknown token kept as unknown", "                return None              # another platform only", "                pass"),
-    ("convert: win32-only dropped, linux-only on linux, unknown token kept as unknown", "            unknown = True               # an unknown token: keep, unknown", "            return None"),
+    ("convert: win32-only dropped, linux-only on linux, unknown token kept as unknown", "            return None                  # another platform only", "            pass"),
+    ("convert: win32-only dropped, linux-only on linux, unknown token kept as unknown", "        if not toks <= NON_TARGETS | TARGETS | {\"all\"}:", "        if \"all\" not in toks and platform not in toks and not toks <= NON_TARGETS | TARGETS:"),
     ("convert: an entry without a CVE gets NSWG-CORE-<key>", 'or [f"NSWG-CORE-{key}"]', 'or ["NSWG-CORE"]'),
     ("convert: a patched version that is not a Node.js release makes the advisory unknown", "            if lo != (0, 0, 0) and vstr(lo) not in released:", "            if False:"),
     ("convert: entries for end-of-life lines only are dropped (also unreadable ones)", 'if not a.get("_unknownLines") and not set(map(str, a["_lines"])) & set(lines):', "if False:"),

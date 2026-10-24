@@ -135,6 +135,11 @@ struct MacInventory {
         guard let data = probe.readData(app.path + "/Contents/Info.plist"),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
               let version = plist["CFBundleShortVersionString"] as? String ?? plist["CFBundleVersion"] as? String else {
+            // Impl round-1 R2: an existing bundle with unreadable metadata is
+            // unknown, never "positively absent".
+            if probe.resolve(app.path) != nil {
+                return .unknown(toolId: tool.id, reason: T.Text("the app's version cannot be read", "la versione dell'app non si può leggere"))
+            }
             return nil
         }
         guard LocalToolsVersion.dottedCompare(version, version) != nil else {
