@@ -170,6 +170,13 @@ enum RetiredIntegrations {
             report.inert = why
             return report
         case .absent:
+            // Never evaluate against an unreadable secret store: an absent
+            // provider there is not "unset", and a wrong first record cannot
+            // be repaired (the legacy probe never runs again).
+            if let problem = KeychainHelper.storeReadProblem() {
+                report.inert = "secret store unreadable (\(problem)); retirement steps wait for it"
+                return report
+            }
             state = evaluate(env)
             do { try save(state, to: env.stateURL) } catch {
                 report.stateWriteFailed = true

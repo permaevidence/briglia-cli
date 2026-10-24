@@ -332,6 +332,17 @@ extension MidturnHarness {
         }
         check("G12b reads stay safe while inert: a stored gws still reads as none", EmailCalendarProvider.current == .none)
 
+        // G14 an unreadable secret store at first evaluation → inert, no record.
+        reset()
+        RIUnits.plantExecutable(env.gwsCandidates[1])
+        let secrets = URL(fileURLWithPath: KeychainHelper.secretStorePath)
+        let savedSecrets = try? Data(contentsOf: secrets)
+        try? PrivateStorage.writeAtomically(Data("{damaged".utf8), to: secrets)
+        let r14 = RetiredIntegrations.migrate(env)
+        check("G14 unreadable secrets.json at first evaluation → inert, no record written",
+              r14.inert?.contains("secret store unreadable") == true && RetiredIntegrations.load(env.stateURL) == .absent)
+        if let savedSecrets { try? PrivateStorage.writeAtomically(savedSecrets, to: secrets) } else { try? FileManager.default.removeItem(at: secrets) }
+
         // G13 never-touch: fake gws binary and ~/.config/gws untouched.
         reset()
         RIUnits.plantExecutable(env.userBinGws)
