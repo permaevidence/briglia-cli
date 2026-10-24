@@ -6,10 +6,10 @@ name: Advisory list
 # `advisory-input` artifact (public data fetched without secrets), parses it
 # (never executes it), and signs only the payload it validated. The signing
 # key is an ENVIRONMENT secret of `advisory-sign` and appears in exactly one
-# step's environment. Publication to briglia.dev / the GitHub mirror is NOT
-# armed: it needs the owner's provisioning decision (see
-# docs/LOCAL_TOOLS_KEY_PROVISIONING.md in private-docs); until then the
-# signed list is only kept as a workflow artifact.
+# step's environment. Publication (owner direction H4, option A) is a
+# SEPARATE job in the `advisory-publish` environment; it stays unarmed until
+# the owner creates the repository, its scoped token and the variable (see
+# docs/LOCAL_TOOLS_KEY_PROVISIONING.md in private-docs).
 on:
   workflow_run:
     workflows: ["Security watch"]
@@ -29,7 +29,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  publish-sign:
     name: Build, validate and sign the advisory list
     if: github.repository == 'permaevidence/briglia-cli-private' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'cancelled')
     runs-on: ubuntu-latest
@@ -91,6 +91,40 @@ jobs:
           name: advisory-list
           path: ${{ runner.temp }}/local-tools.sig.json
           retention-days: 7
-      - name: Publish (not armed)
-        if: steps.gate.outputs.armed == 'true'
-        run: echo "::notice::publication target not armed yet (owner decision pending); the signed list is kept as the 'advisory-list' artifact"
+    outputs:
+      armed: ${{ steps.gate.outputs.armed }}
+
+  publish:
+    # v18-v20 §9.5.11 (owner direction H4 = option A): a SEPARATE job in its
+    # own environment. It receives the already-signed file as an artifact,
+    # re-verifies envelope and payload, refuses a sequence that is not higher
+    # than the published one, and writes exactly v1/local-tools.sig.json to
+    # the dedicated public repository with one compare-and-swap PUT. Its only
+    # secret is a token scoped to that repository; it never sees the signing
+    # key. Armed only when the public key is committed AND the repository
+    # variable ADVISORY_PUBLISH_REPO names the dedicated repository.
+    name: Publish the signed list
+    needs: publish-sign
+    if: needs.publish-sign.outputs.armed == 'true' && vars.ADVISORY_PUBLISH_REPO == 'permaevidence/briglia-advisories'
+    runs-on: ubuntu-latest
+    environment: advisory-publish
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Fetch the signed list from the signing job
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: advisory-list
+          path: ${{ runner.temp }}/signed
+      - name: Verify and publish (the only step that sees the publish token)
+        env:
+          BRIGLIA_ADVISORY_PUBLISH_TOKEN: ${{ secrets.BRIGLIA_ADVISORY_PUBLISH_TOKEN }}
+          REPO: ${{ vars.ADVISORY_PUBLISH_REPO }}
+        run: |
+          python3 .github/scripts/publish-advisory.py --candidate "$RUNNER_TEMP/signed/local-tools.sig.json" \
+            --pubkey security/advisory-signing-pubkey.pem --repo "$REPO"

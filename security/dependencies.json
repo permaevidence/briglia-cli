@@ -266,7 +266,7 @@
    "pin": "commit d3f86a106a0bac45b974a628896c90dbdf5c8093",
    "pin_kind": "exact",
    "scope": "build",
-   "source": ".github/workflows/release-signed.yml",
+   "source": ".github/workflows/advisory-publish.yml",
    "version": "4.3.0",
    "watch": "osv-package"
   },

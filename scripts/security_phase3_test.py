@@ -74,6 +74,54 @@ def selftests(binary):
     rc, out = run([sys.executable, str(ROOT / "scripts/advisory_publish_test.py")])
     check("publisher: rules and deliberate breaks", rc == 0, out)
     print("    " + out.strip().splitlines()[-1])
+    # v17-v20 (§9.5.10, §9.5.11): Node and LibreOffice sources, publish job.
+    for script, label in (("advisory_node_test.py", "Node.js vendor advisories"),
+                          ("advisory_libreoffice_test.py", "LibreOffice CNA adapter + platform disposition"),
+                          ("advisory_publish_job_test.py", "separate publish job (fake contents API)")):
+        rc, out = run([sys.executable, str(ROOT / "scripts" / script)])
+        check(f"publisher: {label}", rc == 0, out)
+        print("    " + (out.strip().splitlines() or ["?"])[-1])
+
+
+def vendor_parity(binary):
+    """The real watchlist built from the frozen 2026-10-24 Node and
+    LibreOffice feeds (deb rows absent → failed) parses in the client and fits."""
+    import advisory_node as an
+    import advisory_libreoffice as al
+    fixn, fixl = ROOT / "scripts/fixtures/node-advisories", ROOT / "scripts/fixtures/libreoffice-advisories"
+    with tempfile.TemporaryDirectory() as tmp:
+        env = scratch_env(tmp)
+        recs = json.load(open(fixl / "records.json"))
+        page = (fixl / "page.html").read_bytes()
+
+        def get(url, limit):
+            if "libreoffice.org" in url:
+                return page
+            cve = url.rsplit("/", 1)[1][:-5]
+            if cve not in recs:
+                import urllib.error
+                raise urllib.error.HTTPError(url, 404, "nf", None, None)
+            return json.dumps(recs[cve]).encode()
+        sources = al.fetch_all("2026-10-24T00:00:00Z", get=get)
+        sources.update({"nodejs-security-wg": {"status": "ok", "checkedAt": "2026-10-24T00:00:00Z", "data": an._shape_wg(json.load(open(fixn / "core-index.json")))},
+                        "nodejs-dist": {"status": "ok", "checkedAt": "2026-10-24T00:00:00Z", "data": an._shape_dist(json.load(open(fixn / "dist-index.json")))},
+                        "nodejs-schedule": {"status": "ok", "checkedAt": "2026-10-24T00:00:00Z", "data": an._shape_schedule(json.load(open(fixn / "schedule.json")))},
+                        "cisa-kev": {"status": "ok", "checkedAt": "2026-10-24T00:00:00Z", "cves": {"CVE-2099-0001": "2026-01-01"}}})
+        bundle = {"schema": 1, "fetchedAt": "2026-10-24T00:00:00Z", "sources": sources, "results": []}
+        data = pub.build(str(ROOT / "security/local-tools.json"), bundle, None, fx.NOW)
+        p = f"{tmp}/real.json"
+        open(p, "wb").write(data)
+        r = parse_payload(binary, env, p)
+        doc = json.loads(data)
+        cov = {(c["identity"], c["source"]): c["status"] for c in doc["coverage"]}
+        vendor_ok = all(cov[(i, s)] == "ok" for i in ("vendor:nodejs.org:node:darwin:official", "vendor:nodejs.org:node:linux:official")
+                        for s in ("nodejs-security-wg", "nodejs-dist", "nodejs-schedule", "cisa-kev"))
+        lo_ok = all(cov[("vendor:documentfoundation:libreoffice:darwin:official", s)] == "ok" for s in ("tdf-advisories", "cve-cna", "cisa-kev"))
+        check("vendor parity: the real watchlist from the frozen Node/LibreOffice feeds parses in the client",
+              r.get("ok") is True and len(r.get("identities", [])) == 59, r)
+        check("vendor parity: vendor coverage ok, deb coverage failed (no deb rows), size within 256 KiB",
+              vendor_ok and lo_ok and all(v == "failed" for (i, src), v in cov.items() if i.startswith("deb:") and src.startswith("osv:")) and len(data) <= 262144,
+              (len(data), [k for k, v in cov.items() if not k[0].startswith("deb:") and v != "ok"]))
 
 
 def parse_payload(binary, env, path):
@@ -387,6 +435,20 @@ def static():
           "placeholderKeyId" in block and re.search(r'"[0-9a-f]{64}"', block) is None)
     check("static: no committed advisory public key yet (publisher stays unarmed)",
           not (ROOT / "security/advisory-signing-pubkey.pem").exists())
+    # v18-v20 §9.5.11: the publish job is separate, in its own environment,
+    # with only the scoped token; the signing job never sees that token.
+    wf = (ROOT / ".github/workflows/advisory-publish.yml").read_text()
+    jobs = wf[wf.index("\njobs:"):]
+    sign = jobs[jobs.index("  publish-sign:"):jobs.index("\n  publish:")]
+    publish = jobs[jobs.index("\n  publish:"):]
+    check("static: the publish job is separate, needs the signing job and uses environment advisory-publish",
+          "needs: publish-sign" in publish and "environment: advisory-publish" in publish and "environment: advisory-sign" in sign)
+    check("static: the publish job holds only the publish token; the signing job only the signing key",
+          re.findall(r"secrets\.(\w+)", publish) == ["BRIGLIA_ADVISORY_PUBLISH_TOKEN"]
+          and re.findall(r"secrets\.(\w+)", sign) == ["BRIGLIA_ADVISORY_SIGNING_KEY"])
+    check("static: publication is armed only by the key AND the exact repository variable",
+          "needs.publish-sign.outputs.armed == 'true' && vars.ADVISORY_PUBLISH_REPO == 'permaevidence/briglia-advisories'" in publish)
+    check("static: the publish job checks out without persisted credentials", "persist-credentials: false" in publish)
 
 
 def main():
@@ -396,6 +458,7 @@ def main():
     binary = os.path.abspath(sys.argv[1])
     selftests(binary)
     parity(binary)
+    vendor_parity(binary)
     signing(binary)
     e2e(binary)
     dpkg_parity(binary)
