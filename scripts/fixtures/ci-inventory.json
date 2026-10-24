@@ -60,11 +60,29 @@
     },
     {
       "op": "add",
+      "platform": "linux",
+      "reason": "Security plan v16 Phase 3 core (§9.5, owner decisions V1-V7 and F3; owner approved implementation 2026-10-24): the local-tools selftest (list verification, observation record, comparators and ranges, F3 trimmed coverage, remediation, inventory on fake machines, send-once rules, one-attempt delivery, service), the advisory-list publisher tests with deliberate breaks, publisher-to-client parity, signing parity, a signed fake advisory channel driving the real binary (one GET, no package names, OFF makes zero requests), and on Linux the native Debian ordering against dpkg. Local fakes only, no network; no change to any other step.",
+      "step": {
+        "name": "Security Phase 3 (known-vulnerability check of your own tools, signed advisory list, local matching, send-once messages)",
+        "run": "python3 scripts/security_phase3_test.py .build/debug/briglia"
+      }
+    },
+    {
+      "op": "add",
       "platform": "macos",
       "reason": "Security auto-update plan v8 Phase 2 (owner-approved 2026-10-23): the update-notice selftest (state machine, store, Telegram one-request classifier), the release-security tooling tests (authorize checks, predecessor from the published history, alias lint, componentAdvisories), a signed fake channel driving the real binary's notice path (one notice, OFF makes zero requests, trust file byte-identical), one-attempt Telegram sends against a fake Bot API counting wire requests, and old-client compatibility of the new manifest fields. Local fakes only, no network; no change to any other step.",
       "step": {
         "name": "Security Phase 2 (signed security metadata, release tooling, update-available notice)",
         "run": "python3 scripts/security_phase2_test.py .build/debug/briglia"
+      }
+    },
+    {
+      "op": "add",
+      "platform": "macos",
+      "reason": "Security plan v16 Phase 3 core (§9.5, owner decisions V1-V7 and F3; owner approved implementation 2026-10-24): the local-tools selftest (list verification, observation record, comparators and ranges, F3 trimmed coverage, remediation, inventory on fake machines, send-once rules, one-attempt delivery, service), the advisory-list publisher tests with deliberate breaks, publisher-to-client parity, signing parity, a signed fake advisory channel driving the real binary (one GET, no package names, OFF makes zero requests), and on Linux the native Debian ordering against dpkg. Local fakes only, no network; no change to any other step.",
+      "step": {
+        "name": "Security Phase 3 (known-vulnerability check of your own tools, signed advisory list, local matching, send-once messages)",
+        "run": "python3 scripts/security_phase3_test.py .build/debug/briglia"
       }
     }
   ],
