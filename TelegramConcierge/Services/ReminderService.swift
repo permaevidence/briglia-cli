@@ -1281,20 +1281,40 @@ actor ReminderService {
     /// Recovery copies made by the per-entry loader (user data:
     /// /deleteuserdata removes them). nil when the folder cannot be listed.
     static func recoveryFileURLs(in folder: URL = StoragePaths.dataRoot) -> [URL]? {
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return nil }
-        return names.filter {
-            ($0.hasPrefix("reminders.recovered-") || $0.hasPrefix("reminders.rejected-")) && $0.hasSuffix(".json")
-        }.sorted().map { folder.appendingPathComponent($0) }
+        guard case .success(let urls) = listRecoveryFiles(in: folder) else { return nil }
+        return urls
     }
+
+    /// `.failure(nil)` = the folder is confirmed absent (ENOENT/ENOTDIR on
+    /// the path itself); `.failure(message)` = it could not be listed.
+    private static func listRecoveryFiles(in folder: URL) -> Result<[URL], RecoveryListingError> {
+        do {
+            let names = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+            return .success(names.filter {
+                ($0.hasPrefix("reminders.recovered-") || $0.hasPrefix("reminders.rejected-")) && $0.hasSuffix(".json")
+            }.sorted().map { folder.appendingPathComponent($0) })
+        } catch {
+            var st = stat()
+            if lstat(folder.path, &st) != 0, errno == ENOENT { return .failure(RecoveryListingError(message: nil)) }
+            return .failure(RecoveryListingError(message: error.localizedDescription))
+        }
+    }
+
+    private struct RecoveryListingError: Error { let message: String? }
 
     /// /deleteuserdata step 12: remove every recovery copy; failures (one per
     /// file, or the listing itself) are returned for the wipe's report.
     static func removeRecoveryFilesForWipe(in folder: URL) -> [String] {
-        guard let urls = recoveryFileURLs(in: folder) else {
-            return FileManager.default.fileExists(atPath: folder.path)
-                ? ["Could not list the data folder to remove reminder recovery copies"] : []
+        switch listRecoveryFiles(in: folder) {
+        case .success(let urls):
+            return urls.compactMap { UserDataWipe.remove($0.path, label: $0.lastPathComponent) }
+        case .failure(let failure):
+            // Only a confirmed-absent folder is "nothing to remove"; a
+            // permission or I/O failure (including an unsearchable ancestor,
+            // which also makes fileExists false) is reported.
+            guard let message = failure.message else { return [] }
+            return ["Could not list the data folder to remove reminder recovery copies (\(message))"]
         }
-        return urls.compactMap { UserDataWipe.remove($0.path, label: $0.lastPathComponent) }
     }
 
     private func saveReminders() {

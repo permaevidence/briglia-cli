@@ -57,9 +57,22 @@ extension RemLoadHarness {
         check("L13 unlistable folder is reported", ReminderService.removeRecoveryFilesForWipe(in: file).count == 1)
         let absent = dataRoot.appendingPathComponent("no-such-folder")
         check("L13 absent folder: nothing to report", ReminderService.removeRecoveryFilesForWipe(in: absent).isEmpty)
+        if getuid() != 0 {
+            // Unsearchable ancestor: fileExists is false, but this is not absence.
+            let parent = dataRoot.appendingPathComponent("l13-parent", isDirectory: true)
+            let inner = parent.appendingPathComponent("data", isDirectory: true)
+            try? FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)
+            try? Data("x".utf8).write(to: inner.appendingPathComponent("reminders.recovered-probe.json"))
+            chmod(parent.path, 0o000)
+            let reported = ReminderService.removeRecoveryFilesForWipe(in: inner)
+            chmod(parent.path, 0o700)
+            try? FileManager.default.removeItem(at: parent)
+            check("L13 unsearchable ancestor is reported, not treated as absent", reported.count == 1)
+        }
     }
 
-    /// Notices are loaded before reminders: a load notice survives restart.
+    /// Notices are loaded before reminders; a load notice is persisted (the
+    /// bytes a restart would read — no real process restart here).
     func rowL14() async {
         await reset()
         put(json([row("A"), "junk"]))
