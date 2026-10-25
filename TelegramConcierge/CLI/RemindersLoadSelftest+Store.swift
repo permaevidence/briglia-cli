@@ -84,12 +84,16 @@ extension RemLoadHarness {
         let (w, wRow) = quarantinedWatcherRow()
         put(json([wRow]))
         await svc.reloadFromDisk()
+        let writes0 = await svc._testReminderFileWrites()
         await svc._testInjectPostRenameFailure(true)
         let result = await svc.resumeImportedWatcher(id: w)
         await svc._testInjectPostRenameFailure(false)
         var succeeded = false
         if case .success = result { succeeded = true }
         check("L7 post-rename failure: reply says approved (it is on disk)", succeeded)
+        let warned = await notices().contains { $0.contains("could not confirm") }
+        let replacements = await svc._testReminderFileWrites() - writes0
+        check("L7 …durability warning queued, exactly one replacement", warned && replacements == 1)
         check("L7 …memory approved, disk approved", await quarantined(w) == false && diskRows()?.first { $0.id == w }?.isImportQuarantined == false)
         await svc.reloadFromDisk()
         check("L7 …immediate reload agrees", await quarantined(w) == false)

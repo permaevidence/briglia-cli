@@ -186,12 +186,18 @@ final class RemLoadHarness {
         await rowL15()
         await rowL16()
         await rowL17()
+        await rowL18()
+        await rowL19()
+        await rowL20()
+        await rowL21()
+        await rowL22()
         print("H — missing-argument hint")
         rowH1()
         rowH2()
         await rowH3()
         rowH4()
         await rowH5()
+        await rowH6()
         await reset()
     }
 }

@@ -1061,6 +1061,11 @@ actor ReminderService {
     // Test seams (reminders-load selftest).
     private var injectPreservationFailure = false
     private var injectPreRenameFailure = false
+    private var forcedRecoverySuffix: String?
+    private var injectRejectedListFailure = false
+    func _testForceRecoverySuffix(_ suffix: String?) { forcedRecoverySuffix = suffix }
+    func _testInjectRejectedListFailure(_ enabled: Bool) { injectRejectedListFailure = enabled }
+    func _testSaveChecked() throws { try saveRemindersChecked() }
     private var reminderFileWrites = 0
     func _testInjectPreservationFailure(_ enabled: Bool) { injectPreservationFailure = enabled }
     func _testInjectPreRenameFailure(_ enabled: Bool) { injectPreRenameFailure = enabled }
@@ -1244,8 +1249,8 @@ actor ReminderService {
         formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
         let stamp = formatter.string(from: Date())
         let folder = remindersFileURL.deletingLastPathComponent()
-        for _ in 0..<8 {
-            let suffix = UUID().uuidString.prefix(8).lowercased()
+        for attempt in 0..<8 {
+            let suffix = (attempt == 0 ? forcedRecoverySuffix : nil) ?? UUID().uuidString.prefix(8).lowercased()
             let original = folder.appendingPathComponent("reminders.recovered-\(stamp)-\(suffix).json")
             do {
                 try PrivateStorage.writeExclusive(data, to: original)
@@ -1265,7 +1270,7 @@ actor ReminderService {
                 }
                 joined.append(Data("\n]\n".utf8))
                 let url = folder.appendingPathComponent("reminders.rejected-\(stamp)-\(suffix).json")
-                if (try? PrivateStorage.writeExclusive(joined, to: url)) != nil { rejectedURL = url }
+                if !injectRejectedListFailure, (try? PrivateStorage.writeExclusive(joined, to: url)) != nil { rejectedURL = url }
             }
             return (original, rejectedURL)
         }
