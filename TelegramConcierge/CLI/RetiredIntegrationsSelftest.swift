@@ -73,10 +73,14 @@ struct RetiredIntegrationsSelftest: AsyncParsableCommand {
 enum RIUnits {
     /// The unit sections use this child's own STANDARD domain (its process
     /// name is `linkName`, enforced before any section runs), like the
-    /// manager section and every other `briglia-mw-` selftest. A separately
-    /// named suite was purged only by the parent, which never opened it, and
-    /// its empty plist shell outlived the parent's sweep on the CI runner.
-    static var domainName: String { RetiredIntegrationsSelftest.linkName }
+    /// manager section and every other `briglia-mw-` selftest, and reset it
+    /// key by key (the only two keys `RetiredIntegrations` reads). On the CI
+    /// runner image a mid-run `removePersistentDomain` — first on a separate
+    /// named suite, then on this domain — left an empty plist shell that
+    /// outlived the parent's purge + final sweep; no other selftest removes a
+    /// persistent domain inside its child.
+    static let defaultsKeys = [RetiredIntegrations.lastUserChannelDefaultsKey,
+                               RetiredIntegrations.whatsappEnabledDefaultsKey]
 
     /// A fake process table the scanner reads; `onSignal` mutates it.
     final class Table {
@@ -153,7 +157,7 @@ enum RIUnits {
     static func resetStore(_ env: RetiredIntegrations.Env) {
         try? FileManager.default.removeItem(at: env.stateURL)
         try? FileManager.default.removeItem(at: env.dataRoot.appendingPathComponent("whatsapp-bridge"))
-        env.defaults.removePersistentDomain(forName: domainName)
+        for key in defaultsKeys { env.defaults.removeObject(forKey: key) }
         for key in [KeychainHelper.emailCalendarProviderKey, KeychainHelper.retiredGwsOAuthClientIDKey,
                     KeychainHelper.retiredGwsOAuthClientSecretKey, KeychainHelper.retiredWhatsappOwnerPhoneKey,
                     KeychainHelper.telegramBotTokenKey, KeychainHelper.telegramChatIdKey,
