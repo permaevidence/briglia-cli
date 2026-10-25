@@ -33,9 +33,6 @@ struct RetiredIntegrationsSelftest: AsyncParsableCommand {
         guard child else { try Self.reexecIsolated(only: only); return }
         let h = MidturnHarness(only: only)
         try await h.runRetiredIntegrations()
-        // Hand every pending preference write to cfprefsd before exiting, so
-        // none lands after the parent's purge (see reexecIsolated).
-        UserDefaults.standard.synchronize()
         if h.failures > 0 {
             print("\n\(h.failures) of \(h.total) retirement check(s) FAILED")
             throw ExitCode(1)
@@ -66,18 +63,11 @@ struct RetiredIntegrationsSelftest: AsyncParsableCommand {
         process.environment = env
         try process.run()
         process.waitUntilExit()
-        // On the CI runner image this child's domain survived a single purge +
-        // sweep (smoke: "written during this run"). The domain is reserved for
-        // this test, so purge again while the sweep reports it still holding
-        // data, and say so (diagnostics for the CI log).
-        var left: [String] = []
-        for attempt in 1...3 {
-            TestPrefsDomains.purge(linkName)
-            left = TestPrefsDomains.finalSweep()
-            guard left.contains(linkName) else { break }
-            print("· preference domain \(linkName) still holds data after sweep \(attempt); purging again")
-        }
-        if !left.isEmpty { print("· preference domains still holding data: \(left.joined(separator: ", "))") }
+        TestPrefsDomains.purge(linkName)
+        // settle: on the CI runner image this domain's empty shell came back
+        // ~8 s after the sweep had removed it (smoke diagnostics, run
+        // 40153678448); keep unlinking reappearances for 25 s.
+        TestPrefsDomains.finalSweep(settle: 25)
         if process.terminationStatus != 0 { throw ExitCode(process.terminationStatus) }
     }
 }

@@ -113,8 +113,13 @@ enum TestPrefsDomains {
     /// domain whose shell never materializes within the timeout has nothing
     /// to clean. Returns the names still holding data after the timeout —
     /// the caller reports them; they also fail the smoke suite's count check.
+    ///
+    /// `settle` > 0 additionally keeps watching the purged domains for that
+    /// many seconds after the sweep and unlinks an empty shell each time one
+    /// (re)appears: on the macOS CI runner image cfprefsd rewrote a child
+    /// domain's shell ~8 s AFTER the sweep had already removed it.
     @discardableResult
-    static func finalSweep(timeout: TimeInterval = 30) -> [String] {
+    static func finalSweep(timeout: TimeInterval = 30, settle: TimeInterval = 0) -> [String] {
         // Self-healing first: a shell that cfprefsd wrote AFTER an earlier
         // run's sweep gave up (seen once under heavy load: >12 s) is by
         // construction a throwaway domain — the prefixes are reserved for
@@ -147,6 +152,17 @@ enum TestPrefsDomains {
                 existing.forEach { _ = unlink($0) }
             } else {
                 holdingData.append(name)
+            }
+        }
+        if settle > 0 {
+            let settleEnd = Date().addingTimeInterval(settle)
+            while Date() < settleEnd {
+                for name in names {
+                    for path in candidatePaths(name) where fm.fileExists(atPath: path) && isEmptyShell(path) {
+                        _ = unlink(path)
+                    }
+                }
+                usleep(250_000)
             }
         }
         lock.lock(); purged.removeAll(); lock.unlock()
