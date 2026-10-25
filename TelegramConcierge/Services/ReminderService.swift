@@ -1285,7 +1285,7 @@ actor ReminderService {
         return urls
     }
 
-    /// `.failure(nil)` = the folder is confirmed absent (ENOENT/ENOTDIR on
+    /// `.failure(nil)` = the folder is confirmed absent (ENOENT from lstat on
     /// the path itself); `.failure(message)` = it could not be listed.
     private static func listRecoveryFiles(in folder: URL) -> Result<[URL], RecoveryListingError> {
         do {
