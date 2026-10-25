@@ -1475,8 +1475,13 @@ actor OpenRouterService {
             persona: persona
         )
         conversation.imageLog = imageLog
-        if context.wireProtocol == .responses { return try await generateResponses(conversation, context: context) }
-        return try await generateChatCompletion(conversation, context: context)
+        let response = context.wireProtocol == .responses
+            ? try await generateResponses(conversation, context: context)
+            : try await generateChatCompletion(conversation, context: context)
+        // Stamp each returned call with this request's provider snapshot, for
+        // the missing-argument hint (0.2.63; ToolArgumentHint). In memory
+        // only — no request or persistence change.
+        return ToolCallRouting.stamp(response, setup: ToolCallRouting.setup(for: context))
     }
 
     func executionContext(

@@ -456,6 +456,17 @@ actor ToolExecutor {
                 if let hold = Self.toolBodyHoldForTesting { hold(call.function.name) }
                 result = try await self.executeBody(call)
                 StageMarkers.exit(bodyToken, .ok)
+                // A missing-argument error names the keys that actually
+                // arrived (a host dropping arguments is otherwise
+                // indistinguishable from the model's own mistake).
+                if let hinted = ToolArgumentHint.annotate(
+                    content: result.content,
+                    toolName: call.function.name,
+                    argumentsJSON: call.function.arguments,
+                    setup: call.routing
+                ) {
+                    result.content = hinted
+                }
             } catch {
                 StageMarkers.exit(bodyToken, error is CancellationError || Task.isCancelled ? .cancelled : .error)
                 throw error

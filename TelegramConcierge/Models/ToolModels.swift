@@ -184,6 +184,15 @@ struct ToolCall: Codable, Identifiable {
     let id: String
     let type: String
     let function: FunctionCall
+    /// Provider setup of the request that returned this call (0.2.63,
+    /// ToolArgumentHint). In-memory only: never encoded, so request bytes and
+    /// persisted history are unchanged; a call decoded from disk has nil
+    /// (= unknown).
+    var routing: ToolCallRouting.Setup? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, type, function
+    }
 }
 
 struct FunctionCall: Codable {
