@@ -102,6 +102,24 @@
         "name": "gws / WhatsApp removal (retirement migration selftest, wire-migration negative tests)",
         "run": "python3 scripts/drop_gws_whatsapp_migration_test.py\n.build/debug/briglia __retired-integrations-selftest\n"
       }
+    },
+    {
+      "op": "add",
+      "platform": "linux",
+      "reason": "Security plan v24 Phase 1 + owner requirement P (Matteo, 2026-10-25; plan accepted by Codex round 24): the private-runtime selftest (AgentMail receipt/current/journal/hold/repair with crash recovery at every write, per-use exec validation and probe mode, legacy ~/.local/bin inspect-only, Node selection and private copy, Python venv, PATH contract), the pin-freshness release gate tests with deliberate breaks, the Python lock check, inventory coverage and static workflow checks. Local fakes only, no network; no change to any other step.",
+      "step": {
+        "name": "Security Phase 1 (private AgentMail / Node / Python runtimes, pin-freshness release gate)",
+        "run": "python3 scripts/security_phase1_test.py .build/debug/briglia"
+      }
+    },
+    {
+      "op": "add",
+      "platform": "macos",
+      "reason": "Security plan v24 Phase 1 + owner requirement P (Matteo, 2026-10-25; plan accepted by Codex round 24): the private-runtime selftest (AgentMail receipt/current/journal/hold/repair with crash recovery at every write, per-use exec validation and probe mode, legacy ~/.local/bin inspect-only, Node selection and private copy, Python venv, PATH contract), the pin-freshness release gate tests with deliberate breaks, the Python lock check, inventory coverage and static workflow checks. Local fakes only, no network; no change to any other step.",
+      "step": {
+        "name": "Security Phase 1 (private AgentMail / Node / Python runtimes, pin-freshness release gate)",
+        "run": "python3 scripts/security_phase1_test.py .build/debug/briglia"
+      }
     }
   ],
   "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove|replace|job-setup, platform, step, reason}).",

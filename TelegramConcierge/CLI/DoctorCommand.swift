@@ -349,20 +349,9 @@ struct Doctor: AsyncParsableCommand {
             } else {
                 note("email/calendar: AgentMail selected but NO API key stored — rerun `briglia setup`, toolchain step")
             }
-            if let tx = AgentMailService.transactionReport() {
-                check(tx, ok: false, hint: "doctor never repairs; the command above settles it safely")
-            }
-            if !AgentMailService.agentMailBrokerInstalled() {
-                note("agentmail CLI (key broker) not installed — inbox context/alerts still work; email ACTIONS need it (`briglia setup`, toolchain step). A bare agentmail binary from npm/brew cannot authenticate: Briglia never puts the key in bash environments")
-            } else if let installed = AgentMailService.installedCLIVersion(), installed != AgentMailService.pinnedVersion {
-                note("agentmail CLI \(installed) installed (key broker); Briglia pins \(AgentMailService.pinnedVersion) — `briglia agentmail upgrade` moves it (prompt examples follow the installed version either way)")
-            } else {
-                note("agentmail CLI \(AgentMailService.pinnedVersion) installed (key broker, pinned version)")
-            }
-            let foreign = AgentMailService.foreignAgentMailInstalls()
-            if !foreign.isEmpty {
-                note("foreign agentmail install at \(foreign.joined(separator: ", ")) — no access to Briglia's key; may shadow Briglia's wrapper depending on PATH order")
-            }
+            // Briglia's private copy (security plan v24 §7.8.1): doctor only
+            // reports; `briglia agentmail repair|upgrade` act.
+            for line in AgentMailService.statusLines() { note(line) }
         }
         for line in RetiredIntegrations.doctorLines() { note(line) }
 

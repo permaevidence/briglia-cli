@@ -9,7 +9,7 @@ Use this skill when the user needs a real spreadsheet. Spreadsheet quality start
 
 Do not fake spreadsheet verification with screenshots alone. Open the workbook programmatically and inspect cells, dimensions, formulas, and types.
 
-**Dependencies**: openpyxl (required); the `formulas` package for true formula evaluation in `check` (recommended); LibreOffice optional for visual rendering. On an unfamiliar machine, run `python3 ${CLAUDE_SKILL_DIR}/skills_doctor.py` once — it reports every dependency of the document/media skills with install commands. Ask the user before starting large installs (LibreOffice is ~600 MB). If pip refuses with `externally-managed-environment` (PEP 668), add `--break-system-packages` to the pip command — the same choice Briglia's onboarding makes, so every package lands in the single Python environment the agent later uses.
+**Dependencies**: openpyxl (required); the `formulas` package for true formula evaluation in `check` (recommended); LibreOffice optional for visual rendering. On an unfamiliar machine, run `python3 ${CLAUDE_SKILL_DIR}/skills_doctor.py` once — it reports every dependency of the document/media skills with install commands. Ask the user before starting large installs (LibreOffice is ~600 MB). Python packages live in Briglia's private environment: run these helpers — and any script of yours that imports python-docx, python-pptx, openpyxl, pillow, formulas, PyMuPDF or WeasyPrint — with `briglia-python` instead of `python3`; if it says the environment is not set up, run `briglia python-env install`. Never `pip install` into the system Python.
 
 `${CLAUDE_SKILL_DIR}/reference.md` holds the detail: schema planning checklist, common formulas, CSV import rules, full verification checklists, and the symptom→fix table. Read it when planning a non-trivial workbook or debugging a defect.
 
@@ -29,10 +29,10 @@ Do not overwrite the user's original workbook unless explicitly asked.
 ## Verification Helper
 
 ```bash
-python3 ${CLAUDE_SKILL_DIR}/verify_xlsx.py manifest book.xlsx              # sheets, dims, tables, charts, named ranges, hidden sheets
-python3 ${CLAUDE_SKILL_DIR}/verify_xlsx.py inspect book.xlsx --rows 3      # headers + sample rows with types and number formats
-python3 ${CLAUDE_SKILL_DIR}/verify_xlsx.py diff before.xlsx after.xlsx     # cell-by-cell diff of an edit
-python3 ${CLAUDE_SKILL_DIR}/verify_xlsx.py check book.xlsx                 # formula lint + evaluation + data-integrity lint
+briglia-python ${CLAUDE_SKILL_DIR}/verify_xlsx.py manifest book.xlsx              # sheets, dims, tables, charts, named ranges, hidden sheets
+briglia-python ${CLAUDE_SKILL_DIR}/verify_xlsx.py inspect book.xlsx --rows 3      # headers + sample rows with types and number formats
+briglia-python ${CLAUDE_SKILL_DIR}/verify_xlsx.py diff before.xlsx after.xlsx     # cell-by-cell diff of an edit
+briglia-python ${CLAUDE_SKILL_DIR}/verify_xlsx.py check book.xlsx                 # formula lint + evaluation + data-integrity lint
 ```
 
 For existing-workbook edits: run `manifest` before and after — any sheet, table, chart, image, named-range, or hidden-sheet change must be intentional. Run `diff` to confirm edits touched only the intended cells.

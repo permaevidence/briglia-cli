@@ -941,32 +941,25 @@ struct SetupWizard {
         save(KeychainHelper.emailCalendarProviderKey, EmailCalendarProvider.agentmail.rawValue)
 
         if AgentMailService.agentMailBrokerInstalled() {
-            print("  ✔ agentmail CLI (key broker) already installed")
+            print("  ✔ agentmail CLI already installed for Briglia")
         } else {
-            // A bare `agentmail` binary here (pre-broker install, npm, brew)
-            // cannot authenticate — Briglia never puts the key in bash envs. The
-            // installer overwrites ~/.local/bin/agentmail with the broker
-            // wrapper, migrating any legacy Briglia install in place.
+            // Briglia's private copy (security plan v24 §7.8.1): installed
+            // under ~/.local/share/briglia/runtime/agentmail and reached
+            // through Briglia's own wrapper; nothing in ~/.local/bin is
+            // written, replaced or removed.
             if WizardIO.askYesNo("Install the agentmail CLI (~5 MB, lets Briglia read/send email)?", default: true) {
                 if let installFailure = await AgentMailService.installAgentMailBinary(progress: { print("  \($0)") }) {
                     print("  ✖ agentmail CLI install failed: \(installFailure)")
                     print("    Inbox alerts and context still work (Briglia polls the API directly);")
                     print("    rerun `briglia setup` later to retry the CLI install.")
                 } else {
-                    print("  ✔ agentmail CLI installed to ~/.local/bin/agentmail (key broker + binary)")
+                    print("  ✔ agentmail CLI \(AgentMailService.pinnedVersion) installed for Briglia (private copy, key broker)")
                 }
             } else {
                 print("  Skipped the CLI — inbox alerts and context still work; Briglia can use the REST API via curl for actions.")
             }
         }
-        let foreign = AgentMailService.foreignAgentMailInstalls()
-        if !foreign.isEmpty {
-            print("""
-              ⚠ another agentmail install exists at \(foreign.joined(separator: ", ")) —
-                it has no access to Briglia's key and may shadow Briglia's wrapper
-                depending on PATH order. Consider removing it.
-            """)
-        }
+        for note in AgentMailService.legacyFindings() { print("  note: \(note)") }
         print("  ✔ AgentMail + calendar configured — activates the next time Briglia starts")
     }
 

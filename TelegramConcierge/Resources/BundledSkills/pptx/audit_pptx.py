@@ -34,7 +34,7 @@ try:
     from pptx import Presentation
     from pptx.util import Emu
 except ImportError:
-    print("error: python-pptx is required (python3 -m pip install python-pptx)", file=sys.stderr)
+    print("error: python-pptx is required (briglia python-env install)", file=sys.stderr)
     raise SystemExit(1)
 
 EMU_PER_PT = 12700

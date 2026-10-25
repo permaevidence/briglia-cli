@@ -149,8 +149,16 @@ enum BashTools {
         // it would let a foreign same-named binary shadow Briglia's wrappers —
         // the exact agentmail-broker bypass Codex flagged (round 5).
         parts.removeAll { $0 == localBin }
+        // Security plan v24 §7.9.1: Briglia's own command directory (the
+        // private `agentmail` key-broker wrapper, `briglia-python`) goes in
+        // FRONT of ~/.local/bin, so neither a legacy nor a foreign `agentmail`
+        // can shadow it; the private Node fallback shims go LAST, so any Node
+        // of the user's wins.
+        let brigliaBin = RuntimePaths.binDir.path
+        let fallback = RuntimePaths.fallbackBinDir.path
+        parts.removeAll { $0 == brigliaBin || $0 == fallback }
         let missing = prepend.filter { !parts.contains($0) }
-        return ([localBin] + missing + parts).joined(separator: ":")
+        return ([brigliaBin, localBin] + missing + parts + [fallback]).joined(separator: ":")
     }
 
     /// Attached execution (foreground-only subagents and internal script
@@ -231,8 +239,15 @@ enum BashTools {
 
     /// Detached invocation of `command` through the login shell.
     static func shellInvocation(for command: String) -> (executable: String, arguments: [String]) {
-        detachedInvocation(executable: PlatformShell.path, arguments: ["-lc", command])
+        detachedInvocation(executable: PlatformShell.path, arguments: ["-lc", loginPathPrefix + command])
     }
+
+    /// Re-applied AFTER login-shell initialisation (security plan §7.5,
+    /// v24 §7.9.1): profile files (`brew shellenv`, path_helper) may put
+    /// another `agentmail` ahead; this puts Briglia's command directory
+    /// first and the Node fallback shims last again. The directories travel
+    /// in the environment, so the command text itself is unchanged.
+    static let loginPathPrefix = "export PATH=\"${BRIGLIA_PATH_FRONT:+$BRIGLIA_PATH_FRONT:}$PATH${BRIGLIA_PATH_BACK:+:$BRIGLIA_PATH_BACK}\"; "
 
     /// Non-interactive hints for agent-spawned shells: with no tty to prompt
     /// on, tools that would otherwise try should fail fast with a readable
@@ -1618,6 +1633,11 @@ actor BackgroundProcessRegistry {
         // (owner decision, 2026-09-02).
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = BashTools.augmentedPath(env["PATH"])
+        env["BRIGLIA_PATH_FRONT"] = RuntimePaths.binDir.path
+        env["BRIGLIA_PATH_BACK"] = RuntimePaths.fallbackBinDir.path
+        // Briglia's private Python (security plan v24 §7.9.4): skills call
+        // `briglia-python`; scripts may use this absolute path.
+        env["BRIGLIA_PYTHON"] = RuntimePaths.binDir.appendingPathComponent("briglia-python").path
         BashTools.applyNonInteractiveEnv(&env)
         for (k, v) in perCommandEnv { env[k] = v }
         process.environment = env

@@ -2,46 +2,37 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-#if canImport(CryptoKit)
-import CryptoKit
-#else
-import Crypto
-#endif
 #if canImport(Glibc)
 import Glibc
 #else
 import Darwin
 #endif
 
-// MARK: - Transactional, cancellable AgentMail CLI installer (plan §6.6)
+// MARK: - AgentMail CLI: Briglia-private install (security plan v24 §7.8.1, §7.9.2)
 //
-// The published pair is `~/.local/bin/agentmail` (the key-broker wrapper) and
-// the immutable versioned binary it points at
-// (`agentmail-bin-<version>-<sha256[0:12]>`). The wrapper replacement is the
-// SINGLE commit point; the transaction metadata (`agentmail.tx.json`) is
-// three-state — staged → committing → committed (or rolled_back) — with
-// `committing` persisted BEFORE the swap so recovery inspects the live
-// wrapper instead of trusting the state. One exclusive, symlink-safe flock
-// (`.agentmail.lock`) serializes every install and repair path; doctor
-// never takes it and only reports.
+// The pinned AgentMail CLI lives ONLY under
+// ~/.local/share/briglia/runtime/agentmail/ (receipt, `current` link,
+// private journal, hold) and is reached through the Briglia-only wrapper
+// ~/.local/share/briglia/bin/agentmail, which execs `briglia __agentmail-exec`:
+// validation at every use, then the key, then execv. Anything an older
+// Briglia left in ~/.local/bin is inspected and reported, never touched.
 
 extension AgentMailService {
     static let wrapperName = "agentmail"
     static let legacyBinaryName = "agentmail-bin"
-    static let transactionFileName = "agentmail.tx.json"
-    static let installerLockName = ".agentmail.lock"
-    static let stagingPrefix = ".agentmail-staging-"
+    static let legacyTransactionFileName = "agentmail.tx.json"
+    /// The binary's name inside a private version directory.
+    static let privateBinaryName = "agentmail-bin"
+    /// Placeholder key for probes: never a real credential.
+    static let probePlaceholderKey = "briglia-probe-placeholder"
 
     // MARK: Pinned upstream release
     //
     // The upstream CLI is pinned to ONE version whose per-target archive
-    // SHA-256 is compiled in (same idea as the lockfile-pinned Playwright):
-    // the installer never asks GitHub for "latest", so an upstream layout or
-    // toolchain change cannot break installs silently — v1.0.0 (2026-08-26)
-    // renamed every asset and nested the binary, and every install 404'd
-    // until 2026-09-04 — and the archive is authenticated against Briglia's
-    // own record instead of a sidecar served from the same origin.
-    // Bumping = new version + hashes here, then the selftest battery.
+    // SHA-256 is compiled in: the installer never asks GitHub for "latest",
+    // and the archive is authenticated against Briglia's own record instead
+    // of a sidecar served from the same origin. Bumping = new version +
+    // hashes here (the release gate, plan §3.5, refuses a stale pin).
     static let pinnedVersion = "1.3.0"
     /// Target triple → SHA-256 of `agentmail-cli-<triple>.tar.gz` for
     /// `pinnedVersion`. Linux uses the musl builds: statically linked, no
@@ -76,89 +67,264 @@ extension AgentMailService {
         return (asset, url, sha)
     }
 
-    /// Selftest seam: the install directory (production: ~/.local/bin).
-    nonisolated(unsafe) static var installDirectoryOverride: URL?
-    static var installDirectory: URL {
-        installDirectoryOverride
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".local/bin", isDirectory: true)
+    /// The compiled pin for this machine; development builds may point it at
+    /// a local fixture archive (`BRIGLIA_AGENTMAIL_TEST_ARCHIVE` + `_SHA256`
+    /// + `_VERSION`) for the selftests. Release builds ignore those.
+    static var runtimePin: RuntimePin? {
+        if let sha = RuntimeSeams.env("BRIGLIA_AGENTMAIL_TEST_SHA256"), let v = RuntimeSeams.env("BRIGLIA_AGENTMAIL_TEST_VERSION") {
+            return RuntimePin(triple: currentTargetTriple, version: v, archiveSHA256: sha)
+        }
+        guard let a = pinnedAsset() else { return nil }
+        return RuntimePin(triple: currentTargetTriple, version: pinnedVersion, archiveSHA256: a.sha256)
     }
 
-    /// Selftest seam: replaces the release lookup + downloads. Returns the
-    /// archive bytes, the checksum file bytes, the version and asset name.
-    typealias DownloadFixture = (version: String, asset: String, archive: Data, checksums: Data)
-    nonisolated(unsafe) static var downloadOverride: ((_ progress: (@Sendable (String) -> Void)?) async throws -> DownloadFixture)?
-    /// Selftest seam: crash injection points, by name (`SIGKILL`s self).
-    nonisolated(unsafe) static var crashPoint: String?
     /// Selftest seam: the exact path of the `briglia` binary the wrapper calls.
     nonisolated(unsafe) static var brigliaPathOverride: String?
+    static func brigliaPath() -> String {
+        brigliaPathOverride ?? (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
+            .resolvingSymlinksInPath().path
+    }
 
-    /// How the installer runs its children (tar, xattr, smoke tests). The
-    /// default is the plain process runner (wizard, setup-api, UT app);
-    /// quick setup passes the journaled `SetupJobRunner`.
-    struct ChildRunner {
-        var run: (_ command: [String], _ timeoutSeconds: Int, _ label: String) async -> (ok: Bool, stdout: String?, detail: String?)
+    // MARK: Paths
 
-        static let plain = ChildRunner { command, timeout, _ in
-            let r = await ProcessRunner.runProcessAsync(
-                executable: command[0], args: Array(command.dropFirst()), timeoutSeconds: timeout)
-            return (r.failureDetail == nil, r.stdout, r.failureDetail)
-        }
+    /// Legacy (inspect-only): ~/.local/bin. Selftest seam for its location.
+    nonisolated(unsafe) static var legacyDirectoryOverride: URL?
+    static var legacyDirectory: URL {
+        legacyDirectoryOverride
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".local/bin", isDirectory: true)
+    }
+    static var legacyWrapperURL: URL { legacyDirectory.appendingPathComponent(wrapperName) }
+    /// The Briglia-only wrapper (first on the agent's PATH).
+    static var wrapperURL: URL { RuntimePaths.binDir.appendingPathComponent(wrapperName) }
 
-        static func journaled(_ runner: SetupJobRunner, row: String) -> ChildRunner {
-            ChildRunner { command, timeout, label in
-                let result = await runner.run(.init(row: row, command: command, mode: .detached,
-                                                    timeout: TimeInterval(timeout), label: label))
-                return (result.ok, result.lastLines.joined(separator: "\n"), result.failureReason)
+    // MARK: Spec
+
+    static func runtimeSpec(pin: RuntimePin) -> RuntimeSpec {
+        RuntimeSpec(
+            component: .agentmail, pin: pin, binaryRelPath: privateBinaryName, usesHold: true,
+            directoryName: { p in "\(sanitize(p.version))-\(p.archiveSHA256.prefix(12))" },
+            stage: { payload, progress in try await stageAgentMail(pin: pin, payload: payload, progress: progress) },
+            postProbe: { journal in await postPublicationProbe(journal) },
+            validateExtra: nil, stagesInPlace: false)
+    }
+
+    static func sanitize(_ v: String) -> String {
+        let s = v.filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" }
+        return s.isEmpty ? "unknown" : s
+    }
+
+    /// Download (or the dev fixture), verify the compiled archive hash,
+    /// extract, unquarantine, then the STAGED probe: the staged binary itself
+    /// with a placeholder key (§7.9.2 v23; never through `current`).
+    static func stageAgentMail(pin: RuntimePin, payload: URL, progress: (@Sendable (String) -> Void)?) async throws -> [String: String]? {
+        let archive: Data
+        if let fixture = RuntimeSeams.env("BRIGLIA_AGENTMAIL_TEST_ARCHIVE") {
+            archive = try Data(contentsOf: URL(fileURLWithPath: fixture))
+        } else {
+            guard let asset = pinnedAsset(triple: pin.triple) else {
+                throw RuntimeError("no pinned AgentMail CLI build for this platform (\(pin.triple))")
+            }
+            do {
+                archive = try await ProcessRunner.downloadReportingProgress(
+                    from: asset.url, label: "Downloading the agentmail CLI \(pin.version)", progress: progress)
+            } catch {
+                throw RuntimeError("download of \(asset.asset) failed (\(error.localizedDescription))")
             }
         }
+        guard RuntimeFS.sha256(archive) == pin.archiveSHA256 else {
+            throw RuntimeError("checksum mismatch: the download is not the pinned AgentMail \(pin.version) archive")
+        }
+        let staging = payload.deletingLastPathComponent()
+        let archivePath = staging.appendingPathComponent("agentmail.tar.gz")
+        try archive.write(to: archivePath)
+        try PrivateStorage.ensureDirectory(payload)
+        progress?("Extracting the agentmail CLI…")
+        let untar = await RuntimeProcess.run("/usr/bin/tar", ["-xf", archivePath.path, "-C", payload.path, "--strip-components=1"], timeout: 60)
+        guard untar.status == 0 else { throw RuntimeError("extraction failed: \(RuntimeProcess.detail(untar))") }
+        try? FileManager.default.removeItem(at: archivePath)
+        let extracted = payload.appendingPathComponent("agentmail")
+        guard RuntimeFS.kind(extracted.path) == .regular else { throw RuntimeError("archive did not contain the agentmail binary") }
+        // Only the binary is kept (the archive's README/LICENSE are not needed).
+        let binary = payload.appendingPathComponent(privateBinaryName)
+        guard rename(extracted.path, binary.path) == 0 else { throw RuntimeError("could not place the binary: \(String(cString: strerror(errno)))") }
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: payload.path)) ?? [] where name != privateBinaryName {
+            try? FileManager.default.removeItem(at: payload.appendingPathComponent(name))
+        }
+        chmod(binary.path, 0o700)
+        #if os(macOS)
+        if removexattr(binary.path, "com.apple.quarantine", 0) != 0, errno != ENOATTR {
+            throw RuntimeError("could not remove the quarantine attribute: \(String(cString: strerror(errno)))")
+        }
+        #endif
+        var env = probeEnvironment()
+        env["AGENTMAIL_API_KEY"] = probePlaceholderKey
+        let probe = await RuntimeProcess.run(binary.path, ["--version"], env: env, timeout: PrivateRuntimeEngine.probeTimeout)
+        guard probe.status == 0 else { throw RuntimeError("the downloaded binary failed to run: \(RuntimeProcess.detail(probe))") }
+        guard probe.stdout.contains(pin.version) else {
+            throw RuntimeError("the downloaded binary reports \(probe.stdout.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60)), not \(pin.version)")
+        }
+        return nil
     }
 
-    struct PreviousWrapper: Codable, Equatable {
-        var bytesB64: String
-        var sha256: String
-        var mode: Int
+    /// A clean, credential-free child environment for probes.
+    static func probeEnvironment() -> [String: String] {
+        let base = ProcessInfo.processInfo.environment
+        var env: [String: String] = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": base["HOME"] ?? NSHomeDirectory()]
+        for k in ["TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "CFFIXED_USER_HOME", "LANG"] { if let v = base[k] { env[k] = v } }
+        return env
     }
 
-    struct Transaction: Codable, Equatable {
-        var version = 1
-        var state: String   // staged | committing | committed | rolled_back
-        var newBinary: String
-        var newSHA256: String
-        var newWrapperSHA256: String
-        var previousWrapper: PreviousWrapper?
-        var previousBinary: String?
-        var startedAt: Date
+    /// Post-publication probe through the published wrapper in the
+    /// journal-bound probe mode (§7.9.2 v23).
+    static func postPublicationProbe(_ journal: RuntimeJournal) async -> String? {
+        do { try ensureWrapper() } catch { return "the wrapper could not be written: \(error)" }
+        var env = probeEnvironment()
+        env["BRIGLIA_AGENTMAIL_PROBE"] = journal.attemptId
+        env["AGENTMAIL_API_KEY"] = "caller-key-ignored-in-probe-mode"
+        let r = await RuntimeProcess.run(wrapperURL.path, ["--version"], env: env, timeout: PrivateRuntimeEngine.probeTimeout)
+        guard r.status == 0 else { return RuntimeProcess.detail(r) }
+        guard r.stdout.contains(journal.newRecord.version) else { return "reports \(r.stdout.prefix(60)), not \(journal.newRecord.version)" }
+        return nil
     }
 
-    struct InstallerBusy: Error {}
+    // MARK: The wrapper
 
-    // MARK: Paths and validation
-
-    static var transactionURL: URL { installDirectory.appendingPathComponent(transactionFileName) }
-    static var wrapperURL: URL { installDirectory.appendingPathComponent(wrapperName) }
-    static var lockURL: URL { installDirectory.appendingPathComponent(installerLockName) }
-
-    static let versionedNameRegex = try! NSRegularExpression(pattern: "^agentmail-bin(-[A-Za-z0-9._]+-[0-9a-f]{12})?$")
-
-    /// A plain basename owned by the transaction: no `/`, not `.`/`..`,
-    /// matches the versioned pattern. Existence checks are the caller's.
-    static func validBasename(_ name: String) -> Bool {
-        guard !name.isEmpty, !name.contains("/"), name != ".", name != ".." else { return false }
-        return versionedNameRegex.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil
+    static func wrapperScript(brigliaPath: String) -> String {
+        """
+        #!/bin/sh
+        # Installed by Briglia CLI. Runs Briglia's private AgentMail CLI after
+        # checking it against its install receipt; the key is fetched at exec
+        # time and handed only to that binary.
+        exec '\(brigliaPath)' __agentmail-exec "$@"
+        """ + "\n"
     }
 
-    static func sha256Hex(_ data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    /// Writes the Briglia-only wrapper when its expected bytes differ
+    /// (private validated write; never anything in ~/.local/bin).
+    static func ensureWrapper() throws {
+        let bytes = Data(wrapperScript(brigliaPath: brigliaPath()).utf8)
+        if RuntimeFS.kind(wrapperURL.path) == .regular, (try? Data(contentsOf: wrapperURL)) == bytes,
+           FileManager.default.isExecutableFile(atPath: wrapperURL.path) { return }
+        try PrivateStorage.ensureDirectory(RuntimePaths.binDir)
+        switch RuntimeFS.kind(wrapperURL.path) {
+        case .absent, .regular: break
+        default: throw RuntimeError("\(wrapperURL.path) exists and is not a regular file — refusing")
+        }
+        try PrivateStorage.writeAtomically(bytes, to: wrapperURL, mode: 0o700)
     }
 
-    static func versionedName(version: String, sha256: String) -> String {
-        let safe = version.filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" }
-        return "agentmail-bin-\(safe.isEmpty ? "unknown" : safe)-\(sha256.prefix(12))"
+    /// Content check for a broker wrapper (ours or an older Briglia's).
+    static func isBrokerWrapper(at url: URL) -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              data.count < 4096,
+              let text = String(data: data, encoding: .utf8) else { return false }
+        return text.hasPrefix("#!/bin/sh") && (text.contains("__agentmail-key") || text.contains("__agentmail-exec"))
     }
 
-    /// `exec '<path>' "$@"` target of a wrapper script; nil when the bytes
-    /// are not a wrapper of ours.
-    static func wrapperTarget(_ bytes: Data) -> String? {
+    /// The legacy broker wrapper shape (pre-Phase 1), kept for the migration
+    /// selftests and the legacy inspection.
+    static func legacyWrapperScript(adaPath: String, realBinaryPath: String) -> String {
+        """
+        #!/bin/sh
+        # Installed by Briglia CLI. Launches the AgentMail CLI with Briglia's stored
+        # API key fetched at exec time, so the key never rides ambiently in
+        # other processes' environments.
+        if [ -z "${AGENTMAIL_API_KEY:-}" ]; then
+            AGENTMAIL_API_KEY="$('\(adaPath)' __agentmail-key 2>/dev/null || true)"
+            export AGENTMAIL_API_KEY
+        fi
+        exec '\(realBinaryPath)' "$@"
+        """
+    }
+
+    // MARK: Per-use validation (`__agentmail-exec`)
+
+    enum ExecDecision: Equatable {
+        /// Run this binary; `forcedKey` replaces any caller key (probe mode).
+        case run(binary: String, forcedKey: String?)
+        case refuse(String)
+    }
+
+    /// Lock-free, read-only: the files are replaced atomically by writers.
+    static func execDecision(args: [String], environment: [String: String]) -> ExecDecision {
+        let c = RuntimeComponent.agentmail
+        let sel = RuntimeSelectionStore.peek()
+        guard let sel else { return .refuse(offMessage("Briglia's runtime state is unreadable")) }
+        let hold = sel[c].hold
+        let receipt: RuntimeReceipt?
+        do { receipt = try RuntimeFS.readJSON(RuntimeReceipt.self, RuntimePaths.receipt(c)) } catch {
+            return .refuse(offMessage("its install receipt is unreadable"))
+        }
+        let cur = PrivateRuntimeEngine.currentState(c)
+        func binary(_ rec: RuntimeRecord) -> String {
+            RuntimePaths.dir(c).appendingPathComponent(rec.directory).appendingPathComponent(privateBinaryName).path
+        }
+        func intact(_ rec: RuntimeRecord) -> Bool {
+            RuntimeFS.validVersionRef(rec.directory) && RuntimeFS.sha256(file: URL(fileURLWithPath: binary(rec))) == rec.binarySHA256
+        }
+        if let probeAttempt = environment["BRIGLIA_AGENTMAIL_PROBE"], !probeAttempt.isEmpty {
+            guard args == ["--version"] else { return .refuse("probe mode allows only --version") }
+            guard let j = try? RuntimeFS.readJSON(RuntimeJournal.self, RuntimePaths.journal(c)),
+                  j.state == "committing", j.attemptId == probeAttempt, cur == .ref(j.newTarget),
+                  j.newRecord.directory == j.newTarget, intact(j.newRecord) else {
+                return .refuse("probe refused: no matching install in progress")
+            }
+            if let hold, hold.attemptId != probeAttempt { return .refuse(offMessage(holdText(hold))) }
+            return .run(binary: binary(j.newRecord), forcedKey: probePlaceholderKey)
+        }
+        if let hold { return .refuse(offMessage(holdText(hold))) }
+        guard let v = receipt?.verifiedRecord else {
+            return .refuse("the AgentMail CLI is not installed for Briglia yet — choose AgentMail in `briglia menu`, or run `briglia agentmail upgrade`")
+        }
+        guard cur == .ref(v.directory), intact(v) else {
+            return .refuse(offMessage("the install does not match its receipt"))
+        }
+        return .run(binary: binary(v), forcedKey: nil)
+    }
+
+    static func holdText(_ h: RuntimeHold) -> String {
+        switch h.reason {
+        case "repair-failed": return "repair failed"
+        case "repair-interrupted": return "repair interrupted"
+        case "repair-in-progress": return "a repair is in progress"
+        default: return "the install does not match its receipt"
+        }
+    }
+
+    static func offMessage(_ why: String) -> String {
+        "AgentMail is off: \(why); run `briglia agentmail repair` (with Briglia stopped: `briglia service stop` or quit the terminal session)"
+    }
+
+    // MARK: Status used by setup, doctor, the menu and the prompt
+
+    /// A usable private install (validated `verified`, no hold).
+    static func agentMailBrokerInstalled() -> Bool {
+        if case .run = execDecision(args: [], environment: [:]) { return true }
+        return false
+    }
+
+    /// The version the agent will run: the verified private copy, else (while
+    /// none exists yet) an older Briglia's wrapper in ~/.local/bin read
+    /// inspect-only (§7.9.2); nil when neither.
+    static func installedCLIVersion() -> String? {
+        if let v = (try? RuntimeFS.readJSON(RuntimeReceipt.self, RuntimePaths.receipt(.agentmail)))??.verifiedRecord?.version,
+           agentMailBrokerInstalled() {
+            return v
+        }
+        return legacyInstalledVersion()
+    }
+
+    /// Inspect-only read of an older Briglia's ~/.local/bin pair.
+    static func legacyInstalledVersion() -> String? {
+        let w = legacyWrapperURL
+        guard RuntimeFS.kind(w.path) == .regular, isBrokerWrapper(at: w),
+              let data = try? Data(contentsOf: w), let target = legacyWrapperTarget(data),
+              RuntimeFS.kind(target) == .regular else { return nil }
+        return cliVersion(fromTargetBasename: URL(fileURLWithPath: target).lastPathComponent)
+    }
+
+    static func legacyWrapperTarget(_ bytes: Data) -> String? {
         guard let text = String(data: bytes, encoding: .utf8) else { return nil }
         for line in text.split(separator: "\n") {
             let t = line.trimmingCharacters(in: .whitespaces)
@@ -170,29 +336,6 @@ extension AgentMailService {
         return nil
     }
 
-    /// Is Briglia's key-brokered install complete: the `agentmail` wrapper
-    /// (verified by content), executable, and its target exists as a
-    /// regular file. A bare `agentmail` binary from npm/brew does NOT count
-    /// (no broker ⇒ cannot authenticate).
-    static func agentMailBrokerInstalled() -> Bool {
-        let wrapper = wrapperURL
-        guard isBrokerWrapper(at: wrapper), let data = try? Data(contentsOf: wrapper),
-              let target = wrapperTarget(data) else { return false }
-        var st = stat()
-        guard lstat(target, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return false }
-        return FileManager.default.isExecutableFile(atPath: target)
-    }
-
-    /// The upstream version baked into the installed key-brokered binary's
-    /// name (`agentmail-bin-<version>-<sha12>`). "legacy" for the
-    /// unversioned pre-transaction name (a 0.7.x install); nil when the
-    /// broker isn't installed.
-    static func installedCLIVersion() -> String? {
-        guard agentMailBrokerInstalled(), let data = try? Data(contentsOf: wrapperURL),
-              let target = wrapperTarget(data) else { return nil }
-        return cliVersion(fromTargetBasename: URL(fileURLWithPath: target).lastPathComponent)
-    }
-
     static func cliVersion(fromTargetBasename base: String) -> String? {
         if base == legacyBinaryName { return "legacy" }
         guard base.hasPrefix(legacyBinaryName + "-") else { return nil }
@@ -201,11 +344,9 @@ extension AgentMailService {
         return String(rest[..<dash])
     }
 
-    /// Command syntax of the CLI the model will find on PATH. The Go CLI
-    /// (0.x) used colon resources (`inboxes:messages list`); the Rust
-    /// rewrite (1.x, pinned) uses nested subcommands (`inboxes messages
-    /// list`) with the same flags. Prompt text follows the INSTALLED
-    /// binary so a device still on 0.7.x is taught commands that work.
+    /// Command syntax of the CLI the agent runs. The Go CLI (0.x) used colon
+    /// resources (`inboxes:messages list`); the Rust rewrite (1.x, pinned)
+    /// uses nested subcommands (`inboxes messages list`) with the same flags.
     enum CLISyntax: Equatable { case v0Colon, v1Nested }
 
     static func cliSyntax(forInstalledVersion version: String?) -> CLISyntax {
@@ -221,590 +362,100 @@ extension AgentMailService {
     /// `inboxes:messages` or `inboxes messages`, for prompt examples.
     static var messagesResource: String { cliSyntax == .v0Colon ? "inboxes:messages" : "inboxes messages" }
 
-    private static func brigliaPath() -> String {
-        brigliaPathOverride ?? (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
-            .resolvingSymlinksInPath().path
-    }
-
-    // MARK: Lock
-
-    /// Exclusive, symlink-safe installer lock. `nil` = busy.
-    private static func openInstallerLock() throws -> Int32? {
-        try FileManager.default.createDirectory(at: installDirectory, withIntermediateDirectories: true)
-        let fd = open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard fd >= 0 else {
-            throw NSError(domain: "briglia.agentmail", code: 1, userInfo: [NSLocalizedDescriptionKey:
-                "cannot open \(lockURL.path): \(String(cString: strerror(errno))) (a symlink or non-regular file at that path is refused)"])
-        }
-        var st = stat()
-        guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else {
-            close(fd)
-            throw NSError(domain: "briglia.agentmail", code: 2, userInfo: [NSLocalizedDescriptionKey:
-                "\(lockURL.path) is not a regular file — refusing"])
-        }
-        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
-            close(fd)
-            return nil
-        }
-        return fd
-    }
-
-    /// Read-only probe for doctor: is an installer or repair running now?
-    static func installerLockBusy() -> Bool {
-        let fd = open(lockURL.path, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
-        guard fd >= 0 else { return false }
-        defer { close(fd) }
-        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
-            flock(fd, LOCK_UN)
-            return false
-        }
-        return true
-    }
-
-    static func withInstallerLock<T>(_ body: () async throws -> T) async throws -> T {
-        guard let fd = try openInstallerLock() else { throw InstallerBusy() }
-        defer { close(fd) }   // releases the flock
-        return try await body()
-    }
-
-    // MARK: Durable helpers
-
-    private static func fsyncDir() throws { try PrivateStorage.fsyncDirectory(installDirectory.path) }
-
-    private static func writeTransaction(_ tx: Transaction) throws {
-        let data = try JSONEncoder.iso.encode(tx)
-        try PrivateStorage.writeAtomically(data, to: transactionURL, mode: 0o600)
-    }
-
-    private static func readTransaction() throws -> Transaction? {
-        var st = stat()
-        guard lstat(transactionURL.path, &st) == 0 else { return nil }
-        guard (st.st_mode & S_IFMT) == S_IFREG else {
-            throw NSError(domain: "briglia.agentmail", code: 3, userInfo: [NSLocalizedDescriptionKey: "\(transactionFileName) is not a regular file"])
-        }
-        let data = try Data(contentsOf: transactionURL)
-        return try JSONDecoder.iso.decode(Transaction.self, from: data)
-    }
-
-    /// Validate every filename and hash in the metadata (plan §6.6 step 3):
-    /// basenames only, versioned pattern, named files are regular when
-    /// present. Returns the reason when invalid.
-    static func validate(_ tx: Transaction) -> String? {
-        guard ["staged", "committing", "committed", "rolled_back"].contains(tx.state) else { return "unknown state '\(tx.state)'" }
-        guard validBasename(tx.newBinary) else { return "new_binary is not a plain versioned basename" }
-        if let prev = tx.previousBinary, !validBasename(prev) { return "previous_binary is not a plain versioned basename" }
-        guard tx.newSHA256.count == 64, tx.newWrapperSHA256.count == 64 else { return "hash fields malformed" }
-        if let prev = tx.previousWrapper {
-            guard prev.sha256.count == 64, let bytes = Data(base64Encoded: prev.bytesB64),
-                  sha256Hex(bytes) == prev.sha256 else { return "previous_wrapper bytes do not match their hash" }
-        }
-        for name in [tx.newBinary, tx.previousBinary].compactMap({ $0 }) {
-            let path = installDirectory.appendingPathComponent(name).path
-            var st = stat()
-            if lstat(path, &st) == 0, (st.st_mode & S_IFMT) != S_IFREG { return "\(name) exists but is not a regular file (symlink?)" }
-        }
-        return nil
-    }
-
-    private static func atomicReplaceWrapper(bytes: Data, mode: mode_t) throws {
-        try PrivateStorage.writeAtomically(bytes, to: wrapperURL, mode: mode)
-    }
-
-    /// The live `agentmail` path is absent, a readable regular file, or
-    /// something else (symlink, directory, unreadable) — and the last is
-    /// never treated as "absent": recovery fails closed on it and a new
-    /// installation refuses to overwrite it.
-    enum WrapperState: Equatable {
-        case absent
-        case valid(Data)
-        case invalid(String)
-    }
-
-    static func liveWrapperState() -> WrapperState {
-        var st = stat()
-        guard lstat(wrapperURL.path, &st) == 0 else {
-            return errno == ENOENT ? .absent : .invalid("lstat failed: \(String(cString: strerror(errno)))")
-        }
-        guard (st.st_mode & S_IFMT) == S_IFREG else {
-            return .invalid("\(wrapperURL.path) exists but is not a regular file (symlink, directory or device)")
-        }
-        guard let data = try? Data(contentsOf: wrapperURL) else { return .invalid("\(wrapperURL.path) exists but cannot be read") }
-        return .valid(data)
-    }
-
-    private static func liveWrapperBytes() -> Data? {
-        if case .valid(let d) = liveWrapperState() { return d }
-        return nil
-    }
-
-    struct CleanupFailure: Error, CustomStringConvertible {
-        let description: String
-    }
-
-    /// Selftest seams: cleanup/barrier fault injection.
-    nonisolated(unsafe) static var injectFsyncFailure = false
-    nonisolated(unsafe) static var injectStagingRemovalFailure = false
-
-    /// Post-verification cleanup, every step checked: an unlinked
-    /// transaction file, removed staging and a directory barrier are part
-    /// of "installed"; a failure here is reported as retryable, never as
-    /// success with debris behind.
-    private static func finishCleanup(deletePrevious previous: String?, liveTarget: String?) throws {
-        // Order: everything that could fail runs BEFORE the transaction file
-        // goes, so a failed step leaves the evidence doctor reports and
-        // repair retries from; the metadata is the last thing removed.
-        if let prev = previous {
-            try deleteIfUnreferenced(prev, liveTarget: liveTarget)
-        }
-        try removeStagingChecked()
-        func barrier() throws {
-            if injectFsyncFailure { throw CleanupFailure(description: "injected directory fsync failure") }
-            do { try fsyncDir() } catch { throw CleanupFailure(description: "directory barrier failed: \(error)") }
-        }
-        try barrier()
-        if unlink(transactionURL.path) != 0, errno != ENOENT {
-            throw CleanupFailure(description: "could not remove \(transactionFileName): \(String(cString: strerror(errno)))")
-        }
-        try barrier()
-    }
-
-    private static func removeStagingChecked() throws {
-        let fm = FileManager.default
-        for entry in try stagingEntries() {
-            if injectStagingRemovalFailure { throw CleanupFailure(description: "injected staging removal failure (\(entry))") }
-            do { try fm.removeItem(at: installDirectory.appendingPathComponent(entry)) } catch {
-                throw CleanupFailure(description: "could not remove staging \(entry): \(error.localizedDescription)")
-            }
-        }
-    }
-
-    private static func crashIf(_ point: String) {
-        // A process-directed SIGKILL may be delivered to another thread
-        // first; never let this thread run past the crash point (it once
-        // reached the wrapper swap and left a temp file the "crash" could
-        // not have produced). A real crash executes nothing further either.
-        if crashPoint == point { kill(getpid(), SIGKILL); while true { sleep(10) } }
-    }
-
-    /// Selftest seam: make unlink of this basename fail (EACCES-like).
-    nonisolated(unsafe) static var injectUnlinkFailure: String?
-
-    /// Checked unlink: ENOENT is fine, anything else is a failure that must
-    /// preserve the transaction evidence.
-    private static func unlinkChecked(_ path: String) throws {
-        if let inject = injectUnlinkFailure, URL(fileURLWithPath: path).lastPathComponent == inject {
-            throw CleanupFailure(description: "injected unlink failure for \(inject)")
-        }
-        if unlink(path) != 0, errno != ENOENT {
-            throw CleanupFailure(description: "could not remove \(URL(fileURLWithPath: path).lastPathComponent): \(String(cString: strerror(errno)))")
-        }
-    }
-
-    private static func deleteIfUnreferenced(_ name: String, liveTarget: String?) throws {
-        let path = installDirectory.appendingPathComponent(name).path
-        if let liveTarget, liveTarget == path { return }
-        try unlinkChecked(path)
-    }
-
-    /// Staging entries; an enumeration failure is an error, never "none".
-    private static func stagingEntries() throws -> [String] {
-        do {
-            return try FileManager.default.contentsOfDirectory(atPath: installDirectory.path).filter { $0.hasPrefix(stagingPrefix) }
-        } catch {
-            throw CleanupFailure(description: "could not list \(installDirectory.path): \(error.localizedDescription)")
-        }
-    }
-
-    // MARK: Install
-
-    /// Returns nil on success or a human-readable failure. `checkpoint`
-    /// throws to abort (quick setup's authorization generation); a
-    /// `CancellationError` is treated the same way.
-    static func installAgentMailBinary(
-        progress: (@Sendable (String) -> Void)? = nil,
-        checkpoint: () throws -> Void = {},
-        runner: ChildRunner = .plain
-    ) async -> String? {
-        do {
-            return try await withInstallerLock {
-                try await installLocked(progress: progress, checkpoint: checkpoint, runner: runner)
-            }
-        } catch is InstallerBusy {
-            return "another AgentMail installation or repair is in progress — retry in a moment"
-        } catch {
-            return "install failed: \(error.localizedDescription)"
-        }
-    }
-
-    private static func installLocked(
-        progress: (@Sendable (String) -> Void)?,
-        checkpoint: () throws -> Void,
-        runner: ChildRunner
-    ) async throws -> String? {
-        try sweepStaleWrapperTemps()
-        // Settle any interrupted transaction first (repair is idempotent).
-        if try readTransaction() != nil {
-            let outcome = await repairLocked(runner: runner)
-            if case .failedClosed(let why) = outcome { return why }
-            if try readTransaction() != nil { return "an interrupted AgentMail transaction could not be settled — run `briglia agentmail repair`" }
-        }
-        try checkpoint()
-
-        // 1. Download.
-        let fixture: DownloadFixture
-        if let downloadOverride {
-            fixture = try await downloadOverride(progress)
-        } else {
-            fixture = try await downloadRelease(progress: progress)
-        }
-        try Task.checkCancellation()
-        try checkpoint()
-        guard let checksums = String(data: fixture.checksums, encoding: .utf8),
-              let line = checksums.split(separator: "\n").first(where: { $0.contains(fixture.asset) }),
-              let expected = line.split(separator: " ").first.map(String.init)?.lowercased(),
-              expected.count == 64 else {
-            return "checksum for \(fixture.asset) not found in checksums file"
-        }
-        guard sha256Hex(fixture.archive) == expected else {
-            return "checksum mismatch — download corrupted or release changed mid-flight, retry"
-        }
-
-        // 2. Stage under the install directory (same filesystem).
-        let fm = FileManager.default
-        try fm.createDirectory(at: installDirectory, withIntermediateDirectories: true)
-        let staging = installDirectory.appendingPathComponent(stagingPrefix + UUID().uuidString, isDirectory: true)
-        try fm.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        var stagingKept = false
-        defer { if !stagingKept { try? fm.removeItem(at: staging) } }
-        let archivePath = staging.appendingPathComponent(fixture.asset)
-        try fixture.archive.write(to: archivePath)
-        progress?("Extracting the agentmail CLI…")
-        // Upstream archives (cargo-dist) nest everything under one
-        // `agentmail-cli-<triple>/` directory; strip it so the binary lands
-        // at `staging/agentmail`. A flat archive yields nothing here and
-        // fails the "did not contain" check below.
-        let untar = await runner.run(["/usr/bin/tar", "-xf", archivePath.path, "-C", staging.path, "--strip-components=1"], 60, "extract agentmail")
-        guard untar.ok else { return "extraction failed: \(untar.detail ?? "tar failed")" }
-        try checkpoint()
-        let stagedBinary = staging.appendingPathComponent("agentmail")
-        var st = stat()
-        guard lstat(stagedBinary.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else {
-            return "archive did not contain the agentmail binary"
-        }
-        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stagedBinary.path)
-        #if os(macOS)
-        // Unquarantine with the syscall the `xattr -d` tool wraps: no child
-        // to journal or reap, and a missing attribute (ENOATTR) is success.
-        if removexattr(stagedBinary.path, "com.apple.quarantine", 0) != 0, errno != ENOATTR {
-            return "could not remove the quarantine attribute: \(String(cString: strerror(errno)))"
-        }
-        try checkpoint()
-        #endif
-        let binaryData = try Data(contentsOf: stagedBinary)
-        let binarySHA = sha256Hex(binaryData)
-        let versioned = versionedName(version: fixture.version, sha256: binarySHA)
-        let versionedPath = installDirectory.appendingPathComponent(versioned).path
-        let wrapperText = wrapperScript(adaPath: brigliaPath(), realBinaryPath: versionedPath)
-        let wrapperBytes = Data(wrapperText.utf8)
-        let stagedWrapper = staging.appendingPathComponent("agentmail-wrapper")
-        // The staged wrapper points at the versioned path; for the staged
-        // smoke test the binary itself is run directly.
-        try wrapperBytes.write(to: stagedWrapper)
-        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stagedWrapper.path)
-        progress?("Checking the downloaded binary…")
-        let stagedSmoke = await runner.run([stagedBinary.path, "--version"], 10, "agentmail --version (staged)")
-        guard stagedSmoke.ok else { return "downloaded binary failed to run: \(stagedSmoke.detail ?? "unknown error")" }
-        try checkpoint()
-
-        // Existing versioned file?
-        var binaryAlreadyPublished = false
-        if lstat(versionedPath, &st) == 0 {
-            guard (st.st_mode & S_IFMT) == S_IFREG, let existing = try? Data(contentsOf: URL(fileURLWithPath: versionedPath)),
-                  sha256Hex(existing) == binarySHA else {
-                return "a file named \(versioned) exists with unexpected content; remove it by hand if it is not yours"
-            }
-            binaryAlreadyPublished = true
-        }
-
-        // 3. Transaction metadata, then publish the binary.
-        try checkpoint()
-        let liveWrapper: Data?
-        switch liveWrapperState() {
-        case .absent: liveWrapper = nil
-        case .valid(let d): liveWrapper = d
-        case .invalid(let why): return "refusing to replace the existing agentmail entry: \(why) — remove it by hand if it is not yours"
-        }
-        let liveTarget = liveWrapper.flatMap(wrapperTarget)
-        var previousBinary: String?
-        if let liveTarget {
-            let base = URL(fileURLWithPath: liveTarget).lastPathComponent
-            if URL(fileURLWithPath: liveTarget).deletingLastPathComponent().path == installDirectory.path, validBasename(base) {
-                previousBinary = base
-            }
-        } else if lstat(installDirectory.appendingPathComponent(legacyBinaryName).path, &st) == 0 {
-            previousBinary = legacyBinaryName
-        }
-        var previous: PreviousWrapper?
-        if let liveWrapper {
-            var wst = stat()
-            lstat(wrapperURL.path, &wst)
-            previous = PreviousWrapper(bytesB64: liveWrapper.base64EncodedString(), sha256: sha256Hex(liveWrapper),
-                                       mode: Int(wst.st_mode & 0o777))
-        }
-        var tx = Transaction(state: "staged", newBinary: versioned, newSHA256: binarySHA,
-                             newWrapperSHA256: sha256Hex(wrapperBytes), previousWrapper: previous,
-                             previousBinary: previousBinary, startedAt: Date())
-        try writeTransaction(tx)
-        crashIf("after-metadata")
-        try checkpoint()
-        if !binaryAlreadyPublished {
-            guard rename(stagedBinary.path, versionedPath) == 0 else {
-                let why = String(cString: strerror(errno))
-                unlink(transactionURL.path)
-                return "could not publish the binary: \(why)"
-            }
-            try fsyncDir()
-        }
-        crashIf("after-binary")
-        stagingKept = false
-
-        // 4. Commit (three states).
-        try checkpoint()
-        tx.state = "committing"
-        try writeTransaction(tx)
-        crashIf("after-committing")
-        try atomicReplaceWrapper(bytes: wrapperBytes, mode: 0o755)
-        crashIf("after-swap")
-        tx.state = "committed"
-        try writeTransaction(tx)
-        crashIf("after-committed")
-
-        // 5. Verify through the published wrapper, else roll back.
-        progress?("Verifying the installation…")
-        return await verifyOrRollback(tx, runner: runner)
-    }
-
-    /// Step 5 and the `committed` repair branch.
-    private static func verifyOrRollback(_ tx: Transaction, runner: ChildRunner) async -> String? {
-        let smoke = await runner.run([wrapperURL.path, "--version"], 10, "agentmail --version")
-        if smoke.ok {
-            let liveTarget = liveWrapperBytes().flatMap(wrapperTarget)
-            let previous = (tx.previousBinary != nil && tx.previousBinary != tx.newBinary) ? tx.previousBinary : nil
-            do {
-                try finishCleanup(deletePrevious: previous, liveTarget: liveTarget)
-            } catch {
-                // The new pair is live and verified, but the transaction is
-                // not settled: retryable, and doctor keeps reporting it.
-                return "installed and verified, but cleanup did not complete (\(error)) — retry, or run `briglia agentmail repair`"
-            }
-            return nil
-        }
-        let detail = smoke.detail ?? "unknown error"
-        do {
-            try rollbackLocked(tx)
-        } catch {
-            return "installed binary failed to run (\(detail)) and the rollback failed too: \(error.localizedDescription) — run `briglia agentmail repair`"
-        }
-        return "installed binary failed to run: \(detail) — the previous installation was restored"
-    }
-
-    /// One atomic wrapper operation, guarded by the wrapper inspection: the
-    /// swap happens only if the live wrapper still hashes to the new one.
-    private static func rollbackLocked(_ txIn: Transaction) throws {
-        var tx = txIn
-        let live: Data?
-        switch liveWrapperState() {
-        case .absent: live = nil
-        case .valid(let d): live = d
-        case .invalid(let why): throw CleanupFailure(description: "the live wrapper is invalid (\(why)); nothing rolled back — inspect it by hand")
-        }
-        let liveHash = live.map(sha256Hex)
-        if liveHash == tx.newWrapperSHA256 {
-            // The metadata sits at `committing` through the rollback swap, so
-            // a crash right after it is classified by wrapper inspection.
-            if tx.state != "committing" {
-                tx.state = "committing"
-                try writeTransaction(tx)
-            }
-            if let prev = tx.previousWrapper, let bytes = Data(base64Encoded: prev.bytesB64) {
-                try atomicReplaceWrapper(bytes: bytes, mode: mode_t(prev.mode))
+    /// Legacy ~/.local/bin findings (inspect-only, §7.8.1 step 2).
+    static func legacyFindings() -> [String] {
+        var out: [String] = []
+        let dir = legacyDirectory
+        let w = legacyWrapperURL
+        switch RuntimeFS.kind(w.path) {
+        case .absent: break
+        case .regular:
+            if isBrokerWrapper(at: w), let data = try? Data(contentsOf: w), let t = legacyWrapperTarget(data),
+               URL(fileURLWithPath: t).deletingLastPathComponent().standardizedFileURL.path == dir.standardizedFileURL.path,
+               RuntimeFS.kind(t) == .regular {
+                out.append("old Briglia copy of agentmail left in place at \(w.path) (not used by Briglia any more); remove it with: rm '\(w.path)' '\(t)'")
             } else {
-                // A failed unlink leaves the failed wrapper live: the metadata
-                // stays at `committing` so doctor reports it and repair
-                // re-inspects; nothing claims "restored".
-                try unlinkChecked(wrapperURL.path)
-                try fsyncDir()
-            }
-            crashIf("after-rollback-swap")
-        }
-        tx.state = "rolled_back"
-        try writeTransaction(tx)
-        let liveTarget = liveWrapperBytes().flatMap(wrapperTarget)
-        try finishCleanup(deletePrevious: tx.newBinary, liveTarget: liveTarget)
-    }
-
-    // MARK: Repair
-
-    enum RepairOutcome: Equatable {
-        case nothingToDo
-        case settled(String)
-        case failedClosed(String)
-        case busy
-    }
-
-    /// `briglia agentmail repair` and quick setup's preflight: takes the
-    /// lock, validates the metadata, then settles the transaction by
-    /// inspecting the LIVE wrapper (never the state alone). Idempotent.
-    static func repairTransaction(runner: ChildRunner = .plain) async -> RepairOutcome {
-        do {
-            return try await withInstallerLock { await repairLocked(runner: runner) }
-        } catch is InstallerBusy {
-            return .busy
-        } catch {
-            return .failedClosed("repair could not start: \(error.localizedDescription)")
-        }
-    }
-
-    /// The atomic wrapper writer stages `.agentmail.tmp-<uuid>` next to the
-    /// wrapper; a crash between its creation and the rename leaves it
-    /// behind. Under the installer lock no writer is mid-write, so every
-    /// such file is stale. Checked removal.
-    static func sweepStaleWrapperTemps() throws {
-        let prefix = ".\(wrapperName).tmp-"
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: installDirectory.path)) ?? []
-        for name in names where name.hasPrefix(prefix) {
-            let path = installDirectory.appendingPathComponent(name).path
-            var st = stat()
-            guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { continue }
-            try unlinkChecked(path)
-        }
-    }
-
-    private static func repairLocked(runner: ChildRunner) async -> RepairOutcome {
-        do { try sweepStaleWrapperTemps() } catch { return .failedClosed("a stale wrapper temp file could not be removed: \(error)") }
-        let tx: Transaction
-        do {
-            guard let read = try readTransaction() else {
-                do { try removeStagingChecked() } catch { return .failedClosed("leftover staging could not be removed: \(error)") }
-                return .nothingToDo
-            }
-            tx = read
-        } catch {
-            return .failedClosed("\(transactionFileName) cannot be read (\(error.localizedDescription)); inspect \(installDirectory.path), then delete the file to abandon the transaction")
-        }
-        if let why = validate(tx) {
-            return .failedClosed("\(transactionFileName) is invalid (\(why)); nothing was changed — inspect \(installDirectory.path)/agentmail and \(transactionFileName), then delete the metadata to abandon the transaction")
-        }
-        let wrapperState = liveWrapperState()
-        if case .invalid(let why) = wrapperState {
-            return .failedClosed("the AgentMail wrapper path is invalid (\(why)); nothing was changed — inspect \(wrapperURL.path) and \(transactionURL.path), then delete \(transactionFileName) to abandon the transaction or restore the wrapper by hand")
-        }
-        let live: Data? = { if case .valid(let d) = wrapperState { return d }; return nil }()
-        let liveHash = live.map(sha256Hex)
-        let liveTarget = live.flatMap(wrapperTarget)
-        let newBinaryPath = installDirectory.appendingPathComponent(tx.newBinary).path
-
-        func cleanPreCommit() -> RepairOutcome {
-            do {
-                try finishCleanup(deletePrevious: tx.newBinary, liveTarget: liveTarget)
-            } catch {
-                return .failedClosed("cleanup did not complete: \(error) — retry `briglia agentmail repair`")
-            }
-            return .settled("the wrapper was never replaced; the previous installation is live and the new binary was removed")
-        }
-        func classifyCommitting() -> String {
-            // previous wrapper live (or ABSENT — never invalid — on a fresh install) → pre-commit
-            if let prev = tx.previousWrapper {
-                if liveHash == prev.sha256 { return "pre" }
-            } else if wrapperState == .absent {
-                return "pre"
-            }
-            if liveHash == tx.newWrapperSHA256, liveTarget == newBinaryPath { return "post" }
-            return "neither"
-        }
-
-        switch tx.state {
-        case "staged":
-            return cleanPreCommit()
-        case "rolled_back":
-            return cleanPreCommit()
-        case "committing", "committed":
-            // `committed` is inspected too: a rollback that crashed after
-            // its swap leaves the previous wrapper live under either state.
-            let cls = classifyCommitting()
-            switch cls {
-            case "pre":
-                return cleanPreCommit()
-            case "post":
-                if tx.state == "committing" {
-                    var updated = tx
-                    updated.state = "committed"
-                    do { try writeTransaction(updated) } catch { return .failedClosed("could not update the metadata: \(error.localizedDescription)") }
-                }
-                var verified = tx
-                verified.state = "committed"
-                let result = await verifyOrRollback(verified, runner: runner)
-                if let result { return .settled("the new pair was live but failed verification: \(result)") }
-                return .settled("the new pair was live; verification passed and the transaction was completed")
-            default:
-                return .failedClosed("the AgentMail wrapper does not match this transaction's previous or new wrapper; inspect \(wrapperURL.path) and \(transactionURL.path), then delete \(transactionFileName) to abandon the transaction or restore the wrapper by hand")
+                out.append("another agentmail at \(w.path) (not Briglia's; Briglia never changes it)")
             }
         default:
-            return .failedClosed("unknown transaction state '\(tx.state)'")
+            out.append("another agentmail entry at \(w.path) (not a regular file; Briglia never changes it)")
+        }
+        let tx = dir.appendingPathComponent(legacyTransactionFileName)
+        if RuntimeFS.kind(tx.path) != .absent {
+            let state = (try? JSONSerialization.jsonObject(with: Data(contentsOf: tx)) as? [String: Any])?["state"] as? String ?? "unknown"
+            out.append("an interrupted older AgentMail install was left in \(dir.path) (state \(state)); Briglia no longer settles it — remove \(tx.path) and the agentmail-bin* files there by hand if you do not need them")
+        }
+        for path in foreignAgentMailInstalls() { out.append("another agentmail at \(path) (no access to Briglia's key; Briglia's own copy is used first)") }
+        return out
+    }
+
+    /// Foreign `agentmail` executables on the standard prefix dirs.
+    static func foreignAgentMailInstalls() -> [String] {
+        ["/opt/homebrew/bin/agentmail", "/usr/local/bin/agentmail", "/usr/bin/agentmail"]
+            .filter { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    // MARK: Entry points
+
+    /// Setup paths (wizard, setup-api, menu job): a first private install, or
+    /// nil when one already works. Returns a human-readable failure.
+    static func installAgentMailBinary(progress: (@Sendable (String) -> Void)? = nil) async -> String? {
+        guard let pin = runtimePin else { return "no pinned AgentMail CLI build for this platform (\(currentTargetTriple))" }
+        switch await PrivateRuntimeEngine.converge(runtimeSpec(pin: pin), trigger: .install, idle: nil, progress: progress) {
+        case .upToDate, .converged:
+            do { try ensureWrapper() } catch { return "installed, but the wrapper could not be written: \(error)" }
+            return nil
+        case .held(let h): return offMessage(holdText(h))
+        case .failed(let why), .abandoned(let why), .throttled(let why), .busy(let why), .notApplicable(let why): return why
         }
     }
 
-    /// Doctor's read-only view: nil when there is nothing to report.
-    static func transactionReport() -> String? {
-        // Hold the installer lock (non-blocking) through the inspection so a
-        // live installer's half-written metadata is never read as a state
-        // (Codex, round 1). Doctor still never mutates.
-        // The lock file is created if absent (0600, empty — the only file
-        // doctor ever creates) so a first installer racing with doctor is
-        // serialized too; a symlink or unopenable lock path is reported.
-        let fd: Int32
-        do {
-            guard let opened = try openInstallerLock() else {
-                return "AgentMail installation in progress (another process holds the installer lock)"
+    /// Daemon startup (§7.8.1, §7.9.5): recovery, then convergence or the one
+    /// automatic repair for a new pin. Only with the AgentMail provider.
+    static func startupConvergence(idle: RuntimeIdleGate?, log: @escaping @Sendable (String) -> Void) async {
+        guard let pin = runtimePin else { return }
+        let spec = runtimeSpec(pin: pin)
+        let health = await PrivateRuntimeEngine.recover(spec)
+        try? ensureWrapperIfInstalled()
+        guard EmailCalendarProvider.current == .agentmail else { return }
+        if case .held(let hold) = health {
+            if hold.pin != pin {
+                let r = await AgentMailRepair.run(spec: spec, automatic: true, idle: idle)
+                log("agentmail: automatic repair for the new pin \(pin.version): \(r)")
+            } else {
+                log("agentmail: off (\(holdText(hold))); waiting for `briglia agentmail repair`")
             }
-            fd = opened
-        } catch {
-            return "AgentMail installer lock cannot be taken (\(error.localizedDescription)); inspect \(lockURL.path)"
+            return
         }
-        defer { close(fd) }
-        var st = stat()
-        guard lstat(transactionURL.path, &st) == 0 else {
-            guard let staging = try? stagingEntries() else { return "AgentMail install directory cannot be listed (\(installDirectory.path))" }
-            return staging.isEmpty ? nil : "AgentMail staging debris left behind (\(staging.joined(separator: ", "))); run `briglia agentmail repair`"
+        if case .notInstalled = health, legacyInstalledVersion() == nil {
+            return   // never installed for Briglia: setup installs it, startup does not
         }
-        do {
-            guard let tx = try readTransaction() else { return nil }
-            if let why = validate(tx) {
-                return "AgentMail install transaction metadata is invalid (\(why)); run `briglia agentmail repair` for instructions"
-            }
-            return "AgentMail install transaction interrupted at state \(tx.state); run `briglia agentmail repair`"
-        } catch {
-            return "AgentMail install transaction metadata cannot be read (\(error.localizedDescription)); run `briglia agentmail repair`"
+        let outcome = await PrivateRuntimeEngine.converge(spec, trigger: .auto, idle: idle)
+        if case .converged = outcome { try? ensureWrapper() }
+        log("agentmail: \(outcome)")
+        for line in PrivateRuntimeEngine.collectGarbage(spec) { log("agentmail: \(line)") }
+    }
+
+    static func ensureWrapperIfInstalled() throws {
+        if (try? RuntimeFS.readJSON(RuntimeReceipt.self, RuntimePaths.receipt(.agentmail)))??.verified != nil {
+            try ensureWrapper()
         }
     }
 
-    // MARK: Download
-
-    private static func downloadRelease(progress: (@Sendable (String) -> Void)?) async throws -> DownloadFixture {
-        guard let pin = pinnedAsset() else {
-            throw NSError(domain: "briglia.agentmail", code: 10, userInfo: [NSLocalizedDescriptionKey:
-                "no pinned AgentMail CLI build for this platform (\(currentTargetTriple))"])
+    /// /deleteuserdata (§7.8.1 step 10): the private AgentMail directories,
+    /// receipt, journal and hold go with the provider data; never ~/.local/bin.
+    static func wipePrivateInstall() throws {
+        let locks = try RuntimeLocks.take(.agentmail)
+        defer { locks.release() }
+        var (sel, _) = try RuntimeSelectionStore.load()
+        sel.generation += 1
+        sel[.agentmail] = RuntimeComponentState()
+        try RuntimeSelectionStore.save(sel)
+        let dir = RuntimePaths.dir(.agentmail)
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where name != ".agentmail.lock" {
+            try FileManager.default.removeItem(at: dir.appendingPathComponent(name))
         }
-        let archive: Data
-        do {
-            archive = try await ProcessRunner.downloadReportingProgress(
-                from: pin.url, label: "Downloading the agentmail CLI \(pinnedVersion)", progress: progress)
-        } catch {
-            throw NSError(domain: "briglia.agentmail", code: 11, userInfo: [NSLocalizedDescriptionKey:
-                "download of \(pin.asset) failed (\(error.localizedDescription)) — \(pin.url.absoluteString)"])
-        }
-        // The verification step reads a checksums text; synthesize it from
-        // the compiled-in record so the rest of the pipeline is unchanged.
-        return (pinnedVersion, pin.asset, archive, Data("\(pin.sha256)  \(pin.asset)\n".utf8))
+        try? RuntimeFS.remove(wrapperURL)
+        try PrivateStorage.fsyncDirectory(dir.path)
     }
 }

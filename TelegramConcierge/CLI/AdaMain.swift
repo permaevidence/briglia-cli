@@ -45,13 +45,13 @@ struct AdaCLI: AsyncParsableCommand {
                       Migrate.self, MigrateProbe.self, MigrateGate.self,
                       AppChatSocketSelftest.self,
                       CommandMenuSelftest.self, TelegramMenuSelftest.self, ImageToolSelftest.self, MediaRoutingSelftest.self, BotSwitchSelftest.self, TelegramTransportSelftest.self, ParkedOutboundSelftest.self,
-                      EmailCalendarSelftest.self, AgentMailKeyCommand.self, AgentMailCommand.self,
+                      EmailCalendarSelftest.self, AgentMailKeyCommand.self, AgentMailExecCommand.self, AgentMailCommand.self, PythonExecCommand.self, PythonEnvCommand.self,
                       WebLiveTest.self, QuickSetupSelftest.self, MenuSelftest.self,
                       StageMarkersCommand.self, StageMarkersSelftest.self, SecurityStatusSelftest.self,
                       UpgradeCheck.self, UpdateCheckOnceCommand.self, UpdateNoticeSendOnceCommand.self, UpdateNoticeSelftest.self, ReleaseSecurityParseCommand.self,
                       LocalToolsSelftest.self, TestSignAdvisoryCommand.self, AdvisoryListParseCommand.self,
                       LocalToolsInventoryCommand.self, LocalToolsCheckOnceCommand.self, LocalToolsVersionCompareCommand.self,
-                      RetiredIntegrationsSelftest.self],
+                      RetiredIntegrationsSelftest.self, PrivateRuntimeSelftest.self],
         defaultSubcommand: Chat.self
     )
 }
@@ -404,15 +404,56 @@ struct AgentMailKeyCommand: ParsableCommand {
     }
 }
 
-/// Hidden: settle an interrupted AgentMail install transaction
-/// (`briglia agentmail repair`). Takes the installer lock, validates the
-/// metadata, inspects the live wrapper, and either completes, rolls back,
-/// or refuses with instructions. Doctor only reports; this is the one
-/// explicit mutation path besides quick setup's preflight.
+/// Hidden: the Briglia-only `agentmail` wrapper's target (security plan v24
+/// §7.9.2). Validates Briglia's private AgentMail copy against its install
+/// receipt at EVERY use (no hold; `current` inside `v/`; full binary hash),
+/// refuses otherwise, fetches the key only after that (a caller-provided
+/// AGENTMAIL_API_KEY is kept but never skips the checks), then execs the
+/// validated binary. With BRIGLIA_AGENTMAIL_PROBE=<attempt> it runs only the
+/// journal-bound `--version` probe with a placeholder key.
+struct AgentMailExecCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "__agentmail-exec",
+        abstract: "Internal: run Briglia's validated AgentMail CLI (the agentmail wrapper's target).",
+        shouldDisplay: false
+    )
+
+    @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
+
+    func run() throws {
+        var env = ProcessInfo.processInfo.environment
+        switch AgentMailService.execDecision(args: arguments, environment: env) {
+        case .refuse(let why):
+            FileHandle.standardError.write(Data("\(why)\n".utf8))
+            throw ExitCode(1)
+        case .run(let binary, let forcedKey):
+            env.removeValue(forKey: "BRIGLIA_AGENTMAIL_PROBE")
+            if let forcedKey {
+                env["AGENTMAIL_API_KEY"] = forcedKey
+            } else if (env["AGENTMAIL_API_KEY"] ?? "").isEmpty {
+                guard let key = KeychainHelper.load(key: KeychainHelper.agentMailApiKeyKey), !key.isEmpty else {
+                    FileHandle.standardError.write(Data("no AgentMail API key stored — run `briglia menu` (email step)\n".utf8))
+                    throw ExitCode(1)
+                }
+                env["AGENTMAIL_API_KEY"] = key
+            }
+            let argv = [binary] + arguments
+            let cArgs = argv.map { strdup($0) } + [nil]
+            let cEnv = env.map { strdup("\($0.key)=\($0.value)") } + [nil]
+            execve(binary, cArgs, cEnv)
+            FileHandle.standardError.write(Data("could not run the AgentMail CLI: \(String(cString: strerror(errno)))\n".utf8))
+            throw ExitCode(126)
+        }
+    }
+}
+
+/// `briglia agentmail upgrade | repair | status` (security plan v24 §7.8.1):
+/// operate ONLY on Briglia's private copy; anything in ~/.local/bin is
+/// reported, never changed.
 struct AgentMailCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agentmail",
-        abstract: "AgentMail CLI maintenance (repair an interrupted install, upgrade to the pinned version).",
+        abstract: "AgentMail CLI maintenance (Briglia's private copy: status, upgrade to the pinned version, repair).",
         shouldDisplay: false
     )
 
@@ -420,32 +461,45 @@ struct AgentMailCommand: AsyncParsableCommand {
 
     func run() async throws {
         AdaCLI.prepareIO()
+        guard let pin = AgentMailService.runtimePin else {
+            print("✖ no pinned AgentMail CLI build for this platform"); throw ExitCode(1)
+        }
+        let spec = AgentMailService.runtimeSpec(pin: pin)
         switch action {
-        case "repair":
-            switch await AgentMailService.repairTransaction() {
-            case .nothingToDo: print("✔ no interrupted AgentMail transaction")
-            case .settled(let how): print("✔ settled: \(how)")
-            case .busy: print("✖ an AgentMail installation or repair is in progress — retry later"); throw ExitCode(1)
-            case .failedClosed(let why): print("✖ \(why)"); throw ExitCode(1)
-            }
-        case "upgrade", "install":
-            // Setup paths skip an already-installed broker; this is the one
-            // explicit way to move a device to the pinned upstream version
-            // (e.g. 0.7.x → 1.x). Same transactional installer, same lock.
-            let installed = AgentMailService.installedCLIVersion()
-            print("installed: \(installed.map { "agentmail CLI \($0)" } ?? "none")")
-            print("pinned:    agentmail CLI \(AgentMailService.pinnedVersion)")
-            if installed == AgentMailService.pinnedVersion {
-                print("✔ already at the pinned version")
-                return
-            }
-            if let failure = await AgentMailService.installAgentMailBinary(progress: { print("  \($0)") }) {
-                print("✖ \(failure)")
+        case "status":
+            for line in AgentMailService.statusLines() { print(line) }
+        case "repair", "upgrade", "install":
+            // Commit and publication need the instance lock (§7.8.1): the
+            // running Briglia does its own automatic work at startup.
+            try? PrivateStorage.ensureDirectory(StoragePaths.dataRoot)
+            let lease: InstanceLease
+            switch InstanceLease.acquire(label: "agentmail \(action)") {
+            case .success(let l): lease = l
+            case .failure(let e):
+                print("✖ \(e.description)")
+                print("  Briglia must be stopped for this (`briglia service stop`, or quit the terminal session); run this again, then start Briglia.")
                 throw ExitCode(1)
             }
-            print("✔ agentmail CLI \(AgentMailService.pinnedVersion) installed — wrapper at \(AgentMailService.wrapperURL.path)")
+            defer { lease.release() }
+            let progress: @Sendable (String) -> Void = { print("  \($0)") }
+            if action == "repair" {
+                let r = await AgentMailRepair.run(spec: spec, automatic: false, idle: nil, progress: progress)
+                switch r {
+                case .nothingToRepair: print("✔ nothing to repair: AgentMail CLI \(pin.version) is installed and matches its receipt")
+                case .repaired(let v): print("✔ repaired: AgentMail CLI \(v) is installed and checked")
+                case .failed(let w), .busy(let w), .throttled(let w): print("✖ \(w)"); throw ExitCode(1)
+                }
+            } else {
+                switch await PrivateRuntimeEngine.converge(spec, trigger: .explicit, idle: nil, progress: progress) {
+                case .upToDate(let r): try? AgentMailService.ensureWrapper(); print("✔ already at the pinned version (AgentMail CLI \(r.version))")
+                case .converged(let r): try? AgentMailService.ensureWrapper(); print("✔ AgentMail CLI \(r.version) installed for Briglia (\(AgentMailService.wrapperURL.path))")
+                case .held(let h): print("✖ \(AgentMailService.offMessage(AgentMailService.holdText(h)))"); throw ExitCode(1)
+                case .failed(let w), .abandoned(let w), .throttled(let w), .busy(let w), .notApplicable(let w): print("✖ \(w)"); throw ExitCode(1)
+                }
+            }
+            for line in AgentMailService.legacyFindings() { print("  note: \(line)") }
         default:
-            print("usage: briglia agentmail repair | upgrade")
+            print("usage: briglia agentmail status | upgrade | repair")
             throw ExitCode(64)
         }
     }

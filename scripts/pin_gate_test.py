@@ -384,6 +384,9 @@ def cases(gate):
           rc == 1 and "incomplete data" in out, out[-300:])
     rc, out = run(repo, "signed", sha_r, now="2026-10-25T13:00:00Z", tag_record=tagmsg, issues_token=None)
     check("signed mode without the issues token -> exit 2", rc == 2, out[-300:])
+    rc, out = run(repo, "precheck", sha_r, now="2026-10-25T13:00:00Z", tag_record=tagmsg, issues_token=None)
+    check("precheck (authorize job, no token): C1 + record structure only, and says it is NOT an authorization",
+          rc == 0 and "NOT an authorization" in out, out[-300:])
     clean_world()
     fake.reset(); heartbeat("2026-10-23T23:00:00Z")
     with open(tagmsg, "w") as f:
@@ -457,7 +460,7 @@ BREAKS = [
     ("record commit not checked", '    if rec["commit"] != commit:', "    if False:"),
     ("record blobs not checked", '        if rec["blobs"][p] != blobs[p]:', "        if False:"),
     ("signed mode skips C2", "        extra, general, c2 = issue_blockers(pins, args, now)", "        extra, general, c2 = {}, [], {\"issues\": 0, \"heartbeat\": \"n/a\"}"),
-    ("strict section: any line accepted", "        if not m:\n            return None", "        if not m:\n            break"),
+    ("strict section: malformed records skipped", "        if not m:\n            return None", "        if not m:\n            i += 1\n            continue"),
     ("next section not required", "not lines[i + 1].startswith(NEXT_SECTION[kind])", "False"),
     ("markerless issues skipped", "            if it[\"state\"] == \"open\":\n                general.append({\"ids\": {f\"watch-unreadable:#{it['number']}\"}", "            if False:\n                general.append({\"ids\": {f\"watch-unreadable:#{it['number']}\"}"),
     ("missing issues token falls back to C1", 'raise ConfigError(f"the issues token ({args.issues_token_env}) is not set: C2 cannot run, refusing (never C1-only)")', "pass"),

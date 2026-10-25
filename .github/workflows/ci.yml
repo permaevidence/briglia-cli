@@ -102,6 +102,8 @@ jobs:
         run: |
           python3 scripts/drop_gws_whatsapp_migration_test.py
           .build/debug/briglia __retired-integrations-selftest
+      - name: Security Phase 1 (private AgentMail / Node / Python runtimes, pin-freshness release gate)
+        run: python3 scripts/security_phase1_test.py .build/debug/briglia
 
   linux-gates-a:
     name: Linux gates A (wire, lifecycle, Responses)
@@ -232,6 +234,8 @@ jobs:
         run: |
           python3 scripts/drop_gws_whatsapp_migration_test.py
           .build/debug/briglia __retired-integrations-selftest
+      - name: Security Phase 1 (private AgentMail / Node / Python runtimes, pin-freshness release gate)
+        run: python3 scripts/security_phase1_test.py .build/debug/briglia
 
   macos-gates:
     name: macOS gates

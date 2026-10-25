@@ -139,6 +139,11 @@ final class TerminalSession {
         // checked); bind failure is loud but never blocks startup.
         AppChatSocketServer.shared.start(manager: manager)
 
+        // Briglia-private runtimes (security plan v24 §7.9.5): recovery first,
+        // then AgentMail convergence (idle-gated commit), the Node selection
+        // (inside the Playwright bootstrap, which awaits it) and the Python
+        // venv. Background work: never blocks startup or a turn.
+        Task { await PrivateRuntimeStartup.run(manager: manager) }
         Task { await BrowserAutomationBootstrap.ensureConfigured() }
 
         // Post-exec restart (/upgrade or /restart re-execs in place): close

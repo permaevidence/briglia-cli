@@ -46,7 +46,7 @@ enum PrivateStorage {
     static let groupOtherBits: mode_t = 0o077
 
     /// Children of the roots the sweep and the scope classification skip.
-    static let excludedRootChildren: Set<String> = ["projects", "toolchain"]
+    static let excludedRootChildren: Set<String> = ["projects", "toolchain", "runtime"]
 
     /// Directories directly under the DATA root whose contents are harness
     /// state (written only through this helper). Everything else inside the

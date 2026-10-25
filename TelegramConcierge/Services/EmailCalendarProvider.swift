@@ -106,6 +106,10 @@ enum EmailCredentialWipe {
         deleteSecret(KeychainHelper.agentMailInboxAddressKey, "AgentMail inbox address")
         deleteSecret(KeychainHelper.retiredGwsOAuthClientIDKey, "retired gws OAuth client id")
         deleteSecret(KeychainHelper.retiredGwsOAuthClientSecretKey, "retired gws OAuth client secret")
+        // Briglia's private AgentMail copy, receipt, journal and hold
+        // (security plan v24 §7.8.1 step 10); never anything in ~/.local/bin.
+        do { try AgentMailService.wipePrivateInstall() }
+        catch { failures.append("Briglia's private AgentMail CLI copy: \(error)") }
         do {
             try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey,
                                     value: EmailCalendarProvider.none.rawValue)

@@ -8,8 +8,10 @@ and whether the daily watch job (scripts/security_watch.py) can check it.
 Generated FROM THE SOURCES so it cannot silently drift:
   * Package.resolved                         Swift packages (compiled in)
   * Resources/MCPBundles/playwright lockfile  managed Playwright npm tree (transitive)
-  * AgentMailInstaller.swift                  pinned AgentMail CLI version + hashes
-  * ToolchainService.swift installSpecs       Homebrew formulae + shared-pip packages
+  * AgentMailInstaller.swift                  pinned AgentMail CLI version + hashes (private copy)
+  * NodeRuntime.swift                         pinned private Node version + hashes
+  * Resources/PythonEnv/requirements.lock     the private Python venv (every locked version)
+  * ToolchainService.swift installSpecs       Homebrew formulae
   * UserdataToolchain.swift packages          userdata (apt-sourced) toolchain
   * .github/workflows/*.yml                   pinned GitHub Actions + build containers
 plus a short list of hand-written entries (Node, OS tools, browsers,
@@ -60,24 +62,52 @@ def need(rel, needle):
     return f"{rel}: {needle}"
 
 
+CONVERGES = ("startup", "bundle", "user-started", "never")
+CLIENT_WATCHES = ("osv", "github-repo-advisories", "node-releases")
+
+
 def entry(**kw):
     base = {
         "id": None, "group": None, "ecosystem": None, "name": None, "version": None,
         "pin": None, "pin_kind": None, "owner": None, "scope": None, "source": None,
-        "watch": None, "gap": None, "exposure": None,
+        "watch": None, "gap": None, "exposure": None, "converges": None,
     }
     unknown = set(kw) - set(base)
     if unknown:
         raise InventoryError(f"unknown entry keys {sorted(unknown)}")
     base.update(kw)
-    for k in ("id", "group", "name", "pin_kind", "owner", "scope", "source", "watch"):
+    if base["converges"] is None:
+        base["converges"] = default_converges(base)
+    for k in ("id", "group", "name", "pin_kind", "owner", "scope", "source", "watch", "converges"):
         if not base[k]:
             raise InventoryError(f"entry {base.get('id')!r} lacks {k}")
+    if base["converges"] not in CONVERGES:
+        raise InventoryError(f"entry {base['id']!r}: converges must be one of {CONVERGES}")
+    check_client_pin(base)
     if base["watch"] == "gap" and not base["gap"]:
         raise InventoryError(f"entry {base['id']!r}: a coverage gap needs a reason")
     if base["watch"] in ("osv", "osv-package") and not (base["ecosystem"] and base["version"]):
         raise InventoryError(f"entry {base['id']!r}: an OSV-watched entry needs ecosystem and exact version")
     return base
+
+
+def default_converges(e):
+    """How a pin reaches clients (plan v21 §7.8, §7.9.6)."""
+    if e["owner"] == BUILD or e["owner"] == HOST or e["owner"] == SHARED:
+        return "never"
+    if e["scope"] == "compiled-in":
+        return "bundle"
+    return None   # a briglia-private runtime entry must say it explicitly
+
+
+def check_client_pin(e):
+    """Drift check (plan v21 §7.8/§7.9.6): a Briglia-private exact pin must
+    converge to clients and be covered by the watch and the release gate."""
+    if e["owner"] == PRIVATE and e["pin_kind"] == "exact":
+        if e["converges"] == "never":
+            raise InventoryError(f"entry {e['id']!r}: a briglia-private exact pin with converges: never would go stale on clients")
+        if e["converges"] in ("startup", "bundle") and e["watch"] not in CLIENT_WATCHES:
+            raise InventoryError(f"entry {e['id']!r}: a client-delivered pin must be watched by {CLIENT_WATCHES}, not {e['watch']!r}")
 
 
 def github_name(url):
@@ -127,7 +157,7 @@ def playwright_tree():
         out.append(entry(
             id=f"npm:playwright-tree:{name}", group="B3 managed Playwright MCP (npm tree)",
             ecosystem="npm", name=name, version=version, pin=integrity, pin_kind="exact",
-            owner=PRIVATE, scope="runtime-managed", source=rel, watch="osv",
+            owner=PRIVATE, scope="runtime-managed", source=rel, watch="osv", converges="startup",
             exposure="installed with npm ci --ignore-scripts into ~/.local/share/briglia/mcp/playwright-<hash>; drives a browser on untrusted web pages"
                      + ("; PRERELEASE build" if "-" in version else "")))
     return out
@@ -143,13 +173,72 @@ def agentmail():
     if len(hashes) < 4:
         raise InventoryError(f"{rel}: expected the per-target SHA-256 table")
     need(rel, "https://github.com/agentmail-to/agentmail-cli/releases/download/v")
+    need(rel, "runtime/agentmail/")
     return [entry(
         id="github-release:agentmail-cli", group="B4 AgentMail CLI",
         ecosystem=None, name="agentmail-to/agentmail-cli", version=m.group(1),
-        pin="compiled SHA-256 per target: " + ", ".join(f"{t}={h[:12]}" for t, h in sorted(hashes)),
-        pin_kind="exact", owner=SHARED, scope="runtime-managed", source=rel, watch="github-repo-advisories",
+        pin="compiled archive SHA-256 per target: " + ", ".join(f"{t}={h[:12]}" for t, h in sorted(hashes)),
+        pin_kind="exact", owner=PRIVATE, scope="runtime-managed", source=rel, watch="github-repo-advisories",
+        converges="startup",
         gap="no OSV ecosystem for a prebuilt GitHub-release binary; its own embedded (Rust) dependencies are not inventoried",
-        exposure="binary and key-broker wrapper live in ~/.local/bin (a shared entry point); parses email from the network; updated only by `briglia agentmail upgrade`")]
+        exposure="private copy under ~/.local/share/briglia/runtime/agentmail (receipt, current link, hold); reached only through Briglia's own wrapper; parses email from the network; converges to the pin at startup after /upgrade"),
+        entry(
+        id="legacy:agentmail-public", group="B4 AgentMail CLI",
+        ecosystem=None, name="~/.local/bin/agentmail (older Briglia)", version=None,
+        pin="whatever an older Briglia left", pin_kind="unpinned", owner=SHARED, scope="runtime-host",
+        source=need(rel, "legacyFindings"), watch="gap", converges="never",
+        gap="inspect-only: Briglia never runs, repairs or removes it; doctor shows the manual removal commands",
+        exposure="not used by Briglia any more")]
+
+
+def node_runtime():
+    rel = f"{SRC}/Services/NodeRuntime.swift"
+    text = read(rel)
+    m = re.search(r'static let pinnedVersion = "([0-9]+\.[0-9]+\.[0-9]+)"', text)
+    if not m:
+        raise InventoryError(f"{rel}: pinnedVersion not found")
+    hashes = re.findall(r'"((?:darwin|linux)-(?:arm64|x64))":\s+"([0-9a-f]{64})"', text)
+    if len(hashes) != 4:
+        raise InventoryError(f"{rel}: expected the four per-platform SHA-256 entries")
+    need(rel, "https://nodejs.org/dist/v")
+    return [entry(
+        id="runtime:node", group="U1 Node.js (private copy when no user Node >= the pin)", ecosystem=None,
+        name="node", version=m.group(1),
+        pin="compiled archive SHA-256 per platform: " + ", ".join(f"{p}={h[:12]}" for p, h in sorted(hashes)),
+        pin_kind="exact", owner=PRIVATE, scope="runtime-managed", source=rel, watch="node-releases", converges="startup",
+        gap="libraries bundled inside Node (OpenSSL, llhttp, zlib, …) are covered only through Node's own security releases",
+        exposure="runs the managed Playwright MCP; a user Node >= the pin is used instead and never changed")]
+
+
+LOCK_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)(?:\s*;\s*([^\\]+?))?\s*\\?$")
+
+
+def python_venv():
+    rel = f"{SRC}/Resources/PythonEnv/requirements.lock"
+    text = read(rel)
+    rows = []
+    for line in text.splitlines():
+        if not line or line[:1] in " #":
+            continue
+        m = LOCK_RE.match(line.rstrip())
+        if not m:
+            raise InventoryError(f"{rel}: unexpected line {line[:60]!r}")
+        rows.append((re.sub(r"[-_.]+", "-", m.group(1)).lower(), m.group(2), (m.group(3) or "").strip()))
+    if not rows:
+        raise InventoryError(f"{rel}: empty lock")
+    out, seen = [], set()
+    for name, version, marker in sorted(rows):
+        key = (name, version)
+        if key in seen:      # the same version under two markers is one watched identity
+            continue
+        seen.add(key)
+        out.append(entry(
+            id=f"pypi:venv:{name}=={version}", group="U4 private Python venv (universal hashed lock)",
+            ecosystem="PyPI", name=name, version=version, pin="sha256 wheel hashes in the lock",
+            pin_kind="exact", owner=PRIVATE, scope="runtime-managed", source=rel, watch="osv", converges="startup",
+            exposure="installed with pip --require-hashes --no-deps --only-binary into ~/.local/share/briglia/runtime/python; "
+                     "used by the document skills on untrusted files" + (f"; marker {marker}" if marker else "")))
+    return out
 
 
 def toolchain_specs():
@@ -174,12 +263,7 @@ def toolchain_specs():
                 gap="version is whatever Homebrew installed; Briglia never upgrades it (report-only, plan D6)",
                 exposure="parses untrusted media/PDF/documents"))
         elif manager == "pip":
-            out.append(entry(
-                id=f"pypi:{package}", group="U4 Python packages for skills (shared interpreter)",
-                ecosystem="PyPI", name=package, version=None, pin="none (`pip install <name>`)",
-                pin_kind="unpinned", owner=SHARED, scope="runtime-host", source=rel, watch="gap",
-                gap="unpinned pip install into the shared python3 (--break-system-packages when needed)",
-                exposure="parses untrusted documents/images" if package in ("pillow", "pymupdf", "openpyxl", "python-docx", "python-pptx") else "skill helper"))
+            continue   # every Python package now comes from the private venv lock (python_venv)
         else:
             raise InventoryError(f"{rel}: unknown install manager {manager!r}")
     return out
@@ -200,6 +284,7 @@ def userdata_toolchain():
                 pin="the device's configured apt sources at install/upgrade time; recorded in toolchain/installed-packages.json",
                 pin_kind="os-repo", owner=PRIVATE, scope="runtime-managed", source=rel, watch="gap",
                 gap="version comes from the device's apt repository (unknown here); not scheduled — `briglia toolchain upgrade` only; whether the sources include the -security pocket is unverified",
+                converges="user-started",
                 exposure=("optional; " if optional == "true" else "") + "parses untrusted media/documents; prefix is private but wrappers are published in ~/.local/bin"))
     return out
 
@@ -259,20 +344,14 @@ def hand_written():
     rows = [
         entry(id="briglia:binary", group="B1 Briglia binary + resource bundle", name="briglia",
               version=None, pin="Ed25519-signed release envelope, anti-rollback sequence floor",
-              pin_kind="exact", owner=PRIVATE, scope="runtime-managed",
+              pin_kind="exact", owner=PRIVATE, scope="runtime-managed", converges="user-started",
               source=need(upg, "manifest.sig.json"),
               watch="gap", gap="the vehicle for every pin above; its advisories are ours (no external feed)",
               exposure="updated only by `briglia upgrade` / `/upgrade` today"),
-        entry(id="runtime:node", group="U1 Node.js (managed copy when no system Node >= 20)", ecosystem=None,
-              name="node", version=None, pin="latest LTS from nodejs.org/dist/index.json at install time",
-              pin_kind="unpinned", owner=SHARED, scope="runtime-managed",
-              source=need(mcp, "https://nodejs.org/dist/index.json"), watch="node-releases",
-              gap="unpinned at install, then never updated (the installed version is per machine, unknown here); ~/.local/node and its ~/.local/bin links are shared entry points; libraries bundled inside Node (OpenSSL, llhttp, zlib, …) are not inventoried separately",
-              exposure="runs the Playwright MCP and user MCP/LSP servers"),
-        entry(id="pypi:weasyprint", group="Skill-only Python dependencies (installed by the agent, not by Briglia)",
-              ecosystem="PyPI", name="weasyprint", version=None, pin="none (skill instructions: `pip install weasyprint`)",
-              pin_kind="unpinned", owner=HOST, scope="runtime-host", source=need(pdf, "python3 -m pip install weasyprint"),
-              watch="gap", gap="installed on demand by the agent following skill text; native pango/cairo closure is OS-owned",
+        entry(id="host:weasyprint-native", group="S8 native libraries of the private Python venv", ecosystem=None,
+              name="pango, cairo, gdk-pixbuf (WeasyPrint)", version=None, pin="Homebrew / distribution package",
+              pin_kind="os-repo", owner=HOST, scope="runtime-host", source=need(pdf, "brew install pango"),
+              watch="gap", gap="OS-owned native libraries loaded by the venv's WeasyPrint; covered by Homebrew / the distribution",
               exposure="renders agent-generated HTML to PDF"),
         entry(id="host:pdf-renderer-browser", group="S5 Browsers (Playwright target, PDF rendering)", ecosystem=None,
               name="Google Chrome / Chromium / Edge", version=None, pin="system install", pin_kind="unpinned",
@@ -313,7 +392,7 @@ def hand_written():
 
 
 def generate():
-    comps = (swift_packages() + playwright_tree() + agentmail() + toolchain_specs()
+    comps = (swift_packages() + playwright_tree() + agentmail() + node_runtime() + python_venv() + toolchain_specs()
              + userdata_toolchain() + workflows() + hand_written())
     ids = [c["id"] for c in comps]
     dup = sorted({i for i in ids if ids.count(i) > 1})
@@ -333,7 +412,7 @@ def generate():
             "osv": "exact version checked daily against OSV (scripts/security_watch.py)",
             "osv-package": "all OSV advisories of the package fetched daily; affected ranges evaluated by the watch itself (OSV does not version-match this ecosystem)",
             "github-repo-advisories": "checked daily against the upstream repository's published GitHub security advisories",
-            "node-releases": "newest Node.js security release per supported LTS line tracked daily (nodejs.org/dist/index.json); the per-machine installed version is not known here",
+            "node-releases": "the exactly pinned Node checked daily against its own line's security releases and end of life (nodejs.org index + release schedule) and the Node Security WG core advisories",
             "gap": "cannot be checked automatically today; listed in the watch job's coverage-gap issue",
         },
         "components": comps,

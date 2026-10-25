@@ -42,6 +42,8 @@ an override it applies was not quoted in it.
 Usage:
   pin_gate.py --mode promoter --source git:<sha> --issues-repo OWNER/NAME [--record-out FILE]
   pin_gate.py --mode signed   --source dir:<tree> --commit <sha> --tag-record FILE --issues-repo OWNER/NAME
+  pin_gate.py --mode precheck --source dir:<tree> --commit <sha> --tag-record FILE   (authorize job:
+              C1 + the record's structure, credential-free; never an authorization)
 Environment: the issues token (read-only use) in the variable named by
 --issues-token-env (default GITHUB_TOKEN; the signed workflow passes
 BRIGLIA_PIN_GATE_ISSUES_TOKEN); GITHUB_TOKEN also raises the advisory API
@@ -426,7 +428,7 @@ def verify_record(rec, commit, blobs, now, overrides):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--mode", choices=("promoter", "signed"), required=True)
+    p.add_argument("--mode", choices=("promoter", "signed", "precheck"), required=True)
     p.add_argument("--source", required=True)
     p.add_argument("--issues-repo", default="")
     p.add_argument("--owner-name", default="Matteo")
@@ -450,19 +452,20 @@ def main(argv=None):
     args.today = now.strftime("%Y-%m-%d")
     today = now.date()
     try:
-        if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", args.issues_repo):
-            raise ConfigError("--issues-repo OWNER/NAME (the private repository) is required in both modes (C2)")
-        if not args.issues_token:
-            raise ConfigError(f"the issues token ({args.issues_token_env}) is not set: C2 cannot run, refusing (never C1-only)")
+        if args.mode != "precheck":
+            if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", args.issues_repo):
+                raise ConfigError("--issues-repo OWNER/NAME (the private repository) is required in both modes (C2)")
+            if not args.issues_token:
+                raise ConfigError(f"the issues token ({args.issues_token_env}) is not set: C2 cannot run, refusing (never C1-only)")
         if args.mode == "promoter":
             if not args.source.startswith("git:"):
                 raise ConfigError("--mode promoter reads the candidate commit: --source git:<sha>")
             commit = args.source[4:]
         else:
             if not args.commit or not re.match(r"^[0-9a-f]{40}$", args.commit):
-                raise ConfigError("--mode signed needs --commit <full sha of the tagged commit>")
+                raise ConfigError(f"--mode {args.mode} needs --commit <full sha of the tagged commit>")
             if not args.tag_record:
-                raise ConfigError("--mode signed needs --tag-record FILE (the release tag's message)")
+                raise ConfigError(f"--mode {args.mode} needs --tag-record FILE (the release tag's message)")
             commit = args.commit
         texts = {path: read_source(args.source, path) for path in BOUND_PATHS}
         if texts[INVENTORY_PATH] is None:
@@ -475,7 +478,7 @@ def main(argv=None):
         return 2
 
     rec = None
-    if args.mode == "signed":
+    if args.mode in ("signed", "precheck"):
         try:
             try:
                 with open(args.tag_record, encoding="utf-8") as f:
@@ -490,9 +493,11 @@ def main(argv=None):
 
     try:
         blockers = direct_blockers(pins, args)
-        extra, general, c2 = issue_blockers(pins, args, now)
-        for cid, bs in extra.items():
-            blockers[cid].extend(bs)
+        general, c2 = [], {"issues": 0, "heartbeat": "not read (precheck)"}
+        if args.mode != "precheck":
+            extra, general, c2 = issue_blockers(pins, args, now)
+            for cid, bs in extra.items():
+                blockers[cid].extend(bs)
     except watch.FeedError as e:
         print(f"✖ pin gate: cannot verify the pins ({e}); nothing can override this — retry", file=sys.stderr)
         return 2
@@ -525,6 +530,9 @@ def main(argv=None):
     if args.mode == "promoter" and args.record_out:
         with open(args.record_out, "w", encoding="utf-8") as f:
             f.write(record_text(commit, blobs, now.strftime("%Y-%m-%dT%H:%M:%SZ"), c2, applied))
+    if args.mode == "precheck":
+        print("✔ pin gate precheck: no direct blocker (C1 only — NOT an authorization; the sign job runs C1 + C2)")
+        return 0
     print("✔ pin gate: no stale client-delivered pin" + (f" ({len(applied)} override(s) applied — quote them in the approval request)" if applied else ""))
     return 0
 

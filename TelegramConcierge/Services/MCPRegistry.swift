@@ -573,6 +573,9 @@ actor MCPRegistry {
 
         do {
             try await client.start()
+            if resolved.command != config.command, resolved.managed != nil, let pid = await client.processIdentifier {
+                NodeRuntime.recordRunning(nodeBinary: resolved.command, pid: pid)
+            }
             try await client.initialize()
             DebugTelemetry.log(
                 .toolStart,
@@ -678,6 +681,12 @@ actor MCPRegistry {
         for extra in extras where !parts.contains(extra) {
             parts.insert(extra, at: 0)
         }
+        // Briglia's private Node fallback shims go LAST (security plan v24
+        // §7.9.1): any Node of the user's wins; the shims only answer where
+        // nothing else would.
+        let fallback = RuntimePaths.fallbackBinDir.path
+        parts.removeAll { $0 == fallback }
+        parts.append(fallback)
         env["PATH"] = parts.joined(separator: ":")
         return env
     }
@@ -685,7 +694,17 @@ actor MCPRegistry {
     /// If `command` is bare (no slash), try to resolve via the augmented
     /// PATH. Returns the config with the absolute path filled in so MCPClient
     /// doesn't need to do its own lookup. Falls through untouched on miss.
-    private static func resolveExecutable(config: MCPServerConfig) -> MCPServerConfig {
+    static func resolveExecutable(config: MCPServerConfig) -> MCPServerConfig {
+        // The managed Playwright entry's bare `node` resolves ONLY to the
+        // Node Briglia selected (security plan v24 §7.9.3), never PATH;
+        // without a selection the server is not spawned. Edited or
+        // user-authored entries named `playwright` keep PATH resolution.
+        if config.command == "node", case .managed = ManagedPlaywright.shape(of: config, layout: ManagedPlaywright.Layout()) {
+            let node = NodeRuntime.selectedNodeBinary() ?? "/nonexistent/briglia-node-not-selected"
+            return MCPServerConfig(name: config.name, command: node, arguments: config.arguments,
+                                   environment: config.environment, disabled: config.disabled,
+                                   secretRefs: config.secretRefs, description: config.description, managed: config.managed)
+        }
         if config.command.contains("/") { return config }
         let env = baseEnvironment()
         let path = env["PATH"] ?? ""
@@ -728,161 +747,21 @@ actor MCPRegistry {
     }
 }
 
-// MARK: - Node.js direct installer
+// MARK: - Node.js detection (read-only)
 
-/// Downloads the official Node.js LTS tarball from nodejs.org (verified
-/// against the release's SHASUMS256.txt), extracts it to ~/.local/node and
-/// links node/npm/npx into ~/.local/bin — a directory every Briglia subprocess
-/// PATH already covers (MCPRegistry.baseEnvironment, BashTools.augmentedPath).
-/// No Homebrew, no admin password. Mirrors
-/// the AgentMail installer.
+/// Read-only Node detection for status. Briglia no longer installs Node into
+/// ~/.local/node or links it into ~/.local/bin (security plan v24 §7.9.3):
+/// its own pinned copy lives under runtime/node/ (`NodeRuntime`).
 enum NodeInstaller {
+    /// Where Briglia ≤ 0.2.62 extracted Node: a legacy shared copy now.
     static var installRoot: URL {
         URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".local/node", isDirectory: true)
-    }
-    static var binDir: URL {
-        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".local/bin", isDirectory: true)
-    }
-
-    /// Latest LTS version string (e.g. "v22.17.0") from the nodejs.org release
-    /// index. Entries are newest-first; `lts` is `false` or the codename string.
-    private static func latestLTSVersion() async throws -> String {
-        guard let url = URL(string: "https://nodejs.org/dist/index.json") else {
-            throw installError("internal error: malformed index URL")
-        }
-        let (data, resp) = try await URLSession.shared.data(from: url)
-        if let code = (resp as? HTTPURLResponse)?.statusCode, code != 200 {
-            throw installError("release index HTTP \(code)")
-        }
-        guard let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            throw installError("unreadable release index")
-        }
-        for entry in list {
-            if entry["lts"] is String, let version = entry["version"] as? String {
-                return version
-            }
-        }
-        throw installError("no LTS release in index")
-    }
-
-    private static func installError(_ message: String) -> NSError {
-        NSError(domain: "NodeInstaller", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
-    }
-
-    /// Returns nil on success, or a human-readable failure detail. `progress`
-    /// receives user-facing status lines (download percentage, install phase).
-    static func installNode(progress: (@Sendable (String) -> Void)? = nil) async -> String? {
-        // nodejs.org/dist asset names, verified against the published file
-        // list: darwin-{arm64,x64} and linux-{arm64,x64}.
-        #if os(Linux)
-        #if arch(arm64)
-        let arch = "linux-arm64"
-        #else
-        let arch = "linux-x64"
-        #endif
-        #else
-        #if arch(arm64)
-        let arch = "darwin-arm64"
-        #else
-        let arch = "darwin-x64"
-        #endif
-        #endif
-        do {
-            progress?("Finding the latest Node.js version…")
-            let version = try await latestLTSVersion()
-            let file = "node-\(version)-\(arch).tar.gz"
-            let base = "https://nodejs.org/dist/\(version)/"
-            guard let tarURL = URL(string: base + file),
-                  let shaURL = URL(string: base + "SHASUMS256.txt") else {
-                return "internal error: malformed download URL"
-            }
-
-            let tarData = try await ProcessRunner.downloadReportingProgress(
-                from: tarURL, label: "Downloading Node.js \(version)", progress: progress)
-            let (shaData, shaResp) = try await URLSession.shared.data(from: shaURL)
-            if let code = (shaResp as? HTTPURLResponse)?.statusCode, code != 200 {
-                return "checksum download failed (HTTP \(code))"
-            }
-            progress?("Installing Node.js…")
-            // SHASUMS256.txt format: one "<hex>  <filename>" line per asset.
-            guard let shaText = String(data: shaData, encoding: .utf8),
-                  let line = shaText.split(separator: "\n").map(String.init)
-                      .first(where: { $0.hasSuffix(" \(file)") }),
-                  let expected = line.split(separator: " ").first.map(String.init)?.lowercased(),
-                  expected.count == 64 else {
-                return "checksum for \(file) not found in SHASUMS256.txt"
-            }
-            let actual = SHA256.hash(data: tarData).map { String(format: "%02x", $0) }.joined()
-            guard actual == expected else {
-                return "checksum mismatch — download corrupted, retry"
-            }
-
-            let fm = FileManager.default
-            let tmpDir = fm.temporaryDirectory.appendingPathComponent("node-install-\(UUID().uuidString)")
-            try fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-            defer { try? fm.removeItem(at: tmpDir) }
-            let tarPath = tmpDir.appendingPathComponent(file)
-            try tarData.write(to: tarPath)
-
-            let untar = await ProcessRunner.runProcessAsync(
-                executable: "/usr/bin/tar",
-                args: ["-xzf", tarPath.path, "-C", tmpDir.path],
-                timeoutSeconds: 120
-            )
-            if let detail = untar.failureDetail {
-                return "extraction failed: \(detail)"
-            }
-            let extractedRoot = tmpDir.appendingPathComponent("node-\(version)-\(arch)", isDirectory: true)
-            guard fm.fileExists(atPath: extractedRoot.appendingPathComponent("bin/node").path) else {
-                return "archive did not contain bin/node"
-            }
-
-            try fm.createDirectory(at: binDir, withIntermediateDirectories: true)
-            if fm.fileExists(atPath: installRoot.path) {
-                try fm.removeItem(at: installRoot)
-            }
-            try fm.moveItem(at: extractedRoot, to: installRoot)
-
-            #if os(macOS)
-            // Belt-and-braces: quarantined unnotarized binaries won't exec.
-            _ = await ProcessRunner.runProcessAsync(
-                executable: "/usr/bin/xattr",
-                args: ["-dr", "com.apple.quarantine", installRoot.path],
-                timeoutSeconds: 60
-            )
-            #endif
-
-            for tool in ["node", "npm", "npx"] {
-                let link = binDir.appendingPathComponent(tool)
-                try? fm.removeItem(at: link)
-                try fm.createSymbolicLink(at: link, withDestinationURL: installRoot.appendingPathComponent("bin/\(tool)"))
-            }
-
-            // Smoke tests through the symlinks. npx runs via `#!/usr/bin/env node`,
-            // so this also proves ~/.local/bin is on the subprocess PATH.
-            let nodeProbe = await ProcessRunner.runProcessAsync(
-                executable: binDir.appendingPathComponent("node").path,
-                args: ["--version"], timeoutSeconds: 15
-            )
-            guard nodeProbe.stdout != nil else {
-                return "installed node failed to run: \(nodeProbe.failureDetail ?? "unknown error")"
-            }
-            let npxProbe = await ProcessRunner.runProcessAsync(
-                executable: binDir.appendingPathComponent("npx").path,
-                args: ["--version"], timeoutSeconds: 30
-            )
-            guard npxProbe.stdout != nil else {
-                return "installed npx failed to run: \(npxProbe.failureDetail ?? "unknown error")"
-            }
-            return nil
-        } catch {
-            return "install failed: \(error.localizedDescription)"
-        }
     }
 
     /// Absolute path of an installed node binary, or nil. Checks the same
     /// locations the subprocess PATH covers.
     static func detectNode() -> String? {
+        if let selected = NodeRuntime.selectedNodeBinary() { return selected }
         let candidates = [
             "/opt/homebrew/bin/node",
             "/usr/local/bin/node",
@@ -1109,17 +988,11 @@ enum BrowserAutomationBootstrap {
         }
     }
 
-    /// A usable Node (≥ 20, npm beside it), installing the LTS into
-    /// ~/.local/node when none is found — quietly, as before; the next start
-    /// retries after a failure.
+    /// The Node for the managed Playwright (security plan v24 §7.9.3): a
+    /// user's Node ≥ the pin (never touched), else Briglia's private pinned
+    /// copy, converged at startup. Never writes ~/.local/node or ~/.local/bin.
     static func ensureNodeDirectory() async -> (String?, String?) {
-        let first = ManagedPlaywright.resolveNodeDirectory()
-        if let dir = first.directory { return (dir, nil) }
-        if let failure = await NodeInstaller.installNode() {
-            return (nil, "\(first.reason ?? "node not found"); background Node.js install failed: \(failure)")
-        }
-        let second = ManagedPlaywright.resolveNodeDirectory(
-            preferred: NodeInstaller.binDir.appendingPathComponent("node").path)
-        return (second.directory, second.reason)
+        let r = await NodeRuntime.select()
+        return (r.directory, r.directory == nil ? (r.reason ?? "Node.js unavailable") : nil)
     }
 }

@@ -1728,7 +1728,7 @@ struct MigrationSelftest: AsyncParsableCommand {
             try writeFile(data + "/ada/conversation.json", "{\"messages\": []}")
             try writeScript(bin + "/agentmail-bin", "#!/bin/sh\necho agentmail-bin\n")
             try writeScript(bin + "/agentmail",
-                            AgentMailService.wrapperScript(adaPath: oldBinary, realBinaryPath: bin + "/agentmail-bin"))
+                            AgentMailService.legacyWrapperScript(adaPath: oldBinary, realBinaryPath: bin + "/agentmail-bin"))
             try writeScript(bin + "/pdftotext",
                             "#!/bin/sh\n\(UserdataToolchain.legacyWrapperMarker)\nexec \"\(data)/ada/toolchain/prefix/usr/bin/pdftotext\" \"$@\"\n")
             try writeFile(unitDir + "/ada.service",

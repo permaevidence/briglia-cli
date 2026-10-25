@@ -159,20 +159,6 @@ enum ToolchainService {
         return out
     }
 
-    /// Does this pip accept `--break-system-packages` (pip ≥ 23.1)? Ubuntu
-    /// 22.04's pip 22.0 rejects the option with a usage error, so the flag
-    /// is passed only where `pip install --help` lists it. Cached per python.
-    nonisolated(unsafe) private static var pipFlagCache: [String: Bool] = [:]
-    private static let pipFlagLock = NSLock()
-    static func pipBreakSystemPackagesSupported(python: String) -> Bool {
-        pipFlagLock.lock(); defer { pipFlagLock.unlock() }
-        if let cached = pipFlagCache[python] { return cached }
-        let r = QuickSetupEvidence.quietRun(python, ["-m", "pip", "install", "--help"], timeoutSeconds: 20)
-        let supported = (r?.status == 0) && (r?.stdout.contains("--break-system-packages") ?? false)
-        pipFlagCache[python] = supported
-        return supported
-    }
-
     /// Whether plain `pip install` works (PEP 668 check), probed the same way
     /// pip itself decides: the EXTERNALLY-MANAGED marker file next to stdlib.
     static func pipStatus() -> PipStatus {
@@ -233,11 +219,20 @@ enum ToolchainService {
             .appendingPathComponent("BundledSkills/pdf/skills_doctor.py").path,
               FileManager.default.fileExists(atPath: script) else { return nil }
 
-        let result = ProcessRunner.runBlockingProcess(
-            executable: python, args: [script], timeoutSeconds: 120
-        )
-        guard let stdout = result.stdout,
-              let data = stdout.data(using: .utf8),
+        // The base python3 is only a stdlib launcher here; Python packages
+        // are checked in Briglia's private environment (security plan v24
+        // §7.9.4, R21-3): BRIGLIA_PYTHON_ENV names its interpreter, or is
+        // empty when none is set up (never the shared site-packages).
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = BashTools.augmentedPath(env["PATH"])
+        if case .run(let venvPython) = PythonRuntime.execDecision() {
+            env["BRIGLIA_PYTHON_ENV"] = venvPython
+        } else {
+            env["BRIGLIA_PYTHON_ENV"] = ""
+        }
+        let result = RuntimeProcess.runBlocking(python, [script], env: env, cwd: URL(fileURLWithPath: "/"), timeout: 120)
+        guard result.status == 0,
+              let data = result.stdout.data(using: .utf8),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
@@ -274,13 +269,13 @@ enum ToolchainService {
         }
         switch spec.manager {
         case "pip":
-            guard let python = python3Path() else { return "python3 non trovato" }
-            var args = ["-m", "pip", "install", spec.package]
-            if pipBreakSystemPackages, pipBreakSystemPackagesSupported(python: python) { args.append("--break-system-packages") }
-            let result = await ProcessRunner.runProcessAsync(
-                executable: python, args: args, timeoutSeconds: spec.timeoutSeconds
-            )
-            return result.failureDetail
+            // Every Python package goes into Briglia's private venv from the
+            // reviewed lock (security plan v24 §7.9.4): never `pip install`
+            // into the shared interpreter, never --break-system-packages.
+            switch await PythonRuntime.converge(trigger: .install) {
+            case .ready, .notSetUp: return nil
+            case .unavailable(let w), .failed(let w): return w
+            }
         case "brewFormula", "brewCask":
             #if os(Linux)
             guard let manager = linuxPackageManager() else {

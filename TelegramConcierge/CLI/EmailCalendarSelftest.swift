@@ -122,16 +122,12 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
         // the key itself (via `briglia __agentmail-key`) and execs the real
         // binary, so only the actual AgentMail process sees it (Codex,
         // 2026-08-22: substring matching is not a credential boundary).
-        let wrapper = AgentMailService.wrapperScript(
-            adaPath: "/home/u/.local/bin/ada",
-            realBinaryPath: "/home/u/.local/bin/agentmail-bin")
+        let wrapper = AgentMailService.wrapperScript(brigliaPath: "/home/u/.local/bin/briglia")
         check("wrapper is a plain sh script", wrapper.hasPrefix("#!/bin/sh"))
-        check("wrapper brokers the key through briglia __agentmail-key",
-              wrapper.contains("'/home/u/.local/bin/ada' __agentmail-key"))
-        check("wrapper execs the real binary with all arguments",
-              wrapper.contains("exec '/home/u/.local/bin/agentmail-bin' \"$@\""))
-        check("wrapper respects a caller-provided key",
-              wrapper.contains("if [ -z \"${AGENTMAIL_API_KEY:-}\" ]"))
+        check("wrapper hands every call to briglia __agentmail-exec (per-use validation, then the key)",
+              wrapper.contains("exec '/home/u/.local/bin/briglia' __agentmail-exec \"$@\""))
+        check("wrapper never names a binary path itself (the validated current link decides)",
+              !wrapper.contains("agentmail-bin"))
         check("wrapper never embeds the key itself", !wrapper.contains("am_"))
 
         // 4c. Capped backlogs drain via PERSISTED page cursors — timestamp
@@ -233,7 +229,7 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
         let binDir = tempRoot.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
         let realWrapper = binDir.appendingPathComponent("agentmail")
-        try AgentMailService.wrapperScript(adaPath: "/x/ada", realBinaryPath: "/x/agentmail-bin")
+        try AgentMailService.wrapperScript(brigliaPath: "/x/briglia")
             .data(using: .utf8)!.write(to: realWrapper)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: realWrapper.path)
         check("our wrapper is recognized", AgentMailService.isBrokerWrapper(at: realWrapper))
@@ -242,7 +238,7 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bareBinary.path)
         check("a bare binary is NOT mistaken for the broker", !AgentMailService.isBrokerWrapper(at: bareBinary))
         let nonExec = binDir.appendingPathComponent("agentmail-noexec")
-        try AgentMailService.wrapperScript(adaPath: "/x/ada", realBinaryPath: "/x/agentmail-bin")
+        try AgentMailService.wrapperScript(brigliaPath: "/x/briglia")
             .data(using: .utf8)!.write(to: nonExec)
         check("a non-executable wrapper does not count", !AgentMailService.isBrokerWrapper(at: nonExec))
 

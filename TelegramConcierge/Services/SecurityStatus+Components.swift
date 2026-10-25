@@ -25,16 +25,6 @@ extension SecurityStatus {
         }
     }
 
-    static func classifyAgentMail(brokerInstalled: Bool, installed: String?, pinned: String) -> Component {
-        guard brokerInstalled else {
-            return Component(name: "AgentMail CLI", state: .notInstalled, detail: "not installed")
-        }
-        if installed == pinned {
-            return Component(name: "AgentMail CLI", state: .pinned, detail: "\(pinned), SHA-256 compiled in")
-        }
-        return Component(name: "AgentMail CLI", state: .differs,
-                         detail: "\(installed.map { "\($0) installed" } ?? "installed version unknown"), this build pins \(pinned) — `briglia agentmail upgrade` installs the pinned one")
-    }
 
     /// `resolved` is `path` with symlinks resolved; `managedRoot` is the
     /// directory Briglia's Node installer extracts to.
@@ -46,7 +36,7 @@ extension SecurityStatus {
         let target = resolved ?? path
         if target == managedRoot || target.hasPrefix(managedRoot.hasSuffix("/") ? managedRoot : managedRoot + "/") {
             return Component(name: "Node.js", state: .unpinned,
-                             detail: "Briglia-downloaded copy\(v) (latest LTS at install time, never updated since)")
+                             detail: "legacy copy\(v) in ~/.local/node from an older Briglia (latest LTS at install time, never updated); Briglia selects its own Node at the next start")
         }
         return Component(name: "Node.js", state: .userOwned, detail: "\(path)\(v); Briglia only needs ≥ \(ManagedPlaywright.minimumNodeMajor) and never replaces it")
     }
@@ -105,18 +95,21 @@ extension SecurityStatus {
         let entry = MCPRegistry.loadConfigsFromDisk().first { $0.name == ManagedPlaywright.serverName }
         out.append(classifyPlaywright(ManagedPlaywright.shape(of: entry, layout: layout),
                                       bundledHash: (try? ManagedPlaywright.Manifests.bundled())?.lockfileHash))
-        out.append(classifyAgentMail(brokerInstalled: AgentMailService.agentMailBrokerInstalled(),
-                                     installed: AgentMailService.installedCLIVersion(),
-                                     pinned: AgentMailService.pinnedVersion))
-        let node = NodeInstaller.detectNode()
-        var version: String? = nil
-        if probeVersions, let node {
-            let r = UserdataToolchain.run(node, ["--version"], timeout: 10)
-            let text = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            if r.exitCode == 0, text.hasPrefix("v"), text.count < 32 { version = text }
+        // Briglia's private runtimes (security plan v24 §7.9.6): AgentMail,
+        // the Node it selected, the Python venv — from their receipts.
+        let runtimes = RuntimeStatus.all()
+        out += runtimes
+        if !runtimes.contains(where: { $0.name == "Node.js" }) {
+            let node = NodeInstaller.detectNode()
+            var version: String? = nil
+            if probeVersions, let node {
+                let r = UserdataToolchain.run(node, ["--version"], timeout: 10)
+                let text = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if r.exitCode == 0, text.hasPrefix("v"), text.count < 32 { version = text }
+            }
+            out.append(classifyNode(path: node, resolved: node.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
+                                    managedRoot: NodeInstaller.installRoot.resolvingSymlinksInPath().path, version: version))
         }
-        out.append(classifyNode(path: node, resolved: node.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
-                                managedRoot: NodeInstaller.installRoot.resolvingSymlinksInPath().path, version: version))
         if let tc = classifyToolchain(manifest: UserdataToolchain.loadManifest()) { out.append(tc) }
         return out
     }
@@ -170,6 +163,13 @@ extension SecurityStatus {
         if !behind.isEmpty {
             let names = behind.joined(separator: ", ")
             reasons.append(Reason(en: "differs from this build's pin: \(names)", it: "diversa dalla versione prevista: \(names)"))
+        }
+        for c in components where [.off, .unknownState, .restartPending].contains(c.state) {
+            switch c.state {
+            case .off: reasons.append(Reason(en: "\(c.name) is off: \(c.detail)", it: "\(c.name) è disattivato: \(c.detail)"))
+            case .unknownState: reasons.append(Reason(en: "\(c.name) does not match its install receipt", it: "\(c.name) non corrisponde alla sua ricevuta di installazione"))
+            default: reasons.append(Reason(en: "\(c.name): restart pending (send /restart)", it: "\(c.name): serve un riavvio (invia /restart)"))
+            }
         }
         guard let host else { return reasons }
         for u in host.updates {

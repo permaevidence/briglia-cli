@@ -471,6 +471,11 @@ enum UpgradeService {
     @MainActor
     static func restartNow() -> Never {
         TerminalSession.shutdownChildProcesses()
+        // Wait for a private-runtime commit in progress (security plan v24
+        // §7.8.1 step 10): taking the selection lock means no commit holds
+        // it; O_CLOEXEC releases it at the exec.
+        let runtimeLock = try? RuntimeLock.acquire(RuntimePaths.selectionLock, timeout: 60)
+        _ = runtimeLock
         fflush(stdout)
         fflush(stderr)
         let originalArguments = CommandLine.arguments

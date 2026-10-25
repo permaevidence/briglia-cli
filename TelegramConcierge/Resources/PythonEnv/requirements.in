@@ -1,0 +1,9 @@
+# Briglia-private Python environment (security plan v24 §7.9.4): the packages the bundled
+# skills need. Regenerate the lock with scripts/python_lock.py --regenerate after any change.
+openpyxl
+python-docx
+python-pptx
+pillow
+formulas
+pymupdf
+weasyprint

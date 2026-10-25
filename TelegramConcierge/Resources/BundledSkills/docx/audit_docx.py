@@ -37,7 +37,7 @@ try:
     from docx import Document
     from docx.enum.table import WD_ROW_HEIGHT_RULE
 except ImportError:
-    print("error: python-docx is required (python3 -m pip install python-docx)", file=sys.stderr)
+    print("error: python-docx is required (briglia python-env install)", file=sys.stderr)
     raise SystemExit(1)
 
 PLACEHOLDER_RE = re.compile(

@@ -20,6 +20,9 @@ enum SecurityStatus {
         case osRepo        // versions come from the device's package sources
         case userOwned     // the user's / OS's copy; Briglia's version is only a minimum
         case notInstalled
+        case off            // AgentMail hold: off until a repair succeeds (§7.8.1 v14)
+        case unknownState   // a private copy that does not match its receipt
+        case restartPending // selected, not yet running (§7.7)
 
         var label: String {
             switch self {
@@ -29,6 +32,9 @@ enum SecurityStatus {
             case .osRepo: return "from the device's package sources"
             case .userOwned: return "yours / the OS's"
             case .notInstalled: return "not installed"
+            case .off: return "OFF"
+            case .unknownState: return "does not match its receipt"
+            case .restartPending: return "restart pending"
             }
         }
     }

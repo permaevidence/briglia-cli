@@ -1296,7 +1296,7 @@ enum SetupAPICore {
             }
             if section["install_cli"] as? Bool == true, !AgentMailService.agentMailBrokerInstalled() {
                 try checkpoint()   // immediately before the install
-                if let installFailure = await AgentMailService.installAgentMailBinary(checkpoint: checkpoint) {
+                if let installFailure = await AgentMailService.installAgentMailBinary() {
                     warnings.append("agentmail CLI install failed: \(installFailure) — inbox "
                                     + "alerts and context still work; retry the install later")
                 }

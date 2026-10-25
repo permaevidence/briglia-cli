@@ -7,7 +7,7 @@ description: "Reliably edit video files with ffmpeg and ffprobe: trim, join, tra
 
 Use this skill for practical video edits that can be done reliably with `ffmpeg`. The goal is not to memorize filters; the goal is to inspect the input, choose the least destructive operation, create a new output file, and verify that the edit is actually correct.
 
-**Dependencies**: ffmpeg and ffprobe (required — install with `brew install ffmpeg` after telling the user). On an unfamiliar machine, run `python3 ${CLAUDE_SKILL_DIR}/skills_doctor.py` once — it reports every dependency of the document/media skills with install commands. If pip refuses with `externally-managed-environment` (PEP 668), add `--break-system-packages` to the pip command — the same choice Briglia's onboarding makes, so every package lands in the single Python environment the agent later uses.
+**Dependencies**: ffmpeg and ffprobe (required — install with `brew install ffmpeg` after telling the user). On an unfamiliar machine, run `python3 ${CLAUDE_SKILL_DIR}/skills_doctor.py` once — it reports every dependency of the document/media skills with install commands. Never `pip install` into the system Python; Briglia's own Python packages live in its private environment (`briglia-python`, `briglia python-env install`).
 
 Do not overwrite the original media unless the user explicitly asks.
 

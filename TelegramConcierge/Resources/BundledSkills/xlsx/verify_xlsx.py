@@ -42,7 +42,7 @@ from pathlib import Path
 try:
     from openpyxl import load_workbook
 except ImportError:
-    print("error: openpyxl is required (python3 -m pip install openpyxl)", file=sys.stderr)
+    print("error: openpyxl is required (briglia python-env install)", file=sys.stderr)
     raise SystemExit(1)
 
 
@@ -288,7 +288,7 @@ def evaluate_workbook(path: Path, formula_targets: set) -> dict:
     except ImportError:
         return {
             "skipped": "the 'formulas' package is not installed",
-            "enable": "python3 -m pip install formulas",
+            "enable": "briglia python-env install",
         }
 
     import contextlib

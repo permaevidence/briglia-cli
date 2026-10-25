@@ -26,6 +26,7 @@ let package = Package(
                 .copy("Resources/BundledSkills"),
                 .copy("Resources/MCPBundles"),
                 .copy("Resources/QuickSetup"),
+                .copy("Resources/PythonEnv"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)

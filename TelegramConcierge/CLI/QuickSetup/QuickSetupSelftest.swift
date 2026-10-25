@@ -34,8 +34,8 @@ struct QuickSetupSelftest: AsyncParsableCommand {
     func run() async throws {
         if jobThenDie { try await SelftestSubprocess.jobThenDie(); return }
         if agentmailCrash != nil || agentmailInstall {
-            try await SelftestSubprocess.agentMail(crash: agentmailCrash, dir: dir!, fixture: fixture!, sums: sums!, hold: holdSeconds)
-            return
+            print("the AgentMail installer battery moved to `briglia __private-runtime-selftest`")
+            throw ExitCode(64)
         }
 
         let tempRoot = FileManager.default.temporaryDirectory
@@ -71,7 +71,6 @@ struct QuickSetupSelftest: AsyncParsableCommand {
         await t.section("13/15. finish, completion order, lease") { try await t.finishAndLease() }
         await t.section("14. keep-awake census") { try await t.census() }
         await t.section("16. package maps + disk floors") { try await t.packagesAndDisk() }
-        await t.section("2b. AgentMail installer") { try await t.agentMailInstaller() }
         await t.section("2c. AgentMail pinned release") { try await t.agentMailPinning() }
 
         print(t.failures == 0 ? "\nquicksetup selftest: all \(t.checks) checks passed"
@@ -1316,20 +1315,17 @@ final class SelftestContext: @unchecked Sendable {
         check("the keep-awake row's real check passes under the shared default reason", QuickSetupEnvironment().keepAwakeHeld())
         KeepAwake.release()
         #endif
-        // Real pip on the CI distribution (Jammy): feature-detected flag, real install of a missing package.
-        if ProcessInfo.processInfo.environment["BRIGLIA_SELFTEST_REAL_PIP"] == "1", let python = ToolchainService.python3Path() {
-            let helpOut = QuickSetupEvidence.quietRun(python, ["-m", "pip", "install", "--help"], timeoutSeconds: 30)?.stdout ?? ""
-            let supported = ToolchainService.pipBreakSystemPackagesSupported(python: python)
-            check("pip --break-system-packages feature detection matches `pip install --help`", supported == helpOut.contains("--break-system-packages"))
-            let status = ToolchainService.DesktopStatus(doctorRan: true, missing: ["openpyxl"], libreOffice: true, mandatoryMissing: ["openpyxl"])
-            let jobs = QuickSetupEnvironment.defaultToolchainJobs(status).filter { $0.label.hasPrefix("pip install") }
-            check("real pip job built for the missing package", jobs.count == 1 && jobs[0].command.contains("openpyxl") && (jobs[0].command.contains("--break-system-packages") == supported), "\(jobs.map(\.command))")
-            if let job = jobs.first {
-                let r = SetupJobRunner()
-                let result = await r.run(job)
-                let imported = QuickSetupEvidence.quietRun(python, ["-c", "import openpyxl; print(openpyxl.__version__)"], timeoutSeconds: 30)
-                check("real `pip install openpyxl` through the runner succeeds and the package imports", result.ok && imported?.status == 0, "\(result.outcome) \(result.lastLines.suffix(3))")
-            }
+        // Python packages (security plan v24 §7.9.4): ONE job building Briglia's
+        // private venv from the reviewed lock — never a shared `pip install`,
+        // never --break-system-packages (the old real-pip check is retired).
+        do {
+            let status = ToolchainService.DesktopStatus(doctorRan: true, missing: ["openpyxl", "pillow"], libreOffice: true, mandatoryMissing: ["openpyxl", "pillow"])
+            let jobs = QuickSetupEnvironment.defaultToolchainJobs(status)
+            let py = jobs.filter { $0.label == "briglia python-env install" }
+            check("missing Python packages → one private-venv job, no shared pip job",
+                  py.count == 1 && py[0].command.suffix(2) == ["python-env", "install"]
+                  && !jobs.contains { $0.command.contains("pip") || $0.command.joined(separator: " ").contains("break-system-packages") },
+                  "\(jobs.map(\.command))")
         }
     }
 

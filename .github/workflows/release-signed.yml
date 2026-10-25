@@ -89,8 +89,23 @@ jobs:
           python3 .github/scripts/release_security.py authorize \
             --file RELEASE_SECURITY.json --sequence "$SEQUENCE" --history "$HISTORY"
 
+          # Pin gate precheck (security plan v24 §3.5.2): the tag must be the
+          # promoter's ANNOTATED tag carrying the briglia-pin-gate record for
+          # this commit; C1 runs now so an obvious refusal costs no build
+          # minutes. Not the authorization: the sign job runs C1 + C2.
+          [ "$(git cat-file -t "refs/tags/$REF_NAME")" = "tag" ] || {
+            echo "✖ $REF_NAME is not an annotated tag from promote-release.sh (no pin-gate record)"; exit 1; }
+          mkdir -p dist
+          git cat-file tag "refs/tags/$REF_NAME" | sed '1,/^$/d' > dist/pin-gate-record.txt
+          python3 scripts/pin_gate.py --mode precheck --source dir:. --commit "$GITHUB_SHA" \
+            --tag-record dist/pin-gate-record.txt
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "sequence=$SEQUENCE" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pin-gate-record
+          path: dist/pin-gate-record.txt
 
   build-macos-arm64:
     name: Build macOS arm64
@@ -220,6 +235,26 @@ jobs:
         with:
           name: manifest
           path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pin-gate-record
+          path: dist
+      - name: Pin gate (C1 + C2, before the signing key is decoded)
+        # Security plan v24 §3.5.2 (owner requirement P): this protected job
+        # (owner approval) is the trusted producer of the release
+        # authorization. C2 reads the private repository's security-watch
+        # issues with a read-only token held only by this environment; a
+        # missing token or any feed failure refuses. Applied overrides must
+        # all be quoted in the tag's record (what the owner approved).
+        env:
+          BRIGLIA_PIN_GATE_ISSUES_TOKEN: ${{ secrets.BRIGLIA_PIN_GATE_ISSUES_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$BRIGLIA_PIN_GATE_ISSUES_TOKEN" ] || {
+            echo "✖ BRIGLIA_PIN_GATE_ISSUES_TOKEN is not configured in the release-sign environment"; exit 1; }
+          python3 scripts/pin_gate.py --mode signed --source dir:. --commit "$GITHUB_SHA" \
+            --tag-record dist/pin-gate-record.txt --issues-repo permaevidence/briglia-cli-private \
+            --issues-token-env BRIGLIA_PIN_GATE_ISSUES_TOKEN | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Sign the manifest
         env:
           SIGNING_KEY_B64: ${{ secrets.BRIGLIA_CLI_SIGNING_KEY }}

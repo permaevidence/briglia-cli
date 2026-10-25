@@ -228,14 +228,10 @@ struct QuickSetupEnvironment {
         return SetupJobRunner.Spec(row: "keepawake", command: [sudo, systemctl, "mask", "sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"],
                                    mode: .terminalHandoff, timeout: 300, label: "mask sleep targets")
     }
-    var installAgentMail: (_ progress: @escaping @Sendable (String) -> Void, _ checkpoint: () throws -> Void, _ runner: SetupJobRunner) async -> String? = { progress, checkpoint, runner in
-        switch await AgentMailService.repairTransaction(runner: .journaled(runner, row: "agentmail_cli")) {
-        case .failedClosed(let why): return why
-        case .busy: return "another AgentMail installation or repair is in progress — retry in a moment"
-        default: break
-        }
-        return await AgentMailService.installAgentMailBinary(progress: progress, checkpoint: checkpoint,
-                                                             runner: .journaled(runner, row: "agentmail_cli"))
+    var installAgentMail: (_ progress: @escaping @Sendable (String) -> Void, _ checkpoint: () throws -> Void, _ runner: SetupJobRunner) async -> String? = { progress, checkpoint, _ in
+        do { try checkpoint() } catch { return "cancelled" }
+        // Briglia's private copy (security plan v24 §7.8.1); never ~/.local/bin.
+        return await AgentMailService.installAgentMailBinary(progress: progress)
     }
     var agentMailInstalled: () -> Bool = { AgentMailService.agentMailBrokerInstalled() }
     // Linux service
@@ -297,11 +293,11 @@ struct QuickSetupEnvironment {
     static func defaultToolchainJobs(_ status: ToolchainService.DesktopStatus) -> [SetupJobRunner.Spec] {
         var jobs: [SetupJobRunner.Spec] = []
         let missing = Set(status.mandatoryMissing)
-        let python = ToolchainService.python3Path()
         let pipPackages = ["python-docx", "python-pptx", "pillow", "pymupdf", "formulas", "openpyxl"].filter { missing.contains($0) }
-        // `--break-system-packages` only where pip knows it (pip ≥ 23.1;
-        // Ubuntu 22.04 ships 22.0 and rejects the option outright).
-        let pipArgs = ["-m", "pip", "install"] + (python.map { ToolchainService.pipBreakSystemPackagesSupported(python: $0) } == true ? ["--break-system-packages"] : [])
+        // Python packages: ONE job building Briglia's private venv from the
+        // reviewed lock (security plan v24 §7.9.4); never the shared pip.
+        let pythonEnvJob = SetupJobRunner.Spec(row: "toolchain", command: [AgentMailService.brigliaPath(), "python-env", "install"],
+                                               mode: .detached, timeout: 3600, label: "briglia python-env install")
         #if os(macOS)
         guard let brew = ToolchainService.brewPath() else { return [] }
         var formulas: [String] = []
@@ -312,12 +308,7 @@ struct QuickSetupEnvironment {
             jobs.append(.init(row: "toolchain", command: [brew, "install", f], mode: .detached, timeout: 900,
                               environment: ["HOMEBREW_NO_AUTO_UPDATE": "1"], label: "brew install \(f)"))
         }
-        if let python {
-            for p in pipPackages {
-                jobs.append(.init(row: "toolchain", command: [python] + pipArgs + [p],
-                                  mode: .detached, timeout: 300, label: "pip install \(p)"))
-            }
-        }
+        if !pipPackages.isEmpty { jobs.append(pythonEnvJob) }
         if !status.libreOffice {
             jobs.append(.init(row: "toolchain", command: [brew, "install", "--cask", "libreoffice"], mode: .detached, timeout: 2400,
                               environment: ["HOMEBREW_NO_AUTO_UPDATE": "1"], label: "brew install --cask libreoffice"))
@@ -337,12 +328,7 @@ struct QuickSetupEnvironment {
                               mode: .terminalHandoff, timeout: 2400, environment: ["DEBIAN_FRONTEND": "noninteractive"],
                               label: "\(manager.name) install \(packages.joined(separator: " "))"))
         }
-        if let python {
-            for p in pipPackages {
-                jobs.append(.init(row: "toolchain", command: [python] + pipArgs + [p],
-                                  mode: .detached, timeout: 300, label: "pip install \(p)"))
-            }
-        }
+        if !pipPackages.isEmpty { jobs.append(pythonEnvJob) }
         #endif
         return jobs
     }

@@ -37,6 +37,9 @@ final class InstanceLease {
     /// file: relying on the kernel to serialize two descriptors of the same
     /// process is exactly the trap the object exists to avoid.
     private static var heldInProcess = false
+    /// Read-only: does this process hold the instance lease (private-runtime
+    /// staging cleanup, security plan §7.8.1 step 3)?
+    static var isHeldInThisProcess: Bool { lock.lock(); defer { lock.unlock() }; return heldInProcess }
 
     /// Selftest seam: observe the unexpected-drop fallback without scraping
     /// stderr. Called after the release, in the order the plan pins.

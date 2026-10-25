@@ -76,7 +76,7 @@ def build_contact_sheet(pages: List[Path], out_dir: Path, cols: int) -> dict:
     try:
         from PIL import Image, ImageDraw
     except ImportError:
-        return {"error": "contact sheet needs Pillow (python3 -m pip install pillow)"}
+        return {"error": "contact sheet needs Pillow (briglia python-env install)"}
 
     cols = max(1, cols)
     rows = (len(pages) + cols - 1) // cols
@@ -152,7 +152,7 @@ def main() -> int:
             if pages is None:
                 print(
                     "error: no PDF page renderer available. Install Poppler (`brew install poppler`) "
-                    "or PyMuPDF (`python3 -m pip install pymupdf`).",
+                    "or PyMuPDF (`briglia python-env install`).",
                     file=sys.stderr,
                 )
                 return 1

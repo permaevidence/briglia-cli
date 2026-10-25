@@ -31,7 +31,7 @@ from typing import List, Optional, Tuple
 CHROME_WARNING = (
     "Rendered with Chrome/Chromium: CSS @page margin boxes are NOT supported — "
     "counter(page) page numbers and running headers/footers were dropped if the CSS used them. "
-    "Install WeasyPrint (python3 -m pip install weasyprint) for full paged-media support."
+    "Install WeasyPrint (briglia python-env install) for full paged-media support."
 )
 
 
@@ -141,7 +141,7 @@ def main() -> int:
 
     print(json.dumps({
         "error": "no HTML-to-PDF engine found",
-        "fix": "Install one: 'python3 -m pip install weasyprint' (preferred for documents) "
+        "fix": "Install one: 'briglia python-env install' (preferred for documents) "
                "or install Google Chrome / Chromium (fine for browser-layout designs).",
     }, indent=2), file=sys.stderr)
     return 1

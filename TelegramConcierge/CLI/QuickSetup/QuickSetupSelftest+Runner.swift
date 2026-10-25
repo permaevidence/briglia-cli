@@ -331,26 +331,6 @@ enum SelftestSubprocess {
                                    mode: .detached, timeout: 120, label: "die"))
     }
 
-    /// One AgentMail install against a fixture, optionally crashing at a
-    /// named point, optionally holding the lock for a while before finishing.
-    static func agentMail(crash: String?, dir: String, fixture: String, sums: String, hold: Double) async throws {
-        AgentMailService.installDirectoryOverride = URL(fileURLWithPath: dir, isDirectory: true)
-        AgentMailService.crashPoint = crash
-        let archive = try Data(contentsOf: URL(fileURLWithPath: fixture))
-        let checksums = try Data(contentsOf: URL(fileURLWithPath: sums))
-        let asset = URL(fileURLWithPath: fixture).lastPathComponent
-        let version = ProcessInfo.processInfo.environment["BRIGLIA_SELFTEST_AM_VERSION"] ?? "1.0.0"
-        AgentMailService.downloadOverride = { _ in
-            if hold > 0 { try? await Task.sleep(nanoseconds: UInt64(hold * 1_000_000_000)) }
-            return (version, asset, archive, checksums)
-        }
-        let failure = await AgentMailService.installAgentMailBinary()
-        if let failure {
-            print("FAILURE: \(failure)")
-            Foundation.exit(1)
-        }
-        print("OK")
-    }
 }
 
 extension SelftestContext {

@@ -9,6 +9,12 @@ and which skills degrade without it.
 Run once when working on an unfamiliar machine, then batch the installs.
 Ask the user before starting large installs (LibreOffice is ~600 MB).
 
+Python packages are checked in Briglia's private environment (security
+plan v24 §7.9.4): the interpreter named by BRIGLIA_PYTHON_ENV (Briglia's
+doctor sets it; empty = not set up), else `briglia-python` (BRIGLIA_PYTHON in
+Briglia's shell), else this interpreter. A package importable only from the
+shared python3 is never reported as present for Briglia.
+
 Usage:
   python3 skills_doctor.py
 """
@@ -16,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -63,41 +70,41 @@ BINARIES = [
 PYTHON_PACKAGES = [
     {
         "module": "openpyxl",
-        "install": "python3 -m pip install openpyxl",
+        "install": "briglia python-env install",
         "skills": ["xlsx"],
         "impact": "required for all spreadsheet work",
     },
     {
         "module": "docx",
         "package": "python-docx",
-        "install": "python3 -m pip install python-docx",
+        "install": "briglia python-env install",
         "skills": ["docx"],
         "impact": "required for all Word-document work",
     },
     {
         "module": "pptx",
         "package": "python-pptx",
-        "install": "python3 -m pip install python-pptx",
+        "install": "briglia python-env install",
         "skills": ["pptx"],
         "impact": "required for all PowerPoint work",
     },
     {
         "module": "PIL",
         "package": "pillow",
-        "install": "python3 -m pip install pillow",
+        "install": "briglia python-env install",
         "skills": ["pdf"],
         "impact": "required for the page contact sheet (render_pdf_pages.py --sheet)",
     },
     {
         "module": "formulas",
-        "install": "python3 -m pip install formulas",
+        "install": "briglia python-env install",
         "skills": ["xlsx"],
         "impact": "optional but recommended: enables true formula evaluation in verify_xlsx.py check",
     },
     {
         "module": "fitz",
         "package": "pymupdf",
-        "install": "python3 -m pip install pymupdf",
+        "install": "briglia python-env install",
         "skills": ["pdf", "docx", "pptx"],
         "impact": "optional: page-rasterization fallback when Poppler is absent",
     },
@@ -108,15 +115,28 @@ def check_binary(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+def briglia_interpreter() -> str | None:
+    """The interpreter whose packages count: Briglia's private environment."""
+    if "BRIGLIA_PYTHON_ENV" in os.environ:
+        return os.environ["BRIGLIA_PYTHON_ENV"] or None
+    return os.environ.get("BRIGLIA_PYTHON") or shutil.which("briglia-python") or sys.executable
+
+
+ENV_NOT_SET_UP = "Briglia's Python environment is not set up (run `briglia python-env install`)"
+
+
 def check_module(module: str) -> str:
-    """Return ok | missing | broken. Probe in a subprocess so partially
-    installed packages (e.g. weasyprint without native libs) can't crash
-    or pollute this process. Runs from a neutral cwd and rejects bare
+    """Return ok | missing | broken | unavailable. Probe in a subprocess so
+    partially installed packages (e.g. weasyprint without native libs) can't
+    crash or pollute this process. Runs from a neutral cwd and rejects bare
     namespace packages — otherwise a stray directory named like the
     module (e.g. a skill folder called 'pptx') counts as installed."""
+    interpreter = briglia_interpreter()
+    if interpreter is None:
+        return "unavailable"
     probe = subprocess.run(
         [
-            sys.executable, "-c",
+            interpreter, "-c",
             f"import {module}, sys; "
             f"sys.exit(0 if getattr(sys.modules['{module}'], '__file__', None) else 3)",
         ],
@@ -129,6 +149,8 @@ def check_module(module: str) -> str:
     if probe.returncode == 3:
         return "missing"
     stderr = probe.stderr.decode(errors="replace")
+    if "Python environment" in stderr and probe.returncode == 1:
+        return "unavailable"
     return "missing" if "ModuleNotFoundError" in stderr else "broken"
 
 
@@ -184,17 +206,19 @@ def main() -> int:
         if status == "ok":
             present.append(entry)
         else:
+            if status == "unavailable":
+                entry["impact"] = ENV_NOT_SET_UP + ". " + entry["impact"]
             if status == "broken":
                 advice = "BROKEN INSTALL (imports but fails): reinstall."
                 if spec["module"] in ("weasyprint", "fitz"):
                     advice += " On macOS, import failures right after install usually mean " \
                               "missing native libraries (e.g. `brew install pango` for weasyprint) — " \
-                              "reinstalling the pip package alone won't fix it."
+                              "rebuilding Briglia's environment alone won't fix it."
                 entry["impact"] = advice + " " + entry["impact"]
             missing.append(entry)
 
     # HTML -> PDF engines: one of the two is enough.
-    weasy_status = "ok" if shutil.which("weasyprint") else check_module("weasyprint")
+    weasy_status = check_module("weasyprint")
     chrome = find_chrome()
     engine_entry = {
         "name": "html-to-pdf engine",
@@ -208,20 +232,20 @@ def main() -> int:
         if weasy_status == "broken":
             notes.append(
                 "WeasyPrint is installed but fails to import — on macOS this almost always means "
-                "missing native libraries: run `brew install pango`, then reinstall "
-                "(`python3 -m pip install --force-reinstall weasyprint`). Chrome works meanwhile "
+                "missing native libraries: run `brew install pango` (Briglia's environment already "
+                "has the Python part). Chrome works meanwhile "
                 "but drops CSS @page margin boxes (page numbers/running footers)."
             )
         elif weasy_status != "ok":
             notes.append(
                 f"WeasyPrint {weasy_status} — Chrome works but drops CSS @page margin boxes "
-                "(page numbers/running footers). Install for full paged-media support: "
-                "python3 -m pip install weasyprint  (on macOS first `brew install pango`)"
+                "(page numbers/running footers). For full paged-media support: "
+                "briglia python-env install  (on macOS also `brew install pango`)"
             )
         engine_entry["impact"] = " ".join(notes) if notes else "fully covered"
         present.append(engine_entry)
     else:
-        engine_entry["install"] = ("python3 -m pip install weasyprint  (on macOS first "
+        engine_entry["install"] = ("briglia python-env install  (on macOS also "
                                    "`brew install pango`; or install Google Chrome)")
         engine_entry["impact"] = "pdf skill cannot render at all without one of these"
         missing.append(engine_entry)

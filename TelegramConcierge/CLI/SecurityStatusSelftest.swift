@@ -234,10 +234,17 @@ struct SecurityStatusSelftest: ParsableCommand {
                 && SecurityStatus.classifyPlaywright(.legacyAuto, bundledHash: h).state == .unpinned
                 && SecurityStatus.classifyPlaywright(.userAuthored, bundledHash: h).state == .userOwned
                 && SecurityStatus.classifyPlaywright(.absent, bundledHash: h).state == .notInstalled)
-        t.check("agentmail: pinned / behind / absent",
-                SecurityStatus.classifyAgentMail(brokerInstalled: true, installed: "1.3.0", pinned: "1.3.0").state == .pinned
-                && SecurityStatus.classifyAgentMail(brokerInstalled: true, installed: "legacy", pinned: "1.3.0").state == .differs
-                && SecurityStatus.classifyAgentMail(brokerInstalled: false, installed: nil, pinned: "1.3.0").state == .notInstalled)
+        // Private runtimes (security plan v24 §7.9.6; the receipt-based
+        // classification itself is tested by __private-runtime-selftest):
+        // OFF, receipt mismatch and restart-pending always need attention.
+        let attention = SecurityStatus.attentionReasons([
+            .init(name: "AgentMail CLI", state: .off, detail: "AgentMail is off: repair failed"),
+            .init(name: "Python environment", state: .unknownState, detail: "x"),
+            .init(name: "Node.js", state: .restartPending, detail: "x")], nil).map(\.en)
+        t.check("runtimes: OFF / receipt mismatch / restart pending each raise an attention reason",
+                attention.contains { $0.hasPrefix("AgentMail CLI is off") }
+                && attention.contains { $0.contains("Python environment does not match") }
+                && attention.contains { $0.contains("Node.js: restart pending") }, attention.joined(separator: " | "))
         let root = "/home/u/.local/node"
         t.check("node: a link into Briglia's ~/.local/node → unpinned; a look-alike sibling directory is NOT Briglia's",
                 SecurityStatus.classifyNode(path: "/home/u/.local/bin/node", resolved: root + "/bin/node", managedRoot: root, version: "v22.1.0").state == .unpinned

@@ -995,6 +995,9 @@ extension ConversationManager {
         await discardPreImportBackgroundOutputs()
         do {
             try discardTurnRecoveryForReplacement()
+            // Private runtimes (security plan v24 §7.8.1 step 10): an import
+            // invalidates any AgentMail/Node/Python commit in flight.
+            RuntimeSelectionStore.bumpGeneration()
             try await MindExportService.shared.applyStagedMind(staged)
             // Stage B (mid-turn early wake §3.12.3): every crash record and
             // /stop entry of the replaced conversation is discarded, and the
