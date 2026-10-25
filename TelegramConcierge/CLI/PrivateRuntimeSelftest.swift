@@ -725,6 +725,23 @@ final class RuntimeHarness {
             try fm.removeItem(at: vtest)
             try RuntimeFS.switchLink(RuntimePaths.current(.node), to: target)
             check("…restored: selected again", NodeRuntime.selectedNodeBinary() == concrete)
+            // Receipt and current still agree; the VERIFIED directory itself (or its bin) is redirected
+            // to an outside copy with identical bytes (round-3 note: descendant containment on its own).
+            let vreal = RuntimePaths.dir(.node).appendingPathComponent(target)
+            let moved = scratch.appendingPathComponent("moved-node-\(UUID().uuidString.prefix(6))", isDirectory: true)
+            try fm.moveItem(at: vreal, to: moved)
+            try fm.createSymbolicLink(atPath: vreal.path, withDestinationPath: moved.path)
+            check("verified v/<name> itself → outside identical copy (receipt/current agree): not selected", NodeRuntime.selectedNodeBinary() == nil)
+            try fm.removeItem(at: vreal)
+            try fm.moveItem(at: moved, to: vreal)
+            let realBin = vreal.appendingPathComponent("bin")
+            let movedBin = scratch.appendingPathComponent("moved-node-bin-\(UUID().uuidString.prefix(6))", isDirectory: true)
+            try fm.moveItem(at: realBin, to: movedBin)
+            try fm.createSymbolicLink(atPath: realBin.path, withDestinationPath: movedBin.path)
+            check("verified v/<name>/bin → outside identical copy (receipt/current agree): not selected", NodeRuntime.selectedNodeBinary() == nil)
+            try fm.removeItem(at: realBin)
+            try fm.moveItem(at: movedBin, to: realBin)
+            check("…restored: selected again (2)", NodeRuntime.selectedNodeBinary() == concrete)
         }
         let noNpm = try sharedNode("30.0.0", npm: false)
         setenv("BRIGLIA_NODE_TEST_SHARED_DIRS", noNpm, 1)
