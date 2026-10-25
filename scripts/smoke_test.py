@@ -528,6 +528,33 @@ def main():
     check("image-orientation-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
 
+    # 3c5-quater-bis-ter. reminders.json loads per entry (one bad row no
+    # longer drops all of them), is never overwritten before it was loaded or
+    # preserved byte-exact, and missing-argument tool errors name the keys
+    # that arrived with setup-specific wording (0.2.63). Private scratch home
+    # and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__reminders-load-selftest"], capture_output=True,
+                          text=True, timeout=600)
+    check("reminders-load-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+    # Every ToolArgumentHint table prefix must still occur verbatim in the
+    # sources (drift would silently disable the hint for that message).
+    src_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "TelegramConcierge")
+    hint_src = open(os.path.join(src_root, "Services", "ToolArgumentHint.swift"), encoding="utf-8").read()
+    prefixes = re.findall(r'Rule\(tool: "[^"]+", prefix: "((?:[^"\\]|\\.)*)"', hint_src)
+    corpus = ""
+    for dirpath, _, names in os.walk(src_root):
+        for name in names:
+            if name.endswith(".swift") and name != "ToolArgumentHint.swift" and "Selftest" not in name:
+                corpus += open(os.path.join(dirpath, name), encoding="utf-8").read()
+    def as_source(prefix):
+        # The table holds the runtime text; sources write quotes as \" in
+        # ordinary string literals and plainly inside #"…"# literals.
+        return [prefix, prefix.replace("\\'", "'")]
+    missing = [p for p in prefixes if not any(v in corpus for v in as_source(p))]
+    check("tool-argument-hint table prefixes occur in sources", len(prefixes) >= 30 and not missing,
+          "missing: " + "; ".join(missing))
+
     # 3c5-quater-ter. Telegram audio files and video notes arrive as files
     # (never auto-transcribed; 20 MB Bot API limit), malformed fields and
     # unreadable kinds get a visible reply (deduplicated), and the voice-note
