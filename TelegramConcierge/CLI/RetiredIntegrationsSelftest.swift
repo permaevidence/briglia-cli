@@ -64,7 +64,6 @@ struct RetiredIntegrationsSelftest: AsyncParsableCommand {
         try process.run()
         process.waitUntilExit()
         TestPrefsDomains.purge(linkName)
-        TestPrefsDomains.purge(RIUnits.suiteName)
         TestPrefsDomains.finalSweep()
         if process.terminationStatus != 0 { throw ExitCode(process.terminationStatus) }
     }
@@ -72,7 +71,12 @@ struct RetiredIntegrationsSelftest: AsyncParsableCommand {
 
 /// Shared fixtures for the unit sections.
 enum RIUnits {
-    static let suiteName = "briglia-mw-retired-units"
+    /// The unit sections use this child's own STANDARD domain (its process
+    /// name is `linkName`, enforced before any section runs), like the
+    /// manager section and every other `briglia-mw-` selftest. A separately
+    /// named suite was purged only by the parent, which never opened it, and
+    /// its empty plist shell outlived the parent's sweep on the CI runner.
+    static var domainName: String { RetiredIntegrationsSelftest.linkName }
 
     /// A fake process table the scanner reads; `onSignal` mutates it.
     final class Table {
@@ -123,10 +127,10 @@ enum RIUnits {
         BridgeScanner.Proc(pid: pid, ppid: ppid, uid: uid, zombie: zombie, argv: argv)
     }
 
-    /// An Env over the isolated data root with injected gws paths, a private
-    /// preference suite, a fake (empty) process table and live remover seams.
+    /// An Env over the isolated data root with injected gws paths, the child's
+    /// private standard preference domain, a fake (empty) process table and live remover seams.
     static func env(root: URL, table: Table = Table()) -> RetiredIntegrations.Env {
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let defaults = UserDefaults.standard
         let fake = root.appendingPathComponent("fake-host", isDirectory: true)
         return RetiredIntegrations.Env(
             dataRoot: StoragePaths.dataRoot,
@@ -149,7 +153,7 @@ enum RIUnits {
     static func resetStore(_ env: RetiredIntegrations.Env) {
         try? FileManager.default.removeItem(at: env.stateURL)
         try? FileManager.default.removeItem(at: env.dataRoot.appendingPathComponent("whatsapp-bridge"))
-        env.defaults.removePersistentDomain(forName: suiteName)
+        env.defaults.removePersistentDomain(forName: domainName)
         for key in [KeychainHelper.emailCalendarProviderKey, KeychainHelper.retiredGwsOAuthClientIDKey,
                     KeychainHelper.retiredGwsOAuthClientSecretKey, KeychainHelper.retiredWhatsappOwnerPhoneKey,
                     KeychainHelper.telegramBotTokenKey, KeychainHelper.telegramChatIdKey,
