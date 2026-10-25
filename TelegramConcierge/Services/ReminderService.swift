@@ -4,6 +4,11 @@ import CryptoKit
 import Crypto
 #endif
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 // MARK: - Reminder Service
 
@@ -68,8 +73,10 @@ actor ReminderService {
     }()
 
     private init() {
-        loadReminders()
+        // Notices first: a load problem queues a notice, which the notice
+        // load would otherwise overwrite.
         loadNotices()
+        loadReminders()
     }
 
     // MARK: - Public API
@@ -779,7 +786,13 @@ actor ReminderService {
         let scriptPaths = Set(reminders.compactMap { $0.scriptPath })
         let scriptedIds = reminders.filter { $0.isScripted }.map { $0.id }
         reminders.removeAll()
-        saveReminders()
+        // A full reset replaces whatever is on disk, readable or not (the
+        // user asked for everything gone): no reconcile, no merge. The wipe
+        // removes the recovery copies separately.
+        storeBaseline = []
+        clearStoreBlock()
+        discardDiskRowsUntilWritten = true
+        do { try writeRemindersFile() } catch { print("[ReminderService] Failed to save reminders: \(error)") }
         for path in scriptPaths where path.hasPrefix(scriptsDirectoryURL.path) {
             try? FileManager.default.removeItem(atPath: path)
         }
@@ -1000,7 +1013,11 @@ actor ReminderService {
     // MARK: - Persistence
 
     private static func sha256Hex(of text: String) -> String {
-        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+        sha256Hex(of: Data(text.utf8))
+    }
+
+    private static func sha256Hex(of data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func loadNotices() {
@@ -1015,34 +1032,266 @@ actor ReminderService {
             try? FileManager.default.removeItem(at: noticesFileURL)
             return
         }
-        if let data = try? JSONEncoder().encode(creationNotices) {
-            try? PrivateStorage.writeAtomically(data, to: noticesFileURL)
+        // Best effort (unchanged contract): a failed write keeps the notices
+        // in memory; it is logged now rather than swallowed.
+        do {
+            try PrivateStorage.writeAtomically(try JSONEncoder().encode(creationNotices), to: noticesFileURL)
+        } catch {
+            print("[ReminderService] Could not persist reminder notices (kept in memory): \(error)")
         }
     }
 
+    // MARK: - Store state (0.2.63, REMINDERS_LOAD_AND_ARG_HINT_PLAN §2.3)
+    //
+    // Invariant: Briglia never overwrites bytes of reminders.json it has not
+    // loaded or preserved. `storeBaseline` = ids memory took from (or last
+    // wrote to) disk, so a row deleted in memory is never resurrected by a
+    // later merge; `lastKnownDiskHash` detects edits made outside Briglia.
+
+    /// Why writes to reminders.json are refused right now (nil = allowed).
+    private var storeBlockReason: String?
+    private var blockNoticeQueued = false
+    private var storeBaseline: Set<UUID> = []
+    /// SHA-256 of the bytes last read or written; nil = unknown.
+    private var lastKnownDiskHash: String?
+    /// Set by the wipe until its `[]` write succeeds: a failed wipe write
+    /// must never let a later save merge the wiped rows back as "unseen".
+    private var discardDiskRowsUntilWritten = false
+
+    // Test seams (reminders-load selftest).
+    private var injectPreservationFailure = false
+    private var injectPreRenameFailure = false
+    private var reminderFileWrites = 0
+    func _testInjectPreservationFailure(_ enabled: Bool) { injectPreservationFailure = enabled }
+    func _testInjectPreRenameFailure(_ enabled: Bool) { injectPreRenameFailure = enabled }
+    /// The real writer's post-rename directory barrier fails (PrivateStorage seam).
+    func _testInjectPostRenameFailure(_ enabled: Bool) {
+        let target = remindersFileURL.standardizedFileURL.path
+        PrivateStorage.failPostRenameBarrierForTesting = enabled ? { $0 == target } : nil
+    }
+    func _testStoreBlockReason() -> String? { storeBlockReason }
+    func _testReminderFileWrites() -> Int { reminderFileWrites }
+    func _testAllReminders() -> [Reminder] { reminders }
+    func _testRemoveReminderRow(id: UUID) { reminders.removeAll { $0.id == id } }
+
+    /// Startup and Mind restore (`reloadFromDisk`): memory becomes the file's
+    /// valid rows; every bit of reconciliation state is reset first.
     private func loadReminders() {
-        guard FileManager.default.fileExists(atPath: remindersFileURL.path) else { return }
-        
-        do {
-            let data = try Data(contentsOf: remindersFileURL)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            reminders = try decoder.decode([Reminder].self, from: data)
-            // Reminders now reuse their row in place, so triggered rows are
-            // legacy artifacts of the old occurrence-per-row model — purge
-            // them once on load instead of carrying them forever.
-            let legacyTriggered = reminders.filter { $0.triggered }.count
-            if legacyTriggered > 0 {
-                reminders.removeAll { $0.triggered }
-                saveReminders()
-                print("[ReminderService] Purged \(legacyTriggered) legacy triggered reminder row(s)")
+        reminders = []
+        storeBaseline = []
+        storeBlockReason = nil
+        blockNoticeQueued = false
+        lastKnownDiskHash = nil
+        discardDiskRowsUntilWritten = false
+        let data: Data
+        switch ReminderStoreFile.read(remindersFileURL) {
+        case .absent:
+            print("[ReminderService] Loaded 0 reminders (no reminders.json)")
+            return
+        case .unreadable(let why):
+            blockStore("reminders.json could not be read: \(why)")
+            return
+        case .data(let bytes):
+            data = bytes
+        }
+        let valid: [Reminder]
+        var rejected: [Data] = []
+        var notAnArray = false
+        switch ReminderStoreFile.decode(data) {
+        case .notAnArray:
+            valid = []
+            notAnArray = true
+        case .entries(let rows, let bad):
+            valid = rows
+            rejected = bad
+        }
+        var rewrite = false
+        if notAnArray || !rejected.isEmpty {
+            guard let copies = preserveOriginal(data, rejected: rejected) else {
+                // Keep the valid rows working, but never rewrite a file whose
+                // contents were not set aside.
+                adoptLoaded(valid)
+                blockStore(notAnArray
+                    ? "reminders.json is not a valid reminder list and could not be backed up"
+                    : "\(Self.entries(rejected.count)) in reminders.json could not be read and the file could not be backed up")
+                return
             }
-            print("[ReminderService] Loaded \(reminders.count) reminders")
-        } catch {
-            print("[ReminderService] Failed to load reminders: \(error)")
+            rewrite = true
+            queueStoreNotice(notAnArray
+                ? "⚠️ reminders.json was not a valid reminder list, so no saved reminders could be loaded. The original file was saved unchanged on this machine as \(copies.original.path). Ask me to look at it if you need those reminders back."
+                : "⚠️ \(Self.entries(rejected.count)) in reminders.json could not be read. The original file was saved unchanged on this machine as \(copies.original.path)\(copies.rejected.map { "; the unreadable entr\(rejected.count == 1 ? "y is" : "ies are") also listed in \($0.path)" } ?? ""). The other \(valid.count) loaded normally. Ask me to look at it if you need it back.")
+        }
+        if adoptLoaded(valid) { rewrite = true }
+        lastKnownDiskHash = Self.sha256Hex(of: data)
+        if rewrite {
+            do { try writeRemindersFile() } catch { print("[ReminderService] Failed to save reminders: \(error)") }
+        }
+        print("[ReminderService] Loaded \(reminders.count) reminders")
+    }
+
+    /// Memory = `valid` minus legacy triggered rows (reminders now reuse their
+    /// row in place, so triggered rows are artifacts of the old
+    /// occurrence-per-row model); all their ids join the baseline. Returns
+    /// whether legacy rows were purged.
+    @discardableResult
+    private func adoptLoaded(_ valid: [Reminder]) -> Bool {
+        reminders = valid.filter { !$0.triggered }
+        storeBaseline = Set(valid.map { $0.id })
+        let purged = valid.count - reminders.count
+        if purged > 0 { print("[ReminderService] Purged \(purged) legacy triggered reminder row(s)") }
+        return purged > 0
+    }
+
+    /// Before every write (§2.3 commit step 1): when the store is blocked or
+    /// the file changed since Briglia last read/wrote it, read it, preserve
+    /// it, and merge its never-loaded rows into memory. Never writes
+    /// reminders.json itself. Throws (store blocked) when the file cannot be
+    /// read or preserved.
+    private func reconcileBeforeWrite() throws {
+        let data: Data
+        switch ReminderStoreFile.read(remindersFileURL) {
+        case .absent:
+            clearStoreBlock()
+            return
+        case .unreadable(let why):
+            blockStore("reminders.json could not be read: \(why)")
+            throw ScriptValidationError(message: "reminders.json was not saved: it could not be read (\(why)) — the change is kept in memory only")
+        case .data(let bytes):
+            data = bytes
+        }
+        let hash = Self.sha256Hex(of: data)
+        if storeBlockReason == nil, hash == lastKnownDiskHash { return }
+        if hash == (try? Self.encodeReminders(reminders)).map({ Self.sha256Hex(of: $0) }) {
+            // Disk already equals memory: nothing to preserve or merge.
+            lastKnownDiskHash = hash
+            clearStoreBlock()
+            return
+        }
+        if discardDiskRowsUntilWritten {
+            // A wipe whose `[]` write failed: the user asked for these rows to
+            // be gone — never copy or merge them back.
+            lastKnownDiskHash = hash
+            clearStoreBlock()
+            return
+        }
+        var diskValid: [Reminder] = []
+        var rejected: [Data] = []
+        var notAnArray = false
+        switch ReminderStoreFile.decode(data) {
+        case .notAnArray: notAnArray = true
+        case .entries(let rows, let bad): diskValid = rows; rejected = bad
+        }
+        guard let copies = preserveOriginal(data, rejected: rejected) else {
+            blockStore("reminders.json changed or could not be fully read, and could not be backed up")
+            throw ScriptValidationError(message: "reminders.json was not saved: its current contents could not be backed up first — the change is kept in memory only")
+        }
+        let inMemory = Set(reminders.map { $0.id })
+        let neverLoaded = diskValid.filter { !inMemory.contains($0.id) && !storeBaseline.contains($0.id) && !$0.triggered }
+        reminders.append(contentsOf: neverLoaded)
+        storeBaseline.formUnion(diskValid.map { $0.id })
+        storeBaseline.formUnion(reminders.map { $0.id })
+        lastKnownDiskHash = hash
+        let wasBlocked = storeBlockReason != nil
+        clearStoreBlock()
+        var detail = ""
+        if notAnArray {
+            detail = " It was not a valid reminder list."
+        } else if !rejected.isEmpty {
+            detail = " \(Self.entries(rejected.count)) in it could not be read\(copies.rejected.map { " (listed in \($0.path))" } ?? "")."
+        }
+        let merged = neverLoaded.isEmpty ? "" : " \(neverLoaded.count) reminder\(neverLoaded.count == 1 ? "" : "s") found in it \(neverLoaded.count == 1 ? "was" : "were") added to the current list."
+        queueStoreNotice(wasBlocked
+            ? "⚠️ reminders.json can be read again. Its contents were saved unchanged on this machine as \(copies.original.path) before Briglia wrote its own list.\(detail)\(merged)"
+            : "⚠️ reminders.json was changed outside Briglia. That version was saved unchanged on this machine as \(copies.original.path) before Briglia wrote its own list.\(detail)\(merged)")
+        print("[ReminderService] reminders.json reconciled before write (preserved at \(copies.original.path); \(neverLoaded.count) row(s) merged)")
+    }
+
+    private static func entries(_ count: Int) -> String {
+        count == 1 ? "1 reminder" : "\(count) reminders"
+    }
+
+    private func blockStore(_ reason: String) {
+        storeBlockReason = reason
+        print("[ReminderService] \(reason) — reminders.json is left untouched; changes are kept in memory only")
+        if !blockNoticeQueued {
+            blockNoticeQueued = true
+            queueStoreNotice("⚠️ \(reason). I left the file untouched; reminder changes are kept in memory only (lost on restart) until it can be read.")
         }
     }
-    
+
+    private func clearStoreBlock() {
+        storeBlockReason = nil
+        blockNoticeQueued = false
+    }
+
+    private func queueStoreNotice(_ text: String) {
+        creationNotices.append(text)
+        saveNotices()
+    }
+
+    /// Exact copy of the whole original file, created exclusively (never
+    /// replaces an earlier copy), plus a best-effort list of the rejected
+    /// entries (re-serialised, not byte-exact). nil when the exact copy could
+    /// not be made durably.
+    private func preserveOriginal(_ data: Data, rejected: [Data]) -> (original: URL, rejected: URL?)? {
+        if injectPreservationFailure {
+            print("[ReminderService] preservation failed: injected (test seam)")
+            return nil
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        let stamp = formatter.string(from: Date())
+        let folder = remindersFileURL.deletingLastPathComponent()
+        for _ in 0..<8 {
+            let suffix = UUID().uuidString.prefix(8).lowercased()
+            let original = folder.appendingPathComponent("reminders.recovered-\(stamp)-\(suffix).json")
+            do {
+                try PrivateStorage.writeExclusive(data, to: original)
+            } catch {
+                if FileManager.default.fileExists(atPath: original.path) || (error as? PrivateStorage.StorageError)?.description.contains("already exists") == true {
+                    continue
+                }
+                print("[ReminderService] preservation failed: \(error)")
+                return nil
+            }
+            var rejectedURL: URL? = nil
+            if !rejected.isEmpty {
+                var joined = Data("[\n".utf8)
+                for (i, raw) in rejected.enumerated() {
+                    if i > 0 { joined.append(Data(",\n".utf8)) }
+                    joined.append(raw)
+                }
+                joined.append(Data("\n]\n".utf8))
+                let url = folder.appendingPathComponent("reminders.rejected-\(stamp)-\(suffix).json")
+                if (try? PrivateStorage.writeExclusive(joined, to: url)) != nil { rejectedURL = url }
+            }
+            return (original, rejectedURL)
+        }
+        print("[ReminderService] preservation failed: no free recovery file name")
+        return nil
+    }
+
+    /// Recovery copies made by the per-entry loader (user data:
+    /// /deleteuserdata removes them). nil when the folder cannot be listed.
+    static func recoveryFileURLs(in folder: URL = StoragePaths.dataRoot) -> [URL]? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return nil }
+        return names.filter {
+            ($0.hasPrefix("reminders.recovered-") || $0.hasPrefix("reminders.rejected-")) && $0.hasSuffix(".json")
+        }.sorted().map { folder.appendingPathComponent($0) }
+    }
+
+    /// /deleteuserdata step 12: remove every recovery copy; failures (one per
+    /// file, or the listing itself) are returned for the wipe's report.
+    static func removeRecoveryFilesForWipe(in folder: URL) -> [String] {
+        guard let urls = recoveryFileURLs(in: folder) else {
+            return FileManager.default.fileExists(atPath: folder.path)
+                ? ["Could not list the data folder to remove reminder recovery copies"] : []
+        }
+        return urls.compactMap { UserDataWipe.remove($0.path, label: $0.lastPathComponent) }
+    }
+
     private func saveReminders() {
         do {
             try saveRemindersChecked()
@@ -1058,19 +1307,62 @@ actor ReminderService {
 
     /// Throwing save for callers that must not proceed on a silent write
     /// failure (quarantine approval — disk and memory may never disagree
-    /// about a quarantine).
+    /// about a quarantine). The ONLY path that writes reminders.json besides
+    /// the startup load's one rewrite and the wipe: reconcile (no write),
+    /// then exactly one atomic write.
     private func saveRemindersChecked() throws {
         if injectCheckedSaveFailure {
             throw ScriptValidationError(message: "injected write failure (test seam)")
         }
+        try reconcileBeforeWrite()
+        try writeRemindersFile()
+    }
+
+    private static func encodeReminders(_ rows: [Reminder]) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
         encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(reminders)
-        // Atomic: `briglia trigger` reads this file from a separate process
-        // to validate watcher ids — a torn in-place write would make it
-        // spuriously reject valid triggers (and a crash mid-write could
-        // corrupt the whole store).
-        try PrivateStorage.writeAtomically(data, to: remindersFileURL)
+        return try encoder.encode(rows)
+    }
+
+    private func writeRemindersFile() throws {
+        let attempted = reminders
+        let data = try Self.encodeReminders(attempted)
+        if injectPreRenameFailure {
+            // Test seam: a final-writer failure AFTER reconciliation/adoption,
+            // before anything is replaced.
+            storeBaseline.formUnion(attempted.map { $0.id })
+            throw ScriptValidationError(message: "injected failure before the rename (test seam)")
+        }
+        do {
+            // Atomic: `briglia trigger` reads this file from a separate process
+            // to validate watcher ids — a torn in-place write would make it
+            // spuriously reject valid triggers (and a crash mid-write could
+            // corrupt the whole store).
+            try PrivateStorage.writeAtomicallyPhased(data, to: remindersFileURL)
+        } catch let replaced as PrivateStorage.ReplacedButNotDurable {
+            // The rename happened (writer phase, not a re-read): the change IS
+            // in place, only its durability is unconfirmed. Callers see
+            // success, so nobody rolls back to a state disk no longer holds
+            // (Codex R2-1/R3-1); the warning is real.
+            committed(attempted, data: data)
+            print("[ReminderService] reminders.json was replaced but its durability could not be confirmed: \(replaced)")
+            queueStoreNotice("⚠️ Reminders were saved, but the disk could not confirm the write is durable (\(replaced.underlying)). If the machine loses power soon, the latest reminder change could be lost.")
+            return
+        } catch {
+            // Not replaced: disk still holds its previous bytes. Every id of
+            // this attempt is still treated as known from now on (a later
+            // merge must never call them unseen — Codex R2-2).
+            storeBaseline.formUnion(attempted.map { $0.id })
+            throw error
+        }
+        committed(attempted, data: data)
+    }
+
+    private func committed(_ attempted: [Reminder], data: Data) {
+        reminderFileWrites += 1
+        lastKnownDiskHash = Self.sha256Hex(of: data)
+        discardDiskRowsUntilWritten = false
+        storeBaseline = Set(attempted.map { $0.id })
     }
 }

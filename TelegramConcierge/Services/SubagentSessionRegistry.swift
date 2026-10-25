@@ -98,10 +98,9 @@ actor SubagentSessionRegistry {
     /// hydration prune must already know which sessions are protected.
     private static func hydratePinnedFromReminders() -> Set<String> {
         let url = StoragePaths.dataRoot.appendingPathComponent("reminders.json")
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let reminders = try? decoder.decode([Reminder].self, from: data) else { return [] }
+        // Per entry (0.2.63): one unreadable row must not unpin every
+        // watcher session before ReminderService has loaded.
+        guard let reminders = ReminderStoreFile.readValidEntries(at: url) else { return [] }
         return Set(reminders.compactMap { $0.triggered ? nil : $0.triageSessionId })
     }
 

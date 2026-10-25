@@ -711,6 +711,9 @@ extension ConversationManager {
                 failures.append(f)
             }
         }
+        // Recovery copies the per-entry reminder loader set aside (0.2.63):
+        // user data.
+        failures.append(contentsOf: ReminderService.removeRecoveryFilesForWipe(in: appFolder))
         // Session affinity (harness state, plan §5/§9): the file and every
         // quarantined sibling, deleted under affinity.lock with a checked
         // directory fsync; the next start mints a new salt and main ID.

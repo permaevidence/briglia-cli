@@ -32,10 +32,8 @@ struct Trigger: ParsableCommand {
         // or a deleted watcher fails HERE, at the caller, instead of being
         // silently dropped as an orphan by the daemon.
         let remindersURL = StoragePaths.dataRoot.appendingPathComponent("reminders.json")
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let data = try? Data(contentsOf: remindersURL),
-              let reminders = try? decoder.decode([Reminder].self, from: data),
+        // Per entry (0.2.63): one unreadable row must not hide valid watchers.
+        guard let reminders = ReminderStoreFile.readValidEntries(at: remindersURL),
               let watcher = reminders.first(where: { $0.id == uuid && !$0.triggered }) else {
             print("✖ no watcher with id \(uuid.uuidString) — list watchers inside Briglia (manage_reminders action='list').")
             throw ExitCode(1)
