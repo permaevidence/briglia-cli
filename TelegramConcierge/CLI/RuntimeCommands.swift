@@ -18,7 +18,7 @@ struct PythonExecCommand: ParsableCommand {
     @Argument(parsing: .captureForPassthrough) var arguments: [String] = []
 
     func run() throws {
-        switch PythonRuntime.execDecision() {
+        switch PythonRuntime.execDecisionLeased() {
         case .refuse(let why):
             FileHandle.standardError.write(Data("\(why)\n".utf8))
             throw ExitCode(1)

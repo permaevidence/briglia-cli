@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BIN = ROOT / ".build" / "debug" / "briglia"
 S = "TelegramConcierge/Services/"
+KC, ST = "TelegramConcierge/Utilities/KeychainHelper.swift", S + "RuntimeStatus.swift"
 ENG, RT, AM, REP, NODE, PY, BASH, MCP = (S + "PrivateRuntimeEngine.swift", S + "PrivateRuntime.swift", S + "AgentMailInstaller.swift",
                                          S + "AgentMailRepair.swift", S + "NodeRuntime.swift", S + "PythonRuntime.swift",
                                          S + "BashTools.swift", S + "MCPRegistry.swift")
@@ -39,14 +40,14 @@ MUTATIONS = [
      "            if sel.generation != generation || receipt.verified != snapshotVerified", "            if receipt.verified != snapshotVerified"),
     ("R7 a repair committing journal is re-probed instead of held off", "crash recovery (repair)", ENG,
      '            do {\n                if RuntimeFS.kind(RuntimePaths.current(c).path) != .absent { try RuntimeFS.remove(RuntimePaths.current(c)) }\n            } catch { return .unknown("\\(error)") }', ""),
-    ("R8 a corrupt selection file does not hold AgentMail", "legacy inspect-only", ENG,
-     "        if selectionCorrupted && spec.usesHold && st.hold == nil {", "        if false {"),
+    ("R8 a corrupt selection file does not hold AgentMail", "legacy inspect-only", RT,
+     "            if let pin = AgentMailService.runtimePin, agentMailHasPrivateTrace() {",
+     "            if false, let pin = AgentMailService.runtimePin, agentMailHasPrivateTrace() {"),
     ("E1 the per-use check ignores the hold", "exec validation", AM,
      "        if let hold { return .refuse(offMessage(holdText(hold))) }\n        guard let v = receipt?.verifiedRecord else {",
      "        guard let v = receipt?.verifiedRecord else {"),
     ("E2 the per-use check skips the binary hash", "exec validation", AM,
-     "RuntimeFS.validVersionRef(rec.directory) && RuntimeFS.sha256(file: URL(fileURLWithPath: binary(rec))) == rec.binarySHA256",
-     "RuntimeFS.validVersionRef(rec.directory)"),
+     "\n                && RuntimeFS.sha256(file: URL(fileURLWithPath: binary(rec))) == rec.binarySHA256", ""),
     ("E3 probe mode keeps the caller's key", "exec validation", AM,
      "return .run(binary: binary(j.newRecord), forcedKey: probePlaceholderKey)", "return .run(binary: binary(j.newRecord), forcedKey: nil)"),
     ("E4 probe mode allows any arguments", "exec validation", AM,
@@ -80,6 +81,25 @@ MUTATIONS = [
     ("B2 Briglia's bin after ~/.local/bin", "path contract", BASH,
      "        return ([brigliaBin, localBin] + missing + parts + [fallback]).joined(separator: \":\")",
      "        return ([localBin, brigliaBin] + missing + parts + [fallback]).joined(separator: \":\")"),
+    ("C1 containment not enforced", "containment", RT,
+     "        let root = RuntimePaths.dataRoot.standardizedFileURL.path\n        let path = url.standardizedFileURL.path\n",
+     "        if url.path.count >= 0 { return }\n        let root = RuntimePaths.dataRoot.standardizedFileURL.path\n        let path = url.standardizedFileURL.path\n"),
+    ("L1 live leases not kept by GC", "python", PY, "                keep.insert(l.directory)\n", "                _ = l\n"),
+    ("L2 GC right after the switch", "python", PY, "            if trigger == .auto {\n                var keep", "            if true {\n                var keep"),
+    ("I1 base identity left out of the pin", "python", PY, "-py\\(base.version)-\\(base.identity)", "-py3.\\(base.minor)"),
+    ("I2 base retarget ignored at use", "python", PY,
+     '        if URL(fileURLWithPath: base).resolvingSymlinksInPath().path != resolved { return "its base interpreter \\(base) now points elsewhere" }\n', ""),
+    ("T1 tree hash never compared", "python", PY, "        return have == want ? nil : \"the environment's files differ from what was built\"", "        return nil"),
+    ("A1 abandonment re-enters its own selection lock", "install, update", ENG,
+     '                try? RuntimeFS.removeTree(scratch)\n                var st = sel[c]; finishAttempt(&st, attempt.attemptId, result: "abandoned", onlyIfUnset: true); sel[c] = st\n                try RuntimeSelectionStore.save(sel)\n                return .abandoned("the installation changed meanwhile (wipe, import, provider change or another install)")',
+     '                return abandon(spec, attempt, scratch, "the installation changed meanwhile (wipe, import, provider change or another install)")'),
+    ("G1 provider change does not bump the generation", "install, update", KC,
+     "        providerChanged = before[emailCalendarProviderKey] != store[emailCalendarProviderKey]", "        providerChanged = false"),
+    ("S2 Node status from the cached version only", "node", ST,
+     "                  PrivateRuntimeEngine.validate(NodeRuntime.spec(pin: pin), vr) == nil else {", "                  true else {"),
+    ("Q1 wrapper path not shell-quoted", "path contract", RT,
+     """    static func shellQuote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\\\''") + "'" }""",
+     """    static func shellQuote(_ s: String) -> String { "'" + s + "'" }"""),
     ("Y1 briglia-python falls back to the shared python3", "python", PY,
      '            return .refuse("Briglia\'s Python environment is not set up yet — run `briglia python-env install` (or the toolchain button in `briglia menu`)")',
      '            return .run("/usr/bin/python3")'),
@@ -92,7 +112,7 @@ MUTATIONS = [
     ("S1 staged payloads keep tool-created group/other bits", "python", ENG,
      "            try RuntimeFS.restrictTree(payload)\n", ""),
     ("Y5 the per-exec venv check skips pyvenv.cfg", "python", PY,
-     '        guard RuntimeFS.sha256(file: dir.appendingPathComponent("env/pyvenv.cfg")) == v.binarySHA256,', "        guard true,"),
+     '              RuntimeFS.sha256(file: dir.appendingPathComponent("env/pyvenv.cfg")) == v.binarySHA256,', "              true,"),
 ]
 
 

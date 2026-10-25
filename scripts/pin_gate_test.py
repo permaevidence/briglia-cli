@@ -20,6 +20,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import security_watch_test as fake  # noqa: E402  (starts the local fake server)
+import security_watch as watch  # noqa: E402
 
 GATE = os.path.join(HERE, "pin_gate.py")
 NOW = "2026-10-25T12:00:00Z"
@@ -224,7 +225,49 @@ def cases(gate):
     clean_world()
     finding(["runtime:node"], [line("runtime:node", "node", "24.9.1")], kind="pin")
     rc, out = run(repo, "promoter", sha)
-    check("C2: open pin issue at the pinned version -> blocks", rc == 1 and "pin issue" in out, out[-300:])
+    check("C2: open pin issue without reason tokens -> blocks (unreadable, fail closed)", rc == 1 and "malformed reason tokens" in out, out[-300:])
+
+    # --- R6: rendered pin issues block per exact reason, each overridable on its own
+    node_pin = next(c for c in PINS if c["id"] == "runtime:node")
+
+    def pin_issue(reasons, body_edit=None):
+        doc = watch.pin_doc(node_pin, reasons, "v24.9.2", "2026-10-25")
+        body = body_edit(doc["body"]) if body_edit else doc["body"]
+        finding(doc["ids"], [], kind="pin", body=body)
+
+    clean_world()
+    pin_issue(["node-behind:v24.9.2"])
+    rc, out = run(repo, "promoter", sha)
+    check("C2 (R6): rendered pin issue, C1 clear -> blocker node-behind:v24.9.2 (not the grouping id)",
+          rc == 1 and "node-behind:v24.9.2" in out and "runtime:node runtime:node" not in out, out[-400:])
+    s_one = repo.commit(overrides=[ovr("runtime:node", "node-behind:v24.9.2")])
+    rc, out = run(repo, "promoter", s_one)
+    check("C2 (R6): the exact (runtime:node, node-behind:v24.9.2) override clears the open watch issue", rc == 0, out[-400:])
+    s_grp = repo.commit(overrides=[ovr("runtime:node", "GHSA-zzzz-zzzz-zzzz")])
+    rc, out = run(repo, "promoter", s_grp)
+    check("C2 (R6): an override for some other blocker does not clear it", rc == 1 and "node-behind:v24.9.2" in out, out[-400:])
+    clean_world()
+    fake.W.node.insert(0, {"version": "v24.9.2", "lts": "Krypton", "security": True})
+    fake.W.schedule["v24"]["end"] = "2026-10-25"
+    pin_issue(["node-behind:v24.9.2", "node-eol:24"])
+    rc, out = run(repo, "promoter", s_one)
+    check("C2 (R6): behind + EOL, only behind overridden -> still blocked by node-eol:24", rc == 1 and "node-eol:24" in out, out[-400:])
+    s_both = repo.commit(overrides=[ovr("runtime:node", "node-behind:v24.9.2"), ovr("runtime:node", "node-eol:24")])
+    rec2 = os.path.join(repo.dir, "..", os.path.basename(repo.dir) + "-record-r6.txt")
+    rc, out = run(repo, "promoter", s_both, record_out=rec2)
+    check("C2 (R6): behind + EOL, both overridden -> clear (C1 and C2)", rc == 0, out[-400:])
+    tag2 = os.path.join(repo.dir, "..", os.path.basename(repo.dir) + "-tag-r6.txt")
+    with open(tag2, "w") as f:
+        f.write("Briglia v9.9.9\n\n" + (open(rec2).read() if os.path.exists(rec2) else ""))
+    rc, out = run(repo, "signed", s_both, now="2026-10-25T13:00:00Z", tag_record=tag2)
+    check("C2 (R6): signed mode, same issue and overrides -> clear", rc == 0 and "OVERRIDE APPLIED" in out, out[-400:])
+    clean_world()
+    pin_issue(["node-behind:v24.9.2"], lambda b: b.replace("(blocker `node-behind:v24.9.2`)", "(blocker `node-behind:latest`)"))
+    rc, out = run(repo, "promoter", s_one)
+    check("C2 (R6): a malformed reason token -> blocks even with the override (fail closed)", rc == 1 and "malformed reason tokens" in out, out[-400:])
+    rc, out = run(repo, "signed", s_one, now="2026-10-25T13:00:00Z", tag_record=tag2)
+    check("C2 (R6): signed mode, malformed reason token -> refused", rc != 0, out[-300:])
+    sha = repo.commit()
     clean_world()
     fake.W.issues.append({"number": 2, "state": "open", "title": "h", "labels": [], "created_at": "2026-10-01T00:00:00Z",
                           "body": "x\n<!-- briglia-security-watch v1 kind=health ids=health fp=0000000000000000 -->"})
@@ -470,6 +513,10 @@ BREAKS = [
     ("signed mode skips the record", "            rec = parse_record(tag_text)\n            verify_record(rec, commit, blobs, now, overrides)", "            rec = None"),
     ("undisclosed override accepted", "        if undisclosed:", "        if False:"),
     ("withdrawn OSV records block", '            if rec.get("withdrawn"):\n                continue', '            if False:\n                continue'),
+    ("R6 pin reasons collapsed to the grouping id", "                    for r in reasons:\n                        out[cid].append({\"ids\": {r}",
+     "                    for r in reasons[:0] + [None]:\n                        out[cid].append({\"ids\": set(it[\"ids\"])"),
+    ("R6 malformed reason tokens accepted", "            if not m or not PIN_REASON_RE.match(m.group(1)) or m.group(1) in reasons:\n                return None",
+     "            if not m:\n                continue"),
     ("missing heartbeat accepted", '            general.append({"ids": {"watch-stale"}, "why": "the security watch heartbeat issue is missing"})', "            pass"),
 ]
 

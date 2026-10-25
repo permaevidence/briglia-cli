@@ -258,6 +258,12 @@ enum KeychainHelper {
     }
 
     private static func mutate(_ change: (inout [String: String]) throws -> Void, skipUnchanged: Bool, wrote: inout Bool) throws {
+        // An email-provider change bumps the private-runtime lifecycle
+        // generation (plan §7.8.1 step 10, review follow-up): an AgentMail
+        // install staged for the old choice is then abandoned at its commit.
+        // Registered first so it runs last, after both locks are released.
+        var providerChanged = false
+        defer { if providerChanged { RuntimeSelectionStore.bumpGeneration() } }
         lock.lock()
         defer { lock.unlock() }
         // Writes materialize the config root; reads never do (StoragePaths:
@@ -295,6 +301,7 @@ enum KeychainHelper {
         // taken still under flock, so it is ours.
         try writeLocked(store)
         wrote = true
+        providerChanged = before[emailCalendarProviderKey] != store[emailCalendarProviderKey]
     }
 
     private static func storeLocked() -> [String: String] {

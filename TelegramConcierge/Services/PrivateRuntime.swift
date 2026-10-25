@@ -191,7 +191,8 @@ final class RuntimeLock {
     private init(fd: Int32) { self.fd = fd }
 
     static func acquire(_ url: URL, timeout: TimeInterval = 30) throws -> RuntimeLock {
-        try PrivateStorage.ensureDirectory(url.deletingLastPathComponent())
+        try RuntimeFS.ensureDir(url.deletingLastPathComponent())
+        try RuntimeFS.contain(url)
         let fd = open(url.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else {
             throw RuntimeError("cannot open \(url.path): \(String(cString: strerror(errno))) (a symlink or non-regular file is refused)")
@@ -313,12 +314,56 @@ enum RuntimeFS {
     }
 
     static func writeJSON<T: Encodable>(_ value: T, _ url: URL) throws {
-        try PrivateStorage.ensureDirectory(url.deletingLastPathComponent())
-        try PrivateStorage.writeAtomically(try encoder.encode(value), to: url, mode: 0o600)
+        try write(try encoder.encode(value), to: url, mode: 0o600)
+    }
+
+    /// Resolved containment (plan §7.1, review R1): `url` must lie lexically
+    /// under the data root, and every existing entry between the data root
+    /// and `url` must be a real directory (never a symlink or other type),
+    /// so no write or execution is redirected out of Briglia's root. The data
+    /// root itself may be a symlink (a deliberately relocated root). The
+    /// final entry may be a symlink only where Briglia manages one (`current`,
+    /// shims), and is otherwise a directory, a regular file or absent.
+    static func contain(_ url: URL, finalMayBeSymlink: Bool = false) throws {
+        let root = RuntimePaths.dataRoot.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix(root + "/") else { throw RuntimeError("\(path) is outside Briglia's data root") }
+        let parts = path.dropFirst(root.count + 1).split(separator: "/").map(String.init)
+        guard !parts.isEmpty, !parts.contains(".."), !parts.contains(".") else { throw RuntimeError("\(path): unexpected path form") }
+        var cur = root
+        for (i, part) in parts.enumerated() {
+            cur += "/" + part
+            let k = kind(cur)
+            if k == .absent { return }   // nothing below exists yet
+            let last = i == parts.count - 1
+            if last {
+                switch k {
+                case .directory, .regular: return
+                case .symlink where finalMayBeSymlink: return
+                default: throw RuntimeError("\(cur) is a \(k) where Briglia expects its own file (refusing to follow it)")
+                }
+            }
+            guard k == .directory else { throw RuntimeError("\(cur) is a \(k), not a directory: refusing a redirect out of Briglia's data root") }
+        }
+    }
+
+    /// PrivateStorage.ensureDirectory with containment before and after.
+    static func ensureDir(_ url: URL) throws {
+        try contain(url)
+        try PrivateStorage.ensureDirectory(url)
+        try contain(url)
+    }
+
+    /// Contained atomic write (parent created owner-only).
+    static func write(_ data: Data, to url: URL, mode: mode_t) throws {
+        try ensureDir(url.deletingLastPathComponent())
+        try contain(url)
+        try PrivateStorage.writeAtomically(data, to: url, mode: mode)
     }
 
     /// Checked unlink + parent fsync; ENOENT is fine.
     static func remove(_ url: URL) throws {
+        try contain(url, finalMayBeSymlink: true)
         if unlink(url.path) != 0, errno != ENOENT {
             throw RuntimeError("could not remove \(url.lastPathComponent): \(String(cString: strerror(errno)))")
         }
@@ -328,6 +373,7 @@ enum RuntimeFS {
     /// The single switch: a fresh relative link renamed over `link`, then the
     /// parent directory fsynced (§7.8.1 "the single authority").
     static func switchLink(_ link: URL, to relativeTarget: String) throws {
+        try contain(link, finalMayBeSymlink: true)
         let dir = link.deletingLastPathComponent()
         let tmp = dir.appendingPathComponent(".\(link.lastPathComponent).tmp-\(UUID().uuidString)")
         guard symlink(relativeTarget, tmp.path) == 0 else {
@@ -340,6 +386,9 @@ enum RuntimeFS {
         }
         try PrivateStorage.fsyncDirectory(dir.path)
     }
+
+    /// POSIX single-quoted word (an apostrophe in a path becomes '\'').
+    static func shellQuote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
     static func readLink(_ url: URL) -> String? {
         guard kind(url.path) == .symlink else { return nil }
@@ -397,6 +446,7 @@ enum RuntimeFS {
 
     static func removeTree(_ url: URL) throws {
         guard kind(url.path) != .absent else { return }
+        try contain(url)
         try FileManager.default.removeItem(at: url)
         try PrivateStorage.fsyncDirectory(url.deletingLastPathComponent().path)
     }
@@ -413,13 +463,36 @@ enum RuntimeSelectionStore {
         do {
             return (try RuntimeFS.readJSON(RuntimeSelectionFile.self, RuntimePaths.selectionFile) ?? RuntimeSelectionFile(), false)
         } catch {
-            let q = RuntimePaths.runtimeRoot.appendingPathComponent("selected.json.corrupt-\(Int(Date().timeIntervalSince1970))")
-            if rename(RuntimePaths.selectionFile.path, q.path) != 0 {
+            // Review R2: the lost file may have held AgentMail's hold, and the
+            // component that reads first may not be AgentMail. So the
+            // replacement written here, in place, already carries the hold:
+            // whichever component saves next keeps it. Order: copy the bad
+            // bytes aside, then atomically replace the file (a crash between
+            // leaves the corrupt file in place → quarantined again).
+            let stamp = Int(Date().timeIntervalSince1970)
+            let q = RuntimePaths.runtimeRoot.appendingPathComponent("selected.json.corrupt-\(stamp)")
+            if let bad = try? Data(contentsOf: RuntimePaths.selectionFile) {
+                try RuntimeFS.write(bad, to: q, mode: 0o600)
+            } else if rename(RuntimePaths.selectionFile.path, q.path) != 0 {
                 throw RuntimeError("selected.json is unreadable and could not be set aside: \(error)")
             }
             try PrivateStorage.fsyncDirectory(RuntimePaths.runtimeRoot.path)
-            return (RuntimeSelectionFile(), true)
+            var fresh = RuntimeSelectionFile()
+            // Any in-flight transaction's generation snapshot no longer matches.
+            fresh.generation = stamp
+            if let pin = AgentMailService.runtimePin, agentMailHasPrivateTrace() {
+                fresh[.agentmail].hold = RuntimeHold(pin: pin, reason: "unknown", since: Date(), attemptId: nil)
+            }
+            try save(fresh)
+            RuntimeSeams.crash(.agentmail, "after-selection-quarantine")
+            return (fresh, true)
         }
+    }
+
+    /// Anything of Briglia's private AgentMail on disk (a hold only matters then).
+    private static func agentMailHasPrivateTrace() -> Bool {
+        [RuntimePaths.receipt(.agentmail), RuntimePaths.current(.agentmail), RuntimePaths.versions(.agentmail), RuntimePaths.journal(.agentmail)]
+            .contains { RuntimeFS.kind($0.path) != .absent }
     }
 
     static func save(_ file: RuntimeSelectionFile) throws {
@@ -444,6 +517,9 @@ enum RuntimeSelectionStore {
 
     /// /deleteuserdata, Mind import and a provider change bump it (§7.8.1 step 10).
     static func bumpGeneration() {
+        // No runtime state yet → nothing in flight to invalidate (and no
+        // files created just for a counter).
+        guard RuntimeFS.kind(RuntimePaths.runtimeRoot.path) == .directory else { return }
         _ = try? update { $0.generation += 1 }
     }
 }

@@ -75,8 +75,8 @@ enum NodeRuntime {
         let staging = payload.deletingLastPathComponent()
         let tarball = staging.appendingPathComponent("node.tar.gz")
         let extract = staging.appendingPathComponent("extract", isDirectory: true)
-        try PrivateStorage.writeAtomically(archive, to: tarball, mode: 0o600)
-        try PrivateStorage.ensureDirectory(extract)
+        try RuntimeFS.write(archive, to: tarball, mode: 0o600)
+        try RuntimeFS.ensureDir(extract)
         progress?("Installing Node.js \(pin.version) for Briglia…")
         let untar = await RuntimeProcess.run("/usr/bin/tar", ["-xzf", tarball.path, "-C", extract.path], timeout: 300)
         guard untar.status == 0 else { throw RuntimeError("extraction failed: \(RuntimeProcess.detail(untar))") }
@@ -232,6 +232,11 @@ enum NodeRuntime {
         guard let s = RuntimeSelectionStore.peek()?[.node].selection, ["private-exact", "shared-accepted"].contains(s.providerClass),
               let dir = s.path else { return nil }
         let node = dir + "/node"
+        if s.providerClass == "private-exact" {
+            // Briglia's own copy: must resolve inside its data root (review R1).
+            guard dir.hasPrefix(RuntimePaths.runtimeRoot.path + "/"),
+                  (try? RuntimeFS.contain(URL(fileURLWithPath: dir).deletingLastPathComponent(), finalMayBeSymlink: true)) != nil else { return nil }
+        }
         return FileManager.default.isExecutableFile(atPath: node) ? node : nil
     }
 
@@ -270,7 +275,7 @@ enum NodeRuntime {
     static let shimNames = ["node", "npm", "npx"]
 
     static func writeShims() throws {
-        try PrivateStorage.ensureDirectory(RuntimePaths.fallbackBinDir)
+        try RuntimeFS.ensureDir(RuntimePaths.fallbackBinDir)
         for name in shimNames {
             let link = RuntimePaths.fallbackBinDir.appendingPathComponent(name)
             let target = RuntimePaths.current(.node).appendingPathComponent("bin/\(name)").path

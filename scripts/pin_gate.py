@@ -272,6 +272,27 @@ def load_issues(args):
     return out
 
 
+PIN_REASON_LINE_RE = re.compile(r"^- (?:behind|end of life): .*\(blocker `([^`]*)`\)$")
+PIN_REASON_RE = re.compile(r"^(node-behind:v\d+\.\d+\.\d+|node-eol:\d+)$")
+
+
+def pin_reasons(body):
+    """The exact reason tokens of a rendered `pin` issue (review R6): every
+    reason line before the component section must carry one well-formed
+    token; none, a malformed one or a duplicate → None (fail closed)."""
+    head = body.split("Affected inventory components:", 1)
+    if len(head) != 2:
+        return None
+    reasons = []
+    for line in head[0].splitlines():
+        if line.startswith("- "):
+            m = PIN_REASON_LINE_RE.match(line)
+            if not m or not PIN_REASON_RE.match(m.group(1)) or m.group(1) in reasons:
+                return None
+            reasons.append(m.group(1))
+    return reasons or None
+
+
 def component_section(body, kind):
     """{id: version} from the strict component section (plan v24 R23-1), or
     None when the section violates the generated format in ANY way."""
@@ -333,10 +354,21 @@ def issue_blockers(pins, args, now):
             general.append({"ids": {f"watch-unreadable:#{it['number']}"},
                             "why": f"open security-watch {it['kind']} issue #{it['number']} has unreadable or conflicting component lines"})
             continue
+        if it["kind"] == "pin":
+            reasons = pin_reasons(it["body"])
+            if reasons is None:
+                general.append({"ids": {f"watch-unreadable:#{it['number']}"},
+                                "why": f"open security-watch pin issue #{it['number']} has missing or malformed reason tokens"})
+                continue
         for cid, version in parsed.items():
             comp = by_id.get(cid)
             if comp is not None and version == comp["version"]:
-                out[cid].append({"ids": set(it["ids"]), "why": f"open security-watch {it['kind']} issue #{it['number']} lists {cid} at {version}"})
+                if it["kind"] == "pin":
+                    # One blocker per exact reason, each overridable on its own.
+                    for r in reasons:
+                        out[cid].append({"ids": {r}, "why": f"open security-watch pin issue #{it['number']}: {cid} at {version} ({r})"})
+                else:
+                    out[cid].append({"ids": set(it["ids"]), "why": f"open security-watch {it['kind']} issue #{it['number']} lists {cid} at {version}"})
     if beat is None:
         if not beat_seen or not any("watch-stale" in g["ids"] for g in general):
             general.append({"ids": {"watch-stale"}, "why": "the security watch heartbeat issue is missing"})

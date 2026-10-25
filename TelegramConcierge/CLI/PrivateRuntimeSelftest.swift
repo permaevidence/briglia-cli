@@ -86,6 +86,9 @@ enum RuntimeSelftestOps {
             guard let pin = AgentMailService.runtimePin else { Foundation.exit(3) }
             let r = await PrivateRuntimeEngine.recover(AgentMailService.runtimeSpec(pin: pin))
             print("RESULT \(r)")
+        case "selection-update":
+            _ = try RuntimeSelectionStore.update { _ in }
+            print("RESULT updated")
         case "node-converge":
             guard let pin = NodeRuntime.runtimePin else { Foundation.exit(3) }
             let r = await PrivateRuntimeEngine.converge(NodeRuntime.spec(pin: pin), trigger: .explicit)
@@ -140,9 +143,76 @@ final class RuntimeHarness {
         await section("agentmail: crash recovery (ordinary)") { try await agentMailCrashes() }
         await section("agentmail: crash recovery (repair)") { try await agentMailRepairCrashes() }
         await section("agentmail: legacy inspect-only, wipe, corrupt state") { try await agentMailLegacy() }
+        await section("containment (no redirect out of the data root)") { try await containment() }
         await section("node: selection and private copy") { try await nodeSelection() }
         await section("python: private venv") { try await pythonEnv() }
         await section("path contract") { pathContract() }
+    }
+
+    // MARK: Containment (review R1)
+
+    func containment() async throws {
+        let a = try agentMailFixture("1.3.0")
+        func outsideDir() throws -> URL {
+            let o = scratch.appendingPathComponent("outside-\(UUID().uuidString.prefix(6))", isDirectory: true)
+            try fm.createDirectory(at: o, withIntermediateDirectories: true)
+            chmod(o.path, 0o755)
+            return o
+        }
+        func untouched(_ o: URL) -> Bool {
+            var st = stat()
+            return ((try? fm.contentsOfDirectory(atPath: o.path)) ?? ["?"]).isEmpty && lstat(o.path, &st) == 0 && st.st_mode & 0o777 == 0o755
+        }
+        // Component directory redirected out.
+        resetRuntime()
+        useAgentMail(a, version: "1.3.0")
+        var o = try outsideDir()
+        try fm.createDirectory(at: RuntimePaths.runtimeRoot, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: am.path, withDestinationPath: o.path)
+        let r1 = await PrivateRuntimeEngine.converge(amSpec(), trigger: .install)
+        check("runtime/agentmail → outside: nothing installed, the outside directory untouched (no lock, receipt, link or copy)",
+              { if case .converged = r1 { return false }; return true }() && untouched(o), "\(r1)")
+        check("…and the wrapper refuses", wrapper(["--version"], key: "k").status != 0)
+        // The runtime root redirected out.
+        resetRuntime()
+        o = try outsideDir()
+        try fm.createSymbolicLink(atPath: RuntimePaths.runtimeRoot.path, withDestinationPath: o.path)
+        let r2 = await PrivateRuntimeEngine.converge(amSpec(), trigger: .install)
+        check("runtime → outside: nothing installed, the outside directory untouched",
+              { if case .converged = r2 { return false }; return true }() && untouched(o), "\(r2)")
+        // A published version directory swapped for a link to an outside copy.
+        resetRuntime()
+        _ = await PrivateRuntimeEngine.converge(amSpec(), trigger: .install)
+        let rec = receipt(.agentmail)!.verifiedRecord!
+        let vdir = am.appendingPathComponent(rec.directory)
+        o = try outsideDir()
+        let copy = o.appendingPathComponent("copy")
+        try fm.copyItem(at: vdir, to: copy)
+        try fm.removeItem(at: vdir)
+        try fm.createSymbolicLink(atPath: vdir.path, withDestinationPath: copy.path)
+        let run = wrapper(["--version"], key: "k")
+        check("v/<name> → an outside copy with the same bytes: the wrapper refuses, never executes it", run.status != 0 && !run.stdout.contains("agentmail 1.3.0"), run.stdout)
+        let h = await PrivateRuntimeEngine.recover(amSpec())
+        check("…recovery does not report it ready", { if case .ready = h { return false }; return true }(), "\(h)")
+        // Briglia's bin directory redirected out: the wrapper is not written there.
+        resetRuntime()
+        o = try outsideDir()
+        try fm.createSymbolicLink(atPath: RuntimePaths.binDir.path, withDestinationPath: o.path)
+        check("bin → outside: writing the wrapper refuses, outside untouched", (try? AgentMailService.ensureWrapper()) == nil && untouched(o))
+        try? fm.removeItem(at: RuntimePaths.binDir)
+        // A deliberately relocated data root (the root itself a link) still works.
+        // (Run in a subprocess: the post-publication probe resolves the data
+        // root from the environment, like the real daemon.)
+        resetRuntime()
+        let xdg = scratch.appendingPathComponent("xdg-\(UUID().uuidString.prefix(6))", isDirectory: true)
+        let realRoot = scratch.appendingPathComponent("relocated-\(UUID().uuidString.prefix(6))", isDirectory: true)
+        try fm.createDirectory(at: xdg, withIntermediateDirectories: true)
+        try fm.createDirectory(at: realRoot, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(atPath: xdg.appendingPathComponent("briglia").path, withDestinationPath: realRoot.path)
+        let r3 = subprocess("agentmail-converge", extraEnv: ["XDG_DATA_HOME": xdg.path])
+        check("a relocated data root (the root itself a symlink) installs normally",
+              r3.stdout.contains("RESULT converged") && RuntimeFS.kind(realRoot.appendingPathComponent("runtime/agentmail/current").path) == .symlink, r3.stdout + r3.stderr)
+        resetRuntime()
     }
 
     // MARK: Shared helpers
@@ -198,8 +268,9 @@ final class RuntimeHarness {
         return RuntimeProcess.runBlocking(AgentMailService.wrapperURL.path, args, env: env, cwd: nil, timeout: 30)
     }
 
-    func subprocess(_ op: String, crash: String? = nil) -> RuntimeProcess.Result {
+    func subprocess(_ op: String, crash: String? = nil, extraEnv: [String: String] = [:]) -> RuntimeProcess.Result {
         var env = ProcessInfo.processInfo.environment
+        for (k, v) in extraEnv { env[k] = v }
         if let crash { env["BRIGLIA_RUNTIME_CRASH"] = crash } else { env.removeValue(forKey: "BRIGLIA_RUNTIME_CRASH") }
         let me = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).path
         return RuntimeProcess.runBlocking(me, ["__private-runtime-selftest", "--op", op], env: env, cwd: nil, timeout: 120)
@@ -267,10 +338,25 @@ final class RuntimeHarness {
         let e = try agentMailFixture("1.3.0")
         useAgentMail(e, version: "1.3.0")
         let gate = RuntimeIdleGate(acquire: { RuntimeSelectionStore.bumpGeneration(); return true }, release: {}, stillWanted: { true })
+        let t8 = Date()
         let r8 = await PrivateRuntimeEngine.converge(amSpec(), trigger: .install, idle: gate)
+        let elapsed8 = Date().timeIntervalSince(t8)
         check("wipe/import/provider change (generation bump) before the commit → abandoned, nothing published",
               { if case .abandoned = r8 { return true }; return false }() && current(.agentmail) == nil
               && ((try? fm.contentsOfDirectory(atPath: RuntimePaths.versions(.agentmail).path)) ?? []).isEmpty, "\(r8)")
+        let last8 = sel()[.agentmail].attempts.last
+        check("…the abandonment is persisted (result + finish time) and returns promptly (< 10 s, never the 30 s self-lock wait)",
+              last8?.result == "abandoned" && last8?.finishedAt != nil && elapsed8 < 10, "\(String(describing: last8)) \(elapsed8)s")
+        // A real provider transition (the settings store, not a synthetic bump).
+        resetRuntime()
+        try fm.createDirectory(at: RuntimePaths.runtimeRoot, withIntermediateDirectories: true)
+        try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: EmailCalendarProvider.agentmail.rawValue)
+        let gateP = RuntimeIdleGate(acquire: { (try? KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey, value: EmailCalendarProvider.none.rawValue)) != nil },
+                                    release: {}, stillWanted: { true })
+        let rP = await PrivateRuntimeEngine.converge(amSpec(), trigger: .install, idle: gateP)
+        check("a real email-provider change (settings store) during staging bumps the generation → abandoned, nothing published",
+              { if case .abandoned = rP { return true }; return false }() && current(.agentmail) == nil, "\(rP)")
+        try? KeychainHelper.delete(key: KeychainHelper.emailCalendarProviderKey)
         let gate2 = RuntimeIdleGate(acquire: { true }, release: {}, stillWanted: { false })
         let r9 = await PrivateRuntimeEngine.converge(amSpec(), trigger: .install, idle: gate2)
         check("provider no longer AgentMail at commit → abandoned", { if case .abandoned = r9 { return true }; return false }(), "\(r9)")
@@ -495,6 +581,34 @@ final class RuntimeHarness {
         let set = ((try? fm.contentsOfDirectory(atPath: RuntimePaths.runtimeRoot.path)) ?? []).filter { $0.hasPrefix("selected.json.corrupt-") }
         check("corrupt selected.json → set aside (kept), AgentMail held until a repair (its hold may have been lost)",
               !set.isEmpty && { if case .held = h { return true }; return false }(), "\(h) \(set)")
+        // R2: whichever component reads the corrupt file first, AgentMail's
+        // hold survives (settled failed repair: hold, no current link).
+        for first in ["node", "generic update", "crash right after the quarantine"] {
+            resetRuntime()
+            useAgentMail(a, version: "1.3.0")
+            _ = await PrivateRuntimeEngine.converge(amSpec(), trigger: .install)
+            try RuntimeFS.remove(RuntimePaths.current(.agentmail))
+            _ = try RuntimeSelectionStore.update { $0[.agentmail].hold = RuntimeHold(pin: amSpec().pin, reason: "repair-interrupted", since: Date(), attemptId: nil) }
+            try "{not json".write(to: RuntimePaths.selectionFile, atomically: true, encoding: .utf8)
+            switch first {
+            case "node":
+                setenv("BRIGLIA_NODE_TEST_ARCHIVE", scratch.appendingPathComponent("no-such-node.tar.gz").path, 1)
+                setenv("BRIGLIA_NODE_TEST_SHA256", String(repeating: "2", count: 64), 1)
+                setenv("BRIGLIA_NODE_TEST_VERSION", "24.22.1", 1)
+                if let np = NodeRuntime.runtimePin { _ = await PrivateRuntimeEngine.converge(NodeRuntime.spec(pin: np), trigger: .explicit) }
+                unsetenv("BRIGLIA_NODE_TEST_ARCHIVE"); unsetenv("BRIGLIA_NODE_TEST_SHA256"); unsetenv("BRIGLIA_NODE_TEST_VERSION")
+            case "generic update":
+                _ = try RuntimeSelectionStore.update { _ in }
+            default:
+                _ = subprocess("selection-update", crash: "agentmail:after-selection-quarantine")
+            }
+            for restart in 1...2 {
+                let rh = await PrivateRuntimeEngine.recover(amSpec())
+                let run = wrapper(["--version"], key: "placeholder")
+                check("R2: \(first) reads the corrupt selection first → restart \(restart): AgentMail still held, no old copy restored",
+                      { if case .held = rh { return true }; return false }() && current(.agentmail) == nil && run.status != 0, "\(rh) \(run.status)")
+            }
+        }
     }
 
     // MARK: Node
@@ -553,6 +667,15 @@ final class RuntimeHarness {
               RuntimeFS.readLink(RuntimePaths.fallbackBinDir.appendingPathComponent("node")) == RuntimePaths.current(.node).appendingPathComponent("bin/node").path)
         let wideNode = widePaths(RuntimePaths.versions(.node))
         check("the private Node tree is owner-only (private storage)", wideNode.isEmpty, wideNode.prefix(5).joined(separator: ", "))
+        check("status: the validated private copy reads pinned", RuntimeStatus.node()?.state == .pinned, "\(String(describing: RuntimeStatus.node()))")
+        if let vr = receipt(.node)?.verifiedRecord {
+            let bin = RuntimePaths.dir(.node).appendingPathComponent(vr.directory).appendingPathComponent(NodeRuntime.spec(pin: NodeRuntime.runtimePin!).binaryRelPath)
+            let saved = try Data(contentsOf: bin)
+            try Data("#!/bin/sh\necho damaged\n".utf8).write(to: bin)
+            check("status: a damaged private copy is not reported pinned (receipt checked, not the cached version)",
+                  RuntimeStatus.node()?.state == .unknownState, "\(String(describing: RuntimeStatus.node()))")
+            try saved.write(to: bin)
+        }
         let noNpm = try sharedNode("30.0.0", npm: false)
         setenv("BRIGLIA_NODE_TEST_SHARED_DIRS", noNpm, 1)
         let r3 = await NodeRuntime.select()
@@ -683,6 +806,46 @@ final class RuntimeHarness {
         let s3 = await PythonRuntime.converge(trigger: .auto)
         check("new lock → rebuilt into a new directory, the old one kept until GC", { if case .ready = s3 { return true }; return false }()
               && receipt(.python)?.verified != dir1, "\(s3)")
+        // R3: the tree just replaced survives this start; a tree a running
+        // briglia-python uses survives every collection while it lives.
+        let dir2 = receipt(.python)?.verified
+        check("R3: the replaced tree survives the start that replaced it",
+              dir1.map { RuntimeFS.kind(RuntimePaths.dir(.python).appendingPathComponent($0).path) == .directory } == true)
+        let go = scratch.appendingPathComponent("python-go-\(UUID().uuidString.prefix(6))")
+        let live = Process()
+        live.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])
+        live.arguments = ["__python-exec", "-u", "-c",
+                          "import sys,time,pathlib,os\nwhile not os.path.exists(sys.argv[1]): time.sleep(0.2)\nimport brigliaprobe\nprint('LIVE', brigliaprobe.VERSION, pathlib.Path(sys.prefix,'pyvenv.cfg').exists(), flush=True)",
+                          go.path]
+        let liveOut = Pipe(); live.standardOutput = liveOut; live.standardError = FileHandle.nullDevice
+        try live.run()
+        var leased = false
+        for _ in 0..<100 where !leased {
+            leased = !((try? fm.contentsOfDirectory(atPath: PythonRuntime.leaseDir.path)) ?? []).isEmpty
+            if !leased { usleep(100_000) }
+        }
+        check("R3: a running briglia-python holds a lease (pid + start time)", leased)
+        let h3 = wheel("3.0")
+        setenv("BRIGLIA_PYTHON_TEST_LOCK", try lock("3.0", h3).path, 1)
+        let s3b = await PythonRuntime.converge(trigger: .install)
+        check("R3: an explicit install collects nothing (the older tree is still there)",
+              dir1.map { RuntimeFS.kind(RuntimePaths.dir(.python).appendingPathComponent($0).path) == .directory } == true)
+        let s3c = await PythonRuntime.converge(trigger: .auto)   // a later start: collects
+        let d2alive = dir2.map { RuntimeFS.kind(RuntimePaths.dir(.python).appendingPathComponent($0).path) == .directory } ?? false
+        let d1gone = dir1.map { RuntimeFS.kind(RuntimePaths.dir(.python).appendingPathComponent($0).path) == .absent } ?? false
+        check("R3: install of a new lock while it runs, then a later start → its tree kept, an unused old tree collected",
+              { if case .ready = s3b { return true }; return false }() && { if case .ready = s3c { return true }; return false }() && d2alive && d1gone,
+              "\(s3b) \(s3c) d2=\(d2alive) d1gone=\(d1gone)")
+        try Data().write(to: go)
+        for _ in 0..<300 where live.isRunning { usleep(100_000) }   // (waitUntilExit can miss the exit inside async code)
+        let liveText = String(decoding: liveOut.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        check("R3: the live process still imports its package and finds its own venv files", liveText.contains("LIVE 2.0 True"), liveText)
+        _ = await PythonRuntime.converge(trigger: .auto)
+        check("R3: after it exits, the next start collects that tree and its stale lease",
+              dir2.map { RuntimeFS.kind(RuntimePaths.dir(.python).appendingPathComponent($0).path) == .absent } == true
+              && ((try? fm.contentsOfDirectory(atPath: PythonRuntime.leaseDir.path)) ?? []).isEmpty)
+        setenv("BRIGLIA_PYTHON_TEST_LOCK", try lock("2.0", h2).path, 1)
+        _ = await PythonRuntime.converge(trigger: .install)
         // A lock whose hash does not match the wheel → pip refuses; previous venv stays.
         setenv("BRIGLIA_PYTHON_TEST_LOCK", try lock("2.0", String(repeating: "a", count: 64)).path, 1)
         let goodDir = receipt(.python)?.verified
@@ -714,6 +877,48 @@ final class RuntimeHarness {
         let s5 = await PythonRuntime.converge(trigger: .install)
         check("no python ≥ the minimum → unavailable with the install hint", { if case .unavailable(let w) = s5 { return w.contains("install Python") }; return false }(), "\(s5)")
         setenv("BRIGLIA_PYTHON_MIN_MINOR", "8", 1)
+        // R4: the base interpreter's identity is recorded and enforced.
+        let baseDir = scratch.appendingPathComponent("pybase-\(UUID().uuidString.prefix(6))", isDirectory: true)
+        try fm.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        let baseLink = baseDir.appendingPathComponent("python3")
+        try fm.createSymbolicLink(atPath: baseLink.path, withDestinationPath: found.path)
+        setenv("BRIGLIA_PYTHON_TEST_BASE_DIRS", baseDir.path, 1)
+        resetRuntime()   // a fresh build through the scratch base path
+        let r4a = await PythonRuntime.converge(trigger: .install)
+        let r4rec = receipt(.python)?.verifiedRecord
+        check("R4: the record carries the resolved base interpreter, its full version and a file-tree hash",
+              { if case .ready = r4a { return true }; return false }() && r4rec?.extra?["baseResolved"] == URL(fileURLWithPath: found.path).resolvingSymlinksInPath().path
+              && r4rec?.extra?["baseVersion"] == found.version && r4rec?.extra?["treeSHA256"]?.count == 64, "\(r4a) \(String(describing: r4rec?.extra))")
+        // Same path, other interpreter → refused at use and in status.
+        let other = baseDir.appendingPathComponent("other-python")
+        try "#!/bin/sh\nexec '\(found.path)' \"$@\"\n".write(to: other, atomically: true, encoding: .utf8)
+        chmod(other.path, 0o755)
+        try fm.removeItem(at: baseLink)
+        try fm.createSymbolicLink(atPath: baseLink.path, withDestinationPath: other.path)
+        check("R4: base path retargeted → briglia-python refuses", { if case .refuse(let w) = PythonRuntime.execDecision() { return w.contains("does not match") }; return false }())
+        check("R4: …and status is not 'pinned'", RuntimeStatus.python()?.state != .pinned, "\(String(describing: RuntimeStatus.python()))")
+        // Same path, same minor, new patch version → startup rebuilds (no fast path).
+        // First rebuild through the retargeted path so only the version differs next.
+        _ = await PythonRuntime.converge(trigger: .install)
+        let r4dirB = receipt(.python)?.verified
+        let minor = found.version.split(separator: ".")[1]
+        try "#!/bin/sh\ncase \"$*\" in *'import sys, venv, ensurepip'*) echo 3.\(minor).99; exit 0;; esac\nexec '\(found.path)' \"$@\"\n".write(to: other, atomically: true, encoding: .utf8)
+        let r4b = await PythonRuntime.converge(trigger: .auto)
+        check("R4: same path and minor, new patch version → rebuilt at startup into a new directory",
+              { if case .ready = r4b { return true }; return false }() && receipt(.python)?.verified != r4dirB && r4dirB != nil
+              && receipt(.python)?.verifiedRecord?.extra?["baseVersion"] == "3.\(minor).99", "\(r4b)")
+        // Removed base → refused.
+        try fm.removeItem(at: baseLink)
+        check("R4: base removed → briglia-python refuses", { if case .refuse = PythonRuntime.execDecision() { return true }; return false }())
+        check("R4: doctor's tree check names the built files", PythonRuntime.doctorTreeLine()?.ok == true)
+        if let v = receipt(.python)?.verified {
+            let extraFile = RuntimePaths.dir(.python).appendingPathComponent(v).appendingPathComponent("env/lib/injected.py")
+            try "x = 1\n".write(to: extraFile, atomically: true, encoding: .utf8)
+            check("R4: an added file in the environment → doctor's tree check fails", PythonRuntime.doctorTreeLine()?.ok == false)
+            try fm.removeItem(at: extraFile)
+        }
+        setenv("BRIGLIA_PYTHON_TEST_BASE_DIRS", base, 1)
+        _ = await PythonRuntime.converge(trigger: .install)
         // Damaged pyvenv.cfg → refuse.
         if let v = receipt(.python)?.verified {
             let cfg = RuntimePaths.dir(.python).appendingPathComponent(v).appendingPathComponent("env/pyvenv.cfg")
@@ -726,6 +931,19 @@ final class RuntimeHarness {
     // MARK: PATH contract
 
     func pathContract() {
+        // Wrappers embed the running briglia path shell-quoted (a path with an apostrophe still works).
+        let odd = scratch.appendingPathComponent("it's here", isDirectory: true)
+        try? fm.createDirectory(at: odd, withIntermediateDirectories: true)
+        let fake = odd.appendingPathComponent("briglia")
+        try? "#!/bin/sh\necho \"ARGS $*\"\n".write(to: fake, atomically: true, encoding: .utf8)
+        chmod(fake.path, 0o755)
+        for (label, script) in [("agentmail", AgentMailService.wrapperScript(brigliaPath: fake.path)), ("briglia-python", PythonRuntime.wrapperScript(brigliaPath: fake.path))] {
+            let w = odd.appendingPathComponent("w-\(label)")
+            try? script.write(to: w, atomically: true, encoding: .utf8)
+            chmod(w.path, 0o700)
+            let r = RuntimeProcess.runBlocking(w.path, ["x"], env: ["PATH": "/usr/bin:/bin"], cwd: nil, timeout: 10)
+            check("\(label) wrapper: a briglia path containing an apostrophe is quoted correctly", r.status == 0 && r.stdout.contains("ARGS __") && r.stdout.contains(" x"), r.stdout + r.stderr)
+        }
         let p = BashTools.augmentedPath("/opt/homebrew/bin:\(home)/.local/bin:/usr/bin")
         let parts = p.split(separator: ":").map(String.init)
         check("agent PATH: Briglia's own bin first, ahead of ~/.local/bin", parts.first == RuntimePaths.binDir.path

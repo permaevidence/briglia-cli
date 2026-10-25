@@ -88,7 +88,7 @@ enum AgentMailRepair {
         let payload = staging.appendingPathComponent("payload", isDirectory: true)
         let identity: String
         do {
-            try PrivateStorage.ensureDirectory(staging)
+            try RuntimeFS.ensureDir(staging)
             _ = try await spec.stage(payload, progress)
             try RuntimeFS.restrictTree(payload)
             guard let h = RuntimeFS.sha256(file: payload.appendingPathComponent(spec.binaryRelPath)) else {
@@ -137,7 +137,7 @@ enum AgentMailRepair {
             }
             // (p1a) the new destination (never an existing path).
             guard let dest = PrivateRuntimeEngine.freshDirectoryName(spec) else { throw RuntimeError("no free version directory name") }
-            try PrivateStorage.ensureDirectory(RuntimePaths.versions(c))
+            try RuntimeFS.ensureDir(RuntimePaths.versions(c))
             guard rename(payload.path, RuntimePaths.dir(c).appendingPathComponent(dest).path) == 0 else {
                 throw RuntimeError("could not publish \(dest): \(String(cString: strerror(errno)))")
             }
@@ -153,10 +153,10 @@ enum AgentMailRepair {
             // (p2) retire an existing journal by copy.
             var retired: String?
             if let jb = journalBytes {
-                try PrivateStorage.ensureDirectory(RuntimePaths.retired(c))
+                try RuntimeFS.ensureDir(RuntimePaths.retired(c))
                 let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
                 let name = "tx-\(stamp)-\(attempt.attemptId.prefix(12)).json"
-                try PrivateStorage.writeAtomically(jb, to: RuntimePaths.retired(c).appendingPathComponent(name), mode: 0o600)
+                try RuntimeFS.write(jb, to: RuntimePaths.retired(c).appendingPathComponent(name), mode: 0o600)
                 retired = "retired/\(name)"
                 pruneRetired()
             }

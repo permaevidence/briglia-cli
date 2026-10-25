@@ -33,7 +33,15 @@ enum PythonRuntime {
 
     // MARK: Base interpreter (user-owned)
 
-    struct Base: Equatable { let path: String; let minor: Int; let version: String }
+    struct Base: Equatable {
+        let path: String; let minor: Int; let version: String
+        /// The interpreter the path resolves to (whole symlink chain).
+        var resolved: String { URL(fileURLWithPath: path).resolvingSymlinksInPath().path }
+        /// Identity bound into the pin (review R4): a different resolved
+        /// interpreter or version — patch included — is a different pin, so
+        /// startup rebuilds instead of taking the "up to date" fast path.
+        var identity: String { String(RuntimeFS.sha256(Data("\(resolved)\u{0}\(version)".utf8)).prefix(10)) }
+    }
 
     static var effectiveMinimumMinor: Int { RuntimeSeams.env("BRIGLIA_PYTHON_MIN_MINOR").flatMap(Int.init) ?? minimumMinor }
 
@@ -88,7 +96,7 @@ enum PythonRuntime {
 
     static func pin(base: Base) -> RuntimePin? {
         guard let sha = lockSHA256 else { return nil }
-        return RuntimePin(triple: "\(NodeRuntime.platform)-py3.\(base.minor)", version: String(sha.prefix(12)), archiveSHA256: sha)
+        return RuntimePin(triple: "\(NodeRuntime.platform)-py\(base.version)-\(base.identity)", version: String(sha.prefix(12)), archiveSHA256: sha)
     }
 
     static func spec(base: Base, pin: RuntimePin) -> RuntimeSpec {
@@ -96,23 +104,37 @@ enum PythonRuntime {
             component: .python, pin: pin, binaryRelPath: "env/pyvenv.cfg", usesHold: false,
             directoryName: { p in "\(p.version)-py3.\(base.minor)" },
             stage: { payload, progress in try await build(base: base, payload: payload, progress: progress) },
-            postProbe: { _ in await probe(python: RuntimePaths.current(.python).appendingPathComponent("env/bin/python").path) },
+            postProbe: { j in
+                if let why = await probe(python: RuntimePaths.current(.python).appendingPathComponent("env/bin/python").path) { return why }
+                return verifyTree(j.newRecord, RuntimePaths.dir(.python).appendingPathComponent(j.newTarget, isDirectory: true))
+            },
             validateExtra: { record, dir in validateExtra(record, dir) },
             stagesInPlace: true)
     }
 
+    /// Use/status check (cheap, no process): the recorded base interpreter
+    /// still resolves to the same file, and so does the venv's interpreter
+    /// chain (review R4). A changed version under the same path is caught at
+    /// startup by the pin identity.
     static func validateExtra(_ record: RuntimeRecord, _ dir: URL) -> String? {
-        let link = RuntimeFS.readLink(dir.appendingPathComponent("env/bin/python"))
+        let py = dir.appendingPathComponent("env/bin/python")
+        let link = RuntimeFS.readLink(py)
         if let want = record.extra?["pythonLink"], link != want { return "env/bin/python changed" }
-        if let base = record.extra?["base"], !FileManager.default.isExecutableFile(atPath: base) {
-            return "its base interpreter \(base) is gone"
+        guard let base = record.extra?["base"], FileManager.default.isExecutableFile(atPath: base) else {
+            return "its base interpreter \(record.extra?["base"] ?? "?") is gone"
         }
+        guard let resolved = record.extra?["baseResolved"], let interp = record.extra?["interpreterResolved"] else {
+            return "the record lacks the base interpreter identity (built by an older Briglia)"
+        }
+        if URL(fileURLWithPath: base).resolvingSymlinksInPath().path != resolved { return "its base interpreter \(base) now points elsewhere" }
+        if py.resolvingSymlinksInPath().path != interp { return "the environment's interpreter now points elsewhere" }
+        guard FileManager.default.isExecutableFile(atPath: interp) else { return "the environment's interpreter \(interp) is gone" }
         return nil
     }
 
     static func build(base: Base, payload: URL, progress: (@Sendable (String) -> Void)?) async throws -> [String: String]? {
         guard let lock = lockURL else { throw RuntimeError("the Python lock is missing from the resource bundle") }
-        try PrivateStorage.ensureDirectory(payload)
+        try RuntimeFS.ensureDir(payload)
         let env = payload.appendingPathComponent("env", isDirectory: true)
         progress?("Creating Briglia's Python environment (Python \(base.version))…")
         let clean = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(), "PIP_DISABLE_PIP_VERSION_CHECK": "1",
@@ -127,8 +149,11 @@ enum PythonRuntime {
         let inst = await RuntimeProcess.run(py, args, env: clean, timeout: 3600)
         guard inst.status == 0 else { throw RuntimeError("pip refused the pinned packages: \(RuntimeProcess.detail(inst))") }
         if let why = await probe(python: py, lock: lock) { throw RuntimeError(why) }
-        var extra: [String: String] = ["base": base.path, "baseVersion": base.version]
+        var extra: [String: String] = ["base": base.path, "baseVersion": base.version, "baseResolved": base.resolved,
+                                       "interpreterResolved": env.appendingPathComponent("bin/python").resolvingSymlinksInPath().path]
         if let link = RuntimeFS.readLink(env.appendingPathComponent("bin/python")) { extra["pythonLink"] = link }
+        guard let tree = treeSHA256(env) else { throw RuntimeError("could not hash the built environment") }
+        extra["treeSHA256"] = tree
         return extra
     }
 
@@ -194,18 +219,18 @@ enum PythonRuntime {
     // MARK: Consumers
 
     static func wrapperScript(brigliaPath: String) -> String {
-        "#!/bin/sh\n# Installed by Briglia CLI: Briglia's private Python environment (never the shared python3).\nexec '\(brigliaPath)' __python-exec \"$@\"\n"
+        "#!/bin/sh\n# Installed by Briglia CLI: Briglia's private Python environment (never the shared python3).\nexec \(RuntimeFS.shellQuote(brigliaPath)) __python-exec \"$@\"\n"
     }
 
     static func ensureWrapper() throws {
         let bytes = Data(wrapperScript(brigliaPath: AgentMailService.brigliaPath()).utf8)
         if (try? Data(contentsOf: wrapperURL)) == bytes, FileManager.default.isExecutableFile(atPath: wrapperURL.path) { return }
-        try PrivateStorage.ensureDirectory(RuntimePaths.binDir)
+        try RuntimeFS.ensureDir(RuntimePaths.binDir)
         switch RuntimeFS.kind(wrapperURL.path) {
         case .absent, .regular: break
         default: throw RuntimeError("\(wrapperURL.path) exists and is not a regular file — refusing")
         }
-        try PrivateStorage.writeAtomically(bytes, to: wrapperURL, mode: 0o700)
+        try RuntimeFS.write(bytes, to: wrapperURL, mode: 0o700)
     }
 
     enum ExecDecision: Equatable { case run(String), refuse(String) }
@@ -225,11 +250,99 @@ enum PythonRuntime {
             return .refuse("Briglia's Python environment is not set up yet — run `briglia python-env install` (or the toolchain button in `briglia menu`)")
         }
         let dir = RuntimePaths.dir(c).appendingPathComponent(v.directory)
-        guard RuntimeFS.sha256(file: dir.appendingPathComponent("env/pyvenv.cfg")) == v.binarySHA256,
+        guard (try? RuntimeFS.contain(dir.appendingPathComponent("env/pyvenv.cfg"))) != nil,
+              (try? RuntimeFS.contain(dir.appendingPathComponent("env/bin/python"), finalMayBeSymlink: true)) != nil,
+              RuntimeFS.sha256(file: dir.appendingPathComponent("env/pyvenv.cfg")) == v.binarySHA256,
               validateExtra(v, dir) == nil else {
             return .refuse("Briglia's Python environment does not match its receipt — Briglia rebuilds it at the next start (or run `briglia python-env install`)")
         }
         return .run(dir.appendingPathComponent("env/bin/python").path)
+    }
+
+    // MARK: File-tree hash (§7.9.4: post-commit probe and doctor)
+
+    /// SHA-256 over the sorted (relative path, type, content-or-link-target)
+    /// of every entry under `env`, skipping `__pycache__` (Python writes byte
+    /// code there on first import). nil if any entry cannot be read.
+    static func treeSHA256(_ env: URL) -> String? {
+        guard let e = FileManager.default.enumerator(atPath: env.path) else { return nil }
+        var rows: [String] = []
+        for case let rel as String in e {
+            if rel.split(separator: "/").contains("__pycache__") { continue }
+            let path = env.path + "/" + rel
+            switch RuntimeFS.kind(path) {
+            case .directory: rows.append("d \(rel)")
+            case .symlink:
+                guard let t = RuntimeFS.readLink(URL(fileURLWithPath: path)) else { return nil }
+                rows.append("l \(rel) \(t)")
+            case .regular:
+                guard let h = RuntimeFS.sha256(file: URL(fileURLWithPath: path)) else { return nil }
+                rows.append("f \(rel) \(h)")
+            default: rows.append("o \(rel)")
+            }
+        }
+        return RuntimeFS.sha256(Data(rows.sorted().joined(separator: "\n").utf8))
+    }
+
+    /// nil when the recorded tree hash matches (or the record predates it is refused).
+    static func verifyTree(_ record: RuntimeRecord, _ dir: URL) -> String? {
+        guard let want = record.extra?["treeSHA256"] else { return "the record lacks a file-tree hash" }
+        guard let have = treeSHA256(dir.appendingPathComponent("env", isDirectory: true)) else { return "the environment's files could not be read" }
+        return have == want ? nil : "the environment's files differ from what was built"
+    }
+
+    /// Doctor: the full tree check of the verified environment.
+    static func doctorTreeLine() -> (ok: Bool, text: String)? {
+        guard let v = ((try? RuntimeFS.readJSON(RuntimeReceipt.self, RuntimePaths.receipt(.python))) ?? nil)?.verifiedRecord else { return nil }
+        if let why = verifyTree(v, RuntimePaths.dir(.python).appendingPathComponent(v.directory, isDirectory: true)) {
+            return (false, "Briglia's Python environment: \(why) — run `briglia python-env install`")
+        }
+        return (true, "Briglia's Python environment files match what was built")
+    }
+
+    // MARK: Live consumers (plan §7.7, review R3)
+
+    /// One lease per running `briglia-python` process, written under the
+    /// component lock just before exec (exec keeps the PID and its start
+    /// time). GC keeps every directory a live lease names.
+    static var leaseDir: URL { RuntimePaths.dir(.python).appendingPathComponent("leases", isDirectory: true) }
+
+    struct Lease: Codable { var pid: Int32; var startTime: UInt64; var directory: String }
+
+    /// Decide and lease atomically w.r.t. GC (which holds the component lock).
+    static func execDecisionLeased() -> ExecDecision {
+        guard let lock = try? RuntimeLock.acquire(RuntimePaths.componentLock(.python), timeout: 30) else {
+            return .refuse("Briglia's Python environment is busy (being updated) — try again in a moment")
+        }
+        defer { lock.release() }
+        let d = execDecision()
+        guard case .run = d, let v = ((try? RuntimeFS.readJSON(RuntimeReceipt.self, RuntimePaths.receipt(.python))) ?? nil)?.verifiedRecord,
+              let start = RuntimeProcessIdentity.startTime(pid: getpid()) else { return d }
+        do {
+            let lease = Lease(pid: getpid(), startTime: start, directory: v.directory)
+            try RuntimeFS.write(try JSONEncoder().encode(lease), to: leaseDir.appendingPathComponent("\(getpid())-\(start).json"), mode: 0o600)
+        } catch {
+            return .refuse("could not record Briglia's Python use (\(error)) — try again")
+        }
+        return d
+    }
+
+    /// Directories named by leases whose process is still the same process;
+    /// stale leases are removed (caller holds the component lock).
+    static func liveLeaseDirectories() -> Set<String> {
+        var keep = Set<String>()
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: leaseDir.path)) ?? [] where name.hasSuffix(".json") {
+            let url = leaseDir.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url), let l = try? JSONDecoder().decode(Lease.self, from: data) else {
+                try? RuntimeFS.remove(url); continue
+            }
+            if kill(l.pid, 0) == 0 || errno == EPERM, RuntimeProcessIdentity.startTime(pid: l.pid) == l.startTime {
+                keep.insert(l.directory)
+            } else {
+                try? RuntimeFS.remove(url)
+            }
+        }
+        return keep
     }
 
     // MARK: Convergence
@@ -261,11 +374,19 @@ enum PythonRuntime {
             }()
             if !hadVenv, !(await legacySharedSetup(base: base)) { return .notSetUp }
         }
+        let previous = ((try? RuntimeFS.readJSON(RuntimeReceipt.self, RuntimePaths.receipt(.python))) ?? nil)?.verified
         let outcome = await PrivateRuntimeEngine.converge(spec, trigger: trigger, progress: progress)
         switch outcome {
         case .upToDate(let r), .converged(let r):
             try? ensureWrapper()
-            _ = PrivateRuntimeEngine.collectGarbage(spec)
+            // GC only at startup, never right after a switch: the tree that was
+            // just replaced stays until a later start, and any tree a running
+            // briglia-python leases stays while that process lives (§7.7).
+            if trigger == .auto {
+                var keep = Set<String>()
+                if case .converged = outcome, let previous { keep.insert(previous) }
+                _ = PrivateRuntimeEngine.collectGarbage(spec, keepRunning: keep, extraKeep: { liveLeaseDirectories() })
+            }
             return .ready(r.extra?["baseVersion"] ?? base.version)
         case .failed(let w), .abandoned(let w), .throttled(let w), .busy(let w), .notApplicable(let w):
             try? ensureWrapper()

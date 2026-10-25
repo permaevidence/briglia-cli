@@ -88,6 +88,7 @@ enum PrivateRuntimeEngine {
     static func validate(_ spec: RuntimeSpec, _ record: RuntimeRecord) -> String? {
         guard RuntimeFS.validVersionRef(record.directory) else { return "receipt record names a path outside v/" }
         let dir = RuntimePaths.dir(spec.component).appendingPathComponent(record.directory, isDirectory: true)
+        do { try RuntimeFS.contain(dir.appendingPathComponent(spec.binaryRelPath)) } catch { return "\(error)" }
         guard RuntimeFS.kind(dir.path) == .directory else { return "\(record.directory) is missing or not a directory" }
         guard let hash = RuntimeFS.sha256(file: dir.appendingPathComponent(spec.binaryRelPath)) else {
             return "\(record.directory)/\(spec.binaryRelPath) is missing"
@@ -399,11 +400,11 @@ enum PrivateRuntimeEngine {
         let scratch: URL
         do {
             if spec.stagesInPlace, let bd = attempt.buildDirectory {
-                try PrivateStorage.ensureDirectory(RuntimePaths.versions(c))
+                try RuntimeFS.ensureDir(RuntimePaths.versions(c))
                 payload = RuntimePaths.dir(c).appendingPathComponent(bd, isDirectory: true)
                 scratch = payload
             } else {
-                try PrivateStorage.ensureDirectory(staging)
+                try RuntimeFS.ensureDir(staging)
                 payload = staging.appendingPathComponent("payload", isDirectory: true)
                 scratch = staging
             }
@@ -462,7 +463,13 @@ enum PrivateRuntimeEngine {
             let journalPresent = RuntimeFS.kind(RuntimePaths.journal(c).path) != .absent
             if sel.generation != generation || receipt.verified != snapshotVerified || rawCurrent(c) != snapshotCurrent
                 || journalPresent || (spec.usesHold && sel[c].hold != nil) {
-                return abandon(spec, attempt, scratch, "the installation changed meanwhile (wipe, import, provider change or another install)")
+                // Settle with the selection state already held: re-entering
+                // the selection lock here would wait on this transaction's own
+                // descriptor (review R5).
+                try? RuntimeFS.removeTree(scratch)
+                var st = sel[c]; finishAttempt(&st, attempt.attemptId, result: "abandoned", onlyIfUnset: true); sel[c] = st
+                try RuntimeSelectionStore.save(sel)
+                return .abandoned("the installation changed meanwhile (wipe, import, provider change or another install)")
             }
             // (a) publish the immutable directory + its record.
             let dest: String
@@ -471,7 +478,7 @@ enum PrivateRuntimeEngine {
             } else {
                 guard let name = freshDirectoryName(spec) else { throw RuntimeError("no free version directory name") }
                 dest = name
-                try PrivateStorage.ensureDirectory(RuntimePaths.versions(c))
+                try RuntimeFS.ensureDir(RuntimePaths.versions(c))
                 let target = RuntimePaths.dir(c).appendingPathComponent(dest, isDirectory: true)
                 guard rename(payload.path, target.path) == 0 else {
                     throw RuntimeError("could not publish \(dest): \(String(cString: strerror(errno)))")
@@ -551,7 +558,7 @@ enum PrivateRuntimeEngine {
     /// Removes `v/` directories that nothing references and that still match
     /// a receipt record; unrecorded or damaged ones are kept and reported.
     /// Staging is removed only when its attempt record's owner is gone.
-    static func collectGarbage(_ spec: RuntimeSpec, keepRunning: Set<String> = []) -> [String] {
+    static func collectGarbage(_ spec: RuntimeSpec, keepRunning: Set<String> = [], extraKeep: (() -> Set<String>)? = nil) -> [String] {
         let c = spec.component
         var report: [String] = []
         guard let locks = try? RuntimeLocks.take(c, timeout: 5) else { return ["garbage collection skipped (locks busy)"] }
@@ -562,7 +569,7 @@ enum PrivateRuntimeEngine {
         let sel = loaded.file
         var receipt = readReceipt
         let st = sel[c]
-        var keep: Set<String> = keepRunning
+        var keep: Set<String> = keepRunning.union(extraKeep?() ?? [])
         if case .ref(let r) = currentState(c) { keep.insert(r) }
         if let v = receipt.verified { keep.insert(v) }
         for a in st.attempts where a.result == nil { if let b = a.buildDirectory { keep.insert(b) } }

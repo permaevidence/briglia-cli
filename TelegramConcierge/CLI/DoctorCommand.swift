@@ -297,6 +297,9 @@ struct Doctor: AsyncParsableCommand {
                 note("missing: \(ToolchainService.displayName(for: entry)) — \(entry.impact)")
             }
             note("LibreOffice: \(ToolchainService.libreOfficePresent() ? "present" : "not installed (optional)")")
+            if let tree = PythonRuntime.doctorTreeLine() {
+                check(tree.text, ok: tree.ok, hint: "briglia python-env install")
+            }
         } else {
             #if os(macOS)
             check("python3", ok: false, hint: "install Xcode Command Line Tools or Homebrew python")

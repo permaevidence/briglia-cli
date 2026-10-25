@@ -136,8 +136,8 @@ extension AgentMailService {
         }
         let staging = payload.deletingLastPathComponent()
         let archivePath = staging.appendingPathComponent("agentmail.tar.gz")
-        try PrivateStorage.writeAtomically(archive, to: archivePath, mode: 0o600)
-        try PrivateStorage.ensureDirectory(payload)
+        try RuntimeFS.write(archive, to: archivePath, mode: 0o600)
+        try RuntimeFS.ensureDir(payload)
         progress?("Extracting the agentmail CLI…")
         let untar = await RuntimeProcess.run("/usr/bin/tar", ["-xf", archivePath.path, "-C", payload.path, "--strip-components=1"], timeout: 60)
         guard untar.status == 0 else { throw RuntimeError("extraction failed: \(RuntimeProcess.detail(untar))") }
@@ -195,7 +195,7 @@ extension AgentMailService {
         # Installed by Briglia CLI. Runs Briglia's private AgentMail CLI after
         # checking it against its install receipt; the key is fetched at exec
         # time and handed only to that binary.
-        exec '\(brigliaPath)' __agentmail-exec "$@"
+        exec \(RuntimeFS.shellQuote(brigliaPath)) __agentmail-exec "$@"
         """ + "\n"
     }
 
@@ -205,12 +205,12 @@ extension AgentMailService {
         let bytes = Data(wrapperScript(brigliaPath: brigliaPath()).utf8)
         if RuntimeFS.kind(wrapperURL.path) == .regular, (try? Data(contentsOf: wrapperURL)) == bytes,
            FileManager.default.isExecutableFile(atPath: wrapperURL.path) { return }
-        try PrivateStorage.ensureDirectory(RuntimePaths.binDir)
+        try RuntimeFS.ensureDir(RuntimePaths.binDir)
         switch RuntimeFS.kind(wrapperURL.path) {
         case .absent, .regular: break
         default: throw RuntimeError("\(wrapperURL.path) exists and is not a regular file — refusing")
         }
-        try PrivateStorage.writeAtomically(bytes, to: wrapperURL, mode: 0o700)
+        try RuntimeFS.write(bytes, to: wrapperURL, mode: 0o700)
     }
 
     /// Content check for a broker wrapper (ours or an older Briglia's).
@@ -261,7 +261,10 @@ extension AgentMailService {
             RuntimePaths.dir(c).appendingPathComponent(rec.directory).appendingPathComponent(privateBinaryName).path
         }
         func intact(_ rec: RuntimeRecord) -> Bool {
-            RuntimeFS.validVersionRef(rec.directory) && RuntimeFS.sha256(file: URL(fileURLWithPath: binary(rec))) == rec.binarySHA256
+            RuntimeFS.validVersionRef(rec.directory)
+                && (try? RuntimeFS.contain(RuntimePaths.current(c), finalMayBeSymlink: true)) != nil
+                && (try? RuntimeFS.contain(URL(fileURLWithPath: binary(rec)))) != nil
+                && RuntimeFS.sha256(file: URL(fileURLWithPath: binary(rec))) == rec.binarySHA256
         }
         if let probeAttempt = environment["BRIGLIA_AGENTMAIL_PROBE"], !probeAttempt.isEmpty {
             guard args == ["--version"] else { return .refuse("probe mode allows only --version") }

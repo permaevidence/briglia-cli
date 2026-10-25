@@ -38,7 +38,17 @@ enum RuntimeStatus {
         }
         switch sel.providerClass {
         case "private-exact":
-            if let v = sel.version, v == NodeRuntime.runtimePin?.version {
+            // Validate the copy itself, not the cached version string (review follow-up).
+            let rcpt = (try? RuntimeFS.readJSON(RuntimeReceipt.self, RuntimePaths.receipt(.node))) ?? nil
+            guard let pin = NodeRuntime.runtimePin, let vr = rcpt?.verifiedRecord,
+                  PrivateRuntimeEngine.currentState(.node) == .ref(vr.directory),
+                  PrivateRuntimeEngine.validate(NodeRuntime.spec(pin: pin), vr) == nil else {
+                return .init(name: name, state: .unknownState, detail: "Briglia's private Node.js copy does not match its receipt; it is reinstalled at the next start")
+            }
+            if vr.pin != pin {
+                return .init(name: name, state: .differs, detail: "\(vr.version) in use; this Briglia expects \(NodeRuntime.pinnedVersion) (updated at the next start)")
+            }
+            if let v = sel.version, v == pin.version {
                 return .init(name: name, state: .pinned, detail: "\(v), Briglia's private copy (used only by Briglia's browser tools)")
             }
             return .init(name: name, state: .differs, detail: "\(sel.version ?? "?") in use; this Briglia expects \(NodeRuntime.pinnedVersion)\(sel.reason.map { " (\($0))" } ?? "")")
