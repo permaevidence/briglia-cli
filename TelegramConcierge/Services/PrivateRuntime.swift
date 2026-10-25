@@ -325,8 +325,12 @@ enum RuntimeFS {
     /// final entry may be a symlink only where Briglia manages one (`current`,
     /// shims), and is otherwise a directory, a regular file or absent.
     static func contain(_ url: URL, finalMayBeSymlink: Bool = false) throws {
-        let root = RuntimePaths.dataRoot.standardizedFileURL.path
-        let path = url.standardizedFileURL.path
+        // Lexical comparison of the spellings as built (both from dataRoot):
+        // standardizing resolves /private aliases for existing paths only,
+        // which made a legitimate descendant look outside (round-2 note).
+        var root = RuntimePaths.dataRoot.path
+        while root.count > 1 && root.hasSuffix("/") { root.removeLast() }
+        let path = url.path
         guard path.hasPrefix(root + "/") else { throw RuntimeError("\(path) is outside Briglia's data root") }
         let parts = path.dropFirst(root.count + 1).split(separator: "/").map(String.init)
         guard !parts.isEmpty, !parts.contains(".."), !parts.contains(".") else { throw RuntimeError("\(path): unexpected path form") }
@@ -471,12 +475,16 @@ enum RuntimeSelectionStore {
             // leaves the corrupt file in place → quarantined again).
             let stamp = Int(Date().timeIntervalSince1970)
             let q = RuntimePaths.runtimeRoot.appendingPathComponent("selected.json.corrupt-\(stamp)")
-            if let bad = try? Data(contentsOf: RuntimePaths.selectionFile) {
-                try RuntimeFS.write(bad, to: q, mode: 0o600)
-            } else if rename(RuntimePaths.selectionFile.path, q.path) != 0 {
-                throw RuntimeError("selected.json is unreadable and could not be set aside: \(error)")
+            // Bytes that cannot even be read (or a non-regular entry) stay in
+            // place and every reader refuses: removing the only evidence before
+            // a hold is durable would let a restart see "no state" (round 2).
+            guard RuntimeFS.kind(RuntimePaths.selectionFile.path) == .regular,
+                  let bad = try? Data(contentsOf: RuntimePaths.selectionFile) else {
+                throw RuntimeError("selected.json is unreadable and is left in place (\(error)); fix or remove it by hand, then run `briglia agentmail repair`")
             }
+            try RuntimeFS.write(bad, to: q, mode: 0o600)
             try PrivateStorage.fsyncDirectory(RuntimePaths.runtimeRoot.path)
+            RuntimeSeams.crash(.agentmail, "after-selection-copy")
             var fresh = RuntimeSelectionFile()
             // Any in-flight transaction's generation snapshot no longer matches.
             fresh.generation = stamp

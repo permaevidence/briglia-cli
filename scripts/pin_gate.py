@@ -272,24 +272,38 @@ def load_issues(args):
     return out
 
 
-PIN_REASON_LINE_RE = re.compile(r"^- (?:behind|end of life): .*\(blocker `([^`]*)`\)$")
-PIN_REASON_RE = re.compile(r"^(node-behind:v\d+\.\d+\.\d+|node-eol:\d+)$")
+PIN_BEHIND_LINE_RE = re.compile(r"^- behind: Node published security release (v\d+\.\d+\.\d+) on the pinned line \(blocker `node-behind:(v\d+\.\d+\.\d+)`\)$")
+PIN_EOL_LINE_RE = re.compile(r"^- end of life: the Node release schedule ends line v(\d+) on [^()`]+ \(blocker `node-eol:(\d+)`\)$")
 
 
 def pin_reasons(body):
-    """The exact reason tokens of a rendered `pin` issue (review R6): every
-    reason line before the component section must carry one well-formed
-    token; none, a malformed one or a duplicate → None (fail closed)."""
+    """The exact reason tokens of a rendered `pin` issue (review R6, round 2):
+    the whole block before the component section must match the renderer's
+    grammar — title line, blank, one or more reason lines, blank — and every
+    reason line must be a complete behind/EOL record whose token agrees with
+    its text. Anything else (indented, unbulleted, unknown or duplicate
+    lines, no reasons) → None (fail closed)."""
     head = body.split("Affected inventory components:", 1)
     if len(head) != 2:
         return None
+    lines = head[0].split("\n")
+    if len(lines) < 5 or not (lines[0].startswith("Briglia's pinned **") and lines[0].endswith("is stale (owner requirement P, plan v21 §3.5):")):
+        return None
+    if lines[1] != "" or lines[-1] != "" or lines[-2] != "":
+        return None
     reasons = []
-    for line in head[0].splitlines():
-        if line.startswith("- "):
-            m = PIN_REASON_LINE_RE.match(line)
-            if not m or not PIN_REASON_RE.match(m.group(1)) or m.group(1) in reasons:
+    for line in lines[2:-2]:
+        m = PIN_BEHIND_LINE_RE.match(line)
+        if m and m.group(1) == m.group(2):
+            tok = f"node-behind:{m.group(2)}"
+        else:
+            m = PIN_EOL_LINE_RE.match(line)
+            if not (m and m.group(1) == m.group(2)):
                 return None
-            reasons.append(m.group(1))
+            tok = f"node-eol:{m.group(2)}"
+        if tok in reasons:
+            return None
+        reasons.append(tok)
     return reasons or None
 
 

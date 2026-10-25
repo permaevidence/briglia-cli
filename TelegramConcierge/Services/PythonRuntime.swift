@@ -129,7 +129,24 @@ enum PythonRuntime {
         if URL(fileURLWithPath: base).resolvingSymlinksInPath().path != resolved { return "its base interpreter \(base) now points elsewhere" }
         if py.resolvingSymlinksInPath().path != interp { return "the environment's interpreter now points elsewhere" }
         guard FileManager.default.isExecutableFile(atPath: interp) else { return "the environment's interpreter \(interp) is gone" }
+        guard let bid = record.extra?["baseIdentity"], let iid = record.extra?["interpreterIdentity"] else {
+            return "the record lacks the base interpreter identity (built by an older Briglia)"
+        }
+        if fileIdentity(resolved) != bid { return "its base interpreter \(base) was replaced or updated in place" }
+        if fileIdentity(interp) != iid { return "the environment's interpreter was replaced or updated in place" }
         return nil
+    }
+
+    /// device, inode, size and modification time (ns) of a regular file.
+    static func fileIdentity(_ path: String) -> String? {
+        var st = stat()
+        guard stat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return nil }
+        #if os(Linux)
+        let m = st.st_mtim
+        #else
+        let m = st.st_mtimespec
+        #endif
+        return "\(st.st_dev):\(st.st_ino):\(st.st_size):\(m.tv_sec).\(m.tv_nsec)"
     }
 
     static func build(base: Base, payload: URL, progress: (@Sendable (String) -> Void)?) async throws -> [String: String]? {
@@ -149,8 +166,17 @@ enum PythonRuntime {
         let inst = await RuntimeProcess.run(py, args, env: clean, timeout: 3600)
         guard inst.status == 0 else { throw RuntimeError("pip refused the pinned packages: \(RuntimeProcess.detail(inst))") }
         if let why = await probe(python: py, lock: lock) { throw RuntimeError(why) }
+        let interp = env.appendingPathComponent("bin/python").resolvingSymlinksInPath().path
         var extra: [String: String] = ["base": base.path, "baseVersion": base.version, "baseResolved": base.resolved,
-                                       "interpreterResolved": env.appendingPathComponent("bin/python").resolvingSymlinksInPath().path]
+                                       "interpreterResolved": interp]
+        // File identity of the resolved base (and venv interpreter): a
+        // same-path replacement or rewrite — e.g. a new version installed in
+        // place — changes it, so use/status refuse until rebuilt (round 2).
+        guard let bid = fileIdentity(base.resolved), let iid = fileIdentity(interp) else {
+            throw RuntimeError("could not identify the base interpreter")
+        }
+        extra["baseIdentity"] = bid
+        extra["interpreterIdentity"] = iid
         if let link = RuntimeFS.readLink(env.appendingPathComponent("bin/python")) { extra["pythonLink"] = link }
         guard let tree = treeSHA256(env) else { throw RuntimeError("could not hash the built environment") }
         extra["treeSHA256"] = tree

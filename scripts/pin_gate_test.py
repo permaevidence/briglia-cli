@@ -241,7 +241,11 @@ def cases(gate):
     check("C2 (R6): rendered pin issue, C1 clear -> blocker node-behind:v24.9.2 (not the grouping id)",
           rc == 1 and "node-behind:v24.9.2" in out and "runtime:node runtime:node" not in out, out[-400:])
     s_one = repo.commit(overrides=[ovr("runtime:node", "node-behind:v24.9.2")])
-    rc, out = run(repo, "promoter", s_one)
+    rec1 = os.path.join(repo.dir, "..", os.path.basename(repo.dir) + "-record-r6one.txt")
+    rc, out = run(repo, "promoter", s_one, record_out=rec1)
+    tag1 = os.path.join(repo.dir, "..", os.path.basename(repo.dir) + "-tag-r6one.txt")
+    with open(tag1, "w") as f:
+        f.write("Briglia v9.9.9\n\n" + (open(rec1).read() if os.path.exists(rec1) else ""))
     check("C2 (R6): the exact (runtime:node, node-behind:v24.9.2) override clears the open watch issue", rc == 0, out[-400:])
     s_grp = repo.commit(overrides=[ovr("runtime:node", "GHSA-zzzz-zzzz-zzzz")])
     rc, out = run(repo, "promoter", s_grp)
@@ -261,12 +265,24 @@ def cases(gate):
         f.write("Briglia v9.9.9\n\n" + (open(rec2).read() if os.path.exists(rec2) else ""))
     rc, out = run(repo, "signed", s_both, now="2026-10-25T13:00:00Z", tag_record=tag2)
     check("C2 (R6): signed mode, same issue and overrides -> clear", rc == 0 and "OVERRIDE APPLIED" in out, out[-400:])
+    repo.git("checkout", "-q", s_one)   # signed mode reads the tagged tree from the working directory
     clean_world()
     pin_issue(["node-behind:v24.9.2"], lambda b: b.replace("(blocker `node-behind:v24.9.2`)", "(blocker `node-behind:latest`)"))
     rc, out = run(repo, "promoter", s_one)
     check("C2 (R6): a malformed reason token -> blocks even with the override (fail closed)", rc == 1 and "malformed reason tokens" in out, out[-400:])
-    rc, out = run(repo, "signed", s_one, now="2026-10-25T13:00:00Z", tag_record=tag2)
-    check("C2 (R6): signed mode, malformed reason token -> refused", rc != 0, out[-300:])
+    rc, out = run(repo, "signed", s_one, now="2026-10-25T13:00:00Z", tag_record=tag1)
+    check("C2 (R6): signed mode (valid record for this commit), malformed reason token -> refused by C2", rc == 1 and "malformed reason tokens" in out, out[-300:])
+    # Round 2: a malformed SECOND reason must not vanish when the first is intact and overridden.
+    for label, edit in (("indented EOL line", lambda b: b.replace("\n- end of life:", "\n  - end of life:")),
+                        ("unbulleted EOL line", lambda b: b.replace("\n- end of life:", "\nend of life:")),
+                        ("EOL token disagreeing with its text", lambda b: b.replace("(blocker `node-eol:24`)", "(blocker `node-eol:22`)")),
+                        ("an unexpected extra line", lambda b: b.replace("\n\nAffected inventory", "\nsee also: notes\n\nAffected inventory"))):
+        clean_world()
+        pin_issue(["node-behind:v24.9.2", "node-eol:24"], edit)
+        rc, out = run(repo, "promoter", s_one)
+        check(f"C2 (R6 r2): behind overridden + {label} -> refused (promoter)", rc == 1 and "malformed reason tokens" in out, out[-300:])
+        rc, out = run(repo, "signed", s_one, now="2026-10-25T13:00:00Z", tag_record=tag1)
+        check(f"C2 (R6 r2): behind overridden + {label} -> refused (signed, valid record)", rc == 1 and "malformed reason tokens" in out, out[-300:])
     sha = repo.commit()
     clean_world()
     fake.W.issues.append({"number": 2, "state": "open", "title": "h", "labels": [], "created_at": "2026-10-01T00:00:00Z",
@@ -515,7 +531,7 @@ BREAKS = [
     ("withdrawn OSV records block", '            if rec.get("withdrawn"):\n                continue', '            if False:\n                continue'),
     ("R6 pin reasons collapsed to the grouping id", "                    for r in reasons:\n                        out[cid].append({\"ids\": {r}",
      "                    for r in reasons[:0] + [None]:\n                        out[cid].append({\"ids\": set(it[\"ids\"])"),
-    ("R6 malformed reason tokens accepted", "            if not m or not PIN_REASON_RE.match(m.group(1)) or m.group(1) in reasons:\n                return None",
+    ("R6 malformed reason tokens accepted", "            if not (m and m.group(1) == m.group(2)):\n                return None",
      "            if not m:\n                continue"),
     ("missing heartbeat accepted", '            general.append({"ids": {"watch-stale"}, "why": "the security watch heartbeat issue is missing"})', "            pass"),
 ]

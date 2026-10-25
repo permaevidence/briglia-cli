@@ -231,12 +231,21 @@ enum NodeRuntime {
     static func selectedNodeBinary() -> String? {
         guard let s = RuntimeSelectionStore.peek()?[.node].selection, ["private-exact", "shared-accepted"].contains(s.providerClass),
               let dir = s.path else { return nil }
-        let node = dir + "/node"
         if s.providerClass == "private-exact" {
-            // Briglia's own copy: must resolve inside its data root (review R1).
-            guard dir.hasPrefix(RuntimePaths.runtimeRoot.path + "/"),
-                  (try? RuntimeFS.contain(URL(fileURLWithPath: dir).deletingLastPathComponent(), finalMayBeSymlink: true)) != nil else { return nil }
+            // Briglia's own copy (review R1, round 2): never follow the cached
+            // path or the `current` link. Take the verified receipt record,
+            // require `current` to name exactly it, validate the record (every
+            // directory from the data root to bin/node real, the binary's hash),
+            // and return the concrete validated path inside v/<name>.
+            guard let pin = runtimePin,
+                  let vr = ((try? RuntimeFS.readJSON(RuntimeReceipt.self, RuntimePaths.receipt(.node))) ?? nil)?.verifiedRecord,
+                  PrivateRuntimeEngine.currentState(.node) == .ref(vr.directory),
+                  PrivateRuntimeEngine.validate(spec(pin: pin), vr) == nil else { return nil }
+            let concrete = RuntimePaths.dir(.node).appendingPathComponent(vr.directory).appendingPathComponent("bin/node")
+            guard (try? RuntimeFS.contain(concrete)) != nil, RuntimeFS.kind(concrete.path) == .regular else { return nil }
+            return FileManager.default.isExecutableFile(atPath: concrete.path) ? concrete.path : nil
         }
+        let node = dir + "/node"
         return FileManager.default.isExecutableFile(atPath: node) ? node : nil
     }
 
@@ -276,9 +285,17 @@ enum NodeRuntime {
 
     static func writeShims() throws {
         try RuntimeFS.ensureDir(RuntimePaths.fallbackBinDir)
+        // Point at the concrete verified copy, never through `current`
+        // (review R1 round 2: a redirected `current` must not be followed).
+        guard let pin = runtimePin,
+              let vr = ((try? RuntimeFS.readJSON(RuntimeReceipt.self, RuntimePaths.receipt(.node))) ?? nil)?.verifiedRecord,
+              PrivateRuntimeEngine.currentState(.node) == .ref(vr.directory),
+              PrivateRuntimeEngine.validate(spec(pin: pin), vr) == nil else {
+            throw RuntimeError("Briglia's private Node.js copy does not match its receipt")
+        }
         for name in shimNames {
             let link = RuntimePaths.fallbackBinDir.appendingPathComponent(name)
-            let target = RuntimePaths.current(.node).appendingPathComponent("bin/\(name)").path
+            let target = RuntimePaths.dir(.node).appendingPathComponent(vr.directory).appendingPathComponent("bin/\(name)").path
             if RuntimeFS.readLink(link) == target { continue }
             switch RuntimeFS.kind(link.path) {
             case .absent, .symlink: try RuntimeFS.switchLink(link, to: target)

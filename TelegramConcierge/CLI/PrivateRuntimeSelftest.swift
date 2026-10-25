@@ -210,6 +210,19 @@ final class RuntimeHarness {
         try fm.createDirectory(at: realRoot, withIntermediateDirectories: true)
         try fm.createSymbolicLink(atPath: xdg.appendingPathComponent("briglia").path, withDestinationPath: realRoot.path)
         let r3 = subprocess("agentmail-converge", extraEnv: ["XDG_DATA_HOME": xdg.path])
+        #if os(macOS)
+        // /private alias spellings (/tmp ↔ /private/tmp, /var ↔ /private/var) of an existing root.
+        let xdgA = scratch.appendingPathComponent("xdg-alias-\(UUID().uuidString.prefix(6))", isDirectory: true)
+        try fm.createDirectory(at: xdgA.appendingPathComponent("briglia"), withIntermediateDirectories: true)
+        let p0 = xdgA.path
+        let alias = p0.hasPrefix("/private/") ? String(p0.dropFirst("/private".count))
+            : (p0.hasPrefix("/tmp/") || p0.hasPrefix("/var/")) ? "/private" + p0 : nil
+        if let alias {
+            let rA = subprocess("agentmail-converge", extraEnv: ["XDG_DATA_HOME": alias])
+            check("an existing data root spelled through a /private alias installs normally (missing descendants under it)",
+                  rA.stdout.contains("RESULT converged"), rA.stdout + rA.stderr)
+        }
+        #endif
         check("a relocated data root (the root itself a symlink) installs normally",
               r3.stdout.contains("RESULT converged") && RuntimeFS.kind(realRoot.appendingPathComponent("runtime/agentmail/current").path) == .symlink, r3.stdout + r3.stderr)
         resetRuntime()
@@ -583,7 +596,7 @@ final class RuntimeHarness {
               !set.isEmpty && { if case .held = h { return true }; return false }(), "\(h) \(set)")
         // R2: whichever component reads the corrupt file first, AgentMail's
         // hold survives (settled failed repair: hold, no current link).
-        for first in ["node", "generic update", "crash right after the quarantine"] {
+        for first in ["node", "generic update", "crash right after the quarantine", "crash between the copy and the replacement", "unreadable bytes"] {
             resetRuntime()
             useAgentMail(a, version: "1.3.0")
             _ = await PrivateRuntimeEngine.converge(amSpec(), trigger: .install)
@@ -599,15 +612,26 @@ final class RuntimeHarness {
                 unsetenv("BRIGLIA_NODE_TEST_ARCHIVE"); unsetenv("BRIGLIA_NODE_TEST_SHA256"); unsetenv("BRIGLIA_NODE_TEST_VERSION")
             case "generic update":
                 _ = try RuntimeSelectionStore.update { _ in }
+            case "crash between the copy and the replacement":
+                _ = subprocess("selection-update", crash: "agentmail:after-selection-copy")
+                check("R2: interrupted between copy and replacement → the corrupt file is still in place",
+                      (try? String(contentsOf: RuntimePaths.selectionFile, encoding: .utf8)) == "{not json")
+            case "unreadable bytes":
+                chmod(RuntimePaths.selectionFile.path, 0o000)
+                let threw = (try? RuntimeSelectionStore.update { _ in }) == nil
+                check("R2: unreadable selection bytes → the writer refuses and leaves the file in place",
+                      threw && RuntimeFS.kind(RuntimePaths.selectionFile.path) == .regular)
             default:
                 _ = subprocess("selection-update", crash: "agentmail:after-selection-quarantine")
             }
             for restart in 1...2 {
                 let rh = await PrivateRuntimeEngine.recover(amSpec())
                 let run = wrapper(["--version"], key: "placeholder")
-                check("R2: \(first) reads the corrupt selection first → restart \(restart): AgentMail still held, no old copy restored",
-                      { if case .held = rh { return true }; return false }() && current(.agentmail) == nil && run.status != 0, "\(rh) \(run.status)")
+                let off: Bool = { if case .ready = rh { return false }; if case .held = rh { return true }; return first == "unreadable bytes" }()
+                check("R2: \(first) → restart \(restart): AgentMail still off, no old copy restored",
+                      off && current(.agentmail) == nil && run.status != 0, "\(rh) \(run.status)")
             }
+            chmod(RuntimePaths.selectionFile.path, 0o600)
         }
     }
 
@@ -663,8 +687,9 @@ final class RuntimeHarness {
         let r2 = await NodeRuntime.select()
         check("only Nodes older than the pin (22.x, the legacy copy) → private 24.22.1 installed and selected",
               r2.providerClass == "private-exact" && r2.version == "24.22.1" && receipt(.node)?.verifiedRecord?.version == "24.22.1", "\(r2)")
-        check("…fallback shims point at runtime/node/current/bin",
-              RuntimeFS.readLink(RuntimePaths.fallbackBinDir.appendingPathComponent("node")) == RuntimePaths.current(.node).appendingPathComponent("bin/node").path)
+        check("…fallback shims point at the concrete verified runtime/node/v/<name>/bin (never through current)",
+              RuntimeFS.readLink(RuntimePaths.fallbackBinDir.appendingPathComponent("node"))
+                == receipt(.node)?.verifiedRecord.map { RuntimePaths.dir(.node).appendingPathComponent($0.directory).appendingPathComponent("bin/node").path })
         let wideNode = widePaths(RuntimePaths.versions(.node))
         check("the private Node tree is owner-only (private storage)", wideNode.isEmpty, wideNode.prefix(5).joined(separator: ", "))
         check("status: the validated private copy reads pinned", RuntimeStatus.node()?.state == .pinned, "\(String(describing: RuntimeStatus.node()))")
@@ -675,6 +700,31 @@ final class RuntimeHarness {
             check("status: a damaged private copy is not reported pinned (receipt checked, not the cached version)",
                   RuntimeStatus.node()?.state == .unknownState, "\(String(describing: RuntimeStatus.node()))")
             try saved.write(to: bin)
+        }
+        // R1 round 2: the private selection resolves to the validated concrete
+        // binary, never through an unchecked `current`, `v/<name>` or `bin` redirect.
+        let concrete = receipt(.node)?.verifiedRecord.map { RuntimePaths.dir(.node).appendingPathComponent($0.directory).appendingPathComponent("bin/node").path }
+        check("private selection → the concrete validated v/<name>/bin/node", NodeRuntime.selectedNodeBinary() == concrete && concrete != nil,
+              "\(String(describing: NodeRuntime.selectedNodeBinary()))")
+        if let target = current(.node) {
+            let outside = scratch.appendingPathComponent("outside-node-\(UUID().uuidString.prefix(6))", isDirectory: true)
+            try fm.createDirectory(at: outside.appendingPathComponent("bin"), withIntermediateDirectories: true)
+            try "#!/bin/sh\necho OUTSIDE_NODE\n".write(to: outside.appendingPathComponent("bin/node"), atomically: true, encoding: .utf8)
+            chmod(outside.appendingPathComponent("bin/node").path, 0o755)
+            let vtest = RuntimePaths.dir(.node).appendingPathComponent("v/test")
+            func picked() -> Bool { (NodeRuntime.selectedNodeBinary().map { !$0.hasPrefix(RuntimePaths.runtimeRoot.path + "/") }) ?? false }
+            try RuntimeFS.switchLink(RuntimePaths.current(.node), to: outside.path)
+            check("current → outside: not selected", !picked() && NodeRuntime.selectedNodeBinary() == nil)
+            try fm.createSymbolicLink(atPath: vtest.path, withDestinationPath: outside.path)
+            try RuntimeFS.switchLink(RuntimePaths.current(.node), to: "v/test")
+            check("current → v/test → outside: not selected", NodeRuntime.selectedNodeBinary() == nil)
+            try fm.removeItem(at: vtest)
+            try fm.createDirectory(at: vtest, withIntermediateDirectories: true)
+            try fm.createSymbolicLink(atPath: vtest.appendingPathComponent("bin").path, withDestinationPath: outside.appendingPathComponent("bin").path)
+            check("current → real v/test whose bin → outside: not selected", NodeRuntime.selectedNodeBinary() == nil)
+            try fm.removeItem(at: vtest)
+            try RuntimeFS.switchLink(RuntimePaths.current(.node), to: target)
+            check("…restored: selected again", NodeRuntime.selectedNodeBinary() == concrete)
         }
         let noNpm = try sharedNode("30.0.0", npm: false)
         setenv("BRIGLIA_NODE_TEST_SHARED_DIRS", noNpm, 1)
@@ -903,6 +953,9 @@ final class RuntimeHarness {
         let r4dirB = receipt(.python)?.verified
         let minor = found.version.split(separator: ".")[1]
         try "#!/bin/sh\ncase \"$*\" in *'import sys, venv, ensurepip'*) echo 3.\(minor).99; exit 0;; esac\nexec '\(found.path)' \"$@\"\n".write(to: other, atomically: true, encoding: .utf8)
+        check("R4: same path, new version (file rewritten in place) → briglia-python refuses BEFORE any startup",
+              { if case .refuse(let w) = PythonRuntime.execDecision() { return w.contains("does not match") }; return false }())
+        check("R4: …and status is not 'pinned' before any startup", RuntimeStatus.python()?.state != .pinned, "\(String(describing: RuntimeStatus.python()))")
         let r4b = await PythonRuntime.converge(trigger: .auto)
         check("R4: same path and minor, new patch version → rebuilt at startup into a new directory",
               { if case .ready = r4b { return true }; return false }() && receipt(.python)?.verified != r4dirB && r4dirB != nil
