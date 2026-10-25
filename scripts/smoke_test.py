@@ -37,6 +37,7 @@ Checks, in order:
 
 import json
 import os
+import plistlib
 import pty
 import re
 import select
@@ -156,6 +157,34 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
 
 
 TEST_PREFS_PREFIXES = ("ada-mig-probe-", "ada-mig-st-", "ada-setup-api-selftest-", "briglia-s4-", "briglia-mw-")
+
+
+PREFS_DIAGNOSTICS = []
+
+
+def _utc(t):
+    return time.strftime("%H:%M:%S", time.gmtime(t))
+
+
+def _prefs_leak_details(names):
+    """Failure-message diagnostics for leaked throwaway domains: size, mtime
+    and top-level keys of each file, plus the recorded selftest windows."""
+    prefs = os.path.expanduser("~/Library/Preferences")
+    out = []
+    for n in sorted(names):
+        path = os.path.join(prefs, n)
+        try:
+            st = os.stat(path)
+            with open(path, "rb") as f:
+                data = f.read()
+            try:
+                keys = sorted(plistlib.loads(data).keys()) if data else []
+            except Exception:  # noqa: BLE001 — diagnostics only
+                keys = ["<unparsable>"]
+            out.append("%s: %d bytes, mtime %s UTC, keys %s" % (n, st.st_size, _utc(st.st_mtime), keys))
+        except OSError as exc:
+            out.append("%s: %s" % (n, exc))
+    return "; ".join(out + PREFS_DIAGNOSTICS + ["checked %s UTC" % _utc(time.time())])
 
 
 def _test_prefs_domains_since(t0):
@@ -895,7 +924,11 @@ def main():
     # ownership-verified bridge stop, descriptor remover with mount checks,
     # retired alerts, at-most-once notices, manager routing. Re-executes
     # itself in a private scratch home and preference domain.
+    _ri_t0 = time.time()
     result = run_selftest([os.path.abspath(ADA), "__retired-integrations-selftest"], capture_output=True, text=True, timeout=300)
+    PREFS_DIAGNOSTICS.append("retired-integrations-selftest ran %s..%s UTC%s" % (
+        _utc(_ri_t0), _utc(time.time()),
+        "".join("; " + l.strip() for l in result.stdout.splitlines() if l.startswith("· preference"))))
     check("retired-integrations-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
@@ -3226,7 +3259,7 @@ def main():
     if leaked is not None:
         check("selftests leave no throwaway preference domains behind",
               not leaked, f"written during this run: {', '.join(sorted(leaked))} "
-              f"(prefixes {', '.join(TEST_PREFS_PREFIXES)})")
+              f"(prefixes {', '.join(TEST_PREFS_PREFIXES)}); " + _prefs_leak_details(leaked))
 
     # Live-settings guard (macOS): the real install's preference domain must
     # carry nothing this run wrote. The live daemon may legitimately update
