@@ -26,6 +26,11 @@ extension RemLoadHarness {
         await svc.clearAllReminders()
         chmod(dataRoot.path, 0o700)
         let failedWrite = diskBytes() == old
+        // The file then changes outside Briglia (hash differs): the wiped rows
+        // must still be neither merged back nor copied aside.
+        var edited = (try? JSONSerialization.jsonObject(with: old) as? [Any]) ?? []
+        edited.append(row("outside-after-wipe"))
+        if failedWrite { put(json(edited)) }
         _ = await svc.addReminder(triggerDate: Date().addingTimeInterval(7_200), prompt: "after")
         let rows = diskRows() ?? []
         if getuid() != 0 || !failedWrite {

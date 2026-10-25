@@ -107,8 +107,11 @@ extension RemLoadHarness {
         var b = ToolCall(id: "same", type: "function", function: function)
         b.routing = .openRouterPinned(["host-b"])
         let results = (try? await executor.executeParallel([a, b])) ?? []
+        // Results arrive in completion order: each host must appear in exactly one.
+        let withA = results.filter { $0.content.contains("host-a") }
+        let withB = results.filter { $0.content.contains("host-b") }
         check("H6 identical calls keep their own request's host",
-              results.count == 2 && results[0].content.contains("host-a") && results[1].content.contains("host-b"))
+              results.count == 2 && withA.count == 1 && withB.count == 1 && !withA[0].content.contains("host-b"))
     }
 }
 

@@ -175,7 +175,13 @@ extension RemLoadHarness {
         let unreadable: Bool = { if case .unreadable = ReminderStoreFile.read(file) { return true }; return false }()
         chmod(file.path, 0o600)
         // root reads anything (Linux CI runs as root): only assert when the probe could fail.
-        if getuid() != 0 { check("L10 permission error is unreadable, not absent", unreadable) }
+        if getuid() != 0 {
+            check("L10 permission error is unreadable, not absent", unreadable)
+            chmod(dataRoot.path, 0o000)     // lstat itself fails (EACCES), not ENOENT
+            let parentDenied: Bool = { if case .unreadable = ReminderStoreFile.read(file) { return true }; return false }()
+            chmod(dataRoot.path, 0o700)
+            check("L10 a failed lstat other than ENOENT is unreadable, not absent", parentDenied)
+        }
     }
 
     /// A legacy triggered row BEFORE an imported watcher, partly damaged
