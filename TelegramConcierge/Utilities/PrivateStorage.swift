@@ -199,8 +199,33 @@ enum PrivateStorage {
     /// `mode` overrides the policy for callers with fixed needs (`0700`
     /// scripts). Returns the path that was actually replaced (the resolved
     /// target when writing through a symlink).
+    /// Thrown by `writeAtomicallyPhased` when the rename already replaced the
+    /// file but the parent-directory durability barrier failed: the new
+    /// contents ARE in place (visible), only their durability is unconfirmed.
+    struct ReplacedButNotDurable: Error, CustomStringConvertible {
+        let underlying: Error
+        var description: String { "replaced, but durability unconfirmed: \(underlying)" }
+    }
+
+    /// Test seam (reminders-load selftest): make the post-rename directory
+    /// barrier of `writeAtomicallyPhased` fail for matching target paths.
+    nonisolated(unsafe) static var failPostRenameBarrierForTesting: ((String) -> Bool)?
+
+    /// `writeAtomically`, but a failure AFTER the rename (the directory fsync)
+    /// is reported as `ReplacedButNotDurable` instead of a plain error, so a
+    /// caller can tell "nothing changed" from "changed, durability unknown".
+    /// Every other error means the target was not replaced.
+    @discardableResult
+    static func writeAtomicallyPhased(_ data: Data, to url: URL, mode explicitMode: mode_t? = nil) throws -> String {
+        try writeAtomically(data, to: url, mode: explicitMode, phased: true)
+    }
+
     @discardableResult
     static func writeAtomically(_ data: Data, to url: URL, mode explicitMode: mode_t? = nil) throws -> String {
+        try writeAtomically(data, to: url, mode: explicitMode, phased: false)
+    }
+
+    private static func writeAtomically(_ data: Data, to url: URL, mode explicitMode: mode_t?, phased: Bool) throws -> String {
         let requested = url.standardizedFileURL.path
         let (kind, currentMode) = lstatKind(requested)
         let target: String
@@ -241,12 +266,53 @@ enum PrivateStorage {
         case .other:
             throw StorageError(description: "refusing to write \(requested): not a regular file (socket, FIFO or device)")
         }
-        try replaceContents(of: target, with: data, mode: finalMode)
+        try replaceContents(of: target, with: data, mode: finalMode, phased: phased)
         return target
     }
 
+    /// Creates `url` as a NEW owner-only file and fails if anything already
+    /// exists at that path (`O_CREAT|O_EXCL`, so it never replaces a previous
+    /// file and never follows a link): full write, fsync, parent fsync. For
+    /// recovery copies that must never overwrite an earlier one. A crash
+    /// mid-write can leave a partial new file, never a damaged old one.
+    static func writeExclusive(_ data: Data, to url: URL, mode: mode_t = 0o600) throws {
+        let path = url.standardizedFileURL.path
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode)
+        guard fd >= 0 else {
+            let code = errno
+            throw StorageError(description: code == EEXIST
+                ? "refusing to create \(path): it already exists"
+                : "could not create \(path): \(String(cString: strerror(code)))")
+        }
+        var failure: String? = nil
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var offset = 0
+            while offset < raw.count, let base = raw.baseAddress {
+                let n = write(fd, base + offset, raw.count - offset)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    failure = "write failed: \(String(cString: strerror(errno)))"
+                    return
+                }
+                offset += n
+            }
+        }
+        if failure == nil, fchmod(fd, mode) != 0 {
+            failure = "could not set mode \(String(mode, radix: 8)): \(String(cString: strerror(errno)))"
+        }
+        if failure == nil, fsync(fd) != 0 {
+            failure = "fsync failed: \(String(cString: strerror(errno)))"
+        }
+        close(fd)
+        if let failure {
+            unlink(path)
+            throw StorageError(description: "could not write \(path): \(failure)")
+        }
+        try fsyncDirectory(url.standardizedFileURL.deletingLastPathComponent().path)
+    }
+
     /// The write proper — `target` is already resolved and classified.
-    private static func replaceContents(of target: String, with data: Data, mode: mode_t) throws {
+    private static func replaceContents(of target: String, with data: Data, mode: mode_t, phased: Bool = false) throws {
         let targetURL = URL(fileURLWithPath: target)
         let dir = targetURL.deletingLastPathComponent()
         let tmp = dir.appendingPathComponent(".\(targetURL.lastPathComponent).tmp-\(UUID().uuidString)")
@@ -283,7 +349,18 @@ enum PrivateStorage {
             unlink(tmp.path)
             throw StorageError(description: "could not move \(tmp.lastPathComponent) into place at \(target): \(why)")
         }
-        try fsyncDirectory(dir.path)
+        guard phased else {
+            try fsyncDirectory(dir.path)
+            return
+        }
+        do {
+            if let fail = failPostRenameBarrierForTesting, fail(target) {
+                throw StorageError(description: "injected directory barrier failure (test seam)")
+            }
+            try fsyncDirectory(dir.path)
+        } catch {
+            throw ReplacedButNotDurable(underlying: error)
+        }
     }
 
     /// Directory barrier: durability of the rename's entry. Part of the
