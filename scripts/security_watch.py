@@ -26,9 +26,14 @@ Issues (all labelled `security-watch`, each carrying a machine marker):
            closed with a comment on the next fully successful run. A failed
            feed never counts as "no advisories".
   node     the newest Node.js security release of every supported LTS line
-           (nodejs.org/dist/index.json): Briglia's managed Node copy is not
-           pinned, so a new security release there is news. Body updated + one
-           comment when it changes.
+           (nodejs.org/dist/index.json), informational (users' own Node lines).
+           Body updated + one comment when it changes.
+  pin      (plan v21 §3.5.1, owner requirement P) one per exactly pinned Node
+           in the inventory: open while the pin is BEHIND the newest
+           `security: true` release of its own major, or its major is past
+           end of life in the Node release schedule. Closed with a comment by
+           the first complete run that finds neither (the bump shipped). A
+           failed index or schedule fetch leaves it exactly as it is.
   heartbeat one issue whose BODY is rewritten at the end of every run (time,
            run link, per-feed status). A body edit notifies nobody; the owner's
            independent release watcher alerts when it is older than 36 h, so a
@@ -46,6 +51,7 @@ comments that could forge a marker, no control characters).
 Usage:
   security_watch.py [--dry-run] [--inventory PATH]
                     [--osv-api URL] [--github-api URL] [--kev-url URL] [--node-index URL]
+                    [--node-schedule URL] [--node-wg URL]
                     [--repo OWNER/NAME]
 Environment: GITHUB_TOKEN (required unless --dry-run), GITHUB_REPOSITORY.
 Exit: 0 healthy run, 1 a feed failed or was incomplete (health issue raised),
@@ -69,6 +75,8 @@ OSV_API = "https://api.osv.dev"
 GITHUB_API = "https://api.github.com"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 NODE_INDEX = "https://nodejs.org/dist/index.json"
+NODE_SCHEDULE = "https://raw.githubusercontent.com/nodejs/Release/main/schedule.json"
+NODE_WG = "https://raw.githubusercontent.com/nodejs/security-wg/main/vuln/core/index.json"
 NODE_MIN_MAJOR = 20          # ManagedPlaywright.minimumNodeMajor
 HEARTBEAT_GAP_HOURS = 36
 REACHABILITY = ("reachable", "not-reachable")
@@ -76,7 +84,7 @@ OVERDUE = "triage-overdue"
 TRIAGE_DAYS_URGENT, TRIAGE_DAYS = 7, 30
 
 LABEL = "security-watch"
-MARKER_RE = re.compile(r"<!-- briglia-security-watch v1 kind=(finding|gaps|health|node|heartbeat|curation) ids=([A-Za-z0-9:._,-]*) fp=([0-9a-f]{16}) -->")
+MARKER_RE = re.compile(r"<!-- briglia-security-watch v1 kind=(finding|gaps|health|node|heartbeat|curation|pin) ids=([A-Za-z0-9:._,-]*) fp=([0-9a-f]{16}) -->")
 MAX_BYTES = 32 * 1024 * 1024
 MAX_PAGES = 25
 MAX_VULNS = 400
@@ -438,16 +446,24 @@ def kev_set(url):
     return out
 
 
-def node_security_releases(url):
-    """{major: newest security release "vX.Y.Z"} for every LTS line >= NODE_MIN_MAJOR."""
+def node_index(url):
+    """The validated release rows of nodejs.org/dist/index.json."""
     status, data, _ = http("GET", url)
     if status != 200 or not isinstance(data, list) or not data:
         raise FeedError(f"Node release index: unexpected response (HTTP {status})")
-    out, lts_seen = {}, False
     for rel in data:
         v = parse_semver(str(rel.get("version") or "")) if isinstance(rel, dict) else None
         if v is None or not isinstance(rel.get("security"), bool) or not isinstance(rel.get("lts"), (str, bool)):
             raise FeedError("Node release index: malformed release row")
+    return data
+
+
+def node_security_releases(url, rows=None):
+    """{major: newest security release "vX.Y.Z"} for every LTS line >= NODE_MIN_MAJOR."""
+    data = node_index(url) if rows is None else rows
+    out, lts_seen = {}, False
+    for rel in data:
+        v = parse_semver(str(rel.get("version") or ""))
         if not rel["lts"]:
             continue
         lts_seen = True
@@ -461,6 +477,151 @@ def node_security_releases(url):
     if not out:
         raise FeedError(f"Node release index: no security release on any LTS line >= {NODE_MIN_MAJOR}")
     return out
+
+
+def node_newest_security(rows, major):
+    """Newest `security: true` release of `major` ("vX.Y.Z"), or None when that major has none."""
+    best = None
+    for rel in rows:
+        v = parse_semver(str(rel.get("version") or ""))
+        if v is None or v[0] != major or rel.get("security") is not True:
+            continue
+        if best is None or v > parse_semver(best):
+            best = clean(rel["version"], 20)
+    return best
+
+
+DATE_RE = re.compile(r"^\d{4}-\d\d-\d\d$")
+
+
+def node_schedule(url):
+    """{major: end-of-life date "YYYY-MM-DD"} from the Node release schedule."""
+    status, data, _ = http("GET", url)
+    if status != 200 or not isinstance(data, dict) or not data:
+        raise FeedError(f"Node release schedule: unexpected response (HTTP {status})")
+    out = {}
+    for key, val in data.items():
+        m = re.match(r"^v(\d+)$", key) if isinstance(key, str) else None
+        if not m:
+            continue   # "v0.10"-style historic keys
+        if not isinstance(val, dict) or not isinstance(val.get("end"), str) or not DATE_RE.match(val["end"]):
+            raise FeedError(f"Node release schedule: {clean(key, 20)} has no valid end date")
+        out[int(m.group(1))] = val["end"]
+    if not out:
+        raise FeedError("Node release schedule: no release lines")
+    return out
+
+
+def node_pin_blockers(version, rows, schedule, today):
+    """Blocker tokens for an exactly pinned Node `version` (plan v21 §3.5.1).
+    Raises FeedError when the pin cannot be evaluated (never "fine" on missing data)."""
+    v = parse_semver(version) if isinstance(version, str) and re.match(r"^\d+\.\d+\.\d+$", version) else None
+    if v is None:
+        raise FeedError(f"pinned Node version {clean(version, 30)!r} is not X.Y.Z")
+    major = v[0]
+    if not any(str(r.get("version")) == "v" + version for r in rows):
+        raise FeedError(f"Node release index does not list the pinned release v{version} (truncated index?)")
+    out = []
+    newest = node_newest_security(rows, major)
+    if newest is not None and parse_semver(newest) > v:
+        out.append(f"node-behind:{newest}")
+    end = schedule.get(major)
+    if end is None:
+        raise FeedError(f"Node release schedule does not list the pinned major v{major}")
+    if end <= today:
+        out.append(f"node-eol:{major}")
+    return out
+
+
+def node_wg(url):
+    """The Node Security WG core index, shaped and bounded by advisory_node.py."""
+    import advisory_node
+    status, data, _ = http("GET", url)
+    if status != 200:
+        raise FeedError(f"Node Security WG index: HTTP {status}")
+    try:
+        return advisory_node._shape_wg(data)
+    except advisory_node.NodeFeedError as e:
+        raise FeedError(f"Node Security WG index: {e}")
+
+
+def _in_ranges(ver, ranges):
+    for r in ranges:
+        ev = r.get("events") or []
+        lo = next((e["introduced"] for e in ev if "introduced" in e), None)
+        hi = next((e.get("fixed") or e.get("limit") for e in ev if "fixed" in e or "limit" in e), None)
+        if lo is None or hi is None:
+            return None
+        import advisory_node
+        a, b = advisory_node.parse_version(lo), advisory_node.parse_version(hi)
+        if a is None or b is None:
+            return None
+        if a <= ver < b:
+            return True
+    return False
+
+
+def node_pin_findings(component, wg, rows):
+    """Raw findings (merge_findings shape) for the exactly pinned Node: every
+    WG core entry that affects the pin on either target platform, or whose
+    applicability is unknown, with or without a fix (plan v22 §3.5.1, R21-1)."""
+    import advisory_node
+    ver = advisory_node.parse_version(component["version"])
+    if ver is None:
+        raise FeedError(f"pinned Node version {clean(component['version'], 30)!r} is not X.Y.Z")
+    released = {str(r.get("version", "")).lstrip("v") for r in rows}
+    out = []
+    for key in sorted(wg, key=int):
+        entry = wg[key]
+        verdicts, fixed = [], set()
+        for platform in ("darwin", "linux"):
+            a = advisory_node.wg_advisory(key, entry, platform, released)
+            if a is None:
+                continue
+            if a["affected"] == "unknown":
+                if a.get("_unknownLines") or ver[0] in a.get("_lines", []) or not a.get("_lines"):
+                    verdicts.append(None)
+                continue
+            hit = _in_ranges(ver, a["affected"]["ranges"])
+            verdicts.append(hit)
+            if hit and a.get("_patched", {}).get(ver[0]):
+                fixed.add(a["_patched"][ver[0]])
+        if not verdicts or all(v is False for v in verdicts):
+            continue
+        applies = "affected (Node Security WG range)" if any(v is True for v in verdicts) else \
+            "applicability unknown (WG entry not evaluable)"
+        ids = sorted({c for c in (entry.get("cve") or []) if isinstance(c, str) and valid_id(c)}) or [f"NSWG-CORE-{key}"]
+        sev = str(entry.get("severity") or "").upper()
+        out.append({"ids": ids, "summary": f"Node.js core advisory {ids[0]} (Security WG entry {key})",
+                    "severity": sev if sev in SEVERITY_ORDER else "UNKNOWN", "components": {component["id"]},
+                    "fixed": fixed, "applies": applies,
+                    "url": f"https://github.com/nodejs/security-wg/blob/main/vuln/core/{key}.json"})
+    return out
+
+
+def pin_doc(component, blockers, newest, end):
+    """One `pin` issue per exactly pinned Node (plan v21 §3.5.1)."""
+    fp = fingerprint(component["id"], component.get("version"), sorted(blockers))
+    lines = [f"Briglia's pinned **{component['name']} {component.get('version')}** is stale (owner requirement P, plan v21 §3.5):", ""]
+    for b in sorted(blockers):
+        if b.startswith("node-behind:"):
+            lines.append(f"- behind: Node published security release {b.split(':', 1)[1]} on the pinned line (blocker `{b}`)")
+        elif b.startswith("node-eol:"):
+            lines.append(f"- end of life: the Node release schedule ends line v{b.split(':', 1)[1]} on {end} (blocker `{b}`)")
+    lines += ["", "Affected inventory components:",
+              f"- `{component['id']}` — {component['name']} {component.get('version')} · owner {component['owner']} · {component['source'].split(':')[0]}",
+              "", f"Newest security release on the pinned line: {newest or 'none listed'} · line end of life: {end}",
+              "", "The release gate (scripts/pin_gate.py) refuses to tag or sign until the pin is bumped in an ordinary "
+              "reviewed, phone-signed release or the owner commits an expiring override. Closed automatically by the "
+              "first complete run after the bump.",
+              "", f"<!-- briglia-security-watch v1 kind=pin ids={component['id']} fp={fp} -->"]
+    return {"kind": "pin", "ids": [component["id"]], "fp": fp,
+            "title": clean(f"[security-watch] pinned {component['name']} {component.get('version')} is stale: " + ", ".join(sorted(blockers)), 200),
+            "body": "\n".join(lines), "components": [component["id"]]}
+
+
+def pinned_nodes(components):
+    return [c for c in components if c.get("watch") == "node-releases" and c.get("pin_kind") == "exact" and c.get("version")]
 
 
 # ---------------------------------------------------------------------------
@@ -560,12 +721,13 @@ def health_doc(failures):
 def node_doc(latest):
     rows = sorted(latest.items())
     fp = fingerprint([[m, v] for m, v in rows])
-    lines = ["Briglia's managed Node.js copy (~/.local/node, used only when no system Node >= 20 exists) is installed as "
-             "the latest LTS at install time and never updated, so every Node security release matters until Phase 1 pins it.",
+    lines = ["Informational: the newest Node.js security release of every supported LTS line. Briglia's own Node is an "
+             "exact pin tracked by the `pin` issue (plan v21 §3.5.1); this list is about the Node lines users run "
+             "themselves (nvm, nodejs.org, distribution packages), which the local-tools check covers on the client.",
              "", "Newest security release per LTS line (nodejs.org/dist/index.json):", ""]
     lines += [f"- Node {m}: {v}" for m, v in rows] or ["- (none listed)"]
-    lines += ["", "Next step (manual): check https://nodejs.org/en/blog/vulnerability for reachability; Phase 1 moves Node "
-              "to an exact pin shipped in a release.", "", f"<!-- briglia-security-watch v1 kind=node ids=node-security fp={fp} -->"]
+    lines += ["", "No action needed for Briglia itself unless the `pin` issue is open.",
+              "", f"<!-- briglia-security-watch v1 kind=node ids=node-security fp={fp} -->"]
     return {"kind": "node", "ids": ["node-security"], "fp": fp, "title": "[security-watch] Node.js security releases",
             "body": "\n".join(lines)}
 
@@ -742,7 +904,7 @@ def got_worse(old_body, doc):
             or (doc["kev"] and not old_kev) or bool(set(doc["components"]) - old_comps))
 
 
-def reconcile(issues, docs, complete, failures, now=None, feeds=None, run_url=None):
+def reconcile(issues, docs, complete, failures, now=None, feeds=None, run_url=None, pin_clear=()):
     """`complete`: every finding source (OSV, repository advisories, KEV) succeeded.
     When it is False, existing findings are left exactly as they are (a failed
     feed is unknown, not "no longer KEV" or "fewer components"); new findings
@@ -771,7 +933,12 @@ def reconcile(issues, docs, complete, failures, now=None, feeds=None, run_url=No
         labels = merged_labels(it, doc)
         labels_now[it["number"]] = labels
         if it["state"] == "closed":
-            if doc["kind"] != "finding" or got_worse(it["body"], doc):
+            if doc["kind"] == "pin":
+                it["state"] = "open"
+                issues.update(it["number"], doc, labels, state="open")
+                issues.comment(it["number"], "Reopened by the security watch: the pinned version is stale again. "
+                                             "See the updated description.")
+            elif doc["kind"] != "finding" or got_worse(it["body"], doc):
                 it["state"] = "open"
                 issues.update(it["number"], doc, labels, state="open")
                 issues.comment(it["number"], "Reopened by the security watch: the advisory now affects more, is more "
@@ -780,8 +947,19 @@ def reconcile(issues, docs, complete, failures, now=None, feeds=None, run_url=No
                 issues.update(it["number"], doc, labels)  # silent refresh of a closed issue
         else:
             issues.update(it["number"], doc, labels)
-            issues.comment(it["number"], "Updated by the security watch: severity, KEV status, affected components "
-                                         "or fixed versions changed. See the updated description.")
+            issues.comment(it["number"], "Updated by the security watch: the stale-pin blockers changed. See the updated description."
+                           if doc["kind"] == "pin" else
+                           "Updated by the security watch: severity, KEV status, affected components "
+                           "or fixed versions changed. See the updated description.")
+
+    # Stale-pin issues whose pin was evaluated completely this run and found
+    # clear (the bump shipped): one comment, closed. Pins not evaluated
+    # (feed failure) are not in `pin_clear` and stay exactly as they are.
+    for it in existing:
+        if it["kind"] == "pin" and it["state"] == "open" and it["number"] not in used and set(it["ids"]) & set(pin_clear):
+            issues.comment(it["number"], "The security watch finds the pinned version current and supported again "
+                                         "(newest security release reached, line not past end of life); closing.")
+            issues.close(it["number"])
 
     # Findings no longer matched: only meaningful after a COMPLETE run.
     if complete:
@@ -924,13 +1102,56 @@ def run(args):
         kev = set()  # NEW findings are still posted (KEV unknown); existing ones are left as they are
         complete = False
 
-    node = None
+    node, node_rows = None, None
     try:
-        node = node_security_releases(args.node_index)
+        node_rows = node_index(args.node_index)
+        node = node_security_releases(args.node_index, rows=node_rows)
         feeds["Node.js releases"] = "ok (" + ", ".join(f"{m}: {v}" for m, v in sorted(node.items())) + ")"
     except FeedError as e:
         failures.append(f"Node releases: {e}")
         feeds["Node.js releases"] = "FAILED"
+
+    # Owner requirement P (plan v21 §3.5.1): every exactly pinned Node is
+    # checked against its own line. Evaluated only on a complete index AND
+    # schedule; otherwise existing `pin` issues are left exactly as they are.
+    pin_docs, pin_clear = [], set()
+    pins = pinned_nodes(components)
+    if pins:
+        try:
+            wg = node_wg(args.node_wg)
+            if node_rows is None:
+                raise FeedError("Node release index unavailable (needed to cross-check WG patched versions)")
+            wg_raw = []
+            for c in pins:
+                wg_raw += node_pin_findings(c, wg, node_rows)
+            raw += wg_raw   # only a complete WG pass contributes
+            feeds["Node.js Security WG"] = f"ok ({len(wg)} entries, {len(wg_raw)} affecting the pin)"
+        except FeedError as e:
+            failures.append(f"Node Security WG: {e}")
+            feeds["Node.js Security WG"] = "FAILED"
+            complete = False
+        schedule = None
+        try:
+            schedule = node_schedule(args.node_schedule)
+            feeds["Node.js schedule"] = f"ok ({len(schedule)} lines)"
+        except FeedError as e:
+            failures.append(f"Node schedule: {e}")
+            feeds["Node.js schedule"] = "FAILED"
+        if node_rows is not None and schedule is not None:
+            today = (getattr(args, "today", None) or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"))
+            for c in pins:
+                try:
+                    blockers = node_pin_blockers(c["version"], node_rows, schedule, today)
+                except FeedError as e:
+                    failures.append(f"Node pin {c['id']}: {e}")
+                    feeds[f"Node pin {c['id']}"] = "FAILED"
+                    continue
+                major = parse_semver(c["version"])[0]
+                feeds[f"Node pin {c['id']}"] = ("stale: " + ", ".join(blockers)) if blockers else f"ok ({c['version']})"
+                if blockers:
+                    pin_docs.append(pin_doc(c, blockers, node_newest_security(node_rows, major), schedule.get(major)))
+                else:
+                    pin_clear.add(c["id"])
 
     groups = merge_findings(raw)
     if len(groups) > MAX_FINDINGS:
@@ -940,6 +1161,7 @@ def run(args):
     docs = [finding_doc(g, kev, by_id) for g in groups] + [gaps_doc(components)]
     if node is not None:
         docs.append(node_doc(node))
+    docs += pin_docs
     if getattr(args, "curation", None):
         cur = load_curation(args.curation)
         if cur is None:
@@ -960,7 +1182,7 @@ def run(args):
     run_url = None
     if os.environ.get("GITHUB_RUN_ID", "").isdigit() and args.repo:
         run_url = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{args.repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-    reconcile(issues, docs, complete, failures, feeds=feeds, run_url=run_url)
+    reconcile(issues, docs, complete, failures, feeds=feeds, run_url=run_url, pin_clear=pin_clear)
     print(f"github writes: {len(issues.actions)}{' (dry run, none sent)' if args.dry_run else ''}")
     return 1 if failures else 0
 
@@ -973,6 +1195,8 @@ def main(argv=None):
     p.add_argument("--github-api", default=GITHUB_API)
     p.add_argument("--kev-url", default=KEV_URL)
     p.add_argument("--node-index", default=NODE_INDEX)
+    p.add_argument("--node-schedule", default=NODE_SCHEDULE)
+    p.add_argument("--node-wg", default=NODE_WG)
     p.add_argument("--curation", help="curation.json from advisory_fetch.py (plan v20 §9.5.10.2)")
     p.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     args = p.parse_args(argv)

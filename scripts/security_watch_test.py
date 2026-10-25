@@ -64,9 +64,16 @@ class World:
             {"version": "v22.20.0", "lts": "Jod", "security": True},
             {"version": "v18.20.9", "lts": "Hydrogen", "security": True},     # below the minimum major
         ]
+        self.schedule = {"v0.10": {"start": "2013-03-11", "end": "2016-10-31"},
+                         "v20": {"start": "2023-04-18", "end": "2026-04-30"},
+                         "v22": {"start": "2024-04-24", "end": "2027-04-30"},
+                         "v24": {"start": "2025-05-06", "end": "2028-04-30"},
+                         "v25": {"start": "2025-10-15", "end": "2026-06-01"}}
+        self.wg = {"1": {"cve": ["CVE-2020-0001"], "vulnerable": "<= 12", "patched": ">= 14.0.0",
+                         "severity": "high", "affectedEnvironments": ["all"]}}   # old lines only
         self.heartbeat_writes = 0
         self.advisories = {}   # repo -> [advisory]
-        self.fail = set()      # {"osv", "kev", "adv", "vulns", "node"}
+        self.fail = set()      # {"osv", "kev", "adv", "vulns", "node", "schedule"}
         self.fail_ids = set()  # OSV record ids whose GET fails
         self.adv_override = None  # raw advisory list served instead (malformed-success cases)
         self.osv_override = None  # raw querybatch result served for every query instead
@@ -172,6 +179,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if "node" in W.fail:
                     return self._send(503, {})
                 return self._send(200, W.node)
+            if path == "/node/wg.json":
+                if "wg" in W.fail:
+                    return self._send(503, {})
+                return self._send(200, W.wg)
+            if path == "/node/schedule.json":
+                if "schedule" in W.fail:
+                    return self._send(503, {})
+                return self._send(200, W.schedule)
             if path == f"/gh/repos/{REPO}/issues":
                 page = int(qs.get("page", ["1"])[0])
                 per = 2  # force pagination of the issue list
@@ -216,7 +231,7 @@ def run_watch(script, inventory=None, dry=False, extra=()):
     env = dict(os.environ, GITHUB_TOKEN="test-token", GITHUB_REPOSITORY=REPO, SECURITY_WATCH_BACKOFF="0")
     cmd = [sys.executable, script, "--inventory", inv, "--osv-api", f"{BASE}/osv",
            "--github-api", f"{BASE}/gh", "--kev-url", f"{BASE}/kev.json",
-           "--node-index", f"{BASE}/node/index.json"] + (["--dry-run"] if dry else []) + list(extra)
+           "--node-index", f"{BASE}/node/index.json", "--node-schedule", f"{BASE}/node/schedule.json", "--node-wg", f"{BASE}/node/wg.json"] + (["--dry-run"] if dry else []) + list(extra)
     p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
     return p.returncode, p.stdout + p.stderr
 
@@ -667,6 +682,114 @@ def scenarios(script):
     check("curation: a complete clean fetch rewrites it to nothing to review", "(0)" in issues("curation")[0]["title"]
           and "nothing to review" in issues("curation")[0]["body"])
 
+
+    # 9c. owner requirement P (plan v21 §3.5.1): the exactly pinned Node is checked against its own line
+    def pin_inv(version, extra_comps=()):
+        d = tempfile.mkdtemp(prefix="secwatch-pin-")
+        path = os.path.join(d, "inv.json")
+        comps = [{"id": "runtime:node", "name": "node", "ecosystem": None, "version": version, "pin_kind": "exact",
+                  "watch": "node-releases", "owner": "briglia-private", "source": "NodeRuntime.swift"}] + list(extra_comps)
+        with open(path, "w") as f:
+            json.dump({"schema": 1, "components": comps}, f)
+        return path
+    reset()
+    rc, out = run_watch(script, inventory=pin_inv("24.9.1"))
+    check("pin: pinned at the newest security release of its line -> no pin issue, exit 0",
+          rc == 0 and not issues("pin") and "Node pin runtime:node: ok (24.9.1)" in issues("heartbeat")[0]["body"], out[-400:])
+    reset()
+    rc, out = run_watch(script, inventory=pin_inv("24.9.0"))
+    pi = issues("pin")
+    check("pin: behind the line's security release -> one pin issue naming node-behind:v24.9.1 at the pinned version",
+          rc == 0 and len(pi) == 1 and "node-behind:v24.9.1" in pi[0]["body"] and "- `runtime:node` — node 24.9.0" in pi[0]["body"],
+          [i["title"] for i in W.issues])
+    writes = len(W.writes)
+    run_watch(script, inventory=pin_inv("24.9.0"))
+    check("pin: an unchanged world writes nothing new", len(W.writes) == writes, W.writes[writes:])
+    W.node.insert(0, {"version": "v24.10.0", "lts": "Krypton", "security": False})
+    run_watch(script, inventory=pin_inv("24.9.0"))
+    check("pin: a newer NON-security release on the line changes nothing", len(W.writes) == writes, W.writes[writes:])
+    W.node.insert(0, {"version": "v26.0.1", "lts": False, "security": True})
+    run_watch(script, inventory=pin_inv("24.9.0"))
+    check("pin: a security release on ANOTHER major does not count", len(W.writes) == writes and "v26" not in issues("pin")[0]["body"])
+    rc, out = run_watch(script, inventory=pin_inv("24.9.1"))
+    pi = issues("pin")[0]
+    check("pin: bump to the security release -> closed with exactly one comment by the complete run",
+          rc == 0 and pi["state"] == "closed" and len(W.comments.get(pi["number"], [])) == 1, (pi["state"], W.comments.get(pi["number"])))
+    W.schedule["v24"]["end"] = "2020-01-01"
+    rc, out = run_watch(script, inventory=pin_inv("24.9.1"))
+    pi = issues("pin")[0]
+    check("pin: line past end of life -> the closed pin issue reopens with node-eol:24",
+          pi["state"] == "open" and "node-eol:24" in pi["body"] and "node-behind" not in pi["body"], pi["body"][:300])
+    body = pi["body"]
+    W.schedule["v24"]["end"] = "2028-04-30"
+    W.fail = {"schedule"}
+    rc, out = run_watch(script, inventory=pin_inv("24.9.1"))
+    check("pin: schedule fetch failure -> exit 1, health issue, the pin issue left exactly as it was (not closed)",
+          rc == 1 and issues("health") and issues("health")[0]["state"] == "open"
+          and issues("pin")[0]["state"] == "open" and issues("pin")[0]["body"] == body, out[-400:])
+    W.fail = {"node"}
+    rc, out = run_watch(script, inventory=pin_inv("24.9.1"))
+    check("pin: index fetch failure -> the pin issue left exactly as it was",
+          rc == 1 and issues("pin")[0]["state"] == "open" and issues("pin")[0]["body"] == body, out[-400:])
+    W.fail = set()
+    del W.schedule["v24"]
+    rc, out = run_watch(script, inventory=pin_inv("24.9.1"))
+    check("pin: pinned major missing from the schedule -> incomplete (exit 1, health), never 'fine'; pin issue untouched",
+          rc == 1 and "does not list the pinned major" in issues("health")[0]["body"]
+          and issues("pin")[0]["state"] == "open", out[-400:])
+    reset()
+    rc, out = run_watch(script, inventory=pin_inv("24.9"))
+    check("pin: a pinned version that is not X.Y.Z -> exit 1 (health), no pin verdict", rc == 1 and not issues("pin"), out[-300:])
+
+
+    # 9d. R21-1: Node Security WG advisories against the pin (with or without a fix; unknown blocks)
+    reset()
+    W.wg["7"] = {"cve": ["CVE-2026-7777"], "vulnerable": "24.x", "patched": "^24.9.1", "severity": "high",
+                 "affectedEnvironments": ["all"]}
+    rc, out = run_watch(script, inventory=pin_inv("24.9.0"))
+    f7 = [i for i in issues("finding") if "CVE-2026-7777" in i["body"]]
+    check("WG: an advisory with a fix affecting the pinned Node -> finding for runtime:node at the pinned version",
+          rc == 0 and len(f7) == 1 and "- `runtime:node` — node 24.9.0" in f7[0]["body"] and "24.9.1" in f7[0]["body"],
+          [i["title"] for i in W.issues])
+    reset()
+    W.wg["8"] = {"cve": ["CVE-2026-8888"], "vulnerable": "24.x", "patched": "", "severity": "critical",
+                 "affectedEnvironments": ["linux"]}
+    rc, out = run_watch(script, inventory=pin_inv("24.9.1"))
+    f8 = [i for i in issues("finding") if "CVE-2026-8888" in i["body"]]
+    check("WG: an UNFIXED advisory (linux only) affecting the pin -> finding, no fix required",
+          rc == 0 and len(f8) == 1 and "CRITICAL" in f8[0]["title"], [i["title"] for i in W.issues])
+    reset()
+    W.wg["9"] = {"cve": ["CVE-2026-9999"], "vulnerable": "~24.9.0", "patched": "", "severity": "low",
+                 "affectedEnvironments": ["all"]}
+    rc, out = run_watch(script, inventory=pin_inv("24.9.1"))
+    f9 = [i for i in issues("finding") if "CVE-2026-9999" in i["body"]]
+    check("WG: an entry the strict grammar cannot read -> finding with applicability unknown (never clean)",
+          len(f9) == 1 and "applicability unknown" in f9[0]["body"], [i["title"] for i in W.issues])
+    reset()
+    W.wg["10"] = {"cve": ["CVE-2026-1010"], "vulnerable": "22.x", "patched": "", "severity": "high",
+                  "affectedEnvironments": ["all"]}
+    W.wg["11"] = {"cve": ["CVE-2026-1111"], "vulnerable": "24.x", "patched": "", "severity": "high",
+                  "affectedEnvironments": ["win32"]}
+    rc, out = run_watch(script, inventory=pin_inv("24.9.1"))
+    check("WG: another line, or another platform only -> no finding",
+          rc == 0 and not issues("finding"), [i["title"] for i in W.issues])
+    reset(); base_world()
+    run_watch(script, inventory=pin_inv("24.9.0", INVENTORY["components"][:1]))
+    W.fail = {"wg"}
+    rc, out = run_watch(script, inventory=pin_inv("24.9.0", INVENTORY["components"][:1]))
+    check("WG: fetch failure -> exit 1, health issue, the run is incomplete (no finding marked unmatched)",
+          rc == 1 and issues("health")[0]["state"] == "open"
+          and not any("No longer matched" in i["body"] for i in issues("finding")), out[-400:])
+    reset()
+    rc, out = run_watch(script, inventory=pin_inv("24.8.7"))
+    check("pin: a pinned release missing from the index -> exit 1 (health), no pin verdict",
+          rc == 1 and not issues("pin") and "does not list the pinned release" in issues("health")[0]["body"], out[-300:])
+    reset()
+    W.node.insert(0, {"version": "v25.1.1", "lts": False, "security": True})
+    rc, out = run_watch(script, inventory=pin_inv("25.1.0"))
+    check("pin: a non-LTS (Current) pinned line counts its own security releases", any("node-behind:v25.1.1" in i["body"] for i in issues("pin")),
+          [i["title"] for i in W.issues])
+
     # 10. config errors
     p = subprocess.run([sys.executable, script, "--repo", REPO], capture_output=True, text=True,
                        env={k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"})
@@ -693,7 +816,7 @@ BREAKS = [
     ("reopen every closed issue", "if doc[\"kind\"] != \"finding\" or got_worse(it[\"body\"], doc):", "if True:"),
     ("dry run still writes", "        if self.dry:\n", "        if False:\n"),
     ("post on every run", 'if it["fp"] == doc["fp"] and UNMATCHED_NOTE not in it["body"]:', "if False:"),
-    ("health never closed", 'issues.close(it["number"])', "pass"),
+    ("health never closed", 'issues.comment(it["number"], "The security watch completed a full check again; closing.")\n                issues.close(it["number"])', 'pass'),
     ("range check always true", "        if not ok:\n            return False", "        if False:\n            return False"),
     ("KEV failure ignored", 'failures.append(f"KEV: {e}")', "pass"),
     ("unmatched marked after an incomplete run", "    reconcile(issues, docs, complete, failures, feeds=", "    reconcile(issues, docs, True, failures, feeds="),
@@ -724,6 +847,17 @@ BREAKS = [
     ("OSV ranges type not validated", 'or not opt(aff, "ranges", list):', 'or False:'),
     ("curation findings dropped", "            docs.append(curation_doc(cur))", "            pass"),
     ("incomplete curation fetch trusted", 'd.get("complete") is not True or ', ''),
+    ("pin never behind", "if newest is not None and parse_semver(newest) > v:", "if False:"),
+    ("pin end of life ignored", "    if end <= today:\n        out.append", "    if False:\n        out.append"),
+    ("schedule without the pinned major read as fine", 'raise FeedError(f"Node release schedule does not list the pinned major v{major}")', "return out"),
+    ("stale pin issue never closed", 'and set(it["ids"]) & set(pin_clear):', "and False:"),
+    ("schedule failure ignored", 'failures.append(f"Node schedule: {e}")', "pass"),
+    ("pin compared with the LTS line", "if best is None or v > parse_semver(best):", "if rel.get(\"lts\") and (best is None or v > parse_semver(best)):"),
+    ("pin closed on a failed fetch", "        if node_rows is not None and schedule is not None:", "        if node_rows is not None and schedule is not None or (pin_clear.update(c[\"id\"] for c in pins) and False):"),
+    ("WG findings dropped", "            raw += wg_raw   # only a complete WG pass contributes", "            pass"),
+    ("WG unknown read as clean", "                    verdicts.append(None)", "                    pass"),
+    ("WG failure ignored", 'failures.append(f"Node Security WG: {e}")', "pass"),
+    ("pinned release need not be in the index", 'raise FeedError(f"Node release index does not list the pinned release v{version} (truncated index?)")', "pass"),
     ("triage during incomplete runs", '        if not complete or it["kind"] != "finding" or it["state"] != "open":', '        if it["kind"] != "finding" or it["state"] != "open":'),
 ]
 
