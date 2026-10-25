@@ -77,11 +77,10 @@ enum RIUnits {
     /// The unit sections use this child's own STANDARD domain (its process
     /// name is `linkName`, enforced before any section runs), like the
     /// manager section and every other `briglia-mw-` selftest, and reset it
-    /// key by key (the only two keys `RetiredIntegrations` reads). On the CI
-    /// runner image a mid-run `removePersistentDomain` — first on a separate
-    /// named suite, then on this domain — left an empty plist shell that
-    /// outlived the parent's purge + final sweep; no other selftest removes a
-    /// persistent domain inside its child.
+    /// key by key (the only two keys `RetiredIntegrations` reads). The CI
+    /// preference-file leak this used to trigger turned out to be cfprefsd
+    /// rewriting the domain's empty shell after the parent's sweep; the parent
+    /// handles that with `finalSweep(settle:)` (see `reexecIsolated`).
     static let defaultsKeys = [RetiredIntegrations.lastUserChannelDefaultsKey,
                                RetiredIntegrations.whatsappEnabledDefaultsKey]
 
