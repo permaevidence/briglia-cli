@@ -168,7 +168,11 @@ extension LocalTools {
                     return (r.exitCode, r.output)
                 },
                 brigliaOwnedRoots: [NodeInstaller.installRoot.resolvingSymlinksInPath().path,
-                                    UserdataToolchain.root.resolvingSymlinksInPath().path])
+                                    UserdataToolchain.root.resolvingSymlinksInPath().path,
+                                    // Briglia's private runtimes (plan v24 §7.9): gated by the
+                                    // release gate (§3.5), not by the user-tools check.
+                                    RuntimePaths.runtimeRoot.resolvingSymlinksInPath().path,
+                                    RuntimePaths.fallbackBinDir.resolvingSymlinksInPath().path])
         }
 
         func owned(_ path: String) -> Bool {

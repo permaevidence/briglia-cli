@@ -651,10 +651,12 @@ def scenarios(script):
 
     # 9. the real inventory loads and runs against an empty feed
     reset()
+    real_pin = next(c["version"] for c in json.load(open(REAL_INVENTORY))["components"] if c["id"] == "runtime:node")
+    W.node.insert(0, {"version": f"v{real_pin}", "lts": "Krypton", "security": True})
     rc, out = run_watch(script, inventory=REAL_INVENTORY)
-    check("real inventory: runs clean against an empty feed (gaps, Node and heartbeat issues only)",
-          rc == 0 and len(W.issues) == 3 and issues("gaps") and issues("node") and issues("heartbeat")
-          and "runtime:node" in issues("gaps")[0]["body"], out[-600:])
+    check("real inventory: runs clean against an empty feed (gaps, Node and heartbeat issues only; the pinned Node current)",
+          rc == 0 and len(W.issues) == 3 and issues("gaps") and issues("node") and issues("heartbeat") and not issues("pin")
+          and "legacy:agentmail-public" in issues("gaps")[0]["body"], out[-600:])
 
     # 9b. LibreOffice platform curation findings (plan v20 §9.5.10.2, impl round-1 R6)
     reset(); base_world()

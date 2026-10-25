@@ -216,12 +216,16 @@ struct EmailCalendarSelftest: AsyncParsableCommand {
         // inherited PATH already lists it after Homebrew — otherwise a
         // foreign agentmail shadows Briglia's key-broker wrapper.
         let home = NSHomeDirectory()
-        check("~/.local/bin moved to the front of an inherited PATH (rest preserved)",
+        // Security plan v24 §7.9.1: Briglia's own command directory (the
+        // private agentmail broker wrapper) goes first, then ~/.local/bin;
+        // the private Node fallback shims last.
+        let own = RuntimePaths.binDir.path, fallback = RuntimePaths.fallbackBinDir.path
+        check("Briglia's bin, then ~/.local/bin, moved to the front of an inherited PATH (rest preserved), fallback shims last",
               BashTools.augmentedPath("/opt/homebrew/bin:\(home)/.local/bin:/usr/bin")
-              == "\(home)/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin")
-        check("missing dirs prepended with ~/.local/bin first",
+              == "\(own):\(home)/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:\(fallback)")
+        check("missing dirs prepended with Briglia's bin and ~/.local/bin first",
               BashTools.augmentedPath("/usr/bin:/bin")
-              == "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+              == "\(own):\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\(fallback)")
 
         // 4f. Broker detection is content-based: a bare binary named
         // `agentmail` (pre-broker Briglia, npm, brew) must NOT count as

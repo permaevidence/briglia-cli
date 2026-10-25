@@ -130,7 +130,12 @@ struct PlaywrightSelftest: AsyncParsableCommand {
             deps.manifests = { manifests }
             deps.flag = .file(flag)
             let dir = nodeDir.path
-            deps.nodeDirectory = { (dir, nil) }
+            // Production records the Node selection the registry's managed
+            // entry resolves against (security plan v24 §7.9.3); so does this seam.
+            deps.nodeDirectory = {
+                NodeRuntime.record(NodeRuntime.Result(directory: dir, providerClass: "shared-accepted", version: "test", reason: nil))
+                return (dir, nil)
+            }
             deps.baseEnvironment = environment()
             deps.npmTimeout = npmTimeout
             deps.handshakeTimeout = 8

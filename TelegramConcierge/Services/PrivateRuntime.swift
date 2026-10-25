@@ -380,6 +380,21 @@ enum RuntimeFS {
     }
 
     /// Recursive size-bounded removal of a directory we own (never follows links).
+    /// Owner-only staged payloads (private storage, Release B): tools such as
+    /// `python -m venv`, pip and tar create 0755/0644 entries; strip group and
+    /// other bits from every non-symlink entry (symlinks carry no mode).
+    static func restrictTree(_ url: URL) throws {
+        func fix(_ path: String) throws {
+            var st = stat()
+            guard lstat(path, &st) == 0 else { throw RuntimeError("could not inspect \(path): \(String(cString: strerror(errno)))") }
+            guard (st.st_mode & S_IFMT) != S_IFLNK, st.st_mode & 0o077 != 0 else { return }
+            guard chmod(path, st.st_mode & 0o7700) == 0 else { throw RuntimeError("could not restrict \(path): \(String(cString: strerror(errno)))") }
+        }
+        try fix(url.path)
+        guard let e = FileManager.default.enumerator(atPath: url.path) else { return }
+        for case let rel as String in e { try fix(url.path + "/" + rel) }
+    }
+
     static func removeTree(_ url: URL) throws {
         guard kind(url.path) != .absent else { return }
         try FileManager.default.removeItem(at: url)

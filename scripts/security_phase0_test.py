@@ -48,9 +48,12 @@ def inventory():
     comps = inv["components"]
     ids = {c["id"] for c in comps}
     want = {"swift:swift-crypto", "npm:playwright-tree:@playwright/mcp", "github-release:agentmail-cli", "runtime:node",
-            "pypi:pillow", "deb:userdata:ffmpeg", "brew:ffmpeg", "pypi:weasyprint",
+            "deb:userdata:ffmpeg", "brew:ffmpeg", "host:weasyprint-native",
             "host:pdf-renderer-browser", "host:os-tools"}
-    check("inventory: covers every component class the plan names", want <= ids, sorted(want - ids))
+    # Phase 1 (plan v24 §7.9.6): Python packages are exact entries of the private venv lock.
+    venv = {i.split("==")[0] for i in ids if i.startswith("pypi:venv:")}
+    check("inventory: covers every component class the plan names", want <= ids and {"pypi:venv:pillow", "pypi:venv:weasyprint"} <= venv,
+          sorted(want - ids) + sorted({"pypi:venv:pillow", "pypi:venv:weasyprint"} - venv))
     retired = sorted(i for i in ids if i == "runtime:gws" or i.startswith("npm:whatsapp:"))
     check("inventory: the removed gws provider and WhatsApp bridge are gone (owner decision 2026-10-24)", not retired, retired)
     check("inventory: every OSV-watched entry has an exact version",
@@ -80,8 +83,12 @@ def inventory():
 
     breaks = [
         ("a Swift pin bumped without regenerating", "Package.resolved", '"version" : "3.15.1"', '"version" : "3.15.2"'),
-        ("the managed-Node download code changed (evidence anchor gone)", "TelegramConcierge/Services/MCPRegistry.swift",
-         "https://nodejs.org/dist/index.json", "https://example.invalid/index.json"),
+        ("the private-Node download code changed (evidence anchor gone)", "TelegramConcierge/Services/NodeRuntime.swift",
+         "https://nodejs.org/dist/v", "https://example.invalid/v"),
+        ("the Node pin changed without regenerating", "TelegramConcierge/Services/NodeRuntime.swift",
+         'static let pinnedVersion = "24.22.1"', 'static let pinnedVersion = "24.22.2"'),
+        ("a Python lock entry changed without regenerating", "TelegramConcierge/Resources/PythonEnv/requirements.lock",
+         "\npillow==", "\npillow==0.0.0.dev0+x "),
         ("a new pinned action added to a workflow", ".github/workflows/security-watch.yml",
          "    steps:\n", "    steps:\n      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4\n"),
         ("the AgentMail pin changed", "TelegramConcierge/Services/AgentMailInstaller.swift",

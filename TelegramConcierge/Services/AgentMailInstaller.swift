@@ -136,7 +136,7 @@ extension AgentMailService {
         }
         let staging = payload.deletingLastPathComponent()
         let archivePath = staging.appendingPathComponent("agentmail.tar.gz")
-        try archive.write(to: archivePath)
+        try PrivateStorage.writeAtomically(archive, to: archivePath, mode: 0o600)
         try PrivateStorage.ensureDirectory(payload)
         progress?("Extracting the agentmail CLI…")
         let untar = await RuntimeProcess.run("/usr/bin/tar", ["-xf", archivePath.path, "-C", payload.path, "--strip-components=1"], timeout: 60)

@@ -12,6 +12,10 @@ enum PrivateRuntimeStartup {
         do { try PythonRuntime.ensureWrapper() } catch { log("python wrapper: \(error)") }
         let gate = idleGate(manager: manager)
         await AgentMailService.startupConvergence(idle: gate, log: log)
+        // Development builds (smoke tests, local runs) never download a real
+        // venv at startup unless asked: the machine's shared python3 can make
+        // the legacy-migration rule fire there. Release builds always run it.
+        if RuntimeSeams.isDev, ProcessInfo.processInfo.environment["BRIGLIA_RUNTIME_STARTUP_PYTHON"] != "1" { return }
         let py = await PythonRuntime.converge(trigger: .auto)
         if py != .notSetUp { log("python environment: \(py)") }
     }

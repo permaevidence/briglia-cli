@@ -90,6 +90,7 @@ enum AgentMailRepair {
         do {
             try PrivateStorage.ensureDirectory(staging)
             _ = try await spec.stage(payload, progress)
+            try RuntimeFS.restrictTree(payload)
             guard let h = RuntimeFS.sha256(file: payload.appendingPathComponent(spec.binaryRelPath)) else {
                 throw RuntimeError("the staged copy lacks \(spec.binaryRelPath)")
             }

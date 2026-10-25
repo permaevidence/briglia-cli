@@ -75,7 +75,7 @@ enum NodeRuntime {
         let staging = payload.deletingLastPathComponent()
         let tarball = staging.appendingPathComponent("node.tar.gz")
         let extract = staging.appendingPathComponent("extract", isDirectory: true)
-        try archive.write(to: tarball)
+        try PrivateStorage.writeAtomically(archive, to: tarball, mode: 0o600)
         try PrivateStorage.ensureDirectory(extract)
         progress?("Installing Node.js \(pin.version) for Briglia…")
         let untar = await RuntimeProcess.run("/usr/bin/tar", ["-xzf", tarball.path, "-C", extract.path], timeout: 300)

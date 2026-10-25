@@ -413,6 +413,7 @@ enum PrivateRuntimeEngine {
         }
         do {
             let extras = try await spec.stage(payload, progress)
+            try RuntimeFS.restrictTree(payload)
             RuntimeSeams.crash(c, "after-stage")
             guard let identity = RuntimeFS.sha256(file: payload.appendingPathComponent(spec.binaryRelPath)) else {
                 throw RuntimeError("the staged copy lacks \(spec.binaryRelPath)")

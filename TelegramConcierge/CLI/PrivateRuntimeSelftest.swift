@@ -110,6 +110,18 @@ final class RuntimeHarness {
         try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
     }
 
+    /// Entries under `root` (symlinks excepted) with any group/other bit.
+    func widePaths(_ root: URL) -> [String] {
+        var out: [String] = []
+        let all = [""] + ((FileManager.default.enumerator(atPath: root.path)?.allObjects as? [String]) ?? [])
+        for rel in all {
+            let path = rel.isEmpty ? root.path : root.path + "/" + rel
+            var st = stat()
+            if lstat(path, &st) == 0, (st.st_mode & S_IFMT) != S_IFLNK, st.st_mode & 0o077 != 0 { out.append(rel.isEmpty ? "." : rel) }
+        }
+        return out
+    }
+
     func check(_ label: String, _ ok: Bool, _ detail: @autoclosure () -> String = "") {
         total += 1
         if ok { print("  ✔ \(label)") } else { failures += 1; print("  ✖ \(label)\(detail().isEmpty ? "" : " — \(detail())")") }
@@ -308,6 +320,13 @@ final class RuntimeHarness {
         let a = try agentMailFixture("1.3.0")
         useAgentMail(a, version: "1.3.0")
         _ = await PrivateRuntimeEngine.converge(amSpec(), trigger: .install)
+        // A hold on an otherwise intact install (e.g. a repair that was
+        // interrupted after its copy passed) still wins: AgentMail stays off.
+        _ = try RuntimeSelectionStore.update { $0[.agentmail].hold = RuntimeHold(pin: amSpec().pin, reason: "repair-interrupted", since: Date(), attemptId: nil) }
+        let intactHeld = await PrivateRuntimeEngine.recover(amSpec())
+        check("hold on an intact install → recovery reports held (never ready), mirror cleared",
+              { if case .held(let x) = intactHeld { return x.reason == "repair-interrupted" }; return false }() && sel()[.agentmail].mirror == nil, "\(intactHeld)")
+        _ = try RuntimeSelectionStore.update { $0[.agentmail].hold = nil }
         let rec = receipt(.agentmail)!.verifiedRecord!
         let bin = am.appendingPathComponent(rec.directory).appendingPathComponent("agentmail-bin")
         try "#!/bin/sh\necho damaged\n".write(to: bin, atomically: false, encoding: .utf8)
@@ -532,6 +551,8 @@ final class RuntimeHarness {
               r2.providerClass == "private-exact" && r2.version == "24.22.1" && receipt(.node)?.verifiedRecord?.version == "24.22.1", "\(r2)")
         check("…fallback shims point at runtime/node/current/bin",
               RuntimeFS.readLink(RuntimePaths.fallbackBinDir.appendingPathComponent("node")) == RuntimePaths.current(.node).appendingPathComponent("bin/node").path)
+        let wideNode = widePaths(RuntimePaths.versions(.node))
+        check("the private Node tree is owner-only (private storage)", wideNode.isEmpty, wideNode.prefix(5).joined(separator: ", "))
         let noNpm = try sharedNode("30.0.0", npm: false)
         setenv("BRIGLIA_NODE_TEST_SHARED_DIRS", noNpm, 1)
         let r3 = await NodeRuntime.select()
@@ -649,6 +670,8 @@ final class RuntimeHarness {
         guard case .run(let py) = PythonRuntime.execDecision() else { check("execDecision runs the venv", false); return }
         let imp = RuntimeProcess.runBlocking(py, ["-c", "import brigliaprobe; print(brigliaprobe.VERSION)"], env: ["PATH": "/usr/bin:/bin"], cwd: nil, timeout: 30)
         check("the venv imports the locked package", imp.stdout.contains("1.0"), imp.stderr)
+        let widePy = widePaths(RuntimePaths.versions(.python))
+        check("the built venv is owner-only (private storage)", widePy.isEmpty, widePy.prefix(5).joined(separator: ", "))
         let shared = RuntimeProcess.runBlocking(py, ["-c", "import json, sys; print(sys.prefix != sys.base_prefix)"], env: ["PATH": "/usr/bin:/bin"], cwd: nil, timeout: 30)
         check("…isolated from the shared site-packages", shared.stdout.contains("True"))
         let dir1 = receipt(.python)?.verified
