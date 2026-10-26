@@ -48,6 +48,51 @@ def isolated_env(tmp):
     return env
 
 
+def python_lock_cap_checks():
+    """Owner decision 2026-10-25: pymupdf is capped below 2 (2.x pulls in onnxruntime and
+    friends the skills never use). The committed lock honours the cap, and --check refuses
+    a lock that violates it or a requirements.in line that is not a bare name / name<cap."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("python_lock", ROOT / "scripts" / "python_lock.py")
+    pl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pl)
+    in_text = Path(pl.IN).read_text(encoding="utf-8")
+    lock_text = Path(pl.LOCK).read_text(encoding="utf-8")
+    rows = pl.entries(lock_text)
+    names = {r[0] for r in rows}
+    check("requirements.in caps pymupdf below 2", ("pymupdf", "2") in pl.caps(in_text), pl.caps(in_text))
+    mu = [r[1] for r in rows if r[0] == "pymupdf"]
+    check("lock: pymupdf is a 1.x release", len(mu) == 1 and mu[0].startswith("1."), mu)
+    gone = {"onnxruntime", "pymupdf-layout", "pymupdf4llm"} & names
+    check("lock: no onnxruntime / pymupdf-layout / pymupdf4llm", not gone, sorted(gone))
+
+    def run_check(in_body, lock_body):
+        with tempfile.TemporaryDirectory() as tmp:
+            i, l = Path(tmp) / "requirements.in", Path(tmp) / "requirements.lock"
+            i.write_text(in_body, encoding="utf-8")
+            l.write_text(lock_body, encoding="utf-8")
+            saved = pl.IN, pl.LOCK
+            pl.IN, pl.LOCK = str(i), str(l)
+            try:
+                import contextlib, io
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    rc = pl.check()
+                return rc, err.getvalue()
+            finally:
+                pl.IN, pl.LOCK = saved
+
+    rc, err = run_check(in_text, lock_text)
+    check("cap control: the committed pair passes the in-process check", rc == 0, err)
+    bumped = re.sub(r"(?m)^pymupdf==\S+", "pymupdf==2.0", lock_text, count=1)
+    rc, err = run_check(in_text, bumped)
+    check("cap break: a lock with pymupdf 2.0 is refused", rc != 0 and "violates the requirements.in cap <2" in err, err)
+    rc, err = run_check(in_text, re.sub(r"(?m)^pymupdf==\S+", "pymupdf==2.0rc1", lock_text, count=1))
+    check("cap break: a 2.0 pre-release is refused too", rc != 0 and "violates the requirements.in cap <2" in err, err)
+    rc, err = run_check(in_text.replace("pymupdf<2", "pymupdf>=1"), lock_text)
+    check("cap break: a non-cap specifier in requirements.in is refused", rc != 0 and "only bare names or name<version caps" in err, err)
+
+
 def main(argv):
     if len(argv) != 1:
         print(__doc__)
@@ -64,6 +109,7 @@ def main(argv):
 
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "python_lock.py"), "--check"], capture_output=True, text=True, timeout=120)
     check("python lock bound to requirements.in and the generator settings", r.returncode == 0, r.stdout + r.stderr)
+    python_lock_cap_checks()
 
     inv = json.loads((ROOT / "security" / "dependencies.json").read_text())
     client = [c for c in inv["components"] if c["owner"] == "briglia-private" and c["pin_kind"] == "exact"

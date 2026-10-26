@@ -1,9 +1,12 @@
 # Briglia-private Python environment (security plan v24 §7.9.4): the packages the bundled
 # skills need. Regenerate the lock with scripts/python_lock.py --regenerate after any change.
+# A line is a bare name, optionally with ONE upper-bound cap ("name<version").
 openpyxl
 python-docx
 python-pptx
 pillow
 formulas
-pymupdf
+# pymupdf is capped below 2 (owner decision 2026-10-25): 2.x pulls in onnxruntime,
+# pymupdf-layout and pymupdf4llm (~460 MB venv), none of which the skills use.
+pymupdf<2
 weasyprint

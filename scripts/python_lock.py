@@ -40,15 +40,39 @@ def norm(name):
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def inputs(text):
+def caps(text):
+    """[(name, cap or None)] from requirements.in. A line is a bare name,
+    optionally with exactly one upper-bound cap: name<version (digits and dots)."""
     out = []
     for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
         if line:
-            if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", line):
-                raise ValueError(f"requirements.in: only bare names are allowed, got {line!r}")
-            out.append(norm(line))
+            m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\s*<\s*([0-9]+(?:\.[0-9]+)*))?$", line)
+            if not m:
+                raise ValueError(f"requirements.in: only bare names or name<version caps are allowed, got {line!r}")
+            out.append((norm(m.group(1)), m.group(2)))
     return out
+
+
+def inputs(text):
+    return [name for name, _ in caps(text)]
+
+
+def release_tuple(version):
+    """Numeric release segment of a PEP 440 version (pre/post/dev suffixes cut)."""
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)*)", version)
+    if not m:
+        raise ValueError(f"unparseable version {version!r}")
+    parts = [int(x) for x in m.group(1).split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def below_cap(version, cap):
+    """True when version < cap. A pre-release of the cap itself (2.0rc1 < 2) is refused
+    too, since its release segment equals the cap."""
+    return release_tuple(version) < release_tuple(cap)
 
 
 def entries(lock_text):
@@ -107,9 +131,24 @@ def check():
             problems.append(f"{r[0]}=={r[1]} has no sha256 hash")
         if r[0] in BOOTSTRAP:
             problems.append(f"bootstrap distribution {r[0]} must not be in the lock")
-    for name in inputs(in_bytes.decode()):
+    try:
+        capped = caps(in_bytes.decode())
+    except ValueError as e:
+        problems.append(str(e))
+        capped = []
+    for name, cap in capped:
         if name not in names:
             problems.append(f"input {name} missing from the lock")
+        if cap is not None:
+            for r in rows:
+                if r[0] == name:
+                    try:
+                        ok = below_cap(r[1], cap)
+                    except ValueError as e:
+                        problems.append(str(e))
+                        continue
+                    if not ok:
+                        problems.append(f"{name}=={r[1]} violates the requirements.in cap <{cap}")
     keys = [(r[0], r[1], r[2]) for r in rows]
     if len(keys) != len(set(keys)):
         problems.append("duplicate (name, version, marker) rows")
