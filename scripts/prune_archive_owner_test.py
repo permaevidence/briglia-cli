@@ -30,12 +30,18 @@ try:
     for path, seam in [(cmp.main_path(tree), 'ManagerSeam.swift'), (tree / 'TelegramConcierge/Services/ConversationArchiveService.swift', 'ArchiveSeam.swift')]:
         path.write_text(path.read_text() + (fixture / seam).read_text())
     storage = tree / 'TelegramConcierge/Utilities/PrivateStorage.swift'
-    text = storage.read_text(); anchor = '        guard rename(tmp.path, target) == 0 else {'
+    # Seam only replaceContents (the atomic replace); its phased post-rename
+    # path repeats the directory barrier, so the post-rename fault follows both.
+    full = storage.read_text()
+    lo = full.index('    private static func replaceContents(')
+    hi = full.index('\n    }\n', lo) + len('\n    }\n')
+    text = full[lo:hi]; anchor = '        guard rename(tmp.path, target) == 0 else {'
     assert text.count(anchor) == 1
-    storage.write_text(text.replace(anchor, '        do { try SnapshotOwnerInputs.storageFault(target) } catch { unlink(tmp.path); throw error }\n' + anchor))
-    text = storage.read_text(); flush = '        try fsyncDirectory(dir.path)\n'
-    assert text.count(flush) == 1
-    storage.write_text(text.replace(flush, flush + '        try SnapshotOwnerInputs.postRenameFault(target)\n'))
+    text = text.replace(anchor, '        do { try SnapshotOwnerInputs.storageFault(target) } catch { unlink(tmp.path); throw error }\n' + anchor)
+    flush = '        try fsyncDirectory(dir.path)\n'
+    assert text.count(flush) == 2
+    text = text.replace(flush, flush + '        try SnapshotOwnerInputs.postRenameFault(target)\n')
+    storage.write_text(full[:lo] + text + full[hi:])
     main = tree / 'TelegramConcierge/CLI/AdaMain.swift'
     source = main.read_text(); assert source.count('PruneArchiveSelftest.self,') == 1
     main.write_text(source.replace('PruneArchiveSelftest.self,', 'PruneArchiveSelftest.self, SnapshotOwnerSelftest.self,'))

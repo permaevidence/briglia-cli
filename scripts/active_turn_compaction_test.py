@@ -56,15 +56,21 @@ key = 'TelegramConcierge/Services/ActiveTurnCompaction.swift'
 sources[key] = sources[key].replace('        for id in carriedDeliveredUserMessageIDs where !existing.contains(id) {',
     '        for id in carriedDeliveredUserMessageIDs where !existing.contains(id) && !CompactionTestInputs.omitCarried {')
 key = 'TelegramConcierge/Utilities/PrivateStorage.swift'
-s = sources[key]
-for anchor, phase, cleanup in [
-    ('        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in', 'write', 'close(fd); unlink(tmp.path); '),
-    ('        if failure == nil, fsync(fd) != 0 {', 'fsync', 'close(fd); unlink(tmp.path); '),
-    ('        guard rename(tmp.path, target) == 0 else {', 'rename', 'unlink(tmp.path); '),
-    ('        try fsyncDirectory(dir.path)', 'directory-fsync', '')]:
-    assert s.count(anchor) == 1
+# Instrument only replaceContents (the atomic replace); writeExclusive shares
+# some lines but has no temp file. The phased post-rename path repeats the
+# directory barrier, so that anchor is seamed on both paths.
+full = sources[key]
+lo = full.index('    private static func replaceContents(')
+hi = full.index('\n    }\n', lo) + len('\n    }\n')
+s = full[lo:hi]
+for anchor, phase, cleanup, n in [
+    ('        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in', 'write', 'close(fd); unlink(tmp.path); ', 1),
+    ('        if failure == nil, fsync(fd) != 0 {', 'fsync', 'close(fd); unlink(tmp.path); ', 1),
+    ('        guard rename(tmp.path, target) == 0 else {', 'rename', 'unlink(tmp.path); ', 1),
+    ('        try fsyncDirectory(dir.path)', 'directory-fsync', '', 2)]:
+    assert s.count(anchor) == n, (anchor, s.count(anchor))
     s = s.replace(anchor, '        do { try CompactionTestInputs.checkpointFault(target, phase: "' + phase + '") } catch { ' + cleanup + 'throw error }\n' + anchor)
-sources[key] = s
+sources[key] = full[:lo] + s + full[hi:]
 key = 'TelegramConcierge/CLI/AdaMain.swift'
 s = sources[key]; assert s.count('PruneArchiveSelftest.self,') == 1
 sources[key] = s.replace('PruneArchiveSelftest.self,', 'PruneArchiveSelftest.self, ActiveCompactionOwnerSelftest.self,')
