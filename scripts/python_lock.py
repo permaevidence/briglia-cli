@@ -58,21 +58,29 @@ def inputs(text):
     return [name for name, _ in caps(text)]
 
 
-def release_tuple(version):
-    """Numeric release segment of a PEP 440 version (pre/post/dev suffixes cut)."""
-    m = re.match(r"^([0-9]+(?:\.[0-9]+)*)", version)
+# A normalized PEP 440 public version, the form uv writes: [N!]N(.N)*[{a|b|rc}N][.postN][.devN].
+# Anything else (local versions, junk suffixes) is refused rather than guessed at.
+VERSION_RE = re.compile(r"^(?:([0-9]+)!)?([0-9]+(?:\.[0-9]+)*)(?:(?:a|b|rc)[0-9]+)?(?:\.post[0-9]+)?(?:\.dev[0-9]+)?$")
+
+
+def release_key(version):
+    """(epoch, release tuple without trailing zeros) of a full normalized PEP 440
+    version; raises ValueError for anything that is not one."""
+    m = VERSION_RE.match(version)
     if not m:
         raise ValueError(f"unparseable version {version!r}")
-    parts = [int(x) for x in m.group(1).split(".")]
+    parts = [int(x) for x in m.group(2).split(".")]
     while len(parts) > 1 and parts[-1] == 0:
         parts.pop()
-    return tuple(parts)
+    return (int(m.group(1) or 0), tuple(parts))
 
 
 def below_cap(version, cap):
-    """True when version < cap. A pre-release of the cap itself (2.0rc1 < 2) is refused
-    too, since its release segment equals the cap."""
-    return release_tuple(version) < release_tuple(cap)
+    """True when version < cap (the cap is an epoch-0 release). The epoch is compared
+    first, so 0!2.0 == 2.0 and 1!1.0 > every epoch-0 version are refused. A pre-, post-
+    or dev release of the cap itself (2.0rc1, 2.dev0) has the cap's release segment and
+    is refused too."""
+    return release_key(version) < release_key(cap)
 
 
 def entries(lock_text):

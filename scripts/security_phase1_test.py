@@ -89,6 +89,12 @@ def python_lock_cap_checks():
     check("cap break: a lock with pymupdf 2.0 is refused", rc != 0 and "violates the requirements.in cap <2" in err, err)
     rc, err = run_check(in_text, re.sub(r"(?m)^pymupdf==\S+", "pymupdf==2.0rc1", lock_text, count=1))
     check("cap break: a 2.0 pre-release is refused too", rc != 0 and "violates the requirements.in cap <2" in err, err)
+    for bad in ("0!2.0", "1!1.0", "1garbage", "1.28.2+local"):
+        rc, err = run_check(in_text, re.sub(r"(?m)^pymupdf==\S+", "pymupdf==" + bad, lock_text, count=1))
+        check(f"cap break: pymupdf=={bad} is refused", rc != 0 and ("violates the requirements.in cap <2" in err or "unparseable version" in err), err)
+    for good in ("0!1.28.2", "1.999.0.post1"):
+        rc, err = run_check(in_text, re.sub(r"(?m)^pymupdf==\S+", "pymupdf==" + good, lock_text, count=1))
+        check(f"cap control: pymupdf=={good} is below the cap", rc == 0, err)
     rc, err = run_check(in_text.replace("pymupdf<2", "pymupdf>=1"), lock_text)
     check("cap break: a non-cap specifier in requirements.in is refused", rc != 0 and "only bare names or name<version caps" in err, err)
 
