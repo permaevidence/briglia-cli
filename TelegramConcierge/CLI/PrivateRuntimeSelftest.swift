@@ -596,7 +596,14 @@ final class RuntimeHarness {
               !set.isEmpty && { if case .held = h { return true }; return false }(), "\(h) \(set)")
         // R2: whichever component reads the corrupt file first, AgentMail's
         // hold survives (settled failed repair: hold, no current link).
-        for first in ["node", "generic update", "crash right after the quarantine", "crash between the copy and the replacement", "unreadable bytes"] {
+        for first in ["node", "generic update", "crash right after the quarantine", "crash between the copy and the replacement", "unreadable bytes", "non-regular entry"] {
+            // chmod 000 does not stop root (Linux CI containers run as root):
+            // there the "non-regular entry" variant below exercises the same
+            // refusal branch of RuntimeSelectionStore.load() root-proof.
+            if first == "unreadable bytes" && geteuid() == 0 {
+                print("  · R2: unreadable selection bytes skipped: running as root, which can read a mode-000 file (the non-regular-entry variant covers the same refusal)")
+                continue
+            }
             resetRuntime()
             useAgentMail(a, version: "1.3.0")
             _ = await PrivateRuntimeEngine.converge(amSpec(), trigger: .install)
@@ -621,17 +628,29 @@ final class RuntimeHarness {
                 let threw = (try? RuntimeSelectionStore.update { _ in }) == nil
                 check("R2: unreadable selection bytes → the writer refuses and leaves the file in place",
                       threw && RuntimeFS.kind(RuntimePaths.selectionFile.path) == .regular)
+            case "non-regular entry":
+                // A directory where the selection file belongs: unreadable for
+                // every user, root included.
+                try fm.removeItem(at: RuntimePaths.selectionFile)
+                try fm.createDirectory(at: RuntimePaths.selectionFile, withIntermediateDirectories: false)
+                let threw = (try? RuntimeSelectionStore.update { _ in }) == nil
+                check("R2: non-regular selection entry (root-proof) → the writer refuses and leaves it in place",
+                      threw && RuntimeFS.kind(RuntimePaths.selectionFile.path) == .directory)
             default:
                 _ = subprocess("selection-update", crash: "agentmail:after-selection-quarantine")
             }
             for restart in 1...2 {
                 let rh = await PrivateRuntimeEngine.recover(amSpec())
                 let run = wrapper(["--version"], key: "placeholder")
-                let off: Bool = { if case .ready = rh { return false }; if case .held = rh { return true }; return first == "unreadable bytes" }()
+                let off: Bool = { if case .ready = rh { return false }; if case .held = rh { return true }; return first == "unreadable bytes" || first == "non-regular entry" }()
                 check("R2: \(first) → restart \(restart): AgentMail still off, no old copy restored",
                       off && current(.agentmail) == nil && run.status != 0, "\(rh) \(run.status)")
             }
-            chmod(RuntimePaths.selectionFile.path, 0o600)
+            if first == "non-regular entry" {
+                try fm.removeItem(at: RuntimePaths.selectionFile)
+            } else {
+                chmod(RuntimePaths.selectionFile.path, 0o600)
+            }
         }
     }
 
@@ -970,6 +989,10 @@ final class RuntimeHarness {
         let r4dirB = receipt(.python)?.verified
         let minor = found.version.split(separator: ".")[1]
         try "#!/bin/sh\ncase \"$*\" in *'import sys, venv, ensurepip'*) echo 3.\(minor).99; exit 0;; esac\nexec '\(found.path)' \"$@\"\n".write(to: other, atomically: true, encoding: .utf8)
+        // An atomic write replaces the file: corelibs Foundation (Linux) does
+        // not carry the old mode over, so the wrapper must be made executable
+        // again or the base would simply vanish from the candidate list.
+        chmod(other.path, 0o755)
         check("R4: same path, new version (file rewritten in place) → briglia-python refuses BEFORE any startup",
               { if case .refuse(let w) = PythonRuntime.execDecision() { return w.contains("does not match") }; return false }())
         check("R4: …and status is not 'pinned' before any startup", RuntimeStatus.python()?.state != .pinned, "\(String(describing: RuntimeStatus.python()))")
