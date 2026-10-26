@@ -102,8 +102,8 @@ jobs:
         run: |
           python3 scripts/drop_gws_whatsapp_migration_test.py
           .build/debug/briglia __retired-integrations-selftest
-      - name: Install python3-venv (Security Phase 1 Python environment checks)
-        run: apt-get install -y python3-venv
+      - name: Install Python 3.11 with venv (Security Phase 1 Python environment checks)
+        run: apt-get install -y python3.11 python3.11-venv
       - name: Security Phase 1 (private AgentMail / Node / Python runtimes, pin-freshness release gate)
         run: python3 scripts/security_phase1_test.py .build/debug/briglia
 

@@ -106,10 +106,10 @@
     {
       "op": "add",
       "platform": "linux",
-      "reason": "0.2.63 Security Phase 1: the private Python environment selftest builds a real venv only when the base interpreter has venv/ensurepip; the swift:6.1-jammy container lacks python3-venv, so those checks were skipped on Linux. Install it in the Linux core job right before the Phase 1 step (apt lists already refreshed by the setup step). Owner-approved 2026-10-26; macOS unchanged.",
+      "reason": "0.2.63 Security Phase 1: the private Python environment needs a base Python 3.11+ with venv/ensurepip (PythonRuntime.minimumMinor = 11); the swift:6.1-jammy container ships Python 3.10 without venv, so those checks were skipped on Linux. Install python3.11 + python3.11-venv (jammy universe) in the Linux core job right before the Phase 1 step (apt lists already refreshed by the setup step); the jammy python3 stays without ensurepip, so Phase 1 resolves the supported 3.11 interpreter. Owner-approved 2026-10-26; macOS unchanged.",
       "step": {
-        "name": "Install python3-venv (Security Phase 1 Python environment checks)",
-        "run": "apt-get install -y python3-venv"
+        "name": "Install Python 3.11 with venv (Security Phase 1 Python environment checks)",
+        "run": "apt-get install -y python3.11 python3.11-venv"
       }
     },
     {
