@@ -13,7 +13,10 @@ Static checks on the real workflow (no network, no GitHub calls):
   * its FIRST step is the guard: no `uses:`, no `if:`, no
     `continue-on-error`, no `shell:` override, no secret reference, and its
     only env entry is RUN_ATTEMPT: ${{ github.run_attempt }};
-  * no other job references the signing key.
+  * no later sign step carries `if:` (an `if: always()` would run checkout and
+    signing after the guard failed);
+  * no secret is bound at workflow level, and no other job references the
+    signing key.
 Execution: the guard's own script runs under bash -e (GitHub's default shell
 on Linux) with RUN_ATTEMPT=1 (passes, silent) and 2, 3, 10, "", "01", " 1"
 (each fails and tells the operator to start a fresh run on the next version
@@ -22,7 +25,8 @@ Deliberate breaks: in-memory copies of the workflow with the guard removed,
 moved after checkout or after signing, moved to another job, reading the wrong
 context, inverted, exiting 0, skippable, continue-on-error, reading a secret,
 with a secret in job-level env, or without the environment must each be
-rejected.
+rejected, as must `if: always()` on the later sign steps and a secret in the
+workflow-level env (Codex review 2026-10-26 notes).
 Exit 0 = all checks passed.
 """
 import os
@@ -115,6 +119,11 @@ def guard_errors(text):
         errs.append("the guard's only env must be RUN_ATTEMPT: ${{ github.run_attempt }}")
     if step_script(first) is None:
         errs.append("the guard step has no run script")
+    for i, step in enumerate(steps[1:], start=2):
+        if re.search(r"^(      - |        )if:", step, re.M):
+            errs.append(f"sign step {i} must not carry if: (it could run after the guard failed)")
+    if "secrets." in text.split("\njobs:\n", 1)[0]:
+        errs.append("no secret may be bound at workflow level (it would reach the guard and every job)")
     for job_id, job_text in jobs.items():
         if job_id != "sign" and SIGNING_SECRET in job_text:
             errs.append(f"job {job_id} references the signing key")
@@ -208,6 +217,14 @@ def main():
                                                       "    environment: release-sign\n    env:\n"
                                                       "      K: ${{ secrets.BRIGLIA_CLI_SIGNING_KEY }}\n", 1)),
         ("environment removed", text.replace("    environment: release-sign\n", "", 1)),
+        ("if: always() on every later sign step",
+         rebuild(head, [guard] + [re.sub(r"^(      - [^\n]*\n)", r"\1        if: always()\n", st, count=1)
+                                   for st in rest])),
+        ("if: always() on the signing step only",
+         rebuild(head, [guard] + [re.sub(r"^(      - [^\n]*\n)", r"\1        if: always()\n", st, count=1)
+                                   if SIGNING_SECRET in st else st for st in rest])),
+        ("signing key in workflow-level env", text.replace(
+            "env:\n  EXPECTED_PUBKEY:", "env:\n  KEY: ${{ secrets.BRIGLIA_CLI_SIGNING_KEY }}\n  EXPECTED_PUBKEY:", 1)),
     ]
     print("— deliberate breaks (each must be rejected) —")
     caught = 0
