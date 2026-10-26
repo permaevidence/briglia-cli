@@ -24,7 +24,8 @@ extension ConversationManager {
     nonisolated static func runArchiveJobBody(messagesToArchive: [Message],
                                               summarizationContext: ConversationArchiveService.SummarizationContext,
                                               snapshotSource: [Message],
-                                              archiveSvc: ConversationArchiveService) async -> (Bool, PruneArchiveReference?) {
+                                              archiveSvc: ConversationArchiveService,
+                                              notifyStatus: Bool) async -> (Bool, PruneArchiveReference?) {
         var lastError: Error? = nil
         let receipt: PruneArchiveReference?
         do {
@@ -36,7 +37,8 @@ extension ConversationManager {
         }
         for attempt in 1...3 {
             do {
-                _ = try await archiveSvc.archiveMessages(messagesToArchive, context: summarizationContext, snapshot: receipt)
+                _ = try await archiveSvc.archiveMessages(messagesToArchive, context: summarizationContext, snapshot: receipt,
+                                                          notifyStatus: notifyStatus)
                 print("[ConversationManager] Archived \(messagesToArchive.count) messages successfully")
                 return (true, receipt)
             } catch {
@@ -78,7 +80,9 @@ extension ConversationManager {
 
     /// Starts the background job: registered with its activity BEFORE the
     /// first suspension; the activity ends only after the outcome is
-    /// installed. No 🧠 notice (owner decision D1); /status shows it.
+    /// installed. No 🧠 notice (owner decision D1), and none from the
+    /// consolidation it runs either (quiet background notices, 0.2.63: the
+    /// job passes `notifyStatus: false`); /status shows it.
     func startBackgroundArchiveJob(batch: [Message],
                                            summarizationContext: ConversationArchiveService.SummarizationContext,
                                            snapshotSource: [Message], view: ArchivePromptView) async {
@@ -95,7 +99,7 @@ extension ConversationManager {
             if let hold = Self.backgroundArchiveHoldForTesting { await hold() }
             let (archived, receipt) = await Self.runArchiveJobBody(
                 messagesToArchive: batch, summarizationContext: summarizationContext,
-                snapshotSource: snapshotSource, archiveSvc: archiveSvc)
+                snapshotSource: snapshotSource, archiveSvc: archiveSvc, notifyStatus: false)
             if archived { await MaintenanceAlertCenter.shared.reportSuccess(.conversationSummary) }
             await MainActor.run {
                 guard let self else { PruneArchiveStore.release(receipt); return }

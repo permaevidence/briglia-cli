@@ -152,7 +152,7 @@ extension ConversationManager {
 
                 let archiveTask = Task.detached { () async -> (Bool, PruneArchiveReference?) in
                     await Self.runArchiveJobBody(messagesToArchive: messagesToArchive, summarizationContext: summarizationContext,
-                                                 snapshotSource: snapshotSource, archiveSvc: archiveSvc)
+                                                 snapshotSource: snapshotSource, archiveSvc: archiveSvc, notifyStatus: true)
                 }
                 // Wait for the archive task. For Task<Bool, Never>, the await doesn't
                 // throw on parent cancellation — it just waits until the detached work

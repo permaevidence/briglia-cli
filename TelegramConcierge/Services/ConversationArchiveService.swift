@@ -1085,7 +1085,11 @@ actor ConversationArchiveService {
     
     /// Archive a batch of messages as a temporary chunk
     /// Uses pending chunk pattern: save raw data first, then summarize, for crash safety
-    func archiveMessages(_ messages: [Message], context: SummarizationContext = .empty, snapshot: PruneArchiveReference? = nil) async throws -> ConversationChunk {
+    /// `notifyStatus: false` (a background archive job) suppresses the
+    /// routine "🧠 Tidying long-term memory…" consolidation notice; failures
+    /// still go to the maintenance alert center.
+    func archiveMessages(_ messages: [Message], context: SummarizationContext = .empty, snapshot: PruneArchiveReference? = nil,
+                         notifyStatus: Bool = true) async throws -> ConversationChunk {
         await acquireChunkWriter()
         defer { releaseChunkWriter() }
         guard !messages.isEmpty else {
@@ -1215,7 +1219,7 @@ actor ConversationArchiveService {
         await maintainUserContextIfNeeded(event: .archive, sharedContext: context)
 
         // Check if we need to consolidate
-        await checkAndConsolidate()
+        await checkAndConsolidate(notifyStatus: notifyStatus)
 
         return chunk
     }

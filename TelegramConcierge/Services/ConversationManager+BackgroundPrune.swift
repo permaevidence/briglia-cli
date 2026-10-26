@@ -533,12 +533,15 @@ extension ConversationManager {
         catch { showMaintenanceNotice("Snapshot retention: \(error.localizedDescription)") }
         job.committed = true
         outcome = .applied
-        // 9. Manager-level token resets (§8.5), then the notice (Q3).
+        // 9. Manager-level token resets (§8.5). No notice: the prune was
+        //    prepared in the background and is already applied (quiet
+        //    background notices, 0.2.63, supersedes Q3). /status shows the
+        //    job while it exists; an inline fallback keeps today's notice.
+        //    The seam is a no-op in production (no suspension).
         lastPromptTokens = nil
         lastCompletionTokens = nil
         bgPruneLog("bgprune.applied", "\(replacements.count) message(s) rewritten")
-        await notifyAutomaticPruningStarted(plan: plan, compressedCount: job.compressedIndices.count,
-            totalTokens: job.totalTokens, targetTokens: job.targetTokens, isMidLoop: job.site == .midLoop)
+        await bgPruneHold("apply.committed")
         return (outcome, replacements)
     }
 
