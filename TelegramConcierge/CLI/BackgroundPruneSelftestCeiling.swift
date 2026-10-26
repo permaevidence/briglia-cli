@@ -107,6 +107,8 @@ enum BackgroundPruneSelftestCeiling {
                 && h.eventCount("bgprune.deadline") == 1 && h.eventCount("bgprune.wait.begin") == 1
                 && h.eventCount("bgprune.inline") == 1 && h.router.summaries == 1 && h.prunedIds(manager).count >= 6,
                 "\(h.allEvents) summaries \(h.router.summaries)")
+        h.check("QN2 the blocking inline fallback keeps today's notice (exactly one)", h.noticeTexts.count == 1,
+                "\(h.channel.delivered)")
         h.check("§7.6 the inline block consumed the job's debt; the slot is still occupied (retiring)",
                 manager.bgPruneTestPhase == "retiring:deadline" && manager.bgPruneTestInlineDebtConsumed)
         hold.release()
@@ -142,6 +144,8 @@ enum BackgroundPruneSelftestCeiling {
                 !manager.bgPruneTestFallbackDue && h.eventCount("bgprune.owed-inline") == 1
                 && h.eventCount(prefix: "bgprune.freeze") == 1 && h.router.summaries == 1 && manager.bgPruneTestPhase == "none",
                 "\(h.allEvents)")
+        h.check("QN2 the owed inline prune keeps today's notice (exactly one)", h.noticeTexts.count == 1,
+                "\(h.channel.delivered)")
         ConversationManager.bgPruneHoldForTesting = nil
         ConversationManager.bgPruneDeadlineSecondsForTesting = nil
     }

@@ -25,7 +25,7 @@ enum BackgroundPruneSelftestApply {
         h.check("B3 the request carried the unchanged conversation (old tool output still present)",
                 h.mainRequests.count == 1 && h.bodyText(h.mainRequests[0]).contains("RESULT-h-call-0"))
         h.check("B3 freeze changed no history byte", h.encoded(Array(manager._testMessages.prefix(seeded.count))) == h.encoded(seeded))
-        h.check("B3 no prune notice at freeze (Q3: at apply)", h.noticeTexts.isEmpty, "\(h.channel.delivered)")
+        h.check("B3 no prune notice at freeze (none at apply either: QN1)", h.noticeTexts.isEmpty, "\(h.channel.delivered)")
         h.check("B3 the worker holds a .pruning activity", manager.bgPruneTestMaintenanceKinds.contains(.pruning))
         h.check("B3 /restart refused while the worker runs",
                 (await manager.bgPruneTestCommand("/restart")).contains("A background prune is finishing"))
@@ -67,7 +67,10 @@ enum BackgroundPruneSelftestApply {
                 manager._testMessages.contains { $0.content == "freeze turn" } && manager._testMessages.contains { $0.content == "apply turn" })
         h.check("§8 the apply's request no longer carries the pruned output",
                 h.mainRequests.count == 1 && !h.bodyText(h.mainRequests[0]).contains("RESULT-h-call-0 "))
-        h.check("Q3 one notice, sent at apply", h.noticeTexts.count == 1, "\(h.channel.delivered)")
+        h.check("QN1 no prune notice at a background apply (quiet background notices)", h.noticeTexts.isEmpty,
+                "\(h.channel.delivered)")
+        h.check("QN1 the apply did not set the inline prune status text",
+                manager.statusMessage != "Summarizing older context before pruning...", manager.statusMessage)
         h.check("§8.3 the apply wrote the history file", h.diskHistory().filter { $0.toolInteractions.isEmpty && $0.content.contains(" answer ") }.count >= 6)
         h.check("§8.3 one summary request in total", h.router.summaries == 1)
         h.check("§4.2 slot released, activities ended", !manager.bgPruneTestMaintenanceKinds.contains(.pruning)
@@ -209,6 +212,9 @@ enum BackgroundPruneSelftestApply {
         let snapshotFile = (try? FileManager.default.contentsOfDirectory(atPath: PruneArchiveStore.root.path))?
             .contains { name in snapshotId.map { name.contains($0.uuidString.lowercased().replacingOccurrences(of: "-", with: "")) } ?? false } ?? false
         h.check("F5 the freeze snapshot is still on disk", snapshotFile)
+        h.check("QN3 the apply's write failure is still shown (failures still notify)",
+                manager.maintenanceNotice?.contains("Could not commit pruned conversation") == true,
+                String(describing: manager.maintenanceNotice))
         manager.bgPruneTestSetLastPromptTokens(60_000)
         let before = h.router.summaries
         _ = await h.turn(manager, "owed turn")
@@ -217,7 +223,7 @@ enum BackgroundPruneSelftestApply {
     }
 
     /// A job that becomes ready between T0 and T1 is applied at T1, once,
-    /// with one notice (B4, §8.5, Codex note 3).
+    /// with no notice (B4, §8.5, Codex note 3; QN1 quiet background notices).
     @MainActor static func readyBetweenT0AndT1(_ h: BackgroundPruneSelftestHarness) async {
         let manager = await h.freshManager(history: h.prunableHistory())
         _ = await h.frozenRunningJob(manager)
@@ -235,8 +241,8 @@ enum BackgroundPruneSelftestApply {
         gate.release()
         let idle = await manager._testAwaitIdle(timeout: 40)
         ConversationManager.bgPruneHoldForTesting = nil
-        h.check("§8.5 the job is applied at T1, once, with one notice", idle && h.eventCount("bgprune.applied") == 1
-                && h.eventCount("bgprune.t0.applied") == 0 && h.noticeTexts.count == 1 && h.prunedIds(manager).count >= 6,
+        h.check("§8.5 the job is applied at T1, once, with no notice (QN1)", idle && h.eventCount("bgprune.applied") == 1
+                && h.eventCount("bgprune.t0.applied") == 0 && h.noticeTexts.isEmpty && h.prunedIds(manager).count >= 6,
                 "\(h.allEvents) notices \(h.noticeTexts.count)")
         h.check("§8.5 the request after the T1 apply carries the applied history",
                 h.mainRequests.count == 1 && !h.bodyText(h.mainRequests[0]).contains("RESULT-h-call-0 "))

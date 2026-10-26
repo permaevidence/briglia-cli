@@ -32,9 +32,9 @@ enum BackgroundPruneSelftestMidLoop {
         _ = await h.waitPhase(manager, "ready")
         manager.bgPruneTestSetLastPromptTokens(1_000)
         _ = await h.turn(manager, "next message")
-        h.check("M a mid-loop job is applied at the next turn's T0, with the mid-loop notice",
+        h.check("M a mid-loop job is applied at the next turn's T0, with no notice (QN1)",
                 h.eventCount("bgprune.t0.applied") == 1 && h.prunedIds(manager).count >= 6
-                && h.channel.delivered.contains { $0.hasPrefix("Context filled up while I was working.") },
+                && !h.channel.delivered.contains { $0.hasPrefix("Context filled up while I was working.") } && h.noticeTexts.isEmpty,
                 "\(h.allEvents) \(h.channel.delivered)")
     }
 

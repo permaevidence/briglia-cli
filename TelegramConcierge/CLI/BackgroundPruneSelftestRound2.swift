@@ -277,26 +277,35 @@ enum BackgroundPruneSelftestRound2 {
                 "error \(String(describing: manager._testLastError)) main \(h.mainRequests.count) events \(h.allEvents)")
     }
 
-    /// §8.3 step 9: OFF during the post-commit notice await → "finished
-    /// first", outcome applied, nothing owed, no abandon.
+    /// §8.3 step 9: OFF after the commit, before the apply returns →
+    /// "finished first", outcome applied, nothing owed, no abandon. The
+    /// post-commit notice await is gone (quiet background notices); the
+    /// window is held with the `apply.committed` test seam instead.
     @MainActor static func committedDuringNotice(_ h: BackgroundPruneSelftestHarness) async {
         let manager = await h.freshManager(history: h.prunableHistory())
         _ = await h.frozenRunningJob(manager, holdSummary: false)
         _ = await h.waitPhase(manager, "ready")
-        let noticeCall = h.channel.callCount + 1
-        h.channel.hold(call: noticeCall)
+        let gate = BackgroundPruneSelftestGate()
+        ConversationManager.bgPruneHoldForTesting = { point in if point == "apply.committed" { await gate.awaitRelease() } }
+        let callsBefore = h.channel.callCount
         manager.bgPruneTestSetLastPromptTokens(1_000)
-        h.startTurn(manager, "apply with a held notice", replies: [BackgroundPruneSelftestHarness.chat("done", prompt: 100)])
-        _ = await h.waitUntil { h.channel.hasStarted(call: noticeCall) }
+        h.startTurn(manager, "apply held after its commit", replies: [BackgroundPruneSelftestHarness.chat("done", prompt: 100)])
+        _ = await h.waitUntil { gate.arrived == 1 }
+        h.check("QN1 nothing was sent between the commit and the apply's return", h.channel.callCount == callsBefore,
+                "\(h.channel.delivered)")
+        h.check("QN1 (C2) the committed apply did not set the inline prune status text",
+                manager.statusMessage != "Summarizing older context before pruning...", manager.statusMessage)
         async let offReply = manager.bgPruneTestCommand("/prunebackground off")
         await h.sleep(0.3)
-        h.channel.release(call: noticeCall)
+        gate.release()
         let reply = await offReply
         _ = await manager._testAwaitIdle(timeout: 30)
-        h.check("§8.3 OFF during the notice await: the committed prune is reported as finished first",
+        ConversationManager.bgPruneHoldForTesting = nil
+        h.check("§8.3 OFF after the commit: the committed prune is reported as finished first",
                 reply == "Background pruning: OFF. The prune that was being applied finished first."
                 && manager.bgPruneTestLastApply?.outcome == .applied && !manager.bgPruneTestFallbackDue
                 && h.eventCount(prefix: "bgprune.abandon") == 0 && h.prunedIds(manager).count >= 6, reply)
+        h.check("QN1 no prune notice for the background apply", h.noticeTexts.isEmpty, "\(h.channel.delivered)")
     }
 
     /// B9: /stop, OFF and a generation bump while the freeze is suspended

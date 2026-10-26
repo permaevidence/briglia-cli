@@ -126,6 +126,9 @@ final class BAArchiveRouter: @unchecked Sendable {
     /// "transient" (malformed body: retried) or "deterministic" (a summary
     /// too short: never retried) for every summary request while set.
     var failSummaries: String?
+    /// When set, only summary requests with this 1-based number or later
+    /// fail (as `failSummaries`): e.g. the consolidation after the chunk.
+    var failSummariesFrom: Int?
     var summaries: Int { lock.lock(); defer { lock.unlock() }; return _summaries }
     var extractions: Int { lock.lock(); defer { lock.unlock() }; return _extractions }
     var otherArchiveRequests: Int { lock.lock(); defer { lock.unlock() }; return _other }
@@ -150,7 +153,8 @@ final class BAArchiveRouter: @unchecked Sendable {
             return (Self.chat("NO_CHANGES"), 0)
         }
         if system.contains(ArchiveFullChunkSelftest.summaryMarker) {
-            lock.lock(); _summaries += 1; let n = _summaries; let hold = holdSummaries.contains(n); let fail = failSummaries; lock.unlock()
+            lock.lock(); _summaries += 1; let n = _summaries; let hold = holdSummaries.contains(n)
+            let fail = failSummariesFrom.map { n >= $0 } == false ? nil : failSummaries; lock.unlock()
             if hold { gate.wait() }
             switch fail {
             case "transient": return ("{not json", 0)
@@ -212,6 +216,7 @@ final class BackgroundArchiveHarness {
         if section("alerts") { await alertSection() }
         if section("commands") { await commandSection() }
         if section("modes") { await modeSection() }
+        if section("quiet") { await quietNoticeSection() }
     }
 
     func configureProvider() throws {
