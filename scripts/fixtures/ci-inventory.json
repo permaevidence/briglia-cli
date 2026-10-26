@@ -106,6 +106,15 @@
     {
       "op": "add",
       "platform": "linux",
+      "reason": "0.2.63 Security Phase 1: the private Python environment selftest builds a real venv only when the base interpreter has venv/ensurepip; the swift:6.1-jammy container lacks python3-venv, so those checks were skipped on Linux. Install it in the Linux core job right before the Phase 1 step (apt lists already refreshed by the setup step). Owner-approved 2026-10-26; macOS unchanged.",
+      "step": {
+        "name": "Install python3-venv (Security Phase 1 Python environment checks)",
+        "run": "apt-get install -y python3-venv"
+      }
+    },
+    {
+      "op": "add",
+      "platform": "linux",
       "reason": "Security plan v24 Phase 1 + owner requirement P (Matteo, 2026-10-25; plan accepted by Codex round 24): the private-runtime selftest (AgentMail receipt/current/journal/hold/repair with crash recovery at every write, per-use exec validation and probe mode, legacy ~/.local/bin inspect-only, Node selection and private copy, Python venv, PATH contract), the pin-freshness release gate tests with deliberate breaks, the Python lock check, inventory coverage and static workflow checks. Local fakes only, no network; no change to any other step.",
       "step": {
         "name": "Security Phase 1 (private AgentMail / Node / Python runtimes, pin-freshness release gate)",
