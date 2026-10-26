@@ -230,6 +230,19 @@ jobs:
     runs-on: ubuntu-latest
     environment: release-sign
     steps:
+      - name: One signing execution per run (attempt 1 only)
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          # The single phone approval binds to the single signing execution
+          # of this run, and the release watcher trusts signing only in
+          # attempt 1. A re-run that would sign again (any "Re-run" form)
+          # must be a fresh run on the next version instead
+          # (RELEASE_RUNBOOKS.md §2a). This step runs first, before checkout
+          # and before any secret is referenced. GitHub still asks for the
+          # release-sign approval before a re-run reaches it.
+          [ "$RUN_ATTEMPT" = "1" ] || {
+            echo "✖ run attempt $RUN_ATTEMPT: signing happens only in attempt 1. Do not re-run a signed release; start a fresh run on the next version (RELEASE_RUNBOOKS.md §2a)."; exit 1; }
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

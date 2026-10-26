@@ -422,6 +422,14 @@ def main():
     check("publisher-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    # 3c1a4. the signing job signs only in run attempt 1 (RELEASE_RUNBOOKS
+    # §2a): the guard is the first step, before checkout and any secret,
+    # behaves for attempts 1/2/3/…, and 13 deliberate breaks are rejected.
+    result = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "sign_attempt_guard_test.py")],
+                            capture_output=True, text=True, timeout=120, cwd=REPO_ROOT)
+    check("sign-attempt-guard", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
     # 3c1b. userdata toolchain installer: fake-apt/dpkg-backed prefix
     # install, alternatives-aware wrappers, probe enforcement, cleanup.
     result = run_selftest([ADA, "__toolchain-selftest"], capture_output=True, text=True, timeout=600)
