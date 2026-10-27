@@ -2,16 +2,16 @@ import Foundation
 
 /// The one preferences accessor (MULTI_ASSISTANT_PLAN v5 §3.6).
 ///
-/// `UserDefaults.standard` is a single domain per OS user (the executable
+/// The standard preferences domain is a single domain per OS user (the executable
 /// name), so every assistant would share the OpenRouter spend ledger,
 /// `/archiveinline`, `/prunebackground`, `/keepsummaries`, the tool switches,
 /// the web-search backend, privacy mode, the last user channel, … The
-/// default profile keeps `UserDefaults.standard` (byte-identical behaviour);
+/// default profile keeps the standard domain (byte-identical behaviour);
 /// an extra gets its own suite `briglia.profile.<name>.<h>`, where `<h>` is
 /// derived from the extra's absolute data root so two XDG installations of
 /// one OS user never share a suite.
 ///
-/// A lint (scripts/prefs_lint.py) fails when `UserDefaults.standard` appears
+/// A lint (scripts/prefs_lint.py) fails when the standard domain is used directly
 /// in production code outside this file.
 enum Prefs {
     /// Test-only suite prefix. Honoured only when the executable's own

@@ -126,6 +126,7 @@ def main():
     shutil.copytree(ROOT / "scripts", tree / "scripts")
     scratch = Path(args.keep_build) if args.keep_build else work / "build"
     failures = 0
+    executed = 0
     try:
         # Lint break (no build needed).
         label, rel, old, new = LINT_BREAK
@@ -135,6 +136,7 @@ def main():
             ok = r.returncode != 0
             print(("✔" if ok else "✖") + f" {label}: lint fails")
             failures += 0 if ok else 1
+            executed += 1
             (tree / rel).write_text(original)
         binary = build(tree, scratch)
         r = selftest(binary, work)
@@ -155,12 +157,12 @@ def main():
                 print(("✔" if caught else "✖") + f" {label}: selftest fails"
                       + (f" ({failed_checks[0][2:80]}…)" if caught and failed_checks else ""))
                 failures += 0 if caught else 1
+                executed += 1
             finally:
                 (tree / rel).write_text(original)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    total = len(BREAKS) + 1
-    print(f"\n{total - failures}/{total} deliberate breaks caught")
+    print(f"\n{executed - failures}/{executed} deliberate breaks caught")
     return 1 if failures else 0
 
 

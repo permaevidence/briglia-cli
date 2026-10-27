@@ -118,8 +118,18 @@ extension ProfileHarness {
             check("\(name): secrets read back its own value", i["secretValue"] as? String == "probe-\(name)")
             check("\(name): preferences read back its own value", i["prefsValue"] as? String == "probe-\(name)")
         }
-        check("default still reads its own value after the extras wrote", info(touch: false).map { _ in true } == true
-              && (info(touch: true)?["prefsValue"] as? String) == "probe-default")
+        // Read back WITHOUT writing, after all three wrote: a shared store
+        // would show the last writer's value everywhere.
+        for sel in [[], ["--profile", "work"], ["--profile", "health"]] {
+            let name = sel.last ?? "default"
+            let r = run(sel + ["__profile-info", "--read"])
+            let obj = r.out.split(separator: "\n").last.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any]
+            check("\(name): after every profile wrote, still reads its own preferences and secrets",
+                  obj?["prefsValue"] as? String == "probe-\(name)" && obj?["secretValue"] as? String == "probe-\(name)",
+                  "\(obj?["prefsValue"] ?? "nil") / \(obj?["secretValue"] ?? "nil")")
+        }
+        check("extras never use the standard preferences object", w["prefsStoreIsStandard"] as? Bool == false
+              && hh["prefsStoreIsStandard"] as? Bool == false && d["prefsStoreIsStandard"] as? Bool == true)
         // Every file carrying a profile's marker lives in that profile's
         // own places; default's root never contains an extra's file.
         let allowed: [String: [String]] = [

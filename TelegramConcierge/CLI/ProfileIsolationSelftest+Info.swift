@@ -16,6 +16,7 @@ struct ProfileInfoCommand: ParsableCommand {
     )
 
     @Flag(name: .customLong("touch")) var touch = false
+    @Flag(name: .customLong("read")) var read = false
 
     static let prefsProbeKey = "briglia.profileProbe"
     static let secretsProbeKey = KeychainHelper.userNameKey
@@ -49,6 +50,7 @@ struct ProfileInfoCommand: ParsableCommand {
             "playwrightArgs": ManagedPlaywright.managedInvocation(token: "0123456789abcdef", layout: .init()).arguments,
             "secretStore": KeychainHelper.secretStorePath,
             "sendsMachineNotices": UpdateNoticeService.sendsMachineNotices,
+            "prefsStoreIsStandard": Prefs.store === UserDefaults.standard,
         ]
         if touch {
             try StoragePaths.ensureRootsChecked()
@@ -61,6 +63,10 @@ struct ProfileInfoCommand: ParsableCommand {
             let big = String(repeating: "\(marker)\n", count: 12_000)
             let spill = TruncationService.truncate(big)
             out["spillPath"] = spill.outputPath ?? NSNull()
+            out["secretValue"] = KeychainHelper.load(key: Self.secretsProbeKey) ?? NSNull()
+            out["prefsValue"] = Prefs.store.string(forKey: Self.prefsProbeKey) ?? NSNull()
+        }
+        if read {
             out["secretValue"] = KeychainHelper.load(key: Self.secretsProbeKey) ?? NSNull()
             out["prefsValue"] = Prefs.store.string(forKey: Self.prefsProbeKey) ?? NSNull()
         }
