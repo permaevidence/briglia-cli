@@ -93,10 +93,10 @@ jobs:
           # promoter's ANNOTATED tag carrying the briglia-pin-gate record for
           # this commit; C1 runs now so an obvious refusal costs no build
           # minutes. Not the authorization: the sign job runs C1 + C2.
-          [ "$(git cat-file -t "refs/tags/$REF_NAME")" = "tag" ] || {
-            echo "✖ $REF_NAME is not an annotated tag from promote-release.sh (no pin-gate record)"; exit 1; }
-          mkdir -p dist
-          git cat-file tag "refs/tags/$REF_NAME" | sed '1,/^$/d' > dist/pin-gate-record.txt
+          # actions/checkout replaces the annotated tag with a lightweight
+          # ref in this clone, so the reader re-fetches the real tag object
+          # (fail-closed; see the script header).
+          ./.github/scripts/read-pin-gate-record.sh "$REF_NAME" "$GITHUB_SHA" dist/pin-gate-record.txt
           python3 scripts/pin_gate.py --mode precheck --source dir:. --commit "$GITHUB_SHA" \
             --tag-record dist/pin-gate-record.txt
 

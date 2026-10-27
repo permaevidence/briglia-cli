@@ -430,6 +430,15 @@ def main():
     check("sign-attempt-guard", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    # 3c1a5. the authorize job reads the promoter's REAL annotated tag even
+    # though actions/checkout clobbers refs/tags/<tag> with a lightweight ref
+    # (v0.2.63 run 40426023973): local bare-repo model of checkout's fetches,
+    # fail-closed refusals, deliberate breaks.
+    result = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "pin_gate_tag_fetch_test.py")],
+                            capture_output=True, text=True, timeout=180, cwd=REPO_ROOT)
+    check("pin-gate-tag-fetch", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
     # 3c1b. userdata toolchain installer: fake-apt/dpkg-backed prefix
     # install, alternatives-aware wrappers, probe enforcement, cleanup.
     result = run_selftest([ADA, "__toolchain-selftest"], capture_output=True, text=True, timeout=600)

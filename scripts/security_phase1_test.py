@@ -152,7 +152,12 @@ def main(argv):
           and "--issues-repo permaevidence/briglia-cli-private" in sign and "is not configured" in sign)
     auth = wf[wf.index("  authorize:\n"):wf.index("  build-macos-arm64:\n")]
     check("signed workflow: the authorize job requires the promoter's annotated tag and runs the credential-free precheck",
-          'git cat-file -t "refs/tags/$REF_NAME")" = "tag"' in auth and "--mode precheck" in auth and "pin-gate-record" in auth)
+          './.github/scripts/read-pin-gate-record.sh "$REF_NAME" "$GITHUB_SHA" dist/pin-gate-record.txt' in auth
+          and "--mode precheck" in auth and "pin-gate-record" in auth)
+    reader = (ROOT / ".github" / "scripts" / "read-pin-gate-record.sh").read_text()
+    check("signed workflow: the tag reader re-fetches the real tag and refuses lightweight/foreign tags",
+          '"+refs/tags/$TAG:$PRIV"' in reader and '[ "$(git cat-file -t "$PRIV")" = "tag" ]' in reader
+          and '"$PRIV^{commit}")" = "$SHA"' in reader)
 
     seams = (ROOT / "TelegramConcierge" / "Services" / "PrivateRuntime.swift").read_text()
     check("runtime test seams are development-build only", 'static var isDev: Bool { adaCLIVersion.hasSuffix("-dev") }' in seams
