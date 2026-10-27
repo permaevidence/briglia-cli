@@ -554,6 +554,24 @@ def main():
                           text=True, timeout=600)
     check("reminders-load-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
+
+    # 3c5-quater-bis-quater. Assistant profiles, stage 1 (MULTI_ASSISTANT_PLAN
+    # v5 §3, §5): bootstrap rules, hidden switch, per-profile roots, suites,
+    # landing and spill, default byte-for-byte unchanged three ways, two
+    # extras sharing no state, machine paths, the bot/inbox registry and its
+    # reservation transactions, startup reconciliation, the sign-in lock.
+    # Fresh child processes in a private scratch home and preference domain.
+    result = run_selftest([os.path.abspath(ADA), "__profile-isolation-selftest"], capture_output=True,
+                          text=True, timeout=600)
+    check("profile-isolation-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
+    # Every production preferences access goes through Prefs (one suite per
+    # assistant); the lint also proves it catches planted violations.
+    for args in ([], ["--self-test"]):
+        result = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "prefs_lint.py")] + args,
+                                capture_output=True, text=True, timeout=60)
+        check("prefs-lint" + (" self-test" if args else ""), result.returncode == 0,
+              (result.stdout + result.stderr)[-1500:])
     # Every ToolArgumentHint table prefix must still occur verbatim in the
     # sources (drift would silently disable the hint for that message).
     src_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "TelegramConcierge")

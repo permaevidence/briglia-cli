@@ -15,6 +15,7 @@ import tempfile
 import platform
 import chat_wire_baseline as wire
 import cm_split_paths as cmp
+import prefs_normalize
 
 # Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
 # large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
@@ -50,6 +51,10 @@ def freeze_fallback_prompt_day(tree):
 
 def instrument(tree):
     evidence = {}
+    # Stage-1 profile trees reach preferences through Prefs (= the standard
+    # domain for default); map them back so accesses are counted per file
+    # exactly as before (prefs_normalize.py). No-op on pinned trees.
+    prefs_normalize.normalize_tree(tree)
     for name in ("AffinitySelftest.swift", "CaptureRequestParser.swift"):
         shutil.copyfile(ROOT / "TelegramConcierge/CLI" / name, tree / "TelegramConcierge/CLI" / name)
     shutil.copyfile(FIXTURES / "Driver.swift", tree / "TelegramConcierge/CLI/ChatLifecycleSelftest.swift")
@@ -188,6 +193,11 @@ REVIEWED_DEFAULTS_DELTAS = {
     "TelegramConcierge/Services/PruneSummaryComposition.swift:defaults": (None, 1),
     "TelegramConcierge/Services/WhatsAppChannelService.swift:defaults": (2, None),
     "TelegramConcierge/Services/RetiredIntegrations.swift:defaults": (None, 1),
+    # Assistant profiles stage 1 (MULTI_ASSISTANT_PLAN v5 §3.6): the one
+    # preferences accessor. Its two accesses are the default store and the
+    # named-domain API; every former call site is mapped back to the
+    # standard domain by prefs_normalize.py and keeps its own count.
+    "TelegramConcierge/Utilities/Prefs.swift:defaults": (None, 2),
 }
 
 

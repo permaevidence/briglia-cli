@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import chat_wire_baseline as wire
 import cm_split_paths as cmp
+import prefs_normalize
 
 # Pinned-tree builds on Linux compile with 2 jobs: 4 parallel frontends of the
 # large ConversationManager were OOM-killed (exit 137) on the 16 GB runner.
@@ -26,6 +27,9 @@ assert 'briglia-active-owner-' in str(root)
 # Construct complete desired source before writing, so a diagnostic rerun only
 # recompiles changed files. All instrumentation stays in this disposable tree.
 sources = {str(p.relative_to(ROOT)): p.read_text() for p in (ROOT / 'TelegramConcierge').rglob('*.swift')}
+# Prefs.store / Prefs.domains are the standard domain for default: map them
+# back so the counted ConversationManager accesses stay 13 (prefs_normalize.py).
+prefs_normalize.normalize_sources(sources)
 fixture = ROOT / 'scripts/fixtures/active-compaction'
 sources['TelegramConcierge/CLI/ActiveCompactionOwnerSelftest.swift'] = (fixture / 'Driver.swift').read_text()
 # ConversationManager: one file on pinned releases, the 15-file family from
