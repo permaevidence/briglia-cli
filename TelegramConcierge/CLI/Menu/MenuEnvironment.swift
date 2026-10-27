@@ -413,9 +413,14 @@ struct MenuEnvironment {
     static func scanTelegram(token: String, since: Date) async -> MenuTelegramScan {
         // A bot another assistant holds is never polled (getUpdates competes
         // with its poller; MULTI_ASSISTANT_PLAN §5.6). No registry → unchanged.
-        if let refusal = AssistantRegistry.telegramDiscoveryRefusal(token: token) {
-            return .failed(refusal)
+        // Default also holds machine/identity-tx.lock for the request, so a
+        // first `profiles add` cannot reserve this bot in the meantime.
+        let identityLock: ProfileFileLock?
+        switch BotSwitchDiscovery.admit(token: token) {
+        case .refused(let refusal): return .failed(refusal)
+        case .admitted(let lock): identityLock = lock
         }
+        defer { withExtendedLifetime(identityLock) {} }
         guard let url = URL(string: DevProbeOverride.url("https://api.telegram.org/bot\(token)/getUpdates?timeout=0&limit=100",
                                                          dev: "/telegram/bot\(token)/getUpdates")) else {
             return .failed("That token doesn't look right.")

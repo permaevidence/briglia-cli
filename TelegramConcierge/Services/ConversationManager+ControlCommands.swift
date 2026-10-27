@@ -899,10 +899,17 @@ extension ConversationManager {
             // Several assistants (MULTI_ASSISTANT_PLAN §5.6): discovery polls
             // the new bot's getUpdates, which would compete with another
             // assistant's poller; refused in multi mode until the
-            // reservation-wired switch lands. No registry → unchanged.
-            if let refusal = AssistantRegistry.telegramDiscoveryRefusal(token: token) {
+            // reservation-wired switch lands. No registry → unchanged, except
+            // that default holds machine/identity-tx.lock from here until the
+            // switch ends, so no first `profiles add` can hand this bot to
+            // another assistant meanwhile (Codex stage-1 R2).
+            let admittedLock: ProfileFileLock?
+            switch BotSwitchDiscovery.admit(token: token, existing: botSwitchIdentityLock) {
+            case .refused(let refusal):
                 try? await sendText("✖ \(refusal)")
                 return
+            case .admitted(let lock):
+                admittedLock = lock
             }
             let currentToken = (KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -946,7 +953,8 @@ extension ConversationManager {
             botSwitchDiscoveryTask?.cancel()
             let code = BotSwitchFlow.generateCode()
             pendingBotSwitch = PendingBotSwitch(newToken: token, botDisplay: display, code: code)
-            startBotSwitchDiscovery(token: token, code: code, botDisplay: display)
+            botSwitchIdentityLock = admittedLock
+            startBotSwitchDiscovery(token: token, code: code, botDisplay: display, identityLock: admittedLock)
             try? await sendText("""
             ✔ Token valid — found \(display).
 
@@ -985,42 +993,18 @@ extension ConversationManager {
     /// Advancing the offset also consumes the new bot's pre-switch messages
     /// server-side, so none of them can re-deliver as user turns after the
     /// cutover starts the main poller at a fresh offset.
-    private func startBotSwitchDiscovery(token: String, code: String, botDisplay: String) {
+    private func startBotSwitchDiscovery(token: String, code: String, botDisplay: String,
+                                         identityLock: ProfileFileLock?) {
         botSwitchDiscoveryTask = Task { [weak self] in
             let deadline = Date().addingTimeInterval(BotSwitchFlow.discoveryTimeoutSeconds)
-            var offset = 0
-            var discovered: BotSwitchFlow.DiscoveredChat?
-            var permanentFailure: String?
-            while !Task.isCancelled && Date() < deadline {
-                // Re-checked before every poll: a registry created after the
-                // switch began stops discovery (never polls a held bot).
-                if let refusal = AssistantRegistry.telegramDiscoveryRefusal(token: token) {
-                    permanentFailure = refusal
-                    break
-                }
-                do {
-                    let (status, data) = try await Self.botSwitchGetUpdates(token: token, offset: offset, timeoutSeconds: 20)
-                    switch BotSwitchFlow.classifyGetUpdates(httpStatus: status, data: data) {
-                    case .updates(let parsed):
-                        if let maxId = parsed.maxUpdateId { offset = maxId + 1 }
-                        if let found = BotSwitchFlow.findCode(code, in: parsed.messages) {
-                            discovered = found
-                            // Confirm the code's batch server-side (the request
-                            // carrying offset = maxId+1 IS the acknowledgment).
-                            _ = try? await Self.botSwitchGetUpdates(token: token, offset: offset, timeoutSeconds: 0)
-                        }
-                    case .permanentError(let description):
-                        permanentFailure = description
-                    case .transientError:
-                        // Errored requests return instantly (no long poll to
-                        // pace the loop) — back off before retrying.
-                        try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    }
-                    if discovered != nil || permanentFailure != nil { break }
-                } catch {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                }
-            }
+            // Re-checked before every request, the acknowledgment included
+            // (BotSwitchDiscovery.run); the identity lock is also kept alive
+            // by this task until its last request has returned.
+            let (discovered, permanentFailure) = await BotSwitchDiscovery.run(
+                token: token, code: code, deadline: deadline,
+                refusal: { AssistantRegistry.telegramDiscoveryRefusal(token: token) },
+                getUpdates: { try await Self.botSwitchGetUpdates(token: $0, offset: $1, timeoutSeconds: $2) })
+            withExtendedLifetime(identityLock) {}
             guard !Task.isCancelled, let self else { return }
             await self.finishBotSwitchDiscovery(discovered: discovered, permanentFailure: permanentFailure,
                                                 token: token, botDisplay: botDisplay)

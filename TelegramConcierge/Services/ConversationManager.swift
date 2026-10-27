@@ -1093,7 +1093,16 @@ class ConversationManager: ObservableObject {
         /// cutover at its next clean boundary (see performPendingBotSwitchIfReady).
         var readyForCutover = false
     }
-    var pendingBotSwitch: PendingBotSwitch?
+    var pendingBotSwitch: PendingBotSwitch? {
+        // Clearing the switch (cancel, timeout, failure, cutover) drops this
+        // process's hold on machine/identity-tx.lock (MULTI_ASSISTANT_PLAN
+        // §5.6, Codex stage-1 R2); a still-running discovery task keeps its
+        // own reference until its last request returns.
+        didSet { if pendingBotSwitch == nil { botSwitchIdentityLock = nil } }
+    }
+    /// Default's hold on machine/identity-tx.lock for the lifetime of a
+    /// /switchbot (nil when no switch is pending, and always nil in extras).
+    var botSwitchIdentityLock: ProfileFileLock?
     var botSwitchDiscoveryTask: Task<Void, Never>?
     /// True while performPendingBotSwitchIfReady() executes. The cutover
     /// awaits network sends after committing credentials, and the reentrant

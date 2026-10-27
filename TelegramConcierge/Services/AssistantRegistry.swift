@@ -364,12 +364,27 @@ enum AssistantRegistry {
         case conflict(String)
         /// A live change of this assistant's own identity is finishing.
         case busy(String)
+        /// The caller's read step found the persisted setting changed since
+        /// the caller captured it: nothing was adopted, released or written
+        /// (Codex stage-1 R5 — a failed consistency check is never a release).
+        case changed
+    }
+
+    /// The value read inside the registry lock: the configured identity
+    /// (empty = nothing configured), or an abort that leaves the slot alone.
+    enum ReconcileRead: Equatable {
+        case configured(String)
+        case aborted
+    }
+
+    static func reconcile(profile: String, kind: Kind, read: () -> String?, paths: Paths = .live) -> ReconcileResult {
+        reconcile(profile: profile, kind: kind, readChecked: { .configured(read() ?? "") }, paths: paths)
     }
 
     /// Before any poll or discovery: compare the profile's persisted value
     /// (read inside the lock) with its record. A value not in the record is
     /// adopted as `current` when free; a conflict refuses the channel.
-    static func reconcile(profile: String, kind: Kind, read: () -> String?, paths: Paths = .live) -> ReconcileResult {
+    static func reconcile(profile: String, kind: Kind, readChecked: () -> ReconcileRead, paths: Paths = .live) -> ReconcileResult {
         switch presence(paths) {
         case .absent:
             // Only default can be a never-multi installation; an extra
@@ -390,6 +405,9 @@ enum AssistantRegistry {
                         ? .noRegistry
                         : .conflict("this assistant's registry is missing; run `briglia doctor`")
                 }
+                // Read first, before any change to the document: an aborted
+                // read returns with `doc` untouched, so nothing is written.
+                guard case .configured(let configured) = readChecked() else { return .changed }
                 cleanAll(&d, paths)
                 if d.index(profile) == nil {
                     guard profile == AssistantProfile.defaultName else {
@@ -399,7 +417,7 @@ enum AssistantRegistry {
                     d.records.append(newRecord(name: profile, displayName: "Bree"))
                 }
                 let i = d.index(profile)!
-                let raw = read()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let raw = configured.trimmingCharacters(in: .whitespacesAndNewlines)
                 var slot = d.records[i].slot(kind)
                 if raw.isEmpty {
                     // Nothing configured: free what this record claimed.
@@ -489,6 +507,7 @@ enum AssistantRegistry {
         switch reconcile(profile: profile, kind: .inbox, read: { inbox }, paths: paths) {
         case .noRegistry, .allowed: return .only(digest)
         case .conflict(let m), .busy(let m): return .none(m)
+        case .changed: return .none("the inbox setting changed; reading resumes at the next check")
         }
     }
 

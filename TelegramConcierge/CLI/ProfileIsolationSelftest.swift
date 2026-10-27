@@ -40,6 +40,7 @@ struct ProfileIsolationSelftest: ParsableCommand {
         if h.section("reconcile") { h.reconcileSection() }
         if h.section("signin") { h.signInSection() }
         if h.section("round2") { h.round2Section() }
+        if h.section("round3") { h.round3Section() }
         print("\n\(h.total - h.failures)/\(h.total) profile isolation checks passed")
         if h.failures > 0 { throw ExitCode(1) }
     }

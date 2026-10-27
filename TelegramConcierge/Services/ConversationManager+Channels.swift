@@ -185,25 +185,26 @@ extension ConversationManager {
     /// Startup reconciliation of one channel identity against the machine
     /// registry; false (with a log line) when another assistant holds it or
     /// the registry cannot be read.
-    nonisolated static func registryAllowsChannel(_ kind: AssistantRegistry.Kind, value: String) -> Bool {
+    nonisolated static func registryAllowsChannel(_ kind: AssistantRegistry.Kind, value: String,
+                                                  profile: String = AssistantProfile.selectedName,
+                                                  paths: AssistantRegistry.Paths = .live,
+                                                  load: (String) -> String? = { KeychainHelper.load(key: $0) }) -> Bool {
         // The persisted value is read under the registry lock (plan §5.6);
-        // if it no longer equals what this process is about to use, nothing
-        // is adopted and the channel waits for the next registration.
+        // if it no longer equals what this process is about to use, the
+        // reconciliation aborts WITHOUT touching this assistant's reservation
+        // and the channel waits for the next registration (Codex stage-1 R5).
         let expected = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        var changedMeanwhile = false
         let key = kind == .bot ? KeychainHelper.telegramBotTokenKey : KeychainHelper.agentMailInboxAddressKey
-        let result = AssistantRegistry.reconcile(profile: AssistantProfile.selectedName, kind: kind, read: {
-            let persisted = KeychainHelper.load(key: key)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if persisted != expected { changedMeanwhile = true; return nil }
-            return persisted
-        })
-        if changedMeanwhile, result != .noRegistry {
-            print("[Assistants] \(kind == .bot ? "Telegram" : "AgentMail") not started: its setting changed while starting; retrying at the next registration")
-            return false
-        }
+        let result = AssistantRegistry.reconcile(profile: profile, kind: kind, readChecked: {
+            let persisted = load(key)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return persisted == expected ? .configured(persisted) : .aborted
+        }, paths: paths)
         switch result {
         case .noRegistry, .allowed:
             return true
+        case .changed:
+            print("[Assistants] \(kind == .bot ? "Telegram" : "AgentMail") not started: its setting changed while starting; retrying at the next registration")
+            return false
         case .conflict(let message), .busy(let message):
             print("[Assistants] \(kind == .bot ? "Telegram" : "AgentMail") not started: \(message)")
             return false
