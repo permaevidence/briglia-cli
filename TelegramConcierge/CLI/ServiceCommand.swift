@@ -333,6 +333,7 @@ struct ServiceInstall: AsyncParsableCommand {
     var noKeepawake = false
 
     func run() async throws {
+        try AssistantProfile.requireDefault(AssistantProfile.serviceMessage)
         AdaCLI.prepareIO()
         try IdentityMigration.gateMutatingEntry()
         #if os(Linux)
@@ -368,6 +369,7 @@ struct ServiceStatus: AsyncParsableCommand {
     )
 
     func run() async throws {
+        try AssistantProfile.requireDefault(AssistantProfile.serviceMessage)
         AdaCLI.prepareIO()
         #if os(Linux)
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -424,6 +426,7 @@ struct ServiceUninstall: AsyncParsableCommand {
     )
 
     func run() async throws {
+        try AssistantProfile.requireDefault(AssistantProfile.serviceMessage)
         AdaCLI.prepareIO()
         #if os(Linux)
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -467,6 +470,7 @@ struct ServiceSelftest: AsyncParsableCommand {
     )
 
     func run() async throws {
+        try AssistantProfile.requireDefault(AssistantProfile.serviceMessage)
         var failures = 0
         func check(_ label: String, _ ok: Bool) {
             print("\(ok ? "✔" : "✖") \(label)")

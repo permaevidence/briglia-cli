@@ -73,7 +73,7 @@ enum ProfileBootstrap {
     static func refusalForExtra(arguments: [String], name: String) -> String? {
         guard let command = arguments.first else { return nil }
         switch command {
-        case "upgrade":
+        case "upgrade", "update":
             return "Updates are installed for the whole computer from the default assistant: run `briglia upgrade` without --profile."
         case "toolchain":
             return "The phone toolchain belongs to the default assistant; run `briglia toolchain …` without --profile."

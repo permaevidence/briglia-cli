@@ -17,6 +17,7 @@ struct ProfileInfoCommand: ParsableCommand {
 
     @Flag(name: .customLong("touch")) var touch = false
     @Flag(name: .customLong("read")) var read = false
+    @Option(name: .customLong("inbox-scope")) var inboxScope: String?
 
     static let prefsProbeKey = "briglia.profileProbe"
     static let secretsProbeKey = KeychainHelper.userNameKey
@@ -65,6 +66,12 @@ struct ProfileInfoCommand: ParsableCommand {
             out["spillPath"] = spill.outputPath ?? NSNull()
             out["secretValue"] = KeychainHelper.load(key: Self.secretsProbeKey) ?? NSNull()
             out["prefsValue"] = Prefs.store.string(forKey: Self.prefsProbeKey) ?? NSNull()
+        }
+        if let inboxScope {
+            // The production AgentMail read boundary, applied to a synthetic
+            // list of inbox ids the "account" returns.
+            let ids = inboxScope.split(separator: ",").map(String.init)
+            out["scopedInboxes"] = AgentMailService.scopedInboxIds(ids)
         }
         if read {
             out["secretValue"] = KeychainHelper.load(key: Self.secretsProbeKey) ?? NSNull()

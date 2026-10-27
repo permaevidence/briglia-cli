@@ -92,9 +92,27 @@ enum AssistantRegistry {
     static let lockWaitSeconds: Double = 10
     static let maxBytes = 1024 * 1024
 
-    static func exists(_ paths: Paths = .live) -> Bool {
+    enum Presence: Equatable {
+        /// Definitely absent (ENOENT): a never-multi installation.
+        case absent
+        case present
+        /// The lookup failed for another reason (permissions, a file where a
+        /// directory should be, …): never treated as absent.
+        case unreadable(String)
+    }
+
+    static func presence(_ paths: Paths = .live) -> Presence {
         var st = stat()
-        return lstat(paths.registry.path, &st) == 0
+        if lstat(paths.registry.path, &st) == 0 { return .present }
+        let err = errno
+        if err == ENOENT { return .absent }
+        return .unreadable(String(cString: strerror(err)))
+    }
+
+    /// True unless the registry is definitely absent (an unreadable registry
+    /// counts as present: callers fail closed).
+    static func exists(_ paths: Paths = .live) -> Bool {
+        presence(paths) != .absent
     }
 
     // MARK: - Values
@@ -352,10 +370,26 @@ enum AssistantRegistry {
     /// (read inside the lock) with its record. A value not in the record is
     /// adopted as `current` when free; a conflict refuses the channel.
     static func reconcile(profile: String, kind: Kind, read: () -> String?, paths: Paths = .live) -> ReconcileResult {
-        guard exists(paths) else { return .noRegistry }
+        switch presence(paths) {
+        case .absent:
+            // Only default can be a never-multi installation; an extra
+            // without its registry was registered once and must not run
+            // unreserved (fail closed).
+            return profile == AssistantProfile.defaultName
+                ? .noRegistry
+                : .conflict("this assistant's registry is missing; run `briglia doctor`")
+        case .unreadable(let why):
+            return .conflict("the assistants registry cannot be read (\(why)); run `briglia doctor`")
+        case .present:
+            break
+        }
         do {
             return try withLock(paths) { doc -> ReconcileResult in
-                guard var d = doc else { return .noRegistry }
+                guard var d = doc else {
+                    return profile == AssistantProfile.defaultName
+                        ? .noRegistry
+                        : .conflict("this assistant's registry is missing; run `briglia doctor`")
+                }
                 cleanAll(&d, paths)
                 if d.index(profile) == nil {
                     guard profile == AssistantProfile.defaultName else {
@@ -397,6 +431,64 @@ enum AssistantRegistry {
         } catch {
             // An unreadable registry fails closed: the channel is not polled.
             return .conflict("the assistants registry cannot be read (\(error)); run `briglia doctor`")
+        }
+    }
+
+    // MARK: - Discovery and inbox scope
+
+    /// May this profile run Telegram discovery (`getUpdates`, which competes
+    /// with the bot's poller) on `token`? nil = yes. Never-multi installs are
+    /// unchanged; with a registry only the bot this profile already holds as
+    /// `current` may be scanned. Changing to a NEW bot in multi mode waits for
+    /// the reservation-wired setters of a later stage (refused, fail closed).
+    static func telegramDiscoveryRefusal(profile: String = AssistantProfile.selectedName, token: String,
+                                         paths: Paths = .live) -> String? {
+        switch presence(paths) {
+        case .absent:
+            return profile == AssistantProfile.defaultName ? nil : "this assistant's registry is missing; run `briglia doctor`"
+        case .unreadable(let why):
+            return "the assistants registry cannot be read (\(why)); run `briglia doctor`"
+        case .present:
+            break
+        }
+        guard let digest = digest(.bot, token) else { return "That doesn't look like a bot token." }
+        do {
+            return try withLock(paths) { doc -> String? in
+                guard var d = doc else { return "the assistants registry cannot be read; run `briglia doctor`" }
+                cleanAll(&d, paths)
+                doc = d
+                if let owner = holder(of: digest, kind: .bot, excluding: profile, in: d) {
+                    return conflictMessage(.bot, owner: owner)
+                }
+                if d.record(profile)?.bot.current == digest { return nil }
+                return "Changing an assistant's Telegram bot is not available yet while several assistants are set up on this computer."
+            }
+        } catch {
+            return "the assistants registry cannot be read (\(error)); run `briglia doctor`"
+        }
+    }
+
+    enum InboxScope: Equatable {
+        /// Never-multi: every inbox the key returns (today's behaviour).
+        case all
+        /// Only the inbox with this digest (the profile's reservation).
+        case only(String)
+        /// Nothing may be read.
+        case none(String)
+    }
+
+    /// Which AgentMail inboxes this profile may read: enforced at the
+    /// service boundary for polling AND prompt snapshots (plan D9).
+    static func inboxScope(profile: String = AssistantProfile.selectedName, configuredInbox: String?,
+                           paths: Paths = .live) -> InboxScope {
+        if case .absent = presence(paths), profile == AssistantProfile.defaultName { return .all }
+        let inbox = configuredInbox?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !inbox.isEmpty, let digest = digest(.inbox, inbox) else {
+            return .none("no inbox is configured for this assistant")
+        }
+        switch reconcile(profile: profile, kind: .inbox, read: { inbox }, paths: paths) {
+        case .noRegistry, .allowed: return .only(digest)
+        case .conflict(let m), .busy(let m): return .none(m)
         }
     }
 

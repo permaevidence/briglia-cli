@@ -186,9 +186,21 @@ extension ConversationManager {
     /// registry; false (with a log line) when another assistant holds it or
     /// the registry cannot be read.
     nonisolated static func registryAllowsChannel(_ kind: AssistantRegistry.Kind, value: String) -> Bool {
-        // Reconciled value = the one this process is about to poll (read
-        // from the secret store by the caller just before).
-        let result = AssistantRegistry.reconcile(profile: AssistantProfile.selectedName, kind: kind, read: { value })
+        // The persisted value is read under the registry lock (plan §5.6);
+        // if it no longer equals what this process is about to use, nothing
+        // is adopted and the channel waits for the next registration.
+        let expected = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        var changedMeanwhile = false
+        let key = kind == .bot ? KeychainHelper.telegramBotTokenKey : KeychainHelper.agentMailInboxAddressKey
+        let result = AssistantRegistry.reconcile(profile: AssistantProfile.selectedName, kind: kind, read: {
+            let persisted = KeychainHelper.load(key: key)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if persisted != expected { changedMeanwhile = true; return nil }
+            return persisted
+        })
+        if changedMeanwhile, result != .noRegistry {
+            print("[Assistants] \(kind == .bot ? "Telegram" : "AgentMail") not started: its setting changed while starting; retrying at the next registration")
+            return false
+        }
         switch result {
         case .noRegistry, .allowed:
             return true

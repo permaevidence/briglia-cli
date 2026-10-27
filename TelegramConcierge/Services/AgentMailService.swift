@@ -492,10 +492,32 @@ actor AgentMailService {
     }
 
     private func fetchInboxIds() async -> [String]? {
-        if let cachedInboxIds { return cachedInboxIds }
-        guard let ids = await fetchInboxIdsOnce() else { return nil }
-        cachedInboxIds = ids
-        return ids
+        let ids: [String]
+        if let cachedInboxIds {
+            ids = cachedInboxIds
+        } else {
+            guard let fetched = await fetchInboxIdsOnce() else { return nil }
+            cachedInboxIds = fetched
+            ids = fetched
+        }
+        return Self.scopedInboxIds(ids)
+    }
+
+    /// Several assistants (MULTI_ASSISTANT_PLAN §5.6, D9): every read —
+    /// polling, prompt snapshots, restore restarts — goes through here, so
+    /// an assistant reads only the inbox it holds in the registry, never one
+    /// another assistant holds, even when the API key can see both. Without
+    /// a registry (one assistant) every inbox is read, as before.
+    static func scopedInboxIds(_ ids: [String]) -> [String] {
+        switch AssistantRegistry.inboxScope(configuredInbox: KeychainHelper.load(key: KeychainHelper.agentMailInboxAddressKey)) {
+        case .all:
+            return ids
+        case .only(let digest):
+            return ids.filter { AssistantRegistry.digest(.inbox, $0) == digest }
+        case .none(let why):
+            print("[AgentMailService] not reading any inbox: \(why)")
+            return []
+        }
     }
 
     private func fetchInboxIdsOnce() async -> [String]? {

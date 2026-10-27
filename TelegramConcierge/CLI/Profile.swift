@@ -1,3 +1,4 @@
+import ArgumentParser
 import Foundation
 #if canImport(CryptoKit)
 import CryptoKit
@@ -179,6 +180,22 @@ enum AssistantProfile {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
         return names.filter { isUsableExtraName($0) && readMetadata($0, environment: environment) != nil }.sorted()
     }
+
+    /// Machine-level commands refuse in an extra INSIDE the parsed command
+    /// (the bootstrap's argv check alone could be bypassed by aliases or
+    /// `--`; Codex stage-1 round 1 R4).
+    static func requireDefault(_ message: String) throws {
+        guard isDefault else {
+            print("✖ \(message)")
+            throw ExitCode(2)
+        }
+    }
+
+    static let machineSettingMessage = "This is a computer-wide setting; change it in your default assistant (run the command without --profile)."
+    static let upgradeMessage = "Updates are installed for the whole computer from the default assistant: run `briglia upgrade` without --profile."
+    static let toolchainMessage = "The phone toolchain belongs to the default assistant; run `briglia toolchain …` without --profile."
+    static let migrateMessage = "Migrations run only for the default assistant; run the command without --profile."
+    static let serviceMessage = "Background services for extra assistants are not available yet; run `briglia --profile <name> daemon` in a terminal."
 
     // MARK: - Bootstrap state
 

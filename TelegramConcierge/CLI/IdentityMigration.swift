@@ -506,6 +506,7 @@ struct Migrate: ParsableCommand {
     var dumpSpec = false
 
     func run() throws {
+        try AssistantProfile.requireDefault(AssistantProfile.migrateMessage)
         AdaCLI.prepareIO()
         if dumpSpec {
             // Read-only: the exact spec this binary would hand the engine.
@@ -615,6 +616,7 @@ struct MigrateProbe: ParsableCommand {
     )
 
     func run() throws {
+        try AssistantProfile.requireDefault(AssistantProfile.migrateMessage)
         AdaCLI.prepareIO()
         let fm = FileManager.default
         var isDir: ObjCBool = false
@@ -683,6 +685,7 @@ struct MigrateGate: ParsableCommand {
     )
 
     func run() throws {
+        try AssistantProfile.requireDefault(AssistantProfile.migrateMessage)
         AdaCLI.prepareIO()
         try IdentityMigration.gateMutatingEntry()
         print("GATE-OK config=\(StoragePaths.configRoot.path) data=\(StoragePaths.dataRoot.path)")

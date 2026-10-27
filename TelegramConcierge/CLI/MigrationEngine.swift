@@ -2996,6 +2996,7 @@ struct MigrationRunCommand: ParsableCommand {
     }
 
     func run() throws {
+        try AssistantProfile.requireDefault(AssistantProfile.migrateMessage)
         AdaCLI.prepareIO()
         guard Self.isDevelopmentBuild() else {
             print(Self.refusalText)

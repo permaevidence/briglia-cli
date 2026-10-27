@@ -411,6 +411,11 @@ struct MenuEnvironment {
     /// (no offset): the daemon still receives it later and answers — the
     /// user's first "hello" gets a reply instead of vanishing.
     static func scanTelegram(token: String, since: Date) async -> MenuTelegramScan {
+        // A bot another assistant holds is never polled (getUpdates competes
+        // with its poller; MULTI_ASSISTANT_PLAN §5.6). No registry → unchanged.
+        if let refusal = AssistantRegistry.telegramDiscoveryRefusal(token: token) {
+            return .failed(refusal)
+        }
         guard let url = URL(string: DevProbeOverride.url("https://api.telegram.org/bot\(token)/getUpdates?timeout=0&limit=100",
                                                          dev: "/telegram/bot\(token)/getUpdates")) else {
             return .failed("That token doesn't look right.")

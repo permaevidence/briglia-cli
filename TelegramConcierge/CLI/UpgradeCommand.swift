@@ -17,6 +17,7 @@ struct Upgrade: AsyncParsableCommand {
     var yes = false
 
     func run() async throws {
+        try AssistantProfile.requireDefault(AssistantProfile.upgradeMessage)
         try IdentityMigration.gateMutatingEntry()
         print("Checking for updates…")
         let update: UpgradeService.Update

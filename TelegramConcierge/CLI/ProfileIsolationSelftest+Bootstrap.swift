@@ -118,7 +118,7 @@ extension ProfileHarness {
               && plain["noticeSetting"] as? String == configBase + "/briglia/update-check.json")
         let noSeam = info(removeEnv: [LandingZone.testRootKey])
         check("default landing zone ~/Documents/Briglia without the test seam",
-              noSeam?["landingRoot"] as? String == home + "/Documents/Briglia", "\(noSeam?["landingRoot"] ?? "")")
+              canon(noSeam?["landingRoot"] as? String) == canon(home + "/Documents/Briglia"), "\(noSeam?["landingRoot"] ?? "")")
         check("diagnostics create no root and no briglia-shared",
               !FileManager.default.fileExists(atPath: dataBase + "/briglia")
               && !FileManager.default.fileExists(atPath: dataBase + "/briglia-shared"))

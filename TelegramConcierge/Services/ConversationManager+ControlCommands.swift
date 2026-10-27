@@ -896,6 +896,14 @@ extension ConversationManager {
             }
 
         case .beginSwitch(let token, let discardBacklog):
+            // Several assistants (MULTI_ASSISTANT_PLAN §5.6): discovery polls
+            // the new bot's getUpdates, which would compete with another
+            // assistant's poller; refused in multi mode until the
+            // reservation-wired switch lands. No registry → unchanged.
+            if let refusal = AssistantRegistry.telegramDiscoveryRefusal(token: token) {
+                try? await sendText("✖ \(refusal)")
+                return
+            }
             let currentToken = (KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if token == currentToken {
@@ -984,6 +992,12 @@ extension ConversationManager {
             var discovered: BotSwitchFlow.DiscoveredChat?
             var permanentFailure: String?
             while !Task.isCancelled && Date() < deadline {
+                // Re-checked before every poll: a registry created after the
+                // switch began stops discovery (never polls a held bot).
+                if let refusal = AssistantRegistry.telegramDiscoveryRefusal(token: token) {
+                    permanentFailure = refusal
+                    break
+                }
                 do {
                     let (status, data) = try await Self.botSwitchGetUpdates(token: token, offset: offset, timeoutSeconds: 20)
                     switch BotSwitchFlow.classifyGetUpdates(httpStatus: status, data: data) {
@@ -1139,6 +1153,11 @@ extension ConversationManager {
         // The confirm was idle-guarded; if a turn slipped in since (app,
         // ambient), wait for a later tick instead of re-routing under it.
         guard activeRunId == nil, activeProcessingTask == nil else { return }
+        if let refusal = AssistantRegistry.telegramDiscoveryRefusal(token: pending.newToken) {
+            pendingBotSwitch = nil
+            await notifyBotSwitchProgress("✖ \(refusal) The switch did NOT happen and the current bot is unchanged.")
+            return
+        }
         // Freeze the state machine for the whole cutover: from here to the
         // end (including the failure path's notify await), every /switchbot
         // command is answered with "finalizing" — see BotSwitchFlow.decide.

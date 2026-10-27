@@ -17,6 +17,7 @@ struct ToolchainCommand: AsyncParsableCommand {
             commandName: "status", abstract: "Show which tools are available and from where.")
 
         func run() throws {
+            try AssistantProfile.requireDefault(AssistantProfile.toolchainMessage)
             let rows = UserdataToolchain.status()
             print("Media toolchain:")
             var lastPackage = ""
@@ -58,6 +59,7 @@ struct ToolchainCommand: AsyncParsableCommand {
         var includeLibreOffice = false
 
         func run() async throws {
+            try AssistantProfile.requireDefault(AssistantProfile.toolchainMessage)
             try IdentityMigration.gateMutatingEntry()
             let report = await Task.detached(priority: .userInitiated) {
                 UserdataToolchain.installSync(includePandoc: includePandoc,
@@ -87,6 +89,7 @@ struct ToolchainCommand: AsyncParsableCommand {
             abstract: "Compare the prefix against the repo and rebuild it when security/bug fixes are available.")
 
         func run() async throws {
+            try AssistantProfile.requireDefault(AssistantProfile.toolchainMessage)
             try IdentityMigration.gateMutatingEntry()
             let report = await Task.detached(priority: .userInitiated) {
                 UserdataToolchain.upgradeSync {
@@ -112,6 +115,7 @@ struct ToolchainCommand: AsyncParsableCommand {
             abstract: "Remove the userdata prefix and every wrapper Briglia created.")
 
         func run() throws {
+            try AssistantProfile.requireDefault(AssistantProfile.toolchainMessage)
             try IdentityMigration.gateMutatingEntry()
             let result = UserdataToolchain.removeAll()
             if !result.removed.isEmpty {

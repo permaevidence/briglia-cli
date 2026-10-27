@@ -109,7 +109,7 @@ extension ProfileHarness {
         check("machine: notice stores read from default's place", work["noticeState"] as? String == dataBase + "/briglia/update/notice.json")
         check("machine: sign-in lock in default's machine/", work["signInLock"] as? String == dataBase + "/briglia/machine/signin.lock")
         let noSeam = info(["--profile", "work"], removeEnv: [LandingZone.testRootKey])
-        check("work landing = its home folder (~/Briglia/work)", noSeam?["landingRoot"] as? String == home + "/Briglia/work")
+        check("work landing = its home folder (~/Briglia/work)", canon(noSeam?["landingRoot"] as? String) == canon(home + "/Briglia/work"))
 
         // Touch every store in three profiles, then prove no crossing.
         guard let d = info(touch: true), let w = info(["--profile", "work"], touch: true),

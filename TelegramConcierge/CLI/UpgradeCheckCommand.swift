@@ -19,6 +19,7 @@ struct UpgradeCheck: ParsableCommand {
         case nil:
             print(ConversationManager.upgradeCheckReply(status: UpdateNoticeService.liveStatus(), tools: LocalToolsText.liveStatus()))
         case "on"?, "off"?:
+            try AssistantProfile.requireDefault(AssistantProfile.machineSettingMessage)
             try IdentityMigration.gateMutatingEntry()
             try UpdateNoticeStore.setEnabled(value!.lowercased() == "on", paths: .live, now: Date())
             print(value!.lowercased() == "on" ? ConversationManager.upgradeCheckOnText : ConversationManager.upgradeCheckOffText)

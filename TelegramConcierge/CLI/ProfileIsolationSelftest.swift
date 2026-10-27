@@ -39,6 +39,7 @@ struct ProfileIsolationSelftest: ParsableCommand {
         if h.section("transactions") { h.transactionSection() }
         if h.section("reconcile") { h.reconcileSection() }
         if h.section("signin") { h.signInSection() }
+        if h.section("round2") { h.round2Section() }
         print("\n\(h.total - h.failures)/\(h.total) profile isolation checks passed")
         if h.failures > 0 { throw ExitCode(1) }
     }
@@ -57,7 +58,9 @@ final class ProfileHarness {
     init(only: String?) throws {
         self.only = only
         let fm = FileManager.default
-        root = URL(fileURLWithPath: NSTemporaryDirectory())
+        // Canonical (symlink-free) scratch root, so path expectations hold
+        // whether the temporary directory is /tmp, /var/folders or /private/….
+        root = URL(fileURLWithPath: NSTemporaryDirectory()).resolvingSymlinksInPath()
             .appendingPathComponent("briglia-pst-\(UUID().uuidString.prefix(8))", isDirectory: true)
         let home = root.appendingPathComponent("home", isDirectory: true)
         for sub in ["home", "tmp", "landing"] {
@@ -170,6 +173,11 @@ final class ProfileHarness {
     func readJSON(_ path: String) -> [String: Any]? {
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Symlink-free form for path comparisons with what a child resolved.
+    func canon(_ path: String?) -> String? {
+        path.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
     }
 
     func mode(_ path: String) -> mode_t {
