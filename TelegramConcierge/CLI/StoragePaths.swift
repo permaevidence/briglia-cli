@@ -21,16 +21,20 @@ enum StoragePaths {
 
     /// State and caches (sessions, archives, ledger, logs, attachments,
     /// projects): `$XDG_DATA_HOME/briglia`, default `~/.local/share/briglia`.
-    static let dataRoot: URL = resolveDataRoot()
+    /// An extra assistant profile (MULTI_ASSISTANT_PLAN §3) uses
+    /// `$XDG_DATA_HOME/briglia-profiles/<name>` instead; the selection is made
+    /// by `ProfileBootstrap` before this static is first read.
+    static let dataRoot: URL = AssistantProfile.selectedDataRoot()
 
     /// User-editable configuration (mcp.json, mcp-routing.json, agents/,
     /// skills/, agent-turns.json): `$XDG_CONFIG_HOME/briglia`, default
     /// `~/.config/briglia`.
-    static let configRoot: URL = resolveConfigRoot()
+    static let configRoot: URL = AssistantProfile.selectedConfigRoot()
 
-    /// Human-readable equivalents for prompts and user-facing messages.
-    static let dataRootDisplay = "~/.local/share/briglia"
-    static let configRootDisplay = "~/.config/briglia"
+    /// Human-readable equivalents for prompts and user-facing messages
+    /// (today's literals for the default profile, byte for byte).
+    static let dataRootDisplay = AssistantProfile.dataRootDisplay
+    static let configRootDisplay = AssistantProfile.configRootDisplay
 
     /// Pure resolution (no filesystem effects), also used by the identity
     /// migration to compute the OLD product's roots under the same XDG rules.

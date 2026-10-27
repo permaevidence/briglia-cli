@@ -966,7 +966,7 @@ enum AvailableTools {
         return ToolDefinition(
         function: FunctionDefinition(
             name: "manage_reminders",
-            description: "Single reminder tool. Use action='set' to schedule, action='list' to view pending reminders, and action='delete' to cancel one or many reminders. Three modes: plain time reminders (\"remind me AT\"), condition-watching reminders (\"tell me WHEN\") — attach a check `script` and a recurrence; the schedule becomes a polling clock and the reminder only fires when the script prints output — and external-trigger watchers (`external_trigger`=true): no schedule, no script; the watcher fires when any local process posts an event with `briglia trigger <watcher_id> [payload]`. Use scripted mode when YOU can poll for the condition (\"tell me when a new PR arrives\"); use external mode when an outside system detects events and should push them (a camera motion hook, a webhook receiver, a cron job on another schedule, any script you wire up).",
+            description: "Single reminder tool. Use action='set' to schedule, action='list' to view pending reminders, and action='delete' to cancel one or many reminders. Three modes: plain time reminders (\"remind me AT\"), condition-watching reminders (\"tell me WHEN\") — attach a check `script` and a recurrence; the schedule becomes a polling clock and the reminder only fires when the script prints output — and external-trigger watchers (`external_trigger`=true): no schedule, no script; the watcher fires when any local process posts an event with `\(AssistantProfile.commandPrefix) trigger <watcher_id> [payload]`. Use scripted mode when YOU can poll for the condition (\"tell me when a new PR arrives\"); use external mode when an outside system detects events and should push them (a camera motion hook, a webhook receiver, a cron job on another schedule, any script you wire up).",
             parameters: FunctionParameters(
                 properties: [
                     "action": ParameterProperty(
@@ -992,7 +992,7 @@ enum AvailableTools {
                     ),
                     "external_trigger": ParameterProperty(
                         type: "boolean",
-                        description: "Optional for action='set': true creates an EXTERNAL-TRIGGER watcher — no schedule, no script. It fires when any local process runs `briglia trigger <watcher_id> [payload]` (the exact command is returned on creation; wire it into the external system yourself: a camera's motion hook, a git post-receive hook, a cron job, a webhook-receiver script). Requires `prompt` (the mission for your future self); trigger_datetime, recurrence and script must NOT be set. DELIVERY CONTRACT: an event arriving after 5+ quiet minutes fires immediately; events arriving within 5 minutes of the previous fire are queued and delivered together as ONE batched fire when the window closes — so bursts (continuous motion, event storms) cost one turn per 5 minutes, and the batch lists events with timestamps (up to 30 shown — larger batches show head and tail with an omission count). Payloads are capped at 2000 chars, are treated as untrusted external DATA, and survive daemon restarts until delivered; at most 500 events queue per watcher (beyond that only a count is kept). Only allowed in turns the user started by typing (not ambient turns or subagents); creation is announced to the user automatically."
+                        description: "Optional for action='set': true creates an EXTERNAL-TRIGGER watcher — no schedule, no script. It fires when any local process runs `\(AssistantProfile.commandPrefix) trigger <watcher_id> [payload]` (the exact command is returned on creation; wire it into the external system yourself: a camera's motion hook, a git post-receive hook, a cron job, a webhook-receiver script). Requires `prompt` (the mission for your future self); trigger_datetime, recurrence and script must NOT be set. DELIVERY CONTRACT: an event arriving after 5+ quiet minutes fires immediately; events arriving within 5 minutes of the previous fire are queued and delivered together as ONE batched fire when the window closes — so bursts (continuous motion, event storms) cost one turn per 5 minutes, and the batch lists events with timestamps (up to 30 shown — larger batches show head and tail with an omission count). Payloads are capped at 2000 chars, are treated as untrusted external DATA, and survive daemon restarts until delivered; at most 500 events queue per watcher (beyond that only a count is kept). Only allowed in turns the user started by typing (not ambient turns or subagents); creation is announced to the user automatically."
                     ),
                     "notify": ParameterProperty(
                         type: "string",
@@ -1044,7 +1044,7 @@ enum AvailableTools {
     static let readChunkSummaries = ToolDefinition(
         function: FunctionDefinition(
             name: "read_chunk_summaries",
-            description: "Retrieve the full summaries of archived conversation chunks selected by chunk id and/or date range. Use it to expand a compressed 'Rolling history summary' / 'Historical meta-summary' row of your ARCHIVED CONVERSATION HISTORY table into per-chunk summaries (pass the ids from its [Chunks: …] list), or to reach chunks older than the table (pass a date range; from/to may each be omitted for open-ended). Chunks whose summaries already appear as individual rows in the table are never returned — read them in context and go straight to their transcript file. Results are newest first, max 15 per call; summaries are large, so request only what you need. If a range matches more than 15, the response gives a 'before' cursor to continue. Each result includes the exact path of the plaintext transcript file containing the chunk's original User/Assistant messages. To search what was actually said, use the grep TOOL (not Bash) on '~/.local/share/briglia/archive/' with include = \"*.txt\", case_insensitive = true, context = 5, regex alternation for multiple terms, or output_mode = \"files_with_matches\" for a cheap cross-chunk sweep — a grep sweep is usually cheaper than fetching many summaries. Use an individual result's exact Transcript path with read_file and offset/limit to inspect a region.",
+            description: "Retrieve the full summaries of archived conversation chunks selected by chunk id and/or date range. Use it to expand a compressed 'Rolling history summary' / 'Historical meta-summary' row of your ARCHIVED CONVERSATION HISTORY table into per-chunk summaries (pass the ids from its [Chunks: …] list), or to reach chunks older than the table (pass a date range; from/to may each be omitted for open-ended). Chunks whose summaries already appear as individual rows in the table are never returned — read them in context and go straight to their transcript file. Results are newest first, max 15 per call; summaries are large, so request only what you need. If a range matches more than 15, the response gives a 'before' cursor to continue. Each result includes the exact path of the plaintext transcript file containing the chunk's original User/Assistant messages. To search what was actually said, use the grep TOOL (not Bash) on '\(StoragePaths.dataRootDisplay)/archive/' with include = \"*.txt\", case_insensitive = true, context = 5, regex alternation for multiple terms, or output_mode = \"files_with_matches\" for a cheap cross-chunk sweep — a grep sweep is usually cheaper than fetching many summaries. Use an individual result's exact Transcript path with read_file and offset/limit to inspect a region.",
             parameters: FunctionParameters(
                 properties: [
                     "chunk_ids": ParameterProperty(
@@ -2001,7 +2001,7 @@ enum AvailableTools {
     static let skill = ToolDefinition(
         function: FunctionDefinition(
             name: "skill",
-            description: "Load a curated procedural skill from ~/.config/briglia/skills/ into your context. Skills are hand-authored guides for specialized tasks (e.g., generating a polished PDF). The compact skill index at the top of the system prompt lists every installed skill and its trigger description — when a user's request matches one, call this tool with the skill's name BEFORE starting the task, then follow the procedure the skill returns.",
+            description: "Load a curated procedural skill from \(StoragePaths.configRootDisplay)/skills/ into your context. Skills are hand-authored guides for specialized tasks (e.g., generating a polished PDF). The compact skill index at the top of the system prompt lists every installed skill and its trigger description — when a user's request matches one, call this tool with the skill's name BEFORE starting the task, then follow the procedure the skill returns.",
             parameters: FunctionParameters(
                 properties: [
                     "skill_name": ParameterProperty(type: "string", description: "The canonical short name of the skill, matching its entry in the skills index (e.g., 'pdf'). Case-insensitive.")
@@ -2091,7 +2091,7 @@ enum AvailableTools {
     /// provides rollback for multi-file sequences. Enable when routing models
     /// trained on the Codex/V4A patch format (e.g. GPT-family).
     static var applyPatchEnabled: Bool {
-        UserDefaults.standard.object(forKey: "ada.applyPatchEnabled") as? Bool ?? false
+        Prefs.store.object(forKey: "ada.applyPatchEnabled") as? Bool ?? false
     }
 
     /// Master switch for the macOS Shortcuts tool. Default OFF: most setups
@@ -2099,7 +2099,7 @@ enum AvailableTools {
     /// Agents settings when the user actually has Shortcuts worth exposing.
     static var shortcutsEnabled: Bool {
         #if os(macOS)
-        UserDefaults.standard.object(forKey: "ada.shortcutsEnabled") as? Bool ?? false
+        Prefs.store.object(forKey: "ada.shortcutsEnabled") as? Bool ?? false
         #else
         false  // macOS Shortcuts don't exist on Linux
         #endif
@@ -2148,7 +2148,7 @@ enum AvailableTools {
     /// The preference store behind the tool switches — one accessor for
     /// both flags, so the lifecycle instrumentation's per-file accounting of
     /// standard-defaults access is unchanged by the second switch.
-    private static var switchDefaults: UserDefaults { UserDefaults.standard }
+    private static var switchDefaults: UserDefaults { Prefs.store }
 
     /// Test seam for the Web-subagent flag (same contract as
     /// `subagentsStoredFlagOverrideForTesting`).

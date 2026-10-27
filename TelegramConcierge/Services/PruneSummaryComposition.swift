@@ -33,7 +33,7 @@ enum KeepSummariesLimit: Equatable, CustomStringConvertible {
 enum KeepSummariesSetting {
     static let defaultsKey = "ada.keepSummaries"
     /// The chat-switch store (`switchDefaults`), read and written only here.
-    private static var defaults: UserDefaults { UserDefaults.standard }
+    private static var defaults: UserDefaults { Prefs.store }
     private static let logLock = NSLock()
     nonisolated(unsafe) private static var invalidLogged = false
 

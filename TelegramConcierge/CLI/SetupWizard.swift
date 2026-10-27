@@ -53,7 +53,7 @@ struct SetupWizard {
 
     /// `legacyDefaults` is a seam for setup-api's selftest — production
     /// callers use the machine's real defaults for the legacy flag.
-    nonisolated static func setupComplete(legacyDefaults: UserDefaults = .standard) -> Bool {
+    nonisolated static func setupComplete(legacyDefaults: UserDefaults = Prefs.store) -> Bool {
         if KeychainHelper.load(key: completeKey) == "true" { return true }
         if ProcessInfo.processInfo.environment["BRIGLIA_IGNORE_LEGACY_SETUP_FLAG"] != nil { return false }
         return legacyDefaults.bool(forKey: legacyCompleteFlag)
@@ -118,7 +118,7 @@ struct SetupWizard {
 
             ── Briglia CLI setup ─────────────────────────────────────────
             \(steps.count) steps, about 5 minutes. Keys are validated as you paste
-            them and stored in ~/.config/briglia/secrets.json (owner-only
+            them and stored in \(StoragePaths.configRootDisplay)/secrets.json (owner-only
             permissions). Press Ctrl-C to abort at any time; finished
             steps stay saved.
             """)
@@ -584,7 +584,7 @@ struct SetupWizard {
             probe: { await Probes.openAI(apiKey: $0) }
         )
 
-        UserDefaults.standard.set(WebSearchBackend.openai.rawValue, forKey: WebSearchBackend.selectionKey)
+        Prefs.store.set(WebSearchBackend.openai.rawValue, forKey: WebSearchBackend.selectionKey)
         save(KeychainHelper.webSearchOpenAIApiKeyKey, key)
         save(KeychainHelper.voiceTranscriptionProviderKey, VoiceTranscriptionProvider.openAI.rawValue)
         save(KeychainHelper.openAITranscriptionApiKeyKey, key)

@@ -803,9 +803,9 @@ enum BrowserAutomationBootstrap {
         var clear: @Sendable () -> Void
 
         static let userDefaults = FlagStore(
-            isSet: { UserDefaults.standard.bool(forKey: autoConfiguredKey) },
-            set: { UserDefaults.standard.set(true, forKey: autoConfiguredKey) },
-            clear: { UserDefaults.standard.removeObject(forKey: autoConfiguredKey) })
+            isSet: { Prefs.store.bool(forKey: autoConfiguredKey) },
+            set: { Prefs.store.set(true, forKey: autoConfiguredKey) },
+            clear: { Prefs.store.removeObject(forKey: autoConfiguredKey) })
 
         static func file(_ url: URL) -> FlagStore {
             FlagStore(

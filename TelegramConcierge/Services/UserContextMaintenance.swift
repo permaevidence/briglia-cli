@@ -445,7 +445,7 @@ extension ConversationArchiveService {
             await MaintenanceAlertCenter.shared.reportSuccess(.userContextRestructure)
         }
         if !runtime.legacyFlagRemoved {
-            UserDefaults.standard.removeObject(forKey: UserContextMaintenance.legacyRetryFlagKey)
+            Prefs.store.removeObject(forKey: UserContextMaintenance.legacyRetryFlagKey)
             runtime.legacyFlagRemoved = true
         }
 

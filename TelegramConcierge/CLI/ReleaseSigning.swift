@@ -383,7 +383,10 @@ enum ReleaseTrustStore {
         if let override = ProcessInfo.processInfo.environment["BRIGLIA_RELEASE_TRUST_FILE"] {
             return URL(fileURLWithPath: override)
         }
-        return StoragePaths.dataRoot.appendingPathComponent("release_trust.json")
+        // Machine-level (MULTI_ASSISTANT_PLAN §5.1): every assistant profile
+        // uses default's trust floor, so an extra can never accept a release
+        // older than one another assistant already verified.
+        return MachinePaths.defaultDataRoot().appendingPathComponent("release_trust.json")
     }
 
     /// Sibling lock, never inside the state file itself (the state file is

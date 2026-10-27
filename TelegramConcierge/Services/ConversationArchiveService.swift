@@ -1064,7 +1064,7 @@ actor ConversationArchiveService {
                 failures.append(failure)
             }
         }
-        UserDefaults.standard.removeObject(forKey: UserContextMaintenance.legacyRetryFlagKey)
+        Prefs.store.removeObject(forKey: UserContextMaintenance.legacyRetryFlagKey)
         let runtime = userContextMaintenanceRuntime
         runtime.suppressed = false
         runtime.inMemoryState = nil

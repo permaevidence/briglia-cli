@@ -136,7 +136,7 @@ enum SkillsRegistry {
 
         let visible = skills.filter { skill in
             guard let toggleKey = skill.requiresToggle else { return true }
-            return UserDefaults.standard.object(forKey: toggleKey) as? Bool ?? false
+            return Prefs.store.object(forKey: toggleKey) as? Bool ?? false
         }
         guard !visible.isEmpty else { return "" }
 

@@ -232,7 +232,7 @@ enum WebSearchBackend: String {
     static var configured: WebSearchBackend {
         resolve(
             override: nil,
-            stored: UserDefaults.standard.string(forKey: selectionKey),
+            stored: Prefs.store.string(forKey: selectionKey),
             hasOpenAIKey: !storedKey(for: .openai).isEmpty,
             hasLegacyOpenRouterKey: !(KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? "").isEmpty
         )
@@ -259,7 +259,7 @@ enum WebSearchBackend: String {
     /// An unparseable stored value is not explicit — resolve() ignores it,
     /// so /websearch and doctor must not present it as a saved choice.
     static var explicitlyStored: WebSearchBackend? {
-        parseSelectable(UserDefaults.standard.string(forKey: selectionKey))
+        parseSelectable(Prefs.store.string(forKey: selectionKey))
     }
 
     /// Pure resolution logic, separated so the selftest can exercise every

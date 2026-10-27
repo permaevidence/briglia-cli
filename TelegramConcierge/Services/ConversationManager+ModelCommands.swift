@@ -929,7 +929,7 @@ extension ConversationManager {
             // Same backend, but only by inference (or an unparseable stored
             // value): persist it so the choice survives whatever key changes
             // drove the inference. No behavior change → no idle guard needed.
-            UserDefaults.standard.set(backend.rawValue, forKey: WebSearchBackend.selectionKey)
+            Prefs.store.set(backend.rawValue, forKey: WebSearchBackend.selectionKey)
             try? await sendText("\(backend.displayName) was active by inference — now saved as the explicit choice.\(followNote)")
             return
         }
@@ -942,7 +942,7 @@ extension ConversationManager {
             try? await sendText("⏳ A turn is running — send /websearch \(backend.rawValue) again when Briglia is idle (or /stop first).")
             return
         }
-        UserDefaults.standard.set(backend.rawValue, forKey: WebSearchBackend.selectionKey)
+        Prefs.store.set(backend.rawValue, forKey: WebSearchBackend.selectionKey)
         try? await sendText("✅ Web page-reading backend: \(backend.displayName) — \(backend.modelSummary). Takes effect from the next search; the research itself stays on your main model.\(followNote)")
     }
 
@@ -999,7 +999,7 @@ extension ConversationManager {
     /// The preference store behind the two tool switches (one accessor, so
     /// the lifecycle instrumentation's per-file accounting of standard-defaults
     /// access is unchanged by the second switch).
-    var switchDefaults: UserDefaults { UserDefaults.standard }
+    var switchDefaults: UserDefaults { Prefs.store }
 
     /// `/websubagent` — the Web research subagent switch (WEB_SUBAGENT_PLAN
     /// §4.8–4.9; default OFF in R1a/R1b, ON since R2). On: the main agent
@@ -1604,7 +1604,7 @@ extension ConversationManager {
         }
 
         isPrivacyModeEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: privacyModeDefaultsKey)
+        Prefs.store.set(enabled, forKey: privacyModeDefaultsKey)
 
         let message = enabled
             ? "Privacy mode on. The local session now hides the conversation until you send /show."

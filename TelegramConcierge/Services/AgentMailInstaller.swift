@@ -170,7 +170,8 @@ extension AgentMailService {
     static func probeEnvironment() -> [String: String] {
         let base = ProcessInfo.processInfo.environment
         var env: [String: String] = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": base["HOME"] ?? NSHomeDirectory()]
-        for k in ["TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "CFFIXED_USER_HOME", "LANG"] { if let v = base[k] { env[k] = v } }
+        for k in ["TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "CFFIXED_USER_HOME", "LANG",
+                  AssistantProfile.environmentKey, AssistantProfile.experimentalKey] { if let v = base[k] { env[k] = v } }
         return env
     }
 
@@ -195,7 +196,7 @@ extension AgentMailService {
         # Installed by Briglia CLI. Runs Briglia's private AgentMail CLI after
         # checking it against its install receipt; the key is fetched at exec
         # time and handed only to that binary.
-        exec \(RuntimeFS.shellQuote(brigliaPath)) __agentmail-exec "$@"
+        exec \(RuntimeFS.shellQuote(brigliaPath))\(RuntimeFS.profileWords()) __agentmail-exec "$@"
         """ + "\n"
     }
 

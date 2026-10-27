@@ -79,7 +79,7 @@ final class GitCheckpointTracker: @unchecked Sendable {
                 + "- review everything you changed since: git -C \(rootPath) diff \(shortSha)\n"
                 + "- restore a single file: git -C \(rootPath) checkout \(shortSha) -- <path>\n"
                 + "- before reporting a multi-file change done, self-review with: git -C \(rootPath) diff --stat \(shortSha)\n"
-                + "Full SHA and earlier checkpoints: ~/.local/share/briglia/git_checkpoints.json\n"
+                + "Full SHA and earlier checkpoints: \(StoragePaths.dataRootDisplay)/git_checkpoints.json\n"
                 + Self.markerEnd
             )
         }

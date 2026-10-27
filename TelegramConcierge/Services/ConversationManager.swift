@@ -810,7 +810,7 @@ class ConversationManager: ObservableObject {
     var staleChannelEpisodeSwept = false
 
     init() {
-        isPrivacyModeEnabled = UserDefaults.standard.bool(forKey: privacyModeDefaultsKey)
+        isPrivacyModeEnabled = Prefs.store.bool(forKey: privacyModeDefaultsKey)
         loadConversation()
         // Mid-turn early wake (§3.9.3, §3.10.4): the stop intent is loaded
         // FIRST — nothing is classified or delivered before it. The loaded

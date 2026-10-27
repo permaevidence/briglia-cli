@@ -111,7 +111,7 @@ enum SetupAPICore {
     /// web-search-backend and legacy-flag reads/writes never touch the
     /// machine's real preferences (the FileDescriptionsStore lesson —
     /// defer-based restore of real keys does not survive a watchdog exit).
-    nonisolated(unsafe) static var defaults: UserDefaults = .standard
+    nonisolated(unsafe) static var defaults: UserDefaults = Prefs.store
 
     struct APIError: Error {
         let code: String

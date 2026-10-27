@@ -20,7 +20,24 @@ enum TruncationService {
     /// instead of paying ~12k tokens of context per opened document.
     /// Console/bash output and search payloads keep the default 50 KB.
     static let documentMaxBytes = 25 * 1024  // 25 KB
-    static let truncationDir = NSTemporaryDirectory() + "briglia-tool-output/"
+    /// Default: `$TMPDIR/briglia-tool-output/` (unchanged). An extra
+    /// assistant: `$TMPDIR/briglia-tool-output-<name>-<h>/` with its own
+    /// sweep (MULTI_ASSISTANT_PLAN §3.7; `<h>` as for its preferences suite).
+    static let truncationDir = AssistantProfile.isDefault
+        ? spillBase + "briglia-tool-output/"
+        : spillBase + "briglia-tool-output-\(AssistantProfile.selectedName)-\(AssistantProfile.installationHash(AssistantProfile.selectedName))/"
+
+    /// Test-only seam: `NSTemporaryDirectory()` ignores TMPDIR on macOS, so
+    /// development builds accept an absolute `BRIGLIA_TEST_SPILL_ROOT` to keep
+    /// selftest spill files out of the real temporary directory.
+    static let testSpillRootKey = "BRIGLIA_TEST_SPILL_ROOT"
+    private static var spillBase: String {
+        if adaCLIVersion.hasSuffix("-dev"), let seam = ProcessInfo.processInfo.environment[testSpillRootKey],
+           seam.hasPrefix("/") {
+            return seam.hasSuffix("/") ? seam : seam + "/"
+        }
+        return NSTemporaryDirectory()
+    }
     /// Pre-rename spill directory. Not deleted eagerly: existing conversations
     /// still reference files in it. Swept by the same 7-day expiry and removed
     /// once empty.
@@ -170,7 +187,10 @@ enum TruncationService {
     static func cleanupOldFiles() {
         let cutoff = Date().addingTimeInterval(-7 * 24 * 3600)
         sweep(directory: truncationDir, cutoff: cutoff, removeWhenEmpty: false)
-        sweep(directory: legacyTruncationDir, cutoff: cutoff, removeWhenEmpty: true)
+        // The pre-rename pool belongs to the default install only.
+        if AssistantProfile.isDefault {
+            sweep(directory: legacyTruncationDir, cutoff: cutoff, removeWhenEmpty: true)
+        }
     }
 
     private static func sweep(directory: String, cutoff: Date, removeWhenEmpty: Bool) {

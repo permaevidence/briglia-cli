@@ -1121,7 +1121,7 @@ final class MigrationEngine {
                     + "not created by a migration — move it aside, then retry")
             }
             if let newDomain = spec.newPrefsDomain,
-               let existingPrefs = UserDefaults.standard.persistentDomain(forName: newDomain),
+               let existingPrefs = Prefs.domains.persistentDomain(forName: newDomain),
                !existingPrefs.isEmpty {
                 return .refused("the new preferences domain \(newDomain) already contains data — "
                     + "it was not created by a migration; export/remove it first, then retry")
@@ -1680,7 +1680,7 @@ final class MigrationEngine {
     func fixupPreferences() throws {
         guard let oldDomain = spec.oldPrefsDomain,
               let newDomain = spec.newPrefsDomain else { return }
-        let defaults = UserDefaults.standard
+        let defaults = Prefs.domains
         guard let contents = defaults.persistentDomain(forName: oldDomain),
               !contents.isEmpty else {
             notes.append("no \(oldDomain) preferences domain — nothing to copy")
@@ -1986,7 +1986,7 @@ final class MigrationEngine {
         // park-restoring rollback can re-import it (plan §4.5.8).
         if let oldDomain = spec.oldPrefsDomain,
            journal.preimages.contains(where: { $0.type == "prefs-old-domain" }) {
-            let defaults = UserDefaults.standard
+            let defaults = Prefs.domains
             defaults.removePersistentDomain(forName: oldDomain)
             guard defaults.synchronize() else {
                 throw EngineError(outcome: .failed(
@@ -2596,7 +2596,7 @@ final class MigrationEngine {
                     }
                 }
             case "prefs-new-domain":
-                let defaults = UserDefaults.standard
+                let defaults = Prefs.domains
                 defaults.removePersistentDomain(forName: pre.path)
                 guard defaults.synchronize() else {
                     throw EngineError(outcome: .failed(
@@ -2606,7 +2606,7 @@ final class MigrationEngine {
             case "prefs-old-domain":
                 // Before committing the old domain was never removed;
                 // re-import only if it is somehow missing.
-                let defaults = UserDefaults.standard
+                let defaults = Prefs.domains
                 if defaults.persistentDomain(forName: pre.path)?.isEmpty ?? true {
                     try reimportOldPrefsDomain(pre)
                 }
@@ -2888,7 +2888,7 @@ final class MigrationEngine {
                 "could not re-import the exported \(pre.path) preferences domain — "
                 + "the export at \(stored.path) is missing or does not match its hash"))
         }
-        let defaults = UserDefaults.standard
+        let defaults = Prefs.domains
         defaults.setPersistentDomain(plist, forName: pre.path)
         guard defaults.synchronize() else {
             throw EngineError(outcome: .failed(
@@ -3004,7 +3004,7 @@ struct MigrationRunCommand: ParsableCommand {
         if let domain = dumpPrefsDomain {
             // Read in a FRESH process so the caller never sees its own
             // process-local UserDefaults cache.
-            let contents = UserDefaults.standard.persistentDomain(forName: domain) ?? [:]
+            let contents = Prefs.domains.persistentDomain(forName: domain) ?? [:]
             var out: [String: String] = [:]
             for (key, value) in contents { out[key] = String(describing: value) }
             let data = try JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])

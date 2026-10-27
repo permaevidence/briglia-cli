@@ -474,7 +474,7 @@ enum IdentityMigration {
             out.append((false, "migrated from \(prior)-era install (persona marker present)", nil))
         }
         if current.pending, current.journalState == nil,
-           let existing = UserDefaults.standard.persistentDomain(forName: newPrefsDomain),
+           let existing = Prefs.domains.persistentDomain(forName: newPrefsDomain),
            !existing.isEmpty {
             out.append((false, "the `\(newPrefsDomain)` preferences domain already holds "
                 + "\(existing.count) key(s) — the migration refuses to overwrite it; if only "

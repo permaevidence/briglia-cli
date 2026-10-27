@@ -588,8 +588,12 @@ extension ConversationManager {
         // Update notice (§5.6): under its lock, bump the notice generation
         // (a check or send in progress cannot write back), then delete the
         // derived state. An explicit /upgradecheck off survives.
-        do { try UpdateNoticeStore.wipeDerivedState(paths: .live, now: Date()) }
-        catch { failures.append("update notice state: \(error.localizedDescription)") }
+        // Machine-level notice state (MULTI_ASSISTANT_PLAN §5.5) is wiped
+        // only by default and only while no extra assistant exists.
+        if AssistantProfile.isDefault && !AssistantRegistry.exists() {
+            do { try UpdateNoticeStore.wipeDerivedState(paths: .live, now: Date()) }
+            catch { failures.append("update notice state: \(error.localizedDescription)") }
+        }
         pendingAmbientTriggers.removeAll()
         _ = persistPendingAmbientTriggers()
         pendingWatcherFireMessages.removeAll()
@@ -1092,6 +1096,12 @@ extension ConversationManager {
         // gracefully when unconfigured, so startup never blocks on it.
         switch state.provider {
         case .agentmail:
+            // One inbox per assistant (MULTI_ASSISTANT_PLAN §5.6, D9).
+            if let inbox = KeychainHelper.load(key: KeychainHelper.agentMailInboxAddressKey),
+               !inbox.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !Self.registryAllowsChannel(.inbox, value: inbox) {
+                return
+            }
             await AgentMailService.shared.setNewEmailHandler { [weak self] newEmails in
                 // nil self = manager gone (shutdown race) → NOT durable:
                 // fail-safe false holds the checkpoint so the mail redelivers

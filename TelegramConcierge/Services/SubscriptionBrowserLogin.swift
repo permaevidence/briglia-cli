@@ -37,6 +37,18 @@ actor SubscriptionBrowserCallback {
 }
 
 extension SubscriptionLogin {
+    static let signInBusyMessage = "Another assistant is signing in to ChatGPT right now. Try again in a minute."
+
+    /// `<default data root>/machine/signin.lock`, non-blocking.
+    static func takeSignInLock(url: URL = MachinePaths.signInLock) throws -> ProfileFileLock {
+        if url == MachinePaths.signInLock { try MachinePaths.ensureMachineDir() }
+        switch ProfileFileLock.take(url) {
+        case .acquired(let lock): return lock
+        case .busy: throw SubscriptionError(signInBusyMessage)
+        case .failed(let why): throw SubscriptionError("Cannot start the browser sign-in: \(why)")
+        }
+    }
+
     static func randomURLToken() -> String {
         var generator = SystemRandomNumberGenerator()
         return Data((0..<32).map { _ in UInt8.random(in: 0...255, using: &generator) })
@@ -55,13 +67,20 @@ extension SubscriptionLogin {
         return url.url!.absoluteString
     }
     func browser(show: (String) async throws -> Void) async throws -> String {
+        // One browser sign-in per computer: every assistant's callback needs
+        // the fixed port 1455 (MULTI_ASSISTANT_PLAN §5.4). Taken before the
+        // login starts and held until the listener is closed.
+        let signInLock = try Self.takeSignInLock()
+        defer { signInLock.release() }
         let pending = try await store.beginLogin()
         let state = Self.randomURLToken(), verifier = Self.randomURLToken()
         let callback = SubscriptionBrowserCallback(state: state)
         let server = QuickSetupHTTPServer(port: 1455, reuseAddress: true) { await callback.receive($0) }
         defer { server.stop() }
         do {
-            try server.start()
+            do { try server.start() } catch {
+                throw SubscriptionError("Port 1455 is used by another program, so the browser sign-in cannot receive its answer. Close that program (or use the device code sign-in) and try again.")
+            }
             try await show(Self.browserURL(state: state, verifier: verifier))
             let deadline = Date().addingTimeInterval(300)
             while Date() < deadline {

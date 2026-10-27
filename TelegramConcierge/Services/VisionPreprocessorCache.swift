@@ -19,7 +19,7 @@ actor VisionPreprocessorCache {
 
     private func loadIfNeeded() {
         guard !loaded else { return }
-        if let data = UserDefaults.standard.data(forKey: Self.storageKey),
+        if let data = Prefs.store.data(forKey: Self.storageKey),
            let descriptions = try? JSONDecoder().decode([String: String].self, from: data) {
             cache = descriptions
         }
@@ -28,7 +28,7 @@ actor VisionPreprocessorCache {
 
     private func persist() {
         if let data = try? JSONEncoder().encode(cache) {
-            UserDefaults.standard.set(data, forKey: Self.storageKey)
+            Prefs.store.set(data, forKey: Self.storageKey)
         }
     }
 
@@ -46,7 +46,7 @@ actor VisionPreprocessorCache {
     /// Synchronous cache lookup keyed by a precomputed content hash. Lets budgeting
     /// callers reuse a memoized hash instead of re-encoding the file on every pass.
     static func cachedDescriptionTokenEstimate(hash: String) -> Int? {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
+        guard let data = Prefs.store.data(forKey: storageKey),
               let descriptions = try? JSONDecoder().decode([String: String].self, from: data),
               let description = descriptions[hash] else {
             return nil
@@ -79,7 +79,7 @@ actor VisionPreprocessorCache {
     /// Clear all cached descriptions.
     func clearAll() {
         cache.removeAll()
-        UserDefaults.standard.removeObject(forKey: Self.storageKey)
+        Prefs.store.removeObject(forKey: Self.storageKey)
     }
 
     /// Reload after a Mind restore.

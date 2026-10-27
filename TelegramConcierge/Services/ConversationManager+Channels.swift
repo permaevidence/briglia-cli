@@ -38,12 +38,12 @@ extension ConversationManager {
         guard lastUserChannelAddress != address else { return }
         lastUserChannelAddress = address
         if let data = try? JSONEncoder().encode(address) {
-            UserDefaults.standard.set(data, forKey: lastUserChannelDefaultsKey)
+            Prefs.store.set(data, forKey: lastUserChannelDefaultsKey)
         }
     }
 
     func loadLastUserChannelAddress() {
-        guard let data = UserDefaults.standard.data(forKey: lastUserChannelDefaultsKey),
+        guard let data = Prefs.store.data(forKey: lastUserChannelDefaultsKey),
               let address = try? JSONDecoder().decode(ChannelAddress.self, from: data) else { return }
         lastUserChannelAddress = address
     }
@@ -182,12 +182,34 @@ extension ConversationManager {
     /// Settings and onboarding call this so the change takes effect live.
     /// The poll loop re-reads `isTelegramConfigured` on every tick, so a
     /// newly saved token starts receiving within a second, no restart needed.
+    /// Startup reconciliation of one channel identity against the machine
+    /// registry; false (with a log line) when another assistant holds it or
+    /// the registry cannot be read.
+    nonisolated static func registryAllowsChannel(_ kind: AssistantRegistry.Kind, value: String) -> Bool {
+        // Reconciled value = the one this process is about to poll (read
+        // from the secret store by the caller just before).
+        let result = AssistantRegistry.reconcile(profile: AssistantProfile.selectedName, kind: kind, read: { value })
+        switch result {
+        case .noRegistry, .allowed:
+            return true
+        case .conflict(let message), .busy(let message):
+            print("[Assistants] \(kind == .bot ? "Telegram" : "AgentMail") not started: \(message)")
+            return false
+        }
+    }
+
     func updateTelegramChannelRegistration() async {
         let token = (KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let chatId = (KeychainHelper.load(key: KeychainHelper.telegramChatIdKey) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let telegramConfigured = !token.isEmpty && Int(chatId) != nil
+        var telegramConfigured = !token.isEmpty && Int(chatId) != nil
+        // Several assistants on one computer (MULTI_ASSISTANT_PLAN §5.6): two
+        // pollers on one bot steal each other's updates, so a bot another
+        // assistant holds is never polled. No registry → no change.
+        if telegramConfigured, !Self.registryAllowsChannel(.bot, value: token) {
+            telegramConfigured = false
+        }
         // /stop visibility: a token change (or removal) is a new transport
         // identity for visibility notices — bump BEFORE the actor adopts it.
         let tokenIdentity = telegramConfigured ? TelegramBotService.credentialIdentity(token) : nil

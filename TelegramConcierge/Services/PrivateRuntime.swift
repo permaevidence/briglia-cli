@@ -394,6 +394,14 @@ enum RuntimeFS {
     /// POSIX single-quoted word (an apostrophe in a path becomes '\'').
     static func shellQuote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
+    /// ` --profile '<name>'` for an extra assistant's wrapper scripts (they
+    /// live in that assistant's own `bin/` and must reach its own state even
+    /// when run outside Briglia); empty for default, so default's wrappers
+    /// keep their exact bytes (MULTI_ASSISTANT_PLAN §3.2).
+    static func profileWords() -> String {
+        AssistantProfile.selectionArguments.map { " " + shellQuote($0) }.joined()
+    }
+
     static func readLink(_ url: URL) -> String? {
         guard kind(url.path) == .symlink else { return nil }
         var buf = [CChar](repeating: 0, count: 4096)

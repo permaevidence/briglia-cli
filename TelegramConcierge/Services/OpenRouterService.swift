@@ -1341,7 +1341,7 @@ actor OpenRouterService {
         let items = hiddenRowNotes.isEmpty ? allItems : allItems.filter { $0.kind != .liveOverlapDisclosure }
         guard !items.isEmpty || !hiddenRowNotes.isEmpty else { return "" }
         let disclosureLines = hiddenRowNotes.map { "\n- " + $0 }.joined()
-        let transcriptLine = "- Original messages are plaintext transcript files in `~/.local/share/briglia/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = \"*.txt\" (or \"<chunk-id>*.txt\" for one chunk), case_insensitive = true, context = 5; use output_mode = \"files_with_matches\" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path"
+        let transcriptLine = "- Original messages are plaintext transcript files in `\(StoragePaths.dataRootDisplay)/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = \"*.txt\" (or \"<chunk-id>*.txt\" for one chunk), case_insensitive = true, context = 5; use output_mode = \"files_with_matches\" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path"
         if items.isEmpty {
             // Every row overlaps live messages: the section still says so,
             // so the omission never looks like missing history.
@@ -1364,7 +1364,7 @@ actor OpenRouterService {
         // The caller's per-turn/per-run snapshot decides it when given, so a
         // first retirement mid-turn appears from the next turn.
         let retiredFactsLine = (retiredFactsPresent ?? RetiredUserFacts.hasRecords())
-            ? "\n- Facts removed from your user profile during maintenance are kept word for word in ~/.local/share/briglia/archive/retired_user_facts.jsonl (one JSON record per line, newest last; the original text is in \"line\"); grep it like the transcripts (include = \"retired_user_facts.jsonl\")."
+            ? "\n- Facts removed from your user profile during maintenance are kept word for word in \(StoragePaths.dataRootDisplay)/archive/retired_user_facts.jsonl (one JSON record per line, newest last; the original text is in \"line\"); grep it like the transcripts (include = \"retired_user_facts.jsonl\")."
             : ""
         var output: String
         if hiddenCount > 0 {
@@ -1376,7 +1376,7 @@ actor OpenRouterService {
             Showing a chronological history timeline with \(items.count) summary item(s), covering \(representedChunkCount) archived chunk(s). **\(hiddenCount) older chunk(s) predate this table and are not shown.**
             - Chunk rows carry a chunk id in the ID column. Meta-summary rows compress several chunks: their chunk ids are listed as [Chunks: …] at the end of the Summary cell (the row's own ID is a summary id, not a chunk id)
             - `read_chunk_summaries` retrieves full per-chunk summaries not visible here: pass chunk_ids (e.g. from a [Chunks: …] list) and/or a from/to date range. The \(hiddenCount) unshown chunk(s) all predate the oldest row — reach them with a date range (a to-only query returns the newest matches before that date). Summaries already shown as individual rows below are never re-sent
-            - Original messages are plaintext transcript files in `~/.local/share/briglia/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = "*.txt" (or "<chunk-id>*.txt" for one chunk), case_insensitive = true, context = 5; use output_mode = "files_with_matches" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path\(snapshotHeader)\(retiredFactsLine)\(disclosureLines)
+            - Original messages are plaintext transcript files in `\(StoragePaths.dataRootDisplay)/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = "*.txt" (or "<chunk-id>*.txt" for one chunk), case_insensitive = true, context = 5; use output_mode = "files_with_matches" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path\(snapshotHeader)\(retiredFactsLine)\(disclosureLines)
 
             | # | Type | ID | Size | Date Range | Summary |
             |---|------|-----|------|------------|---------|
@@ -1389,7 +1389,7 @@ actor OpenRouterService {
             
             Showing all \(totalChunkCount) archived chunk(s) via \(items.count) chronological summary item(s).
             - Chunk rows carry a chunk id in the ID column. Meta-summary rows compress several chunks: their chunk ids are listed as [Chunks: …] at the end of the Summary cell (the row's own ID is a summary id, not a chunk id). Use `read_chunk_summaries` with those chunk_ids (or a from/to date range) to expand a meta row into full per-chunk summaries; summaries already shown as individual rows are never re-sent
-            - Original messages are plaintext transcript files in `~/.local/share/briglia/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = "*.txt" (or "<chunk-id>*.txt" for one chunk), case_insensitive = true, context = 5; use output_mode = "files_with_matches" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path\(snapshotHeader)\(retiredFactsLine)\(disclosureLines)
+            - Original messages are plaintext transcript files in `\(StoragePaths.dataRootDisplay)/archive/`, named `<full-chunk-uuid>.txt` (chunk ids here are the filename's first 8 characters). Search with the grep tool: path = that folder, include = "*.txt" (or "<chunk-id>*.txt" for one chunk), case_insensitive = true, context = 5; use output_mode = "files_with_matches" to cheaply identify relevant chunks, then read_file with offset/limit on the exact path\(snapshotHeader)\(retiredFactsLine)\(disclosureLines)
             
             | # | Type | ID | Size | Date Range | Summary |
             |---|------|-----|------|------------|---------|

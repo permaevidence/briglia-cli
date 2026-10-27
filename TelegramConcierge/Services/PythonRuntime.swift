@@ -245,7 +245,7 @@ enum PythonRuntime {
     // MARK: Consumers
 
     static func wrapperScript(brigliaPath: String) -> String {
-        "#!/bin/sh\n# Installed by Briglia CLI: Briglia's private Python environment (never the shared python3).\nexec \(RuntimeFS.shellQuote(brigliaPath)) __python-exec \"$@\"\n"
+        "#!/bin/sh\n# Installed by Briglia CLI: Briglia's private Python environment (never the shared python3).\nexec \(RuntimeFS.shellQuote(brigliaPath))\(RuntimeFS.profileWords()) __python-exec \"$@\"\n"
     }
 
     static func ensureWrapper() throws {

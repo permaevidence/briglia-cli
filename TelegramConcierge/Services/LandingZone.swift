@@ -9,10 +9,37 @@ import Foundation
 /// under ~/Documents rather than the XDG data root because these are files
 /// the USER browses, not internal state.)
 enum LandingZone {
-    static let root: URL = {
+    static let root: URL = resolveRoot()
+
+    /// Test-only seam (MULTI_ASSISTANT_PLAN §3.7): honoured only in
+    /// development builds, so parallel-daemon tests keep `bootstrap()` out of
+    /// the real home. The selected profile's folder is `<seam>/<profile>`.
+    static let testRootKey = "BRIGLIA_TEST_LANDING_ROOT"
+
+    /// Default: `~/Documents/Briglia` (unchanged). An extra assistant: its
+    /// home folder (`profile.json` `homeFolder`, default `~/Briglia/<name>`,
+    /// plan D8).
+    static func resolveRoot(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        if adaCLIVersion.hasSuffix("-dev"), let seam = environment[testRootKey], seam.hasPrefix("/") {
+            return URL(fileURLWithPath: seam, isDirectory: true)
+                .appendingPathComponent(AssistantProfile.selectedName, isDirectory: true)
+        }
         let home = FileManager.default.homeDirectoryForCurrentUser
+        if AssistantProfile.isExtra {
+            if let folder = AssistantProfile.selectedMetadata?.homeFolder, folder.hasPrefix("/") {
+                return URL(fileURLWithPath: folder, isDirectory: true)
+            }
+            return defaultExtraHome(AssistantProfile.selectedName)
+        }
         return home.appendingPathComponent("Documents/Briglia", isDirectory: true)
-    }()
+    }
+
+    /// `~/Briglia/<name>` (D8).
+    static func defaultExtraHome(_ name: String) -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Briglia", isDirectory: true)
+            .appendingPathComponent(name, isDirectory: true)
+    }
 
     enum Kind: String, CaseIterable {
         case telegram

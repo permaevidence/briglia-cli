@@ -122,7 +122,7 @@ enum RetiredIntegrations {
             return Env(
                 dataRoot: root,
                 stateURL: root.appendingPathComponent("retired-integrations.json"),
-                defaults: UserDefaults.standard,
+                defaults: Prefs.store,
                 gwsCandidates: ["/opt/homebrew/bin/gws", "/usr/local/bin/gws", home + "/.cargo/bin/gws",
                                 home + "/.local/bin/gws", "/usr/bin/gws"],
                 gwsConfigDirectory: URL(fileURLWithPath: home).appendingPathComponent(".config/gws", isDirectory: true),

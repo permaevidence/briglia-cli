@@ -50,7 +50,7 @@ enum TestPrefsDomains {
     /// Remove the domain now and remember it for the final sweep.
     static func purge(_ name: String) {
         guard isTestDomain(name) else { return }
-        let defaults = UserDefaults.standard
+        let defaults = Prefs.domains
         defaults.removePersistentDomain(forName: name)
         defaults.synchronize()
         lock.lock(); defer { lock.unlock() }

@@ -566,7 +566,7 @@ extension KeychainHelper {
 
     /// Load the list of registered service keys (metadata only, no secrets).
     static func loadServiceKeys() -> [ServiceKey] {
-        guard let data = UserDefaults.standard.data(forKey: serviceKeysMetadataDefaultsKey),
+        guard let data = Prefs.store.data(forKey: serviceKeysMetadataDefaultsKey),
               let keys = try? JSONDecoder().decode([ServiceKey].self, from: data) else {
             return []
         }
@@ -576,7 +576,7 @@ extension KeychainHelper {
     /// Persist the metadata list (names + descriptions) to UserDefaults.
     static func saveServiceKeys(_ keys: [ServiceKey]) {
         guard let data = try? JSONEncoder().encode(keys) else { return }
-        UserDefaults.standard.set(data, forKey: serviceKeysMetadataDefaultsKey)
+        Prefs.store.set(data, forKey: serviceKeysMetadataDefaultsKey)
     }
 
     /// Read a service key's secret value from the Keychain.
@@ -753,7 +753,7 @@ extension KeychainHelper {
     }
 
     private static func loadOpenRouterSpendLedger() -> OpenRouterSpendLedger {
-        guard let data = UserDefaults.standard.data(forKey: openRouterSpendLedgerDefaultsKey),
+        guard let data = Prefs.store.data(forKey: openRouterSpendLedgerDefaultsKey),
               let ledger = try? JSONDecoder().decode(OpenRouterSpendLedger.self, from: data) else {
             return OpenRouterSpendLedger(byDay: [:])
         }
@@ -762,11 +762,11 @@ extension KeychainHelper {
 
     private static func saveOpenRouterSpendLedger(_ ledger: OpenRouterSpendLedger) {
         guard let data = try? JSONEncoder().encode(ledger) else { return }
-        UserDefaults.standard.set(data, forKey: openRouterSpendLedgerDefaultsKey)
+        Prefs.store.set(data, forKey: openRouterSpendLedgerDefaultsKey)
     }
 
     private static func loadOpenRouterSpendLimitBoostLedger() -> OpenRouterSpendLimitBoostLedger {
-        guard let data = UserDefaults.standard.data(forKey: openRouterSpendLimitBoostDefaultsKey),
+        guard let data = Prefs.store.data(forKey: openRouterSpendLimitBoostDefaultsKey),
               let ledger = try? JSONDecoder().decode(OpenRouterSpendLimitBoostLedger.self, from: data) else {
             return OpenRouterSpendLimitBoostLedger(dailyByDay: [:], monthlyByMonth: [:])
         }
@@ -775,7 +775,7 @@ extension KeychainHelper {
 
     private static func saveOpenRouterSpendLimitBoostLedger(_ ledger: OpenRouterSpendLimitBoostLedger) {
         guard let data = try? JSONEncoder().encode(ledger) else { return }
-        UserDefaults.standard.set(data, forKey: openRouterSpendLimitBoostDefaultsKey)
+        Prefs.store.set(data, forKey: openRouterSpendLimitBoostDefaultsKey)
     }
 
     private static func pruneOldSpendEntries(_ ledger: inout OpenRouterSpendLedger, referenceDate: Date) {

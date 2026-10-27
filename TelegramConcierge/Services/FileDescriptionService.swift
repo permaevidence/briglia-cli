@@ -21,7 +21,7 @@ enum FileDescriptionsStore {
 
     static func loadData() -> Data? {
         if let url = _testStoreURL { return try? Data(contentsOf: url) }
-        return UserDefaults.standard.data(forKey: storageKey)
+        return Prefs.store.data(forKey: storageKey)
     }
 
     static func storeData(_ data: Data) throws {
@@ -29,7 +29,7 @@ enum FileDescriptionsStore {
             try data.write(to: url, options: .atomic)
             return
         }
-        UserDefaults.standard.set(data, forKey: storageKey)
+        Prefs.store.set(data, forKey: storageKey)
     }
 
     static func clear() {
@@ -37,7 +37,7 @@ enum FileDescriptionsStore {
             try? FileManager.default.removeItem(at: url)
             return
         }
-        UserDefaults.standard.removeObject(forKey: storageKey)
+        Prefs.store.removeObject(forKey: storageKey)
     }
 }
 

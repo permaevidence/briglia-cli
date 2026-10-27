@@ -20,6 +20,14 @@ struct AdaCLI: AsyncParsableCommand {
         signal(SIGPIPE, SIG_IGN)
     }
 
+    /// Entry point: select the assistant profile (MULTI_ASSISTANT_PLAN §3.2)
+    /// before ArgumentParser or any storage/preferences static runs, then
+    /// parse the remaining argv exactly as before.
+    static func main() async {
+        let arguments = ProfileBootstrap.run()
+        await main(arguments)
+    }
+
     static let configuration = CommandConfiguration(
         commandName: "briglia",
         abstract: "Briglia — your personal AI agent, in the terminal.",
@@ -51,7 +59,8 @@ struct AdaCLI: AsyncParsableCommand {
                       UpgradeCheck.self, UpdateCheckOnceCommand.self, UpdateNoticeSendOnceCommand.self, UpdateNoticeSelftest.self, ReleaseSecurityParseCommand.self,
                       LocalToolsSelftest.self, TestSignAdvisoryCommand.self, AdvisoryListParseCommand.self,
                       LocalToolsInventoryCommand.self, LocalToolsCheckOnceCommand.self, LocalToolsVersionCompareCommand.self,
-                      RetiredIntegrationsSelftest.self, PrivateRuntimeSelftest.self],
+                      RetiredIntegrationsSelftest.self, PrivateRuntimeSelftest.self,
+                      ProfilesCommand.self, ProfileInitCommand.self, ProfileInfoCommand.self, ProfileIsolationSelftest.self],
         defaultSubcommand: Chat.self
     )
 }

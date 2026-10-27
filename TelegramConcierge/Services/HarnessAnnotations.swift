@@ -242,7 +242,7 @@ enum MidTurnDelivery {
            env == "0" || env.lowercased() == "false" {
             return false
         }
-        if UserDefaults.standard.bool(forKey: "ada.midturnLegacyDelivery") {
+        if Prefs.store.bool(forKey: "ada.midturnLegacyDelivery") {
             return false
         }
         return true

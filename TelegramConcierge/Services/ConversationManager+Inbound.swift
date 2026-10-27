@@ -421,13 +421,13 @@ extension ConversationManager {
 
     var shouldResumePollingOnLaunch: Bool {
         get {
-            if UserDefaults.standard.object(forKey: shouldResumePollingDefaultsKey) == nil {
+            if Prefs.store.object(forKey: shouldResumePollingDefaultsKey) == nil {
                 return true
             }
-            return UserDefaults.standard.bool(forKey: shouldResumePollingDefaultsKey)
+            return Prefs.store.bool(forKey: shouldResumePollingDefaultsKey)
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: shouldResumePollingDefaultsKey)
+            Prefs.store.set(newValue, forKey: shouldResumePollingDefaultsKey)
         }
     }
 

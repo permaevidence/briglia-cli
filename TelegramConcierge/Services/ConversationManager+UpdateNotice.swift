@@ -10,6 +10,9 @@ extension ConversationManager {
     /// lock). Detached: never blocks startup or a turn.
     func startUpdateNoticeService() {
         guard UpdateNoticeService.current == nil else { return }
+        // Computer-wide notices are checked and sent only by the default
+        // assistant (MULTI_ASSISTANT_PLAN §5.5, D15).
+        guard UpdateNoticeService.sendsMachineNotices else { return }
         // Development builds (every test harness runs one) never contact the
         // real release channel on their own: the loop starts there only for
         // an explicit test channel. Stamped releases always run it.
@@ -156,6 +159,8 @@ extension ConversationManager {
 
     // MARK: - /upgradecheck
 
+    static let upgradeCheckMachineWideText = "This is a computer-wide setting; change it in your default assistant."
+
     func handleUpgradeCheckCommand(argument: String) async {
         guard replyAddress != nil else { return }
         let arg = argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -164,6 +169,10 @@ extension ConversationManager {
             try? await sendText(Self.upgradeCheckReply(status: UpdateNoticeService.current?.status() ?? UpdateNoticeService.liveStatus(),
                                                         tools: LocalToolsText.liveStatus()))
         case "on", "off":
+            guard AssistantProfile.isDefault else {
+                try? await sendText(Self.upgradeCheckMachineWideText)
+                return
+            }
             do {
                 try UpdateNoticeStore.setEnabled(arg == "on", paths: .live, now: Date())
             } catch {

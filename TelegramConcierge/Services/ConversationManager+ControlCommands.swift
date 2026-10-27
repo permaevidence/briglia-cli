@@ -1289,6 +1289,12 @@ extension ConversationManager {
     /// restart would discard the run) and on sudo-owned install dirs (no one
     /// is at the keyboard to answer a password prompt).
     private func handleUpgradeCommand() async {
+        // Updates are computer-wide: only the default assistant installs
+        // them in this version (MULTI_ASSISTANT_PLAN §6 comes later).
+        guard AssistantProfile.isDefault else {
+            try? await sendText("Updates are installed for the whole computer from your default assistant — send /upgrade there.")
+            return
+        }
         guard activeRunId == nil, activeProcessingTask == nil else {
             try? await sendText("⏳ A turn is running — send /upgrade again when Briglia is idle (or /stop first).")
             return

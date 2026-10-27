@@ -168,8 +168,14 @@ enum ManagedPlaywright {
 
     struct Layout: Sendable {
         let mcpRoot: URL
-        init(dataRoot: URL = StoragePaths.dataRoot) {
+        /// An extra assistant's own Chrome profile (MULTI_ASSISTANT_PLAN
+        /// §5.3): without it every assistant's browser would default to the
+        /// same `ms-playwright-mcp/mcp-<browser>-<hash(cwd)>` profile and the
+        /// second one would fail to start. nil for default (unchanged).
+        let browserProfile: URL?
+        init(dataRoot: URL = StoragePaths.dataRoot, extra: Bool = AssistantProfile.isExtra) {
             mcpRoot = dataRoot.appendingPathComponent("mcp", isDirectory: true)
+            browserProfile = extra ? dataRoot.appendingPathComponent("browser-profile", isDirectory: true) : nil
         }
         var installLock: URL { mcpRoot.appendingPathComponent("playwright-install.lock") }
         var statusFile: URL { mcpRoot.appendingPathComponent("playwright-bootstrap.json") }
@@ -269,7 +275,10 @@ enum ManagedPlaywright {
     /// time (`~/.local/bin` first, where `NodeInstaller` links its copy) —
     /// so a Node reinstall or a Homebrew upgrade never strands the entry.
     static func managedInvocation(token: String, layout: Layout) -> (command: String, arguments: [String]) {
-        ("node", [layout.cliPath(token: token)])
+        if let profile = layout.browserProfile {
+            return ("node", [layout.cliPath(token: token), "--user-data-dir", profile.path])
+        }
+        return ("node", [layout.cliPath(token: token)])
     }
 
     static func shape(of config: MCPServerConfig?, layout: Layout) -> EntryShape {

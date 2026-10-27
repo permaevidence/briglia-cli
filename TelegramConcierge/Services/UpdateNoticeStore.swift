@@ -27,9 +27,12 @@ enum UpdateNoticeStore {
         var state: URL
 
         static var live: Paths {
-            Paths(setting: StoragePaths.configRoot.appendingPathComponent("update-check.json"),
-                  lock: StoragePaths.configRoot.appendingPathComponent("update-check.lock"),
-                  state: StoragePaths.dataRoot.appendingPathComponent("update/notice.json"))
+            // Machine-level (MULTI_ASSISTANT_PLAN §5.5): the stores live in
+            // default's roots for every profile; only default sends notices,
+            // extras read them.
+            Paths(setting: MachinePaths.defaultConfigRoot().appendingPathComponent("update-check.json"),
+                  lock: MachinePaths.defaultConfigRoot().appendingPathComponent("update-check.lock"),
+                  state: MachinePaths.defaultDataRoot().appendingPathComponent("update/notice.json"))
         }
     }
 

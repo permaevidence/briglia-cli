@@ -96,7 +96,14 @@ actor MCPClient {
         self.arguments = config.arguments
         self.environment = resolvedEnvironment
         self.outboundLimits = outboundLimits
+        self.isManagedEntry = config.managed != nil
     }
+
+    /// A Briglia-managed entry (the pinned Playwright server). In an extra
+    /// assistant it runs with cwd = that assistant's data root, so
+    /// home-relative outputs (`.playwright-mcp/`) land in the profile
+    /// (MULTI_ASSISTANT_PLAN §5.3).
+    private let isManagedEntry: Bool
 
     // MARK: - Lifecycle
 
@@ -128,7 +135,9 @@ actor MCPClient {
         // macOS GUI apps launch with cwd=/. MCP servers that create files
         // relative to cwd (e.g. Playwright creating .playwright-mcp/) would
         // fail with ENOENT trying to write to /. Set a sane working directory.
-        proc.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        proc.currentDirectoryURL = AssistantProfile.isExtra && isManagedEntry
+            ? StoragePaths.dataRoot
+            : FileManager.default.homeDirectoryForCurrentUser
 
         let stdin = Pipe()
         let stdout = Pipe()

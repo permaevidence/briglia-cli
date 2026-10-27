@@ -1587,7 +1587,7 @@ actor ToolExecutor {
                 return jsonObjectString([
                     "success": true,
                     "reminder_id": reminder.id.uuidString,
-                    "trigger_command": "briglia trigger \(reminder.id.uuidString) 'optional payload text'",
+                    "trigger_command": "\(AssistantProfile.commandPrefix) trigger \(reminder.id.uuidString) 'optional payload text'",
                     "message": "External-trigger watcher created. Wire the trigger command into the external system (script, cron job, camera hook — any local process). Delivery: an event after \(cooldownMinutes)+ quiet minutes fires immediately; events arriving within \(cooldownMinutes) minutes of the previous fire are queued and delivered together as one batched fire when the window closes. Events survive daemon restarts.\(routingNote)"
                 ])
             }
@@ -1737,7 +1737,7 @@ actor ToolExecutor {
                 if reminder.isExternal {
                     // No schedule: the row fires on posted events, not a clock.
                     entryFields.append("\"external_trigger\": true")
-                    entryFields.append("\"trigger_command\": \"briglia trigger \(idStr)\"")
+                    entryFields.append("\"trigger_command\": \"\(AssistantProfile.commandPrefix) trigger \(idStr)\"")
                 } else {
                     entryFields.append("\"trigger_datetime\": \"\(triggerLocal)\"")
                     entryFields.append("\"trigger_readable\": \"\(triggerReadable)\"")
@@ -2312,7 +2312,7 @@ actor ToolExecutor {
         var output = """
         === ARCHIVED CHUNK SUMMARIES ===
         Showing \(pageChunks.count) of \(totalMatched) matched chunk(s), newest first (max \(maxResults) per call)
-        Plaintext archive folder: ~/.local/share/briglia/archive/
+        Plaintext archive folder: \(StoragePaths.dataRootDisplay)/archive/
 
         Each Transcript below is the plaintext file with the chunk's original User/Assistant messages. Search all chunks with the grep tool on that folder, or pass an exact Transcript path to read_file.
 
@@ -2330,7 +2330,7 @@ actor ToolExecutor {
             let shortId = String(chunk.id.uuidString.prefix(8))
             let dateRange = "\(dateFormatter.string(from: chunk.startDate)) - \(dateFormatter.string(from: chunk.endDate))"
             let typeLabel = chunk.type == .consolidated ? "CONSOLIDATED" : "TEMPORARY"
-            let sidecarPath = "~/.local/share/briglia/archive/\(chunk.id.uuidString).txt"
+            let sidecarPath = "\(StoragePaths.dataRootDisplay)/archive/\(chunk.id.uuidString).txt"
 
             // The sidecar is the agent's only content path — if the file is
             // missing, say so explicitly. A silently absent sidecar makes
@@ -2361,7 +2361,7 @@ actor ToolExecutor {
             output += "\n\nWARNING: \(missingSidecarCount) chunk(s) above have no transcript file yet — cross-chunk grep sweeps are currently blind to them. Regeneration has been triggered; re-run this tool to confirm before trusting a negative search result."
         }
 
-        output += "\n\nUse grep for content search: path = '~/.local/share/briglia/archive/', include = '*.txt', case_insensitive = true, context = 5. Use read_file with the exact Transcript path above to inspect one chunk."
+        output += "\n\nUse grep for content search: path = '\(StoragePaths.dataRootDisplay)/archive/', include = '*.txt', case_insensitive = true, context = 5. Use read_file with the exact Transcript path above to inspect one chunk."
         if totalMatched > pageChunks.count, let oldestShown = pageChunks.last {
             // Fractional seconds keep the cursor exact: a whole-second cursor
             // rounds down on the round-trip and the strict endDate < before
