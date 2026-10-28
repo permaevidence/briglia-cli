@@ -83,7 +83,12 @@ extension ProfileHarness {
         guard let a = startChild(["daemon"], extraEnv: e.merging([AssistantProfile.experimentalKey: ""]) { $1 }),
               a.waitFor(30, { $0.contains("daemon running") }) else { check("G1: inactive daemon A starts", false); return }
         defer { chmod(lockPath, 0o600); a.kill(SIGTERM) }
-        for (mode, label) in [(mode_t(0o400), "readable but not writable"), (mode_t(0o000), "unreadable")] {
+        // As root (Linux CI containers) a mode-0000 file is still readable, so
+        // only the readable case can be exercised there.
+        let modes: [(mode_t, String)] = getuid() == 0 ? [(0o400, "readable but not writable")]
+            : [(0o400, "readable but not writable"), (0o000, "unreadable")]
+        if getuid() == 0 { print("   (running as root: the unreadable-lock case is covered by the in-process describe() check)") }
+        for (mode, label) in modes {
             chmod(lockPath, mode)
             let add = run(["profiles", "add", "work", "--name", "Work", "--home", root.appendingPathComponent("g1-home").path], extraEnv: e)
             // Readable: the probe sees the holder (unleased). Unreadable: the

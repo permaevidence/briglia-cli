@@ -102,7 +102,14 @@ extension ProfileHarness {
         check("default prefs: UserDefaults.standard", plain["prefsSuite"] as? String == "standard")
         check("default spill dir (test seam)", plain["spillDir"] as? String == env["TMPDIR"]! + "briglia-tool-output/")
         let realSpill = info(removeEnv: [TruncationService.testSpillRootKey])?["spillDir"] as? String
-        check("default spill dir unchanged without the seam", realSpill == NSTemporaryDirectory() + "briglia-tool-output/", realSpill ?? "nil")
+        // Darwin's temporary directory is per user and ignores TMPDIR; Linux
+        // Foundation honours the child's TMPDIR (the harness's scratch tmp).
+        #if os(Linux)
+        let expectedSpill = env["TMPDIR"]! + "briglia-tool-output/"
+        #else
+        let expectedSpill = NSTemporaryDirectory() + "briglia-tool-output/"
+        #endif
+        check("default spill dir unchanged without the seam", realSpill == expectedSpill, realSpill ?? "nil")
         check("default secret store", plain["secretStore"] as? String == configBase + "/briglia/secrets.json")
         check("default Playwright invocation unchanged (no extra args)", (plain["playwrightArgs"] as? [String])?.count == 1)
         check("default AgentMail wrapper bytes unchanged", plain["agentmailWrapper"] as? String == """

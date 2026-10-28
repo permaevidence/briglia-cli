@@ -142,6 +142,13 @@ extension ProfileHarness {
             guard let data = FileManager.default.contents(atPath: file), data.count < 4_000_000 else { continue }
             let text = String(decoding: data, as: UTF8.self)
             for (name, places) in allowed where text.contains("probe-\(name)") {
+                // Linux Foundation keeps a named suite in ~/.config/<suite>.plist:
+                // that file is the profile's own suite (§3.6), not a crossing.
+                #if os(Linux)
+                // (default's standard domain is ~/.config/<process name>.plist).
+                let suite = Prefs.suiteName(profile: name, environment: env, processName: Self.exeName) ?? Self.exeName
+                if file == root.path + "/home/.config/\(suite).plist" { continue }
+                #endif
                 if !places.contains(where: { file.hasPrefix($0) }) { crossings.append("\(name) → \(file)") }
             }
         }
