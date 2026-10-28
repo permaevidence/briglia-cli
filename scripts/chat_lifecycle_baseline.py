@@ -198,6 +198,10 @@ REVIEWED_DEFAULTS_DELTAS = {
     # named-domain API; every former call site is mapped back to the
     # standard domain by prefs_normalize.py and keeps its own count.
     "TelegramConcierge/Utilities/Prefs.swift:defaults": (None, 2),
+    # Stage 2 (§5.7): `profiles remove` deletes the removed extra's own
+    # preferences suite through the named-domain API (Prefs.domains), never
+    # the standard domain's keys.
+    "TelegramConcierge/CLI/ProfilesCommand+Lifecycle.swift:defaults": (None, 1),
 }
 
 
