@@ -225,6 +225,11 @@ extension ProfileHarness {
     }
 
     private func leaseBarrierAtEntry() {
+        // A live coordinator holds upgrade.lock (otherwise a starter would
+        // rightly take over recovery of an orphaned barrier, R7).
+        try? FileManager.default.createDirectory(at: barrierPaths.root, withIntermediateDirectories: true)
+        let coordinatorLock: ProfileFileLock? = { if case .acquired(let l) = ProfileFileLock.take(barrierPaths.lock) { return l }; return nil }()
+        defer { coordinatorLock?.release() }
         writeBarrier(state: .open)
         let s = run(["__member-probe"])
         check("barrier: a session that finds an open barrier exits 75 with the updating message",

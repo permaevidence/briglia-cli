@@ -27,6 +27,8 @@ enum UpgradeCoordinator {
         /// under the upgrade lock).
         var trustFloor: () -> Int? = { ReleaseTrustStore.load(domain: ReleasePolicy.effective.trustDomain).sequence }
         var installedSequence: (URL) -> Int? = { UpgradeBarrier.installedSequence(.live, executable: $0) }
+        /// Running Briglias without a member lease (refused, R1).
+        var unleased: () -> [String] = { UnleasedInstances.find() }
     }
 
     enum Outcome: Equatable {
@@ -135,6 +137,10 @@ enum UpgradeCoordinator {
             openedAt: Date(),
             coordinator: .init(lease: own?.uuid ?? "", pid: getpid(), processStartTime: ProcessIdentity.selfStartTime),
             participants: nil, committedBinarySHA256: nil, reason: nil)
+        // Every running Briglia must be a member (R1): one without a lease
+        // would never park.
+        let unleased = settings.unleased()
+        if !unleased.isEmpty { return .refused(UnleasedInstances.message + " (" + unleased.joined(separator: ", ") + ")") }
         do {
             if AssistantRegistry.exists(settings.registryPaths) {
                 try AssistantRegistry.withLock(settings.registryPaths) { doc in
@@ -231,6 +237,8 @@ enum UpgradeCoordinator {
         }
 
         // 6. Pre-publication checks with everyone parked.
+        let lateUnleased = settings.unleased()
+        if !lateUnleased.isEmpty { return cancel(UnleasedInstances.message + " (" + lateUnleased.joined(separator: ", ") + ")") }
         for root in settings.checkpointRoots() {
             do { try TurnCheckpointStore.refuseReplacementWithUnfinishedEnvelope(dataRoot: root) } catch {
                 return cancel("\(error)")

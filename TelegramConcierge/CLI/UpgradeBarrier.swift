@@ -265,23 +265,45 @@ enum UpgradeBarrier {
     /// only when no re-exec is needed.
     static let reexecGuardKey = "BRIGLIA_REEXEC_GUARD"
 
-    static func reexecIfOlder(_ paths: Paths = .live) {
+    /// §6.1: a member whose RUNNING image (its compiled/loaded sequence, read
+    /// once at start) is older than the disk-validated installed release
+    /// re-execs the binary on disk (same argv). The running image is never
+    /// identified by re-reading its pathname (that reads the replacement;
+    /// Codex stage-2 R3). One attempt per installed identity
+    /// (`BRIGLIA_REEXEC_GUARD`); a failed required exec fails closed (exit 75)
+    /// instead of continuing on the old image. Returns only when no re-exec is
+    /// needed.
+    static func reexecIfOlder(_ paths: Paths = .live, runningSequence: Int = ReleaseSequence.compiled,
+                              exec: (String, [String]) -> Void = { path, args in
+                                  var argv: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
+                                  argv.append(nil)
+                                  fflush(stdout); fflush(stderr)
+                                  execv(path, argv)
+                              }) {
         // Cheap first: only a record claiming a newer sequence is worth
         // hashing the installed pair for.
-        guard case .value(let raw) = readFile(paths.installed, as: Installed.self), raw.sequence > ReleaseSequence.compiled,
-              let rec = validatedInstalled(paths), rec.sequence > ReleaseSequence.compiled else { return }
-        // Never loop: not when this image already IS that binary, and not a
-        // second time for the same installed identity.
-        let own = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
-        if sha256(file: own) == rec.binarySHA256 { return }
-        if ProcessInfo.processInfo.environment[reexecGuardKey] == rec.binarySHA256 { return }
-        setenv(reexecGuardKey, rec.binarySHA256, 1)
-        var argv: [UnsafeMutablePointer<CChar>?] = CommandLine.arguments.map { strdup($0) }
-        argv.append(nil)
-        fflush(stdout); fflush(stderr)
-        execv(rec.executable, argv)
-        // exec failed: keep running the old image (logged).
-        FileHandle.standardError.write(Data("⚠ could not start the updated Briglia (\(String(cString: strerror(errno)))); continuing on \(adaCLIVersion)\n".utf8))
+        guard case .value(let raw) = readFile(paths.installed, as: Installed.self), raw.sequence > runningSequence,
+              let rec = validatedInstalled(paths, executable: URL(fileURLWithPath: raw.executable)),
+              rec.sequence > runningSequence else { return }
+        if ProcessInfo.processInfo.environment[reexecGuardKey] == "\(rec.binarySHA256):\(rec.sequence)" {
+            // Already re-executed once for this installed identity and still
+            // older: the installed record does not match the binary. Refuse.
+            FileHandle.standardError.write(Data("✖ The installed Briglia (\(rec.version)) does not start as the recorded release; run `briglia upgrade --recover` or reinstall.\n".utf8))
+            exit(75)
+        }
+        setenv(reexecGuardKey, "\(rec.binarySHA256):\(rec.sequence)", 1)
+        exec(rec.executable, CommandLine.arguments)
+        // Only reached when exec failed: never continue on the old image.
+        FileHandle.standardError.write(Data("✖ Could not start the updated Briglia (\(String(cString: strerror(errno)))); try again in a minute.\n".utf8))
+        exit(75)
+    }
+
+    /// The pair on disk is the committed one (§6.3 step 9 boundary): the
+    /// barrier's committed binary hash equals the installed binary's.
+    static func committedPairOnDisk(_ barrier: Record, paths: Paths = .live) -> Bool {
+        guard let expected = barrier.committedBinarySHA256, case .value(let rec) = readFile(paths.installed, as: Installed.self),
+              rec.binarySHA256 == expected else { return false }
+        return validatedInstalled(paths, executable: URL(fileURLWithPath: rec.executable)) != nil
     }
 
     // MARK: Messages (EN/IT)

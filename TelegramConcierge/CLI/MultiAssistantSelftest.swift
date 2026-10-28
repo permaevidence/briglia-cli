@@ -30,6 +30,7 @@ struct MultiAssistantSelftest: ParsableCommand {
         if h.section("upgrade") { h.upgradeSection() }
         if h.section("supervisor") { h.supervisorSection() }
         if h.section("chatgpt") { h.sharedLoginSection() }
+        if h.section("round2") { h.stage2Round2Section() }
         print("\n\(h.total - h.failures)/\(h.total) multi-assistant checks passed")
         if h.failures > 0 { throw ExitCode(1) }
     }
@@ -49,6 +50,7 @@ struct MemberProbeCommand: ParsableCommand {
     @Option(name: .customLong("hold-tx")) var holdTx: String?
     @Flag(name: .customLong("long-lived")) var longLived = false
     @Flag(name: .customLong("promote")) var promote = false
+    @Option(name: .customLong("reexec-after")) var reexecAfter: Double?
 
     func run() throws {
         setvbuf(stdout, nil, _IOLBF, 0)
@@ -77,6 +79,13 @@ struct MemberProbeCommand: ParsableCommand {
             } catch {
                 print("TX_REFUSED:\(error)")
             }
+        }
+        if let reexecAfter {
+            // R3: the running image's sequence is compared with a validated
+            // installed release that appeared after this process started.
+            Thread.sleep(forTimeInterval: reexecAfter)
+            UpgradeBarrier.reexecIfOlder()
+            print("CONTINUED-ON-OLD-IMAGE")
         }
         if hold > 0 { Thread.sleep(forTimeInterval: hold) }
         ticket?.finish()

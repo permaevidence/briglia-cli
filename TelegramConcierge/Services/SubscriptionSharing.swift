@@ -214,8 +214,15 @@ enum SubscriptionSharing {
         }
         let lock: ProfileFileLock?
         do { lock = try shareLock() } catch {
-            clearBinding(&result)
-            result.notes.append("ChatGPT was not signed out because another assistant is changing its ChatGPT setting; sign out from the menu.")
+            // Without the sharing lock nothing about sharing changes (Codex
+            // stage-2 R6): the selection binding is cleared, the scope (and
+            // an own store) stay as they are, and the reset is reported.
+            clearBinding(&result, removeScope: false)
+            if AssistantProfile.isExtra, scope() == .own {
+                result.failures.append("ChatGPT (own login) was not reset because another assistant is changing its ChatGPT setting; this assistant keeps its own login — run /deleteuserdata again in a moment")
+            } else {
+                result.notes.append("ChatGPT was not signed out because another assistant is changing its ChatGPT setting; sign out from the menu.")
+            }
             return result
         }
         defer { lock?.release() }
@@ -229,7 +236,7 @@ enum SubscriptionSharing {
                     return result
                 }
             }
-            clearBinding(&result)
+            clearBinding(&result, removeScope: true)
             let others = displayNames(sharers().filter { $0 != AssistantProfile.selectedName })
             result.notes.append("ChatGPT stays signed in for \(others.joined(separator: ", ")); sign out from the menu to remove it for everyone. / ChatGPT resta connesso per \(others.joined(separator: ", ")); disconnettilo dal menu per rimuoverlo per tutti.")
             return result
@@ -240,7 +247,7 @@ enum SubscriptionSharing {
             do { if try store.read() != nil { try await store.logout() } }
             catch { result.failures.append("ChatGPT local sign-out: \(error.localizedDescription)") }
         } else {
-            clearBinding(&result)
+            clearBinding(&result, removeScope: false)
             let names = displayNames(others).joined(separator: ", ")
             result.notes.append("ChatGPT stays signed in for \(names); sign out from the menu to remove it for everyone. / ChatGPT resta connesso per \(names); disconnettilo dal menu per rimuoverlo per tutti.")
         }
@@ -249,13 +256,15 @@ enum SubscriptionSharing {
 
     /// This assistant's own binding: generation, fingerprint, scope key, and
     /// the runtime slot only when it is the active ChatGPT binding.
-    private static func clearBinding(_ result: inout WipeResult) {
+    /// `removeScope` only under the sharing lock and after an own store was
+    /// signed out (the own → shared transition, §25.14 R2-1).
+    private static func clearBinding(_ result: inout WipeResult, removeScope: Bool) {
         do {
             try KeychainHelper.conditionalTransaction { s in
                 let bound = s[ProviderProfiles.subscriptionGenerationKey]
                 s.removeValue(forKey: ProviderProfiles.subscriptionGenerationKey)
                 s.removeValue(forKey: accountFingerprintKey)
-                s.removeValue(forKey: scopeKey)
+                if removeScope { s.removeValue(forKey: scopeKey) }
                 if s[ProviderProfiles.activeProfileKey] == "chatgpt", let bound, s[KeychainHelper.openAICompatibleApiKeyKey] == bound {
                     s.removeValue(forKey: KeychainHelper.openAICompatibleApiKeyKey)
                 }
@@ -271,12 +280,23 @@ enum SubscriptionSharing {
     /// refused while this assistant runs. Clears the selection binding.
     static func changeScope(to target: Scope) async throws -> String {
         guard AssistantProfile.isExtra else { throw SubscriptionError("The default assistant owns the shared ChatGPT login; it has no separate login.") }
-        if let dir = MemberLeases.directory(profile: AssistantProfile.selectedName, generation: MemberEntry.generation),
-           !MemberLeases.users(dir, assistantsOnly: true, except: MemberEntry.current?.uuid).isEmpty {
-            throw SubscriptionError("Stop this assistant before changing its ChatGPT login (or change it while it is idle from its menu).")
-        }
+        // Lock order: chatgpt-share.lock → registry.lock (inside). The probe
+        // of this profile's assistant leases and the publication of a
+        // settings transaction happen in ONE registry critical section, so a
+        // starting assistant either is seen (refused) or waits for us
+        // (startup admission), for the whole transition (Codex stage-2 R5).
         let lock = try ChatGPTShare.takeLock()
         defer { lock?.release() }
+        let ownLease = MemberEntry.current?.uuid
+        let tx: AssistantRegistry.SettingsTransaction
+        do {
+            tx = try AssistantRegistry.beginSettings(profile: AssistantProfile.selectedName, key: "chatgpt_scope") { record in
+                let dir = MemberLeases.extraDirectory(record.name, generation: record.generation)
+                return MemberLeases.users(dir, assistantsOnly: true, except: ownLease).isEmpty ? nil
+                    : "Stop this assistant before changing its ChatGPT login."
+            }
+        } catch { throw SubscriptionError("\(error)") }
+        defer { tx.finish() }
         let current = scope()
         guard current != target else { return "ChatGPT: already \(target == .own ? "its own login" : "the shared login")." }
         if target == .shared {
@@ -286,7 +306,7 @@ enum SubscriptionSharing {
             if try own.read() != nil { try await own.logout() }
         }
         var noop = WipeResult()
-        clearBinding(&noop)
+        clearBinding(&noop, removeScope: false)
         if !noop.failures.isEmpty { throw SubscriptionError(noop.failures.joined(separator: "; ")) }
         try KeychainHelper.saveBatch([scopeKey: target == .own ? Scope.own.rawValue : String?.none])
         return target == .own

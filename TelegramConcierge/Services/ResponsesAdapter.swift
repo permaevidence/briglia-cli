@@ -177,14 +177,19 @@ struct ResponsesAdapter {
         // per request — the same account re-signed in elsewhere rebinds this
         // assistant; a different account is refused until chosen again (D18).
         var subscriptionGeneration = context.subscriptionGeneration
+        // One store for the whole request (resolution, credential, refresh,
+        // settlement, requireLogin): a later scope change never splits it.
+        let authStore = SubscriptionAuthStore()
+        var subscriptionLogin = SubscriptionLogin()
+        subscriptionLogin.store = authStore
         if let captured = subscriptionGeneration {
-            subscriptionGeneration = try await SubscriptionSharing.resolveGeneration(captured)
+            subscriptionGeneration = try await SubscriptionSharing.resolveGeneration(captured, store: authStore)
         }
         while attempt < 4 {
             try Task.checkCancellation()
             do {
                 if let generation = subscriptionGeneration {
-                    let login = SubscriptionLogin()
+                    let login = subscriptionLogin
                     // Budgeted (maintenance) contexts: no refresh when no send is left.
                     try context.sendBudget?.requireCapacity()
                     let credential = try await login.store.credential(generation: generation, refresh: Self.refresher(login, context.authBudget))
@@ -242,13 +247,13 @@ struct ResponsesAdapter {
                 try Task.checkCancellation()
                 if case ResponsesFailure.http(401, _) = error, let generation = subscriptionGeneration {
                     guard !didRefreshAfter401 else {
-                        try await SubscriptionAuthStore().requireLogin(generation: generation, rejectedAccess: usedAccess)
+                        try await authStore.requireLogin(generation: generation, rejectedAccess: usedAccess)
                         throw SubscriptionError(SubscriptionSharing.decorateRevocation("ChatGPT rejected the refreshed login; sign in again"))
                     }
                     // Budgeted contexts never refresh for a resend they could not make.
                     try context.sendBudget?.requireCapacity()
                     didRefreshAfter401 = true
-                    let login = SubscriptionLogin()
+                    let login = subscriptionLogin
                     _ = try await login.store.credential(generation: generation, rejectedAccess: usedAccess, refresh: Self.refresher(login, context.authBudget))
                     continue
                 }

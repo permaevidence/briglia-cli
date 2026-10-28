@@ -53,6 +53,34 @@ struct UpgradeReadinessCheckCommand: AsyncParsableCommand {
         let parkedAck = UpgradeBarrier.readAck(lease.uuid, paths)
         check("monitor: ready → pauses admission and acks parked", parkedAck?.state == .parked && m.admissionPaused,
               "\(String(describing: parkedAck)) paused=\(m.admissionPaused)")
+        // R2 (Codex stage 2): while parked NO work producer is admitted.
+        let settingsAdmitted = await m.beginBrowserSettingsMutation()
+        if settingsAdmitted { m.endBrowserSettingsMutation() }
+        check("pause: browser/menu settings are refused while parked", !settingsAdmitted)
+        let mindAdmitted = m.beginMindRestore()
+        if mindAdmitted { m.endMindRestore() }
+        check("pause: a Mind operation is refused while parked", !mindAdmitted)
+        let nameBefore = KeychainHelper.load(key: KeychainHelper.assistantNameKey)
+        let cmd = await m.handleTerminalCommand("/setname ParkedProbe")
+        let cmd2 = await m.handleTerminalCommand("/setname confirm")
+        check("pause: terminal/app commands are refused while parked (a /setname changes nothing)",
+              KeychainHelper.load(key: KeychainHelper.assistantNameKey) == nameBefore
+              && (cmd ?? []).joined().contains("updating") && (cmd2 ?? []).joined().contains("updating"), "\(cmd ?? []) \(cmd2 ?? [])")
+        let status = await m.handleTerminalCommand("/status")
+        check("pause: /status still answers while parked", status != nil && !(status ?? []).joined().contains("updating"))
+        await m.upgradeMonitorTick(lease: lease)
+        check("pause: the parked ack is re-evaluated each tick (still parked when nothing runs)",
+              UpgradeBarrier.readAck(lease.uuid, paths)?.state == .parked)
+        m.browserSettingsCommandIngress += 1
+        await m.upgradeMonitorTick(lease: lease)
+        check("pause: a command already inside its handler turns the ack to busy", UpgradeBarrier.readAck(lease.uuid, paths)?.state == .busy
+              && UpgradeBarrier.readAck(lease.uuid, paths)?.reason == "a command" && m.admissionPaused)
+        m.browserSettingsCommandIngress -= 1
+        m.isRestoringMind = true
+        let mindBusy = await m.upgradeBusyReason(initiating: true)
+        m.isRestoringMind = false
+        check("readiness: a Mind operation counts as busy (parking never sets it)", mindBusy == "a settings change", mindBusy ?? "nil")
+        await m.upgradeMonitorTick(lease: lease)
         let refused = await m.sendFromApp(text: "hello", attachments: [])
         if case .refused(let why) = refused { check("pause: app/terminal input is refused while parked", why.contains("updating"), why) }
         else { check("pause: app/terminal input is refused while parked", false, "\(refused)") }

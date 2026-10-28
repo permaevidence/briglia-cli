@@ -67,7 +67,7 @@ final class MenuHost {
                 try await MenuBarrier.$held.withValue(true) { try await body() }
             } catch {
                 await manager.reloadBrowserSettings()
-                IdentityChange.finishDeferred()
+                IdentityChange.finishDeferred(quiescent: manager.lastEmailResetQuiescent)
                 manager.endBrowserSettingsMutation()
                 throw error
             }
@@ -75,7 +75,7 @@ final class MenuHost {
             // an inbox released by this save is freed only after the poller
             // moved to the new one (MULTI_ASSISTANT_PLAN §5.6 step 6).
             await manager.reloadBrowserSettings()
-            IdentityChange.finishDeferred()
+            IdentityChange.finishDeferred(quiescent: manager.lastEmailResetQuiescent)
             manager.endBrowserSettingsMutation()
             return true
         }

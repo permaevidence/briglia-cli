@@ -694,7 +694,22 @@ extension ConversationManager {
         // it out when ~/.config/gws exists. The frozen system-prompt context
         // is cleared too — it holds pre-wipe inbox snippets that would
         // otherwise survive until the next day-roll.
-        failures.append(contentsOf: EmailCredentialWipe.execute())
+        // Several assistants (§5.6, Codex stage-2 R4): the inbox removal is a
+        // registry transaction; the poller is already quiescent, so it is
+        // released right after the wipe.
+        do {
+            let ticket = try IdentityChange.begin(kind: .inbox, rawValue: nil, mode: .assistant)
+            var wipeFailures: [String] = []
+            do {
+                try ticket.commit {
+                    wipeFailures = EmailCredentialWipe.execute()
+                }
+                ticket.finish()
+            } catch { ticket.abort(); wipeFailures.append("email reservation: \(error)") }
+            failures.append(contentsOf: wipeFailures)
+        } catch {
+            failures.append("email removal refused: \(error)")
+        }
         frozenEmailContext = nil
         frozenCalendarContext = nil
 
@@ -1039,6 +1054,9 @@ extension ConversationManager {
     /// Shares the existing ingress/maintenance barrier, without cancelling work
     /// or replacing memory. Only a short mutation + service reload holds it.
     func beginBrowserSettingsMutation() async -> Bool {
+        // Parked for an update (MULTI_ASSISTANT_PLAN §6.4): no settings work
+        // may start until the barrier ends (Codex stage-2 R2).
+        guard !admissionPaused else { return false }
         guard subscriptionLoginTask == nil, watcherChecksInFlight.isEmpty,
               triageRunsInFlight.isEmpty, activeProcessingTask == nil,
               browserSettingsCommandIngress == 0, beginMindRestore() else { return false }
@@ -1129,7 +1147,8 @@ extension ConversationManager {
         let current = AppliedEmailState.current
         guard current != appliedEmailState else { return }
         let previous = appliedEmailState
-        if !(await AgentMailService.shared.resetForWipe()) {
+        lastEmailResetQuiescent = await AgentMailService.shared.resetForWipe()
+        if !lastEmailResetQuiescent {
             print("[ConversationManager] WARNING: AgentMail poller not quiescent at provider change — late ticks are discarded by the generation token")
         }
         if let previous, previous.agentMailKey != current.agentMailKey || previous.inbox != current.inbox {
@@ -1144,7 +1163,7 @@ extension ConversationManager {
     }
 
     func beginMindRestore() -> Bool {
-        guard !isRestoringMind,
+        guard !admissionPaused, !isRestoringMind,
               !isTurnActive,
               maintenanceActivities.isEmpty,
               archiveRecoveryTask == nil else { return false }

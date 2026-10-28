@@ -97,6 +97,9 @@ final class TerminalSession {
             }
         }
         Self.leaseForSignalHandler = lease
+        // A registry created while this process started (first `profiles
+        // add`): enroll before anything touches state (Codex stage-2 R1).
+        MemberEntry.enrollLateIfNeeded(kind: headless ? "daemon" : "chat")
         installSignalHandlers()
         KeepAwake.holdForProcessLifetime(reason: "Briglia is running")
         // Both roots must be usable directories before anything writes;

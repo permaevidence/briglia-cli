@@ -72,7 +72,8 @@ enum MemberEntry {
             return words.contains("--assistant") && adaCLIVersion.hasSuffix("-dev")
                 ? .assistant(kind: "probe") : .session(kind: "probe")
         default:
-            if first.hasSuffix("selftest") || first.hasSuffix("-selftest") { return nil }
+            // Dev selftests run against temporary roots (development builds only).
+            if adaCLIVersion.hasSuffix("-dev"), first.hasSuffix("selftest") { return nil }
             return .session(kind: first)
         }
     }
@@ -91,6 +92,10 @@ enum MemberEntry {
 
     static func enter(arguments: [String]) {
         guard CoordinationMode.active, let role = classify(arguments) else { return }
+        enter(role: role)
+    }
+
+    static func enter(role: Role) {
         let profile = AssistantProfile.selectedName
         // 1. Generation (extras), unlocked.
         if AssistantProfile.isExtra {
@@ -155,6 +160,23 @@ enum MemberEntry {
         fflush(stdout)
     }
 
+    /// Late enrollment (Codex stage-2 R1): an assistant that entered while
+    /// coordination was inactive re-checks right after taking its instance
+    /// lock (which touches no state). If a registry appeared meanwhile it runs
+    /// the assistant entry protocol now ("publish, then look" against the
+    /// first `profiles add`, which publishes the registry, then probes for
+    /// unleased instances and waits for this enrollment).
+    static func enrollLateIfNeeded(kind: String) {
+        guard current == nil else { return }
+        // Dev-only seam: widen the window between taking the instance lock
+        // and looking for the registry (the first-add race test).
+        if adaCLIVersion.hasSuffix("-dev"), let ms = Double(ProcessInfo.processInfo.environment["BRIGLIA_TEST_LATE_ENROLL_PAUSE_MS"] ?? ""), ms > 0 {
+            Thread.sleep(forTimeInterval: ms / 1000)
+        }
+        guard AssistantRegistry.presence() != .absent else { return }
+        enter(role: .assistant(kind: kind))
+    }
+
     static func registryRecord(_ profile: String) -> AssistantRegistry.Record? {
         (try? AssistantRegistry.read(.live))??.record(profile)
     }
@@ -176,6 +198,13 @@ enum MemberEntry {
     static func parkAtStartupIfNeeded(poll: TimeInterval = 2) {
         var told = false
         while let barrier = UpgradeBarrier.current(), barrier.isActive {
+            // A dead coordinator (open/committed and upgrade.lock free): the
+            // starting assistant owns recovery/closure, before any profile
+            // initialisation or bundle access (Codex stage-2 R7).
+            if barrier.state == .open || barrier.state == .committed {
+                recoverAtStartupIfOrphaned(barrier)
+                if let again = UpgradeBarrier.current(), again.id == barrier.id, again.state != barrier.state { continue }
+            }
             switch barrier.state {
             case .open, .stuck:
                 if !told {
@@ -189,11 +218,33 @@ enum MemberEntry {
                 }
                 Thread.sleep(forTimeInterval: poll)
             case .committed:
+                // Run only on the committed pair: older image → re-exec; a disk
+                // that does not match the commit → wait (never run unverified).
+                guard UpgradeBarrier.committedPairOnDisk(barrier) else {
+                    if !told { say("· Briglia is finishing an update; this assistant starts when it is done."); told = true }
+                    Thread.sleep(forTimeInterval: poll)
+                    continue
+                }
                 UpgradeBarrier.reexecIfOlder()
                 return
             default:
                 return
             }
+        }
+    }
+
+    static func recoverAtStartupIfOrphaned(_ barrier: UpgradeBarrier.Record, paths: UpgradeBarrier.Paths = .live) {
+        guard case .acquired(let lock) = ProfileFileLock.take(paths.lock) else { return }
+        defer { lock.release() }
+        guard let again = UpgradeBarrier.current(paths), again.id == barrier.id else { return }
+        switch again.state {
+        case .open:
+            let outcome = UpgradeJournal.recover(again, allowStuck: false, paths: paths)
+            say("· Recovered an interrupted update: \(outcome)")
+        case .committed:
+            UpgradeCoordinator.closeIfPossible(.init(paths: paths), holdingLock: true)
+        default:
+            break
         }
     }
 

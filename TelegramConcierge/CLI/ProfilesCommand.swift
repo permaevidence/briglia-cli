@@ -225,6 +225,10 @@ enum ProfileProvisioning {
         let share: ProfileFileLock?
         do { share = try ChatGPTShare.takeLock() } catch { throw ProvisioningError("\(error)") }
         defer { share?.release() }
+        // A Briglia running without a member lease (started before any
+        // registry, switch off) would sit outside every barrier (R1).
+        if !UnleasedInstances.find(registryPaths: registryPaths).isEmpty { throw ProvisioningError(UnleasedInstances.message) }
+        let registryExisted = AssistantRegistry.exists(registryPaths)
         let defaultBot = KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey)
         let defaultInbox = KeychainHelper.load(key: KeychainHelper.agentMailInboxAddressKey)
         let defaultName = (KeychainHelper.load(key: KeychainHelper.assistantNameKey) ?? "")
@@ -270,6 +274,34 @@ enum ProfileProvisioning {
             try FileManager.default.createDirectory(at: homeFolder, withIntermediateDirectories: true)
             d.records.append(AssistantRegistry.newRecord(name: name, displayName: displayName))
             doc = d
+        }
+        // Publish, then look: an inactive Briglia that took its instance lock
+        // before the registry existed either sees the registry and enrolls
+        // (late enrollment) or is seen here. Give a racing enrollment a moment.
+        let deadline = Date().addingTimeInterval(unleasedGraceSeconds)
+        while !UnleasedInstances.find(registryPaths: registryPaths).isEmpty {
+            if Date() >= deadline {
+                rollbackAdd(name: name, registryPaths: registryPaths, removeRegistry: !registryExisted)
+                throw ProvisioningError(UnleasedInstances.message)
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+    }
+
+    static var unleasedGraceSeconds: TimeInterval = 5
+
+    /// Undo a just-created profile (nothing of it ever ran).
+    static func rollbackAdd(name: String, registryPaths: AssistantRegistry.Paths, removeRegistry: Bool) {
+        try? FileManager.default.removeItem(at: AssistantProfile.extraConfigRoot(name))
+        try? FileManager.default.removeItem(at: AssistantProfile.extraDataRoot(name))
+        _ = try? AssistantRegistry.withLock(registryPaths) { doc in
+            guard var d = doc, let i = d.index(name) else { return }
+            d.records.remove(at: i)
+            doc = d
+        }
+        if removeRegistry, let doc = (try? AssistantRegistry.read(registryPaths)) ?? nil,
+           doc.records.allSatisfy({ $0.name == AssistantProfile.defaultName }) {
+            try? FileManager.default.removeItem(at: registryPaths.registry)
         }
     }
 

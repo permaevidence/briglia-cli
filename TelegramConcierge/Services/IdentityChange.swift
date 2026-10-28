@@ -124,26 +124,11 @@ enum IdentityChange {
             guard let dir = leases(record) else { return nil }
             return MemberLeases.users(dir, assistantsOnly: true, except: ownLease).isEmpty ? nil : runningMessage
         }
-        let value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if value.isEmpty {
-            // Removal: nothing to reserve; the offline rule still applies,
-            // and an offline removal frees the value at once (no consumer).
-            do {
-                try AssistantRegistry.withLock(paths) { doc in
-                    guard var d = doc, let i = d.index(profile) else { return }
-                    if let refusal = precheck(d.records[i]) { throw Refusal(refusal) }
-                    if mode == .offline, d.records[i].activeTx[kind.rawValue] == nil {
-                        var slot = d.records[i].slot(kind)
-                        slot.current = nil
-                        d.records[i].setSlot(kind, slot)
-                        doc = d
-                    }
-                }
-            } catch { release(); throw error }
-            return Ticket(kind: kind, tx: nil, identityLock: lock, ownsIdentityLock: owns)
-        }
+        // Changes AND removals are registry transactions (Codex stage-2 R4):
+        // published with the offline probe, old ownership kept until commit,
+        // released after the consumer is quiescent.
         do {
-            let tx = try AssistantRegistry.begin(profile: profile, kind: kind, rawValue: value, paths: paths, precheck: precheck)
+            let tx = try AssistantRegistry.begin(profile: profile, kind: kind, rawValue: rawValue, paths: paths, precheck: precheck)
             return Ticket(kind: kind, tx: tx, identityLock: lock, ownsIdentityLock: owns)
         } catch {
             release()
@@ -171,7 +156,11 @@ enum IdentityChange {
         deferredLock.lock(); deferred.append(ticket); deferredLock.unlock()
     }
 
-    static func finishDeferred() {
+    /// `quiescent: false` (the old poller did not confirm it stopped): the
+    /// tickets stay open — their writer leases keep the old value reserved —
+    /// until a later reload confirms, or this process exits (dead writer).
+    static func finishDeferred(quiescent: Bool = true) {
+        guard quiescent else { return }
         deferredLock.lock(); let tickets = deferred; deferred = []; deferredLock.unlock()
         for t in tickets { t.finish() }
     }

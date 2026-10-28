@@ -159,6 +159,12 @@ extension ConversationManager {
 
     func handleControlCommandIfNeeded(_ text: String) async -> Bool {
         let token = commandToken(from: text)
+        // Parked for an update (§6.4, Codex stage-2 R2): terminal/app commands
+        // reach this without the poll loop; only read-only /status runs.
+        if admissionPaused, text.hasPrefix("/"), token != "/status" {
+            try? await sendText(Self.updatingRefusal)
+            return true
+        }
         if browserSettingsMutation, text.hasPrefix("/") {
             try? await sendText("Browser settings are being applied. Please retry this command in a moment.")
             return true

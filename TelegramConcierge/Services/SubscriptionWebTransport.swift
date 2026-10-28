@@ -83,7 +83,10 @@ enum SubscriptionWebTransport {
         }
         // Several assistants (§25.4): resolved once per request — the same
         // account re-signed in elsewhere rebinds; another account refuses.
-        let generation = try await SubscriptionSharing.resolveGeneration(captured)
+        let authStore = SubscriptionAuthStore()
+        var subscriptionLogin = SubscriptionLogin()
+        subscriptionLogin.store = authStore
+        let generation = try await SubscriptionSharing.resolveGeneration(captured, store: authStore)
         var request = try buildRequest(body: body, generation: generation, lane: lane, timeout: timeout)
         var usedAccess: String?
         var didRefreshAfter401 = false
@@ -97,7 +100,7 @@ enum SubscriptionWebTransport {
                     if let deadline { return try validatedTerminal(try await deadline.race { try await sendOverride(pending) }) }
                     return try validatedTerminal(try await sendOverride(request))
                 }
-                let login = SubscriptionLogin()
+                let login = subscriptionLogin
                 let credential = try await login.store.credential(generation: generation, refresh: login.refresh)
                 try Task.checkCancellation()
                 try login.store.validate(generation: generation)
@@ -117,11 +120,11 @@ enum SubscriptionWebTransport {
                 if let failure = error as? SubscriptionError, failure.usageExhausted { throw failure }
                 if case ResponsesFailure.http(401, _) = error {
                     guard !didRefreshAfter401 else {
-                        try await SubscriptionAuthStore().requireLogin(generation: generation, rejectedAccess: usedAccess)
+                        try await authStore.requireLogin(generation: generation, rejectedAccess: usedAccess)
                         throw SubscriptionError(SubscriptionSharing.decorateRevocation("ChatGPT rejected the refreshed login; sign in again"))
                     }
                     didRefreshAfter401 = true
-                    let login = SubscriptionLogin()
+                    let login = subscriptionLogin
                     _ = try await login.store.credential(generation: generation, rejectedAccess: usedAccess, refresh: login.refresh)
                     continue
                 }

@@ -9,7 +9,50 @@ struct Doctor: AsyncParsableCommand {
     @Flag(name: .long, help: "Also probe the configured services over the network.")
     var online = false
 
+    @Flag(name: .customLong("read-only"), help: .hidden)
+    var readOnly = false
+
+    /// `briglia doctor --read-only` (MULTI_ASSISTANT_PLAN §6.1): exempt from
+    /// every gate and lease; reads only machine records (barrier, journal,
+    /// registry, member leases) and no bundle resource, so it can always
+    /// report a stuck update.
+    static func readOnlyReport(paths: UpgradeBarrier.Paths = .live, registryPaths: AssistantRegistry.Paths = .live) -> [String] {
+        var lines = ["Assistants and updates (read-only)"]
+        if let b = UpgradeBarrier.current(paths) {
+            lines.append("  · update barrier: \(b.state.rawValue) (target \(b.targetVersion), id \(b.id.prefix(8)))\(b.reason.map { " — \($0)" } ?? "")")
+            if b.state == .stuck { lines.append("  ✖ " + UpgradeBarrier.stuckMessage) }
+        } else {
+            lines.append("  ✔ no update in progress")
+        }
+        switch UpgradeBarrier.journal(paths) {
+        case .absent: break
+        case .value(let j): lines.append("  · update journal: \(j.phase.rawValue) (backups \(j.backupBinary), \(j.backupBundle))")
+        case .malformed(let why): lines.append("  ✖ update journal unreadable: \(why)")
+        }
+        switch AssistantRegistry.presence(registryPaths) {
+        case .absent: lines.append("  · one assistant (no registry)")
+        case .unreadable(let why): lines.append("  ✖ assistants registry unreadable: \(why)")
+        case .present:
+            if let doc = (try? AssistantRegistry.read(registryPaths)) ?? nil {
+                for r in doc.records {
+                    let dir = r.name == AssistantProfile.defaultName ? paths.root.deletingLastPathComponent().appendingPathComponent("members")
+                        : registryPaths.root.appendingPathComponent("members/\(r.name)/\(r.generation)")
+                    let running = MemberLeases.users(dir, assistantsOnly: true).count
+                    lines.append("  · \(r.name) (\(r.displayName)): \(r.state)\(running > 0 ? ", running" : "")\(r.activeTx.isEmpty ? "" : ", a settings change is in progress")")
+                }
+            } else { lines.append("  ✖ assistants registry damaged") }
+        }
+        let unleased = UnleasedInstances.find(registryPaths: registryPaths, defaultData: paths.root.deletingLastPathComponent().deletingLastPathComponent(),
+                                              defaultLeases: paths.root.deletingLastPathComponent().appendingPathComponent("members"))
+        if !unleased.isEmpty { lines.append("  ✖ running without coordination: \(unleased.joined(separator: ", ")) — " + UnleasedInstances.message) }
+        return lines
+    }
+
     func run() async throws {
+        if readOnly {
+            for line in Self.readOnlyReport() { print(line) }
+            return
+        }
         var problems = 0
         func check(_ label: String, ok: Bool, hint: String? = nil) {
             print("  \(ok ? "✔" : "✖") \(label)")

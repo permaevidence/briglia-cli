@@ -195,6 +195,14 @@ enum AssistantRegistry {
             record.activeTx[kind.rawValue] = nil
             try? FileManager.default.removeItem(at: paths.txLease(active.txId))
         }
+        // Other settings transactions (e.g. the ChatGPT scope change): only
+        // the entry itself, when its writer lease is dead.
+        for (key, active) in record.activeTx where Kind(rawValue: key) == nil {
+            if ProfileFileLock.probe(paths.txLease(active.txId)) == .dead {
+                record.activeTx[key] = nil
+                try? FileManager.default.removeItem(at: paths.txLease(active.txId))
+            }
+        }
         // Orphans: entries without an activeTx whose writer is dead.
         for kind in Kind.allCases where record.activeTx[kind.rawValue] == nil {
             var slot = record.slot(kind)
@@ -229,12 +237,13 @@ enum AssistantRegistry {
         let paths: Paths
         let profile: String
         let kind: Kind
-        let digest: String
+        /// nil = a removal (the value is cleared at commit).
+        let digest: String?
         let txId: String
         private var lease: ProfileFileLock?
         private(set) var committed = false
 
-        fileprivate init(paths: Paths, profile: String, kind: Kind, digest: String, txId: String, lease: ProfileFileLock) {
+        fileprivate init(paths: Paths, profile: String, kind: Kind, digest: String?, txId: String, lease: ProfileFileLock) {
             self.paths = paths; self.profile = profile; self.kind = kind
             self.digest = digest; self.txId = txId; self.lease = lease
         }
@@ -249,11 +258,19 @@ enum AssistantRegistry {
                 }
                 var record = d.records[i]
                 var slot = record.slot(kind)
-                guard record.activeTx[kind.rawValue]?.txId == txId, slot.pending?.txId == txId,
-                      slot.pending?.value == digest else {
-                    throw RegistryError("the reservation for this change was lost — nothing was changed; try again")
+                if let digest {
+                    guard record.activeTx[kind.rawValue]?.txId == txId, slot.pending?.txId == txId,
+                          slot.pending?.value == digest else {
+                        throw RegistryError("the reservation for this change was lost — nothing was changed; try again")
+                    }
+                } else {
+                    guard record.activeTx[kind.rawValue]?.txId == txId else {
+                        throw RegistryError("the reservation for this change was lost — nothing was changed; try again")
+                    }
                 }
                 try writeSecret()
+                // The old value stays protected (`releasing`) until its
+                // consumer is quiescent (step 6), for removals too.
                 if let old = slot.current, old != digest { slot.releasing = Tagged(value: old, txId: txId) }
                 slot.current = digest
                 slot.pending = nil
@@ -315,9 +332,13 @@ enum AssistantRegistry {
     /// refuse an unfinished live change of the same kind or a value held by
     /// another assistant, else publish `activeTx` and `pending`. Must be
     /// called before ANY network use of the new identity.
-    static func begin(profile: String, kind: Kind, rawValue: String, paths: Paths = .live,
+    static func begin(profile: String, kind: Kind, rawValue: String?, paths: Paths = .live,
                       precheck: (Record) -> String? = { _ in nil }) throws -> Transaction {
-        guard let digest = digest(kind, rawValue) else {
+        // nil/empty = a removal: published like any change (startup waits
+        // for it, overlapping changes are refused), committed by clearing.
+        let removal = (rawValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty
+        let digest: String? = removal ? nil : self.digest(kind, rawValue ?? "")
+        if !removal, digest == nil {
             throw RegistryError(kind == .bot ? "that does not look like a Telegram bot token" : "that does not look like an email address")
         }
         try PrivateStorage.ensureDirectory(paths.root, mode: 0o700)
@@ -345,12 +366,14 @@ enum AssistantRegistry {
                         ? "another change of this assistant's bot is still finishing — try again in a moment"
                         : "another change of this assistant's inbox is still finishing — try again in a moment")
                 }
-                if let owner = holder(of: digest, kind: kind, excluding: profile, in: d) {
+                if let digest, let owner = holder(of: digest, kind: kind, excluding: profile, in: d) {
                     throw RegistryError(conflictMessage(kind, owner: owner))
                 }
-                var slot = d.records[i].slot(kind)
-                slot.pending = Tagged(value: digest, txId: txId)
-                d.records[i].setSlot(kind, slot)
+                if let digest {
+                    var slot = d.records[i].slot(kind)
+                    slot.pending = Tagged(value: digest, txId: txId)
+                    d.records[i].setSlot(kind, slot)
+                }
                 d.records[i].activeTx[kind.rawValue] = ActiveTx(txId: txId, phase: "reserving")
                 doc = d
             }
@@ -361,6 +384,56 @@ enum AssistantRegistry {
         }
         MemberEntry.noteOwnTx(txId)
         return Transaction(paths: paths, profile: profile, kind: kind, digest: digest, txId: txId, lease: lease)
+    }
+
+    // MARK: - Settings transactions (startup exclusion for other settings)
+
+    /// A writer lease published as `activeTx[key]` in one registry critical
+    /// section with `precheck` (the offline-setter probe), so a starting
+    /// assistant waits for it exactly like for a bot/inbox change (§5.6).
+    final class SettingsTransaction {
+        let paths: Paths, profile: String, key: String, txId: String
+        private var lease: ProfileFileLock?
+        fileprivate init(paths: Paths, profile: String, key: String, txId: String, lease: ProfileFileLock) {
+            self.paths = paths; self.profile = profile; self.key = key; self.txId = txId; self.lease = lease
+        }
+        func finish() {
+            _ = try? AssistantRegistry.withLock(paths) { doc in
+                guard var d = doc, let i = d.index(profile), d.records[i].activeTx[key]?.txId == txId else { return }
+                d.records[i].activeTx[key] = nil
+                doc = d
+            }
+            lease?.release(); lease = nil
+            try? FileManager.default.removeItem(at: paths.txLease(txId))
+            MemberEntry.forgetOwnTx(txId)
+        }
+        deinit { if lease != nil { finish() } }
+    }
+
+    static func beginSettings(profile: String, key: String, paths: Paths = .live,
+                              precheck: (Record) -> String? = { _ in nil }) throws -> SettingsTransaction {
+        try PrivateStorage.ensureDirectory(paths.txDir, mode: 0o700)
+        let txId = UUID().uuidString.lowercased()
+        guard case .acquired(let lease) = ProfileFileLock.take(paths.txLease(txId)) else {
+            throw RegistryError("could not create the change lease for this assistant")
+        }
+        do {
+            try withLock(paths) { doc in
+                guard var d = doc, let i = d.index(profile) else { throw RegistryError("this assistant is not registered on this computer") }
+                cleanAll(&d, paths)
+                if d.records[i].state != "active" { throw RegistryError("this assistant is being removed") }
+                if let refusal = precheck(d.records[i]) { throw RegistryError(refusal) }
+                if d.records[i].activeTx[key] != nil { throw RegistryError("another change of this setting is still finishing — try again in a moment") }
+                d.records[i].activeTx[key] = ActiveTx(txId: txId, phase: "changing")
+                doc = d
+            }
+        } catch {
+            lease.release()
+            try? FileManager.default.removeItem(at: paths.txLease(txId))
+            throw error
+        }
+        MemberEntry.noteOwnTx(txId)
+        return SettingsTransaction(paths: paths, profile: profile, key: key, txId: txId, lease: lease)
     }
 
     // MARK: - Startup reconciliation

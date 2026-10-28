@@ -31,8 +31,11 @@ extension ConversationManager {
         if !maintenanceActivities.isEmpty || archiveRecoveryTask != nil { return "memory maintenance" }
         if backgroundPruneEngaged && backgroundPruneBlocksExit { return "a background prune" }
         if UpgradeReadiness.convergence > 0 { return "startup setup" }
-        if browserSettingsMutation || (isRestoringMind && !admissionPaused) || subscriptionLoginTask != nil
+        if browserSettingsMutation || isRestoringMind || subscriptionLoginTask != nil
             || botSwitchCutoverInProgress { return "a settings change" }
+        // Commands already inside the handler (terminal, app socket, Telegram);
+        // the initiating /upgrade handler is itself one of them.
+        if browserSettingsCommandIngress > (initiating && MemberEntry.isCoordinator ? 1 : 0) { return "a command" }
         if !parkedOutbound.isEmpty || parkedOutbound.isFlushing { return "a message waiting to be sent" }
         if stalledConfirmUpdateId != nil { return "storage problems" }
         if !initiating && (browserSettingsPollIngress > 0 || browserSettingsAppIngress > 0) { return "receiving a message" }
@@ -84,7 +87,13 @@ extension ConversationManager {
         switch barrier.state {
         case .open:
             if upgradeParkedFor == barrier.id {
-                ackUpgrade(barrier, lease: lease, state: .parked, reason: nil, paths: paths)
+                // Re-evaluated every tick: `parked` must stay true, not cached
+                // (Codex stage-2 R2). Admission stays closed either way.
+                if let reason = await upgradeBusyReason(initiating: true) {
+                    ackUpgrade(barrier, lease: lease, state: .busy, reason: reason, paths: paths)
+                } else {
+                    ackUpgrade(barrier, lease: lease, state: .parked, reason: nil, paths: paths)
+                }
                 return
             }
             let initiating = MemberEntry.isCoordinator
@@ -118,6 +127,13 @@ extension ConversationManager {
             // update; followers restart here (same PID), confirming nothing.
             guard !MemberEntry.isCoordinator, upgradeParkedFor == barrier.id
                     || (barrier.participants?.contains { $0.lease == lease.uuid } ?? false) else { return }
+            // Exec only into the committed pair (Codex stage-2 R1 Q1): a disk
+            // that no longer matches the commit keeps this assistant parked.
+            guard UpgradeBarrier.committedPairOnDisk(barrier, paths: paths) else {
+                if upgradeParkedFor == nil { upgradeParkedFor = barrier.id; pauseAdmission() }
+                print("[upgrade] the installed files do not match the committed update; staying paused")
+                return
+            }
             UpgradeService.writeRestartMarker(version: barrier.targetVersion, kind: .upgrade,
                                               barrierId: barrier.id, oldLease: lease.uuid)
             saveConversation()

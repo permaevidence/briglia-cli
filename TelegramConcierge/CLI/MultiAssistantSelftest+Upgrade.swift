@@ -102,6 +102,9 @@ extension ProfileHarness {
         ensureExtra("work", display: "Work")      // the busy participant below (independent of other sections)
         let add = run(["profiles", "add", "up", "--name", "Up", "--home", root.appendingPathComponent("home-up").path, "--copy-keys"])
         guard add.status == 0 else { check("upgrade: extra with copied keys", false, add.out); return }
+        // Real-manager readiness first: later steps leave an installed.json
+        // whose (test) sequence would make harness children re-exec.
+        readinessInRealManager()
         // Trust rule (pure, §5.1).
         check("trust: floor equal to the candidate is accepted", UpgradeCoordinator.trustRefusal(candidate: 102, floor: 102, installed: 100) == nil)
         check("trust: a floor above the candidate refuses", UpgradeCoordinator.trustRefusal(candidate: 101, floor: 102, installed: 100) != nil)
@@ -195,9 +198,13 @@ extension ProfileHarness {
         check("recovery: both assistants resumed (still running)", d0.running && d1.running)
         d0.kill(SIGTERM); d1.kill(SIGTERM)
 
-        readinessInRealManager()
         upgradeKillPoints(fx)
         upgradeStuckAndConcurrentRecovery(fx)
+        // The scratch install's records must not follow later sections: its
+        // installed.json names a test sequence the harness binary never has.
+        try? FileManager.default.removeItem(at: barrierPaths.installed)
+        try? FileManager.default.removeItem(at: barrierPaths.barrier)
+        UpgradeBarrier.clearAcks(barrierPaths)
     }
 
     /// Every kill point, coordinator alone (zero assistants), then

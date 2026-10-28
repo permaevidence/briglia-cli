@@ -1213,6 +1213,12 @@ enum SetupAPICore {
 
     private static func applyTelegram(_ section: [String: Any]) throws {
         if section["remove"] as? Bool == true {
+            // Removing the bot of a running assistant with several assistants
+            // set up: its poller keeps the bot until a restart (S2-3 extended
+            // to removal, Codex stage-2 R4).
+            if IdentityChange.processMode == .assistant, CoordinationMode.multi {
+                throw APIError(code: "use_switchbot", message: "Stop this assistant before removing its Telegram bot. / Ferma questo assistente prima di rimuovere il suo bot Telegram.")
+            }
             do {
                 try IdentityChange.apply(kind: .bot, rawValue: nil) {
                     try KeychainHelper.saveBatch([
@@ -1277,12 +1283,23 @@ enum SetupAPICore {
             // ~/.config/gws. Plain provider:none keeps credentials so
             // re-enabling is one tap.
             if section["remove_credentials"] as? Bool == true {
-                let failures = EmailCredentialWipe.execute()
-                guard failures.isEmpty else {
-                    throw APIError(code: "remove_failed",
-                                   message: "credential removal incomplete: "
-                                   + failures.joined(separator: "; "))
+                // The inbox removal is an identity transaction (Codex stage-2
+                // R4): refused while the profile's assistant runs (offline),
+                // startup waits for it, the old inbox stays reserved until the
+                // poller stopped (live hub: after the reload).
+                let ticket: IdentityChange.Ticket
+                do { ticket = try IdentityChange.begin(kind: .inbox, rawValue: nil) } catch { throw identityRefused(error) }
+                var failures: [String] = []
+                do {
+                    try ticket.commit {
+                        failures = EmailCredentialWipe.execute()
+                        if !failures.isEmpty { throw APIError(code: "remove_failed", message: "credential removal incomplete: " + failures.joined(separator: "; ")) }
+                    }
+                } catch {
+                    ticket.abort()
+                    throw (error as? APIError) ?? identityRefused(error)
                 }
+                if IdentityChange.processMode == .assistant { IdentityChange.deferFinish(ticket) } else { ticket.finish() }
             } else {
                 do {
                     try KeychainHelper.save(key: KeychainHelper.emailCalendarProviderKey,

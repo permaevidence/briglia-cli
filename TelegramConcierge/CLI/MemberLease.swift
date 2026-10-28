@@ -14,11 +14,49 @@ import Darwin
 /// switch therefore behaves exactly as today: no lease, no barrier, the old
 /// `/upgrade` path.
 enum CoordinationMode {
-    /// Evaluated once, after the profile bootstrap (it reads only XDG paths).
-    static let active: Bool = AssistantProfile.experimentalEnabled || AssistantRegistry.presence() != .absent
+    /// Evaluated on every use (an lstat): a registry created while this
+    /// process runs switches coordination on for it too (Codex stage-2 R1).
+    static var active: Bool { AssistantProfile.experimentalEnabled || AssistantRegistry.presence() != .absent }
 
     /// The registry exists (an unreadable one counts as existing: fail closed).
     static var multi: Bool { AssistantRegistry.presence() != .absent }
+}
+
+/// Exclusion against a Briglia that runs WITHOUT a member lease (Codex
+/// stage-2 R1): one started before the first registry existed, with the
+/// experimental switch off. Its instance lock is held but no assistant lease
+/// of its profile is live. First `profiles add` and the upgrade barrier
+/// refuse while one exists; the user stops (or restarts) it first.
+enum UnleasedInstances {
+    /// Is `instance.lock` in `dataRoot` held by another process? Never creates it.
+    static func instanceHeld(_ dataRoot: URL) -> Bool {
+        let path = dataRoot.appendingPathComponent("instance.lock").path
+        let fd = open(path, O_RDWR | O_CLOEXEC)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 { flock(fd, LOCK_UN); return false }
+        return errno == EWOULDBLOCK
+    }
+
+    /// The profiles (default + registered extras) running without a lease.
+    static func find(registryPaths: AssistantRegistry.Paths = .live,
+                     defaultData: URL = MachinePaths.defaultDataRoot(),
+                     defaultLeases: URL = MemberLeases.defaultDirectory(),
+                     extraData: (String) -> URL = { AssistantProfile.extraDataRoot($0) }) -> [String] {
+        var out: [String] = []
+        if instanceHeld(defaultData), MemberLeases.users(defaultLeases, assistantsOnly: true).isEmpty {
+            out.append(AssistantProfile.defaultName)
+        }
+        if let doc = (try? AssistantRegistry.read(registryPaths)) ?? nil {
+            for r in doc.records where r.name != AssistantProfile.defaultName {
+                let dir = registryPaths.root.appendingPathComponent("members/\(r.name)/\(r.generation)", isDirectory: true)
+                if instanceHeld(extraData(r.name)), MemberLeases.users(dir, assistantsOnly: true).isEmpty { out.append(r.name) }
+            }
+        }
+        return out
+    }
+
+    static let message = "A Briglia started before assistants were set up is still running without coordination. Stop it (Ctrl-C, or `briglia service uninstall` on Linux), or restart it with BRIGLIA_EXPERIMENTAL_PROFILES=1, then try again."
 }
 
 /// Identity of a process, used to validate a recorded PID before signalling

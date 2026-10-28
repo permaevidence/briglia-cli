@@ -73,6 +73,37 @@ BREAKS = [
     ("M18 owner fields written in never-multi mode", "chatgpt", T + "Services/SubscriptionSharing.swift",
      "    static var ownerTag: String? { CoordinationMode.multi ? AssistantProfile.selectedName : nil }",
      "    static var ownerTag: String? { AssistantProfile.selectedName }"),
+    # Codex stage-2 round 1 (R1–R7)
+    ('M19 no late enrollment when the registry appears after the instance lock', 'round2', T + 'CLI/MemberEntry.swift',
+     '        guard AssistantRegistry.presence() != .absent else { return }\n        enter(role: .assistant(kind: kind))',
+     '        guard AssistantRegistry.presence() != .absent else { return }\n        _ = kind'),
+    ('M20 an unleased running Briglia is not detected', 'round2', T + 'CLI/MemberLease.swift',
+     '        return errno == EWOULDBLOCK\n    }',
+     '        return false && errno == EWOULDBLOCK\n    }'),
+    ('M21 parked state admits browser/menu settings', 'upgrade', T + 'Services/ConversationManager+Persistence.swift',
+     '        guard !admissionPaused else { return false }\n        guard subscriptionLoginTask == nil,',
+     '        guard subscriptionLoginTask == nil,'),
+    ('M22 parked state admits terminal/app commands', 'upgrade', T + 'Services/ConversationManager+ControlCommands.swift',
+     '        if admissionPaused, text.hasPrefix("/"), token != "/status" {',
+     '        if false, admissionPaused, text.hasPrefix("/"), token != "/status" {'),
+    ('M23 old-image re-exec identifies the running image by its pathname (round-1 shape)', 'round2', T + 'CLI/UpgradeBarrier.swift',
+     '        if ProcessInfo.processInfo.environment[reexecGuardKey] == ',
+     '        if sha256(file: (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()) == rec.binarySHA256 { return }\n        if ProcessInfo.processInfo.environment[reexecGuardKey] == '),
+    ('M24 a removal publishes no transaction (round-1 shape)', 'round2', T + 'Services/AssistantRegistry.swift',
+     '                d.records[i].activeTx[kind.rawValue] = ActiveTx(txId: txId, phase: "reserving")',
+     '                if digest != nil { d.records[i].activeTx[kind.rawValue] = ActiveTx(txId: txId, phase: "reserving") }'),
+    ('M25 the scope change ignores a starting assistant', 'round2', T + 'Services/SubscriptionSharing.swift',
+     '                return MemberLeases.users(dir, assistantsOnly: true, except: ownLease).isEmpty ? nil',
+     '                return MemberLeases.users(dir, assistantsOnly: true, except: ownLease).isEmpty || true ? nil'),
+    ('M26 a wipe without the sharing lock drops `own`', 'round2', T + 'Services/SubscriptionSharing.swift',
+     '            clearBinding(&result, removeScope: false)\n            if AssistantProfile.isExtra, scope() == .own {',
+     '            clearBinding(&result, removeScope: true)\n            if AssistantProfile.isExtra, scope() == .own {'),
+    ('M27 a starting assistant never recovers an orphaned barrier', 'round2', T + 'CLI/MemberEntry.swift',
+     '                recoverAtStartupIfOrphaned(barrier)\n',
+     '                _ = barrier\n'),
+    ('M28 a command already inside its handler does not count as busy', 'upgrade', T + 'Services/ConversationManager+UpgradeBarrier.swift',
+     '        if browserSettingsCommandIngress > (initiating && MemberEntry.isCoordinator ? 1 : 0) { return "a command" }',
+     '        _ = initiating'),
 ]
 
 
@@ -140,7 +171,7 @@ def main():
                 print((r.stdout + r.stderr)[-3000:])
                 return 1
         for label, section, rel, old, new in BREAKS:
-            if args.only and args.only != label.split()[0]:
+            if args.only and label.split()[0] not in args.only.split(","):
                 continue
             original = mutate(tree, rel, old, new)
             try:
