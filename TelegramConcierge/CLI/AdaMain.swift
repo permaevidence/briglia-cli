@@ -604,7 +604,24 @@ struct Daemon: AsyncParsableCommand {
         abstract: "Run Briglia headless: no local chat, messaging channels (Telegram) only."
     )
 
+    @Flag(name: .customLong("all"), help: .hidden)
+    var all = false
+
     func run() async throws {
+        if all {
+            // The supervisor (MULTI_ASSISTANT_PLAN §4.3): every assistant
+            // with autostart, in this window. Hidden while experimental.
+            AdaCLI.prepareIO()
+            guard AssistantProfile.experimentalEnabled else {
+                print("✖ Several assistants on one computer are not available in this version yet.")
+                throw ExitCode(2)
+            }
+            try AssistantProfile.requireDefault("Run the supervisor without --profile: `briglia daemon --all`.")
+            let supervisor = Supervisor()
+            if case .refused(let why) = supervisor.acquire() { print("✖ \(why)"); throw ExitCode(1) }
+            supervisor.runForever()
+        }
+        SupervisedLog.redirectIfSupervised()
         AdaCLI.prepareIO()
         try IdentityMigration.gateMutatingEntry()
         IdentityMigration.warnLegacyEnvironment()
