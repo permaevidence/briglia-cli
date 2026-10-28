@@ -36,6 +36,8 @@ struct MultiAssistantSelftest: ParsableCommand {
         if h.section("chatgpt") { h.sharedLoginSection() }
         if h.section("round2") { h.stage2Round2Section() }
         if h.section("round3") { h.stage2Round3Section() }
+        if h.section("stage3") { h.stage3Section() }
+        if h.section("stage3e2e") { h.stage3ProcessSection() }
         print("\n\(h.total - h.failures)/\(h.total) multi-assistant checks passed")
         if h.failures > 0 { throw ExitCode(1) }
     }

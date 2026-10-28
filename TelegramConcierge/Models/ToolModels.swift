@@ -1234,6 +1234,29 @@ enum AvailableTools {
         )
     )
 
+    /// Multi-assistant board (MULTI_ASSISTANT_PLAN §8.5); listed only while
+    /// several assistants exist (`MultiAssistant.context() != nil`).
+    static let board = ToolDefinition(
+        function: FunctionDefinition(
+            name: "board",
+            description: "The board shared by the Briglia assistants on this computer. action='read' shows every other assistant (active or idle: task, repo, branch, folders, files it is editing) and your own claimed files; action='post' publishes a short label of what you are working on (task, up to 120 characters) so the others can avoid your area; action='clear' removes it; action='release' frees your claimed files before your turn ends (files being edited right now stay protected).",
+            parameters: FunctionParameters(
+                properties: [
+                    "action": ParameterProperty(
+                        type: "string",
+                        description: "read | post | clear | release",
+                        enumValues: ["read", "post", "clear", "release"]
+                    ),
+                    "task": ParameterProperty(
+                        type: "string",
+                        description: "For action='post': what you are working on, up to 120 characters. Other assistants see it as an untrusted label."
+                    )
+                ],
+                required: ["action"]
+            )
+        )
+    )
+
     // MARK: - macOS Shortcuts Tools
 
     static let shortcuts = ToolDefinition(
@@ -2188,7 +2211,8 @@ enum AvailableTools {
             : []
         let shortcutTools: [ToolDefinition] = shortcutsEnabled ? [shortcuts] : []
         let calendarTools: [ToolDefinition] = EmailCalendarProvider.current == .agentmail ? [manageCalendar] : []
-        return filesystemTools + textOnlyTools + [manageReminders, readChunkSummaries, generateImage, transcribeMedia, sendDocumentToChat, midTurnMessageUser] + calendarTools + shortcutTools + subagentTools + [skill]
+        let boardTools: [ToolDefinition] = MultiAssistant.context() != nil ? [board] : []
+        return filesystemTools + textOnlyTools + [manageReminders, readChunkSummaries, generateImage, transcribeMedia, sendDocumentToChat, midTurnMessageUser] + calendarTools + shortcutTools + subagentTools + [skill] + boardTools
     }
 
     /// All available tools. `includeWebSearch` toggles whether the four web tools

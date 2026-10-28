@@ -35,7 +35,9 @@ extension ConversationManager {
             || botSwitchCutoverInProgress { return "a settings change" }
         // Commands already inside the handler (terminal, app socket, Telegram);
         // the initiating /upgrade handler is itself one of them.
-        if browserSettingsCommandIngress > (initiating && MemberEntry.isCoordinator ? 1 : 0) { return "a command" }
+        // S2-12: the coordinated /upgrade runs as its own task, so no command
+        // handler belongs to it any more.
+        if browserSettingsCommandIngress > (initiating && MemberEntry.isCoordinator && upgradeCoordinatorTask == nil ? 1 : 0) { return "a command" }
         if !parkedOutbound.isEmpty || parkedOutbound.isFlushing { return "a message waiting to be sent" }
         if stalledConfirmUpdateId != nil { return "storage problems" }
         if !initiating && (browserSettingsPollIngress > 0 || browserSettingsAppIngress > 0) { return "receiving a message" }
@@ -96,7 +98,12 @@ extension ConversationManager {
                 }
                 return
             }
-            let initiating = MemberEntry.isCoordinator
+            // S2-12: the coordinating assistant keeps answering (/status,
+            // /stop, /upgrade cancel) until every other participant parked;
+            // only then does it park itself like a follower.
+            let detachedCoordinator = MemberEntry.isCoordinator && upgradeCoordinatorTask != nil
+            if detachedCoordinator, !Self.othersParked(barrier, lease: lease, paths: paths) { return }
+            let initiating = MemberEntry.isCoordinator && !detachedCoordinator
             // Before pausing, a poll tick in progress is normal (the loop is
             // always inside one): only work counts. Ingress is checked after
             // the pause, once the current tick drained.
@@ -148,6 +155,15 @@ extension ConversationManager {
             }
         default:
             break
+        }
+    }
+
+    /// Every participant other than `lease` acked `parked` for `barrier`.
+    static func othersParked(_ barrier: UpgradeBarrier.Record, lease: MemberLease, paths: UpgradeBarrier.Paths) -> Bool {
+        guard let participants = barrier.participants else { return false }
+        return participants.filter { $0.lease != lease.uuid }.allSatisfy { p in
+            let ack = UpgradeBarrier.readAck(p.lease, paths)
+            return ack?.barrierId == barrier.id && ack?.incarnation == p.incarnation && ack?.state == .parked
         }
     }
 

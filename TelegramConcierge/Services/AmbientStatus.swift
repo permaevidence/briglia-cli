@@ -68,7 +68,10 @@ enum AmbientStatus {
     /// The tail text for one request, or nil when nothing runs (or the
     /// request omits the block: research style, legacy web loop,
     /// summarizer helpers).
-    static func currentText(omit: Bool) async -> String? {
+    /// `markShown`: the text goes on the wire, so board notices it carries
+    /// count as delivered (consumed at the end of the turn); the context
+    /// snapshot (display only) leaves them pending.
+    static func currentText(omit: Bool, markShown: Bool = false) async -> String? {
         guard !omit else { return nil }
         let rows: (bash: [BashRow], subagents: [SubagentRow])
         if let override = rowsOverrideForTesting {
@@ -76,12 +79,15 @@ enum AmbientStatus {
         } else {
             rows = (await BackgroundProcessRegistry.shared.ambientRows(), await SubagentBackgroundRegistry.shared.ambientRows())
         }
-        return render(bash: rows.bash, subagents: rows.subagents)
+        return render(bash: rows.bash, subagents: rows.subagents, board: boardLinesOverrideForTesting?() ?? AssistantBoard.ambientLines(markShown: markShown))
     }
+
+    /// Selftests: replaces the board section.
+    nonisolated(unsafe) static var boardLinesOverrideForTesting: (() -> [String]?)?
 
     /// Wire text (marker-neutralized) for a request, or nil.
     static func wireText(omit: Bool) async -> String? {
-        guard let text = await currentText(omit: omit) else { return nil }
+        guard let text = await currentText(omit: omit, markShown: true) else { return nil }
         return MarkerNeutralizer.escape(text)
     }
 
@@ -140,11 +146,16 @@ enum AmbientStatus {
 
     // MARK: Rendering
 
-    static func render(bash: [BashRow], subagents: [SubagentRow]) -> String? {
-        guard !bash.isEmpty || !subagents.isEmpty else { return nil }
+    /// `board`: the multi-assistant section (A2), rebuilt for every request
+    /// and never persisted; nil or empty with one assistant or when no other
+    /// assistant is active, so the text is exactly today's.
+    static func render(bash: [BashRow], subagents: [SubagentRow], board: [String]? = nil) -> String? {
+        let boardLines = board ?? []
+        guard !bash.isEmpty || !subagents.isEmpty || !boardLines.isEmpty else { return nil }
         let now = nowOverrideForTesting ?? Date()
         let redactor = BashTools.SecretRedactor(environment: redactionEnvironmentForTesting ?? KeychainHelper.redactionEnvironment())
-        var lines = [label, dataNote]
+        var lines = [label]
+        if !bash.isEmpty || !subagents.isEmpty { lines.append(dataNote) }
         if !bash.isEmpty {
             lines.append("Running background bash:")
             let ordered = bash.sorted { ($0.startedAt, $0.id) < ($1.startedAt, $1.id) }
@@ -167,6 +178,7 @@ enum AmbientStatus {
             }
             if ordered.count > maxRowsPerSection { lines.append("- … and \(ordered.count - maxRowsPerSection) more") }
         }
+        lines += boardLines
         return lines.joined(separator: "\n")
     }
 

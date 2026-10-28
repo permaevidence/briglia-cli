@@ -1079,6 +1079,8 @@ extension ConversationManager {
         // Security (auto-update plan, Phase 0): read-only; the host check
         // runs in the background at most every 6 h, /status never waits.
         contextLine += "\n" + SecurityStatusCache.shared.statusLine()
+        // Several assistants (§10.3, §25.7): empty with one.
+        for line in multiAssistantStatusLines() { contextLine += "\n" + line }
         // BGPRUNE{ A-STATUS
         if backgroundPruneEngaged {
             contextLine += "\n" + backgroundPruneStatusLine()

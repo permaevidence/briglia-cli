@@ -27,8 +27,13 @@ enum UpgradeCoordinator {
         /// under the upgrade lock).
         var trustFloor: () -> Int? = { ReleaseTrustStore.load(domain: ReleasePolicy.effective.trustDomain).sequence }
         var installedSequence: (URL) -> Int? = { UpgradeBarrier.installedSequence(.live, executable: $0) }
+        /// The names still waited for, after every poll (for `/status`).
+        var onWaiting: ([String]) -> Void = { _ in }
+        /// The user asked to stop waiting (`/upgrade cancel`, `/stop`):
+        /// honoured only before anything is installed.
+        var cancelRequested: () -> Bool = { false }
         /// Running Briglias without a member lease (refused, R1).
-        var unleased: () -> [String] = { UnleasedInstances.find() }
+        var unleased: () -> [UnleasedInstances.Finding] = { UnleasedInstances.findings() }
     }
 
     enum Outcome: Equatable {
@@ -148,7 +153,7 @@ enum UpgradeCoordinator {
         // Every running Briglia must be a member (R1): one without a lease
         // would never park.
         let unleased = settings.unleased()
-        if !unleased.isEmpty { return .refused(UnleasedInstances.message + " (" + unleased.joined(separator: ", ") + ")") }
+        if !unleased.isEmpty { return .refused(UnleasedInstances.describe(unleased)) }
         do {
             if AssistantRegistry.exists(settings.registryPaths) {
                 try AssistantRegistry.withLock(settings.registryPaths) { doc in
@@ -238,7 +243,11 @@ enum UpgradeCoordinator {
                 let reason = (ack?.barrierId == barrier.id ? ack?.reason : nil) ?? "a job to finish"
                 busy.append("‘\(displayName(p.profile, settings.registryPaths))’ (\(reason))")
             }
+            settings.onWaiting(busy)
             if busy.isEmpty { break }
+            if settings.cancelRequested() {
+                return cancel("cancelled by the user before anything was installed")
+            }
             if Date() >= deadline {
                 return cancel("waited \(Int(settings.waitSeconds / 60)) minutes; still busy: \(busy.joined(separator: ", ")). Nothing was changed.")
             }
@@ -251,7 +260,7 @@ enum UpgradeCoordinator {
 
         // 6. Pre-publication checks with everyone parked.
         let lateUnleased = settings.unleased()
-        if !lateUnleased.isEmpty { return cancel(UnleasedInstances.message + " (" + lateUnleased.joined(separator: ", ") + ")") }
+        if !lateUnleased.isEmpty { return cancel(UnleasedInstances.describe(lateUnleased)) }
         for root in settings.checkpointRoots() {
             do { try TurnCheckpointStore.refuseReplacementWithUnfinishedEnvelope(dataRoot: root) } catch {
                 return cancel("\(error)")

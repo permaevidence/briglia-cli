@@ -89,20 +89,35 @@ enum UnleasedInstances {
         return !owned
     }
 
-    /// The profiles (default + registered extras) running without a lease.
+    /// One profile that blocks coordination: a Briglia runs without a lease,
+    /// or its instance lock cannot be examined (Codex stage-2 round-4 note:
+    /// the second case names the path and the error instead of claiming
+    /// that something runs).
+    struct Finding: Equatable {
+        enum Kind: Equatable { case unleased; case uncheckable(String) }
+        var profile: String
+        var kind: Kind
+    }
+
+    static func finding(profile: String, dataRoot: URL, leases: URL) -> Finding? {
+        if case .unknown(let why) = probe(dataRoot) { return Finding(profile: profile, kind: .uncheckable(why)) }
+        return unleased(dataRoot: dataRoot, leases: leases) ? Finding(profile: profile, kind: .unleased) : nil
+    }
+
+    /// The profiles (default + registered extras) that block coordination.
     /// A non-empty answer is re-checked once after a short pause: a holder
     /// that has just taken the flock may not have written its pid yet.
-    static func find(registryPaths: AssistantRegistry.Paths = .live,
-                     defaultData: URL = MachinePaths.defaultDataRoot(),
-                     defaultLeases: URL = MemberLeases.defaultDirectory(),
-                     extraData: (String) -> URL = { AssistantProfile.extraDataRoot($0) }) -> [String] {
-        func scan() -> [String] {
-            var out: [String] = []
-            if unleased(dataRoot: defaultData, leases: defaultLeases) { out.append(AssistantProfile.defaultName) }
+    static func findings(registryPaths: AssistantRegistry.Paths = .live,
+                         defaultData: URL = MachinePaths.defaultDataRoot(),
+                         defaultLeases: URL = MemberLeases.defaultDirectory(),
+                         extraData: (String) -> URL = { AssistantProfile.extraDataRoot($0) }) -> [Finding] {
+        func scan() -> [Finding] {
+            var out: [Finding] = []
+            if let f = finding(profile: AssistantProfile.defaultName, dataRoot: defaultData, leases: defaultLeases) { out.append(f) }
             if let doc = (try? AssistantRegistry.read(registryPaths)) ?? nil {
                 for r in doc.records where r.name != AssistantProfile.defaultName {
                     let dir = registryPaths.root.appendingPathComponent("members/\(r.name)/\(r.generation)", isDirectory: true)
-                    if unleased(dataRoot: extraData(r.name), leases: dir) { out.append(r.name) }
+                    if let f = finding(profile: r.name, dataRoot: extraData(r.name), leases: dir) { out.append(f) }
                 }
             }
             return out
@@ -111,6 +126,26 @@ enum UnleasedInstances {
         if first.isEmpty { return first }
         Thread.sleep(forTimeInterval: 0.3)
         return scan()
+    }
+
+    static func find(registryPaths: AssistantRegistry.Paths = .live,
+                     defaultData: URL = MachinePaths.defaultDataRoot(),
+                     defaultLeases: URL = MemberLeases.defaultDirectory(),
+                     extraData: (String) -> URL = { AssistantProfile.extraDataRoot($0) }) -> [String] {
+        findings(registryPaths: registryPaths, defaultData: defaultData, defaultLeases: defaultLeases, extraData: extraData).map(\.profile)
+    }
+
+    /// The refusal text for a non-empty `findings` answer.
+    static func describe(_ findings: [Finding]) -> String {
+        let running = findings.filter { $0.kind == .unleased }.map(\.profile)
+        var parts: [String] = []
+        if !running.isEmpty { parts.append(message + " (" + running.joined(separator: ", ") + ")") }
+        for f in findings {
+            if case .uncheckable(let why) = f.kind {
+                parts.append("The instance lock of ‘\(f.profile)’ could not be checked (\(why)), so Briglia cannot tell whether that assistant is running. Make the file readable and writable by you (chmod 600 on it), then try again.")
+            }
+        }
+        return parts.joined(separator: " ")
     }
 
     static let message = "A Briglia started before assistants were set up is still running without coordination. Stop it (Ctrl-C, or `briglia service uninstall` on Linux), or restart it with BRIGLIA_EXPERIMENTAL_PROFILES=1, then try again. (If no Briglia is running, its instance.lock could not be checked: make it readable by you, e.g. `chmod 600 <data folder>/instance.lock`.)"

@@ -42,9 +42,14 @@ struct Doctor: AsyncParsableCommand {
                 }
             } else { lines.append("  ✖ assistants registry damaged") }
         }
-        let unleased = UnleasedInstances.find(registryPaths: registryPaths, defaultData: paths.root.deletingLastPathComponent().deletingLastPathComponent(),
-                                              defaultLeases: paths.root.deletingLastPathComponent().appendingPathComponent("members"))
-        if !unleased.isEmpty { lines.append("  ✖ running without coordination: \(unleased.joined(separator: ", ")) — " + UnleasedInstances.message) }
+        let findings = UnleasedInstances.findings(registryPaths: registryPaths, defaultData: paths.root.deletingLastPathComponent().deletingLastPathComponent(),
+                                                  defaultLeases: paths.root.deletingLastPathComponent().appendingPathComponent("members"))
+        for f in findings {
+            switch f.kind {
+            case .unleased: lines.append("  ✖ running without coordination: \(f.profile) — " + UnleasedInstances.message)
+            case .uncheckable(let why): lines.append("  ✖ instance lock of \(f.profile) cannot be checked: \(why) — make it readable and writable by you (chmod 600)")
+            }
+        }
         return lines
     }
 
@@ -412,6 +417,15 @@ struct Doctor: AsyncParsableCommand {
             note(line)
         }
 
+        // Several assistants (§10.4): nothing printed with one.
+        let multiLines = MultiAssistantDoctor.lines()
+        if !multiLines.isEmpty {
+            print("\nAssistants")
+            for line in multiLines {
+                if line.problem { check(line.text, ok: false, hint: line.hint) } else { note(line.text) }
+            }
+        }
+
         if online {
             print("\nOnline probes")
             if !baseURL.isEmpty && !model.isEmpty {
@@ -481,5 +495,55 @@ extension Doctor {
               let entry = OpenCodeGo.catalogEntry(for: model) else { return nil }
         // Not a failure: OpenCode still serves the alias. Nudge only.
         return "model id \"\(model)\" is OpenCode's legacy alias for \(entry.label) (canonical id \"\(canonical)\"); pick the model again with /model or `briglia setup` before the alias is retired"
+    }
+}
+
+/// `briglia doctor` with several assistants (MULTI_ASSISTANT_PLAN §10.4,
+/// §25.7): registry and leases (the read-only report), shared-folder
+/// permissions, board and claims files, stale reservations, ChatGPT scope.
+enum MultiAssistantDoctor {
+    struct Line: Equatable { var problem: Bool; var text: String; var hint: String? }
+
+    static func lines(paths: MultiAssistant.Paths = .live, registryPaths: AssistantRegistry.Paths = .live,
+                      barrierPaths: UpgradeBarrier.Paths = .live, now: Date = Date()) -> [Line] {
+        guard AssistantRegistry.presence(registryPaths) != .absent else { return [] }
+        var out: [Line] = []
+        for raw in Doctor.readOnlyReport(paths: barrierPaths, registryPaths: registryPaths).dropFirst() {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            out.append(Line(problem: t.hasPrefix("✖"), text: String(t.dropFirst(2)), hint: nil))
+        }
+        func privateDir(_ url: URL, _ label: String) {
+            var st = stat()
+            guard lstat(url.path, &st) == 0 else { return }
+            let ok = (st.st_mode & S_IFMT) == S_IFDIR && (st.st_mode & 0o077) == 0 && st.st_uid == getuid()
+            out.append(Line(problem: !ok, text: "\(label) is private to you", hint: ok ? nil : "chmod 700 \(url.path)"))
+        }
+        privateDir(paths.shared, "the shared assistants folder")
+        privateDir(paths.boardDir, "the board folder")
+        privateDir(paths.claimsDir, "the file-claims folder")
+        if let names = try? FileManager.default.contentsOfDirectory(atPath: paths.claimsDir.path) {
+            for name in names.sorted() where name.hasSuffix(".json") {
+                guard let doc = FileClaims.read(paths.claimsDir.appendingPathComponent(name)) else {
+                    out.append(Line(problem: true, text: "file claims \(name) unreadable", hint: "it is ignored; remove it when that assistant is stopped"))
+                    continue
+                }
+                let old = doc.claims.filter { $0.state == FileClaims.reserved && now.timeIntervalSince($0.reservedAt) > 600 }
+                if !old.isEmpty {
+                    out.append(Line(problem: true, text: "\(doc.profile): \(old.count) file edit\(old.count == 1 ? "" : "s") reserved for more than 10 minutes (\(old.prefix(3).map { MultiAssistant.display($0.path) }.joined(separator: ", ")))",
+                                    hint: "an edit may be stuck; stopping that assistant frees its files"))
+                } else {
+                    out.append(Line(problem: false, text: "\(doc.profile): \(doc.claims.count) claimed file\(doc.claims.count == 1 ? "" : "s")", hint: nil))
+                }
+            }
+        }
+        if let scope = SubscriptionSharing.scopeStatus() {
+            out.append(Line(problem: false, text: "ChatGPT: \(scope) (store \(SubscriptionSharing.storeDirectory().path))", hint: nil))
+            if AssistantProfile.isExtra, SubscriptionSharing.scope() == .own,
+               (try? SubscriptionAuthStore().read())?.credential == nil {
+                out.append(Line(problem: true, text: "this assistant uses its own ChatGPT login, but it is not signed in",
+                                hint: "\(AssistantProfile.commandPrefix) subscription login, or `subscription scope shared`"))
+            }
+        }
+        return out
     }
 }

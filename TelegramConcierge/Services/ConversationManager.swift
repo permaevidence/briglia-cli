@@ -39,7 +39,14 @@ class ConversationManager: ObservableObject {
     var subscriptionLoginInProgress: Bool { subscriptionLoginTask != nil }
     var subscriptionLoginRunID: UUID?
     var activeRunId: UUID? {
-        didSet { isTurnActive = activeRunId != nil }
+        didSet {
+            isTurnActive = activeRunId != nil
+            // Multi-assistant claim lifetime (A2): the turn is a claim scope.
+            if oldValue != activeRunId {
+                if let old = oldValue { ClaimScopes.shared.turnEnded(old) }
+                if let new = activeRunId { ClaimScopes.shared.turnStarted(new) }
+            }
+        }
     }
     /// Published mirror of `activeRunId` so the in-app chat composer can show
     /// a stop control / working indicator while a turn runs.
@@ -1343,6 +1350,12 @@ class ConversationManager: ObservableObject {
     var upgradeMonitorTask: Task<Void, Never>?
     /// The barrier this assistant is parked for (nil = not parked).
     var upgradeParkedFor: String?
+    /// The default's coordinated `/upgrade`, running beside the poll loop
+    /// (S2-12): `/status`, `/stop` and `/upgrade cancel` keep working.
+    var upgradeCoordinatorTask: Task<Void, Never>?
+    /// The assistants the coordinator still waits for (for `/status`).
+    var upgradeWaitingFor: [String] = []
+    let upgradeCancelFlag = UpgradeCancelFlag()
     var browserSettingsPollIngress = 0
     var browserSettingsAppIngress = 0
     var browserSettingsCommandIngress = 0

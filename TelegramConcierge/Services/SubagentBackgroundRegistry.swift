@@ -519,6 +519,10 @@ actor SubagentBackgroundRegistry {
     /// cancelling (the `running` handle map is UI/lookup state and can lag
     /// the task's actual lifetime; the task map is what writes files).
     func activeRunIds() -> [String] { Array(tasks.keys) }
+    /// Every subagent run still alive (background, wake-detached and
+    /// foreground) for the multi-assistant claim lifetime (A2).
+    func liveRunIds() -> Set<String> { Set(running.keys).union(tasks.keys).union(foreground.keys) }
+
 
     func _testRegister(id: String, task: Task<Void, Never>) { tasks[id] = task }
     func _testUnregister(id: String) { tasks.removeValue(forKey: id) }

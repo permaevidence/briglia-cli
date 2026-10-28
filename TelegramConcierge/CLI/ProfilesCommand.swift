@@ -242,7 +242,8 @@ enum ProfileProvisioning {
         var generation = ""
         // A Briglia running without a member lease (started before any
         // registry, switch off) would sit outside every barrier (R1).
-        if !UnleasedInstances.find(registryPaths: registryPaths).isEmpty { throw ProvisioningError(UnleasedInstances.message) }
+        let blocking = UnleasedInstances.findings(registryPaths: registryPaths)
+        if !blocking.isEmpty { throw ProvisioningError(UnleasedInstances.describe(blocking)) }
         let registryExisted = AssistantRegistry.exists(registryPaths)
         let defaultBot = KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey)
         let defaultInbox = KeychainHelper.load(key: KeychainHelper.agentMailInboxAddressKey)
@@ -299,10 +300,10 @@ enum ProfileProvisioning {
         // before the registry existed either sees the registry and enrolls
         // (late enrollment) or is seen here. Give a racing enrollment a moment.
         let deadline = Date().addingTimeInterval(unleasedGraceSeconds)
-        while !UnleasedInstances.find(registryPaths: registryPaths).isEmpty {
+        while case let late = UnleasedInstances.findings(registryPaths: registryPaths), !late.isEmpty {
             if Date() >= deadline {
                 rollbackAdd(name: name, op: op, generation: generation, registryPaths: registryPaths, removeRegistry: !registryExisted)
-                throw ProvisioningError(UnleasedInstances.message)
+                throw ProvisioningError(UnleasedInstances.describe(late))
             }
             Thread.sleep(forTimeInterval: 0.2)
         }

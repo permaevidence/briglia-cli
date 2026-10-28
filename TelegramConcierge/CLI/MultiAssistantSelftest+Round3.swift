@@ -86,11 +86,18 @@ extension ProfileHarness {
         for (mode, label) in [(mode_t(0o400), "readable but not writable"), (mode_t(0o000), "unreadable")] {
             chmod(lockPath, mode)
             let add = run(["profiles", "add", "work", "--name", "Work", "--home", root.appendingPathComponent("g1-home").path], extraEnv: e)
+            // Readable: the probe sees the holder (unleased). Unreadable: the
+            // refusal names the lock and the error (round-4 note).
+            let expected = mode == 0 ? "could not be checked" : "without coordination"
             check("G1: an unleased owner behind a \(label) instance.lock still refuses first add (no registry)",
-                  add.status != 0 && add.out.contains("without coordination") && !FileManager.default.fileExists(atPath: reg.registry.path), add.out)
+                  add.status != 0 && add.out.contains(expected) && !FileManager.default.fileExists(atPath: reg.registry.path), add.out)
+            if mode == 0 {
+                check("G1: the uncheckable refusal names the lock path and the error",
+                      add.out.contains(lockPath) && add.out.contains("ermission denied"), add.out)
+            }
             _ = try? AssistantRegistry.withLock(reg) { doc in doc = AssistantRegistry.Document(version: 1, records: [AssistantRegistry.newRecord(name: "default", displayName: "Bree")]) }
             let up = run(["upgrade", "--yes"], extraEnv: e.merging(["BRIGLIA_TEST_UPGRADE_STAGED": root.appendingPathComponent("nonexistent").path]) { $1 })
-            check("G1: … and the upgrader (\(label))", up.status != 0 && up.out.contains("without coordination"), up.out)
+            check("G1: … and the upgrader (\(label))", up.status != 0 && up.out.contains(expected), up.out)
             try? FileManager.default.removeItem(at: reg.registry)
         }
         chmod(lockPath, 0o600)

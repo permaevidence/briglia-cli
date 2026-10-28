@@ -63,7 +63,7 @@ struct AdaCLI: AsyncParsableCommand {
                       LocalToolsSelftest.self, TestSignAdvisoryCommand.self, AdvisoryListParseCommand.self,
                       LocalToolsInventoryCommand.self, LocalToolsCheckOnceCommand.self, LocalToolsVersionCompareCommand.self,
                       RetiredIntegrationsSelftest.self, PrivateRuntimeSelftest.self,
-                      ProfilesCommand.self, ProfileInitCommand.self, ProfileInfoCommand.self, ProfileIsolationSelftest.self,
+                      ProfilesCommand.self, WorktreeCommand.self, BoardProbeCommand.self, Stage3ManagerCheckCommand.self, ProfileInitCommand.self, ProfileInfoCommand.self, ProfileIsolationSelftest.self,
                       ReleaseIdentityCommand.self, MultiAssistantSelftest.self, MindExportOfflineCommand.self, MemberProbeCommand.self, UpgradeReadinessCheckCommand.self, SharedLoginProbeCommand.self],
         defaultSubcommand: Chat.self
     )

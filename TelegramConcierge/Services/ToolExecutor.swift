@@ -434,6 +434,30 @@ actor ToolExecutor {
 
     private func executeMarked(_ call: ToolCall) async throws -> ToolResultMessage {
         try Task.checkCancellation()
+        // Multi-assistant stage 3 (claims, tripwire, board, heads-ups): nil
+        // with one assistant, so the path below is today's, byte for byte.
+        var multi: MultiAssistantHooks.Pending?
+        switch await MultiAssistantHooks.before(toolName: call.function.name, argumentsJSON: call.function.arguments) {
+        case nil: break
+        case .refuse(let message)?:
+            return ToolResultMessage(toolCallId: call.id, content: MultiAssistantHooks.refusalContent(message))
+        case .proceed(let pending)?: multi = pending
+        }
+        guard let multi else { return try await executeMarkedBody(call) }
+        var result: ToolResultMessage
+        do {
+            result = try await executeMarkedBody(call)
+        } catch {
+            _ = await MultiAssistantHooks.after(toolName: call.function.name, argumentsJSON: call.function.arguments,
+                                                resultContent: "{\"error\": \"cancelled\"}", pending: multi)
+            throw error
+        }
+        result.content += await MultiAssistantHooks.after(toolName: call.function.name, argumentsJSON: call.function.arguments,
+                                                          resultContent: result.content, pending: multi)
+        return result
+    }
+
+    private func executeMarkedBody(_ call: ToolCall) async throws -> ToolResultMessage {
         return try await withTelemetry(call) {
             // Git safety net: the first edit in a repo snapshots the working
             // tree BEFORE the edit lands (git stash create — a dangling
@@ -623,6 +647,8 @@ actor ToolExecutor {
             return await executeBashManage(call)
         case "todo_write":
             content = await executeTodoWrite(call)
+        case "board":
+            content = MultiAssistantHooks.executeBoardTool(argumentsJSON: call.function.arguments)
         case "subagent_manage":
             content = await executeSubagentManage(call)
         case "lsp":

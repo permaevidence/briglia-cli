@@ -226,6 +226,8 @@ enum ProfileLifecycle {
             doc = d
         }
         MemberLeases.sweep(leaseDir)
+        // Stage 3: its board entry, file claims and notices (§11).
+        AssistantBoard.removeFiles(profile: name, paths: MultiAssistant.Paths(shared: paths.root))
         // rmdir, never a recursive removal: a directory that still holds a
         // late starter's lease (or another generation) is kept.
         rmdir(leaseDir.path)

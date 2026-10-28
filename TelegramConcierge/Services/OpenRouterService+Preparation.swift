@@ -155,6 +155,12 @@ extension OpenRouterService {
             **MCP servers** — registered in \(MCPRegistry.configFileURL.path) with the shape {"mcpServers": {"<name>": {"command": "npx", "args": ["..."], "env": {}}}}. You may edit this file yourself when the user asks to add or remove a server. Config loads at startup: after editing, have the user send /restart (works from Telegram and the terminal) to apply it. The Browse subagent is available only while a "playwright" server is registered; it is auto-registered on fresh installs.
             """
 
+            // Multi-assistant stage 3: only together with the board tool
+            // (several assistants on this computer); absent otherwise.
+            if tools?.contains(where: { $0.function.name == "board" }) == true {
+                prompt += MultiAssistantHooks.promptSection
+            }
+
             // Skills index — compact list of installed curated skills.
             // Only shown when the agent actually has the `skill` tool;
             // otherwise it's advertising a capability the agent can't invoke.

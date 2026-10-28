@@ -604,6 +604,12 @@ extension ConversationManager {
         RenderedPDFPageCache.shared.removeAll()
         ModelImageCache.shared.removeAll()
         CacheDiagnostics.reset()
+        // Several assistants (§11): this assistant's own board entry, file
+        // claims and notices (idle: no edit is reserved). Nothing with one.
+        if MultiAssistant.context() != nil || AssistantRegistry.presence() != .absent {
+            AssistantBoard.removeFiles(profile: AssistantProfile.selectedName)
+            BoardWriter.shared.reset()
+        }
 
         // Quiescence passed: an explicit wipe also discards unpublished
         // recovery held in memory, so no later retry can resurrect old work.
