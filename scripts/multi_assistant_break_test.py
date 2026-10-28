@@ -234,6 +234,14 @@ BREAKS = [
     ('M74 liveness ignores a process-tree termination still in progress (S3-R4-1)', 'stage3', T + 'Services/BashTools.swift',
      '        Set(entries.values.filter { !$0.lifecycleSettled || $0.terminationsInFlight > 0 }.map(\\.id))',
      '        Set(entries.values.filter { !$0.lifecycleSettled }.map(\\.id))'),
+    # Codex stage-3 round 5.
+    ('M75 retention prunes an entry whose termination is still in flight (S3-R5-1)', 'stage3', T + 'Services/BashTools.swift',
+     '            guard e.terminationsInFlight == 0 else { return false }\n', ''),
+    ('M76 removeEntry retires an entry whose termination is still in flight (S3-R5-1)', 'stage3', T + 'Services/BashTools.swift',
+     '        if e.terminationsInFlight > 0 { e.retireWhenTerminated = true; return }\n', ''),
+    ('M77 the wipe drops entries without joining terminations in flight (S3-R5-1)', 'stage3', T + 'Services/BashTools.swift',
+     '        while entries.values.contains(where: { $0.terminationsInFlight > 0 }), Date() < joinDeadline {',
+     '        while false, Date() < joinDeadline {'),
 ]
 
 

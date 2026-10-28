@@ -1341,6 +1341,10 @@ actor BackgroundProcessRegistry {
         /// The root may exit and the readers drain — `lifecycleSettled` —
         /// while a same-group child still runs inside the SIGTERM grace.
         var terminationsInFlight = 0
+        /// `removeEntry` asked to retire this entry while a termination was
+        /// in flight (S3-R5-1); `endTermination` retires it once the last
+        /// one returns.
+        var retireWhenTerminated = false
         /// When the settle sequence finished — the clock the retention
         /// policy (BASH_V2_PLAN §13) prunes against. nil while running.
         var settledAt: Date?
@@ -1562,6 +1566,11 @@ actor BackgroundProcessRegistry {
 
         func prunable(_ e: Entry) -> Bool {
             guard e.lifecycleSettled, e.status != .running else { return false }
+            // Codex stage-3 S3-R5-1: an entry whose process-tree termination
+            // is still running is live (`unsettledEntryIds`); retiring it
+            // would drop that obligation, because liveness only scans
+            // retained entries.
+            guard e.terminationsInFlight == 0 else { return false }
             guard e.waiter == nil else { return false }
             if let ws = watches[e.id], !ws.isEmpty { return false }
             if pendingMatchEvents.contains(where: { $0.handle == e.id }) { return false }
@@ -1888,7 +1897,7 @@ actor BackgroundProcessRegistry {
         e.terminationCause = cause
         e.terminationsInFlight += 1
         await ProcessTree.terminate(e.process, graceNanos: 200_000_000)
-        e.terminationsInFlight -= 1
+        endTermination(e)
     }
 
     /// Handle-based stop for the attached initial-wait cancellation path.
@@ -1902,9 +1911,20 @@ actor BackgroundProcessRegistry {
     /// else can still need them; a late markTerminated for a removed id is
     /// a harmless no-op.
     func removeEntry(uuid: UUID) {
-        if let key = entries.first(where: { $0.value.jobUUID == uuid })?.key {
-            entries.removeValue(forKey: key)
-        }
+        guard let (key, e) = entries.first(where: { $0.value.jobUUID == uuid }) else { return }
+        // S3-R5-1: never retire an entry while a termination of it is still
+        // running (e.g. /stop's sweep racing the attached caller): it stays
+        // live until `endTermination` retires it.
+        if e.terminationsInFlight > 0 { e.retireWhenTerminated = true; return }
+        entries.removeValue(forKey: key)
+    }
+
+    /// Pair of every `terminationsInFlight += 1`: decrement and, when the
+    /// last termination returned, honour a deferred `removeEntry`.
+    private func endTermination(_ e: Entry) {
+        e.terminationsInFlight -= 1
+        guard e.terminationsInFlight == 0, e.retireWhenTerminated else { return }
+        if let key = entries.first(where: { $0.value === e })?.key { entries.removeValue(forKey: key) }
     }
 
     // MARK: Inspect / mutate
@@ -1927,6 +1947,8 @@ actor BackgroundProcessRegistry {
 
     /// Selftests: whether the exit monitor settled this job's lifecycle.
     func lifecycleSettledForTesting(handleId: String) -> Bool { entries[handleId]?.lifecycleSettled ?? true }
+    /// Selftests: whether the registry still retains this entry.
+    func hasEntryForTesting(handleId: String) -> Bool { entries[handleId] != nil }
 
     func runningBackgroundJobCount() -> Int {
         entries.values.filter { $0.kind == .background && $0.status == .running }.count
@@ -2082,7 +2104,7 @@ actor BackgroundProcessRegistry {
         e.terminationCause = .userKill
         e.terminationsInFlight += 1
         await ProcessTree.terminate(e.process, graceNanos: 300_000_000)
-        e.terminationsInFlight -= 1
+        endTermination(e)
         return true
     }
 
@@ -2513,7 +2535,7 @@ actor BackgroundProcessRegistry {
         }
         for e in running {
             await ProcessTree.terminate(e.process, graceNanos: 300_000_000)
-            e.terminationsInFlight -= 1
+            endTermination(e)
         }
         return stopped
     }
@@ -2712,7 +2734,7 @@ actor BackgroundProcessRegistry {
         e.terminationsInFlight += 1
         try? e.stdin.close()
         await ProcessTree.terminate(e.process, graceNanos: 300_000_000)
-        e.terminationsInFlight -= 1
+        endTermination(e)
     }
 
     /// Withdraw the pending completion notices named by `receipts`. Called
@@ -2748,7 +2770,7 @@ actor BackgroundProcessRegistry {
             e.terminationsInFlight += 1
             try? e.stdin.close()
             await ProcessTree.terminate(e.process, graceNanos: 300_000_000)
-            e.terminationsInFlight -= 1
+            endTermination(e)
         }
     }
 
@@ -2776,7 +2798,7 @@ actor BackgroundProcessRegistry {
             if t.entry.process.isRunning { _ = Darwin.kill(t.entry.process.processIdentifier, SIGKILL) }
             for g in t.groups where Darwin.kill(-g, 0) == 0 { _ = Darwin.kill(-g, SIGKILL) }
             for pid in t.descendants where Darwin.kill(pid, 0) == 0 { _ = Darwin.kill(pid, SIGKILL) }
-            t.entry.terminationsInFlight -= 1
+            endTermination(t.entry)
         }
     }
 
@@ -2792,6 +2814,13 @@ actor BackgroundProcessRegistry {
     func purgeAllForWipe() async -> Int {
         let runningCount = entries.values.filter { $0.status == .running }.count
         await terminateAll()
+        // S3-R5-1: a termination started elsewhere (kill, /stop, deadline)
+        // may still be inside its grace; let it finish its SIGKILL sweep
+        // before the entries go (bounded: graces are ≤ 300 ms).
+        let joinDeadline = Date().addingTimeInterval(5)
+        while entries.values.contains(where: { $0.terminationsInFlight > 0 }), Date() < joinDeadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
         for e in entries.values {
             e.executionDeadlineTask?.cancel()
             e.executionDeadlineTask = nil
