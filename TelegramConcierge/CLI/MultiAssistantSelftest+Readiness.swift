@@ -48,7 +48,7 @@ struct UpgradeReadinessCheckCommand: AsyncParsableCommand {
         check("readiness: a background subagent keeps the assistant busy", withAgent == "a background agent", withAgent ?? "nil")
         agent.cancel()
         await SubagentBackgroundRegistry.shared._testUnregister(id: agentId)
-        let pollingPref = Prefs.store.object(forKey: m.shouldResumePollingDefaultsKey) as? Bool
+        Prefs.store.set(true, forKey: m.shouldResumePollingDefaultsKey)
         await m.upgradeMonitorTick(lease: lease)
         let parkedAck = UpgradeBarrier.readAck(lease.uuid, paths)
         check("monitor: ready → pauses admission and acks parked", parkedAck?.state == .parked && m.admissionPaused,
@@ -61,7 +61,7 @@ struct UpgradeReadinessCheckCommand: AsyncParsableCommand {
         await m.upgradeMonitorTick(lease: lease)
         check("monitor: cancelled → admission resumes", !m.admissionPaused && m.upgradeParkedFor == nil)
         check("pause: parking never touches the polling preference (not stopPolling)",
-              (Prefs.store.object(forKey: m.shouldResumePollingDefaultsKey) as? Bool) == pollingPref)
+              Prefs.store.object(forKey: m.shouldResumePollingDefaultsKey) as? Bool == true)
         var stuck = barrier; stuck.state = .stuck; stuck.id = "rd-2"
         try? UpgradeBarrier.writeBarrier(stuck, paths)
         await m.upgradeMonitorTick(lease: lease)

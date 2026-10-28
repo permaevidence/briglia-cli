@@ -99,6 +99,7 @@ extension ProfileHarness {
         try? writeDefaultSecrets(["llm_provider": "openai_compatible", "openai_compatible_base_url": "http://127.0.0.1:9/v1",
                                   "openai_compatible_model": "mock-model", "openai_compatible_api_key": "k",
                                   "assistant_name": "Bree", "user_name": "Test"])
+        ensureExtra("work", display: "Work")      // the busy participant below (independent of other sections)
         let add = run(["profiles", "add", "up", "--name", "Up", "--home", root.appendingPathComponent("home-up").path, "--copy-keys"])
         guard add.status == 0 else { check("upgrade: extra with copied keys", false, add.out); return }
         // Trust rule (pure, §5.1).
@@ -131,6 +132,12 @@ extension ProfileHarness {
             busy.kill()
         }
         check("barrier: after a cancel both daemons keep running", d0.running && d1.running)
+        // …and keep polling: a cancelled barrier resumed admission, it did
+        // not stop the poll loop (never stopPolling, §6.4).
+        let ticksBefore = d0.output.components(separatedBy: "Listening...").count
+        Thread.sleep(forTimeInterval: 3.5)
+        check("barrier: after a cancel the daemon's poll loop still runs (admission resumed, not stopped)",
+              d0.output.components(separatedBy: "Listening...").count > ticksBefore && !d0.output.contains("· Stopped"))
         // A session that does not close itself (not long-lived) is waited
         // for: the barrier never publishes past it (§6.1, §6.3 step 5).
         if let sess = startChild(["__member-probe", "--hold", "60"]), sess.waitFor(10, { $0.contains("\"uuid\"") }) {
@@ -205,6 +212,10 @@ extension ProfileHarness {
             let before = installedMarker(fx)
             let k = runFrom(fx, ["upgrade", "--yes"], extra: ["BRIGLIA_UPGRADE_KILL": point])
             guard k.status == 91 else { check("kill \(point): coordinator died there", false, k.out); continue }
+            if point != "prepared", rollBack.contains(point), case .value(let j) = UpgradeBarrier.journal(barrierPaths) {
+                check("kill \(point): the old binary's backup is retained until commit",
+                      FileManager.default.fileExists(atPath: j.backupBinary))
+            }
             // The install's binary may be moved aside: probe and recover
             // with the harness binary (same code, same scratch records).
             let refused = run(["__member-probe"])

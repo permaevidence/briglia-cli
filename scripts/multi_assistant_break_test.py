@@ -118,6 +118,7 @@ def main():
     ap.add_argument("--keep-build")
     ap.add_argument("--only")
     ap.add_argument("--skip-control", action="store_true")
+    ap.add_argument("--verbose", action="store_true", help="print the selftest output of a break that was not caught")
     args = ap.parse_args()
     work = Path(tempfile.mkdtemp(prefix="briglia-mbreak-"))
     tree = work / "tree"
@@ -151,6 +152,8 @@ def main():
                       + (f" ({failed[0][2:90]}…)" if caught and failed else ""), flush=True)
                 failures += 0 if caught else 1
                 executed += 1
+                if not caught and args.verbose:
+                    print((r.stdout + r.stderr)[-6000:])
             finally:
                 (tree / rel).write_text(original)
     finally:
