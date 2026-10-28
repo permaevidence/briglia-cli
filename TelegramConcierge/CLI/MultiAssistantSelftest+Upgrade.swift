@@ -199,6 +199,7 @@ extension ProfileHarness {
         d0.kill(SIGTERM); d1.kill(SIGTERM)
 
         upgradeKillPoints(fx)
+        upgradeRecoveryOwnerDies(fx)
         upgradeStuckAndConcurrentRecovery(fx)
         // The scratch install's records must not follow later sections: its
         // installed.json names a test sequence the harness binary never has.
@@ -239,6 +240,22 @@ extension ProfileHarness {
             }
             check("kill \(point): afterwards Briglia runs normally", runFrom(fx, ["__member-probe"]).status == 0)
         }
+    }
+
+    /// A recovery owner that itself dies halfway (old binary back, old
+    /// bundle not yet): the next recovery finishes from the same row.
+    private func upgradeRecoveryOwnerDies(_ fx: UpgradeFixture) {
+        setStagedSequence(fx.staged, 170)
+        let before = installedMarker(fx)
+        let k = runFrom(fx, ["upgrade", "--yes"], extra: ["BRIGLIA_UPGRADE_KILL": "moved-bundle-in"])
+        guard k.status == 91 else { check("recovery owner dies: setup", false, k.out); return }
+        let first = run(["upgrade", "--recover"], extraEnv: ["BRIGLIA_UPGRADE_KILL": "recovery-binary-restored"])
+        check("recovery owner dies: the first recovery died halfway, the barrier is still open",
+              first.status == 91 && UpgradeBarrier.current(barrierPaths)?.state == .open, first.out)
+        let second = run(["upgrade", "--recover"])
+        check("recovery owner dies: the next recovery finishes the rollback (old pair verified, cancelled)",
+              second.status == 0 && UpgradeBarrier.current(barrierPaths)?.state == .cancelled && installedMarker(fx) == before
+              && FileManager.default.fileExists(atPath: fx.exe.path), second.out)
     }
 
     private func upgradeStuckAndConcurrentRecovery(_ fx: UpgradeFixture) {

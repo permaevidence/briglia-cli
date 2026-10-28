@@ -158,6 +158,7 @@ enum UpgradeJournal {
             try? fm.removeItem(at: exe)
             guard (try? fm.moveItem(at: backupBin, to: exe)) != nil else { return false }
         }
+        killPoint("recovery-binary-restored")
         if j.bundleExisted, fm.fileExists(atPath: backupBundle.path) {
             try? fm.removeItem(at: bundle)
             guard (try? fm.moveItem(at: backupBundle, to: bundle)) != nil else { return false }
