@@ -25,7 +25,10 @@ extension ProfileHarness {
         try? fm.createDirectory(at: install, withIntermediateDirectories: true)
         try? fm.createDirectory(at: staged, withIntermediateDirectories: true)
         let realExe = UpgradeService.executableURL
-        let realBundle = realExe.deletingLastPathComponent().appendingPathComponent(BundleCheck.bundleName)
+        // The resource bundle this binary really uses (next to it, or the
+        // build directory's when it runs through a hard link elsewhere).
+        let besideExe = realExe.deletingLastPathComponent().appendingPathComponent(BundleCheck.bundleName)
+        let realBundle = FileManager.default.fileExists(atPath: besideExe.path) ? besideExe : Bundle.module.bundleURL
         let exe = install.appendingPathComponent(Self.exeName)
         let bundle = install.appendingPathComponent(BundleCheck.bundleName)
         guard link(realExe.path, exe.path) == 0 || (try? fm.copyItem(at: realExe, to: exe)) != nil,
