@@ -148,7 +148,7 @@ BREAKS = [
     ('M42 a closed scope does not release claims (A2)', 'stage3', T + 'Services/FileClaims.swift',
      '                if c.state == held, c.scopes.contains(scope) {', '                if false, c.scopes.contains(scope) {'),
     ('M43 turn end releases claims while its jobs still run (A2)', 'stage3', T + 'Services/FileClaims.swift',
-     '            if jobs.isEmpty {\n                self.close(scope, ctx)', '            if true {\n                self.close(scope, ctx)'),
+     '            if jobs.isEmpty, let ctx = MultiAssistant.context() {\n                self.close(scope, ctx)', '            if let ctx = MultiAssistant.context() {\n                self.close(scope, ctx)'),
     ('M44 a failed edit keeps its new reservation as held', 'stage3', T + 'Services/FileClaims.swift',
      '                } else if c.wasHeld == true {', '                } else {'),
     ('M45 another assistant\'s own state is editable (§7.4)', 'stage3', T + 'Services/FileClaims.swift',

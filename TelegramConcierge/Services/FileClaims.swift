@@ -277,13 +277,16 @@ final class ClaimScopes: @unchecked Sendable {
         let wasCurrent = currentTurn == scope
         if wasCurrent { currentTurn = nil }
         lock.unlock()
-        guard wasCurrent, let ctx = MultiAssistant.context() else { return }
-        BoardNotices.consumeShown(ctx)
+        // One assistant (no registry): nothing was ever claimed.
+        guard wasCurrent, MultiAssistant.contextOverrideForTesting != nil || AssistantRegistry.presence() != .absent else { return }
+        if let ctx = MultiAssistant.context() { BoardNotices.consumeShown(ctx) }
         Task.detached { [self] in
             let jobs = await Self.liveJobs()
-            if jobs.isEmpty {
+            if jobs.isEmpty, let ctx = MultiAssistant.context() {
                 self.close(scope, ctx)
             } else {
+                // Jobs still run, or the context is momentarily unavailable
+                // (registry being rewritten): the ticker closes it later.
                 self.lock.lock(); self.pending[scope] = jobs; self.lock.unlock()
                 self.startTicker()
             }
@@ -335,9 +338,11 @@ final class ClaimScopes: @unchecked Sendable {
         if let ctx = MultiAssistant.context() {
             for scope in ready { close(scope, ctx) }
             Tripwire.shared.settleFinished(ctx, alive: alive)
-        } else {
+        } else if AssistantRegistry.presence() == .absent && MultiAssistant.contextOverrideForTesting == nil {
+            // The registry is gone (last extra removed): nothing to release.
             lock.lock(); for scope in ready { pending.removeValue(forKey: scope) }; lock.unlock()
         }
+        // Otherwise keep them pending until the context is readable again.
     }
 
     func resetForTesting() {
