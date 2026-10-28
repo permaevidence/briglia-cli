@@ -14,6 +14,7 @@ extension ProfileHarness {
             _ = run(["profiles", "remove", name, "--yes", "--no-export"])
         }
         f1AnotherStartersLeaseDoesNotCertifyTheOwner()
+        g1UnprobeableInstanceLockFailsClosed()
         f2TerminalPruneRefusedWhileParked()
         f4ProvisionalAddIsNeverAdmitted()
     }
@@ -67,6 +68,40 @@ extension ProfileHarness {
               c.waitFor(30, { $0.contains("daemon running") }) else { check("F1: control daemon", false); return }
         let none = UnleasedInstances.find(registryPaths: reg, defaultData: dataRoot, defaultLeases: members)
         check("F1: control — an owner holding its own assistant lease is coordinated", none.isEmpty, "\(none)")
+        c.kill(SIGTERM)
+    }
+
+    /// G1 (Codex round 3): an instance lock that cannot be probed (not
+    /// writable, or not readable) never counts as "nobody runs".
+    private func g1UnprobeableInstanceLockFailsClosed() {
+        let e = roots3("g1")
+        let data = e["XDG_DATA_HOME"]!
+        let dataRoot = URL(fileURLWithPath: data + "/briglia", isDirectory: true)
+        let lockPath = data + "/briglia/instance.lock"
+        let members = URL(fileURLWithPath: data + "/briglia/machine/members", isDirectory: true)
+        let reg = AssistantRegistry.Paths(root: URL(fileURLWithPath: data + "/" + AssistantProfile.sharedDirName, isDirectory: true))
+        guard let a = startChild(["daemon"], extraEnv: e.merging([AssistantProfile.experimentalKey: ""]) { $1 }),
+              a.waitFor(30, { $0.contains("daemon running") }) else { check("G1: inactive daemon A starts", false); return }
+        defer { chmod(lockPath, 0o600); a.kill(SIGTERM) }
+        for (mode, label) in [(mode_t(0o400), "readable but not writable"), (mode_t(0o000), "unreadable")] {
+            chmod(lockPath, mode)
+            let add = run(["profiles", "add", "work", "--name", "Work", "--home", root.appendingPathComponent("g1-home").path], extraEnv: e)
+            check("G1: an unleased owner behind a \(label) instance.lock still refuses first add (no registry)",
+                  add.status != 0 && add.out.contains("without coordination") && !FileManager.default.fileExists(atPath: reg.registry.path), add.out)
+            _ = try? AssistantRegistry.withLock(reg) { doc in doc = AssistantRegistry.Document(version: 1, records: [AssistantRegistry.newRecord(name: "default", displayName: "Bree")]) }
+            let up = run(["upgrade", "--yes"], extraEnv: e.merging(["BRIGLIA_TEST_UPGRADE_STAGED": root.appendingPathComponent("nonexistent").path]) { $1 })
+            check("G1: … and the upgrader (\(label))", up.status != 0 && up.out.contains("without coordination"), up.out)
+            try? FileManager.default.removeItem(at: reg.registry)
+        }
+        chmod(lockPath, 0o600)
+        a.kill(SIGTERM)
+        // Control: a leased owner behind a read-only lock is still recognised.
+        guard let c = startChild(["daemon"], extraEnv: e.merging([AssistantProfile.experimentalKey: "1"]) { $1 }),
+              c.waitFor(30, { $0.contains("daemon running") }) else { check("G1: control daemon", false); return }
+        chmod(lockPath, 0o400)
+        let none = UnleasedInstances.find(registryPaths: reg, defaultData: dataRoot, defaultLeases: members)
+        check("G1: control — a leased owner behind a read-only instance.lock is coordinated", none.isEmpty, "\(none)")
+        chmod(lockPath, 0o600)
         c.kill(SIGTERM)
     }
 

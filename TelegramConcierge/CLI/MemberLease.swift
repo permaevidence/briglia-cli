@@ -28,15 +28,33 @@ enum CoordinationMode {
 /// of its profile is live. First `profiles add` and the upgrade barrier
 /// refuse while one exists; the user stops (or restarts) it first.
 enum UnleasedInstances {
-    /// Is `instance.lock` in `dataRoot` held by another process? Never creates it.
-    static func instanceHeld(_ dataRoot: URL) -> Bool {
-        let path = dataRoot.appendingPathComponent("instance.lock").path
-        let fd = open(path, O_RDWR | O_CLOEXEC)
-        guard fd >= 0 else { return false }
-        defer { close(fd) }
-        if flock(fd, LOCK_EX | LOCK_NB) == 0 { flock(fd, LOCK_UN); return false }
-        return errno == EWOULDBLOCK
+    enum LockProbe: Equatable {
+        /// No lock file, or our non-blocking exclusive probe succeeded.
+        case free
+        /// Another process holds it.
+        case held
+        /// It exists but cannot be examined (open or flock error): never
+        /// treated as "nobody runs" (Codex stage-2 G1).
+        case unknown(String)
     }
+
+    /// Probe `instance.lock` in `dataRoot` without creating it. Opened
+    /// read-only (flock does not need write access); only ENOENT means absent.
+    static func probe(_ dataRoot: URL) -> LockProbe {
+        let path = dataRoot.appendingPathComponent("instance.lock").path
+        let fd = open(path, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else {
+            let err = errno
+            return err == ENOENT ? .free : .unknown("\(path): \(String(cString: strerror(err)))")
+        }
+        defer { close(fd) }
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 { flock(fd, LOCK_UN); return .free }
+        let err = errno
+        return err == EWOULDBLOCK ? .held : .unknown("\(path): \(String(cString: strerror(err)))")
+    }
+
+    /// Held by another process, or impossible to examine (fail closed).
+    static func instanceHeld(_ dataRoot: URL) -> Bool { probe(dataRoot) != .free }
 
     /// The pid the current holder wrote into `instance.lock` (InstanceLease
     /// writes it right after taking the flock). nil when unreadable.
@@ -58,7 +76,11 @@ enum UnleasedInstances {
     /// starter still before its instance lock) never certifies the owner.
     /// An unreadable holder pid or a lease without a sidecar fails closed.
     static func unleased(dataRoot: URL, leases: URL) -> Bool {
-        guard instanceHeld(dataRoot) else { return false }
+        switch probe(dataRoot) {
+        case .free: return false
+        case .unknown: return true
+        case .held: break
+        }
         guard let pid = holderPid(dataRoot), let start = ProcessIdentity.startTime(pid) else { return true }
         let owned = MemberLeases.users(leases, assistantsOnly: true).contains { e in
             guard e.probe == .live, let s = e.sidecar, s.role == "assistant" else { return false }
@@ -91,7 +113,7 @@ enum UnleasedInstances {
         return scan()
     }
 
-    static let message = "A Briglia started before assistants were set up is still running without coordination. Stop it (Ctrl-C, or `briglia service uninstall` on Linux), or restart it with BRIGLIA_EXPERIMENTAL_PROFILES=1, then try again."
+    static let message = "A Briglia started before assistants were set up is still running without coordination. Stop it (Ctrl-C, or `briglia service uninstall` on Linux), or restart it with BRIGLIA_EXPERIMENTAL_PROFILES=1, then try again. (If no Briglia is running, its instance.lock could not be checked: make it readable by you, e.g. `chmod 600 <data folder>/instance.lock`.)"
 }
 
 /// Identity of a process, used to validate a recorded PID before signalling

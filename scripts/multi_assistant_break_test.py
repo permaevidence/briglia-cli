@@ -134,6 +134,12 @@ BREAKS = [
     ('M37 a dead provisional record blocks the upgrader forever (F4)', 'round3', T + 'CLI/UpgradeCoordinator.swift',
      '                           ProfileFileLock.probe(settings.registryPaths.txLease(op)) == .dead { continue }',
      '                           ProfileFileLock.probe(settings.registryPaths.txLease(op)) == .dead, false { continue }'),
+    # Codex stage-2 round 3, G1.
+    ('M38 an instance.lock that cannot be opened counts as nobody running (G1)', 'round3', T + 'CLI/MemberLease.swift',
+     '            return err == ENOENT ? .free : .unknown(', '            return err != -1 ? .free : .unknown('),
+    ('M39 the probe needs write access to instance.lock (G1)', 'round3', T + 'CLI/MemberLease.swift',
+     '        let fd = open(path, O_RDONLY | O_CLOEXEC)\n        guard fd >= 0 else {\n            let err = errno',
+     '        let fd = open(path, O_RDWR | O_CLOEXEC)\n        guard fd >= 0 else {\n            let err = errno'),
 ]
 
 
