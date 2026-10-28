@@ -1,5 +1,10 @@
 import ArgumentParser
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
 
 /// Hidden child of `__multi-assistant-selftest` (an assistant member in the
 /// harness's scratch roots, with at least one extra registered): the
@@ -84,6 +89,54 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         UpgradeService.checkOverrideForTesting = nil
         check("S3-7: a terminal/app /upgrade gets the acknowledgement and the delayed result in its reply",
               local.contains("Checking for an update") && local.contains("Already up to date (9.9.9-test)") && m.upgradeCoordinatorTask == nil, local)
+        await successfulUpgradeDeliversBeforeRestart(m, lease: lease, check: check)
         print("STAGE3_DONE")
+    }
+
+    /// Codex stage-3 S3-R2-4: a terminal/app /upgrade whose coordinated
+    /// update commits must hand its captured reply to the client BEFORE the
+    /// non-returning restart. Synthetic check/staging/barrier; the restart
+    /// is intercepted (the process then exits 0, so this runs last and
+    /// prints STAGE3_DONE from inside the intercept).
+    @MainActor private func successfulUpgradeDeliversBeforeRestart(_ m: ConversationManager, lease: MemberLease,
+                                                                  check: @escaping (String, Bool, String) -> Void) async {
+        var fds: [Int32] = [0, 0]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else { check("S3-R2-4: socket pair", false, "\(errno)"); return }
+        let client = ClientHandle(id: 9_001, fd: fds[0])
+        final class Seen { var lines: [String]? }
+        let seen = Seen()
+        UpgradeService.checkOverrideForTesting = {
+            .available(UpgradeService.Update(version: "9.9.10", sequence: 999, url: "https://invalid.example/briglia.tar.gz", sha256: "00", size: 1))
+        }
+        UpgradeService.stageOverrideForTesting = { u in
+            StagedUpgrade(version: u.version, sequence: u.sequence, binary: URL(fileURLWithPath: "/nonexistent/briglia"),
+                          bundle: URL(fileURLWithPath: "/nonexistent/bundle"), tempDirectory: nil)
+        }
+        UpgradeCoordinator.runOverrideForTesting = { staged, afterCommit in
+            let record = UpgradeBarrier.Record(id: "s3r24", state: .committed, targetVersion: staged.version, targetSequence: staged.sequence,
+                                               openedAt: Date(), coordinator: .init(lease: lease.uuid, pid: getpid(), processStartTime: ProcessIdentity.selfStartTime),
+                                               participants: nil, committedBinarySHA256: nil, reason: nil)
+            await afterCommit(record)
+            return .committed(version: staged.version, barrierId: record.id)
+        }
+        UpgradeService.restartInterceptForTesting = {
+            let terminal = (seen.lines ?? []).joined(separator: "\n")
+            check("S3-R2-4: a terminal /upgrade whose update commits gets its whole reply (acknowledgement through \"installed — restarting now\") before the restart",
+                  seen.lines != nil && terminal.contains("Checking for an update") && terminal.contains("9.9.10 installed — restarting now"), terminal)
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            _ = fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) | O_NONBLOCK)
+            let n = read(fds[1], &buffer, buffer.count)
+            let wire = n > 0 ? String(decoding: buffer[0..<n], as: UTF8.self) : ""
+            check("S3-R2-4: the app socket's command_result is written before the restart",
+                  wire.contains("\"command_result\"") && wire.contains("restarting now"), wire.isEmpty ? "nothing on the socket" : String(wire.prefix(300)))
+            print("STAGE3_DONE")
+        }
+        await m.handleTerminalCommand("/upgrade", deliver: { lines in
+            seen.lines = lines
+            client.send(["type": "command_result", "handled": lines != nil, "lines": lines ?? []])
+        }, drainBeforeExit: { client.waitForPendingWrites(timeout: 2) })
+        // Only reached when the restart did not happen.
+        UpgradeService.restartInterceptForTesting = nil
+        check("S3-R2-4: the committed update reached the restart", false, (seen.lines ?? []).joined(separator: " | "))
     }
 }

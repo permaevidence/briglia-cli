@@ -669,6 +669,10 @@ final class AppChatSocketServer {
                     ]
                     if let ref { event["ref"] = ref }
                     client.send(event)
+                } drainBeforeExit: {
+                    // A coordinated /upgrade restarts in place: the queued
+                    // result must reach the socket before the exec (S3-R2-4).
+                    client.waitForPendingWrites(timeout: 2)
                 }
             }
 
@@ -695,6 +699,14 @@ final class ClientHandle: @unchecked Sendable {
         self.id = id
         self.fd = fd
         self.writeQueue = DispatchQueue(label: "com.permaevidence.briglia.app-chat.write.\(id)")
+    }
+
+    /// Blocks until every event queued so far has been written (or failed),
+    /// at most `timeout` seconds.
+    func waitForPendingWrites(timeout: Double) {
+        let done = DispatchSemaphore(value: 0)
+        writeQueue.async { done.signal() }
+        _ = done.wait(timeout: .now() + timeout)
     }
 
     func send(_ event: [String: Any]) {

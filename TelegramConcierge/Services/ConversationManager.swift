@@ -1046,6 +1046,19 @@ class ConversationManager: ObservableObject {
         }
         func close() { isOpen = false }
 
+        /// Codex stage-3 S3-R2-4: set by `handleTerminalCommand` for the
+        /// duration of the handler — hands the captured lines to the client
+        /// (and waits until they are written) when the handler will never
+        /// return (a coordinated /upgrade's restart).
+        var exitDelivery: (([String]) -> Void)?
+        func deliverBeforeExit() {
+            guard !isDelivered, let delivery = exitDelivery else { return }
+            exitDelivery = nil
+            close()
+            delivery(lines)
+            markDelivered()
+        }
+
         /// /stop visibility (§4.2): follow-ups that must come AFTER this
         /// command's result wait until the caller handed the result to its
         /// client (`markDelivered`).

@@ -208,6 +208,24 @@ BREAKS = [
      '        if Self.commandCapture != nil {\n            upgradeHandlerAwaiting = true', '        if false {\n            upgradeHandlerAwaiting = true'),
     ('M66 the recorded-worktree heads-up needs an active board entry (§7.2)', 'stage3', T + 'Services/MultiAssistantHooks.swift',
      '        for s in all where !s.active {', '        for s in all where false {'),
+    # Codex stage-3 round 2 (each restores the round-2 behaviour).
+    ('M67 the path lock is released before a delayed settlement is recorded (S3-R2-2)', 'stage3', T + 'Services/MultiAssistantHooks.swift',
+     '            settleWithRetry(ctx, opId: opId, changed: changed, scopes: scopes, unlocking: pending.locked)',
+     '            settleWithRetry(ctx, opId: opId, changed: changed, scopes: scopes); ClaimPathLocks.shared.release(pending.locked)'),
+    ('M68 a reservation takes over another unsettled operation (S3-R2-2)', 'stage3', T + 'Services/FileClaims.swift',
+     '                if let c = doc.claims.first(where: { $0.path == path }), c.state == reserved, c.opId != opId {',
+     '                if let c = doc.claims.first(where: { $0.path == path }), c.state == "-", c.opId != opId {'),
+    ('M69 an out-of-turn edit inherits only the open scopes (S3-R2-3)', 'stage3', T + 'Services/FileClaims.swift',
+     '        if inTurn { return openScopes().sorted() }',
+     '        if inTurn || !openScopes().isEmpty { return openScopes().sorted() }'),
+    ('M70 the ticker judges scopes published after its liveness sample (S3-R2-1)', 'stage3', T + 'Services/FileClaims.swift',
+     '        let ready = known.filter { pending[$0.key] == $0.value && $0.value.isDisjoint(with: alive) }.map(\\.key)',
+     '        let ready = pending.filter { $0.value.isDisjoint(with: alive) }.map(\\.key)'),
+    ('M71 the tripwire settles watches added after the sample (S3-R2-1)', 'stage3', T + 'Services/FileClaims.swift',
+     '        func finished(_ w: Watch) -> Bool { known.contains(w.id) && w.jobs.isDisjoint(with: alive) }',
+     '        func finished(_ w: Watch) -> Bool { w.jobs.isDisjoint(with: alive) }'),
+    ('M72 a committed terminal/app /upgrade restarts before delivering its reply (S3-R2-4)', 'stage3e2e', T + 'Services/ConversationManager+ControlCommands.swift',
+     '            Self.commandCapture?.deliverBeforeExit()\n', ''),
 ]
 
 

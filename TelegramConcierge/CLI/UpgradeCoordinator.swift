@@ -139,9 +139,14 @@ enum UpgradeCoordinator {
 
     // MARK: Run (steps 3–10)
 
+    /// Selftests (development builds only): replaces the barrier protocol;
+    /// receives the real after-commit closure.
+    nonisolated(unsafe) static var runOverrideForTesting: ((StagedUpgrade, (UpgradeBarrier.Record) async -> Void) async -> Outcome)?
+
     static func run(staged: StagedUpgrade, settings: Settings, holding lock: ProfileFileLock,
                     afterCommit: (UpgradeBarrier.Record) async -> Void = { _ in }) async -> Outcome {
         withExtendedLifetime(lock) {}
+        if adaCLIVersion.hasSuffix("-dev"), let override = runOverrideForTesting { return await override(staged, afterCommit) }
         let paths = settings.paths
         let own = settings.ownLease
         // 3. Publish the barrier (under registry.lock when there is one).

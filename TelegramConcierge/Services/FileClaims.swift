@@ -116,10 +116,10 @@ enum FileClaims {
             for path in paths {
                 // §7.4: another assistant's own state and the shared folder.
                 if MultiAssistant.isInside(path, MultiAssistant.canonical(ctx.paths.shared.path)) {
-                    throw Refusal(message: "edit refused: \(MultiAssistant.display(path)) is inside Briglia's shared coordination folder; Briglia does not edit it with file tools.")
+                    throw Refusal(message: "edit refused: \(MultiAssistant.q(MultiAssistant.display(path), 120)) is inside Briglia's shared coordination folder; Briglia does not edit it with file tools.")
                 }
                 for peer in ctx.peers where peer.stateRoots.contains(where: { MultiAssistant.isInside(path, $0) }) {
-                    throw Refusal(message: "edit refused: \(MultiAssistant.display(path)) belongs to the assistant \(MultiAssistant.q(peer.displayName, 40)); Briglia does not edit another assistant's memory or settings.")
+                    throw Refusal(message: "edit refused: \(MultiAssistant.q(MultiAssistant.display(path), 120)) belongs to the assistant \(MultiAssistant.q(peer.displayName, 40)); Briglia does not edit another assistant's memory or settings.")
                 }
             }
             for peer in ctx.peers {
@@ -128,6 +128,15 @@ enum FileClaims {
                 }
             }
             var doc = loadOwn(ctx)
+            // Codex stage-3 S3-R2-2: an entry still reserved by ANOTHER live
+            // operation of this assistant belongs to an edit whose settlement
+            // is not recorded yet; taking it over would lose that edit's
+            // identity (and with it a successful change). Refuse instead.
+            for path in paths {
+                if let c = doc.claims.first(where: { $0.path == path }), c.state == reserved, c.opId != opId {
+                    throw Refusal(message: "edit refused: another of your edits on \(MultiAssistant.q(MultiAssistant.display(path), 120)) is still being recorded; try again in a moment. Nothing was changed.")
+                }
+            }
             var additions = 0
             for path in paths {
                 if let i = doc.claims.firstIndex(where: { $0.path == path }) {
@@ -152,10 +161,10 @@ enum FileClaims {
     static func refusalText(path: String, owner: String, claim: Claim, now: Date) -> String {
         let name = MultiAssistant.q(owner, 40)
         if claim.state == reserved {
-            return "edit refused: \(MultiAssistant.display(path)) is being changed by the assistant \(name) right now; try again in a moment. Nothing was changed."
+            return "edit refused: \(MultiAssistant.q(MultiAssistant.display(path), 120)) is being changed by the assistant \(name) right now; try again in a moment. Nothing was changed."
         }
         let when = claim.lastEditAt.map { " (last change \(MultiAssistant.clock($0)), \(MultiAssistant.minutesAgo($0, now: now)))" } ?? ""
-        return "edit refused: \(MultiAssistant.display(path)) is being edited by the assistant \(name)\(when). It frees up as soon as \(name)'s current turn and the jobs it started end. Work on a copy, choose another file, or tell the user. Nothing was changed."
+        return "edit refused: \(MultiAssistant.q(MultiAssistant.display(path), 120)) is being edited by the assistant \(name)\(when). It frees up as soon as \(name)'s current turn and the jobs it started end. Work on a copy, choose another file, or tell the user. Nothing was changed."
     }
 
     /// Settle operation `opId`: `changed` → held under `scopes`; otherwise
@@ -269,16 +278,19 @@ final class ClaimScopes: @unchecked Sendable {
         return s
     }
 
-    /// Scopes for an edit that settles now; an edit outside any turn gets
-    /// its own scope bound to the jobs alive at that moment.
+    /// Scopes for an edit that settles now. Inside a turn: every open scope
+    /// (the turn and the ended turns still waiting for their jobs). Outside
+    /// any turn: ALWAYS its own scope bound to the jobs alive at that moment,
+    /// besides every open one — Codex stage-3 S3-R2-3: an older pending
+    /// scope does not necessarily cover the job making this edit.
     func scopesForEdit(opId: String) async -> [String] {
-        let open = openScopes()
-        if !open.isEmpty { return open.sorted() }
+        lock.lock(); let inTurn = currentTurn != nil; lock.unlock()
+        if inTurn { return openScopes().sorted() }
         let scope = "op:" + opId
         let jobs = await Self.liveJobs()
         lock.lock(); pending[scope] = jobs; lock.unlock()
         startTicker()
-        return [scope]
+        return openScopes().union([scope]).sorted()
     }
 
     func turnStarted(_ id: UUID) {
@@ -352,14 +364,21 @@ final class ClaimScopes: @unchecked Sendable {
 
     /// One pass: close every pending scope whose jobs all ended; settle
     /// detached-command tripwires.
+    ///
+    /// Codex stage-3 S3-R2-1: only scopes and watches that were already
+    /// registered BEFORE the liveness sample are judged by it (and a scope
+    /// only if its job set is unchanged since): a scope published while the
+    /// sample was being taken may name a job the sample never saw.
     func tick() async {
+        lock.lock(); let known = pending; lock.unlock()
+        let knownWatches = Tripwire.shared.watchIds
         let alive = await Self.liveJobs()
         lock.lock()
-        let ready = pending.filter { $0.value.isDisjoint(with: alive) }.map(\.key)
+        let ready = known.filter { pending[$0.key] == $0.value && $0.value.isDisjoint(with: alive) }.map(\.key)
         lock.unlock()
         if let ctx = MultiAssistant.context() {
             for scope in ready { close(scope, ctx) }
-            Tripwire.shared.settleFinished(ctx, alive: alive)
+            Tripwire.shared.settleFinished(ctx, alive: alive, known: knownWatches)
             // Safety sweep under the claims lock: a held claim none of whose
             // scopes is open any more goes (S3-2).
             if (try? FileClaims.pruneClosed(ctx, open: { self.openScopes() })) != nil {
@@ -476,6 +495,7 @@ final class Tripwire: @unchecked Sendable {
     }
 
     struct Watch {
+        var id = UUID()
         var jobs: Set<String>
         var snapshot: Snapshot
         var reported: Set<String>
@@ -485,13 +505,17 @@ final class Tripwire: @unchecked Sendable {
     private var watches: [Watch] = []
 
     var hasWatches: Bool { lock.lock(); defer { lock.unlock() }; return !watches.isEmpty }
+    var watchIds: Set<UUID> { lock.lock(); defer { lock.unlock() }; return Set(watches.map(\.id)) }
 
     /// A detached command settled: compare and tell both sides (this
     /// assistant through its own notices, since its Bash result is gone).
-    func settleFinished(_ ctx: MultiAssistant.Context, alive: Set<String>) {
+    /// Only watches in `known` (registered before `alive` was sampled) are
+    /// judged (S3-R2-1).
+    func settleFinished(_ ctx: MultiAssistant.Context, alive: Set<String>, known: Set<UUID>) {
         lock.lock()
-        let done = watches.filter { $0.jobs.isDisjoint(with: alive) }
-        watches.removeAll { $0.jobs.isDisjoint(with: alive) }
+        func finished(_ w: Watch) -> Bool { known.contains(w.id) && w.jobs.isDisjoint(with: alive) }
+        let done = watches.filter(finished)
+        watches.removeAll(where: finished)
         lock.unlock()
         for w in done {
             for c in Self.changes(w.snapshot, excluding: w.reported) {

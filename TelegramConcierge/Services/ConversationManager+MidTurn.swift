@@ -1085,12 +1085,20 @@ extension ConversationManager {
     /// socket `command_result`, print the terminal lines); only THEN are
     /// follow-up notices of this command (e.g. a stopped request's completion)
     /// released, so they can never precede the command's own result.
-    func handleTerminalCommand(_ text: String, deliver: ([String]?) -> Void) async {
+    ///
+    /// `drainBeforeExit` runs after `deliver` only when the command restarts
+    /// the process before returning (S3-R2-4): it must block until the
+    /// client has the lines (the app socket's queued write).
+    func handleTerminalCommand(_ text: String, deliver: @escaping ([String]?) -> Void,
+                               drainBeforeExit: (() -> Void)? = nil) async {
         let capture = CommandResponseCapture()
+        capture.exitDelivery = { lines in deliver(lines); drainBeforeExit?() }
         let handled = await Self.$commandCapture.withValue(capture) {
             await handleControlCommandIfNeeded(text)
         }
         capture.close()
+        capture.exitDelivery = nil
+        guard !capture.isDelivered else { return }
         deliver(handled ? capture.lines : nil)
         capture.markDelivered()
     }

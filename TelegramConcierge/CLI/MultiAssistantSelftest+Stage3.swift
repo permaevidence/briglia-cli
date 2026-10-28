@@ -111,6 +111,7 @@ extension ProfileHarness {
         stage3BoardTool()
         stage3StatusAndDoctor()
         stage3CoordinatorCancel()
+        stage3Round2()
     }
 
     // MARK: Context rule

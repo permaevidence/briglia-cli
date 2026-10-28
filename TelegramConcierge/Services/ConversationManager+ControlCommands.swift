@@ -1558,6 +1558,9 @@ extension ConversationManager {
                                               barrierId: barrier.id, oldLease: MemberEntry.current?.uuid)
             self.saveConversation()
             try? await self.sendText("✅ \(barrier.targetVersion) installed — restarting now. I'll confirm when I'm back online.", to: address)
+            // A terminal/app /upgrade: its handler never returns past the
+            // exec, so its captured reply goes to the client now (S3-R2-4).
+            Self.commandCapture?.deliverBeforeExit()
             self.stopPolling()
             // Parked before publication: the last batch was processed and
             // confirmed, so persisting the offset is all that is left.

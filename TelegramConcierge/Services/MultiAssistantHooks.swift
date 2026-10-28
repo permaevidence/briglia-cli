@@ -116,8 +116,9 @@ enum MultiAssistantHooks {
             let succeeded = !resultContent.contains("\"error\"")
             let changed = succeeded || pending.locked.contains { Tripwire.stamp($0) != pending.stampsBefore[$0] }
             let scopes = await ClaimScopes.shared.scopesForEdit(opId: opId)
-            settleWithRetry(ctx, opId: opId, changed: changed, scopes: scopes)
-            ClaimPathLocks.shared.release(pending.locked)
+            // The in-process path lock is released only once the settlement
+            // is recorded (Codex stage-3 S3-R2-2).
+            settleWithRetry(ctx, opId: opId, changed: changed, scopes: scopes, unlocking: pending.locked)
         }
         if let snap = pending.tripwire {
             appended += await Tripwire.shared.afterCommand(ctx, snap)
@@ -129,9 +130,17 @@ enum MultiAssistantHooks {
     }
 
     /// §7.3 step 4: a settlement that cannot take the lock is retried in the
-    /// background (the entries stay `reserved`, still protective).
-    static func settleWithRetry(_ ctx: MultiAssistant.Context, opId: String, changed: Bool, scopes: [String]) {
-        do { try FileClaims.settle(ctx, opId: opId, changed: changed, scopes: scopes); return } catch {}
+    /// background (the entries stay `reserved`, still protective). The
+    /// in-process path locks of the operation (`unlocking`) are kept until
+    /// the settlement is recorded (Codex stage-3 S3-R2-2), so another edit of
+    /// the same file by this assistant waits for it instead of replacing the
+    /// unsettled reservation.
+    static func settleWithRetry(_ ctx: MultiAssistant.Context, opId: String, changed: Bool, scopes: [String], unlocking: [String] = []) {
+        do {
+            try FileClaims.settle(ctx, opId: opId, changed: changed, scopes: scopes)
+            ClaimPathLocks.shared.release(unlocking)
+            return
+        } catch {}
         // Never abandoned (S3-2): retried until it succeeds or the process
         // ends (then the lease dies and every reader ignores the entries).
         Task.detached {
@@ -139,7 +148,10 @@ enum MultiAssistantHooks {
             while true {
                 attempt += 1
                 try? await Task.sleep(nanoseconds: UInt64(min(5.0, 0.2 * Double(attempt)) * 1_000_000_000))
-                if (try? FileClaims.settle(ctx, opId: opId, changed: changed, scopes: scopes)) != nil { return }
+                if (try? FileClaims.settle(ctx, opId: opId, changed: changed, scopes: scopes)) != nil {
+                    ClaimPathLocks.shared.release(unlocking)
+                    return
+                }
             }
         }
     }

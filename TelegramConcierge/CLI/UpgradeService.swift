@@ -223,7 +223,14 @@ enum UpgradeService {
     /// validate the unpacked build (bundle-check) — WITHOUT touching the
     /// installation. The barrier path (MULTI_ASSISTANT_PLAN §6.3 step 2)
     /// installs it later under the journal. The caller removes `tempDirectory`.
+    /// Selftests (development builds only): a synthetic staged pair.
+    nonisolated(unsafe) static var stageOverrideForTesting: ((Update) async throws -> StagedUpgrade)?
+    /// Selftests (development builds only): runs instead of the exec, then
+    /// the process exits 0 (the restart never returns).
+    nonisolated(unsafe) static var restartInterceptForTesting: (@MainActor () -> Void)?
+
     static func downloadAndStage(_ update: Update, progress: (String) -> Void) async throws -> StagedUpgrade {
+        if adaCLIVersion.hasSuffix("-dev"), let override = stageOverrideForTesting { return try await override(update) }
         try TurnCheckpointStore.refuseReplacementWithUnfinishedEnvelope()
         progress("Downloading…")
         let fm = FileManager.default
@@ -526,6 +533,11 @@ enum UpgradeService {
     /// reacquires it during normal startup.
     @MainActor
     static func restartNow() -> Never {
+        if adaCLIVersion.hasSuffix("-dev"), let intercept = restartInterceptForTesting {
+            intercept()
+            fflush(stdout)
+            exit(0)
+        }
         TerminalSession.shutdownChildProcesses()
         // Wait for a private-runtime commit in progress (security plan v24
         // §7.8.1 step 10): taking the selection lock means no commit holds
