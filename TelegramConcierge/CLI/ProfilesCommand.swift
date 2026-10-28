@@ -225,6 +225,21 @@ enum ProfileProvisioning {
         let share: ProfileFileLock?
         do { share = try ChatGPTShare.takeLock() } catch { throw ProvisioningError("\(error)") }
         defer { share?.release() }
+        // Codex stage-2 F4: the record is published PROVISIONAL (`adding`,
+        // which the entry protocol never admits) under this operation's tx
+        // lease, flipped to `active` only after the unleased re-check passes;
+        // a failed add removes only its own still-provisional record.
+        try PrivateStorage.ensureDirectory(registryPaths.root, mode: 0o700)
+        try PrivateStorage.ensureDirectory(registryPaths.txDir, mode: 0o700)
+        let op = UUID().uuidString.lowercased()
+        guard case .acquired(let adder) = ProfileFileLock.take(registryPaths.txLease(op)) else {
+            throw ProvisioningError("could not create the lease for adding this assistant")
+        }
+        defer {
+            adder.release()
+            try? FileManager.default.removeItem(at: registryPaths.txLease(op))
+        }
+        var generation = ""
         // A Briglia running without a member lease (started before any
         // registry, switch off) would sit outside every barrier (R1).
         if !UnleasedInstances.find(registryPaths: registryPaths).isEmpty { throw ProvisioningError(UnleasedInstances.message) }
@@ -272,34 +287,58 @@ enum ProfileProvisioning {
             try PrivateStorage.writeAtomically(try AssistantProfile.encodeMetadata(meta),
                                                to: AssistantProfile.metadataURL(name), mode: 0o600)
             try FileManager.default.createDirectory(at: homeFolder, withIntermediateDirectories: true)
-            d.records.append(AssistantRegistry.newRecord(name: name, displayName: displayName))
+            var record = AssistantRegistry.newRecord(name: name, displayName: displayName)
+            record.state = "adding"
+            record.addingOp = op
+            generation = record.generation
+            d.records.append(record)
             doc = d
         }
+        afterProvisionalPublish()
         // Publish, then look: an inactive Briglia that took its instance lock
         // before the registry existed either sees the registry and enrolls
         // (late enrollment) or is seen here. Give a racing enrollment a moment.
         let deadline = Date().addingTimeInterval(unleasedGraceSeconds)
         while !UnleasedInstances.find(registryPaths: registryPaths).isEmpty {
             if Date() >= deadline {
-                rollbackAdd(name: name, registryPaths: registryPaths, removeRegistry: !registryExisted)
+                rollbackAdd(name: name, op: op, generation: generation, registryPaths: registryPaths, removeRegistry: !registryExisted)
                 throw ProvisioningError(UnleasedInstances.message)
             }
             Thread.sleep(forTimeInterval: 0.2)
+        }
+        // Activate only our own provisional record (same op and generation).
+        try AssistantRegistry.withLock(registryPaths) { doc in
+            guard var d = doc, let i = d.index(name), d.records[i].state == "adding",
+                  d.records[i].addingOp == op, d.records[i].generation == generation else {
+                throw ProvisioningError("‘\(name)’ changed while it was being added; nothing was activated")
+            }
+            d.records[i].state = "active"
+            d.records[i].addingOp = nil
+            doc = d
         }
     }
 
     static var unleasedGraceSeconds: TimeInterval = 5
 
-    /// Undo a just-created profile (nothing of it ever ran).
-    static func rollbackAdd(name: String, registryPaths: AssistantRegistry.Paths, removeRegistry: Bool) {
-        try? FileManager.default.removeItem(at: AssistantProfile.extraConfigRoot(name))
-        try? FileManager.default.removeItem(at: AssistantProfile.extraDataRoot(name))
+    /// Test seam: runs right after the provisional record was published.
+    static var afterProvisionalPublish: () -> Void = {}
+
+    /// Undo our own just-created profile while it is still provisional
+    /// (`adding`, same op and generation): nothing could have entered it. An
+    /// active (or otherwise changed) record is never deleted here.
+    static func rollbackAdd(name: String, op: String, generation: String, registryPaths: AssistantRegistry.Paths, removeRegistry: Bool,
+                            configRoot: URL? = nil, dataRoot: URL? = nil) {
+        var removed = false
         _ = try? AssistantRegistry.withLock(registryPaths) { doc in
-            guard var d = doc, let i = d.index(name) else { return }
+            guard var d = doc, let i = d.index(name), d.records[i].state == "adding",
+                  d.records[i].addingOp == op, d.records[i].generation == generation else { return }
+            try? FileManager.default.removeItem(at: configRoot ?? AssistantProfile.extraConfigRoot(name))
+            try? FileManager.default.removeItem(at: dataRoot ?? AssistantProfile.extraDataRoot(name))
             d.records.remove(at: i)
             doc = d
+            removed = true
         }
-        if removeRegistry, let doc = (try? AssistantRegistry.read(registryPaths)) ?? nil,
+        if removed, removeRegistry, let doc = (try? AssistantRegistry.read(registryPaths)) ?? nil,
            doc.records.allSatisfy({ $0.name == AssistantProfile.defaultName }) {
             try? FileManager.default.removeItem(at: registryPaths.registry)
         }

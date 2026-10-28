@@ -38,22 +38,57 @@ enum UnleasedInstances {
         return errno == EWOULDBLOCK
     }
 
+    /// The pid the current holder wrote into `instance.lock` (InstanceLease
+    /// writes it right after taking the flock). nil when unreadable.
+    static func holderPid(_ dataRoot: URL) -> pid_t? {
+        let path = dataRoot.appendingPathComponent("instance.lock").path
+        let fd = open(path, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var buf = [UInt8](repeating: 0, count: 32)
+        let n = pread(fd, &buf, buf.count, 0)
+        guard n > 0, let text = String(bytes: buf[0..<n], encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else { return nil }
+        return pid
+    }
+
+    /// Codex stage-2 F1: a held instance lock is coordinated only when ITS
+    /// holder (the pid in the lock file, same process start time) holds a live
+    /// assistant lease of that profile. Another process's lease (a second
+    /// starter still before its instance lock) never certifies the owner.
+    /// An unreadable holder pid or a lease without a sidecar fails closed.
+    static func unleased(dataRoot: URL, leases: URL) -> Bool {
+        guard instanceHeld(dataRoot) else { return false }
+        guard let pid = holderPid(dataRoot), let start = ProcessIdentity.startTime(pid) else { return true }
+        let owned = MemberLeases.users(leases, assistantsOnly: true).contains { e in
+            guard e.probe == .live, let s = e.sidecar, s.role == "assistant" else { return false }
+            return s.pid == pid && s.processStartTime == start
+        }
+        return !owned
+    }
+
     /// The profiles (default + registered extras) running without a lease.
+    /// A non-empty answer is re-checked once after a short pause: a holder
+    /// that has just taken the flock may not have written its pid yet.
     static func find(registryPaths: AssistantRegistry.Paths = .live,
                      defaultData: URL = MachinePaths.defaultDataRoot(),
                      defaultLeases: URL = MemberLeases.defaultDirectory(),
                      extraData: (String) -> URL = { AssistantProfile.extraDataRoot($0) }) -> [String] {
-        var out: [String] = []
-        if instanceHeld(defaultData), MemberLeases.users(defaultLeases, assistantsOnly: true).isEmpty {
-            out.append(AssistantProfile.defaultName)
-        }
-        if let doc = (try? AssistantRegistry.read(registryPaths)) ?? nil {
-            for r in doc.records where r.name != AssistantProfile.defaultName {
-                let dir = registryPaths.root.appendingPathComponent("members/\(r.name)/\(r.generation)", isDirectory: true)
-                if instanceHeld(extraData(r.name)), MemberLeases.users(dir, assistantsOnly: true).isEmpty { out.append(r.name) }
+        func scan() -> [String] {
+            var out: [String] = []
+            if unleased(dataRoot: defaultData, leases: defaultLeases) { out.append(AssistantProfile.defaultName) }
+            if let doc = (try? AssistantRegistry.read(registryPaths)) ?? nil {
+                for r in doc.records where r.name != AssistantProfile.defaultName {
+                    let dir = registryPaths.root.appendingPathComponent("members/\(r.name)/\(r.generation)", isDirectory: true)
+                    if unleased(dataRoot: extraData(r.name), leases: dir) { out.append(r.name) }
+                }
             }
+            return out
         }
-        return out
+        let first = scan()
+        if first.isEmpty { return first }
+        Thread.sleep(forTimeInterval: 0.3)
+        return scan()
     }
 
     static let message = "A Briglia started before assistants were set up is still running without coordination. Stop it (Ctrl-C, or `briglia service uninstall` on Linux), or restart it with BRIGLIA_EXPERIMENTAL_PROFILES=1, then try again."

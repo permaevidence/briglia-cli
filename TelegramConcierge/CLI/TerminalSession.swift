@@ -394,6 +394,14 @@ final class TerminalSession {
             prompt()
 
         case line == "/prune":
+            // Parked for an update (Codex stage-2 F2): refused before any
+            // work; the manager refuses too (its app-channel reply is not
+            // shown in the terminal, so say it here).
+            if manager.admissionPaused {
+                print("  \(ConversationManager.updatingRefusal)")
+                prompt()
+                break
+            }
             await manager.manualPruneFromApp()
 
         case line.hasPrefix("/attach "):

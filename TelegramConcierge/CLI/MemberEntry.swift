@@ -102,7 +102,10 @@ enum MemberEntry {
             guard let record = registryRecord(profile) else {
                 fail("This assistant is not registered on this computer (it may have been removed). Run `briglia profiles list`.")
             }
-            guard record.state == "active" else { fail("This assistant is being removed.") }
+            guard record.state == "active" else {
+                fail(record.state == "adding" ? "This assistant is still being set up; try again in a moment."
+                                              : "This assistant is being removed.")
+            }
             generation = record.generation
         }
         guard let directory = leaseDirectory(profile: profile, generation: generation) else {

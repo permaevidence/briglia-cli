@@ -104,6 +104,36 @@ BREAKS = [
     ('M28 a command already inside its handler does not count as busy', 'upgrade', T + 'Services/ConversationManager+UpgradeBarrier.swift',
      '        if browserSettingsCommandIngress > (initiating && MemberEntry.isCoordinator ? 1 : 0) { return "a command" }',
      '        _ = initiating'),
+    # Codex stage-2 round 2, F1–F4 (each restores the round-2 behaviour).
+    ('M29 any live assistant lease certifies the instance owner (F1)', 'round3', T + 'CLI/MemberLease.swift',
+     '            return s.pid == pid && s.processStartTime == start',
+     '            return true'),
+    ('M30 terminal /prune runs while parked: terminal and manager guards gone (F2)', 'round3', [
+        (T + 'CLI/TerminalSession.swift', '            if manager.admissionPaused {\n                print(', '            if false {\n                print('),
+        (T + 'Services/ConversationManager+ModelCommands.swift',
+         '        guard !admissionPaused else {\n            print("[ConversationManager] /prune refused: parked for an update")\n            try? await sendText(Self.updatingRefusal, to: Self.appChannelAddress)',
+         '        guard true else {\n            print("[ConversationManager] /prune refused: parked for an update")\n            try? await sendText(Self.updatingRefusal, to: Self.appChannelAddress)'),
+        (T + 'Services/ConversationManager+ModelCommands.swift',
+         '        guard !admissionPaused else {\n            print("[ConversationManager] /prune refused: parked for an update")\n            try? await sendText(Self.updatingRefusal, to: address)',
+         '        guard true else {\n            print("[ConversationManager] /prune refused: parked for an update")\n            try? await sendText(Self.updatingRefusal, to: address)'),
+     ]),
+    ('M31 the terminal does not say why /prune was refused (F2)', 'round3', T + 'CLI/TerminalSession.swift',
+     '            if manager.admissionPaused {\n                print(', '            if false {\n                print('),
+    ('M32 closure does not validate the committed pair (F3)', 'upgrade', T + 'CLI/UpgradeCoordinator.swift',
+     '        guard UpgradeBarrier.committedPairOnDisk(barrier, paths: settings.paths) else {\n            barrier.state = .stuck',
+     '        guard true || UpgradeBarrier.committedPairOnDisk(barrier, paths: settings.paths) else {\n            barrier.state = .stuck'),
+    ('M33 a post-commit rollback leaves installed.json naming the removed pair (F3)', 'upgrade', T + 'CLI/UpgradeJournal.swift',
+     '                   rec.binarySHA256 == j.new.binarySHA256 {', '                   rec.binarySHA256 == j.new.binarySHA256, false {'),
+    ('M34 the first add publishes its record active before the unleased check (F4)', 'round3', T + 'CLI/ProfilesCommand.swift',
+     '            record.state = "adding"\n', '            record.state = "active"\n'),
+    ('M35 the rollback deletes a record that is not its own provisional one (F4)', 'round3', T + 'CLI/ProfilesCommand.swift',
+     '            guard var d = doc, let i = d.index(name), d.records[i].state == "adding",\n                  d.records[i].addingOp == op, d.records[i].generation == generation else { return }\n            try? FileManager.default.removeItem(at: configRoot',
+     '            guard var d = doc, let i = d.index(name) else { return }\n            try? FileManager.default.removeItem(at: configRoot'),
+    ('M36 remove ignores an add that is still running (F4)', 'round3', T + 'CLI/ProfilesCommand+Lifecycle.swift',
+     '            if d.records[i].state == "adding", let adder = d.records[i].addingOp,', '            if false, let adder = d.records[i].addingOp,'),
+    ('M37 a dead provisional record blocks the upgrader forever (F4)', 'round3', T + 'CLI/UpgradeCoordinator.swift',
+     '                           ProfileFileLock.probe(settings.registryPaths.txLease(op)) == .dead { continue }',
+     '                           ProfileFileLock.probe(settings.registryPaths.txLease(op)) == .dead, false { continue }'),
 ]
 
 
@@ -170,10 +200,16 @@ def main():
             if not ok:
                 print((r.stdout + r.stderr)[-3000:])
                 return 1
-        for label, section, rel, old, new in BREAKS:
+        for entry in BREAKS:
+            label, section, rel = entry[0], entry[1], entry[2]
+            old, new = (entry[3], entry[4]) if len(entry) == 5 else (None, None)
             if args.only and label.split()[0] not in args.only.split(","):
                 continue
-            original = mutate(tree, rel, old, new)
+            edits = rel if isinstance(rel, list) else [(rel, old, new)]
+            originals = {}
+            for erel, eold, enew in edits:
+                text = mutate(tree, erel, eold, enew)
+                originals.setdefault(erel, text)
             try:
                 binary = build(tree, scratch)
                 r = selftest(binary, work, section)
@@ -186,7 +222,8 @@ def main():
                 if not caught and args.verbose:
                     print((r.stdout + r.stderr)[-6000:])
             finally:
-                (tree / rel).write_text(original)
+                for erel, text in originals.items():
+                    (tree / erel).write_text(text)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\n{executed - failures}/{executed} deliberate breaks caught")

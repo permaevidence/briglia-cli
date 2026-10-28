@@ -51,8 +51,10 @@ enum AssistantRegistry {
     struct Record: Codable, Equatable {
         var name: String
         var generation: String
-        var state: String          // "active" | "removing"
+        var state: String          // "active" | "removing" | "adding" (provisional, never admissible)
         var removingOp: String?
+        /// The `profiles add` operation of a provisional record (its tx lease).
+        var addingOp: String? = nil
         var autostart: Bool
         var displayName: String
         var activeTx: [String: ActiveTx]

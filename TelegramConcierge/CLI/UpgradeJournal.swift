@@ -216,6 +216,12 @@ enum UpgradeJournal {
         }
         func rollBack(_ j: UpgradeBarrier.Journal) -> RecoveryOutcome {
             if restoreOld(j) {
+                // A rollback after commit (the stuck rows): installed.json must
+                // not keep naming the pair that was just taken out.
+                if case .value(let rec) = UpgradeBarrier.readFile(paths.installed, as: UpgradeBarrier.Installed.self),
+                   rec.binarySHA256 == j.new.binarySHA256 {
+                    try? FileManager.default.removeItem(at: paths.installed)
+                }
                 _ = write(.cancelled, "rolled back after an interrupted update")
                 try? FileManager.default.removeItem(at: paths.journal)
                 return .cancelled("the interrupted update was undone; the previous version is installed")

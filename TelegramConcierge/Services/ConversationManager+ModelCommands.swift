@@ -1264,11 +1264,24 @@ extension ConversationManager {
     /// manual prune as /prune, but routes result text to the app channel
     /// (no-op transport) and surfaces the outcome via the maintenance notice.
     func manualPruneFromApp() async {
+        // Parked for an update (Codex stage-2 F2): the terminal's /prune and
+        // the app's button reach this without the control-command gate.
+        guard !admissionPaused else {
+            print("[ConversationManager] /prune refused: parked for an update")
+            try? await sendText(Self.updatingRefusal, to: Self.appChannelAddress)
+            return
+        }
         guard activeRunId == nil else { return }
         await manualPruneToolInteractions(notify: Self.appChannelAddress)
     }
 
     func manualPruneToolInteractions(notify address: ChannelAddress? = nil, noSnapshot: Bool = false) async {
+        // Before any work (maintenance, context reads): parked admission is closed.
+        guard !admissionPaused else {
+            print("[ConversationManager] /prune refused: parked for an update")
+            try? await sendText(Self.updatingRefusal, to: address)
+            return
+        }
         guard activeRunId == nil, activeProcessingTask == nil, !isRestoringMind,
               maintenanceActivities.isEmpty, archiveRecoveryTask == nil else {
             try? await sendText("Briglia is busy; retry /prune when idle.", to: address)

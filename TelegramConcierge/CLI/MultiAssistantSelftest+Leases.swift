@@ -12,8 +12,11 @@ final class MAChild {
     private let lock = NSLock()
     private var buffer = Data()
 
-    init(process: Process, pipe: Pipe) {
-        self.process = process; self.pipe = pipe
+    /// The child's stdin (kept open so a test can type into it).
+    var input: Pipe?
+
+    init(process: Process, pipe: Pipe, input: Pipe? = nil) {
+        self.process = process; self.pipe = pipe; self.input = input
         pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let d = h.availableData
             guard let self else { return }
@@ -67,7 +70,7 @@ func Darwin_or_Glibc_kill(_ pid: pid_t, _ sig: Int32) {
 extension ProfileHarness {
     // MARK: - Helpers
 
-    func startChild(_ args: [String], extraEnv: [String: String] = [:], stdin: String? = nil) -> MAChild? {
+    func startChild(_ args: [String], extraEnv: [String: String] = [:], stdin: String? = nil, keepStdinOpen: Bool = false) -> MAChild? {
         let p = Process()
         p.executableURL = exe
         p.arguments = args
@@ -81,6 +84,7 @@ extension ProfileHarness {
         p.standardInput = input
         do { try p.run() } catch { return nil }
         if let stdin { input.fileHandleForWriting.write(Data(stdin.utf8)) }
+        if keepStdinOpen { return MAChild(process: p, pipe: out, input: input) }
         try? input.fileHandleForWriting.close()
         return MAChild(process: p, pipe: out)
     }

@@ -8,6 +8,9 @@ import Darwin
 /// `briglia daemon --all` (§4.3, §16 item 8) with real headless daemons.
 extension ProfileHarness {
     func supervisorSection() {
+        // Whatever happens below (a deliberate break such as M17 restarting
+        // a stopped assistant), no supervised daemon outlives this section.
+        defer { reapLeasedProcesses() }
         try? writeDefaultSecrets(["llm_provider": "openai_compatible", "openai_compatible_base_url": "http://127.0.0.1:9/v1",
                                   "openai_compatible_model": "mock-model", "openai_compatible_api_key": "k",
                                   "assistant_name": "Bree", "user_name": "Test"])

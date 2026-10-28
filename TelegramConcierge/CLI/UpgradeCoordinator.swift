@@ -88,11 +88,19 @@ enum UpgradeCoordinator {
             // Its coordinator died (we hold the lock): the recovery table.
             switch UpgradeJournal.recover(barrier, allowStuck: false, paths: settings.paths) {
             case .cancelled, .nothing, .closedCleanup: return nil
-            case .committed: return closeIfPossible(settings) ? nil : "The previous update is still finishing (assistants are restarting); try again in a minute."
+            case .committed: return closeRefusal(settings)
             case .stuck(let why), .malformed(let why): return why
             }
         case .committed:
-            return closeIfPossible(settings) ? nil : "The previous update is still finishing (assistants are restarting); try again in a minute."
+            return closeRefusal(settings)
+        }
+    }
+
+    static func closeRefusal(_ settings: Settings) -> String? {
+        switch closeAttempt(settings) {
+        case .closed: return nil
+        case .pairMismatch: return UpgradeBarrier.stuckMessage
+        case .waiting: return "The previous update is still finishing (assistants are restarting); try again in a minute."
         }
     }
 
@@ -145,6 +153,11 @@ enum UpgradeCoordinator {
             if AssistantRegistry.exists(settings.registryPaths) {
                 try AssistantRegistry.withLock(settings.registryPaths) { doc in
                     for r in doc?.records ?? [] {
+                        // A provisional add whose `profiles add` died is inert (never
+                        // admissible); a live one is still being set up.
+                        if r.state == "adding", let op = r.addingOp,
+                           ProfileFileLock.probe(settings.registryPaths.txLease(op)) == .dead { continue }
+                        if r.state == "adding" { throw UpgradeJournal.Failure("‘\(r.displayName)’ is being set up; try again in a minute") }
                         if r.state != "active" { throw UpgradeJournal.Failure("‘\(r.displayName)’ is being removed; try again in a minute") }
                         for (_, a) in r.activeTx where ProfileFileLock.probe(settings.registryPaths.txLease(a.txId)) != .dead {
                             throw UpgradeJournal.Failure("a settings change of ‘\(r.displayName)’ is finishing; try again in a minute")
@@ -269,7 +282,13 @@ enum UpgradeCoordinator {
         // 10. A session coordinator closes the barrier itself (R5-1).
         let closeDeadline = Date().addingTimeInterval(max(settings.waitSeconds, 60))
         while Date() < closeDeadline {
-            if closeIfPossible(settings, holdingLock: true) { break }
+            let closing = closeAttempt(settings, holdingLock: true)
+            if closing == .closed { break }
+            if closing == .pairMismatch {
+                try? own?.update { $0.coordinator = false }
+                MemberEntry.isCoordinator = false
+                return .stuck(pairMismatchReason + "; run `briglia upgrade --recover`")
+            }
             try? await Task.sleep(nanoseconds: UInt64(settings.poll * 1_000_000_000))
         }
         try? own?.update { $0.coordinator = false }
@@ -283,28 +302,72 @@ enum UpgradeCoordinator {
     /// `upgrade.lock` non-blocking first (assistants' monitor and startup).
     @discardableResult
     static func closeIfPossible(_ settings: Settings, holdingLock: Bool = true) -> Bool {
+        closeAttempt(settings, holdingLock: holdingLock) == .closed
+    }
+
+    enum CloseResult: Equatable {
+        case closed
+        /// Not committed, lock busy, or participants still restarting.
+        case waiting
+        /// Codex stage-2 F3: the installed pair is not the committed one. The
+        /// barrier was marked `stuck`; journal and backups are kept.
+        case pairMismatch
+    }
+
+    static let pairMismatchReason = "the installed files do not match the committed update"
+
+    /// Closure validates the committed pair FIRST (Codex stage-2 F3): every
+    /// caller (startup recovery, the assistants' monitor, the coordinator,
+    /// `upgrade --recover`) goes through here, so recovery material is never
+    /// discarded for a pair that is not the committed one.
+    static func closeAttempt(_ settings: Settings, holdingLock: Bool = true) -> CloseResult {
         var held: ProfileFileLock?
         if !holdingLock {
-            guard case .acquired(let l) = ProfileFileLock.take(settings.paths.lock) else { return false }
+            guard case .acquired(let l) = ProfileFileLock.take(settings.paths.lock) else { return .waiting }
             held = l
         }
         defer { held?.release() }
-        guard var barrier = UpgradeBarrier.current(settings.paths), barrier.state == .committed else { return false }
+        guard var barrier = UpgradeBarrier.current(settings.paths), barrier.state == .committed else { return .waiting }
+        guard UpgradeBarrier.committedPairOnDisk(barrier, paths: settings.paths) else {
+            barrier.state = .stuck
+            barrier.reason = pairMismatchReason
+            _ = try? UpgradeBarrier.writeBarrier(barrier, settings.paths)
+            return .pairMismatch
+        }
         let dirs = memberDirectories(settings.registryPaths, defaultDirectory: settings.paths.root.deletingLastPathComponent().appendingPathComponent("members", isDirectory: true))
         for p in barrier.participants ?? [] {
             if let ack = UpgradeBarrier.readAck(p.lease, settings.paths), ack.barrierId == barrier.id, ack.state == .restarted,
                (ack.releaseSequence ?? 0) >= barrier.targetSequence { continue }
             let dir = dirs.first { $0.profile == p.profile }?.directory
-            guard let dir, ProfileFileLock.probe(dir.appendingPathComponent("\(p.lease).lock")) == .dead else { return false }
+            guard let dir, ProfileFileLock.probe(dir.appendingPathComponent("\(p.lease).lock")) == .dead else { return .waiting }
             // Dead: closable only when no assistant of that profile still runs an older image.
             let stale = MemberLeases.users(dir, assistantsOnly: true).contains { ($0.sidecar?.releaseSequence ?? 0) < barrier.targetSequence }
-            if stale { return false }
+            if stale { return .waiting }
         }
         barrier.state = .closed
-        guard (try? UpgradeBarrier.writeBarrier(barrier, settings.paths)) != nil else { return false }
+        guard (try? UpgradeBarrier.writeBarrier(barrier, settings.paths)) != nil else { return .waiting }
         UpgradeJournal.cleanup(settings.paths)
         UpgradeBarrier.clearAcks(settings.paths)
-        return true
+        return .closed
+    }
+
+    /// The committed pair failed validation (now `stuck`): run the stuck row
+    /// of the recovery table once — re-verify against the journal (finish
+    /// the commit) or restore the previous version from the kept backups.
+    static func recoverMismatch(_ settings: Settings) -> (ok: Bool, text: String) {
+        guard let stuck = UpgradeBarrier.current(settings.paths), stuck.state == .stuck else {
+            return (false, "✖ " + pairMismatchReason + "; run `briglia upgrade --recover` again")
+        }
+        switch UpgradeJournal.recover(stuck, allowStuck: true, paths: settings.paths) {
+        case .committed(let t):
+            return closeAttempt(settings) == .pairMismatch
+                ? (false, "✖ " + pairMismatchReason + "; reinstall Briglia with the installer, then run `briglia upgrade --recover`")
+                : (true, "✔ " + t)
+        case .cancelled(let t): return (true, "✔ " + pairMismatchReason + "; " + t)
+        case .nothing(let t): return (true, t)
+        case .closedCleanup: return (true, "✔ The previous update was already finished; leftovers removed.")
+        case .stuck(let t), .malformed(let t): return (false, "✖ " + pairMismatchReason + "; " + t)
+        }
     }
 
     // MARK: Recovery command (§6.5)
@@ -325,11 +388,14 @@ enum UpgradeCoordinator {
         }
         switch UpgradeJournal.recover(barrier, allowStuck: true, paths: settings.paths) {
         case .nothing(let t):
-            if closeIfPossible(settings) { return (true, "✔ The update was already finished; closed it.") }
-            return (true, t)
+            switch closeAttempt(settings) {
+            case .closed: return (true, "✔ The update was already finished; closed it.")
+            case .pairMismatch: return recoverMismatch(settings)
+            case .waiting: return (true, t)
+            }
         case .cancelled(let t): return (true, "✔ " + t)
         case .committed(let t):
-            closeIfPossible(settings)
+            if closeAttempt(settings) == .pairMismatch { return recoverMismatch(settings) }
             return (true, "✔ " + t)
         case .closedCleanup: return (true, "✔ The previous update was already finished; leftovers removed.")
         case .stuck(let t): return (false, "✖ " + t)

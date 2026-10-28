@@ -162,6 +162,7 @@ enum ProfileLifecycle {
         defer { share?.release() }
         let home = hooks.homeFolder(name)
         // 1. Publish `removing` (or adopt a dead remover's operation).
+        var priorState: (state: String, addingOp: String?) = ("active", nil)
         try AssistantRegistry.withLock(paths) { doc in
             guard var d = doc, let i = d.index(name) else { throw LifecycleError("there is no assistant ‘\(name)’") }
             if hooks.barrierActive() { throw LifecycleError("Briglia is updating; try again in a minute") }
@@ -172,6 +173,13 @@ enum ProfileLifecycle {
                ProfileFileLock.probe(paths.txLease(other)) != .dead {
                 throw LifecycleError("another removal of ‘\(name)’ is running")
             }
+            // A provisional add still running owns its record (Codex stage-2
+            // F4); one whose `profiles add` died may be removed.
+            if d.records[i].state == "adding", let adder = d.records[i].addingOp,
+               ProfileFileLock.probe(paths.txLease(adder)) != .dead {
+                throw LifecycleError("‘\(name)’ is still being added; try again in a moment")
+            }
+            priorState = (d.records[i].state == "adding" ? "adding" : "active", d.records[i].addingOp)
             d.records[i].state = "removing"
             d.records[i].removingOp = op
             doc = d
@@ -181,7 +189,8 @@ enum ProfileLifecycle {
         func restore(_ why: String) throws -> Never {
             try? AssistantRegistry.withLock(paths) { doc in
                 guard var d = doc, let i = d.index(name), d.records[i].removingOp == op else { return }
-                d.records[i].state = "active"
+                d.records[i].state = priorState.state
+                d.records[i].addingOp = priorState.addingOp
                 d.records[i].removingOp = nil
                 doc = d
             }

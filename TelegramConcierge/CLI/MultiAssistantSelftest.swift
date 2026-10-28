@@ -24,6 +24,8 @@ struct MultiAssistantSelftest: ParsableCommand {
     func run() throws {
         let h = try ProfileHarness(only: only)
         defer { h.cleanup() }
+        // Runs before cleanup: no test daemon may outlive the harness.
+        defer { h.reapLeasedProcesses() }
         if h.section("leases") { h.leasesSection() }
         if h.section("identity") { h.identitySection() }
         if h.section("remove") { h.removeSection() }
@@ -31,6 +33,7 @@ struct MultiAssistantSelftest: ParsableCommand {
         if h.section("supervisor") { h.supervisorSection() }
         if h.section("chatgpt") { h.sharedLoginSection() }
         if h.section("round2") { h.stage2Round2Section() }
+        if h.section("round3") { h.stage2Round3Section() }
         print("\n\(h.total - h.failures)/\(h.total) multi-assistant checks passed")
         if h.failures > 0 { throw ExitCode(1) }
     }

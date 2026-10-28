@@ -201,6 +201,7 @@ extension ProfileHarness {
         upgradeKillPoints(fx)
         upgradeRecoveryOwnerDies(fx)
         upgradeStuckAndConcurrentRecovery(fx)
+        upgradeCommittedPairMismatch(fx)
         // The scratch install's records must not follow later sections: its
         // installed.json names a test sequence the harness binary never has.
         try? FileManager.default.removeItem(at: barrierPaths.installed)
