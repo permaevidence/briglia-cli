@@ -255,6 +255,28 @@ extension ProfileHarness {
         check("F3: afterwards Briglia runs normally", runFrom(fx, ["__member-probe"]).status == 0)
     }
 
+    /// Purge the throwaway preference domain of every extra profile the
+    /// stage-2 sections create (the isolation harness purges only its own
+    /// names; a smoke run caught `up` left behind), in the harness roots and
+    /// in the round-2/3 `<tag>-data` roots.
+    func purgeProfileDomains() {
+        var names: Set<String> = ["up", "work", "rm4", "sc5", "own6", "sa", "sb", "sup", "crashy", "solo", "gone"]
+        for r in registryDoc()?.records ?? [] where r.name != AssistantProfile.defaultName { names.insert(r.name) }
+        var envs = [env]
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [] where name.hasSuffix("-data") {
+            let tag = String(name.dropLast(5))
+            var e = env
+            e["XDG_DATA_HOME"] = root.appendingPathComponent("\(tag)-data").path
+            e["XDG_CONFIG_HOME"] = root.appendingPathComponent("\(tag)-config").path
+            envs.append(e)
+        }
+        for e in envs {
+            for name in names {
+                TestPrefsDomains.purge(Self.suitePrefix + "briglia.profile.\(name).\(AssistantProfile.installationHash(name, environment: e))")
+            }
+        }
+    }
+
     /// Stop every process still holding an assistant or session lease under
     /// this harness's roots (a break run can leave daemons behind, e.g. M17).
     func reapLeasedProcesses() {

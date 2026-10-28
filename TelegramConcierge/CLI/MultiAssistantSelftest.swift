@@ -24,7 +24,9 @@ struct MultiAssistantSelftest: ParsableCommand {
     func run() throws {
         let h = try ProfileHarness(only: only)
         defer { h.cleanup() }
-        // Runs before cleanup: no test daemon may outlive the harness.
+        // Run before cleanup (defers unwind in reverse): first no test daemon
+        // may outlive the harness, then every extra's preference domain goes.
+        defer { h.purgeProfileDomains() }
         defer { h.reapLeasedProcesses() }
         if h.section("leases") { h.leasesSection() }
         if h.section("identity") { h.identitySection() }
