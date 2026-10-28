@@ -48,6 +48,7 @@ struct UpgradeReadinessCheckCommand: AsyncParsableCommand {
         check("readiness: a background subagent keeps the assistant busy", withAgent == "a background agent", withAgent ?? "nil")
         agent.cancel()
         await SubagentBackgroundRegistry.shared._testUnregister(id: agentId)
+        let pollingPref = Prefs.store.object(forKey: m.shouldResumePollingDefaultsKey) as? Bool
         await m.upgradeMonitorTick(lease: lease)
         let parkedAck = UpgradeBarrier.readAck(lease.uuid, paths)
         check("monitor: ready → pauses admission and acks parked", parkedAck?.state == .parked && m.admissionPaused,
@@ -59,6 +60,8 @@ struct UpgradeReadinessCheckCommand: AsyncParsableCommand {
         try? UpgradeBarrier.writeBarrier(cancelled, paths)
         await m.upgradeMonitorTick(lease: lease)
         check("monitor: cancelled → admission resumes", !m.admissionPaused && m.upgradeParkedFor == nil)
+        check("pause: parking never touches the polling preference (not stopPolling)",
+              (Prefs.store.object(forKey: m.shouldResumePollingDefaultsKey) as? Bool) == pollingPref)
         var stuck = barrier; stuck.state = .stuck; stuck.id = "rd-2"
         try? UpgradeBarrier.writeBarrier(stuck, paths)
         await m.upgradeMonitorTick(lease: lease)
@@ -67,6 +70,35 @@ struct UpgradeReadinessCheckCommand: AsyncParsableCommand {
         await m.upgradeMonitorTick(lease: lease)
         check("monitor: barrier gone → resumes", !m.admissionPaused)
         held?.release()
+        // The /switchbot reservation through the REAL manager (Codex stage-1
+        // notes 2 and 3): clearing the switch aborts the reservation and
+        // drops the identity lock; an unconfirmed switch expires.
+        if CoordinationMode.multi {
+            let regPaths = AssistantRegistry.Paths.live
+            func pending() -> String? { ((try? AssistantRegistry.read(regPaths)) ?? nil)?.record("default")?.bot.pending?.value }
+            if let ticket = try? IdentityChange.begin(kind: .bot, rawValue: "7070:SWITCH", mode: .assistant) {
+                m.pendingBotSwitch = ConversationManager.PendingBotSwitch(newToken: "7070:SWITCH", botDisplay: "@new", code: "123456")
+                m.botSwitchTicket = ticket
+                check("switch lifetime: the reservation is live while the switch is pending",
+                      pending() == AssistantRegistry.digest(.bot, "7070:SWITCH")
+                      && ProfileFileLock.probe(MachinePaths.identityTxLock) == .live)
+                m.pendingBotSwitch = nil
+                check("switch lifetime: cancelling the switch aborts the reservation and frees the identity lock",
+                      pending() == nil && m.botSwitchTicket == nil && ProfileFileLock.probe(MachinePaths.identityTxLock) == .dead)
+            } else { check("switch lifetime: reserve", false) }
+            if let ticket = try? IdentityChange.begin(kind: .bot, rawValue: "7171:SWITCH", mode: .assistant) {
+                var p = ConversationManager.PendingBotSwitch(newToken: "7171:SWITCH", botDisplay: "@new", code: "654321")
+                p.discovered = .init(chatId: 99, senderDisplay: "New owner")
+                p.discoveredAt = Date().addingTimeInterval(-(BotSwitchFlow.confirmTimeoutSeconds / 2 + 5))
+                m.pendingBotSwitch = p
+                m.botSwitchTicket = ticket
+                await m.expireUnconfirmedBotSwitchIfDue()
+                check("switch timeout: a reminder halfway, the switch still pending", m.pendingBotSwitch?.reminded == true && pending() != nil)
+                await m.expireUnconfirmedBotSwitchIfDue(now: Date().addingTimeInterval(BotSwitchFlow.confirmTimeoutSeconds))
+                check("switch timeout: an unconfirmed switch expires, releasing the bot and the identity lock (profiles add possible again)",
+                      m.pendingBotSwitch == nil && pending() == nil && ProfileFileLock.probe(MachinePaths.identityTxLock) == .dead)
+            } else { check("switch timeout: reserve", false) }
+        }
         print("READINESS_DONE")
     }
 }

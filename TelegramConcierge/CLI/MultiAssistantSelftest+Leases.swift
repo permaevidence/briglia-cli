@@ -211,6 +211,14 @@ extension ProfileHarness {
               MemberEntry.classify(["daemon"]) == .assistant(kind: "daemon") && MemberEntry.classify([]) == .assistant(kind: "chat")
               && MemberEntry.classify(["menu"]) == .session(kind: "menu") && MemberEntry.classify(["upgrade", "--recover"]) == .recovery
               && MemberEntry.classify(["trigger", "w1"]) == .session(kind: "trigger"))
+        let unit = AgentServiceSupport.templateUnitText(adaPath: "/opt/b/briglia", home: "/home/u")
+        check("linux: the extras' template passes --profile %i in argv (never only the environment)",
+              unit.contains("ExecStart=\"/opt/b/briglia\" --profile %i daemon") && unit.contains("BRIGLIA_EXPERIMENTAL_PROFILES=1")
+              && AgentServiceSupport.extraUnitName("work") == "briglia@work.service" && AgentServiceSupport.userUnitName == "briglia.service")
+        let promo = run(["__member-probe", "--promote"])
+        let uuid = (promo.out.split(separator: "\n").first { $0.hasPrefix("{") }).flatMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }?["uuid"] as? String
+        check("promotion: menu → terminal chat changes the role on the SAME lease (no admission gap)",
+              promo.out.contains("PROMOTED:ok:assistant:chat:") && uuid != nil && promo.out.contains(":\(uuid ?? "-")"), promo.out)
         let rid = run(["__release-identity"])
         check("__release-identity prints version and compiled sequence",
               rid.status == 0 && rid.out.contains("\"sequence\":\(adaCLIReleaseSequence)"), rid.out)

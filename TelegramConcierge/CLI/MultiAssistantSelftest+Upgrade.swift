@@ -128,6 +128,14 @@ extension ProfileHarness {
             busy.kill()
         }
         check("barrier: after a cancel both daemons keep running", d0.running && d1.running)
+        // A session that does not close itself (not long-lived) is waited
+        // for: the barrier never publishes past it (§6.1, §6.3 step 5).
+        if let sess = startChild(["__member-probe", "--hold", "60"]), sess.waitFor(10, { $0.contains("\"uuid\"") }) {
+            let r = runFrom(fx, ["upgrade", "--yes"], extra: ["BRIGLIA_TEST_UPGRADE_WAIT_SECONDS": "5"])
+            check("barrier: an open session makes the update wait, then cancel; nothing changed",
+                  r.status != 0 && r.out.contains("probe open") && installedMarker(fx) == nil, r.out)
+            sess.kill()
+        }
 
         // A long-lived session closes itself; everyone parks; swap; restart.
         guard let session = startChild(["__member-probe", "--long-lived", "--hold", "120"]),

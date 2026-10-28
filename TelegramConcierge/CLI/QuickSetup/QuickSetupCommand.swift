@@ -537,6 +537,9 @@ enum QuickSetupSession {
             if WizardIO.askYesNo("Start Briglia now?", default: true) {
                 // Same process image, no exec behind us: nothing to sweep, and
                 // the setup's own children are journaled, not leftovers.
+                if let refusal = MemberEntry.promoteToAssistant(kind: "chat") {
+                    held.release(); print("✖ \(refusal)"); throw ExitCode(1)
+                }
                 let session = await TerminalSession(sweepLeftoversAtEntry: false)
                 try await session.runChat(adopting: held)
             } else {

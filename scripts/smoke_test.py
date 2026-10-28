@@ -565,6 +565,15 @@ def main():
                           text=True, timeout=600)
     check("profile-isolation-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
+    # Assistant profiles, stage 2 (MULTI_ASSISTANT_PLAN §4.3, §4.4, §5.6,
+    # §5.7, §6, §25): member leases and the entry protocol, identity
+    # transactions, remove/stop, the upgrade barrier with real headless
+    # daemons (park, swap, restart in place, closure, kill points and
+    # recovery), the supervisor, the shared ChatGPT login. Scratch roots only.
+    result = run_selftest([os.path.abspath(ADA), "__multi-assistant-selftest"], capture_output=True,
+                          text=True, timeout=1800)
+    check("multi-assistant-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
     # Every production preferences access goes through Prefs (one suite per
     # assistant); the lint also proves it catches planted violations.
     for args in ([], ["--self-test"]):

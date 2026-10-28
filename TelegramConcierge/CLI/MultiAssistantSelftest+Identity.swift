@@ -139,13 +139,19 @@ extension ProfileHarness {
         let again = run(["profiles", "stop", "gone"])
         check("stop: nothing running → says so", again.out.contains("not running"), again.out)
         // A forged sidecar (pid of an unrelated process) is never signalled.
-        if let dir = extraLeaseDir("gone"), let fake = try? MemberLease.create(in: dir, role: "assistant", sessionKind: "daemon", profile: "gone") {
-            try? fake.update { $0.pid = getppid(); $0.processStartTime = "forged" }
-            let forged = run(["profiles", "stop", "gone"])
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleeper.arguments = ["30"]
+        if (try? sleeper.run()) != nil, let dir = extraLeaseDir("gone"),
+           let fake = try? MemberLease.create(in: dir, role: "assistant", sessionKind: "daemon", profile: "gone") {
+            try? fake.update { $0.pid = sleeper.processIdentifier; $0.processStartTime = "forged" }
+            let forged = run(["profiles", "stop", "gone"], extraEnv: ["BRIGLIA_TEST_STOP_WAIT": "1"])
+            Thread.sleep(forTimeInterval: 0.3)
             check("stop: a sidecar whose pid is not the lease holder is refused, nothing signalled",
-                  forged.status != 0 && forged.out.contains("not the one that holds its lease"), forged.out)
+                  forged.status != 0 && forged.out.contains("not the one that holds its lease") && sleeper.isRunning, forged.out)
             fake.release()
         }
+        if sleeper.isRunning { sleeper.terminate() }
         // Mind export first (outside every lock), then removal.
         let exportDir = root.appendingPathComponent("exports", isDirectory: true)
         let removed = run(["profiles", "remove", "gone", "--yes", "--export-to", exportDir.path])
@@ -218,5 +224,7 @@ extension ProfileHarness {
         let ok = Result { try ProfileLifecycle.remove(name: "w", confirmedGeneration: gen, hooks: hooks) }
         check("remove: succeeds with no member", (try? ok.get()) != nil && (try? Reg.read(paths))??.record("w") == nil
               && !FileManager.default.fileExists(atPath: cfg.path))
+        check("remove: the lease directory's parent is only ever rmdir'ed (a non-empty one is kept)",
+              FileManager.default.fileExists(atPath: root.path) && FileManager.default.fileExists(atPath: exe.path))
     }
 }

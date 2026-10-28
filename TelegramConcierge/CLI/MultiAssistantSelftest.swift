@@ -48,6 +48,7 @@ struct MemberProbeCommand: ParsableCommand {
     @Option(name: .customLong("hold")) var hold: Double = 0
     @Option(name: .customLong("hold-tx")) var holdTx: String?
     @Flag(name: .customLong("long-lived")) var longLived = false
+    @Flag(name: .customLong("promote")) var promote = false
 
     func run() throws {
         setvbuf(stdout, nil, _IOLBF, 0)
@@ -61,6 +62,11 @@ struct MemberProbeCommand: ParsableCommand {
         if let g = MemberEntry.generation { info["generation"] = g }
         let data = try JSONSerialization.data(withJSONObject: info, options: [.sortedKeys])
         print(String(decoding: data, as: UTF8.self))
+        if promote, let lease = MemberEntry.current {
+            let refusal = MemberEntry.promoteToAssistant(kind: "chat")
+            let onDisk = MemberLeases.readSidecar(lease.sidecarURL)
+            print("PROMOTED:\(refusal ?? "ok"):\(onDisk?.role ?? "?"):\(onDisk?.sessionKind ?? "?"):\(lease.uuid)")
+        }
         var ticket: IdentityChange.Ticket?
         if let holdTx {
             let parts = holdTx.split(separator: ":", maxSplits: 1).map(String.init)

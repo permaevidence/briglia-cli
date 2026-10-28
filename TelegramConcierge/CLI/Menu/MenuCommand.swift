@@ -197,6 +197,12 @@ struct MenuCommand: AsyncParsableCommand {
             print("\nStarting Briglia. Keep this window open (you can minimize it) and talk to it on Telegram.")
             print("To change settings later, quit Briglia (Ctrl-C) and type: briglia menu\n")
             if let held = leaseBox.take() {
+                // The menu becomes the running assistant: its member lease
+                // changes role without being released, then re-checks the
+                // barrier and the settings admission (MULTI_ASSISTANT_PLAN §4.4).
+                if let refusal = MemberEntry.promoteToAssistant(kind: "chat") {
+                    held.release(); print("✖ \(refusal)"); throw ExitCode(1)
+                }
                 let session = await TerminalSession(sweepLeftoversAtEntry: false)
                 try await session.runChat(adopting: held)
             }

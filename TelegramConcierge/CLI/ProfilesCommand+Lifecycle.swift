@@ -81,7 +81,9 @@ extension ProfilesCommand {
         func run() throws {
             try ProfilesCommand.requireExperimental()
             try ProfilesCommand.requireDefault()
-            let stopped = ProfileLifecycle.stop(name: name)
+            var wait: TimeInterval = 30
+            if adaCLIVersion.hasSuffix("-dev"), let v = Double(ProcessInfo.processInfo.environment["BRIGLIA_TEST_STOP_WAIT"] ?? "") { wait = v }
+            let stopped = ProfileLifecycle.stop(name: name, wait: wait)
             switch stopped {
             case .notRunning: print("‘\(name)’ is not running.")
             case .stopped(let pids): print("✔ Stopped ‘\(name)’ (pid \(pids.map(String.init).joined(separator: ", "))).")
@@ -215,8 +217,10 @@ enum ProfileLifecycle {
             doc = d
         }
         MemberLeases.sweep(leaseDir)
-        try? fm.removeItem(at: leaseDir)       // fails (kept) while not empty
-        try? fm.removeItem(at: leaseDir.deletingLastPathComponent())
+        // rmdir, never a recursive removal: a directory that still holds a
+        // late starter's lease (or another generation) is kept.
+        rmdir(leaseDir.path)
+        rmdir(leaseDir.deletingLastPathComponent().path)
         return [home].compactMap { $0 }
     }
 

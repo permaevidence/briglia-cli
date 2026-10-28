@@ -37,7 +37,8 @@ extension ProfileHarness {
         let sb = sharedProbe("sb", "status")
         check("resolver: `subscription scope own` gives an extra its own store",
               scope.status == 0 && sb["storeDir"] as? String == (configBase + "/briglia-profiles/sb"), "\(scope.out) \(sb)")
-        check("sharers: default + every extra not explicitly own", (sa["sharers"] as? [String]) == ["default", "sa"] || (sharedProbe("sa", "status")["sharers"] as? [String]) == ["default", "sa"])
+        let sharers = sharedProbe("sa", "status")["sharers"] as? [String] ?? []
+        check("sharers: default + every extra not explicitly own", sharers.first == "default" && sharers.contains("sa") && !sharers.contains("sb"), "\(sharers)")
         check("protection: an extra protects both stores (file tools, redaction)",
               (sa["protected"] as? [String])?.count == 2 && (def["protected"] as? [String])?.count == 1)
 
@@ -110,7 +111,10 @@ extension ProfileHarness {
         }
         let defWipe = sharedProbe(nil, "wipe")
         check("wipe: default keeps the login while another extra shares it", defWipe["storeSignedIn"] as? Bool == true, "\(defWipe)")
-        _ = run(["--profile", "sa", "subscription", "scope", "own"])
+        // Every extra on this computer (other sections leave more) → own.
+        for name in (registryDoc()?.records.map(\.name) ?? []) where name != "default" {
+            _ = run(["--profile", name, "subscription", "scope", "own"])
+        }
         let lastWipe = sharedProbe(nil, "wipe")
         check("wipe: the last sharer (default, every extra own) signs the machine store out", lastWipe["storeSignedIn"] as? Bool == false, "\(lastWipe)")
         // An own-scope extra's wipe signs its own store out and returns to shared.
