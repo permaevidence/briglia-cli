@@ -228,8 +228,12 @@ BREAKS = [
      '            Self.commandCapture?.deliverBeforeExit()\n', ''),
     # Codex stage-3 round 3.
     ('M73 a job being terminated counts as finished (S3-R3-1)', 'stage3', T + 'Services/BashTools.swift',
-     '        Set(entries.values.filter { !$0.lifecycleSettled }.map(\\.id))',
+     '        Set(entries.values.filter { !$0.lifecycleSettled || $0.terminationsInFlight > 0 }.map(\\.id))',
      '        Set(entries.values.filter { $0.status == .running }.map(\\.id))'),
+    # Codex stage-3 round 4.
+    ('M74 liveness ignores a process-tree termination still in progress (S3-R4-1)', 'stage3', T + 'Services/BashTools.swift',
+     '        Set(entries.values.filter { !$0.lifecycleSettled || $0.terminationsInFlight > 0 }.map(\\.id))',
+     '        Set(entries.values.filter { !$0.lifecycleSettled }.map(\\.id))'),
 ]
 
 

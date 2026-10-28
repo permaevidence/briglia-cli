@@ -49,6 +49,81 @@ extension ProfileHarness {
         stage3UnsettledReservation()
         stage3OutOfTurnScope()
         stage3TerminatingJob()
+        stage3RootExitsFirst(redirected: true)
+        stage3RootExitsFirst(redirected: false)
+    }
+
+    // MARK: S3-R4-1 — the root exits on SIGTERM, a same-group child writes late
+
+    private func stage3RootExitsFirst(redirected: Bool) {
+        let variant = redirected ? "redirected child" : "child on the inherited pipe"
+        guard let fx = makeS3("r4-root-" + (redirected ? "redir" : "pipe")) else { check("S3-R4-1 fixture", false); return }
+        defer { fx.release(); resetStage3Seams() }
+        let a = fx.ctx("default"), b = fx.ctx("work")
+        MultiAssistant.contextOverrideForTesting = a
+        ClaimScopes.tickSeconds = 3600
+        ClaimScopes.liveJobsOverrideForTesting = nil
+        let file = fx.root.appendingPathComponent("rootfirst.txt").path
+        let watched = MultiAssistant.canonical(fx.root.appendingPathComponent("watched.txt").path)
+        FileManager.default.createFile(atPath: watched, contents: Data("WATCH\n".utf8))
+        // Work holds a claim on `watched` (tripwire target).
+        try? FileClaims.reserve(b, paths: [watched], opId: "w1")
+        try? FileClaims.settle(b, opId: "w1", changed: true, scopes: ["x"], open: { Self.syntheticOpen })
+        let turn = UUID(), scope = "turn:" + turn.uuidString.lowercased()
+        ClaimScopes.shared.turnStarted(turn)
+        try? FileClaims.reserve(a, paths: [file], opId: "rf1")
+        try? FileClaims.settle(a, opId: "rf1", changed: true, scopes: [scope])
+        guard let snap = wait({ await Tripwire.snapshot(a) }), snap.files.contains(where: { $0.owned.path == watched }) else {
+            check("S3-R4-1 (\(variant)): tripwire snapshot of Work's claim", false); return
+        }
+        // Root: default TERM disposition (exits at once). Child: same process
+        // group, traps TERM and appends to the watched file 120 ms later.
+        let ready = fx.root.appendingPathComponent("child-ready").path
+        let body = "$SIG{TERM}=sub{$t=time()+0.12 unless defined $t}; open(R,\">\",$ARGV[1]); close R; while(1){ if(defined $t && time()>=$t){ open(F,\">>\",$ARGV[0]); print F \"LATE\\n\"; close F; $t=1e18 } sleep 0.005 }"
+        let child = "perl -MTime::HiRes=time,sleep -e '\(body)' \"\(watched)\" \"\(ready)\"" + (redirected ? " </dev/null >/dev/null 2>&1" : "")
+        guard let job = wait({ try? await BackgroundProcessRegistry.shared.start(command: child + " & while :; do sleep 0.02; done",
+                                                                                  workdir: fx.root.path, description: "s3r41") }) else {
+            check("S3-R4-1 (\(variant)): start the job", false); return
+        }
+        let jobKey = "bash:" + job.id
+        _ = wait { await Tripwire.shared.afterCommand(a, snap) }
+        ClaimScopes.shared.turnEnded(turn)
+        guard until(5, { ClaimScopes.shared.pendingScopesForTesting[scope]?.contains(jobKey) == true }) && Tripwire.shared.hasWatches,
+              until(10, { FileManager.default.fileExists(atPath: ready) }) else {
+            check("S3-R4-1 (\(variant)): T pending on the job, watch registered, child running", false)
+            _ = wait { await BackgroundProcessRegistry.shared.kill(handleId: job.id) }
+            return
+        }
+        final class Flag: @unchecked Sendable { var done = false }
+        let killFlag = Flag()
+        let killDone = DispatchSemaphore(value: 0)
+        Task.detached { _ = await BackgroundProcessRegistry.shared.kill(handleId: job.id); killFlag.done = true; killDone.signal() }
+        var sawSettledDuringKill = false, droppedDuringKill = false, samples = 0
+        while !killFlag.done {
+            let live = wait { await ClaimScopes.liveJobs() }
+            let settled = wait { await BackgroundProcessRegistry.shared.lifecycleSettledForTesting(handleId: job.id) }
+            _ = wait { await ClaimScopes.shared.tick() }
+            if killFlag.done { break }
+            samples += 1
+            if settled { sawSettledDuringKill = true }
+            if !live.contains(jobKey) || FileClaims.claims(ofSelf: a).isEmpty || !Tripwire.shared.hasWatches { droppedDuringKill = true }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        _ = killDone.wait(timeout: .now() + 10)
+        check("S3-R4-1 (\(variant)): throughout the process-tree termination the job counts as alive; the claim, pending scope and watch stay",
+              samples > 0 && !droppedDuringKill, "samples \(samples) settledEarly \(sawSettledDuringKill)")
+        if redirected {
+            check("S3-R4-1: the fixture exercises the root-exits-first ordering (lifecycle settled while the termination was still running)",
+                  sawSettledDuringKill, "samples \(samples)")
+        }
+        _ = until(10) { !wait({ await ClaimScopes.liveJobs() }).contains(jobKey) }
+        _ = wait { await ClaimScopes.shared.tick() }
+        let late = (try? String(contentsOfFile: watched, encoding: .utf8)) ?? ""
+        let notices = BoardNotices.pending(b, now: MultiAssistant.now)
+        check("S3-R4-1 (\(variant)): the child's late write reaches the tripwire (Work is told) before the watch is torn down",
+              late.contains("LATE") && notices.contains { $0.path == watched }, "file \(late.debugDescription) notices \(notices.count)")
+        check("S3-R4-1 (\(variant)): after the termination finished, the claim and the watch are released",
+              FileClaims.claims(ofSelf: a).isEmpty && !Tripwire.shared.hasWatches && ClaimScopes.shared.pendingScopesForTesting[scope] == nil)
     }
 
     // MARK: S3-R3-1 — a job being terminated is still alive
@@ -66,14 +141,18 @@ extension ProfileHarness {
         try? FileClaims.reserve(a, paths: [file], opId: "tj1")
         try? FileClaims.settle(a, opId: "tj1", changed: true, scopes: [scope])
         // A job that ignores SIGTERM: alive until the SIGKILL escalation.
-        guard let job = wait({ try? await BackgroundProcessRegistry.shared.start(command: "trap '' TERM; while :; do sleep 0.05; done",
+        let ready = fx.root.appendingPathComponent("job-ready").path
+        guard let job = wait({ try? await BackgroundProcessRegistry.shared.start(command: "trap '' TERM; : > \"\(ready)\"; while :; do sleep 0.05; done",
                                                                                   workdir: fx.root.path, description: "s3r31") }) else {
             check("S3-R3-1: start the job", false); return
         }
         let jobKey = "bash:" + job.id
         ClaimScopes.shared.turnEnded(turn)
-        guard until(5, { ClaimScopes.shared.pendingScopesForTesting[scope]?.contains(jobKey) == true }) else {
-            check("S3-R3-1: T pending on the job", false, "\(ClaimScopes.shared.pendingScopesForTesting)"); return
+        guard until(5, { ClaimScopes.shared.pendingScopesForTesting[scope]?.contains(jobKey) == true }),
+              until(10, { FileManager.default.fileExists(atPath: ready) }) else {
+            check("S3-R3-1: T pending on the job (job running)", false, "\(ClaimScopes.shared.pendingScopesForTesting)")
+            _ = wait { await BackgroundProcessRegistry.shared.kill(handleId: job.id) }
+            return
         }
         _ = wait { await Tripwire.shared.afterCommand(a, Tripwire.Snapshot(files: [], jobsBefore: [])) }
         let killDone = DispatchSemaphore(value: 0)

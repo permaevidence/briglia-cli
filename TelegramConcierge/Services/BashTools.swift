@@ -1335,6 +1335,12 @@ actor BackgroundProcessRegistry {
         /// process actually dies — callers awaiting final output must gate
         /// on THIS flag, never on status.
         var lifecycleSettled = false
+        /// Process-tree terminations in progress for this job (Codex stage-3
+        /// S3-R4-1): registered before signalling, cleared once
+        /// `ProcessTree.terminate` returned (its SIGKILL escalation done).
+        /// The root may exit and the readers drain — `lifecycleSettled` —
+        /// while a same-group child still runs inside the SIGTERM grace.
+        var terminationsInFlight = 0
         /// When the settle sequence finished — the clock the retention
         /// policy (BASH_V2_PLAN §13) prunes against. nil while running.
         var settledAt: Date?
@@ -1880,7 +1886,9 @@ actor BackgroundProcessRegistry {
         guard e.status == .running else { return }
         e.status = .killed
         e.terminationCause = cause
+        e.terminationsInFlight += 1
         await ProcessTree.terminate(e.process, graceNanos: 200_000_000)
+        e.terminationsInFlight -= 1
     }
 
     /// Handle-based stop for the attached initial-wait cancellation path.
@@ -1909,11 +1917,16 @@ actor BackgroundProcessRegistry {
     /// (MULTI_ASSISTANT_PLAN A2: a turn's file claims last until the jobs
     /// running when it ended stop). Codex stage-3 S3-R3-1: a kill or an
     /// execution deadline stamps the terminal status BEFORE the process tree
-    /// is terminated, so `status` is not liveness: only `lifecycleSettled`
-    /// (exit recorded, readers drained) says the job can no longer write.
+    /// is terminated, so `status` is not liveness: the job counts until its
+    /// lifecycle settled (exit recorded, readers drained) AND no process-tree
+    /// termination of it is still in progress (S3-R4-1: the root can exit on
+    /// SIGTERM while a same-group child writes during the grace).
     func unsettledEntryIds() -> Set<String> {
-        Set(entries.values.filter { !$0.lifecycleSettled }.map(\.id))
+        Set(entries.values.filter { !$0.lifecycleSettled || $0.terminationsInFlight > 0 }.map(\.id))
     }
+
+    /// Selftests: whether the exit monitor settled this job's lifecycle.
+    func lifecycleSettledForTesting(handleId: String) -> Bool { entries[handleId]?.lifecycleSettled ?? true }
 
     func runningBackgroundJobCount() -> Int {
         entries.values.filter { $0.kind == .background && $0.status == .running }.count
@@ -2067,7 +2080,9 @@ actor BackgroundProcessRegistry {
         // rather than .exited/.crashed.
         e.status = .killed
         e.terminationCause = .userKill
+        e.terminationsInFlight += 1
         await ProcessTree.terminate(e.process, graceNanos: 300_000_000)
+        e.terminationsInFlight -= 1
         return true
     }
 
@@ -2491,11 +2506,15 @@ actor BackgroundProcessRegistry {
         for e in running {
             e.status = .killed
             e.terminationCause = .userKill
+            e.terminationsInFlight += 1
             try? e.stdin.close()
             stopped.append(StoppedJob(jobUUID: e.jobUUID, handle: e.id, command: redactor.redact(e.command),
                                       runningForSeconds: Int(Date().timeIntervalSince(e.startedAt))))
         }
-        for e in running { await ProcessTree.terminate(e.process, graceNanos: 300_000_000) }
+        for e in running {
+            await ProcessTree.terminate(e.process, graceNanos: 300_000_000)
+            e.terminationsInFlight -= 1
+        }
         return stopped
     }
 
@@ -2690,8 +2709,10 @@ actor BackgroundProcessRegistry {
         guard let e = entries[handleId], e.status == .running else { return }
         e.status = .timedOut
         e.terminationCause = .executionDeadline
+        e.terminationsInFlight += 1
         try? e.stdin.close()
         await ProcessTree.terminate(e.process, graceNanos: 300_000_000)
+        e.terminationsInFlight -= 1
     }
 
     /// Withdraw the pending completion notices named by `receipts`. Called
@@ -2724,8 +2745,10 @@ actor BackgroundProcessRegistry {
         for e in running {
             e.status = .killed
             e.terminationCause = .ownerFinished
+            e.terminationsInFlight += 1
             try? e.stdin.close()
             await ProcessTree.terminate(e.process, graceNanos: 300_000_000)
+            e.terminationsInFlight -= 1
         }
     }
 
@@ -2743,6 +2766,7 @@ actor BackgroundProcessRegistry {
         for t in trees {
             t.entry.status = .killed
             t.entry.terminationCause = .appShutdown
+            t.entry.terminationsInFlight += 1
             if t.entry.process.isRunning { t.entry.process.terminate() }
             for g in t.groups { _ = Darwin.kill(-g, SIGTERM) }
             for pid in t.descendants { _ = Darwin.kill(pid, SIGTERM) }
@@ -2752,6 +2776,7 @@ actor BackgroundProcessRegistry {
             if t.entry.process.isRunning { _ = Darwin.kill(t.entry.process.processIdentifier, SIGKILL) }
             for g in t.groups where Darwin.kill(-g, 0) == 0 { _ = Darwin.kill(-g, SIGKILL) }
             for pid in t.descendants where Darwin.kill(pid, 0) == 0 { _ = Darwin.kill(pid, SIGKILL) }
+            t.entry.terminationsInFlight -= 1
         }
     }
 
