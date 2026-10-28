@@ -229,7 +229,9 @@ extension ConversationManager {
                     // conversation and save it over the restored files.
                     // Channel messages stay queued server-side and are picked
                     // up on the first tick after the restore completes.
-                    if isRestoringMind {
+                    // Parked for an update (§6.4): same top-of-loop idle, so a
+                    // pause never splits a fetched batch.
+                    if isRestoringMind || admissionPaused {
                         try? await Task.sleep(nanoseconds: 200_000_000)
                         continue
                     }

@@ -13,7 +13,7 @@ struct ReleaseIdentityCommand: ParsableCommand {
     )
 
     func run() throws {
-        let identity = UpgradeBarrier.ReleaseIdentity(version: adaCLIVersion, sequence: adaCLIReleaseSequence)
+        let identity = UpgradeBarrier.ReleaseIdentity(version: adaCLIVersion, sequence: ReleaseSequence.compiled)
         let data = try JSONEncoder().encode(identity)
         print(String(decoding: data, as: UTF8.self))
     }

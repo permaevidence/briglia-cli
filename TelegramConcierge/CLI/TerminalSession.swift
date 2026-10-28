@@ -143,12 +143,22 @@ final class TerminalSession {
         // then AgentMail convergence (idle-gated commit), the Node selection
         // (inside the Playwright bootstrap, which awaits it) and the Python
         // venv. Background work: never blocks startup or a turn.
-        Task { await PrivateRuntimeStartup.run(manager: manager) }
-        Task { await BrowserAutomationBootstrap.ensureConfigured() }
+        // Counted by the upgrade barrier's readiness (§6.2): startup
+        // convergence reads the bundle and private runtimes.
+        let mgr = manager
+        Task { await UpgradeReadiness.tracking { await PrivateRuntimeStartup.run(manager: mgr) } }
+        if !(RuntimeSeams.isDev && ProcessInfo.processInfo.environment["BRIGLIA_TEST_NO_BROWSER_BOOTSTRAP"] == "1") {
+            Task { await UpgradeReadiness.tracking { await BrowserAutomationBootstrap.ensureConfigured() } }
+        }
+        // The upgrade barrier's monitor (only while coordination is active).
+        manager.startUpgradeMonitor()
 
         // Post-exec restart (/upgrade or /restart re-execs in place): close
         // the loop the old process opened with "I'll confirm when I'm back."
         if let marker = UpgradeService.consumeRestartMarker() {
+            if let barrierId = marker.barrierId, let oldLease = marker.oldLease {
+                ConversationManager.acknowledgeUpgradeRestart(barrierId: barrierId, oldLease: oldLease)
+            }
             switch marker.kind {
             case .upgrade:
                 print("✔ Update \(marker.version) installed — Briglia restarted.")

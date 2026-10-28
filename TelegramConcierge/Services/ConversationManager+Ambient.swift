@@ -1376,7 +1376,7 @@ extension ConversationManager {
             return false
         }
         switch Self.emailDeliveryRoute(
-            isRestoringMind: isRestoringMind,
+            isRestoringMind: isRestoringMind || admissionPaused,
             providerActive: EmailCalendarProvider.current != .none,
             hasReplyChannel: replyAddress != nil,
             emailCount: emails.count,

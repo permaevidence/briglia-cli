@@ -65,6 +65,8 @@ enum MemberEntry {
             return words.contains("--read-only") ? nil : .session(kind: "doctor")
         case "upgrade", "update":
             return words.contains("--recover") ? .recovery : .session(kind: "upgrade")
+        case "__upgrade-readiness-check":
+            return adaCLIVersion.hasSuffix("-dev") ? .assistant(kind: "probe") : .session(kind: "probe")
         case "__member-probe":
             // Selftest probe: an assistant only in development builds.
             return words.contains("--assistant") && adaCLIVersion.hasSuffix("-dev")

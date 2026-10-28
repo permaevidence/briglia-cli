@@ -27,6 +27,7 @@ struct MultiAssistantSelftest: ParsableCommand {
         if h.section("leases") { h.leasesSection() }
         if h.section("identity") { h.identitySection() }
         if h.section("remove") { h.removeSection() }
+        if h.section("upgrade") { h.upgradeSection() }
         print("\n\(h.total - h.failures)/\(h.total) multi-assistant checks passed")
         if h.failures > 0 { throw ExitCode(1) }
     }
@@ -44,9 +45,11 @@ struct MemberProbeCommand: ParsableCommand {
     @Flag(name: .customLong("assistant")) var assistant = false
     @Option(name: .customLong("hold")) var hold: Double = 0
     @Option(name: .customLong("hold-tx")) var holdTx: String?
+    @Flag(name: .customLong("long-lived")) var longLived = false
 
     func run() throws {
         setvbuf(stdout, nil, _IOLBF, 0)
+        if longLived { MemberEntry.startSessionBarrierWatch(poll: 0.5) }
         var info: [String: Any] = ["profile": AssistantProfile.selectedName, "pid": Int(getpid())]
         if let lease = MemberEntry.current {
             info["uuid"] = lease.uuid

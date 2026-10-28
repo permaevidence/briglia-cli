@@ -51,6 +51,9 @@ enum UpgradeService {
 
     struct Update {
         let version: String
+        /// The authenticated manifest's release sequence (the barrier's
+        /// trust check, MULTI_ASSISTANT_PLAN §5.1).
+        var sequence: Int = 0
         let url: String
         let sha256: String
         /// Authenticated exact artifact size from the signed manifest —
@@ -206,8 +209,49 @@ enum UpgradeService {
         guard let entry = manifest.platforms[platform] else {
             return .noBuildForPlatform(version: manifest.version, platform: platform)
         }
-        return .available(Update(
-            version: manifest.version, url: entry.url, sha256: entry.sha256, size: entry.size))
+        var update = Update(
+            version: manifest.version, url: entry.url, sha256: entry.sha256, size: entry.size)
+        update.sequence = manifest.sequence
+        return .available(update)
+    }
+
+    /// Download, verify and unpack into a fresh temporary directory, then
+    /// validate the unpacked build (bundle-check) — WITHOUT touching the
+    /// installation. The barrier path (MULTI_ASSISTANT_PLAN §6.3 step 2)
+    /// installs it later under the journal. The caller removes `tempDirectory`.
+    static func downloadAndStage(_ update: Update, progress: (String) -> Void) async throws -> StagedUpgrade {
+        try TurnCheckpointStore.refuseReplacementWithUnfinishedEnvelope()
+        progress("Downloading…")
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("briglia-upgrade-\(UUID().uuidString)")
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        do {
+            let tarball = tmp.appendingPathComponent("briglia.tar.gz")
+            guard update.size > 0 else {
+                throw UpgradeError(message: "release entry carries no authenticated size — refusing an unbounded download")
+            }
+            let digest = try await BoundedHTTP.downloadFile(
+                url: URL(string: update.url)!, to: tarball, expectedBytes: update.size)
+            guard digest == update.sha256.lowercased() else {
+                throw UpgradeError(message: "checksum mismatch — download corrupted or tampered with; nothing was changed")
+            }
+            try runOrThrow("/usr/bin/tar", ["-xzf", tarball.path, "-C", tmp.path])
+            let newBinary = tmp.appendingPathComponent("briglia")
+            let newBundle = tmp.appendingPathComponent(BundleCheck.bundleName)
+            guard fm.fileExists(atPath: newBinary.path), fm.fileExists(atPath: newBundle.path) else {
+                throw UpgradeError(message: "unexpected tarball layout — expected briglia + \(BundleCheck.bundleName)")
+            }
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+            do {
+                try runOrThrow(newBinary.path, ["bundle-check"], currentDirectory: "/")
+            } catch {
+                throw UpgradeError(message: "the downloaded build failed verification (\(error.localizedDescription)) — nothing was changed, still on \(adaCLIVersion)")
+            }
+            return StagedUpgrade(version: update.version, sequence: update.sequence, binary: newBinary, bundle: newBundle, tempDirectory: tmp)
+        } catch {
+            try? fm.removeItem(at: tmp)
+            throw error
+        }
     }
 
     /// Download, verify, unpack, and swap the installed binary + bundle.
@@ -442,10 +486,17 @@ enum UpgradeService {
         let at: Date
         // Absent in markers written by pre-/restart versions → upgrade.
         let kind: RestartKind?
+        // Multi-assistant upgrade barrier (absent otherwise): the barrier
+        // and the lease uuid this process held before the exec.
+        var barrierId: String?
+        var oldLease: String?
     }
 
-    static func writeRestartMarker(version: String, kind: RestartKind = .upgrade) {
-        let marker = RestartMarker(version: version, at: Date(), kind: kind)
+    struct RestartInfo { let version: String; let kind: RestartKind; let barrierId: String?; let oldLease: String? }
+
+    static func writeRestartMarker(version: String, kind: RestartKind = .upgrade,
+                                   barrierId: String? = nil, oldLease: String? = nil) {
+        let marker = RestartMarker(version: version, at: Date(), kind: kind, barrierId: barrierId, oldLease: oldLease)
         if let data = try? JSONEncoder().encode(marker) {
             try? PrivateStorage.writeAtomically(data, to: restartMarkerURL)
         }
@@ -454,13 +505,14 @@ enum UpgradeService {
     /// Returns the marker when this process is a post-exec restart, deleting
     /// it. Stale markers (an exec that never happened, a manual restart days
     /// later) are discarded silently.
-    static func consumeRestartMarker() -> (version: String, kind: RestartKind)? {
+    static func consumeRestartMarker() -> RestartInfo? {
         let fm = FileManager.default
         guard let data = try? Data(contentsOf: restartMarkerURL) else { return nil }
         try? fm.removeItem(at: restartMarkerURL)
         guard let marker = try? JSONDecoder().decode(RestartMarker.self, from: data),
               Date().timeIntervalSince(marker.at) < 15 * 60 else { return nil }
-        return (marker.version, marker.kind ?? .upgrade)
+        return RestartInfo(version: marker.version, kind: marker.kind ?? .upgrade,
+                           barrierId: marker.barrierId, oldLease: marker.oldLease)
     }
 
     /// Replace this process with the (just-swapped) installed binary, keeping

@@ -119,7 +119,7 @@ final class MemberLease: @unchecked Sendable {
             let sidecar = Sidecar(role: role, coordinator: false, recovery: false, pid: getpid(),
                                   processStartTime: ProcessIdentity.selfStartTime,
                                   incarnation: UUID().uuidString.lowercased(),
-                                  releaseSequence: adaCLIReleaseSequence, sessionKind: sessionKind,
+                                  releaseSequence: ReleaseSequence.compiled, sessionKind: sessionKind,
                                   profile: profile,
                                   executable: (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath().path)
             let lease = MemberLease(uuid: uuid, directory: directory, fd: fd, sidecar: sidecar)

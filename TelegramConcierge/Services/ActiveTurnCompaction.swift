@@ -265,8 +265,8 @@ enum TurnCheckpointStore {
         }
         return data
     }
-    static func refuseReplacementWithUnfinishedEnvelope() throws {
-        let url = StoragePaths.dataRoot.appendingPathComponent("turn_salvage.json")
+    static func refuseReplacementWithUnfinishedEnvelope(dataRoot: URL = StoragePaths.dataRoot) throws {
+        let url = dataRoot.appendingPathComponent("turn_salvage.json")
         guard let data = try read(url) else { return }
         guard (try? JSONDecoder().decode([ToolInteraction].self, from: data)) != nil else {
             throw PruneArchiveStore.Failure("An unfinished versioned turn checkpoint is present. Start the current Briglia version to recover it before replacing or rolling back the binary. Recovery data was preserved.")

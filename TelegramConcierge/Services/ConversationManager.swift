@@ -1331,6 +1331,13 @@ class ConversationManager: ObservableObject {
     /// the user why. On success the poll loop idles and new turns are
     /// refused until `endMindRestore()`.
     var browserSettingsMutation = false
+    /// Upgrade barrier (MULTI_ASSISTANT_PLAN §6.4): new work is not admitted
+    /// while parked for an update. Reversible; never touches the polling
+    /// preference.
+    var admissionPaused = false
+    var upgradeMonitorTask: Task<Void, Never>?
+    /// The barrier this assistant is parked for (nil = not parked).
+    var upgradeParkedFor: String?
     var browserSettingsPollIngress = 0
     var browserSettingsAppIngress = 0
     var browserSettingsCommandIngress = 0

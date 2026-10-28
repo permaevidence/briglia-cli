@@ -263,8 +263,19 @@ enum UpgradeBarrier {
     /// §6.1: a member whose compiled sequence is older than the validated
     /// installed release re-execs the binary on disk (same argv). Returns
     /// only when no re-exec is needed.
+    static let reexecGuardKey = "BRIGLIA_REEXEC_GUARD"
+
     static func reexecIfOlder(_ paths: Paths = .live) {
-        guard let rec = validatedInstalled(paths), rec.sequence > adaCLIReleaseSequence else { return }
+        // Cheap first: only a record claiming a newer sequence is worth
+        // hashing the installed pair for.
+        guard case .value(let raw) = readFile(paths.installed, as: Installed.self), raw.sequence > ReleaseSequence.compiled,
+              let rec = validatedInstalled(paths), rec.sequence > ReleaseSequence.compiled else { return }
+        // Never loop: not when this image already IS that binary, and not a
+        // second time for the same installed identity.
+        let own = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
+        if sha256(file: own) == rec.binarySHA256 { return }
+        if ProcessInfo.processInfo.environment[reexecGuardKey] == rec.binarySHA256 { return }
+        setenv(reexecGuardKey, rec.binarySHA256, 1)
         var argv: [UnsafeMutablePointer<CChar>?] = CommandLine.arguments.map { strdup($0) }
         argv.append(nil)
         fflush(stdout); fflush(stderr)

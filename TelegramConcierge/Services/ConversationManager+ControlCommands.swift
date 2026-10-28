@@ -1356,6 +1356,10 @@ extension ConversationManager {
             try? await sendText("⏳ A turn is running — send /upgrade again when Briglia is idle (or /stop first).")
             return
         }
+        if CoordinationMode.active {
+            await handleUpgradeCoordinated()
+            return
+        }
         // During a durability stall an earlier update in this very batch is
         // processed but unconfirmed — the upgrade handler's own
         // confirmProcessed(higher id) would implicitly confirm it, bypassing
@@ -1445,6 +1449,83 @@ extension ConversationManager {
             } catch {
                 try? await sendText("✖ Update failed: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// `/upgrade` with several assistants (MULTI_ASSISTANT_PLAN §6): this
+    /// assistant is the coordinator AND a participant — its monitor parks it
+    /// under the same readiness rules as everyone (only this handler is not
+    /// a turn). After the commit it confirms only its own update and execs.
+    private func handleUpgradeCoordinated() async {
+        guard stalledConfirmUpdateId == nil else {
+            try? await sendText("✖ Briglia can't persist state to disk right now; /upgrade is deferred until storage recovers.")
+            return
+        }
+        let lock: ProfileFileLock
+        switch UpgradeCoordinator.acquire() {
+        case .success(let l): lock = l
+        case .failure(let why): try? await sendText("✖ \(why)"); return
+        }
+        defer { lock.release() }
+        var settings = UpgradeCoordinator.Settings()
+        settings.progress = { [weak self] line in Task { @MainActor in try? await self?.sendText(line) } }
+        if let why = UpgradeCoordinator.settlePrevious(settings) { try? await sendText("✖ \(why)"); return }
+        var checkedManifest: ReleaseSigning.Manifest?
+        var warnings: [String] = []
+        let result = await UpgradeService.check(warn: { warnings.append($0) }, onManifest: { checkedManifest = $0 })
+        for w in warnings { try? await sendText(w) }
+        if let note = Self.upgradeDisplayNote(manifest: checkedManifest, installed: adaCLIReleaseSequence,
+                                              observed: Self.observedForUpgradeDisplay()) {
+            try? await sendText(note)
+        }
+        let update: UpgradeService.Update
+        switch result {
+        case .available(let available): update = available
+        case .upToDate(let version): try? await sendText("✔ Already up to date (\(version))."); return
+        case .rollbackRefused(let live, let floor):
+            try? await sendText("✖ The release channel serves signed metadata with sequence \(live), BELOW this install's trusted floor \(floor). Refusing."); return
+        case .manifestOlder(let current, let manifest):
+            try? await sendText("⚠ The release feed serves \(manifest), older than the installed \(current). Not downgrading; try again in a few minutes."); return
+        case .unsupportedPlatform: try? await sendText("✖ No prebuilt releases exist for this platform."); return
+        case .noBuildForPlatform(let version, let platform): try? await sendText("✖ Release \(version) has no \(platform) build yet."); return
+        case .failed(let reason): try? await sendText("✖ Update check failed: \(reason)"); return
+        }
+        guard UpgradeService.installDirWritable() else {
+            try? await sendText("✖ Briglia is installed in \(UpgradeService.installDir.path), which needs sudo to replace. Run `briglia upgrade` in a terminal instead.")
+            return
+        }
+        try? await sendText("⬇ Updating \(adaCLIVersion) → \(update.version)… every assistant on this computer pauses at a quiet moment first (up to 10 minutes).")
+        let staged: StagedUpgrade
+        do { staged = try await UpgradeService.downloadAndStage(update) { _ in } } catch {
+            try? await sendText("✖ Update failed: \(error.localizedDescription)"); return
+        }
+        defer { if let tmp = staged.tempDirectory { try? FileManager.default.removeItem(at: tmp) } }
+        MemberEntry.isCoordinator = true
+        defer { MemberEntry.isCoordinator = false }
+        archiveExitPending = true
+        defer { archiveExitPending = false }
+        let outcome = await UpgradeCoordinator.run(staged: staged, settings: settings, holding: lock) { [weak self] barrier in
+            guard let self else { return }
+            UpgradeService.writeRestartMarker(version: barrier.targetVersion, kind: .upgrade,
+                                              barrierId: barrier.id, oldLease: MemberEntry.current?.uuid)
+            self.saveConversation()
+            try? await self.sendText("✅ \(barrier.targetVersion) installed — restarting now. I'll confirm when I'm back online.")
+            if let capture = Self.commandCapture, !capture.lines.isEmpty {
+                for line in capture.lines { print("  " + line.replacingOccurrences(of: "\n", with: "\n  ")) }
+            }
+            self.stopPolling()
+            if let ownUpdateId = self.processingTelegramUpdateId {
+                await self.telegramService.confirmProcessed(updateId: ownUpdateId)
+            } else {
+                await self.telegramService.persistOffsetNow()
+            }
+            UpgradeService.restartNow()
+        }
+        switch outcome {
+        case .committed: break
+        case .cancelled(let why): try? await sendText("✖ Update cancelled: \(why)")
+        case .refused(let why): try? await sendText("✖ \(why)")
+        case .stuck(let why): try? await sendText("✖ \(why)\n\(UpgradeBarrier.stuckMessage)")
         }
     }
 

@@ -260,6 +260,7 @@ extension ConversationManager {
         guard !trimmed.isEmpty || !attachments.isEmpty else { return .refused("empty message") }
 
         // The composer bypasses the poll loop, so it needs its own restore gate.
+        guard !admissionPaused else { return .refused(Self.updatingRefusal) }
         guard !isRestoringMind else {
             return .refused(browserSettingsMutation ? "browser settings are being updated — try again in a moment" : "memory restore in progress — try again in a moment")
         }
