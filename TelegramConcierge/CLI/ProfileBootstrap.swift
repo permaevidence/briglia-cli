@@ -79,8 +79,6 @@ enum ProfileBootstrap {
             return "The phone toolchain belongs to the default assistant; run `briglia toolchain …` without --profile."
         case "migrate", "__migrate-run", "__migrate-probe", "__migrate-gate":
             return "Migrations run only for the default assistant; run the command without --profile."
-        case "service":
-            return "Background services for extra assistants are not available yet; run `briglia --profile \(name) daemon` in a terminal."
         case "upgradecheck":
             if arguments.count > 1, ["on", "off"].contains(arguments[1].lowercased()) {
                 return "This is a computer-wide setting; change it in your default assistant (`briglia upgradecheck \(arguments[1].lowercased())` without --profile)."

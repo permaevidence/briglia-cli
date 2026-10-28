@@ -1197,14 +1197,30 @@ enum SetupAPICore {
         } catch { throw saveFailed(error) }
     }
 
+    /// A bot change through setup-api (menu, phone app) inside a running
+    /// assistant with several assistants set up: the running poller keeps the
+    /// old bot until a restart, so the change goes through /switchbot, whose
+    /// cutover is coordinated (MULTI_ASSISTANT_PLAN §5.6).
+    static let liveBotChangeMessage = "Change this assistant's Telegram bot with /switchbot <new token> in its current chat, or stop it and change it here. / Cambia il bot Telegram di questo assistente con /switchbot <nuovo token> nella sua chat, oppure fermalo e cambialo qui."
+
+    private static func identityRefused(_ error: Error) -> APIError {
+        if let api = error as? APIError { return api }
+        if error is IdentityChange.Refusal || error is AssistantRegistry.RegistryError {
+            return APIError(code: "identity_refused", message: "\(error)")
+        }
+        return saveFailed(error)
+    }
+
     private static func applyTelegram(_ section: [String: Any]) throws {
         if section["remove"] as? Bool == true {
             do {
-                try KeychainHelper.saveBatch([
-                    KeychainHelper.telegramBotTokenKey: String?.none,
-                    KeychainHelper.telegramChatIdKey: String?.none,
-                ])
-            } catch { throw saveFailed(error) }
+                try IdentityChange.apply(kind: .bot, rawValue: nil) {
+                    try KeychainHelper.saveBatch([
+                        KeychainHelper.telegramBotTokenKey: String?.none,
+                        KeychainHelper.telegramChatIdKey: String?.none,
+                    ])
+                }
+            } catch { throw identityRefused(error) }
             return
         }
         guard let token = nonEmptyString(section["token"]) else {
@@ -1224,12 +1240,19 @@ enum SetupAPICore {
             throw APIError(code: "invalid_chat_id",
                            message: TelegramPairing.privateChatExplanation)
         }
+        let current = KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey)
+        if IdentityChange.processMode == .assistant, CoordinationMode.multi,
+           AssistantRegistry.normalize(.bot, current ?? "") != AssistantRegistry.normalize(.bot, token) {
+            throw APIError(code: "use_switchbot", message: liveBotChangeMessage)
+        }
         do {
-            try KeychainHelper.saveBatch([
-                KeychainHelper.telegramBotTokenKey: token,
-                KeychainHelper.telegramChatIdKey: chatId,
-            ])
-        } catch { throw saveFailed(error) }
+            try IdentityChange.apply(kind: .bot, rawValue: token) {
+                try KeychainHelper.saveBatch([
+                    KeychainHelper.telegramBotTokenKey: token,
+                    KeychainHelper.telegramChatIdKey: chatId,
+                ])
+            }
+        } catch { throw identityRefused(error) }
     }
 
     private static func applyEmailCalendar(
@@ -1289,7 +1312,22 @@ enum SetupAPICore {
                 changes[KeychainHelper.agentMailInboxAddressKey] = inbox
             }
             try checkpoint()   // immediately before the saveBatch
-            do { try KeychainHelper.saveBatch(changes) } catch { throw saveFailed(error) }
+            if let inbox = inboxes.first {
+                // One inbox per assistant (D9): reserved, written at commit,
+                // the old inbox released after the poller moved (§5.6).
+                let ticket: IdentityChange.Ticket
+                do { ticket = try IdentityChange.begin(kind: .inbox, rawValue: inbox) } catch { throw identityRefused(error) }
+                do {
+                    try checkpoint()
+                    try ticket.commit { try KeychainHelper.saveBatch(changes) }
+                } catch {
+                    ticket.abort()
+                    throw (error as? CheckpointRevoked).map { _ in error } ?? identityRefused(error)
+                }
+                if IdentityChange.processMode == .assistant { IdentityChange.deferFinish(ticket) } else { ticket.finish() }
+            } else {
+                do { try KeychainHelper.saveBatch(changes) } catch { throw saveFailed(error) }
+            }
             if let failure {
                 warnings.append("agentmail: could not list inboxes (\(failure)) — continuing; "
                                 + "Briglia retries at runtime")

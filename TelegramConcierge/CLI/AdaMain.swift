@@ -25,6 +25,9 @@ struct AdaCLI: AsyncParsableCommand {
     /// parse the remaining argv exactly as before.
     static func main() async {
         let arguments = ProfileBootstrap.run()
+        // Member lease and entry protocol (MULTI_ASSISTANT_PLAN §4.4): before
+        // ArgumentParser, before any command touches profile state.
+        MemberEntry.enter(arguments: arguments)
         await main(arguments)
     }
 
@@ -60,7 +63,8 @@ struct AdaCLI: AsyncParsableCommand {
                       LocalToolsSelftest.self, TestSignAdvisoryCommand.self, AdvisoryListParseCommand.self,
                       LocalToolsInventoryCommand.self, LocalToolsCheckOnceCommand.self, LocalToolsVersionCompareCommand.self,
                       RetiredIntegrationsSelftest.self, PrivateRuntimeSelftest.self,
-                      ProfilesCommand.self, ProfileInitCommand.self, ProfileInfoCommand.self, ProfileIsolationSelftest.self],
+                      ProfilesCommand.self, ProfileInitCommand.self, ProfileInfoCommand.self, ProfileIsolationSelftest.self,
+                      ReleaseIdentityCommand.self, MultiAssistantSelftest.self, MindExportOfflineCommand.self, MemberProbeCommand.self],
         defaultSubcommand: Chat.self
     )
 }

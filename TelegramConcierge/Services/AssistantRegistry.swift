@@ -303,7 +303,10 @@ enum AssistantRegistry {
             lease?.release()
             lease = nil
             try? FileManager.default.removeItem(at: paths.txLease(txId))
+            MemberEntry.forgetOwnTx(txId)
         }
+
+        var isOpen: Bool { lease != nil }
 
         deinit { lease?.release() }
     }
@@ -312,7 +315,8 @@ enum AssistantRegistry {
     /// refuse an unfinished live change of the same kind or a value held by
     /// another assistant, else publish `activeTx` and `pending`. Must be
     /// called before ANY network use of the new identity.
-    static func begin(profile: String, kind: Kind, rawValue: String, paths: Paths = .live) throws -> Transaction {
+    static func begin(profile: String, kind: Kind, rawValue: String, paths: Paths = .live,
+                      precheck: (Record) -> String? = { _ in nil }) throws -> Transaction {
         guard let digest = digest(kind, rawValue) else {
             throw RegistryError(kind == .bot ? "that does not look like a Telegram bot token" : "that does not look like an email address")
         }
@@ -331,6 +335,10 @@ enum AssistantRegistry {
                 if d.records[i].state != "active" {
                     throw RegistryError("this assistant is being removed")
                 }
+                // The offline-setter rule (§5.6): probed in the SAME critical
+                // section that publishes activeTx, so a starting assistant
+                // either is seen here or sees our activeTx under this lock.
+                if let refusal = precheck(d.records[i]) { throw RegistryError(refusal) }
                 if let active = d.records[i].activeTx[kind.rawValue] {
                     _ = active
                     throw RegistryError(kind == .bot
@@ -351,6 +359,7 @@ enum AssistantRegistry {
             try? FileManager.default.removeItem(at: paths.txLease(txId))
             throw error
         }
+        MemberEntry.noteOwnTx(txId)
         return Transaction(paths: paths, profile: profile, kind: kind, digest: digest, txId: txId, lease: lease)
     }
 
@@ -479,7 +488,14 @@ enum AssistantRegistry {
                     return conflictMessage(.bot, owner: owner)
                 }
                 if d.record(profile)?.bot.current == digest { return nil }
-                return "Changing an assistant's Telegram bot is not available yet while several assistants are set up on this computer."
+                // A new bot may be scanned only under this profile's own live
+                // reservation (§5.6 step 2: reserve before discovery).
+                if let record = d.record(profile), let pending = record.bot.pending, pending.value == digest,
+                   record.activeTx[Kind.bot.rawValue]?.txId == pending.txId,
+                   ProfileFileLock.probe(paths.txLease(pending.txId)) == .live {
+                    return nil
+                }
+                return "Reserve this bot for the assistant first (start the change again with /switchbot <token>)."
             }
         } catch {
             return "the assistants registry cannot be read (\(error)); run `briglia doctor`"

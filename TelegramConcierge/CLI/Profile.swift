@@ -195,7 +195,6 @@ enum AssistantProfile {
     static let upgradeMessage = "Updates are installed for the whole computer from the default assistant: run `briglia upgrade` without --profile."
     static let toolchainMessage = "The phone toolchain belongs to the default assistant; run `briglia toolchain …` without --profile."
     static let migrateMessage = "Migrations run only for the default assistant; run the command without --profile."
-    static let serviceMessage = "Background services for extra assistants are not available yet; run `briglia --profile <name> daemon` in a terminal."
 
     // MARK: - Bootstrap state
 

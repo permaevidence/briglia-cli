@@ -219,6 +219,17 @@ enum KeychainHelper {
         return .wrote
     }
 
+    /// Run `body` (which exits the process) while holding the in-process lock
+    /// and the cross-process secrets flock, so no secrets write of this or any
+    /// other process is cut in half (MULTI_ASSISTANT_PLAN §6.1: a long-lived
+    /// session closing itself when a barrier opens). Never returns.
+    static func withSecretsLockForExit(_ body: () -> Never) -> Never {
+        lock.lock()
+        let fd = open(lockURL.path, O_CREAT | O_WRONLY | O_CLOEXEC, 0o600)
+        if fd >= 0 { _ = flock(fd, LOCK_EX) }
+        body()
+    }
+
     /// Non-blocking snapshot: nil when the in-process lock is held.
     static func tryLoadSnapshot() -> [String: String]? {
         guard lock.try() else { return nil }

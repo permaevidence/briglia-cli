@@ -1092,14 +1092,28 @@ class ConversationManager: ObservableObject {
         /// Set by the idle-guarded confirm; the poll loop executes the actual
         /// cutover at its next clean boundary (see performPendingBotSwitchIfReady).
         var readyForCutover = false
+        /// When the code arrived; an unconfirmed switch expires after
+        /// `BotSwitchFlow.confirmTimeoutSeconds` (it holds the bot's
+        /// reservation and blocks `profiles add`; Codex stage-1 note 3).
+        var discoveredAt: Date?
+        var reminded = false
     }
     var pendingBotSwitch: PendingBotSwitch? {
         // Clearing the switch (cancel, timeout, failure, cutover) drops this
         // process's hold on machine/identity-tx.lock (MULTI_ASSISTANT_PLAN
-        // §5.6, Codex stage-1 R2); a still-running discovery task keeps its
-        // own reference until its last request returns.
-        didSet { if pendingBotSwitch == nil { botSwitchIdentityLock = nil } }
+        // §5.6, Codex stage-1 R2) and aborts its registry reservation (a
+        // committed one was finished at cutover); a still-running discovery
+        // task keeps its own reference until its last request returns.
+        didSet {
+            if pendingBotSwitch == nil {
+                botSwitchTicket?.abort()
+                botSwitchTicket = nil
+                botSwitchIdentityLock = nil
+            }
+        }
     }
+    /// The /switchbot reservation (multi mode; nil otherwise).
+    var botSwitchTicket: IdentityChange.Ticket?
     /// Default's hold on machine/identity-tx.lock for the lifetime of a
     /// /switchbot (nil when no switch is pending, and always nil in extras).
     var botSwitchIdentityLock: ProfileFileLock?

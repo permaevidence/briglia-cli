@@ -16,6 +16,9 @@ import Foundation
 enum BotSwitchFlow {
     /// How long discovery waits for the code before auto-cancelling.
     static let discoveryTimeoutSeconds: TimeInterval = 600
+    /// A discovered but unconfirmed switch expires after this (it holds the
+    /// new bot's reservation; MULTI_ASSISTANT_PLAN §5.6).
+    static let confirmTimeoutSeconds: TimeInterval = 1800
 
     enum Action: Equatable {
         /// Bare command, nothing pending: explain the flow.

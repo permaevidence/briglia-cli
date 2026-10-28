@@ -935,8 +935,19 @@ struct SetupWizard {
         }
         save(KeychainHelper.agentMailApiKeyKey, key)
         if let inbox = inboxes.first {
-            save(KeychainHelper.agentMailInboxAddressKey, inbox)
-            print("  ✔ Briglia's inbox: \(inbox)")
+            // One inbox per assistant (MULTI_ASSISTANT_PLAN §5.6, D9).
+            do {
+                try IdentityChange.apply(kind: .inbox, rawValue: inbox) {
+                    try KeychainHelper.save(key: KeychainHelper.agentMailInboxAddressKey, value: inbox)
+                }
+                print("  ✔ Briglia's inbox: \(inbox)")
+            } catch let refusal as IdentityChange.Refusal {
+                print("  ✖ \(refusal)")
+            } catch let refusal as AssistantRegistry.RegistryError {
+                print("  ✖ \(refusal)")
+            } catch {
+                reportFatalSaveFailure(error)
+            }
         }
         save(KeychainHelper.emailCalendarProviderKey, EmailCalendarProvider.agentmail.rawValue)
 
@@ -1010,8 +1021,20 @@ struct SetupWizard {
             }
             break
         }
-        save(KeychainHelper.telegramBotTokenKey, token)
-        save(KeychainHelper.telegramChatIdKey, chatId)
+        do {
+            try IdentityChange.apply(kind: .bot, rawValue: token) {
+                try KeychainHelper.saveBatch([KeychainHelper.telegramBotTokenKey: token,
+                                              KeychainHelper.telegramChatIdKey: chatId])
+            }
+        } catch let refusal as IdentityChange.Refusal {
+            print("  ✖ \(refusal)")
+            return
+        } catch let refusal as AssistantRegistry.RegistryError {
+            print("  ✖ \(refusal)")
+            return
+        } catch {
+            reportFatalSaveFailure(error)
+        }
         print("  ✔ Telegram connected — messages to your bot reach Briglia while `briglia` or `briglia daemon` is running")
     }
 

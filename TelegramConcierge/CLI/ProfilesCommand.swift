@@ -16,7 +16,7 @@ struct ProfilesCommand: ParsableCommand {
         commandName: "profiles",
         abstract: "Manage extra assistants on this computer (experimental).",
         shouldDisplay: false,
-        subcommands: [List.self, Add.self]
+        subcommands: [List.self, Add.self, Remove.self, Stop.self]
     )
 
     static func requireExperimental() throws {
@@ -206,6 +206,10 @@ enum ProfileProvisioning {
         case .failed(let why): throw ProvisioningError(why)
         }
         defer { identity.release() }
+        // The new extra becomes a sharer of the ChatGPT login (§25.11).
+        let share: ProfileFileLock?
+        do { share = try ChatGPTShare.takeLock() } catch { throw ProvisioningError("\(error)") }
+        defer { share?.release() }
         let defaultBot = KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey)
         let defaultInbox = KeychainHelper.load(key: KeychainHelper.agentMailInboxAddressKey)
         let defaultName = (KeychainHelper.load(key: KeychainHelper.assistantNameKey) ?? "")
@@ -220,6 +224,10 @@ enum ProfileProvisioning {
                 d.records.insert(seed, at: 0)
             }
             AssistantRegistry.cleanAll(&d, registryPaths)
+            // Refused while an upgrade barrier exists (§5.7, §6.3 step 3).
+            if let barrier = UpgradeBarrier.current(), barrier.isActive {
+                throw ProvisioningError("Briglia is updating; try again in a minute")
+            }
             guard d.record(name) == nil, !FileManager.default.fileExists(atPath: AssistantProfile.extraConfigRoot(name).path),
                   !FileManager.default.fileExists(atPath: AssistantProfile.extraDataRoot(name).path) else {
                 throw ProvisioningError("an assistant with the id ‘\(name)’ already exists")

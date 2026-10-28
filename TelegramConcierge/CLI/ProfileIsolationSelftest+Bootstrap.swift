@@ -43,9 +43,11 @@ extension ProfileHarness {
         check("hidden: without the experimental switch an extra is refused",
               failed(decide(["--profile", "work"], env: [:]))?.contains("not available") == true)
         check("hidden: default needs no switch", ok(decide(["--profile", "default"], env: [:]))?.profile == "default")
-        for cmd in [["upgrade"], ["toolchain", "status"], ["migrate"], ["service", "install"], ["upgradecheck", "off"]] {
+        for cmd in [["upgrade"], ["toolchain", "status"], ["migrate"], ["upgradecheck", "off"]] {
             check("extra refuses \(cmd.joined(separator: " "))", failed(decide(["--profile", "work"] + cmd)) != nil)
         }
+        // Stage 2: extras get their own systemd unit (briglia@<n>.service, §4.2).
+        check("extra may manage its own service (stage 2)", ok(decide(["--profile", "work", "service", "status"]))?.profile == "work")
         check("extra may read upgradecheck", ok(decide(["--profile", "work", "upgradecheck"]))?.profile == "work")
         check("default may run upgrade", ok(decide(["upgrade"]))?.profile == "default")
 
@@ -119,8 +121,13 @@ extension ProfileHarness {
         let noSeam = info(removeEnv: [LandingZone.testRootKey])
         check("default landing zone ~/Documents/Briglia without the test seam",
               canon(noSeam?["landingRoot"] as? String) == canon(home + "/Documents/Briglia"), "\(noSeam?["landingRoot"] ?? "")")
-        check("diagnostics create no root and no briglia-shared",
-              !FileManager.default.fileExists(atPath: dataBase + "/briglia")
-              && !FileManager.default.fileExists(atPath: dataBase + "/briglia-shared"))
+        // Stage 2: with coordination active (experimental switch) a session
+        // takes a member lease, so default's data root gains exactly the one
+        // new directory `machine/` (plan §3.1, §12) and no leftover lease.
+        let rootEntries = (try? FileManager.default.contentsOfDirectory(atPath: dataBase + "/briglia")) ?? []
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: dataBase + "/briglia/machine/members")) ?? []
+        check("diagnostics create only machine/ (member leases, released) and no briglia-shared",
+              rootEntries.allSatisfy { $0 == "machine" } && leftovers.isEmpty
+              && !FileManager.default.fileExists(atPath: dataBase + "/briglia-shared"), "\(rootEntries) \(leftovers)")
     }
 }

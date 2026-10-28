@@ -52,6 +52,94 @@ enum AgentServiceSupport {
         """
     }
 
+    // MARK: Extra assistants (MULTI_ASSISTANT_PLAN §4.2)
+
+    /// One systemd template for every extra assistant; the instance name is
+    /// the profile id. Default keeps `briglia.service` exactly.
+    static let templateUnitName = "briglia@.service"
+    static func extraUnitName(_ profile: String) -> String { "briglia@\(profile).service" }
+
+    /// The template passes `--profile %i` in argv (never only in the
+    /// environment: an older binary then fails to parse instead of acting on
+    /// default's data, §13). While assistants are experimental the unit also
+    /// carries the experimental switch.
+    static func templateUnitText(adaPath: String, home: String) -> String {
+        let binDir = (adaPath as NSString).deletingLastPathComponent
+        return """
+        [Unit]
+        Description=Briglia CLI assistant %i
+
+        [Service]
+        Type=simple
+        ExecStart="\(adaPath)" --profile %i daemon
+        WorkingDirectory=\(home)
+        Environment="HOME=\(home)"
+        Environment="PATH=\(binDir):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        Environment="\(AssistantProfile.experimentalKey)=1"
+        Restart=always
+        RestartSec=5
+        KillSignal=SIGINT
+        TimeoutStopSec=30
+
+        [Install]
+        WantedBy=default.target
+
+        """
+    }
+
+    static func templateUnitPath(home: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
+        userUnitDirectory(home: home) + "/" + templateUnitName
+    }
+
+    #if os(Linux)
+    /// Install (or refresh) the template and enable `briglia@<profile>`.
+    static func installExtraService(_ profile: String) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let unitDir = userUnitDirectory(home: home)
+        guard PlatformBinary.find("systemctl") != nil else {
+            print("  ✖ systemctl not found — this system doesn't run systemd.")
+            return false
+        }
+        do {
+            try FileManager.default.createDirectory(atPath: unitDir, withIntermediateDirectories: true)
+            try templateUnitText(adaPath: adaExecutablePath(), home: home)
+                .write(toFile: templateUnitPath(home: home), atomically: true, encoding: .utf8)
+            print("  ✔ wrote \(templateUnitPath(home: home))")
+        } catch {
+            print("  ✖ could not write the unit template: \(error.localizedDescription)")
+            return false
+        }
+        var step = run("systemctl", ["--user", "daemon-reload"])
+        guard step.status == 0 else { print("  ✖ systemctl --user daemon-reload failed: \(step.output)"); return false }
+        step = run("systemctl", ["--user", "enable", "--now", extraUnitName(profile)])
+        guard step.status == 0 else { print("  ✖ enable --now failed: \(step.output)"); return false }
+        print("  ✔ \(extraUnitName(profile)) enabled and started")
+        if !lingerEnabled() {
+            print("  ⚠ linger is off — enable it once from the default assistant (`briglia service install`) or: sudo loginctl enable-linger \(NSUserName())")
+        }
+        return true
+    }
+
+    /// Disable `briglia@<profile>`; the template (machine-wide) is removed
+    /// only when no other extra's unit is still enabled.
+    static func uninstallExtraService(_ profile: String, others: [String]) {
+        _ = run("systemctl", ["--user", "disable", "--now", extraUnitName(profile)])
+        let stillUsed = others.contains { run("systemctl", ["--user", "is-enabled", extraUnitName($0)]).output == "enabled" }
+        if !stillUsed { try? FileManager.default.removeItem(atPath: templateUnitPath()) }
+        _ = run("systemctl", ["--user", "daemon-reload"])
+    }
+    #endif
+
+    /// `profiles remove`: disable the extra's unit when one exists (Linux);
+    /// nothing on macOS (the supervisor reads the registry).
+    static func disableExtraUnitIfPresent(_ profile: String) {
+        #if os(Linux)
+        guard FileManager.default.fileExists(atPath: templateUnitPath()) else { return }
+        let others = AssistantProfile.listExtras().filter { $0 != profile }
+        uninstallExtraService(profile, others: others)
+        #endif
+    }
+
     /// The Ubuntu Touch keep-awake unit: holds a kernel wakelock so the
     /// phone never fully suspends while Briglia should stay reachable. Gated on
     /// the Android wakelock sysfs interface actually existing.
@@ -333,10 +421,19 @@ struct ServiceInstall: AsyncParsableCommand {
     var noKeepawake = false
 
     func run() async throws {
-        try AssistantProfile.requireDefault(AssistantProfile.serviceMessage)
         AdaCLI.prepareIO()
         try IdentityMigration.gateMutatingEntry()
         #if os(Linux)
+        if AssistantProfile.isExtra {
+            guard TelegramConfig.isConfigured else {
+                print("✖ This assistant has no Telegram bot yet; set one up first.")
+                throw ExitCode(1)
+            }
+            print("Installing the background service for this assistant…")
+            guard AgentServiceSupport.installExtraService(AssistantProfile.selectedName) else { throw ExitCode(1) }
+            print("\nDone. Logs: journalctl --user -u \(AgentServiceSupport.extraUnitName(AssistantProfile.selectedName)) -f")
+            return
+        }
         guard TelegramConfig.isConfigured else {
             print("""
             ✖ The service runs `briglia daemon`, which needs the Telegram channel.
@@ -369,9 +466,15 @@ struct ServiceStatus: AsyncParsableCommand {
     )
 
     func run() async throws {
-        try AssistantProfile.requireDefault(AssistantProfile.serviceMessage)
         AdaCLI.prepareIO()
         #if os(Linux)
+        if AssistantProfile.isExtra {
+            let unit = AgentServiceSupport.extraUnitName(AssistantProfile.selectedName)
+            let enabled = AgentServiceSupport.run("systemctl", ["--user", "is-enabled", unit]).output
+            let active = AgentServiceSupport.run("systemctl", ["--user", "is-active", unit]).output
+            print("Service \(unit): enabled \(enabled), active \(active)")
+            return
+        }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let unitPath = AgentServiceSupport.userUnitDirectory(home: home)
             + "/" + AgentServiceSupport.userUnitName
@@ -426,9 +529,14 @@ struct ServiceUninstall: AsyncParsableCommand {
     )
 
     func run() async throws {
-        try AssistantProfile.requireDefault(AssistantProfile.serviceMessage)
         AdaCLI.prepareIO()
         #if os(Linux)
+        if AssistantProfile.isExtra {
+            let me = AssistantProfile.selectedName
+            AgentServiceSupport.uninstallExtraService(me, others: AssistantProfile.listExtras().filter { $0 != me })
+            print("✔ \(AgentServiceSupport.extraUnitName(me)) removed")
+            return
+        }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let unitPath = AgentServiceSupport.userUnitDirectory(home: home)
             + "/" + AgentServiceSupport.userUnitName
@@ -470,7 +578,6 @@ struct ServiceSelftest: AsyncParsableCommand {
     )
 
     func run() async throws {
-        try AssistantProfile.requireDefault(AssistantProfile.serviceMessage)
         var failures = 0
         func check(_ label: String, _ ok: Bool) {
             print("\(ok ? "✔" : "✖") \(label)")

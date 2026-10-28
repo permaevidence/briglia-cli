@@ -67,11 +67,15 @@ final class MenuHost {
                 try await MenuBarrier.$held.withValue(true) { try await body() }
             } catch {
                 await manager.reloadBrowserSettings()
+                IdentityChange.finishDeferred()
                 manager.endBrowserSettingsMutation()
                 throw error
             }
-            // Reload (AI, tools, email pollers) before lifting the barrier.
+            // Reload (AI, tools, email pollers) before lifting the barrier;
+            // an inbox released by this save is freed only after the poller
+            // moved to the new one (MULTI_ASSISTANT_PLAN §5.6 step 6).
             await manager.reloadBrowserSettings()
+            IdentityChange.finishDeferred()
             manager.endBrowserSettingsMutation()
             return true
         }

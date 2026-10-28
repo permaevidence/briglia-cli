@@ -917,6 +917,29 @@ extension ConversationManager {
                 try? await sendText("✖ That is the CURRENT bot's token — paste the NEW bot's token (from @BotFather).")
                 return
             }
+            // Several assistants (§5.6 step 2): reserve the new bot BEFORE any
+            // network use of it (getMe, webhook info, discovery). A pending
+            // earlier switch is replaced: its reservation ends first. Never-
+            // multi installs get no reservation (the identity lock suffices).
+            if botSwitchTicket != nil {
+                botSwitchDiscoveryTask?.cancel()
+                botSwitchDiscoveryTask = nil
+                pendingBotSwitch = nil
+            }
+            let ticket: IdentityChange.Ticket
+            do {
+                ticket = try IdentityChange.begin(kind: .bot, rawValue: token, mode: .assistant,
+                                                  existingIdentityLock: admittedLock)
+            } catch {
+                try? await sendText("✖ \(error)")
+                return
+            }
+            var keepTicket = false
+            defer { if !keepTicket { ticket.abort() } }
+            if ticket.reserved, let refusal = AssistantRegistry.telegramDiscoveryRefusal(token: token) {
+                try? await sendText("✖ \(refusal)")
+                return
+            }
             let botInfo: TelegramBotInfo
             do {
                 botInfo = try await telegramService.getMe(token: token)
@@ -954,6 +977,8 @@ extension ConversationManager {
             let code = BotSwitchFlow.generateCode()
             pendingBotSwitch = PendingBotSwitch(newToken: token, botDisplay: display, code: code)
             botSwitchIdentityLock = admittedLock
+            if ticket.reserved { botSwitchTicket = ticket }
+            keepTicket = ticket.reserved
             startBotSwitchDiscovery(token: token, code: code, botDisplay: display, identityLock: admittedLock)
             try? await sendText("""
             ✔ Token valid — found \(display).
@@ -1028,11 +1053,12 @@ extension ConversationManager {
             return
         }
         pending.discovered = discovered
+        pending.discoveredAt = Date()
         pendingBotSwitch = pending
         // Acknowledge inside the NEW chat so its owner sees progress too.
         try? await Self.botSwitchSendMessage(token: token, chatId: discovered.chatId,
             text: "✔ Code received. This chat becomes Briglia's home as soon as the current owner sends /switchbot confirm.")
-        await notifyBotSwitchProgress("✔ Code received from \(discovered.senderDisplay) in \(botDisplay)'s chat. Send /switchbot confirm to complete the switch — the current bot disconnects at that moment. /switchbot cancel aborts.")
+        await notifyBotSwitchProgress("✔ Code received from \(discovered.senderDisplay) in \(botDisplay)'s chat. Send /switchbot confirm to complete the switch — the current bot disconnects at that moment. /switchbot cancel aborts. (Without a confirm the switch is cancelled after \(Int(BotSwitchFlow.confirmTimeoutSeconds / 60)) minutes.)")
     }
 
     /// Discovery progress reaches the user outside any command window: chat
@@ -1125,6 +1151,25 @@ extension ConversationManager {
         next.append(Self.durabilityStallRecoveryText)
     }
 
+    /// An unconfirmed discovered switch reminds once halfway and expires
+    /// after `BotSwitchFlow.confirmTimeoutSeconds`: it holds the new bot's
+    /// reservation (and, in default, the identity lock that `profiles add`
+    /// needs), so it must not stay forever (Codex stage-1 note 3).
+    func expireUnconfirmedBotSwitchIfDue(now: Date = Date()) async {
+        guard var pending = pendingBotSwitch, !pending.readyForCutover, let found = pending.discoveredAt else { return }
+        let age = now.timeIntervalSince(found)
+        if age >= BotSwitchFlow.confirmTimeoutSeconds {
+            botSwitchDiscoveryTask?.cancel()
+            botSwitchDiscoveryTask = nil
+            pendingBotSwitch = nil
+            await notifyBotSwitchProgress("⌛ /switchbot was not confirmed within \(Int(BotSwitchFlow.confirmTimeoutSeconds / 60)) minutes — bot switch cancelled; the current bot is unchanged. /switchbot <token> starts over.")
+        } else if !pending.reminded, age >= BotSwitchFlow.confirmTimeoutSeconds / 2 {
+            pending.reminded = true
+            pendingBotSwitch = pending
+            await notifyBotSwitchProgress("⏳ Reminder: send /switchbot confirm to finish moving to \(pending.botDisplay), or /switchbot cancel. It is cancelled automatically in \(Int(BotSwitchFlow.confirmTimeoutSeconds / 120)) minutes.")
+        }
+    }
+
     /// Execute a confirmed /switchbot. Called ONLY from the poll loop's clean
     /// boundary: no getUpdates batch is in flight there, so every confirm for
     /// the OLD bot has already been persisted under its own token hash —
@@ -1132,6 +1177,7 @@ extension ConversationManager {
     /// offset state (which would silently drop the new bot's messages).
     func performPendingBotSwitchIfReady() async {
         guard !botSwitchCutoverInProgress else { return }
+        await expireUnconfirmedBotSwitchIfDue()
         guard let pending = pendingBotSwitch, pending.readyForCutover,
               let discovered = pending.discovered else { return }
         // The confirm was idle-guarded; if a turn slipped in since (app,
@@ -1151,10 +1197,15 @@ extension ConversationManager {
         // 1. Both credentials as ONE atomic write — a mid-swap crash must
         //    never leave one bot's token with another bot's chat id.
         do {
-            try KeychainHelper.saveBatch([
-                KeychainHelper.telegramBotTokenKey: pending.newToken,
-                KeychainHelper.telegramChatIdKey: String(discovered.chatId),
-            ])
+            let write = {
+                try KeychainHelper.saveBatch([
+                    KeychainHelper.telegramBotTokenKey: pending.newToken,
+                    KeychainHelper.telegramChatIdKey: String(discovered.chatId),
+                ])
+            }
+            // Multi mode: the reservation's commit (§5.6 step 4) writes the
+            // secret and keeps the old bot `releasing` until step 6 below.
+            if let ticket = botSwitchTicket { try ticket.commit(write) } else { try write() }
         } catch {
             pendingBotSwitch?.readyForCutover = false
             await notifyBotSwitchProgress("✖ Could not save the new bot's credentials (\(error.localizedDescription)) — the switch did NOT happen and the current bot is unchanged. Fix storage, then send /switchbot confirm again.")
@@ -1182,6 +1233,9 @@ extension ConversationManager {
         // 4. Fresh offsets under the new token's hash, then rebuild the
         //    channel registration (pairedChatId, trimmed command menu).
         await cutOverTelegramBot(to: pending.newToken)
+        // §5.6 step 6: the old bot's poller is gone (the swap happened at
+        // this clean loop boundary) and its farewell was sent; release it.
+        botSwitchTicket?.finish()
 
         // 5. Ambient output follows Briglia's new home.
         if lastUserChannelAddress?.kind == .telegram, let address = telegramAddress {
