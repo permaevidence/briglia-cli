@@ -635,8 +635,12 @@ extension ConversationManager {
             if let f = UserDataWipe.remove(url.path, label: label) { failures.append(f) }
         }
 
-        do { if try SubscriptionAuthStore().read() != nil { try await SubscriptionAuthStore().logout() } }
-        catch { failures.append("ChatGPT local sign-out: \(error.localizedDescription)") }
+        // Shared ChatGPT login (§25.6): never-multi unchanged; with several
+        // assistants only the last sharer signs the machine store out.
+        let chatgptWipe = await SubscriptionSharing.wipe()
+        failures.append(contentsOf: chatgptWipe.failures)
+        for note in chatgptWipe.notes { print("[deleteuserdata] \(note)") }
+        lastWipeNotes = chatgptWipe.notes
 
         if let failure = UserDataWipe.remove(PruneArchiveStore.root.path, label: "conversation snapshots") { failures.append(failure) }
 
@@ -831,11 +835,10 @@ extension ConversationManager {
     /// restored/deleted state to become live. Await the owner task's real exit.
     private func quiesceSubscriptionLogin(timeoutSeconds: Double) async -> String? {
         subscriptionLoginTask?.cancel()
-        do {
-            if let pending = try SubscriptionAuthStore().read()?.pendingLogin {
-                try await SubscriptionAuthStore().cancelLogin(pending)
-            }
-        } catch { return "cannot cancel ChatGPT login: \(error.localizedDescription)" }
+        // Only this assistant's own pending sign-in (§25.12): another
+        // assistant's sign-in to the shared login is never cancelled here.
+        do { try await SubscriptionAuthStore().cancelOwnedPending() }
+        catch { return "cannot cancel ChatGPT login: \(error.localizedDescription)" }
         let deadline = ProcessInfo.processInfo.systemUptime + timeoutSeconds
         while subscriptionLoginTask != nil && ProcessInfo.processInfo.systemUptime < deadline {
             try? await Task.sleep(nanoseconds: 50_000_000)

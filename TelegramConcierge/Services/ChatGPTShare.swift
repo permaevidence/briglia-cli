@@ -10,7 +10,11 @@ import Foundation
 /// `secrets.lock`.
 enum ChatGPTShare {
     static var lockURL: URL { MachinePaths.machineDir().appendingPathComponent("chatgpt-share.lock") }
-    static let waitSeconds: Double = 10
+    /// 10 s; development builds may shorten it for tests.
+    static var waitSeconds: Double {
+        if adaCLIVersion.hasSuffix("-dev"), let v = Double(ProcessInfo.processInfo.environment["BRIGLIA_TEST_SHARE_WAIT"] ?? ""), v >= 0 { return v }
+        return 10
+    }
     static let busyMessage = "Another assistant is changing its ChatGPT setting right now — try again in a moment."
 
     struct Busy: Error, CustomStringConvertible { let description = ChatGPTShare.busyMessage }

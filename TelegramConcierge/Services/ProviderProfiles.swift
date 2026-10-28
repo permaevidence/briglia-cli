@@ -163,6 +163,12 @@ enum ProviderProfiles {
         switch profile {
         case .chatgpt:
             guard let state = try? SubscriptionAuthStore().read(), state.credential != nil, state.requiresLogin != true else { return false }
+            // Several assistants (§25.4): a usable shared login can be chosen
+            // explicitly even when another assistant signed in again (the
+            // explicit choice rebinds; requests never switch silently).
+            if CoordinationMode.multi, SubscriptionSharing.scope() == .shared {
+                return value(subscriptionModelKey) != nil
+            }
             return value(subscriptionModelKey) != nil && state.generation == value(subscriptionGenerationKey)
         case .openai: return value(openaiApiKeyKey) != nil && value(openaiModelKey) != nil
         case .opencode:
@@ -352,7 +358,18 @@ enum ProviderProfiles {
         switch profile {
         case .chatgpt:
             let saved = KeychainHelper.loadSnapshot()
-            guard let model = saved[subscriptionModelKey], let generation = saved[subscriptionGenerationKey],
+            var generation = saved[subscriptionGenerationKey]
+            // Explicit activation in multi mode binds the CURRENT shared login
+            // (generation + account fingerprint): this is "choose ChatGPT
+            // again" after a sign-in to another account (D18).
+            if CoordinationMode.multi, SubscriptionSharing.scope() == .shared,
+               let current = try SubscriptionAuthStore().read(), current.credential != nil, current.requiresLogin != true,
+               current.pendingLogin == nil {
+                generation = current.generation
+                changes[subscriptionGenerationKey] = current.generation
+                for (k, v) in SubscriptionSharing.bindingChanges(for: current) { changes[k] = v }
+            }
+            guard let model = saved[subscriptionModelKey], let generation,
                   let state = try SubscriptionAuthStore().read(), state.generation == generation, state.credential != nil, state.requiresLogin != true, state.pendingLogin == nil else {
                 throw SubscriptionError("Subscription login changed before activation; retry selection")
             }
@@ -528,6 +545,7 @@ enum ProviderProfiles {
             if profile == active { line += " — ACTIVE" }
             guard isConfigured(profile) else { return line + " — not configured" }
             var parts: [String] = profile == .chatgpt ? ["billing: subscription; quota unknown (not unlimited)"] : []
+            if profile == .chatgpt, let line = SubscriptionSharing.scopeStatus() { parts.append(line) }
             if let model = configuredModel(profile) { parts.append(model) }
             if let endpoint = configuredEndpoint(profile) { parts.append("@ \(endpoint)") }
             if let masked = maskedKey(profile) { parts.append("key \(masked)") }

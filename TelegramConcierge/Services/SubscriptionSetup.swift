@@ -72,7 +72,7 @@ struct SubscriptionSetup {
                     try checkpoint(); try Task.checkCancellation()
                     var state = try store.read() ?? SubscriptionAuthState(generation: UUID().uuidString)
                     let id = UUID().uuidString
-                    state.pendingLogin = id; state.deviceChallenge = nil
+                    state.startPending(id)
                     try store.write(state); return id
                 }
                 do {
@@ -108,7 +108,8 @@ struct SubscriptionSetup {
                     guard var state = try store.read(), state.pendingLogin == pending else {
                         throw SubscriptionError("Login cancelled or superseded; start again")
                     }
-                    state.pendingLogin = nil; state.deviceChallenge = nil
+                    guard SubscriptionSharing.pendingOwned(state) else { throw SubscriptionError(SubscriptionSharing.foreignPendingMessage) }
+                    state.clearPending()
                     try store.write(state); return ok(["state": "cancelled"])
                 }
             }
@@ -143,6 +144,9 @@ struct SubscriptionSetup {
             return try await store.locked {
                 try checkpoint(); try Task.checkCancellation(); try store.validate(generation: state.generation)
                 try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil, model: model, effort: effort, textOnly: false)
+                // Explicit selection binds the account too (multi mode, §25.4).
+                let binding = SubscriptionSharing.bindingChanges(for: state)
+                if !binding.isEmpty { try KeychainHelper.saveBatch(binding) }
                 if request["activate"] as? Bool != false { try ProviderProfiles.activate(.chatgpt) }
                 return ok(["state": "signed_in", "model": model, "effort": effort])
             }
@@ -162,8 +166,9 @@ struct SubscriptionSetup {
             try checkpoint(); try Task.checkCancellation()
             guard var state = try store.read(), state.pendingLogin == pending,
                   var challenge = state.deviceChallenge else { throw SubscriptionError("Login cancelled or superseded; start again") }
+            guard SubscriptionSharing.pendingOwned(state) else { throw SubscriptionError(SubscriptionSharing.foreignPendingMessage) }
             if Date() >= challenge.expires {
-                state.pendingLogin = nil; state.deviceChallenge = nil; try store.write(state)
+                state.clearPending(); try store.write(state)
                 throw SubscriptionError("Device login expired; start again")
             }
             if Date() < challenge.nextPoll { return challenge }
@@ -206,12 +211,11 @@ struct SubscriptionSetup {
                       var current = state.deviceChallenge, current.deviceID == challenge.deviceID,
                       current.pollAttempt == attempt else { throw SubscriptionError("Login cancelled or superseded; start again") }
                 if Date() >= current.expires || ["access_denied", "expired_token"].contains(reason) {
-                    state.pendingLogin = nil; state.deviceChallenge = nil; try store.write(state)
+                    state.clearPending(); try store.write(state)
                     throw SubscriptionError("Device login denied or expired; start again")
                 }
                 if let credential {
-                    state.credential = credential; state.generation = UUID().uuidString; state.requiresLogin = nil
-                    state.pendingLogin = nil; state.deviceChallenge = nil; try store.write(state)
+                    state.commitPending(credential); try store.write(state)
                     return ok(["state": "signed_in"])
                 }
                 guard [403, 404, 429].contains(status) || ["authorization_pending", "slow_down"].contains(reason) else {

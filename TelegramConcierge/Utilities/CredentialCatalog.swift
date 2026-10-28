@@ -43,16 +43,22 @@ enum CredentialCatalog {
 
     static let subscriptionTokensTreatment: Treatment = .redact
     static func subscriptionRedactionValues() -> [String: String] {
-        guard subscriptionTokensTreatment == .redact, let state = try? SubscriptionAuthStore().read() else { return [:] }
+        guard subscriptionTokensTreatment == .redact else { return [:] }
         var values: [String: String] = [:]
-        if let credential = state.credential {
-            values["subscription_access"] = credential.access
-            values["subscription_refresh"] = credential.refresh
-        }
-        // A refresh checkpoint (not yet committed) holds the next token set.
-        if let pending = state.pendingRotation?.credential {
-            values["subscription_pending_access"] = pending.access
-            values["subscription_pending_refresh"] = pending.refresh
+        // Both stores (machine + own), distinct labels per store so neither
+        // overwrites the other; default's identical paths count once (§25.13).
+        for (index, dir) in SubscriptionSharing.protectedStoreDirectories().enumerated() {
+            guard let state = try? SubscriptionAuthStore(directory: dir).read() else { continue }
+            let tag = index == 0 ? "" : "_own"
+            if let credential = state.credential {
+                values["subscription_access" + tag] = credential.access
+                values["subscription_refresh" + tag] = credential.refresh
+            }
+            // A refresh checkpoint (not yet committed) holds the next token set.
+            if let pending = state.pendingRotation?.credential {
+                values["subscription_pending_access" + tag] = pending.access
+                values["subscription_pending_refresh" + tag] = pending.refresh
+            }
         }
         return values
     }
@@ -66,6 +72,10 @@ enum CredentialCatalog {
         Entry(key: ProviderProfiles.subscriptionModelKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.subscriptionEffortKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.subscriptionGenerationKey, treatment: .notSecret),
+        // Shared ChatGPT login (MULTI_ASSISTANT_PLAN §25): scope and the
+        // account fingerprint (a SHA-256, never the account id).
+        Entry(key: SubscriptionSharing.scopeKey, treatment: .notSecret),
+        Entry(key: SubscriptionSharing.accountFingerprintKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.subscriptionTextOnlyKey, treatment: .notSecret),
 
         // Model providers (visible by owner decision)

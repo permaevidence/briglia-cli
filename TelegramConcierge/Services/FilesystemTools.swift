@@ -181,7 +181,12 @@ actor FilesystemTools {
             }
             // Briglia's own secret store is shown with the Telegram bot token masked
             // (HarnessSecretStore); every other value is returned verbatim.
-            let isSubscription = URL(fileURLWithPath: resolvedPath).standardizedFileURL == SubscriptionAuthStore().file.resolvingSymlinksInPath().standardizedFileURL
+            // Both ChatGPT stores this assistant can reach: the shared
+            // machine store and its own (identical for default; §25.6).
+            let isSubscription = SubscriptionSharing.protectedStoreDirectories().contains {
+                URL(fileURLWithPath: resolvedPath).standardizedFileURL
+                    == SubscriptionAuthStore(directory: $0).file.resolvingSymlinksInPath().standardizedFileURL
+            }
             let text = isSubscription ? "[Subscription OAuth credentials omitted; use briglia subscription status]" : HarnessSecretStore.isSecretStore(resolvedPath)
                 ? HarnessSecretStore.maskedForRead(decodedText)
                 : decodedText

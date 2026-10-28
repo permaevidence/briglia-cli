@@ -9,6 +9,8 @@ struct SubscriptionCommand: AsyncParsableCommand {
     @Option(help: "Model to save; availability depends on your subscription") var model: String?
     @Option(help: "Reasoning effort") var effort: String?
     @Flag(help: "Activate after login (requires stopped Briglia)") var activate = false
+    @Argument(help: .hidden) var scopeValue: String?
+    var scopeArgument: SubscriptionSharing.Scope? { scopeValue.flatMap(SubscriptionSharing.Scope.init(rawValue:)) }
 
     func run() async throws {
         AdaCLI.prepareIO()
@@ -21,6 +23,17 @@ struct SubscriptionCommand: AsyncParsableCommand {
             } else { print("ChatGPT subscription: signed out") }
         case "models":
             print("Known compatibility candidates (not live entitlement discovery): \(ResponsesAdapter.subscriptionModelChoices.map(\.id).joined(separator: ", ")). Availability is verified by requests; catalog freshness is unknown.")
+        case "scope":
+            // `briglia --profile <n> subscription scope [shared|own]` (§25.7).
+            guard let target = scopeArgument else {
+                print("ChatGPT: " + (SubscriptionSharing.scope() == .own ? "this assistant's own login" : "the shared login"))
+                if let s = SubscriptionSharing.sharingSentence() { print(s) }
+                return
+            }
+            try IdentityMigration.gateMutatingEntry()
+            do { print(try await SubscriptionSharing.changeScope(to: target)) } catch {
+                print("✖ \(error.localizedDescription)"); throw ExitCode(1)
+            }
         case "login", "select", "cancel", "logout":
             try IdentityMigration.gateMutatingEntry()
             // Profile changes need daemon exclusion. Logout may invalidate an
@@ -39,16 +52,20 @@ struct SubscriptionCommand: AsyncParsableCommand {
             }
             defer { lease?.release() }
             if action == "cancel" {
-                if let pending = try store.read()?.pendingLogin { try await store.cancelLogin(pending) }
+                if try await store.cancelOwnedPending() == .foreign {
+                    print(SubscriptionSharing.foreignPendingMessage); return
+                }
                 print("Pending ChatGPT login cancelled; existing credentials preserved.")
                 return
             }
             if action == "logout" {
+                if let sentence = SubscriptionSharing.sharingSentence(signOut: true) { print(sentence) }
                 try await store.logout()
                 print("ChatGPT signed out locally. Saved history remains; queued requests cannot reuse this login.")
                 return
             }
             if action == "login" {
+                if let sentence = SubscriptionSharing.sharingSentence() { print(sentence) }
                 let login = SubscriptionLogin()
                 if browser {
                     _ = try await login.browser { print("Open this login link on this computer (expires in 5 minutes):\n" + $0) }

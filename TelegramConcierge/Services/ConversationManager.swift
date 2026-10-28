@@ -1114,6 +1114,8 @@ class ConversationManager: ObservableObject {
     }
     /// The /switchbot reservation (multi mode; nil otherwise).
     var botSwitchTicket: IdentityChange.Ticket?
+    /// Notes of the last /deleteuserdata (shared ChatGPT login, §25.6).
+    var lastWipeNotes: [String] = []
     /// Default's hold on machine/identity-tx.lock for the lifetime of a
     /// /switchbot (nil when no switch is pending, and always nil in extras).
     var botSwitchIdentityLock: ProfileFileLock?

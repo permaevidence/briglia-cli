@@ -168,14 +168,29 @@ enum ProfileProvisioning {
     /// Keys the init child accepts: the allow-list plus the two identity
     /// values `profiles add` sets itself.
     static var initAcceptedKeys: Set<String> {
-        Set(copyableSecretKeys + [KeychainHelper.assistantNameKey, KeychainHelper.telegramBotTokenKey])
+        Set(copyableSecretKeys + [KeychainHelper.assistantNameKey, KeychainHelper.telegramBotTokenKey,
+                                  ProviderProfiles.subscriptionGenerationKey, SubscriptionSharing.accountFingerprintKey])
     }
 
     /// Default's values for the allow-list (read in default's process).
+    /// ChatGPT is never copied but SHARED (§25.6, D2): when default's provider
+    /// is ChatGPT, the new extra is bound to the current machine login
+    /// (generation + account fingerprint, from ONE validated snapshot); no
+    /// token is ever copied. An unusable login binds nothing.
     static func copyableSecrets() -> [String: String] {
         var out: [String: String] = [:]
         for key in copyableSecretKeys {
             if let value = KeychainHelper.load(key: key), !value.isEmpty { out[key] = value }
+        }
+        if ProviderProfiles.activeProfile() == .chatgpt,
+           let state = try? SubscriptionAuthStore(directory: MachinePaths.defaultConfigRoot()).read(),
+           let credential = state.credential, state.requiresLogin != true, state.pendingLogin == nil {
+            out[ProviderProfiles.subscriptionGenerationKey] = state.generation
+            out[SubscriptionSharing.accountFingerprintKey] = SubscriptionSharing.fingerprint(credential.account)
+            if out[KeychainHelper.openAICompatibleApiKeyKey] != nil { out[KeychainHelper.openAICompatibleApiKeyKey] = state.generation }
+        } else if ProviderProfiles.activeProfile() == .chatgpt {
+            // No usable login to bind: the runtime slot must not carry a stale generation.
+            out.removeValue(forKey: KeychainHelper.openAICompatibleApiKeyKey)
         }
         return out
     }

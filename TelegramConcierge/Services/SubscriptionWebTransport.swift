@@ -78,9 +78,12 @@ enum SubscriptionWebTransport {
     /// lookup/refresh is never cut by it.
     static func post(body: [String: JSONValue], lane: AffinityLane, timeout: TimeInterval,
                      deadline: ExtractorDeadline? = nil) async throws -> Data {
-        guard let generation = activeGeneration() else {
+        guard let captured = activeGeneration() else {
             throw SubscriptionError("The ChatGPT subscription is no longer the active provider")
         }
+        // Several assistants (§25.4): resolved once per request — the same
+        // account re-signed in elsewhere rebinds; another account refuses.
+        let generation = try await SubscriptionSharing.resolveGeneration(captured)
         var request = try buildRequest(body: body, generation: generation, lane: lane, timeout: timeout)
         var usedAccess: String?
         var didRefreshAfter401 = false
@@ -115,7 +118,7 @@ enum SubscriptionWebTransport {
                 if case ResponsesFailure.http(401, _) = error {
                     guard !didRefreshAfter401 else {
                         try await SubscriptionAuthStore().requireLogin(generation: generation, rejectedAccess: usedAccess)
-                        throw SubscriptionError("ChatGPT rejected the refreshed login; sign in again")
+                        throw SubscriptionError(SubscriptionSharing.decorateRevocation("ChatGPT rejected the refreshed login; sign in again"))
                     }
                     didRefreshAfter401 = true
                     let login = SubscriptionLogin()

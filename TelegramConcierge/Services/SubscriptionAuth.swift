@@ -165,9 +165,16 @@ struct SubscriptionAuthState: Codable {
     var pendingRotation: SubscriptionPendingRotation? = nil
     var refreshOp: SubscriptionRefreshOp? = nil
     var refreshRecovery: SubscriptionRefreshRecovery? = nil
+    /// Multi-assistant owners (MULTI_ASSISTANT_PLAN §25.12): the profile that
+    /// signed in / started the pending login. Omitted in never-multi mode
+    /// (byte-identical file); older binaries ignore and drop them.
+    var signedInBy: String? = nil
+    var pendingLoginBy: String? = nil
     var valid: Bool {
         version == 1 && UUID(uuidString: generation) != nil
             && (pendingLogin == nil || UUID(uuidString: pendingLogin!) != nil)
+            && (signedInBy == nil || AssistantProfile.isValidName(signedInBy!))
+            && (pendingLoginBy == nil || (pendingLogin != nil && AssistantProfile.isValidName(pendingLoginBy!)))
             && (credential == nil || credential!.valid)
             && (deviceChallenge == nil || (pendingLogin != nil && deviceChallenge!.valid))
             && (pendingRotation == nil || pendingRotation!.valid)
@@ -176,6 +183,23 @@ struct SubscriptionAuthState: Codable {
     }
     /// Every refresh-settlement record cleared (new login, logout).
     mutating func clearRefreshRecords() { pendingRotation = nil; refreshOp = nil; refreshRecovery = nil }
+
+    // Centralised pending-login transitions (§25.12): callable inside an
+    // existing `store.locked` closure, the owner written with the id.
+    mutating func startPending(_ id: String, owner: String? = SubscriptionSharing.ownerTag) {
+        pendingLogin = id; pendingLoginBy = owner; deviceChallenge = nil
+    }
+    mutating func clearPending() { pendingLogin = nil; pendingLoginBy = nil; deviceChallenge = nil }
+    /// A new credential and generation; `signedInBy` from the pending owner.
+    mutating func commitPending(_ credential: SubscriptionCredential) {
+        let owner = pendingLoginBy
+        generation = UUID().uuidString
+        self.credential = credential
+        requiresLogin = nil
+        clearPending()
+        clearRefreshRecords()
+        signedInBy = owner
+    }
 }
 
 /// What the caller of a refresh-and-settle sees. The settle runs detached;
@@ -217,7 +241,10 @@ final class SubscriptionRefreshCaller: @unchecked Sendable {
 /// logout and login commit across all processes. A pending login never holds it.
 struct SubscriptionAuthStore {
     let directory: URL
-    init(directory: URL = StoragePaths.configRoot) { self.directory = directory }
+    /// The default store is the one this assistant uses: the machine store
+    /// (default's config root) unless an extra chose its own (§25.2–§25.3).
+    /// For default this is exactly `StoragePaths.configRoot`, as before.
+    init(directory: URL = SubscriptionSharing.storeDirectory()) { self.directory = directory }
     var file: URL { directory.appendingPathComponent(SubscriptionEndpoint.storeName) }
     var lockFile: URL { directory.appendingPathComponent("subscription-auth.lock") }
 
@@ -288,8 +315,7 @@ struct SubscriptionAuthStore {
         try await locked {
             var state = try read() ?? SubscriptionAuthState(generation: UUID().uuidString)
             let pending = UUID().uuidString
-            state.pendingLogin = pending
-            state.deviceChallenge = nil
+            state.startPending(pending)
             try write(state)
             return pending
         }
@@ -305,12 +331,7 @@ struct SubscriptionAuthStore {
                 throw SubscriptionError("Login was cancelled or superseded; start login again")
             }
             try precondition?()
-            state.generation = UUID().uuidString
-            state.pendingLogin = nil
-            state.deviceChallenge = nil
-            state.credential = credential
-            state.requiresLogin = nil
-            state.clearRefreshRecords()
+            state.commitPending(credential)
             try Task.checkCancellation()
             try write(state)
             return state.generation
@@ -327,9 +348,24 @@ struct SubscriptionAuthStore {
     func cancelLogin(_ pending: String) async throws {
         try await locked {
             guard var state = try read(), state.pendingLogin == pending else { return }
-            state.pendingLogin = nil
+            state.clearPending()
             state.deviceChallenge = nil
             try write(state)
+        }
+    }
+
+    enum OwnedCancel: Equatable { case none, cancelled, foreign }
+
+    /// Cancel the pending login only when the calling profile owns it
+    /// (§25.12): the owner filter and the cancelled id are one operation.
+    @discardableResult
+    func cancelOwnedPending(profile: String = AssistantProfile.selectedName) async throws -> OwnedCancel {
+        try await locked {
+            guard var state = try read(), state.pendingLogin != nil else { return .none }
+            guard SubscriptionSharing.pendingOwned(state, by: profile) else { return .foreign }
+            state.clearPending()
+            try write(state)
+            return .cancelled
         }
     }
 

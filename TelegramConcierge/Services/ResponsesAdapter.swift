@@ -173,10 +173,17 @@ struct ResponsesAdapter {
         var attempt = 0
         var dispatch = 0
         var silenceTimeouts = 0
+        // Several assistants (§25.4): the login generation is resolved ONCE
+        // per request — the same account re-signed in elsewhere rebinds this
+        // assistant; a different account is refused until chosen again (D18).
+        var subscriptionGeneration = context.subscriptionGeneration
+        if let captured = subscriptionGeneration {
+            subscriptionGeneration = try await SubscriptionSharing.resolveGeneration(captured)
+        }
         while attempt < 4 {
             try Task.checkCancellation()
             do {
-                if let generation = context.subscriptionGeneration {
+                if let generation = subscriptionGeneration {
                     let login = SubscriptionLogin()
                     // Budgeted (maintenance) contexts: no refresh when no send is left.
                     try context.sendBudget?.requireCapacity()
@@ -233,10 +240,10 @@ struct ResponsesAdapter {
                     spendUSD: nil, responses: round.metadata)
             } catch {
                 try Task.checkCancellation()
-                if case ResponsesFailure.http(401, _) = error, let generation = context.subscriptionGeneration {
+                if case ResponsesFailure.http(401, _) = error, let generation = subscriptionGeneration {
                     guard !didRefreshAfter401 else {
                         try await SubscriptionAuthStore().requireLogin(generation: generation, rejectedAccess: usedAccess)
-                        throw SubscriptionError("ChatGPT rejected the refreshed login; sign in again")
+                        throw SubscriptionError(SubscriptionSharing.decorateRevocation("ChatGPT rejected the refreshed login; sign in again"))
                     }
                     // Budgeted contexts never refresh for a resend they could not make.
                     try context.sendBudget?.requireCapacity()

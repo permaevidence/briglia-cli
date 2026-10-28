@@ -448,7 +448,11 @@ extension ConversationManager {
                 try? await sendText("✖ Briglia can't persist state to disk right now (writes failing — check disk space); /deleteuserdata is deferred until storage recovers.")
                 return
             }
+            lastWipeNotes = []
             let failures = await deleteAllMemory()
+            // Several assistants (§25.6): a note that the shared ChatGPT login
+            // stays for the others is sent after the result.
+            defer { for note in lastWipeNotes { Task { [weak self] in try? await self?.sendText(note) } } }
             if let first = failures.first, first.hasPrefix("ABORTED: ") {
                 try? await sendText("✖ " + first)
             } else if failures.isEmpty {

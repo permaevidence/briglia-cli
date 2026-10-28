@@ -679,9 +679,14 @@ extension ConversationManager {
         if action == "cancel" || action == "logout" {
             subscriptionLoginRunID = nil; subscriptionLoginTask?.cancel(); subscriptionLoginTask = nil
             do {
-                if action == "logout" { try await SubscriptionAuthStore().logout() }
-                else if let pending = try SubscriptionAuthStore().read()?.pendingLogin { try await SubscriptionAuthStore().cancelLogin(pending) }
-                try? await sendText(action == "logout" ? "ChatGPT signed out locally." : "ChatGPT login cancelled.", to: address)
+                if action == "logout" {
+                    let sentence = SubscriptionSharing.sharingSentence(signOut: true)
+                    try await SubscriptionAuthStore().logout()
+                    try? await sendText("ChatGPT signed out locally." + (sentence.map { " " + $0 } ?? ""), to: address)
+                } else {
+                    let outcome = try await SubscriptionAuthStore().cancelOwnedPending()
+                    try? await sendText(outcome == .foreign ? SubscriptionSharing.foreignPendingMessage : "ChatGPT login cancelled.", to: address)
+                }
             } catch { try? await sendText(error.localizedDescription, to: address) }
             return
         }
