@@ -37,7 +37,10 @@ extension ConversationManager {
         // the initiating /upgrade handler is itself one of them.
         // S2-12: the coordinated /upgrade runs as its own task, so no command
         // handler belongs to it any more.
-        if browserSettingsCommandIngress > (initiating && MemberEntry.isCoordinator && upgradeCoordinatorTask == nil ? 1 : 0) { return "a command" }
+        // A terminal/app /upgrade waits inside its handler for the coordinator
+        // task (S3-7): that one handler is the update itself, not work.
+        let ownHandler = MemberEntry.isCoordinator && (upgradeCoordinatorTask == nil ? initiating : upgradeHandlerAwaiting)
+        if browserSettingsCommandIngress > (ownHandler ? 1 : 0) { return "a command" }
         if !parkedOutbound.isEmpty || parkedOutbound.isFlushing { return "a message waiting to be sent" }
         if stalledConfirmUpdateId != nil { return "storage problems" }
         if !initiating && (browserSettingsPollIngress > 0 || browserSettingsAppIngress > 0) { return "receiving a message" }

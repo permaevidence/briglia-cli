@@ -64,6 +64,9 @@ extension ProfileHarness {
                   leaseDirs: dirs, leases: leases, names: names)
     }
 
+    /// Scopes the in-process claim tests settle under directly.
+    static let syntheticOpen: Set<String> = ["turn:t1", "turn:t2", "turn:zz", "s1", "s2", "turn:b", "x"]
+
     func resetStage3Seams() {
         MultiAssistant.contextOverrideForTesting = nil
         MultiAssistant.nowOverrideForTesting = nil
@@ -103,6 +106,7 @@ extension ProfileHarness {
         stage3Scopes()
         stage3Hooks()
         stage3Tripwire()
+        stage3TripwireAggregate()
         stage3HeadsUp()
         stage3BoardTool()
         stage3StatusAndDoctor()
@@ -226,23 +230,23 @@ extension ProfileHarness {
         }
         let r1 = refusal(b, [file], "op-b1")
         check("claims: a path reserved by another assistant is refused (\"being changed … right now\")", r1?.contains("right now") == true, r1 ?? "nil")
-        try? FileClaims.settle(a, opId: "op-a1", changed: true, scopes: ["turn:t1"])
+        try? FileClaims.settle(a, opId: "op-a1", changed: true, scopes: ["turn:t1"], open: { Self.syntheticOpen })
         let r2 = refusal(b, [file], "op-b2")
         check("claims: a held claim refuses another assistant's edit tools and names the owner and the turn rule",
               r2?.contains("being edited by the assistant \"Bree\"") == true && r2?.contains("current turn") == true && r2?.contains("Nothing was changed") == true, r2 ?? "nil")
         check("claims: a refused reservation writes nothing for the refused assistant", FileClaims.read(b.paths.claimsFile("work")) == nil)
         try? FileClaims.releaseScope(a, "turn:t1")
         check("A2 claims: closing the turn's scope releases the claim at once (no timer)", refusal(b, [file], "op-b3") == nil)
-        try? FileClaims.settle(b, opId: "op-b3", changed: false, scopes: [])
+        try? FileClaims.settle(b, opId: "op-b3", changed: false, scopes: [], open: { Self.syntheticOpen })
         check("claims: a failed edit removes its new reservation", FileClaims.claims(ofSelf: b).isEmpty)
         // Previously held stays held on failure.
-        try? FileClaims.reserve(a, paths: [file], opId: "op-a2"); try? FileClaims.settle(a, opId: "op-a2", changed: true, scopes: ["turn:t2"])
-        try? FileClaims.reserve(a, paths: [file], opId: "op-a3"); try? FileClaims.settle(a, opId: "op-a3", changed: false, scopes: ["turn:t2"])
+        try? FileClaims.reserve(a, paths: [file], opId: "op-a2"); try? FileClaims.settle(a, opId: "op-a2", changed: true, scopes: ["turn:t2"], open: { Self.syntheticOpen })
+        try? FileClaims.reserve(a, paths: [file], opId: "op-a3"); try? FileClaims.settle(a, opId: "op-a3", changed: false, scopes: ["turn:t2"], open: { Self.syntheticOpen })
         check("claims: a failed edit of a path already held keeps it held", FileClaims.claims(ofSelf: a).first?.state == FileClaims.held)
-        try? FileClaims.settle(a, opId: "op-a2", changed: true, scopes: ["turn:zz"])
+        try? FileClaims.settle(a, opId: "op-a2", changed: true, scopes: ["turn:zz"], open: { Self.syntheticOpen })
         check("claims: a late settlement of another opId never changes the entry", FileClaims.claims(ofSelf: a).first?.scopes == ["turn:t2"])
         // Several scopes: released only when all closed.
-        try? FileClaims.reserve(a, paths: [file + "2"], opId: "op-a4"); try? FileClaims.settle(a, opId: "op-a4", changed: true, scopes: ["s1", "s2"])
+        try? FileClaims.reserve(a, paths: [file + "2"], opId: "op-a4"); try? FileClaims.settle(a, opId: "op-a4", changed: true, scopes: ["s1", "s2"], open: { Self.syntheticOpen })
         try? FileClaims.releaseScope(a, "s1")
         check("A2 claims: an edit made under two open scopes stays claimed until both end", FileClaims.claims(ofSelf: a).contains { $0.path == file + "2" })
         try? FileClaims.releaseScope(a, "s2")
@@ -250,7 +254,7 @@ extension ProfileHarness {
         // Crash/stop: the owner's lease dies → free immediately.
         fx.leases["default"]?.release()
         check("claims: a crashed/stopped owner's claims are ignored at once", refusal(b, [file], "op-b4") == nil)
-        try? FileClaims.settle(b, opId: "op-b4", changed: false, scopes: [])
+        try? FileClaims.settle(b, opId: "op-b4", changed: false, scopes: [], open: { Self.syntheticOpen })
         // Stale own entries (an earlier lease of this profile) are dropped.
         var stale = FileClaims.Document(profile: "work", claims: [])
         stale.claims.append(.init(path: "/stale", state: FileClaims.held, opId: "o", lease: "old-lease", incarnation: "i", scopes: ["x"], wasHeld: nil, reservedAt: Date(), lastEditAt: Date()))
@@ -260,10 +264,10 @@ extension ProfileHarness {
         // §7.4
         let foreign = fx.peer("default").stateRoots[0] + "/secrets.json"
         let r3 = refusal(b, [foreign], "op-b6")
-        check("§7.4: another assistant's own state is refused", r3?.contains("belongs to the assistant ‘Bree’") == true, r3 ?? "nil")
+        check("§7.4: another assistant's own state is refused", r3?.contains("belongs to the assistant \"Bree\"") == true, r3 ?? "nil")
         let r4 = refusal(b, [MultiAssistant.canonical(fx.paths.shared.path) + "/registry.json"], "op-b7")
         check("§7.4: the shared coordination folder is refused", r4?.contains("shared coordination folder") == true, r4 ?? "nil")
-        try? FileClaims.settle(b, opId: "op-b5", changed: false, scopes: [])
+        try? FileClaims.settle(b, opId: "op-b5", changed: false, scopes: [], open: { Self.syntheticOpen })
         _ = try? FileClaims.releaseHeld(b)
         FileClaims.maxEntries = 3
         _ = refusal(b, ["/c1", "/c2", "/c3"], "op-b8")
@@ -320,6 +324,42 @@ extension ProfileHarness {
         jobs.value = []
         Thread.sleep(forTimeInterval: 0.5)
         check("A2 scopes: … and released when they end", FileClaims.claims(ofSelf: a).isEmpty)
+        // S3-2 (a): a settlement that arrives after its turn closed.
+        let t4 = UUID()
+        ClaimScopes.shared.turnStarted(t4)
+        try? FileClaims.reserve(a, paths: [file], opId: "op4")
+        let s4 = wait { await ClaimScopes.shared.scopesForEdit(opId: "op4") }
+        ClaimScopes.shared.turnEnded(t4)
+        Thread.sleep(forTimeInterval: 0.4)
+        check("S3-2: a reservation outlives its closed turn only until it settles", FileClaims.claims(ofSelf: a).first?.state == FileClaims.reserved)
+        try? FileClaims.settle(a, opId: "op4", changed: true, scopes: s4)
+        check("S3-2: a late settlement under a closed turn releases at once (never resurrects the scope)", FileClaims.claims(ofSelf: a).isEmpty)
+        // S3-2 (b): held under A, re-reserved, A closes, settles under B, B closes.
+        jobs.value = ["bash:A"]
+        let tA = UUID(); ClaimScopes.shared.turnStarted(tA)
+        let sA = wait { await ClaimScopes.shared.scopesForEdit(opId: "opA") }
+        try? FileClaims.reserve(a, paths: [file], opId: "opA"); try? FileClaims.settle(a, opId: "opA", changed: true, scopes: sA)
+        ClaimScopes.shared.turnEnded(tA)
+        Thread.sleep(forTimeInterval: 0.3)
+        let tB = UUID(); ClaimScopes.shared.turnStarted(tB)
+        try? FileClaims.reserve(a, paths: [file], opId: "opB")
+        jobs.value = []
+        Thread.sleep(forTimeInterval: 0.5)
+        let sB = wait { await ClaimScopes.shared.scopesForEdit(opId: "opB") }
+        try? FileClaims.settle(a, opId: "opB", changed: true, scopes: sB)
+        check("S3-2: after re-editing, the claim carries only the open turn (A dropped)", FileClaims.claims(ofSelf: a).first?.scopes == ["turn:" + tB.uuidString.lowercased()],
+              "\(FileClaims.claims(ofSelf: a).first?.scopes ?? [])")
+        ClaimScopes.shared.turnEnded(tB)
+        Thread.sleep(forTimeInterval: 0.5)
+        check("S3-2: … and goes when that turn ends", FileClaims.claims(ofSelf: a).isEmpty)
+        // A held entry whose scopes are all closed is swept by the ticker.
+        try? FileClaims.withLock(a) {
+            var d = FileClaims.loadOwn(a)
+            d.claims.append(.init(path: "/orphan", state: FileClaims.held, opId: "o", lease: a.me.lease, incarnation: a.me.incarnation, scopes: ["turn:gone"], wasHeld: nil, reservedAt: Date(), lastEditAt: Date()))
+            try FileClaims.saveOwn(d, a)
+        }
+        _ = wait { await ClaimScopes.shared.tick() }
+        check("S3-2: the safety sweep drops a held claim none of whose scopes is open", !FileClaims.claims(ofSelf: a).contains { $0.path == "/orphan" })
     }
 
     // MARK: Hooks (edit tools)
@@ -352,6 +392,16 @@ extension ProfileHarness {
         let rb = wait { await MultiAssistantHooks.before(toolName: "edit_file", argumentsJSON: "{\"path\":\"\(file)\",\"old_string\":\"one\",\"new_string\":\"x\"}") }
         if case .refuse(let m)? = rb { check("hooks: another assistant's edit tool on the claimed file is refused before anything changes", m.contains("being edited") && (try? String(contentsOfFile: file, encoding: .utf8)) == "two") }
         else { check("hooks: another assistant's edit refused", false) }
+        let padded = wait { await MultiAssistantHooks.before(toolName: "edit_file", argumentsJSON: "{\"path\":\" \(file)\",\"old_string\":\"one\",\"new_string\":\"x\"}") }
+        if case .refuse(let m)? = padded { check("S3-1: a padded path (leading space, as the tool trims it) is still refused", m.contains("being edited")) }
+        else { check("S3-1: a padded path (leading space, as the tool trims it) is still refused", false, "\(String(describing: padded))") }
+        let paddedState = wait { await MultiAssistantHooks.before(toolName: "write_file", argumentsJSON: "{\"path\":\"  \(fx.peer("default").stateRoots[0])/x.txt\",\"content\":\"y\"}") }
+        if case .refuse(let m)? = paddedState { check("S3-1: a padded path into another assistant's state is refused", m.contains("belongs to the assistant")) }
+        else { check("S3-1: a padded path into another assistant's state is refused", false, "\(String(describing: paddedState))") }
+        let patchArgs = try! JSONSerialization.data(withJSONObject: ["patch_text": "*** Begin Patch\n*** Update File:   \(file)  \n*** Move to:  \(file).moved\n@@\n-x\n+y\n*** End Patch"])
+        let paddedPatch = MultiAssistantHooks.editPaths(toolName: "apply_patch", argumentsJSON: String(decoding: patchArgs, as: UTF8.self))
+        check("S3-1: apply_patch paths come from the patch parser (both move endpoints, trimmed)",
+              paddedPatch == [MultiAssistant.canonical(file), MultiAssistant.canonical(file) + ".moved"].sorted(), "\(paddedPatch)")
         let rb2 = wait { await MultiAssistantHooks.before(toolName: "apply_patch", argumentsJSON: "{\"patch_text\":\"*** Begin Patch\\n*** Delete File: \(file)\\n*** End Patch\"}") }
         if case .refuse(let m)? = rb2 { check("hooks: apply_patch (delete) of a claimed file is refused too", m.contains("being edited")) }
         else { check("hooks: apply_patch refused", false) }
@@ -390,7 +440,7 @@ extension ProfileHarness {
         let a = fx.ctx("default"), b = fx.ctx("work")
         let file = fx.root.appendingPathComponent("t.txt").path
         FileManager.default.createFile(atPath: file, contents: Data("v1".utf8))
-        try? FileClaims.reserve(b, paths: [file], opId: "ob"); try? FileClaims.settle(b, opId: "ob", changed: true, scopes: ["turn:b"])
+        try? FileClaims.reserve(b, paths: [file], opId: "ob"); try? FileClaims.settle(b, opId: "ob", changed: true, scopes: ["turn:b"], open: { Self.syntheticOpen })
         let jobs = JobsBox()
         ClaimScopes.liveJobsOverrideForTesting = { jobs.value }
         ClaimScopes.tickSeconds = 0.1
@@ -424,9 +474,43 @@ extension ProfileHarness {
         Thread.sleep(forTimeInterval: 0.6)
         check("A2 tripwire: when the detached job ends, the owner and this assistant are told",
               BoardNotices.pending(b, now: Date()).count == 1 && BoardNotices.pending(a, now: Date()).first?.kind == "self")
+        BoardNotices.consumeShown(b)
+        try? FileManager.default.removeItem(at: b.paths.noticesDir("work"))
+        for i in 0..<9 {
+            BoardNotices.post(.init(id: UUID().uuidString.lowercased(), path: "/n\(i)", byDisplayName: "Bree", at: Date().addingTimeInterval(Double(i)), kind: "peer", ownerDisplayName: nil), to: "work", paths: b.paths)
+        }
+        MultiAssistant.contextOverrideForTesting = b
+        _ = AssistantBoard.ambientLines()
+        BoardNotices.consumeShown(b)
+        check("S3-4: only the eight notices actually rendered are consumed", BoardNotices.pending(b, now: Date()).count == 1)
+        let read = AssistantBoard.fullBoard(b)
+        BoardNotices.consumeShown(b)
+        check("S3-4: the board tool shows the rest, which then count as delivered", read.contains("/n8") && BoardNotices.pending(b, now: Date()).isEmpty, read)
+        MultiAssistant.contextOverrideForTesting = a
         let old = BoardNotices.Notice(id: UUID().uuidString.lowercased(), path: "/x", byDisplayName: "W", at: Date().addingTimeInterval(-7200), kind: "peer", ownerDisplayName: nil)
         BoardNotices.post(old, to: "work", paths: b.paths)
         check("A2 tripwire: notices older than an hour expire", !BoardNotices.pending(b, now: Date()).contains { $0.id == old.id })
+    }
+
+    private func stage3TripwireAggregate() {
+        guard let fx = makeS3("trip-agg", names: ["default": "Bree", "work": "Work", "health": "Health"]) else { check("aggregate fixture", false); return }
+        defer { fx.release(); resetStage3Seams() }
+        let dir = fx.root.appendingPathComponent("many", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var last = ""
+        for (who, n) in [("work", 1000), ("health", 1001)] {
+            let paths = (0..<n).map { MultiAssistant.canonical(dir.path) + "/\(who)-\($0)" }
+            try? FileClaims.reserve(fx.ctx(who), paths: paths, opId: "op-\(who)")
+            try? FileClaims.settle(fx.ctx(who), opId: "op-\(who)", changed: true, scopes: ["s"], open: { ["s"] })
+            last = paths.last!
+        }
+        FileManager.default.createFile(atPath: last, contents: Data("a".utf8))
+        let a = fx.ctx("default")
+        ClaimScopes.liveJobsOverrideForTesting = { [] }
+        guard let snap = wait({ await Tripwire.snapshot(a) }) else { check("aggregate snapshot", false); return }
+        try? "changed!".write(toFile: last, atomically: false, encoding: .utf8)
+        check("S3-5: every claim of every peer is checked (2,001 across two peers; the last one changed)",
+              snap.files.count == 2001 && Tripwire.changes(snap).map(\.path) == [last], "\(snap.files.count)")
     }
 
     // MARK: Heads-up (§8.4)
@@ -466,6 +550,10 @@ extension ProfileHarness {
         ClaimScopes.shared.turnStarted(UUID())
         check("§8.4: a repository with another assistant's recorded worktree → heads-up",
               MultiAssistantHooks.headsUp(a, toolName: "read_file", touched: [MultiAssistant.canonical(repo.path) + "/README"]).contains("is active here"))
+        try? FileManager.default.removeItem(at: fx.paths.boardFile("work"))
+        ClaimScopes.shared.turnStarted(UUID())
+        let noBoard = MultiAssistantHooks.headsUp(a, toolName: "read_file", touched: [MultiAssistant.canonical(repo.path) + "/README"])
+        check("§7.2: the recorded-worktree heads-up does not depend on the board entry", noBoard.contains("has its own worktree of this repository"), noBoard)
     }
 
     // MARK: Board tool + writer
@@ -519,6 +607,14 @@ extension ProfileHarness {
         check("§10.3 /status: names the default as the sender of computer-wide notices", lines.last?.contains("sent by ‘Bree’ (the default assistant)") == true)
         let one = AssistantRegistry.Document(version: 1, records: [AssistantRegistry.newRecord(name: "default", displayName: "Bree")])
         check("§10.3 /status: nothing with one assistant", ConversationManager.multiAssistantStatusLines(doc: one, me: "default", waitingFor: [], barrier: nil, ctx: nil, chatgptScope: nil, running: { _ in true }).isEmpty)
+        var addingRec = AssistantRegistry.newRecord(name: "work", displayName: "Work"); addingRec.state = "adding"
+        let adding = AssistantRegistry.Document(version: 1, records: [AssistantRegistry.newRecord(name: "default", displayName: "Bree"), addingRec])
+        check("§10.3 /status: nothing while the only extra is still being added (active-record rule)",
+              ConversationManager.multiAssistantStatusLines(doc: adding, me: "default", waitingFor: [], barrier: nil, ctx: nil, chatgptScope: nil, running: { _ in true }).isEmpty)
+        let regAdding = AssistantRegistry.Paths(root: fx.root.appendingPathComponent("reg-adding"))
+        try? FileManager.default.createDirectory(at: regAdding.root, withIntermediateDirectories: true)
+        try? AssistantRegistry.write(adding, regAdding)
+        check("§10.4 doctor: nothing while the only extra is still being added", MultiAssistantDoctor.lines(paths: fx.paths, registryPaths: regAdding).isEmpty)
         let barrier = UpgradeBarrier.Record(id: "x", state: .open, targetVersion: "9.9.9", targetSequence: 9, openedAt: Date(),
                                             coordinator: .init(lease: "", pid: 1, processStartTime: ""), participants: [], committedBinarySHA256: nil, reason: nil)
         let up = ConversationManager.multiAssistantStatusLines(doc: doc, me: "default", waitingFor: ["‘Work’ (a reply in progress)"], barrier: barrier, ctx: nil, chatgptScope: nil, running: { _ in true })
@@ -579,6 +675,15 @@ extension ProfileHarness {
             check("S2-12: /upgrade cancel stops the wait before anything is installed (barrier cancelled)",
                   why.contains("cancelled by the user") && Date().timeIntervalSince(started) < 10 && UpgradeBarrier.current(settings.paths)?.state == .cancelled, why)
         } else { check("S2-12: cancel outcome", false, "\(outcome)") }
+        // S3-6: a cancel raised before everyone is ready is honoured even when
+        // the next poll finds nobody busy.
+        busy.release()
+        try? FileManager.default.removeItem(at: settings.paths.barrier)
+        var s2 = settings
+        s2.cancelRequested = { true }
+        let early = wait { await UpgradeCoordinator.run(staged: staged, settings: s2, holding: lock) }
+        if case .cancelled(let why) = early { check("S3-6: a cancel already raised wins over 'everyone ready' (nothing installed)", why.contains("cancelled by the user")) }
+        else { check("S3-6: a cancel already raised wins over 'everyone ready'", false, "\(early)") }
         MemberEntry.isCoordinator = false
     }
 
@@ -621,6 +726,9 @@ extension ProfileHarness {
         check("stage3 e2e: Work's edit_file of the claimed file is refused (real executor, other process)",
               e.contains("edit refused") && e.contains("Bree"), e)
         check("stage3 e2e: the refused edit changed nothing", (try? String(contentsOfFile: file, encoding: .utf8)) == "from bree\n")
+        let padded = tool(b, "edit_file", ["path": " " + file, "old_string": "from bree", "new_string": "bypassed"])
+        check("S3-1 e2e: the same edit with a padded path is refused too (real executor)",
+              padded.contains("edit refused") && (try? String(contentsOfFile: file, encoding: .utf8)) == "from bree\n", padded)
         let bash = tool(b, "bash", ["command": "printf 'bash wrote this\\n' >> '\(file)'"])
         check("A2 e2e: Work's Bash is not blocked and its result carries the tripwire warning",
               bash.contains("Changed during this command") && bash.contains("notes.md") && (try? String(contentsOfFile: file, encoding: .utf8))?.contains("bash wrote this") == true, bash)
@@ -688,6 +796,18 @@ extension ProfileHarness {
         check("§7.2 integrate: target checked out in the user's checkout → hand-off with the exact command, target unchanged",
               handoff.status == 0 && handoff.out.contains("git merge --ff-only briglia/work/invoices")
               && !FileManager.default.fileExists(atPath: r + "/b.txt"), handoff.out)
+        // S3-3: a failing `git worktree list` never counts as "not checked out".
+        let shim = root.appendingPathComponent("gitshim", isDirectory: true)
+        try? FileManager.default.createDirectory(at: shim, withIntermediateDirectories: true)
+        let realGit = ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"].first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/usr/bin/git"
+        let script = "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = list ]; then echo 'fatal: injected enumeration error' >&2; exit 1; fi; done\nexec \(realGit) \"$@\"\n"
+        FileManager.default.createFile(atPath: shim.path + "/git", contents: Data(script.utf8), attributes: [.posixPermissions: 0o755])
+        let beforeMain = WorktreeCommand.git(["rev-parse", "main"], in: r).out
+        let broken = run(["--profile", "work", "worktree", "integrate", "main", "--worktree", landing],
+                         extraEnv: ["PATH": shim.path + ":" + (env["PATH"] ?? "/usr/bin:/bin")])
+        check("S3-3: a failed checkout enumeration refuses and leaves the target unchanged",
+              broken.status != 0 && broken.out.contains("could not list the checkouts") && WorktreeCommand.git(["rev-parse", "main"], in: r).out == beforeMain
+              && WorktreeCommand.git(["status", "--porcelain"], in: r).out.isEmpty, broken.out)
         _ = WorktreeCommand.git(["switch", "-q", "-c", "user-elsewhere"], in: r)
         let ff = run(["--profile", "work", "worktree", "integrate", "main", "--worktree", landing, "--test", "test -f b.txt"])
         let mainSha = WorktreeCommand.git(["rev-parse", "main"], in: r).out

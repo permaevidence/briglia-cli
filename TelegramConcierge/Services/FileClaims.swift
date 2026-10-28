@@ -119,7 +119,7 @@ enum FileClaims {
                     throw Refusal(message: "edit refused: \(MultiAssistant.display(path)) is inside Briglia's shared coordination folder; Briglia does not edit it with file tools.")
                 }
                 for peer in ctx.peers where peer.stateRoots.contains(where: { MultiAssistant.isInside(path, $0) }) {
-                    throw Refusal(message: "edit refused: \(MultiAssistant.display(path)) belongs to the assistant ‘\(peer.displayName)’; Briglia does not edit another assistant's memory or settings.")
+                    throw Refusal(message: "edit refused: \(MultiAssistant.display(path)) belongs to the assistant \(MultiAssistant.q(peer.displayName, 40)); Briglia does not edit another assistant's memory or settings.")
                 }
             }
             for peer in ctx.peers {
@@ -161,19 +161,28 @@ enum FileClaims {
     /// Settle operation `opId`: `changed` → held under `scopes`; otherwise
     /// the new reservations go and previously held paths stay held. Matches
     /// by `opId` only.
-    static func settle(_ ctx: MultiAssistant.Context, opId: String, changed: Bool, scopes: [String], now: Date = MultiAssistant.now) throws {
+    ///
+    /// Codex stage-3 S3-2: only scopes that are STILL open (read under the
+    /// claims lock, where every closure also runs) are kept, for the new
+    /// scopes and for the ones the entry already had; an entry left with no
+    /// open scope is released at once. A late settlement can therefore never
+    /// resurrect a closed turn.
+    static func settle(_ ctx: MultiAssistant.Context, opId: String, changed: Bool, scopes: [String], now: Date = MultiAssistant.now,
+                       open: () -> Set<String> = { ClaimScopes.shared.openScopes() }) throws {
         try withLock(ctx) {
+            let openNow = open()
             var doc = loadOwn(ctx)
             var out: [Claim] = []
             for var c in doc.claims {
                 guard c.opId == opId, c.state == reserved else { out.append(c); continue }
+                let kept = Set(c.scopes).intersection(openNow)
                 if changed {
                     c.state = held; c.lastEditAt = now
-                    c.scopes = Array(Set(c.scopes).union(scopes)).sorted()
+                    c.scopes = Array(kept.union(Set(scopes).intersection(openNow))).sorted()
                     c.wasHeld = nil
-                    out.append(c)
-                } else if c.wasHeld == true {
-                    c.state = held; c.wasHeld = nil
+                    if !c.scopes.isEmpty { out.append(c) }
+                } else if c.wasHeld == true, !kept.isEmpty {
+                    c.state = held; c.wasHeld = nil; c.scopes = Array(kept).sorted()
                     out.append(c)
                 }
             }
@@ -188,9 +197,11 @@ enum FileClaims {
             var doc = loadOwn(ctx)
             var out: [Claim] = []
             for var c in doc.claims {
-                if c.state == held, c.scopes.contains(scope) {
+                if c.scopes.contains(scope) {
                     c.scopes.removeAll { $0 == scope }
-                    if c.scopes.isEmpty { continue }
+                    // A reservation stays (still protective) until its
+                    // operation settles; it just no longer carries the scope.
+                    if c.state == held, c.scopes.isEmpty { continue }
                 }
                 out.append(c)
             }
@@ -202,11 +213,12 @@ enum FileClaims {
 
     /// Drop every held claim whose scopes are all closed (startup after a
     /// crash of the bookkeeping, and the periodic sweep).
-    static func pruneClosed(_ ctx: MultiAssistant.Context, open: Set<String>) throws {
+    static func pruneClosed(_ ctx: MultiAssistant.Context, open: () -> Set<String>) throws {
         try withLock(ctx) {
+            let openNow = open()
             var doc = loadOwn(ctx)
             let before = doc.claims
-            doc.claims.removeAll { $0.state == held && Set($0.scopes).isDisjoint(with: open) }
+            doc.claims.removeAll { $0.state == held && Set($0.scopes).isDisjoint(with: openNow) }
             guard doc.claims != before else { return }
             try saveOwn(doc, ctx)
         }
@@ -233,6 +245,8 @@ final class ClaimScopes: @unchecked Sendable {
     private var currentTurn: String?
     /// Ended turns (and out-of-turn edits) waiting for these jobs.
     private var pending: [String: Set<String>] = [:]
+    /// Ended turns whose live-job snapshot is still being taken: open.
+    private var ending: Set<String> = []
     private var ticker: Task<Void, Never>?
     /// Areas already announced in the current turn (heads-up dedup).
     private var announced: Set<String> = []
@@ -250,7 +264,7 @@ final class ClaimScopes: @unchecked Sendable {
 
     func openScopes() -> Set<String> {
         lock.lock(); defer { lock.unlock() }
-        var s = Set(pending.keys)
+        var s = Set(pending.keys).union(ending)
         if let t = currentTurn { s.insert(t) }
         return s
     }
@@ -275,19 +289,24 @@ final class ClaimScopes: @unchecked Sendable {
         let scope = "turn:" + id.uuidString.lowercased()
         lock.lock()
         let wasCurrent = currentTurn == scope
-        if wasCurrent { currentTurn = nil }
+        if wasCurrent { currentTurn = nil; ending.insert(scope) }
         lock.unlock()
         // One assistant (no registry): nothing was ever claimed.
-        guard wasCurrent, MultiAssistant.contextOverrideForTesting != nil || AssistantRegistry.presence() != .absent else { return }
+        guard wasCurrent, MultiAssistant.contextOverrideForTesting != nil || AssistantRegistry.presence() != .absent else {
+            lock.lock(); ending.remove(scope); lock.unlock()
+            return
+        }
         if let ctx = MultiAssistant.context() { BoardNotices.consumeShown(ctx) }
         Task.detached { [self] in
             let jobs = await Self.liveJobs()
+            // Hand over from `ending` to `pending` atomically (never closed in
+            // between), then close at once when no job runs.
+            self.lock.lock(); self.pending[scope] = jobs; self.ending.remove(scope); self.lock.unlock()
             if jobs.isEmpty, let ctx = MultiAssistant.context() {
                 self.close(scope, ctx)
             } else {
                 // Jobs still run, or the context is momentarily unavailable
                 // (registry being rewritten): the ticker closes it later.
-                self.lock.lock(); self.pending[scope] = jobs; self.lock.unlock()
                 self.startTicker()
             }
         }
@@ -299,15 +318,18 @@ final class ClaimScopes: @unchecked Sendable {
         return announced.insert(key).inserted
     }
 
+    /// The scope stops counting as open BEFORE its claims are released, so
+    /// a settlement racing the closure drops it (S3-2); if the release
+    /// cannot run, the claims are swept by `pruneClosed` on the next tick.
     private func close(_ scope: String, _ ctx: MultiAssistant.Context) {
-        do { try FileClaims.releaseScope(ctx, scope) } catch {
-            // Retried by the ticker (the scope stays pending with no jobs).
-            lock.lock(); pending[scope] = []; lock.unlock()
-            startTicker()
-            return
-        }
         lock.lock(); pending.removeValue(forKey: scope); lock.unlock()
+        do { try FileClaims.releaseScope(ctx, scope) } catch {
+            lock.lock(); sweepOwed = true; lock.unlock()
+            startTicker()
+        }
     }
+
+    private var sweepOwed = false
 
     private func startTicker() {
         lock.lock()
@@ -317,7 +339,7 @@ final class ClaimScopes: @unchecked Sendable {
                 try? await Task.sleep(nanoseconds: UInt64(Self.tickSeconds * 1_000_000_000))
                 await self.tick()
                 self.lock.lock()
-                let idle = self.pending.isEmpty && !Tripwire.shared.hasWatches
+                let idle = self.pending.isEmpty && self.ending.isEmpty && !self.sweepOwed && !Tripwire.shared.hasWatches
                 if idle { self.ticker = nil }
                 self.lock.unlock()
                 if idle { return }
@@ -338,6 +360,11 @@ final class ClaimScopes: @unchecked Sendable {
         if let ctx = MultiAssistant.context() {
             for scope in ready { close(scope, ctx) }
             Tripwire.shared.settleFinished(ctx, alive: alive)
+            // Safety sweep under the claims lock: a held claim none of whose
+            // scopes is open any more goes (S3-2).
+            if (try? FileClaims.pruneClosed(ctx, open: { self.openScopes() })) != nil {
+                lock.lock(); sweepOwed = false; lock.unlock()
+            }
         } else if AssistantRegistry.presence() == .absent && MultiAssistant.contextOverrideForTesting == nil {
             // The registry is gone (last extra removed): nothing to release.
             lock.lock(); for scope in ready { pending.removeValue(forKey: scope) }; lock.unlock()
@@ -346,7 +373,7 @@ final class ClaimScopes: @unchecked Sendable {
     }
 
     func resetForTesting() {
-        lock.lock(); currentTurn = nil; pending.removeAll(); announced.removeAll(); ticker?.cancel(); ticker = nil; lock.unlock()
+        lock.lock(); currentTurn = nil; pending.removeAll(); ending.removeAll(); sweepOwed = false; announced.removeAll(); ticker?.cancel(); ticker = nil; lock.unlock()
     }
 
     var pendingScopesForTesting: [String: Set<String>] { lock.lock(); defer { lock.unlock() }; return pending }
@@ -407,13 +434,12 @@ final class Tripwire: @unchecked Sendable {
         var jobsBefore: Set<String>
     }
 
-    static let maxFiles = 2000
-
     /// Before a Bash command: every file another assistant claims.
     static func snapshot(_ ctx: MultiAssistant.Context) async -> Snapshot? {
         let owned = FileClaims.othersClaimed(ctx)
         let jobs = await ClaimScopes.liveJobs()
-        return Snapshot(files: owned.prefix(maxFiles).map { ($0, stamp($0.path)) }, jobsBefore: jobs)
+        // Every claim of every peer (≤2,000 each, ≤7 peers): no silent cap (S3-5).
+        return Snapshot(files: owned.map { ($0, stamp($0.path)) }, jobsBefore: jobs)
     }
 
     /// Changed files since `snapshot` (each reported once per snapshot).

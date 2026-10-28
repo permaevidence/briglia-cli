@@ -1356,6 +1356,8 @@ class ConversationManager: ObservableObject {
     /// The assistants the coordinator still waits for (for `/status`).
     var upgradeWaitingFor: [String] = []
     let upgradeCancelFlag = UpgradeCancelFlag()
+    /// A terminal/app `/upgrade` handler is waiting for the coordinator task.
+    var upgradeHandlerAwaiting = false
     var browserSettingsPollIngress = 0
     var browserSettingsAppIngress = 0
     var browserSettingsCommandIngress = 0

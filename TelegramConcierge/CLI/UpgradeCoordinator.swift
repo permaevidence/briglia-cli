@@ -244,10 +244,11 @@ enum UpgradeCoordinator {
                 busy.append("‘\(displayName(p.profile, settings.registryPaths))’ (\(reason))")
             }
             settings.onWaiting(busy)
-            if busy.isEmpty { break }
+            // Checked before readiness is accepted (S3-6).
             if settings.cancelRequested() {
                 return cancel("cancelled by the user before anything was installed")
             }
+            if busy.isEmpty { break }
             if Date() >= deadline {
                 return cancel("waited \(Int(settings.waitSeconds / 60)) minutes; still busy: \(busy.joined(separator: ", ")). Nothing was changed.")
             }
@@ -271,6 +272,8 @@ enum UpgradeCoordinator {
             return cancel(refusal)
         }
 
+        // The last point where a requested cancel is honoured (S3-6).
+        if settings.cancelRequested() { return cancel("cancelled by the user before anything was installed") }
         // 7–8. Journal, swap, verify, commit.
         do {
             let journal = try UpgradeJournal.swap(staged, barrierId: barrier.id, executable: settings.executable, paths: paths)

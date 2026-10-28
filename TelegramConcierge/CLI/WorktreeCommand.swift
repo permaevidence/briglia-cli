@@ -163,7 +163,11 @@ struct WorktreeCommand: ParsableCommand {
                 let outcome: String? = try WorktreeCommand.withRepoLock(paths, commonDir: loc.commonDir) {
                     let now = WorktreeCommand.git(["rev-parse", "--verify", "refs/heads/\(target)"], in: dir)
                     guard now.ok, now.out == old.out else { return nil }    // moved: rebase again
+                    // S3-3: a failed enumeration never counts as "not checked out".
                     let list = WorktreeCommand.git(["worktree", "list", "--porcelain"], in: dir)
+                    guard list.ok, list.out.hasPrefix("worktree ") else {
+                        return "✖ Briglia could not list the checkouts of this repository (\(list.ok ? "unexpected output" : list.detail)); \(target) was not changed."
+                    }
                     var checkedOut: [String] = []
                     var current: String?
                     for line in list.out.split(separator: "\n").map(String.init) {
@@ -176,9 +180,10 @@ struct WorktreeCommand: ParsableCommand {
                         return "✔ \(target) fast-forwarded to \(String(new.out.prefix(12))) (\(branch))."
                     }
                     let owned = WorktreeRegistry.load(paths).filter { $0.profile == profile }.map(\.path)
+                    let wtStatus = checkedOut.first.map { WorktreeCommand.git(["status", "--porcelain"], in: $0) }
+                    let wtHead = checkedOut.first.map { WorktreeCommand.git(["rev-parse", "HEAD"], in: $0) }
                     if checkedOut.count == 1, let wt = checkedOut.first, owned.contains(wt),
-                       WorktreeCommand.git(["status", "--porcelain"], in: wt).out.isEmpty,
-                       WorktreeCommand.git(["rev-parse", "HEAD"], in: wt).out == old.out {
+                       let st = wtStatus, st.ok, st.out.isEmpty, let hd = wtHead, hd.ok, hd.out == old.out {
                         let m = WorktreeCommand.git(["merge", "--ff-only", branch], in: wt)
                         guard m.ok else { return "✖ git merge --ff-only failed: \(m.detail)" }
                         return "✔ \(target) fast-forwarded in your worktree \(MultiAssistant.display(wt))."

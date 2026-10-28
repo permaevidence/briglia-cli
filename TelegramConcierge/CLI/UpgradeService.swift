@@ -123,8 +123,12 @@ enum UpgradeService {
     /// reported, never silently swallowed.
     /// `onManifest` receives the authenticated manifest (display only: the
     /// security wording and the "GitHub may still be updating" line).
+    /// Selftests (development builds only): replaces the release check.
+    nonisolated(unsafe) static var checkOverrideForTesting: (() async -> CheckResult)?
+
     static func check(warn: (String) -> Void = { _ in },
                       onManifest: (ReleaseSigning.Manifest) -> Void = { _ in }) async -> CheckResult {
+        if adaCLIVersion.hasSuffix("-dev"), let override = checkOverrideForTesting { return await override() }
         guard let platform = platformKey else { return .unsupportedPlatform }
         let policy = ReleasePolicy.effective
         let manifest: ReleaseSigning.Manifest

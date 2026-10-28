@@ -25,7 +25,7 @@ extension ConversationManager {
     nonisolated static func multiAssistantStatusLines(doc: AssistantRegistry.Document, me: String, waitingFor: [String],
                                                       barrier: UpgradeBarrier.Record?, ctx: MultiAssistant.Context?,
                                                       chatgptScope: String?, running: (AssistantRegistry.Record) -> Bool) -> [String] {
-        guard doc.records.count >= 2 else { return [] }
+        guard doc.records.filter({ $0.state == "active" }).count >= 2 else { return [] }
         var lines: [String] = []
         let others = doc.records.filter { $0.name != me }.map { r in
             "\(r.displayName) " + (r.state == "active" ? (running(r) ? "running" : "stopped") : r.state)
@@ -57,7 +57,8 @@ extension ConversationManager {
             try? await sendText("The board exists only while several assistants are set up on this computer.")
             return
         }
-        try? await sendText(AssistantBoard.fullBoard(ctx))
+        // The user's view: notices stay pending for the model (not "shown").
+        try? await sendText(AssistantBoard.fullBoard(ctx, markShown: false))
     }
 
     // MARK: Coordinated /upgrade as its own task (S2-12)

@@ -506,7 +506,14 @@ enum MultiAssistantDoctor {
 
     static func lines(paths: MultiAssistant.Paths = .live, registryPaths: AssistantRegistry.Paths = .live,
                       barrierPaths: UpgradeBarrier.Paths = .live, now: Date = Date()) -> [Line] {
-        guard AssistantRegistry.presence(registryPaths) != .absent else { return [] }
+        // Same predicate as the model-facing gate: at least two ACTIVE assistants.
+        guard AssistantRegistry.presence(registryPaths) != .absent,
+              let doc = (try? AssistantRegistry.read(registryPaths)) ?? nil,
+              doc.records.filter({ $0.state == "active" }).count >= 2 else {
+            // An unreadable registry is still reported (fail visible).
+            if case .unreadable(let why) = AssistantRegistry.presence(registryPaths) { return [Line(problem: true, text: "assistants registry unreadable: \(why)", hint: nil)] }
+            return []
+        }
         var out: [Line] = []
         for raw in Doctor.readOnlyReport(paths: barrierPaths, registryPaths: registryPaths).dropFirst() {
             let t = raw.trimmingCharacters(in: .whitespaces)

@@ -24,9 +24,29 @@ enum MultiAssistantHooks {
 
     /// Every file an edit tool will touch (all patch operations, both move
     /// endpoints), canonical.
+    ///
+    /// Codex stage-3 S3-1: the paths are taken exactly as the tools take
+    /// them — `FilesystemTools.normalizePath` for write/edit (trimmed,
+    /// `~` expanded) and `ApplyPatch.parse` for patches — so a padded path
+    /// cannot slip past the claim while still being edited. A path the tool
+    /// itself would reject (not absolute, unparsable patch) changes nothing.
     static func editPaths(toolName: String, argumentsJSON: String) -> [String] {
-        Array(Set(ProjectInstructionsTracker.touchedPaths(toolName: toolName, argumentsJSON: argumentsJSON)
-            .map(MultiAssistant.canonical))).sorted()
+        guard let data = argumentsJSON.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [] }
+        var raw: [String] = []
+        if toolName == "apply_patch" {
+            guard let text = obj["patch_text"] as? String, let ops = try? ApplyPatch.parse(patchText: text) else { return [] }
+            for op in ops {
+                switch op {
+                case .update(let path, _, let moveTo): raw.append(path); if let m = moveTo { raw.append(m) }
+                case .add(let path, _): raw.append(path)
+                case .delete(let path): raw.append(path)
+                }
+            }
+        } else if let path = obj["path"] as? String {
+            raw.append(FilesystemTools.normalizePath(path))
+        }
+        return Array(Set(raw.filter { $0.hasPrefix("/") }.map(MultiAssistant.canonical))).sorted()
     }
 
     /// Paths a tool call touches, for heads-ups and the board's folders.
@@ -112,9 +132,13 @@ enum MultiAssistantHooks {
     /// background (the entries stay `reserved`, still protective).
     static func settleWithRetry(_ ctx: MultiAssistant.Context, opId: String, changed: Bool, scopes: [String]) {
         do { try FileClaims.settle(ctx, opId: opId, changed: changed, scopes: scopes); return } catch {}
+        // Never abandoned (S3-2): retried until it succeeds or the process
+        // ends (then the lease dies and every reader ignores the entries).
         Task.detached {
-            for attempt in 0..<600 {
-                try? await Task.sleep(nanoseconds: UInt64(min(5.0, 0.2 * Double(attempt + 1)) * 1_000_000_000))
+            var attempt = 0
+            while true {
+                attempt += 1
+                try? await Task.sleep(nanoseconds: UInt64(min(5.0, 0.2 * Double(attempt)) * 1_000_000_000))
                 if (try? FileClaims.settle(ctx, opId: opId, changed: changed, scopes: scopes)) != nil { return }
             }
         }
@@ -125,11 +149,22 @@ enum MultiAssistantHooks {
     static func headsUp(_ ctx: MultiAssistant.Context, toolName: String, touched: [String]) -> String {
         guard !touched.isEmpty else { return "" }
         let now = MultiAssistant.now
-        let states = AssistantBoard.peers(ctx, now: now).filter(\.active)
-        guard !states.isEmpty else { return "" }
+        let all = AssistantBoard.peers(ctx, now: now)
+        let states = all.filter(\.active)
         let worktrees = WorktreeRegistry.load(ctx.paths)
+        guard !states.isEmpty || !worktrees.isEmpty else { return "" }
         let myLocations = touched.compactMap(BoardGit.locate)
         var lines: [String] = []
+        // §7.2: a repository with another assistant's recorded worktree gets
+        // a heads-up whether or not that assistant's board entry is active.
+        for s in all where !s.active {
+            for loc in myLocations {
+                guard let w = worktrees.first(where: { $0.profile == s.peer.profile && $0.commonDir == loc.commonDir && $0.path != loc.worktree }),
+                      ClaimScopes.shared.firstAnnouncement(s.peer.profile + "|repo:" + loc.commonDir) else { continue }
+                lines.append("[Board] \(MultiAssistant.q(s.peer.displayName, 40)) has its own worktree of this repository (\(MultiAssistant.q(MultiAssistant.display(w.path), 120)), branch \(MultiAssistant.q(w.branch, 60))). Work in your own worktree (`\(AssistantProfile.commandPrefix) worktree add <repo> <topic>`).")
+                break
+            }
+        }
         for s in states {
             guard let e = s.entry else { continue }
             var area: String?

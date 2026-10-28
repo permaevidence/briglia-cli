@@ -75,6 +75,15 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
 
         let board = (await m.handleTerminalCommand("/board") ?? []).joined(separator: "\n")
         check("/board answers with the full board while several assistants exist", board.contains("Assistant board"), board)
+        // S3-7: a terminal/app /upgrade receives the delayed result.
+        UpgradeService.checkOverrideForTesting = {
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            return .upToDate("9.9.9-test")
+        }
+        let local = (await m.handleTerminalCommand("/upgrade") ?? []).joined(separator: "\n")
+        UpgradeService.checkOverrideForTesting = nil
+        check("S3-7: a terminal/app /upgrade gets the acknowledgement and the delayed result in its reply",
+              local.contains("Checking for an update") && local.contains("Already up to date (9.9.9-test)") && m.upgradeCoordinatorTask == nil, local)
         print("STAGE3_DONE")
     }
 }

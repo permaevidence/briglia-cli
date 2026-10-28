@@ -1491,13 +1491,25 @@ extension ConversationManager {
         let address = replyAddress
         upgradeCancelFlag.reset()
         upgradeWaitingFor = []
-        upgradeCoordinatorTask = Task { @MainActor [weak self] in
+        try? await sendText("🔎 Checking for an update… (/status shows progress; /upgrade cancel stops it before anything is installed)")
+        let task = Task { @MainActor [weak self] in
             guard let self else { lock.release(); return }
             await self.runCoordinatedUpgrade(holding: lock, address: address)
             lock.release()
             self.upgradeCoordinatorTask = nil
             self.upgradeWaitingFor = []
             self.upgradeCancelFlag.reset()
+        }
+        upgradeCoordinatorTask = task
+        // A terminal/app command collects its replies in a capture that closes
+        // when the handler returns, and those channels have no later route
+        // (Codex stage-3 S3-7): there the handler waits for the result, while
+        // Telegram and the poll loop return at once (S2-12). Other terminal
+        // commands keep being handled meanwhile (each is its own call).
+        if Self.commandCapture != nil {
+            upgradeHandlerAwaiting = true
+            await task.value
+            upgradeHandlerAwaiting = false
         }
     }
 
