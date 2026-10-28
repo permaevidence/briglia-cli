@@ -266,7 +266,7 @@ final class ClaimScopes: @unchecked Sendable {
 
     static func liveJobs() async -> Set<String> {
         if let o = liveJobsOverrideForTesting { return await o() }
-        let bash = await BackgroundProcessRegistry.shared.runningEntryIds()
+        let bash = await BackgroundProcessRegistry.shared.unsettledEntryIds()
         let agents = await SubagentBackgroundRegistry.shared.liveRunIds()
         return Set(bash.map { "bash:" + $0 }).union(agents.map { "agent:" + $0 })
     }

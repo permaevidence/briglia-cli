@@ -226,6 +226,10 @@ BREAKS = [
      '        func finished(_ w: Watch) -> Bool { w.jobs.isDisjoint(with: alive) }'),
     ('M72 a committed terminal/app /upgrade restarts before delivering its reply (S3-R2-4)', 'stage3e2e', T + 'Services/ConversationManager+ControlCommands.swift',
      '            Self.commandCapture?.deliverBeforeExit()\n', ''),
+    # Codex stage-3 round 3.
+    ('M73 a job being terminated counts as finished (S3-R3-1)', 'stage3', T + 'Services/BashTools.swift',
+     '        Set(entries.values.filter { !$0.lifecycleSettled }.map(\\.id))',
+     '        Set(entries.values.filter { $0.status == .running }.map(\\.id))'),
 ]
 
 

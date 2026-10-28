@@ -48,6 +48,48 @@ extension ProfileHarness {
         stage3StaleSample()
         stage3UnsettledReservation()
         stage3OutOfTurnScope()
+        stage3TerminatingJob()
+    }
+
+    // MARK: S3-R3-1 — a job being terminated is still alive
+
+    private func stage3TerminatingJob() {
+        guard let fx = makeS3("r3-terminating") else { check("S3-R3-1 fixture", false); return }
+        defer { fx.release(); resetStage3Seams() }
+        let a = fx.ctx("default")
+        MultiAssistant.contextOverrideForTesting = a
+        ClaimScopes.tickSeconds = 3600
+        ClaimScopes.liveJobsOverrideForTesting = nil   // the real registries
+        let file = fx.root.appendingPathComponent("terminating.txt").path
+        let turn = UUID(), scope = "turn:" + turn.uuidString.lowercased()
+        ClaimScopes.shared.turnStarted(turn)
+        try? FileClaims.reserve(a, paths: [file], opId: "tj1")
+        try? FileClaims.settle(a, opId: "tj1", changed: true, scopes: [scope])
+        // A job that ignores SIGTERM: alive until the SIGKILL escalation.
+        guard let job = wait({ try? await BackgroundProcessRegistry.shared.start(command: "trap '' TERM; while :; do sleep 0.05; done",
+                                                                                  workdir: fx.root.path, description: "s3r31") }) else {
+            check("S3-R3-1: start the job", false); return
+        }
+        let jobKey = "bash:" + job.id
+        ClaimScopes.shared.turnEnded(turn)
+        guard until(5, { ClaimScopes.shared.pendingScopesForTesting[scope]?.contains(jobKey) == true }) else {
+            check("S3-R3-1: T pending on the job", false, "\(ClaimScopes.shared.pendingScopesForTesting)"); return
+        }
+        _ = wait { await Tripwire.shared.afterCommand(a, Tripwire.Snapshot(files: [], jobsBefore: [])) }
+        let killDone = DispatchSemaphore(value: 0)
+        Task.detached { _ = await BackgroundProcessRegistry.shared.kill(handleId: job.id); killDone.signal() }
+        Thread.sleep(forTimeInterval: 0.1)   // inside the 300 ms SIGTERM grace
+        let sampled = wait { await ClaimScopes.liveJobs() }
+        _ = wait { await ClaimScopes.shared.tick() }
+        check("S3-R3-1: a job whose kill was requested but whose process tree has not finished still counts as alive",
+              sampled.contains(jobKey), "\(sampled)")
+        check("S3-R3-1: … so a tick during its termination keeps the claim, the pending scope and the tripwire watch",
+              !FileClaims.claims(ofSelf: a).isEmpty && ClaimScopes.shared.pendingScopesForTesting[scope] != nil && Tripwire.shared.hasWatches)
+        _ = killDone.wait(timeout: .now() + 10)
+        let settled = until(10) { !wait({ await ClaimScopes.liveJobs() }).contains(jobKey) }
+        _ = wait { await ClaimScopes.shared.tick() }
+        check("S3-R3-1: once the job's lifecycle settled, the next tick releases the claim and the watch",
+              settled && FileClaims.claims(ofSelf: a).isEmpty && ClaimScopes.shared.pendingScopesForTesting[scope] == nil && !Tripwire.shared.hasWatches)
     }
 
     // MARK: S3-R2-1 — a liveness sample older than a pending scope never closes it

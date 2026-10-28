@@ -1905,10 +1905,14 @@ actor BackgroundProcessRegistry {
     /// /exportmind's non-destructive consistency barrier (Codex,
     /// 2026-08-27): a running job can write spill/attachment files while
     /// the export copies them, so the export refuses rather than kills.
-    /// Every running job id, any kind and owner (MULTI_ASSISTANT_PLAN A2:
-    /// a turn's file claims last until the jobs running when it ended stop).
-    func runningEntryIds() -> Set<String> {
-        Set(entries.values.filter { $0.status == .running }.map(\.id))
+    /// Every job id whose lifecycle has not settled, any kind and owner
+    /// (MULTI_ASSISTANT_PLAN A2: a turn's file claims last until the jobs
+    /// running when it ended stop). Codex stage-3 S3-R3-1: a kill or an
+    /// execution deadline stamps the terminal status BEFORE the process tree
+    /// is terminated, so `status` is not liveness: only `lifecycleSettled`
+    /// (exit recorded, readers drained) says the job can no longer write.
+    func unsettledEntryIds() -> Set<String> {
+        Set(entries.values.filter { !$0.lifecycleSettled }.map(\.id))
     }
 
     func runningBackgroundJobCount() -> Int {
