@@ -87,6 +87,7 @@ extension ConversationManager {
                                                           : "setting up \(ManagedBots.handle(pending.botUsername))"
                 }
                 try? await sendText("A new assistant «\(pending.name)» is pending: \(what). /newassistant cancel drops it.")
+                if pending.phase == .confirm { await sendManagedConfirmation(pending) }
             } else {
                 try? await sendText("""
                 /newassistant <Name> creates another assistant with its own Telegram bot, from here:
@@ -114,6 +115,10 @@ extension ConversationManager {
             await sendManagedBotReply("✔ Cancelled — no new assistant will be created.\(leftover)", owner: owner)
             return
         case "retry", "riprova":
+            if let pending, pending.phase == .confirm, ManagedBots.isLive(pending, now: Date()) {
+                await sendManagedConfirmation(pending)
+                return
+            }
             guard let pending, pending.phase == .claimed, pending.botId != nil else {
                 try? await sendText("Nothing to retry — send /newassistant <Name> to start.")
                 return
@@ -199,15 +204,20 @@ extension ConversationManager {
         }
     }
 
-    // MARK: Events (§28.6 S4-P2/P3)
+    // MARK: Events (§28.6 S4-P2/P3, Codex stage-4 S4-R1-1/R1-4)
 
-    /// The `managed_bot_created` service message, already past the pairing
-    /// gate (the paired owner's private chat). The decision and its durable
-    /// write happen before any await; a failed write is a durability failure
-    /// (the update stays unconfirmed and is re-delivered).
-    func handleManagedBotCreatedMessage(_ created: TelegramManagedBotCreated, sender: TelegramUser?) async {
-        let event = ManagedBots.Event(senderId: sender.map { Int64($0.id) }, botId: Int64(created.bot.id),
-                                      botUsername: created.bot.username)
+    /// What to do after a managed-bot write was saved.
+    enum ManagedFollowUp {
+        case none
+        case start(name: String, username: String?)
+        case ask(ManagedBots.Pending)
+        case tell(String)
+    }
+
+    /// The durable part of a `managed_bot_created` event: decide and write,
+    /// synchronously (no await). Throws when the write fails; the caller then
+    /// keeps the event for the durability stall to retry.
+    func applyManagedBotCreated(_ event: ManagedBots.Event) throws -> ManagedFollowUp {
         let pending = ManagedBots.loadPending()
         let managerId = AssistantRegistry.normalize(.bot, ownBotToken).flatMap(Int64.init)
         let decision = ManagedBots.decide(event, pending: pending, known: ManagedBots.loadKnown(),
@@ -216,71 +226,125 @@ extension ConversationManager {
         case .ignore(let why):
             print("[ManagedBots] ignored a created bot (id \(event.botId)): \(why)")
             if why.contains("no /newassistant") {
-                try? await sendText("I saw that you created \(ManagedBots.handle(event.botUsername)), but there's no current /newassistant request for it. Send /newassistant <Name> to make an assistant — or delete that bot in @BotFather if you don't need it.")
-            } else if why.contains("already an assistant") || why.contains("another bot") {
-                try? await sendText("\(ManagedBots.handle(event.botUsername)) wasn't used: \(why).")
+                return .tell("I saw that you created \(ManagedBots.handle(event.botUsername)), but there's no current /newassistant request for it. Send /newassistant <Name> to make an assistant — or delete that bot in @BotFather if you don't need it.")
             }
+            if why.contains("already an assistant") || why.contains("another bot") {
+                return .tell("\(ManagedBots.handle(event.botUsername)) wasn't used: \(why).")
+            }
+            return .none
         case .resume:
-            _ = startManagedBotCreationIfPossible()
+            return .start(name: pending?.name ?? "", username: event.botUsername)
         case .claim:
-            guard let pending else { return }
-            do {
-                try ManagedBots.updatePending(requestId: pending.requestId) {
-                    $0?.phase = .claimed; $0?.botId = event.botId; $0?.botUsername = event.botUsername; $0?.failed = nil
-                }
-            } catch {
-                inboundDurabilityFailure = true
-                return
+            guard let pending else { return .none }
+            try ManagedBots.updatePending(requestId: pending.requestId) {
+                $0?.phase = .claimed; $0?.botId = event.botId; $0?.botUsername = event.botUsername; $0?.failed = nil
             }
-            if !startManagedBotCreationIfPossible() {
-                try? await sendText("Your new bot \(ManagedBots.handle(event.botUsername)) exists. I'll set up «\(pending.name)» as soon as the memory operation or update that is running now has finished.")
-            }
+            return .start(name: pending.name, username: event.botUsername)
         case .askConfirmation:
-            guard let pending else { return }
-            do {
-                try ManagedBots.updatePending(requestId: pending.requestId) {
-                    $0?.phase = .confirm; $0?.botId = event.botId; $0?.botUsername = event.botUsername
-                }
-            } catch {
-                inboundDurabilityFailure = true
-                return
+            guard var pending else { return .none }
+            try ManagedBots.updatePending(requestId: pending.requestId) {
+                $0?.phase = .confirm; $0?.botId = event.botId; $0?.botUsername = event.botUsername
             }
-            let keyboard = TelegramInlineKeyboardMarkup(inlineKeyboard: [[
-                TelegramInlineKeyboardButton(text: "Yes, use it", callbackData: ManagedBots.confirmData(yes: true, requestId: pending.requestId, botId: event.botId)),
-                TelegramInlineKeyboardButton(text: "No", callbackData: ManagedBots.confirmData(yes: false, requestId: pending.requestId, botId: event.botId)),
-            ]])
-            if let chat = pairedChatId {
-                try? await telegramService.sendMessage(chatId: chat, text: "Use \(ManagedBots.handle(event.botUsername)) for the new assistant «\(pending.name)»?", keyboard: keyboard)
-            }
+            pending.phase = .confirm; pending.botId = event.botId; pending.botUsername = event.botUsername
+            return .ask(pending)
         }
+    }
+
+    /// The `managed_bot_created` service message, already past the pairing
+    /// gate (the paired owner's private chat). A failed write is a durability
+    /// failure AND the event is kept: the stall retries this write before the
+    /// update is acknowledged (S4-R1-1).
+    func handleManagedBotCreatedMessage(_ created: TelegramManagedBotCreated, sender: TelegramUser?) async {
+        let event = ManagedBots.Event(senderId: sender.map { Int64($0.id) }, botId: Int64(created.bot.id),
+                                      botUsername: created.bot.username)
+        do {
+            await performManagedFollowUp(try applyManagedBotCreated(event))
+        } catch {
+            managedBotRetries.append(.created(event))
+            inboundDurabilityFailure = true
+        }
+    }
+
+    func performManagedFollowUp(_ followUp: ManagedFollowUp) async {
+        switch followUp {
+        case .none: return
+        case .tell(let text): try? await sendText(text)
+        case .start(let name, let username):
+            if !startManagedBotCreationIfPossible(), !name.isEmpty {
+                try? await sendText("Your new bot \(ManagedBots.handle(username)) exists. I'll set up «\(name)» as soon as the memory operation or update that is running now has finished.")
+            }
+        case .ask(let pending):
+            await sendManagedConfirmation(pending)
+        }
+    }
+
+    /// The Yes/No question for a candidate bot. Re-sent by `/newassistant`
+    /// and `/newassistant retry` while the request waits for it (S4-R1-4).
+    func sendManagedConfirmation(_ pending: ManagedBots.Pending) async {
+        guard let botId = pending.botId, let chat = pairedChatId else { return }
+        let keyboard = TelegramInlineKeyboardMarkup(inlineKeyboard: [[
+            TelegramInlineKeyboardButton(text: "Yes, use it", callbackData: ManagedBots.confirmData(yes: true, requestId: pending.requestId, botId: botId)),
+            TelegramInlineKeyboardButton(text: "No", callbackData: ManagedBots.confirmData(yes: false, requestId: pending.requestId, botId: botId)),
+        ]])
+        do {
+            try await telegramService.sendMessage(chatId: chat, text: "Use \(ManagedBots.handle(pending.botUsername)) for the new assistant «\(pending.name)»?", keyboard: keyboard)
+        } catch {
+            try? await sendText("I couldn't show the question about \(ManagedBots.handle(pending.botUsername)) (\(error.localizedDescription)). Send /newassistant to see it again.")
+        }
+    }
+
+    /// The durable part of a confirmation tap. Nil = the button is stale.
+    func applyManagedConfirm(yes: Bool, requestId: Int32, botId: Int64) throws -> ManagedBots.Pending? {
+        guard let pending = ManagedBots.loadPending(), pending.requestId == requestId, pending.phase == .confirm,
+              pending.botId == botId, ManagedBots.isLive(pending, now: Date()) else { return nil }
+        try ManagedBots.updatePending(requestId: pending.requestId) {
+            if yes { $0?.phase = .claimed; $0?.failed = nil } else { $0?.phase = .waiting; $0?.botId = nil; $0?.botUsername = nil }
+        }
+        return pending
     }
 
     /// The confirmation buttons. Bound to (request id, bot id): a stale or
     /// another request's button is refused in place.
     func handleManagedBotConfirmCallback(_ query: TelegramCallbackQuery, menuMessage: TelegramMessage) async {
         guard managedBotsActiveHere, let parsed = ManagedBots.parseConfirm(query.data ?? "") else { return }
-        let pending = ManagedBots.loadPending()
-        guard let pending, pending.requestId == parsed.requestId, pending.phase == .confirm, pending.botId == parsed.botId,
-              ManagedBots.isLive(pending, now: Date()) else {
-            try? await telegramService.answerCallbackQuery(id: query.id, text: "This question is no longer current.", showAlert: false)
+        let pending: ManagedBots.Pending?
+        do { pending = try applyManagedConfirm(yes: parsed.yes, requestId: parsed.requestId, botId: parsed.botId) } catch {
+            managedBotRetries.append(.confirm(yes: parsed.yes, requestId: parsed.requestId, botId: parsed.botId))
+            inboundDurabilityFailure = true
+            try? await telegramService.answerCallbackQuery(id: query.id, text: "Saving that is delayed (storage problem); it is applied as soon as storage works.", showAlert: false)
             return
         }
-        do {
-            try ManagedBots.updatePending(requestId: pending.requestId) {
-                if parsed.yes { $0?.phase = .claimed; $0?.failed = nil } else { $0?.phase = .waiting; $0?.botId = nil; $0?.botUsername = nil }
-            }
-        } catch {
-            inboundDurabilityFailure = true
-            try? await telegramService.answerCallbackQuery(id: query.id, text: "Couldn't save that — try again in a moment.", showAlert: false)
+        guard let pending else {
+            try? await telegramService.answerCallbackQuery(id: query.id, text: "This question is no longer current.", showAlert: false)
             return
         }
         try? await telegramService.answerCallbackQuery(id: query.id)
         try? await telegramService.editMessageText(chatId: menuMessage.chat.id, messageId: menuMessage.messageId,
             text: parsed.yes ? "✔ Using \(ManagedBots.handle(pending.botUsername)) for «\(pending.name)»."
                              : "✖ Not using \(ManagedBots.handle(pending.botUsername)). Tap the create button again, or /newassistant cancel.")
-        if parsed.yes, !startManagedBotCreationIfPossible() {
-            try? await sendText("I'll set up «\(pending.name)» as soon as the memory operation or update that is running now has finished.")
+        if parsed.yes { await performManagedFollowUp(.start(name: pending.name, username: pending.botUsername)) }
+    }
+
+    /// The durability stall (S4-R1-1): managed-bot writes that failed are
+    /// retried with the other durable writes; the stalled update is confirmed
+    /// only when they all landed. Follow-ups run after the stall clears.
+    func retryManagedBotWrites() -> Bool {
+        while let first = managedBotRetries.first {
+            let followUp: ManagedFollowUp
+            do {
+                switch first {
+                case .created(let event): followUp = try applyManagedBotCreated(event)
+                case .confirm(let yes, let requestId, let botId):
+                    let p = try applyManagedConfirm(yes: yes, requestId: requestId, botId: botId)
+                    followUp = (yes && p != nil) ? .start(name: p!.name, username: p!.botUsername) : .none
+                }
+            } catch {
+                return false
+            }
+            managedBotRetries.removeFirst()
+            Task { @MainActor [weak self] in await self?.performManagedFollowUp(followUp) }
         }
+        return true
     }
 
     // MARK: Creation (one producer; gated; resumable)
@@ -289,7 +353,7 @@ extension ConversationManager {
     /// busy by the wipe/import, settings and upgrade checks (§28.6 S4-P7).
     var managedBotCreationOwed: Bool {
         guard managedBotsActiveHere, let p = ManagedBots.loadPending() else { return false }
-        return p.phase == .claimed && p.failed != true && ManagedBots.isLive(p, now: Date())
+        return p.phase == .claimed && p.failed != true
     }
 
     /// Start the creation task for the claimed request, unless one runs or a
@@ -301,7 +365,7 @@ extension ConversationManager {
         if managedBotCreationTask != nil { return true }
         guard !isRestoringMind, !admissionPaused, !browserSettingsMutation else { return false }
         guard let pending = ManagedBots.loadPending(), pending.phase == .claimed, let botId = pending.botId,
-              pending.failed != true, ManagedBots.isLive(pending, now: Date()) else { return false }
+              pending.failed != true else { return false }
         let manager = ownBotToken
         let owner = pending.ownerId
         managedBotCreationBotId = botId
@@ -325,7 +389,7 @@ extension ConversationManager {
         let botDigest = AssistantRegistry.digest(.bot, "\(botId):x")
         if let record = (try? AssistantRegistry.read(.live))??.record(pending.profileId) {
             if record.state == "active", record.bot.current == botDigest {
-                await completeManagedBotCreation(pending: pending, generation: record.generation, manager: manager, owner: owner, created: false)
+                await completeManagedBotCreation(pending: pending, generation: record.generation, manager: manager, owner: owner)
                 return
             }
             if record.state == "adding", let op = record.addingOp,
@@ -362,15 +426,21 @@ extension ConversationManager {
             return
         }
         let generation = (try? AssistantRegistry.read(.live))??.record(pending.profileId)?.generation ?? ""
-        await completeManagedBotCreation(pending: pending, generation: generation, manager: manager, owner: owner, created: true)
+        await completeManagedBotCreation(pending: pending, generation: generation, manager: manager, owner: owner)
     }
 
-    private func completeManagedBotCreation(pending: ManagedBots.Pending, generation: String, manager: String, owner: Int64, created: Bool) async {
+    /// The bot is remembered FIRST (the rotation grant); the claim is retired
+    /// only at the very end, after access and Start, so every interruption
+    /// before that resumes here (S4-R1-3).
+    private func completeManagedBotCreation(pending: ManagedBots.Pending, generation: String, manager: String, owner: Int64) async {
         guard let botId = pending.botId else { return }
         var known = ManagedBots.loadKnown()
         known.bots[String(botId)] = ManagedBots.KnownBot(profile: pending.profileId, generation: generation, managerBotId: pending.managerBotId)
-        try? ManagedBots.saveKnown(known)
-        _ = try? ManagedBots.updatePending(requestId: pending.requestId) { $0 = nil }
+        do { try ManagedBots.saveKnown(known) } catch {
+            _ = try? ManagedBots.updatePending(requestId: pending.requestId) { $0?.failed = true }
+            await sendManagedBotReply("⚠️ «\(pending.name)» was created, but I couldn't save its record (\(error.localizedDescription)). Fix storage, then send /newassistant retry to finish.", owner: owner)
+            return
+        }
         // Owner-only access (the owner can always use it); Briglia's own
         // pairing answers only the owner either way.
         var notes: [String] = []
@@ -382,6 +452,7 @@ extension ConversationManager {
         do { started = try await Task.detached { try AssistantControl.start(profile) }.value } catch {
             started = "not started (\(error)) — start it from `briglia menu`"
         }
+        _ = try? ManagedBots.updatePending(requestId: pending.requestId) { $0 = nil }
         let handle = ManagedBots.handle(pending.botUsername)
         let link = pending.botUsername.map { " Open it: https://t.me/\($0)" } ?? ""
         var text = "✔ «\(pending.name)» is ready — \(handle), \(started). Only you can use it.\(link)"
@@ -389,7 +460,7 @@ extension ConversationManager {
         await sendManagedBotReply(text, owner: owner)
     }
 
-    /// A reply that also removes the create-bot keyboard (falls back to the
+    /// A reply that also removes the create-button keyboard (falls back to the
     /// ordinary reply path).
     func sendManagedBotReply(_ text: String, owner: Int) async {
         await sendManagedBotReply(text, owner: Int64(owner))
@@ -401,6 +472,22 @@ extension ConversationManager {
             return
         }
         try? await sendText(text)
+    }
+
+    // MARK: - Assistants page operations (Codex stage-4 S4-R1-6)
+
+    /// Admit one Assistants-page operation of the live menu (Add, Start,
+    /// Stop, Rename of another assistant, Settings) for its whole lifetime:
+    /// refused while a wipe/import, a settings change or an update pause is
+    /// on; while it runs, those wait (they count it as busy).
+    func admitAssistantsMenuOperation() -> Bool {
+        guard !isRestoringMind, !browserSettingsMutation, !admissionPaused else { return false }
+        assistantsMenuOperations += 1
+        return true
+    }
+
+    func endAssistantsMenuOperation() {
+        assistantsMenuOperations = max(0, assistantsMenuOperations - 1)
     }
 
     // MARK: - /switchbot newtoken (§28.6 S4-P4)
@@ -446,10 +533,14 @@ extension ConversationManager {
         print("[ManagedBots] rotation recovery: \(outcome)")
     }
 
-    /// The transaction: same-bot reservation, durable intent before the
-    /// remote call, replace (or recover the live token), cursor under the new
-    /// token first, then the secret, then the in-memory adoption (cursor
-    /// kept), then the intent is cleared.
+    /// The transaction (§28.6 S4-P4, Codex stage-4 S4-R1-2): same-bot
+    /// reservation; a durable intent carrying the confirmed cursor BEFORE the
+    /// remote call; replace (or recover the live token); the cursor written
+    /// under the new token (checked) BEFORE the secret; the secret; the
+    /// in-memory token switched with the cursor kept; the intent cleared
+    /// last. Recovery (at startup, before Telegram is registered) repeats the
+    /// cursor write from the intent, so neither a restart nor a crash between
+    /// the writes resumes from 0.
     func rotateManagedToken(recovering: Bool) async -> String {
         let current = ownBotToken
         guard let idText = AssistantRegistry.normalize(.bot, current), let botId = Int64(idText) else {
@@ -460,8 +551,17 @@ extension ConversationManager {
             return "✖ \(error)"
         }
         let profile = AssistantProfile.selectedName
-        if !recovering {
-            do { try ManagedBots.saveRotation(ManagedBots.RotationIntent(botId: botId, startedAt: Date())) } catch {
+        var intent: ManagedBots.RotationIntent
+        if recovering, let saved = ManagedBots.loadRotation(), saved.botId == botId {
+            intent = saved
+        } else if recovering {
+            ticket.abort()
+            try? ManagedBots.saveRotation(nil)   // not this bot's intent any more
+            return "token unchanged"
+        } else {
+            let cursor = await telegramService.confirmedCursor()
+            intent = ManagedBots.RotationIntent(botId: botId, startedAt: Date(), lastUpdateId: cursor.lastUpdateId, lastUpdateAt: cursor.lastUpdateAt)
+            do { try ManagedBots.saveRotation(intent) } catch {
                 ticket.abort()
                 return "✖ Couldn't record the token change (\(error.localizedDescription)); nothing was changed."
             }
@@ -497,16 +597,23 @@ extension ConversationManager {
             try? ManagedBots.saveRotation(nil)
             return recovering ? "token unchanged" : "✖ Telegram didn't issue a new token (\(failure)); the current one still works."
         }
-        // Cursor first (same bot, same update ids), then the secret.
-        await telegramService.persistOffsetState(forToken: newToken)
+        // Cursor first (same bot, same update ids), checked; then the secret.
+        do {
+            try TelegramBotService.writeOffsetState(forToken: newToken, lastUpdateId: intent.lastUpdateId, lastUpdateAt: intent.lastUpdateAt)
+        } catch {
+            ticket.abort()
+            await telegramService.rebindSameBot(token: newToken)
+            return "⚠️ Telegram issued a new token but I couldn't save the update position (\(error.localizedDescription)). I'm using the new token until I restart; the change is completed at the next start."
+        }
         do {
             try ticket.commit { try KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: newToken) }
         } catch {
             ticket.abort()
-            await telegramService.configure(token: newToken)
-            return "⚠️ Telegram issued a new token but I couldn't save it (\(error.localizedDescription)). I'm using it until I restart; the intent is kept and completed at the next start."
+            await telegramService.rebindSameBot(token: newToken)
+            return "⚠️ Telegram issued a new token but I couldn't save it (\(error.localizedDescription)). I'm using it until I restart; the change is completed at the next start."
         }
         ticket.finish()
+        await telegramService.rebindSameBot(token: newToken)
         await updateTelegramChannelRegistration()
         try? ManagedBots.saveRotation(nil)
         return "✔ New token for this bot: the old one no longer works. Nothing else changed."

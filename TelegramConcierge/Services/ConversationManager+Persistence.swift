@@ -1032,6 +1032,9 @@ extension ConversationManager {
         if pendingManagedRotation || managedRotationInProgress {
             return Self.busyMessage("a bot token change", outcome: outcome)
         }
+        if assistantsMenuOperations > 0 {
+            return Self.busyMessage("an assistant being changed from the menu", outcome: outcome)
+        }
         return await Self.multiAssistantBackgroundWorkRefusal(outcome: outcome)
     }
 
@@ -1249,7 +1252,8 @@ extension ConversationManager {
         // a bot token change is a producer too.
         guard subscriptionLoginTask == nil, watcherChecksInFlight.isEmpty,
               triageRunsInFlight.isEmpty, activeProcessingTask == nil,
-              managedBotCreationTask == nil, !pendingManagedRotation, !managedRotationInProgress,
+              managedBotCreationTask == nil, !managedBotCreationOwed, !pendingManagedRotation, !managedRotationInProgress,
+              assistantsMenuOperations == 0,
               browserSettingsCommandIngress == 0, beginMindRestore() else { return false }
         browserSettingsMutation = true
         // An app attachment copy or Telegram long poll may have crossed its

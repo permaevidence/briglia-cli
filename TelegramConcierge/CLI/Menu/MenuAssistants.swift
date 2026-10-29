@@ -41,6 +41,12 @@ struct MenuAssistantsEnvironment {
     /// The live hub: a /deleteuserdata wipe or Mind import holds the restore
     /// gate (every Assistants action is refused meanwhile).
     var restoreGateUp: () -> Bool = { false }
+    /// The live hub (Codex stage-4 S4-R1-6): an Assistants operation is
+    /// admitted by the running assistant for its whole lifetime (refused
+    /// while a wipe/import, a settings change or an update pause is on; those
+    /// wait for it). Offline (no running Briglia) there is nothing to admit.
+    var admit: () async -> Bool = { true }
+    var release: () async -> Void = {}
     var existingProfiles: () -> Set<String> = {
         var names = Set(((try? AssistantRegistry.read(.live)) ?? nil)?.records.map(\.name) ?? [])
         names.formUnion(AssistantProfile.listExtras())
@@ -131,8 +137,8 @@ extension MenuWorkflow {
     }
 
     var assistantGateMessage: String {
-        L("Briglia is replacing its memory right now (a wipe or a memory import). Try again in a moment.",
-          "Briglia sta sostituendo la sua memoria (cancellazione o importazione). Riprova tra un momento.")
+        L("Briglia is replacing its memory, applying settings or updating right now. Try again in a moment.",
+          "Briglia sta sostituendo la sua memoria, applicando impostazioni o aggiornandosi. Riprova tra un momento.")
     }
 
     /// The Assistants actions. Nil = not an Assistants action.
@@ -140,6 +146,22 @@ extension MenuWorkflow {
         guard action.hasPrefix("assistant_") else { return nil }
         guard assistantsEnabled else { return (false, L("Several assistants aren't available here.", "Più assistenti non sono disponibili qui.")) }
         guard !env.assistants.restoreGateUp() else { return (false, assistantGateMessage) }
+        // Default's own rename runs inside the settings barrier instead.
+        let ownRename = action == "assistant_rename" && ((body["profile"] as? String) ?? "") == AssistantProfile.defaultName
+        if !ownRename {
+            guard await env.assistants.admit() else { return (false, assistantGateMessage) }
+        }
+        do {
+            let result = try await assistantActionBody(action, body, checkpoint: checkpoint)
+            if !ownRename { await env.assistants.release() }
+            return result
+        } catch {
+            if !ownRename { await env.assistants.release() }
+            throw error
+        }
+    }
+
+    private func assistantActionBody(_ action: String, _ body: [String: Any], checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         func s(_ k: String) -> String { ((body[k] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
         let profile = s("profile")
         switch action {

@@ -101,6 +101,8 @@ final class MenuHost {
         // Assistants page (§28.3): every action is refused while a wipe or a
         // Mind import holds the restore gate.
         env.assistants.restoreGateUp = { [weak manager] in manager?.isRestoringMind ?? false }
+        env.assistants.admit = { [weak manager] in await manager?.admitAssistantsMenuOperation() ?? false }
+        env.assistants.release = { [weak manager] in await manager?.endAssistantsMenuOperation() }
         env.loginBlock = { [weak manager] in
             if manager?.subscriptionLoginInProgress == true { return .telegramLogin }
             return (try? SubscriptionSetup.checkLoginReplacement()) == nil ? .activeLogin : nil

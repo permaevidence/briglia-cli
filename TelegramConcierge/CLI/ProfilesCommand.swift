@@ -225,19 +225,31 @@ enum ProfileProvisioning {
         var admissionEnvironment: [String: String] { [MemberEntry.provisioningOpKey: op] }
 
         /// Activate only our own provisional record (same op and generation).
+        /// On failure the operation keeps its leases and its rollback (Codex
+        /// stage-4 S4-R1-7), unless the record is visibly active already (the
+        /// write landed but reported an error): then it counts as activated.
         func activate(autostart: Bool) throws {
             precondition(!finished, "provisional add already finished")
-            defer { release() }
-            try AssistantRegistry.withLock(registryPaths) { doc in
-                guard var d = doc, let i = d.index(name), d.records[i].state == "adding",
-                      d.records[i].addingOp == op, d.records[i].generation == generation else {
-                    throw ProvisioningError("‘\(name)’ changed while it was being added; nothing was activated")
+            do {
+                if let hook = ProfileProvisioning.activateFaultForTesting { try hook() }
+                try AssistantRegistry.withLock(registryPaths) { doc in
+                    guard var d = doc, let i = d.index(name), d.records[i].state == "adding",
+                          d.records[i].addingOp == op, d.records[i].generation == generation else {
+                        throw ProvisioningError("‘\(name)’ changed while it was being added; nothing was activated")
+                    }
+                    d.records[i].state = "active"
+                    d.records[i].addingOp = nil
+                    d.records[i].autostart = autostart
+                    doc = d
                 }
-                d.records[i].state = "active"
-                d.records[i].addingOp = nil
-                d.records[i].autostart = autostart
-                doc = d
+            } catch {
+                if let r = (try? AssistantRegistry.read(registryPaths))??.record(name), r.state == "active", r.generation == generation {
+                    release()
+                    return
+                }
+                throw error
             }
+            release()
         }
 
         /// Undo our own provisional record and its roots (never an active one).
@@ -384,6 +396,9 @@ enum ProfileProvisioning {
 
     static var unleasedGraceSeconds: TimeInterval = 5
 
+    /// Selftests: fail the activation write (S4-R1-7).
+    nonisolated(unsafe) static var activateFaultForTesting: (() throws -> Void)?
+
     /// Test seam: runs right after the provisional record was published.
     static var afterProvisionalPublish: () -> Void = {}
 
@@ -449,6 +464,14 @@ struct ProfileInitCommand: ParsableCommand {
     func run() throws {
         guard AssistantProfile.isExtra else {
             print("✖ __profile-init runs only for an extra assistant")
+            throw ExitCode(2)
+        }
+        // Only the add operation that is still setting this assistant up
+        // (MemberEntry admitted it to its provisional record): never against
+        // an active assistant (Codex stage-4 round-1 note).
+        guard let record = (try? AssistantRegistry.read(.live))??.record(AssistantProfile.selectedName),
+              record.state == "adding", MemberEntry.provisioningAdmits(record, role: .session(kind: "__profile-init")) else {
+            print("✖ __profile-init runs only while its assistant is being added")
             throw ExitCode(2)
         }
         try StoragePaths.ensureRootsChecked()

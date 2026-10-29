@@ -1148,7 +1148,7 @@ extension ConversationManager {
     /// awaited (no history write, no offset, no confirmation change).
     func retryDurabilityStall(_ stalledId: Int) async {
         if saveConversation(), persistPendingMidTurnQueue(),
-           persistPendingInboundBuffers(), remarkActiveTurnIfNeeded() {
+           persistPendingInboundBuffers(), remarkActiveTurnIfNeeded(), retryManagedBotWrites() {
             await telegramService.confirmProcessed(updateId: stalledId)
             stalledConfirmUpdateId = nil
             durabilityStallAnnounced = false

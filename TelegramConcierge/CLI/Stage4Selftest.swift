@@ -100,6 +100,8 @@ final class S4FakeBotAPI: @unchecked Sendable {
     var tokenFailures = 0
     var replaceFailures = 0
     var accessCalls: [(Int64, Bool)] = []
+    /// sendMessage with an inline keyboard fails (a lost confirmation question).
+    var failInlineKeyboard = false
 
     var sent: [Sent] { lock.lock(); defer { lock.unlock() }; return _sent }
     func clear() { lock.lock(); _sent = []; accessCalls = []; lock.unlock() }
@@ -131,6 +133,9 @@ final class S4FakeBotAPI: @unchecked Sendable {
             return reply(["id": id, "is_bot": true, "first_name": id == managerId ? "Bree" : "New",
                           "username": id == managerId ? managerUsername : "bot\(id)", "can_manage_bots": id == managerId && canManage])
         case "sendMessage":
+            if failInlineKeyboard, (body["reply_markup"] as? [String: Any])?["inline_keyboard"] != nil {
+                return reply(NSNull(), ok: false, status: 502, description: "Bad Gateway")
+            }
             return reply(["message_id": Int.random(in: 100...99999), "date": 0, "chat": ["id": body["chat_id"] ?? 0, "type": "private"]])
         case "getManagedBotToken":
             lock.lock(); defer { lock.unlock() }
@@ -433,8 +438,16 @@ final class Stage4Harness {
         var dup = ""
         do { try await AssistantControl.create(.init(profile: "w1", displayName: "work")) } catch { dup = "\(error)" }
         check("C7 a second assistant with the same name is refused", dup.contains("already called"), dup)
-        let init1 = runChild(["--profile", "work", "__profile-init"], stdin: "{\"secrets\":{}}", extra: [MemberEntry.provisioningOpKey: "not-the-op"])
-        check("C8 an active assistant's init needs no op, a provisional one only its own op (refused here: fine either way)", init1.status == 0, init1.out)
+        let init1 = runChild(["--profile", "work", "__profile-init"], stdin: "{\"secrets\":{\"assistant_name\":\"Evil\"}}", extra: [MemberEntry.provisioningOpKey: "not-the-op"])
+        check("C8 the init child writes nothing to an assistant that is no longer being added", init1.status != 0 && secrets("work")["assistant_name"] as? String == "Work", init1.out)
+        // S4-R1-7: a failed activation keeps its rollback.
+        ProfileProvisioning.activateFaultForTesting = { throw AssistantControl.ControlError("injected activation failure") }
+        var act = ""
+        do { try await AssistantControl.create(.init(profile: "coder", displayName: "Coder")) } catch { act = "\(error)" }
+        ProfileProvisioning.activateFaultForTesting = nil
+        check("C9 a failure at activation leaves nothing behind (rollback still owns the record and roots)",
+              act.contains("nothing was left behind") && registry()?.record("coder") == nil
+                && !FileManager.default.fileExists(atPath: AssistantProfile.extraConfigRoot("coder").path), act)
     }
 
     struct RunResult { var status: Int32; var out: String }
@@ -566,9 +579,10 @@ final class Stage4Harness {
         check("B14 /newassistant retry creates it", registry()?.record("coder")?.state == "active" && ManagedBots.loadPending() == nil)
         // An event with no request.
         api.clear()
+        let recordsBefore = registry()?.records.count
         await m._testProcessUpdate(Self.created(13, bot: 9004, username: "random_bot"))
         check("B15 a created bot without a request: nothing happens, the owner is told", api.texts().contains { $0.contains("no current /newassistant") }
-              && registry()?.records.count == 5)
+              && registry()?.records.count == recordsBefore)
         // Cancel.
         await m._testProcessUpdate(Self.update(14, ["text": "/newassistant Probe"]))
         await m._testProcessUpdate(Self.update(15, ["text": "/newassistant cancel"]))
@@ -583,7 +597,15 @@ final class Stage4Harness {
 
     // MARK: - Gates (§28.6 S4-P3/P7)
 
+    /// Remove extra assistants between scenarios (the 8-assistant cap).
+    func removeExtras(keeping: Set<String>) {
+        for r in registry()?.records ?? [] where r.name != "default" && !keeping.contains(r.name) {
+            _ = try? ProfileLifecycle.remove(name: r.name, confirmedGeneration: r.generation)
+        }
+    }
+
     func gatesSection() async {
+        removeExtras(keeping: ["health"])
         let m = await freshManager()
         // A claim while the restore gate is up: durable, creation deferred.
         await m._testProcessUpdate(Self.update(30, ["text": "/newassistant Gated"]))
@@ -615,6 +637,7 @@ final class Stage4Harness {
         gate.open()
         await waitCreation(m)
         ConversationManager.managedBotCreationHookForTesting = nil
+        removeExtras(keeping: ["health"])
         // A failed durable write keeps the update unconfirmed.
         await m._testProcessUpdate(Self.update(34, ["text": "/newassistant Durable"]))
         let p3 = ManagedBots.loadPending()
@@ -625,42 +648,110 @@ final class Stage4Harness {
         let failed = m.inboundDurabilityFailure
         chmod(dir.path, 0o700)
         check("G4 a claim that can't be saved is a durability failure (the update is not acknowledged)",
-              failed && ManagedBots.loadPending()?.phase == .waiting)
+              failed && ManagedBots.loadPending()?.phase == .waiting && m.managedBotRetries.count == 1)
         m.inboundDurabilityFailure = false
+        // S4-R1-1: the stall retries it with the other durable writes; while
+        // it still fails the stall holds, once it lands the claim is there.
+        chmod(dir.path, 0o500)
+        let stillFailing = m.retryManagedBotWrites()
+        chmod(dir.path, 0o700)
+        api.tokens[9103] = S4FakeBotAPI.token(9103)
+        let landed = m.retryManagedBotWrites()
+        check("G4b the durability stall retries the managed claim before acknowledging (held while failing, claimed once it lands)",
+              !stillFailing && landed && m.managedBotRetries.isEmpty && ManagedBots.loadPending()?.phase == .claimed && ManagedBots.loadPending()?.botId == 9103)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        await waitCreation(m)
+        check("G4c …and the creation then runs", registry()?.record(p3?.profileId ?? "")?.state == "active" && ManagedBots.loadKnown().bots["9103"] != nil)
+        // S4-R1-3: the bot record can't be saved → the claim is kept, retry finishes.
+        await m._testProcessUpdate(Self.update(40, ["text": "/newassistant Recorded"]))
+        let p4 = ManagedBots.loadPending()
+        api.tokens[9105] = S4FakeBotAPI.token(9105)
+        try? FileManager.default.createDirectory(at: ManagedBots.knownURL().appendingPathExtension("tmpblock"), withIntermediateDirectories: true)
+        let knownBackup = FileManager.default.contents(atPath: ManagedBots.knownURL().path)
+        try? FileManager.default.removeItem(at: ManagedBots.knownURL())
+        try? FileManager.default.createDirectory(at: ManagedBots.knownURL(), withIntermediateDirectories: true)   // a directory: the write fails
+        await m._testProcessUpdate(Self.created(41, bot: 9105, username: p4?.suggestedUsername ?? ""))
+        await waitCreation(m)
+        let keptClaim = ManagedBots.loadPending()
+        try? FileManager.default.removeItem(at: ManagedBots.knownURL())
+        try? FileManager.default.removeItem(at: ManagedBots.knownURL().appendingPathExtension("tmpblock"))
+        if let knownBackup { try? knownBackup.write(to: ManagedBots.knownURL()) }
+        check("G6 the bot record can't be saved: the claim is kept (failed), nothing is announced as ready",
+              keptClaim?.phase == .claimed && keptClaim?.failed == true && keptClaim?.botId == 9105, "\(String(describing: keptClaim))")
+        await m._testProcessUpdate(Self.update(42, ["text": "/newassistant retry"]))
+        await waitCreation(m)
+        check("G7 …and /newassistant retry finishes it (record saved, claim retired, one profile)",
+              ManagedBots.loadPending() == nil && ManagedBots.loadKnown().bots["9105"]?.profile == p4?.profileId
+                && registry()?.records.filter { $0.name == p4?.profileId }.count == 1)
+        // S4-R1-4: the Yes/No question was lost; /newassistant shows it again.
+        await m._testProcessUpdate(Self.update(43, ["text": "/newassistant Questions"]))
+        api.failInlineKeyboard = true
+        await m._testProcessUpdate(Self.created(44, bot: 9106, username: "edited_name_bot"))
+        api.failInlineKeyboard = false
+        api.clear()
+        await m._testProcessUpdate(Self.update(45, ["text": "/newassistant"]))
+        let reasked = api.sent.contains { ($0.body["reply_markup"] as? [String: Any])?["inline_keyboard"] != nil && ($0.body["text"] as? String ?? "").contains("edited_name_bot") }
+        check("G8 a confirmation question that failed to arrive is shown again by /newassistant", reasked && ManagedBots.loadPending()?.phase == .confirm,
+              "pending=\(String(describing: ManagedBots.loadPending())) sent=\(api.texts())")
+        _ = try? ManagedBots.savePending(nil)
+        // S4-R1-5: a claimed request is still resumable a day later.
+        await m._testProcessUpdate(Self.update(46, ["text": "/newassistant Later"]))
+        let p5 = ManagedBots.loadPending()
+        _ = try? ManagedBots.updatePending(requestId: p5?.requestId ?? 0) {
+            $0?.phase = .claimed; $0?.botId = 9107; $0?.failed = true; $0?.createdAt = Date().addingTimeInterval(-25 * 3600)
+        }
+        api.tokens[9107] = S4FakeBotAPI.token(9107)
+        await m._testProcessUpdate(Self.update(47, ["text": "/newassistant retry"]))
+        await waitCreation(m)
+        check("G9 a claimed bot is still finished by /newassistant retry 25 hours later", registry()?.record(p5?.profileId ?? "")?.state == "active")
         // Resume after a crash: the profile already exists with that bot.
+        removeExtras(keeping: ["health"])
+        await m._testProcessUpdate(Self.update(48, ["text": "/newassistant Resumed"]))
+        let p6 = ManagedBots.loadPending()
         api.tokens[9104] = S4FakeBotAPI.token(9104)
-        _ = try? await AssistantControl.create(.init(profile: p3?.profileId ?? "durable", displayName: "Durable", botToken: S4FakeBotAPI.token(9104)))
-        _ = try? ManagedBots.updatePending(requestId: p3?.requestId ?? 0) { $0?.phase = .claimed; $0?.botId = 9104 }
+        _ = try? await AssistantControl.create(.init(profile: p6?.profileId ?? "resumed", displayName: "Resumed", botToken: S4FakeBotAPI.token(9104)))
+        _ = try? ManagedBots.updatePending(requestId: p6?.requestId ?? 0) { $0?.phase = .claimed; $0?.botId = 9104 }
         let countBefore = registry()?.records.count ?? 0
         startedProfiles = []
         m.startManagedBotCreationIfPossible()
         await waitCreation(m)
         check("G5 a creation interrupted after the profile was made only completes (no second profile)",
-              registry()?.records.count == countBefore && ManagedBots.loadKnown().bots["9104"] != nil && startedProfiles == [p3?.profileId ?? "durable"])
+              registry()?.records.count == countBefore && ManagedBots.loadKnown().bots["9104"] != nil && startedProfiles == [p6?.profileId ?? "resumed"])
+        removeExtras(keeping: ["health"])
     }
 
     // MARK: - Rotation (§28.6 S4-P4)
 
     func rotationSection() async {
         let m = await freshManager()
+        // Own fixture (the section runs alone too): an assistant "rot" made
+        // for the managed bot 9301 by this manager.
+        let botId: Int64 = 9301
+        api.tokens[botId] = S4FakeBotAPI.token(botId)
+        if registry()?.record("rot") == nil {
+            _ = try? await AssistantControl.create(.init(profile: "rot", displayName: "Rot", botToken: S4FakeBotAPI.token(botId)))
+        }
+        var fixture = ManagedBots.loadKnown()
+        fixture.bots[String(botId)] = ManagedBots.KnownBot(profile: "rot", generation: registry()?.record("rot")?.generation ?? "", managerBotId: api.managerId)
+        try? ManagedBots.saveKnown(fixture)
         // The grant: only the assistant the bot was made for, same generation, same manager.
-        guard let rec = registry()?.record("health"), let botId = Int64("9001") else { check("R0 rotation fixture", false); return }
+        guard let rec = registry()?.record("rot") else { check("R0 rotation fixture", false); return }
         var known = ManagedBots.loadKnown()
-        check("R1 grant: the assistant made for the bot", ManagedBotGrant.check(botId: botId, profile: "health", managerBotId: api.managerId, known: known) == .allowed)
+        check("R1 grant: the assistant made for the bot", ManagedBotGrant.check(botId: botId, profile: "rot", managerBotId: api.managerId, known: known) == .allowed)
         check("R2 grant: another assistant, an unknown bot, another manager are refused",
               ManagedBotGrant.check(botId: botId, profile: "work", managerBotId: api.managerId, known: known) == .refused("not_known")
-                && ManagedBotGrant.check(botId: 1, profile: "health", managerBotId: api.managerId, known: known) == .refused("not_known")
-                && ManagedBotGrant.check(botId: botId, profile: "health", managerBotId: 5, known: known) == .refused("manager_changed"))
-        known.bots["9001"]?.generation = "old"
-        check("R3 grant: a re-added assistant (new generation) is refused", ManagedBotGrant.check(botId: botId, profile: "health", managerBotId: api.managerId, known: known) == .refused("not_known"))
+                && ManagedBotGrant.check(botId: 1, profile: "rot", managerBotId: api.managerId, known: known) == .refused("not_known")
+                && ManagedBotGrant.check(botId: botId, profile: "rot", managerBotId: 5, known: known) == .refused("manager_changed"))
+        known.bots["9301"]?.generation = "old"
+        check("R3 grant: a re-added assistant (new generation) is refused", ManagedBotGrant.check(botId: botId, profile: "rot", managerBotId: api.managerId, known: known) == .refused("not_known"))
         _ = rec
         // The default-side child: one JSON line, the right refusal codes.
-        let bad = runChild(["--profile", "default", "__managed-bot", "replace-token", "--bot", "1", "--for", "health"])
+        let bad = runChild(["--profile", "default", "__managed-bot", "replace-token", "--bot", "1", "--for", "rot"])
         check("R4 the child refuses an unknown bot with a code and prints no token", bad.status == 1 && bad.out.contains("\"code\":\"not_known\""), bad.out)
-        let tokenBefore = api.tokens[9001]
-        let good = runChild(["--profile", "default", "__managed-bot", "current-token", "--bot", "9001", "--for", "health"])
+        let tokenBefore = api.tokens[9301]
+        let good = runChild(["--profile", "default", "__managed-bot", "current-token", "--bot", "9301", "--for", "rot"])
         check("R5 a granted request that Telegram doesn't answer returns a code, never a token, and changes nothing",
-              good.status == 1 && good.out.contains("\"code\":\"telegram\"") && !good.out.contains("AAsynthetic") && api.tokens[9001] == tokenBefore, good.out)
+              good.status == 1 && good.out.contains("\"code\":\"telegram\"") && !good.out.contains("AAsynthetic") && api.tokens[9301] == tokenBefore, good.out)
         // The plumbing in this (default) process for its own bot: grant it to
         // default for the test, then rotate (cursor kept, secret committed).
         let myBot = api.managerId
@@ -676,15 +767,9 @@ final class Stage4Harness {
         check("R6 a rotation the first assistant refuses changes nothing (token kept, intent kept for the restart check)",
               refused.hasPrefix("✖") && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx", refused)
         try? ManagedBots.saveRotation(nil)
-        // Cursor persistence: written under the new token's fingerprint first.
-        let newToken = "\(myBot):AAsyntheticManagerToken2xxxxxxxxx"
-        await m.telegramService.persistOffsetState(forToken: newToken)
-        let offsetData = FileManager.default.contents(atPath: StoragePaths.dataRoot.appendingPathComponent("telegram_offset.json").path) ?? Data()
-        let offset = (try? JSONSerialization.jsonObject(with: offsetData)) as? [String: Any]
-        let expectedHash = sha16(newToken)
-        check("R7 the confirmed cursor is written under the new token (same bot: same update ids)",
-              offset?["lastUpdateId"] as? Int == 77 && offset?["tokenHash"] as? String == expectedHash, "\(String(describing: offset))")
-        await m.telegramService.persistOffsetState(forToken: "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx")
+        func offsetFile() -> [String: Any]? {
+            (try? JSONSerialization.jsonObject(with: FileManager.default.contents(atPath: StoragePaths.dataRoot.appendingPathComponent("telegram_offset.json").path) ?? Data())) as? [String: Any]
+        }
         // End to end in process (the default-side child answered by the fake).
         ManagedBotRotation.runOverrideForTesting = { [api] action, bot, _ in
             action == .replace ? try ManagedBotAPI_sync { try await ManagedBotAPI.replaceManagedBotToken(manager: "\(api.managerId):m", botId: bot) }
@@ -695,29 +780,48 @@ final class Stage4Harness {
         await m.telegramService.confirmProcessed(updateId: 88)
         let ok = await m.rotateManagedToken(recovering: false)
         let stored = KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey)
-        let offset2 = (try? JSONSerialization.jsonObject(with: FileManager.default.contents(atPath: StoragePaths.dataRoot.appendingPathComponent("telegram_offset.json").path) ?? Data())) as? [String: Any]
-        check("R8 rotation: the new token is stored, the old one is gone, the cursor kept under the new token, the intent cleared",
+        let offset2 = offsetFile()
+        check("R7 rotation: the new token is stored, the old one is gone, the cursor kept under the new token, the intent cleared",
               ok.hasPrefix("✔") && stored == api.tokens[myBot] && stored != "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx"
                 && offset2?["lastUpdateId"] as? Int == 88 && offset2?["tokenHash"] as? String == sha16(stored ?? "") && ManagedBots.loadRotation() == nil,
               "\(ok) \(String(describing: offset2))")
-        // The replace answer is lost (the token WAS replaced): recovered by
-        // asking for the current token, never a second revocation.
+        // A lost replace answer (the token WAS replaced): recovered with the
+        // live token, never a second revocation.
         api.replaceFailures = 1
         let before = api.tokens[myBot]
+        let replacesBefore = api.sent.filter { $0.method == "replaceManagedBotToken" }.count
         let recovered = await m.rotateManagedToken(recovering: false)
-        let replaces = api.sent.filter { $0.method == "replaceManagedBotToken" }.count
-        check("R9 a lost replace answer is recovered with the live token (one revocation only)",
+        let replaces = api.sent.filter { $0.method == "replaceManagedBotToken" }.count - replacesBefore
+        check("R8 a lost replace answer is recovered with the live token (one revocation only)",
               recovered.hasPrefix("✔") && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == api.tokens[myBot]
-                && api.tokens[myBot] != before && ManagedBots.loadRotation() == nil, "\(recovered) replaces=\(replaces)")
-        // A crash after the remote change: the intent is completed at startup.
-        let current = api.tokens[myBot] ?? ""
-        try? ManagedBots.saveRotation(ManagedBots.RotationIntent(botId: myBot, startedAt: Date()))
+                && api.tokens[myBot] != before && replaces == 1 && ManagedBots.loadRotation() == nil, "\(recovered) replaces=\(replaces)")
+        // S4-R1-2: a restart before Telegram is registered. The old token's
+        // cursor (77) is on disk; the intent says 77; the token was replaced
+        // remotely. A FRESH manager recovers: the cursor stays 77.
+        let oldToken = KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) ?? ""
+        try? TelegramBotService.writeOffsetState(forToken: oldToken, lastUpdateId: 77, lastUpdateAt: Date())
+        try? ManagedBots.saveRotation(ManagedBots.RotationIntent(botId: myBot, startedAt: Date(), lastUpdateId: 77, lastUpdateAt: Date()))
         api.tokens[myBot] = S4FakeBotAPI.token(myBot, 7)
-        let atStart = await m.rotateManagedToken(recovering: true)
-        check("R10 an interrupted rotation is completed from the live token at the next start",
+        let fresh = ConversationManager()
+        let atStart = await fresh.rotateManagedToken(recovering: true)
+        check("R9 recovery in a fresh process (before registration) keeps the confirmed cursor under the recovered token",
               atStart.hasPrefix("✔") && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == S4FakeBotAPI.token(myBot, 7)
-                && ManagedBots.loadRotation() == nil && current != S4FakeBotAPI.token(myBot, 7), atStart)
+                && offsetFile()?["lastUpdateId"] as? Int == 77 && offsetFile()?["tokenHash"] as? String == sha16(S4FakeBotAPI.token(myBot, 7))
+                && ManagedBots.loadRotation() == nil, "\(atStart) \(String(describing: offsetFile()))")
+        // Crash between the cursor write and the secret write: the file holds
+        // the NEW fingerprint, the stored token is still the old one.
+        let stillOld = KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) ?? ""
+        api.tokens[myBot] = S4FakeBotAPI.token(myBot, 8)
+        try? TelegramBotService.writeOffsetState(forToken: S4FakeBotAPI.token(myBot, 8), lastUpdateId: 91, lastUpdateAt: Date())
+        try? ManagedBots.saveRotation(ManagedBots.RotationIntent(botId: myBot, startedAt: Date(), lastUpdateId: 91, lastUpdateAt: Date()))
+        let fresh2 = ConversationManager()
+        let crashRecovered = await fresh2.rotateManagedToken(recovering: true)
+        check("R10 a crash between the cursor and the secret write is completed at the next start, cursor intact",
+              crashRecovered.hasPrefix("✔") && stillOld != S4FakeBotAPI.token(myBot, 8)
+                && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == S4FakeBotAPI.token(myBot, 8)
+                && offsetFile()?["lastUpdateId"] as? Int == 91, "\(crashRecovered) \(String(describing: offsetFile()))")
         try? KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx")
+        try? TelegramBotService.writeOffsetState(forToken: "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx", lastUpdateId: 0, lastUpdateAt: nil)
         api.tokens[myBot] = nil
     }
 
@@ -792,7 +896,46 @@ final class Stage4Harness {
         let hidden = MenuWorkflow(env: env, runner: SetupJobRunner(secrets: [:]))
         await hidden.start()
         check("P8 hidden (one assistant / switch off / child page): no assistants block at all", hidden.status()["assistants"] == nil)
-        await menu.shutdown(); await hidden.shutdown()
+        await hidden.shutdown()
+        // S4-R1-6: the live menu's Add is admitted by the running assistant
+        // for its whole lifetime; a wipe/import, a settings change and an
+        // update wait for it; while those run, Add is refused.
+        // Several assistants exist (the wipe/import gate applies only then).
+        _ = try? AssistantRegistry.withLock(.live) { doc in
+            if doc == nil { doc = AssistantRegistry.Document(version: 1, records: [AssistantRegistry.newRecord(name: "default", displayName: "Bree")]) }
+        }
+        let mgr = ConversationManager()
+        var liveEnv = env
+        liveEnv.assistants.enabled = { true }
+        liveEnv.assistants.admit = { await mgr.admitAssistantsMenuOperation() }
+        liveEnv.assistants.release = { await mgr.endAssistantsMenuOperation() }
+        let inValidation = AsyncGate()
+        var suspended = false
+        liveEnv.assistants.create = { r, validate in
+            if let t = r.botToken { _ = try await validate(t) }
+            suspended = true
+            await inValidation.wait()
+        }
+        let live = MenuWorkflow(env: liveEnv, runner: SetupJobRunner(secrets: [:]))
+        await live.start()
+        let adding = Task { @MainActor in await live.handle(["action": "assistant_add", "name": "Suspended", "token": "123456789:AAsyntheticTokenForTheMenuTestxxxxx"]) }
+        for _ in 0..<50 where !suspended { try? await Task.sleep(nanoseconds: 50_000_000) }
+        let wipe = await mgr.multiAssistantBusyRefusal(outcome: (" x", " x"))
+        let settings = await mgr.beginBrowserSettingsMutation()
+        if settings { mgr.endBrowserSettingsMutation() }
+        let upgrade = await mgr.upgradeBusyReason(initiating: false)
+        check("P9 while a menu Add is in progress (suspended in validation) a wipe/import refuses, settings and an update wait",
+              suspended && mgr.assistantsMenuOperations == 1 && wipe != nil && !settings && upgrade != nil,
+              "suspended=\(suspended) ops=\(mgr.assistantsMenuOperations) wipe=\(String(describing: wipe)) settings=\(settings) upgrade=\(String(describing: upgrade))")
+        inValidation.open()
+        _ = await adding.value
+        check("P10 …and the admission ends with the action", mgr.assistantsMenuOperations == 0)
+        mgr.isRestoringMind = true
+        let refusedDuringWipe = await live.handle(["action": "assistant_start", "profile": "work"])
+        mgr.isRestoringMind = false
+        check("P11 an Assistants action is refused while the running assistant replaces its memory", refusedDuringWipe?["ok"] as? Bool == false && mgr.assistantsMenuOperations == 0)
+        await live.shutdown()
+        await menu.shutdown()
     }
 
     // MARK: - Single-assistant invariance

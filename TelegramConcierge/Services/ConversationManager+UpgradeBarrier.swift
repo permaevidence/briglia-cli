@@ -33,6 +33,7 @@ extension ConversationManager {
         if UpgradeReadiness.convergence > 0 { return "startup setup" }
         if managedBotCreationTask != nil || managedBotCreationOwed { return "a new assistant being created" }
         if pendingManagedRotation || managedRotationInProgress { return "a bot token change" }
+        if assistantsMenuOperations > 0 { return "an assistant being changed from the menu" }
         if browserSettingsMutation || isRestoringMind || subscriptionLoginTask != nil
             || botSwitchCutoverInProgress { return "a settings change" }
         // Commands already inside the handler (terminal, app socket, Telegram);

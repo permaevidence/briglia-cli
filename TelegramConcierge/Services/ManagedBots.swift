@@ -163,9 +163,11 @@ enum ManagedBotAPI {
 /// `/deleteuserdata`, not part of a Mind export/import. No token is ever
 /// stored here.
 enum ManagedBots {
+    /// An invitation (the button, a confirmation question) expires; a request
+    /// whose bot is already claimed never does: the bot exists, so the work
+    /// stays resumable until it completes or the owner cancels it (Codex
+    /// stage-4 S4-R1-5).
     static let pendingTTL: TimeInterval = 15 * 60
-    /// A request whose bot was already claimed may be retried this long.
-    static let claimedTTL: TimeInterval = 24 * 3600
 
     enum Phase: String, Codable {
         /// The button was sent; waiting for the owner to create the bot.
@@ -266,9 +268,16 @@ enum ManagedBots {
 
     // MARK: Rotation intent (the managed assistant's own data root, §28.6 S4-P4)
 
+    /// Written BEFORE the remote replacement (Codex stage-4 S4-R1-2): the
+    /// bot, and the confirmed update cursor at that moment, so the cursor
+    /// can be re-established under the new token whatever happens next (a
+    /// restart before registration, a crash between the cursor and the
+    /// secret write).
     struct RotationIntent: Codable, Equatable {
         var botId: Int64
         var startedAt: Date
+        var lastUpdateId: Int = 0
+        var lastUpdateAt: Date? = nil
     }
 
     static func rotationURL(dataRoot: URL = StoragePaths.dataRoot) -> URL {
@@ -367,8 +376,7 @@ enum ManagedBots {
     }
 
     static func isLive(_ p: Pending, now: Date) -> Bool {
-        let age = now.timeIntervalSince(p.createdAt)
-        return p.phase == .claimed ? age < claimedTTL : age < pendingTTL
+        p.phase == .claimed || now.timeIntervalSince(p.createdAt) < pendingTTL
     }
 
     /// §28.6 S4-P2: only from the paired owner; a bot already made into an

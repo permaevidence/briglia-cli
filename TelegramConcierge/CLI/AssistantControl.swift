@@ -78,10 +78,13 @@ enum AssistantControl {
                     var botSecrets: [String: String] = [KeychainHelper.telegramBotTokenKey: token]
                     if let chat = r.chatId { botSecrets[KeychainHelper.telegramChatIdKey] = chat }
                     if let u = username, !u.isEmpty { botSecrets[KeychainHelper.telegramBotUsernameKey] = u }
-                    try tx.commit {
-                        try ProfileProvisioning.runInit(profile: r.profile, payload: ["secrets": botSecrets], executable: executable,
-                                                        extraEnvironment: pending.admissionEnvironment)
-                    }
+                    // Written by the child while the profile is still
+                    // provisional (nobody can start it, a rollback removes it);
+                    // the commit itself waits for no other process under
+                    // registry.lock (Codex stage-4 round-1 note).
+                    try ProfileProvisioning.runInit(profile: r.profile, payload: ["secrets": botSecrets], executable: executable,
+                                                    extraEnvironment: pending.admissionEnvironment)
+                    try tx.commit {}
                     try tx.finish()   // nobody consumed the old (absent) bot
                 } catch {
                     tx.abort()

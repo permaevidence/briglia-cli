@@ -124,7 +124,10 @@ enum AssistantName {
             }
             try save(name)
         }
-        if profile != AssistantProfile.defaultName { updateMetadata(profile: profile, name: name) }
+        // profile.json follows the CURRENT record (a newer rename wins).
+        if profile != AssistantProfile.defaultName, let current = (try? AssistantRegistry.read(paths))??.record(profile)?.displayName {
+            updateMetadata(profile: profile, name: current)
+        }
         return name
     }
 

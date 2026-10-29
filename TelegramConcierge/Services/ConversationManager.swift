@@ -1113,6 +1113,18 @@ class ConversationManager: ObservableObject {
     /// boundary (§28.6 S4-P4). In progress = the rotation transaction runs.
     var pendingManagedRotation = false
     var managedRotationInProgress = false
+    /// Managed-bot writes that failed with storage problems (Codex stage-4
+    /// S4-R1-1): retried by the durability stall before the update that
+    /// carried them is acknowledged.
+    enum ManagedRetry: Equatable {
+        case created(ManagedBots.Event)
+        case confirm(yes: Bool, requestId: Int32, botId: Int64)
+    }
+    var managedBotRetries: [ManagedRetry] = []
+    /// Assistants-page operations of the live menu in progress (Codex
+    /// stage-4 S4-R1-6): admitted only with every gate down, counted by the
+    /// wipe/import, settings and upgrade checks for their whole lifetime.
+    var assistantsMenuOperations = 0
     /// Selftests: runs inside the creation task before the profile is made.
     nonisolated(unsafe) static var managedBotCreationHookForTesting: (() async -> Void)?
 

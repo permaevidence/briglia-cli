@@ -96,20 +96,33 @@ actor TelegramBotService {
         }
     }
 
-    /// A managed bot's token rotation (MULTI_ASSISTANT_PLAN §28.6 S4-P4):
-    /// the SAME bot, so the same update-id sequence. The confirmed cursor is
-    /// written under the new token's fingerprint BEFORE the new token is
-    /// stored, so a restart with the new token resumes from it (never from 0,
-    /// which would re-serve updates processed but not yet acknowledged to
-    /// Telegram). The in-memory cursor is kept; `configure` then switches the
-    /// token without touching it.
-    func persistOffsetState(forToken token: String) {
+    /// A managed bot's token rotation (MULTI_ASSISTANT_PLAN §28.6 S4-P4,
+    /// Codex stage-4 S4-R1-2): the SAME bot keeps the same update-id
+    /// sequence, so its confirmed cursor must survive the token change.
+    /// `confirmedCursor` is read while the service runs with the old token;
+    /// the rotation intent keeps it; `writeOffsetState` re-establishes it
+    /// under the new token's fingerprint (checked, before the secret commit),
+    /// and is repeated by recovery from the intent — so a restart before
+    /// registration or a crash between the two writes never resumes from 0.
+    func confirmedCursor() -> (lastUpdateId: Int, lastUpdateAt: Date?) {
         loadOffsetStateIfNeeded()
-        let hash = SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16).description
-        let state = OffsetState(lastUpdateId: max(lastUpdateId, 0), lastUpdateAt: lastUpdateAt, tokenHash: hash)
-        if let data = try? JSONEncoder().encode(state) {
-            try? PrivateStorage.writeAtomically(data, to: offsetStateURL)
-        }
+        return (lastUpdateId, lastUpdateAt)
+    }
+
+    nonisolated static func tokenFingerprint(_ token: String) -> String {
+        SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16).description
+    }
+
+    nonisolated static func writeOffsetState(forToken token: String, lastUpdateId: Int, lastUpdateAt: Date?) throws {
+        let state = OffsetState(lastUpdateId: max(lastUpdateId, 0), lastUpdateAt: lastUpdateAt, tokenHash: tokenFingerprint(token))
+        try PrivateStorage.writeAtomically(try JSONEncoder().encode(state),
+                                           to: StoragePaths.dataRoot.appendingPathComponent("telegram_offset.json"))
+    }
+
+    /// The same bot, a new token: the in-memory cursor is kept (never
+    /// `adoptNewBot`, which resets it).
+    func rebindSameBot(token: String) {
+        botToken = token
     }
 
     /// Acknowledge ONE update as durably processed: advance the confirmed
@@ -192,7 +205,9 @@ actor TelegramBotService {
         normalized = normalized.replacingOccurrences(of: "~~", with: "")
         normalized = normalized.replacingRegexMatches(of: #"`([^`\n]+)`"#, with: "$1")
         normalized = normalized.replacingRegexMatches(of: #"\*([^*\n]+)\*"#, with: "$1")
-        normalized = normalized.replacingRegexMatches(of: #"_([^_\n]+)_"#, with: "$1")
+        // Emphasis only at word boundaries (as Markdown): `_word_` loses its
+        // underscores, an identifier such as a bot's @user_name_bot does not.
+        normalized = normalized.replacingRegexMatches(of: #"(?<![A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])"#, with: "$1")
         normalized = normalized.replacingRegexMatches(of: #"\[([^\]]+)\]\(([^)]+)\)"#, with: "$1 ($2)")
 
         // Keep spacing readable after cleanup.
