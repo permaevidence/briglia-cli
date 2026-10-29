@@ -31,19 +31,28 @@ struct SubscriptionCommand: AsyncParsableCommand {
                 return
             }
             try IdentityMigration.gateMutatingEntry()
+            // The intake stop across processes (S3-R15-1 audit): the login
+            // scope is replaced by a wipe/import too.
+            let scopeLock: ProfileFileLock?
+            switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
+            case .admitted(let lock): scopeLock = lock
+            case .busy: print("✖ " + MemoryReplacementLock.busyMessage); throw ExitCode(75)
+            case .failed(let why): print("✖ \(why)"); throw ExitCode(1)
+            }
+            defer { scopeLock?.release() }
             do { print(try await SubscriptionSharing.changeScope(to: target)) } catch {
                 print("✖ \(error.localizedDescription)"); throw ExitCode(1)
             }
         case "login", "select", "cancel", "logout":
             try IdentityMigration.gateMutatingEntry()
             // The intake stop across processes (Codex stage-3 S3-R14-1).
-            let replacementLock: ProfileFileLock
+            let replacementLock: ProfileFileLock?
             switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
-            case .acquired(let lock): replacementLock = lock
+            case .admitted(let lock): replacementLock = lock
             case .busy: print("✖ " + MemoryReplacementLock.busyMessage); throw ExitCode(75)
             case .failed(let why): print("✖ \(why)"); throw ExitCode(1)
             }
-            defer { replacementLock.release() }
+            defer { replacementLock?.release() }
             // Profile changes need daemon exclusion. Logout may invalidate an
             // active session; each queued dispatch checks its captured generation.
             let model = model ?? ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel

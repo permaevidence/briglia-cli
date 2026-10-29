@@ -336,6 +336,9 @@ BREAKS = [
     ('M110 an admitted Stop is not counted (S3-R14-2)', 'stage3e2e', T + 'Services/ConversationManager+Channels.swift',
      '        browserSettingsCommandIngress += 1\n        defer { browserSettingsCommandIngress -= 1 }\n        await stopActiveExecution(notify: Self.appChannelAddress)',
      '        await stopActiveExecution(notify: Self.appChannelAddress)'),
+    ('M111 the setup wizard ignores a memory replacement (S3-R15-1)', 'stage3e2e', T + 'CLI/SetupWizard.swift',
+     '        defer { replacementLock.release() }\n        if Self.setupComplete() {',
+     '        replacementLock.release()\n        if Self.setupComplete() {'),
     # The round-12 head's behaviour (all three intake-stop fixes removed,
     # test seams kept): Codex's sequence must fail.
     ('M103 the round-12 head: no startup hold, no clear serialization, no deferral (S3-R12-1)', 'stage3e2e', [

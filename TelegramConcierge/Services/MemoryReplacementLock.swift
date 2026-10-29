@@ -25,10 +25,22 @@ enum MemoryReplacementLock {
         return ProfileFileLock.take(url, waitSeconds: 0)
     }
 
-    /// Standalone writers: bounded wait for a replacement to finish.
-    static func shared(waitSeconds: Double = 60) -> ProfileFileLock.Outcome {
-        try? PrivateStorage.ensureDirectory(StoragePaths.dataRoot)
-        return ProfileFileLock.take(url, waitSeconds: waitSeconds, shared: true)
+    enum Admission { case admitted(ProfileFileLock?), busy, failed(String) }
+
+    /// Standalone writers: bounded wait for a replacement to finish. Never
+    /// creates a root: with no data root yet there is nothing a replacement
+    /// could be deleting (and a pre-migration layout must stay untouched),
+    /// so the writer is admitted without a lock.
+    static func shared(waitSeconds: Double = 60) -> Admission {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: StoragePaths.dataRoot.path, isDirectory: &isDir), isDir.boolValue else {
+            return .admitted(nil)
+        }
+        switch ProfileFileLock.take(url, waitSeconds: waitSeconds, shared: true) {
+        case .acquired(let lock): return .admitted(lock)
+        case .busy: return .busy
+        case .failed(let why): return .failed(why)
+        }
     }
 
     /// 60 s; development builds accept BRIGLIA_REPLACEMENT_WAIT_SECONDS for tests.

@@ -90,10 +90,13 @@ struct SetupAPI: AsyncParsableCommand {
             // deletes or a Mind import replaces (names, AgentMail key and
             // inbox, the ChatGPT login). Held shared for the whole request;
             // waits (bounded) while the running assistant replaces memory.
+            // The migration refusal comes first: a refused request must not
+            // touch the roots.
             var replacementLock: ProfileFileLock?
             if verb == "apply" || verb == "subscription" {
+                if verb == "apply", let refusal = SetupAPICore.migrationRefusal() { respond(refusal) }
                 switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
-                case .acquired(let lock): replacementLock = lock
+                case .admitted(let lock): replacementLock = lock
                 case .busy:
                     respond(SetupAPICore.errorResponse(code: "memory_operation_in_progress", message: MemoryReplacementLock.busyMessage))
                 case .failed(let why):

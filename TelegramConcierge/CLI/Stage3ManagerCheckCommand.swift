@@ -186,6 +186,9 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         await standaloneSetupDuringWipe(m, check: check)
         await standaloneWriterMakesWipeWait(m, check: check)
         await admittedStopIsDrained(m, check: check)
+        // Codex stage-3 S3-R15-1: the ordinary setup wizard.
+        await openWizardMakesWipeRefuse(m, check: check)
+        await wizardStartedDuringWipeRefuses(m, check: check)
         ClaimScopes.tickSeconds = 2
     }
 
@@ -376,7 +379,7 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
     @MainActor private func standaloneWriterMakesWipeWait(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
         await awaitArchiveIdle(m)
         try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
-        guard case .acquired(let writer) = MemoryReplacementLock.shared(waitSeconds: 0) else {
+        guard case .admitted(let held) = MemoryReplacementLock.shared(waitSeconds: 0), let writer = held else {
             check("S3-R14-1: a standalone writer's shared lock", false, "not acquired"); return
         }
         ConversationManager.admissionDrainSecondsForTesting = 0.5
@@ -433,6 +436,89 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         }
         check("S3-R14-2: once the Stop finished, the wipe runs",
               !after.contains { $0.hasPrefix("ABORTED") } && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil, "\(after)")
+    }
+
+    /// A REAL `setup` wizard child with an open stdin (its own scratch
+    /// environment), for the S3-R15-1 rows.
+    final class WizardChild {
+        let process = Process()
+        let input = Pipe()
+        init?(env extra: [String: String]) {
+            process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+            process.arguments = ["setup"]
+            process.environment = ProcessInfo.processInfo.environment.merging(extra) { $1 }
+            process.standardInput = input
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do { try process.run() } catch { return nil }
+        }
+        func send(_ text: String) { input.fileHandleForWriting.write(Data(text.utf8)) }
+        func finish() async -> Int32 {
+            try? input.fileHandleForWriting.close()
+            let by = Date().addingTimeInterval(30)
+            while process.isRunning && Date() < by { try? await Task.sleep(nanoseconds: 20_000_000) }
+            if process.isRunning { process.terminate() }
+            while process.isRunning { try? await Task.sleep(nanoseconds: 20_000_000) }
+            return process.terminationStatus
+        }
+    }
+
+    /// Codex stage-3 S3-R15-1, first ordering: a real `briglia setup` wizard
+    /// already open at its name prompt (the old name cached as the default)
+    /// makes the wipe wait, then refuse with nothing deleted; Enter then
+    /// keeps the (still present) name.
+    @MainActor private func openWizardMakesWipeRefuse(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+        try? KeychainHelper.save(key: SetupWizard.completeKey, value: "true")
+        guard let wizard = WizardChild(env: [:]) else { check("S3-R15-1: wizard child", false, "spawn failed"); return }
+        wizard.send("5\n")
+        // The wizard holds the shared lock for its whole run: an exclusive
+        // attempt is busy once it is up.
+        let by = Date().addingTimeInterval(20)
+        var holding = false
+        while Date() < by && wizard.process.isRunning {
+            if case .busy = MemoryReplacementLock.tryExclusive() { holding = true; break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 500_000_000)   // let it reach the name prompt
+        ConversationManager.admissionDrainSecondsForTesting = 1
+        let refused = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        ConversationManager.admissionDrainSecondsForTesting = nil
+        let nameDuring = KeychainHelper.load(key: KeychainHelper.userNameKey)
+        wizard.send("\n\n")   // keep the cached name, leave the section menu
+        let status = await wizard.finish()
+        check("S3-R15-1: a real setup wizard open at its (cached) name prompt makes the wipe refuse after the drain limit, nothing deleted; Enter keeps the name",
+              holding && Self.isWorkRefusal(refused) && refused[0].contains("another Briglia command") && nameDuring == "Sentinel"
+              && KeychainHelper.load(key: KeychainHelper.userNameKey) == "Sentinel" && m.memoryReplacementLock == nil,
+              "holding \(holding) \(refused) during \(nameDuring ?? "nil") exit \(status)")
+    }
+
+    /// Codex stage-3 S3-R15-1, second ordering: a real wizard started during
+    /// a real wipe (name already deleted) refuses before reading or saving
+    /// anything; the wiped name stays wiped.
+    @MainActor private func wizardStartedDuringWipeRefuses(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+        try? KeychainHelper.save(key: SetupWizard.completeKey, value: "true")
+        final class Seen { var window = false, status: Int32 = 0 }
+        let seen = Seen()
+        ConversationManager.reloadBeforeLoadConversationForTesting = { @MainActor in
+            seen.window = m.memoryReplacementLock != nil && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil
+            guard let wizard = WizardChild(env: ["BRIGLIA_REPLACEMENT_WAIT_SECONDS": "0.5"]) else { return }
+            wizard.send("5\nR15_WIZARD_DURING_WIPE\n\n")
+            seen.status = await wizard.finish()
+        }
+        let wipe = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        ConversationManager.reloadBeforeLoadConversationForTesting = nil
+        let name = KeychainHelper.load(key: KeychainHelper.userNameKey)
+        check("S3-R15-1: a real setup wizard started during a real wipe refuses (exit 75) and the wiped name stays wiped",
+              seen.window && seen.status == 75 && !wipe.contains { $0.hasPrefix("ABORTED") } && name == nil,
+              "window \(seen.window) exit \(seen.status) name \(name ?? "nil") \(wipe)")
     }
 
     /// One pending chunk on disk whose raw message carries `marker`; the

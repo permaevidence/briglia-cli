@@ -85,6 +85,25 @@ struct SetupWizard {
     }()
 
     func run() async throws {
+        // The intake stop across processes (Codex stage-3 S3-R15-1): the
+        // wizard runs beside a live assistant (it takes no instance lease)
+        // and caches values across prompts (Enter keeps the shown name), so
+        // it holds the shared replacement lock for its WHOLE run — a wizard
+        // already open makes a /deleteuserdata or Mind import wait, then
+        // refuse with nothing deleted; one started during a replacement
+        // waits (bounded) and then refuses before reading anything. Both
+        // entries (`briglia setup`, the quick-setup fallback) pass here.
+        let replacementLock: ProfileFileLock?
+        switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
+        case .admitted(let lock): replacementLock = lock
+        case .busy:
+            print("✖ " + MemoryReplacementLock.busyMessage)
+            throw ExitCode(75)
+        case .failed(let why):
+            print("✖ \(why)")
+            throw ExitCode(1)
+        }
+        defer { replacementLock?.release() }
         if Self.setupComplete() {
             await rerunMenu()
             return
