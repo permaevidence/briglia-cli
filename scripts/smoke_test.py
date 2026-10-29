@@ -574,6 +574,13 @@ def main():
                           text=True, timeout=1800)
     check("multi-assistant-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
+    # Assistant profiles, stage 4: assistant names, provisional create,
+    # managed bots (claim, rotation, hold), the menu Assistants page and the
+    # supervisor re-arm. Re-execs itself in a private scratch home.
+    result = run_selftest([os.path.abspath(ADA), "__stage4-selftest"], capture_output=True,
+                          text=True, timeout=900)
+    check("stage4-selftest", result.returncode == 0,
+          (result.stdout + result.stderr)[-2500:])
     # Every production preferences access goes through Prefs (one suite per
     # assistant); the lint also proves it catches planted violations.
     for args in ([], ["--self-test"]):
