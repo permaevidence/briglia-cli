@@ -566,7 +566,8 @@ extension ConversationManager {
         // 0e. Purge bash jobs: kill everything and drop registry state —
         //     the already-queued completion notices must die too. A job
         //     still stopping after the join limit is kept (its file claims
-        //     stay valid) and reported rather than silently dropped.
+        //     stay valid, see the claims step below) and reported rather
+        //     than silently dropped.
         let bashPurge = await BackgroundProcessRegistry.shared.purgeAllForWipeReporting()
         if bashPurge.retained > 0 {
             failures.append("\(bashPurge.retained) background command(s) were still stopping after 60 s and were kept; run /deleteuserdata again in a minute to clear them")
@@ -609,11 +610,21 @@ extension ConversationManager {
         RenderedPDFPageCache.shared.removeAll()
         ModelImageCache.shared.removeAll()
         CacheDiagnostics.reset()
-        // Several assistants (§11): this assistant's own board entry, file
-        // claims and notices (idle: no edit is reserved). Nothing with one.
+        // Several assistants (§11): this assistant's own board entry and
+        // notices (idle: no edit is reserved). Nothing with one. Claims are
+        // NOT deleted outright (Codex stage-3 S3-R7-1): an ended turn's
+        // claims stay protected while the jobs bound to it are still live
+        // (e.g. kept by the purge above). A ticker pass releases every claim
+        // no live scope protects; the file goes only once no scope is pending.
         if MultiAssistant.context() != nil || AssistantRegistry.presence() != .absent {
-            AssistantBoard.removeFiles(profile: AssistantProfile.selectedName)
+            AssistantBoard.removeFiles(profile: AssistantProfile.selectedName, includeClaims: false)
             BoardWriter.shared.reset()
+            if MultiAssistant.context() != nil {
+                await ClaimScopes.shared.tick()
+            }
+            if MultiAssistant.context() == nil || !ClaimScopes.shared.hasPendingScopes {
+                try? FileManager.default.removeItem(at: MultiAssistant.Paths.live.claimsFile(AssistantProfile.selectedName))
+            }
         }
 
         // Quiescence passed: an explicit wipe also discards unpublished
@@ -926,7 +937,10 @@ extension ConversationManager {
     ///   restored one has no record of launching them, so their completion
     ///   notices (and spill files) would be noise from a vanished context.
     ///   Purged like the wipe does, not merely drained: a job finishing
-    ///   AFTER this discard would otherwise queue a fresh notice.
+    ///   AFTER this discard would otherwise queue a fresh notice. Exception
+    ///   (Codex stage-3 S3-R6-1/R7-1): a job still stopping when the purge's
+    ///   join limit expires is kept, so its claims stay protected; its late
+    ///   completion notice can then reach the restored conversation.
     /// - A watcher check that finished during the barrier persisted a fire
     ///   (or queued an in-memory fallback message); the Mind archive carries
     ///   no outbox/spool, so pending records are pre-import by definition.

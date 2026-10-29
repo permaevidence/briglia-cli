@@ -17,6 +17,8 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         shouldDisplay: false
     )
 
+    @Flag(name: .customLong("wipe")) var wipeOnly = false
+
     @MainActor func run() async throws {
         guard adaCLIVersion.hasSuffix("-dev"), let lease = MemberEntry.current else {
             print("CHECK 0 needs a development build and a member lease"); return
@@ -25,6 +27,11 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
             print("CHECK \(ok ? 1 : 0) \(label)\(ok || detail.isEmpty ? "" : " — \(detail)")")
         }
         let m = ConversationManager()
+        if wipeOnly {
+            await wipeKeepsProtectedClaims(m, check: check)
+            print("STAGE3_WIPE_DONE")
+            return
+        }
         let paths = UpgradeBarrier.Paths.live
         let held: ProfileFileLock? = { if case .acquired(let l) = ProfileFileLock.take(paths.lock) { return l }; return nil }()
         let other = UpgradeBarrier.Participant(profile: "work", generation: "g", lease: "0ther-1ease", incarnation: "inc-1", coordinator: false)
@@ -91,6 +98,72 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
               local.contains("Checking for an update") && local.contains("Already up to date (9.9.9-test)") && m.upgradeCoordinatorTask == nil, local)
         await successfulUpgradeDeliversBeforeRestart(m, lease: lease, check: check)
         print("STAGE3_DONE")
+    }
+
+    /// Codex stage-3 S3-R7-1: the real `/deleteuserdata` wipe must not
+    /// delete claims bound to jobs its registry purge kept (join limit
+    /// expired while a queued /stop batch was still terminating them).
+    @MainActor private func wipeKeepsProtectedClaims(_ m: ConversationManager,
+                                                     check: @escaping (String, Bool, String) -> Void) async {
+        guard let ctx = MultiAssistant.context() else { check("S3-R7-1: multi-assistant context", false, "nil"); return }
+        let reg = BackgroundProcessRegistry.shared
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("s3r71-\(UUID().uuidString.prefix(8))")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = MultiAssistant.canonical(dir.appendingPathComponent("claimed.txt").path)
+        let trigger = dir.appendingPathComponent("TRIGGER").path
+        FileManager.default.createFile(atPath: file, contents: Data("OWNER\n".utf8))
+        let turn = UUID(), scope = "turn:" + turn.uuidString.lowercased()
+        ClaimScopes.shared.turnStarted(turn)
+        try? FileClaims.reserve(ctx, paths: [file], opId: "wipe1")
+        try? FileClaims.settle(ctx, opId: "wipe1", changed: true, scopes: [scope])
+        let body = "open(P,\">\",$ARGV[0]); print P $$; close P; while(1){ if(-e $ARGV[1]){ open(F,\">>\",$ARGV[2]); print F \"JOB\\n\"; close F; exit 0 } sleep 0.001 }"
+        var jobs: [String] = [], pidFiles: [String] = []
+        for i in 0..<6 {
+            let pidFile = dir.appendingPathComponent("pid-\(i)").path
+            let cmd = "exec /usr/bin/perl -MTime::HiRes=sleep -e '\(body)' \"\(pidFile)\" \"\(trigger)\" \"\(file)\""
+            guard let j = try? await reg.start(command: cmd, workdir: dir.path, description: "s3r71-\(i)") else {
+                check("S3-R7-1: start job \(i)", false, ""); return
+            }
+            jobs.append(j.id); pidFiles.append(pidFile)
+        }
+        let readyBy = Date().addingTimeInterval(15)
+        while !pidFiles.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) && Date() < readyBy {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        ClaimScopes.shared.turnEnded(turn)
+        let stop = Task.detached { _ = await reg.stopAllMainOwned() }
+        let stampedBy = Date().addingTimeInterval(5)
+        while await reg.runningBackgroundJobCount() != 0 && Date() < stampedBy {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        await reg._testSetWipeJoinLimit(0.2)
+        let failures = await m.deleteAllMemory()
+        await reg._testSetWipeJoinLimit(nil)
+        let liveAfter = await reg.unsettledEntryIds().intersection(jobs).count
+        await ClaimScopes.shared.tick()
+        let held = FileClaims.claims(ofSelf: ctx).contains { $0.path == file }
+        check("S3-R7-1: /deleteuserdata reports the background commands it kept",
+              failures.contains { $0.contains("still stopping") } && liveAfter > 0, "live \(liveAfter) failures \(failures)")
+        check("S3-R7-1: the claim bound to those jobs survives the wipe while they are live (a peer edit stays refused)",
+              held && ClaimScopes.shared.pendingScopesForTesting[scope] != nil, "held \(held)")
+        FileManager.default.createFile(atPath: trigger, contents: Data())
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let text = (try? String(contentsOfFile: file, encoding: .utf8)) ?? ""
+        check("S3-R7-1: every job was already signalled (no late write)", !text.contains("JOB"), text.debugDescription)
+        await stop.value
+        let cleared = await reg.purgeAllForWipeReporting()
+        await ClaimScopes.shared.tick()
+        check("S3-R7-1: once the jobs ended, the claim is released by ordinary scope settlement",
+              cleared.retained == 0 && !FileClaims.claims(ofSelf: ctx).contains { $0.path == file }
+              && ClaimScopes.shared.pendingScopesForTesting[scope] == nil, "retained \(cleared.retained)")
+        // The ordinary case: nothing live, the wipe removes the claims file.
+        try? FileClaims.reserve(ctx, paths: [file], opId: "wipe2")
+        try? FileClaims.settle(ctx, opId: "wipe2", changed: true, scopes: ["op:wipe2-gone"])
+        let second = await m.deleteAllMemory()
+        check("S3-R7-1: with nothing live, the wipe still removes this assistant's claims file",
+              !FileManager.default.fileExists(atPath: ctx.paths.claimsFile(ctx.me.profile).path)
+              && !second.contains { $0.contains("still stopping") }, "\(second)")
     }
 
     /// Codex stage-3 S3-R2-4: a terminal/app /upgrade whose coordinated

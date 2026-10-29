@@ -251,6 +251,13 @@ BREAKS = [
      '            $0.status == .running'),
     ('M80 the wipe retires live entries when its join limit expires (S3-R6-1)', 'stage3', T + 'Services/BashTools.swift',
      '            if live(e) { retained += 1; continue }\n', ''),
+    # Codex stage-3 round 7.
+    ('M81 /deleteuserdata deletes claims bound to jobs its purge kept (S3-R7-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '            AssistantBoard.removeFiles(profile: AssistantProfile.selectedName, includeClaims: false)',
+     '            AssistantBoard.removeFiles(profile: AssistantProfile.selectedName)'),
+    ('M82 the wipe removes the claims file while a scope is still pending (S3-R7-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '            if MultiAssistant.context() == nil || !ClaimScopes.shared.hasPendingScopes {',
+     '            if true {'),
 ]
 
 

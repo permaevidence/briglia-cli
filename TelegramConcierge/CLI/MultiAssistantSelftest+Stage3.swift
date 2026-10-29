@@ -768,6 +768,10 @@ extension ProfileHarness {
         let lines = r.out.split(separator: "\n").filter { $0.hasPrefix("CHECK ") }
         check("stage3: the real-manager child ran", r.out.contains("STAGE3_DONE") && !lines.isEmpty, String(r.out.suffix(800)))
         for line in lines { check(String(line.dropFirst(8)), line.hasPrefix("CHECK 1 ")) }
+        let w = run(["__stage3-manager-check", "--wipe"], extraEnv: ["BRIGLIA_TEST_NO_BROWSER_BOOTSTRAP": "1"])
+        let wlines = w.out.split(separator: "\n").filter { $0.hasPrefix("CHECK ") }
+        check("stage3: the real-manager wipe child ran", w.out.contains("STAGE3_WIPE_DONE") && wlines.count >= 5, String(w.out.suffix(800)))
+        for line in wlines { check(String(line.dropFirst(8)), line.hasPrefix("CHECK 1 ")) }
     }
 
     // MARK: Worktree helper (§7.2)

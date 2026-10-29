@@ -396,6 +396,10 @@ final class ClaimScopes: @unchecked Sendable {
     }
 
     var pendingScopesForTesting: [String: Set<String>] { lock.lock(); defer { lock.unlock() }; return pending }
+
+    /// Whether any ended turn or out-of-turn edit still waits for its jobs
+    /// (its claims are still protected).
+    var hasPendingScopes: Bool { lock.lock(); defer { lock.unlock() }; return !pending.isEmpty }
 }
 
 // MARK: - In-process per-path serialisation (§7.3)

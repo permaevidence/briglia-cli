@@ -443,11 +443,12 @@ enum AssistantBoard {
 
     // MARK: Cleanup (§11, profiles remove)
 
-    /// Removes a profile's board entry, claims and notices.
-    static func removeFiles(profile: String, paths: MultiAssistant.Paths = .live) {
+    /// Removes a profile's board entry, notices and (unless `includeClaims`
+    /// is false) its claims.
+    static func removeFiles(profile: String, paths: MultiAssistant.Paths = .live, includeClaims: Bool = true) {
         guard MultiAssistant.isProfileName(profile) else { return }
         try? FileManager.default.removeItem(at: paths.boardFile(profile))
-        try? FileManager.default.removeItem(at: paths.claimsFile(profile))
+        if includeClaims { try? FileManager.default.removeItem(at: paths.claimsFile(profile)) }
         try? FileManager.default.removeItem(at: paths.noticesDir(profile))
     }
 }
