@@ -564,8 +564,13 @@ extension ConversationManager {
         _ = await SubagentBackgroundRegistry.shared.drainCompletions()
 
         // 0e. Purge bash jobs: kill everything and drop registry state —
-        //     the already-queued completion notices must die too.
-        _ = await BackgroundProcessRegistry.shared.purgeAllForWipe()
+        //     the already-queued completion notices must die too. A job
+        //     still stopping after the join limit is kept (its file claims
+        //     stay valid) and reported rather than silently dropped.
+        let bashPurge = await BackgroundProcessRegistry.shared.purgeAllForWipeReporting()
+        if bashPurge.retained > 0 {
+            failures.append("\(bashPurge.retained) background command(s) were still stopping after 60 s and were kept; run /deleteuserdata again in a minute to clear them")
+        }
 
         // 0f. Clear every inbound/outbound buffer that could re-persist or
         //     resurface old content: captionless-media attachment buffers

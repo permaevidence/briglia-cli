@@ -53,6 +53,112 @@ extension ProfileHarness {
         stage3RootExitsFirst(redirected: false)
         stage3RetentionDuringTermination()
         stage3RemoveEntryDuringTermination()
+        stage3WipeDuringQueuedStop(timeoutBranch: false)
+        stage3WipeDuringQueuedStop(timeoutBranch: true)
+    }
+
+    // MARK: S3-R6-1 — the wipe must not drop a /stop batch it has not joined
+
+    /// Codex stage-3 round 6: /stop stamps every selected job and counts its
+    /// termination, then terminates them one by one (300 ms each). A wipe
+    /// arriving meanwhile must neither drop not-yet-signalled jobs nor, when
+    /// its join limit expires, retire entries liveness still counts.
+    private func stage3WipeDuringQueuedStop(timeoutBranch: Bool) {
+        let variant = timeoutBranch ? "join limit expired" : "default join"
+        let count = timeoutBranch ? 6 : 24
+        guard let fx = makeS3("r6-wipe-" + (timeoutBranch ? "limit" : "join")) else { check("S3-R6-1 fixture", false); return }
+        let reg = BackgroundProcessRegistry.shared
+        defer {
+            _ = wait { await reg._testSetWipeJoinLimit(nil) }
+            fx.release(); resetStage3Seams()
+        }
+        let a = fx.ctx("default"), b = fx.ctx("work")
+        MultiAssistant.contextOverrideForTesting = a
+        ClaimScopes.tickSeconds = 3600
+        ClaimScopes.liveJobsOverrideForTesting = nil
+        let file = fx.root.appendingPathComponent("claimed.txt").path
+        let watched = MultiAssistant.canonical(fx.root.appendingPathComponent("watched.txt").path)
+        let trigger = fx.root.appendingPathComponent("TRIGGER").path
+        FileManager.default.createFile(atPath: watched, contents: Data("WATCH\n".utf8))
+        FileManager.default.createFile(atPath: file, contents: Data("OWNER\n".utf8))
+        try? FileClaims.reserve(b, paths: [watched], opId: "w1")
+        try? FileClaims.settle(b, opId: "w1", changed: true, scopes: ["x"], open: { Self.syntheticOpen })
+        let turn = UUID(), scope = "turn:" + turn.uuidString.lowercased()
+        ClaimScopes.shared.turnStarted(turn)
+        try? FileClaims.reserve(a, paths: [file], opId: "q1")
+        try? FileClaims.settle(a, opId: "q1", changed: true, scopes: [scope])
+        guard let snap = wait({ await Tripwire.snapshot(a) }), snap.files.contains(where: { $0.owned.path == watched }) else {
+            check("S3-R6-1 (\(variant)): tripwire snapshot of Work's claim", false); return
+        }
+        // TERM-sensitive jobs (default disposition, no fork): each writes its
+        // pid, then appends to both files once TRIGGER exists.
+        let body = "open(P,\">\",$ARGV[0]); print P $$; close P; while(1){ if(-e $ARGV[1]){ open(F,\">>\",$ARGV[2]); print F \"JOB\\n\"; close F; open(W,\">>\",$ARGV[3]); print W \"LATE\\n\"; close W; exit 0 } sleep 0.001 }"
+        var jobs: [String] = [], pidFiles: [String] = []
+        for i in 0..<count {
+            let pidFile = fx.root.appendingPathComponent("pid-\(i)").path
+            let cmd = "exec /usr/bin/perl -MTime::HiRes=sleep -e '\(body)' \"\(pidFile)\" \"\(trigger)\" \"\(file)\" \"\(watched)\""
+            guard let j = wait({ try? await reg.start(command: cmd, workdir: fx.root.path, description: "s3r61-\(i)") }) else {
+                check("S3-R6-1 (\(variant)): start job \(i)", false); return
+            }
+            jobs.append(j.id); pidFiles.append(pidFile)
+        }
+        _ = wait { await Tripwire.shared.afterCommand(a, snap) }
+        ClaimScopes.shared.turnEnded(turn)
+        guard until(15, { pidFiles.allSatisfy { FileManager.default.fileExists(atPath: $0) } }),
+              until(5, { ClaimScopes.shared.pendingScopesForTesting[scope]?.isEmpty == false }), Tripwire.shared.hasWatches else {
+            check("S3-R6-1 (\(variant)): jobs running, T pending on them, watch registered", false)
+            _ = wait { await reg.purgeAllForWipe() }; return
+        }
+        final class Flag: @unchecked Sendable { var done = false }
+        let stopFlag = Flag()
+        let stopDone = DispatchSemaphore(value: 0)
+        Task.detached { _ = await reg.stopAllMainOwned(); stopFlag.done = true; stopDone.signal() }
+        // /stop has pre-stamped every selected entry.
+        _ = until(5) { wait({ await reg.runningBackgroundJobCount() }) == 0 }
+        let liveBefore = wait { await reg.unsettledEntryIds() }.intersection(jobs).count
+        var retainedReported = -1
+        if timeoutBranch {
+            _ = wait { await reg._testSetWipeJoinLimit(0.2) }
+            retainedReported = wait { await reg.purgeAllForWipeReporting() }.retained
+        } else {
+            _ = wait { await reg.purgeAllForWipe() }
+        }
+        let stopStillRunning = !stopFlag.done
+        let liveAfter = wait { await reg.unsettledEntryIds() }.intersection(jobs).count
+        _ = wait { await ClaimScopes.shared.tick() }
+        let claimHeld = !FileClaims.claims(ofSelf: a).isEmpty && Tripwire.shared.hasWatches
+        // Any job still alive now (e.g. not yet reached by the /stop batch)
+        // would write as soon as TRIGGER exists: none may.
+        FileManager.default.createFile(atPath: trigger, contents: Data())
+        Thread.sleep(forTimeInterval: 0.3)
+        let target = (try? String(contentsOfFile: file, encoding: .utf8)) ?? ""
+        let watchedText = (try? String(contentsOfFile: watched, encoding: .utf8)) ?? ""
+        check("S3-R6-1 (\(variant)): no job survives the wipe's return (no late write to the claimed or the watched file)",
+              !target.contains("JOB") && !watchedText.contains("LATE"),
+              "claimed \(target.debugDescription) watched \(watchedText.debugDescription)")
+        if timeoutBranch {
+            check("S3-R6-1 (\(variant)): the fixture queues a /stop batch longer than the join limit",
+                  liveBefore == count && stopStillRunning, "liveBefore \(liveBefore) stopStillRunning \(stopStillRunning)")
+            check("S3-R6-1 (\(variant)): live entries are kept and reported, not retired; the claim and the watch stay",
+                  liveAfter > 0 && retainedReported >= liveAfter && claimHeld,
+                  "liveAfter \(liveAfter) reported \(retainedReported) claimHeld \(claimHeld)")
+        } else {
+            check("S3-R6-1 (\(variant)): the fixture queues a /stop batch longer than 5 s (old join bound)",
+                  liveBefore == count, "liveBefore \(liveBefore)")
+            check("S3-R6-1 (\(variant)): when the wipe returns, no bound entry is live and the /stop batch has finished",
+                  liveAfter == 0 && !stopStillRunning, "liveAfter \(liveAfter) stopStillRunning \(stopStillRunning)")
+        }
+        _ = stopDone.wait(timeout: .now() + 30)
+        if timeoutBranch {
+            _ = wait { await reg._testSetWipeJoinLimit(nil) }
+            let second = wait { await reg.purgeAllForWipeReporting() }
+            check("S3-R6-1 (\(variant)): once the /stop batch ended, a second wipe retires everything",
+                  second.retained == 0 && wait({ await reg.unsettledEntryIds() }).intersection(jobs).isEmpty,
+                  "retained \(second.retained)")
+            _ = wait { await ClaimScopes.shared.tick() }
+        }
+        check("S3-R6-1 (\(variant)): afterwards the claim and the watch are released",
+              FileClaims.claims(ofSelf: a).isEmpty && !Tripwire.shared.hasWatches)
     }
 
     /// S3-R5-1, the other retirement path: `removeEntry` (the attached

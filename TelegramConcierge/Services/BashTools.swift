@@ -2777,7 +2777,13 @@ actor BackgroundProcessRegistry {
     /// Terminate all background processes and their descendants. Called from
     /// applicationWillTerminate so background zsh children don't outlive the app.
     func terminateAll() async {
-        let running = entries.values.filter { $0.status == .running }
+        // Also every tree another path already stamped but whose termination
+        // has not finished (a /stop batch terminates sequentially, so its
+        // later jobs may not have been signalled yet — Codex S3-R6-1). Their
+        // status/cause attribution is kept.
+        let running = entries.values.filter {
+            $0.status == .running || ($0.terminationsInFlight > 0 && $0.process.isRunning)
+        }
         guard !running.isEmpty else { return }
         // Collect descendants before signalling — orphans reparent to launchd.
         let trees = running.map { entry -> (entry: Entry, descendants: [Int32], groups: [Int32]) in
@@ -2786,8 +2792,10 @@ actor BackgroundProcessRegistry {
             return (entry, kids, groups)
         }
         for t in trees {
-            t.entry.status = .killed
-            t.entry.terminationCause = .appShutdown
+            if t.entry.status == .running {
+                t.entry.status = .killed
+                t.entry.terminationCause = .appShutdown
+            }
             t.entry.terminationsInFlight += 1
             if t.entry.process.isRunning { t.entry.process.terminate() }
             for g in t.groups { _ = Darwin.kill(-g, SIGTERM) }
@@ -2812,16 +2820,47 @@ actor BackgroundProcessRegistry {
     /// `markTerminated` entries[id] guard. Returns the number of jobs that
     /// were still running, for the honest wipe report.
     func purgeAllForWipe() async -> Int {
+        await purgeAllForWipeReporting().running
+    }
+
+    struct WipePurgeResult: Sendable {
+        /// Jobs still running when the wipe started.
+        let running: Int
+        /// Entries kept because they were still live (a termination still in
+        /// flight, or the job not yet settled) when the join limit expired.
+        let retained: Int
+    }
+
+    /// Selftests: lower the wipe's join limit to exercise its timeout branch.
+    var wipeJoinLimitOverrideForTesting: TimeInterval?
+    func _testSetWipeJoinLimit(_ seconds: TimeInterval?) { wipeJoinLimitOverrideForTesting = seconds }
+
+    /// Codex stage-3 S3-R5-1/S3-R6-1: the wipe never retires an entry that
+    /// liveness (`unsettledEntryIds`) still counts. It signals every live tree
+    /// at once (including a /stop batch's not-yet-reached jobs), then joins
+    /// until no entry is live; a job started meanwhile is terminated too. If
+    /// the join limit expires first, the live entries are KEPT (their claims
+    /// and watches stay) and reported, never silently dropped.
+    func purgeAllForWipeReporting() async -> WipePurgeResult {
         let runningCount = entries.values.filter { $0.status == .running }.count
+        func live(_ e: Entry) -> Bool {
+            e.status == .running || e.process.isRunning || !e.lifecycleSettled || e.terminationsInFlight > 0
+        }
+        let deadline = Date().addingTimeInterval(wipeJoinLimitOverrideForTesting ?? 60)
+        // Signal every live tree now, including the jobs a /stop batch has
+        // stamped but not reached yet (terminateAll selects those too).
         await terminateAll()
-        // S3-R5-1: a termination started elsewhere (kill, /stop, deadline)
-        // may still be inside its grace; let it finish its SIGKILL sweep
-        // before the entries go (bounded: graces are ≤ 300 ms).
-        let joinDeadline = Date().addingTimeInterval(5)
-        while entries.values.contains(where: { $0.terminationsInFlight > 0 }), Date() < joinDeadline {
+        while true {
+            // A job started while we waited is terminated as well.
+            if entries.values.contains(where: { $0.status == .running }) { await terminateAll() }
+            if !entries.values.contains(where: live) || Date() >= deadline { break }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
-        for e in entries.values {
+        // No suspension from here on: the retire decision and the removal
+        // happen in one actor step.
+        var retained = 0
+        for (key, e) in entries {
+            if live(e) { retained += 1; continue }
             e.executionDeadlineTask?.cancel()
             e.executionDeadlineTask = nil
             try? e.stdin.close()
@@ -2829,13 +2868,13 @@ actor BackgroundProcessRegistry {
             for path in [e.stdoutSpillPath, e.stderrSpillPath] {
                 if let path { try? FileManager.default.removeItem(atPath: path) }
             }
+            entries.removeValue(forKey: key)
         }
-        entries.removeAll()
         pendingCompletions.removeAll()
         watches.removeAll()
         pendingMatchEvents.removeAll()
         tombstones.removeAll()
-        return runningCount
+        return WipePurgeResult(running: runningCount, retained: retained)
     }
 }
 

@@ -240,8 +240,17 @@ BREAKS = [
     ('M76 removeEntry retires an entry whose termination is still in flight (S3-R5-1)', 'stage3', T + 'Services/BashTools.swift',
      '        if e.terminationsInFlight > 0 { e.retireWhenTerminated = true; return }\n', ''),
     ('M77 the wipe drops entries without joining terminations in flight (S3-R5-1)', 'stage3', T + 'Services/BashTools.swift',
-     '        while entries.values.contains(where: { $0.terminationsInFlight > 0 }), Date() < joinDeadline {',
-     '        while false, Date() < joinDeadline {'),
+     '            if !entries.values.contains(where: live) || Date() >= deadline { break }',
+     '            break'),
+    # Codex stage-3 round 6.
+    ('M78 the wipe does not signal a /stop batch it has not reached (S3-R6-1)', 'stage3', T + 'Services/BashTools.swift',
+     '        // stamped but not reached yet (terminateAll selects those too).\n        await terminateAll()\n',
+     '        // stamped but not reached yet (terminateAll selects those too).\n'),
+    ('M79 terminateAll skips pre-stamped trees still terminating (S3-R6-1)', 'stage3', T + 'Services/BashTools.swift',
+     '            $0.status == .running || ($0.terminationsInFlight > 0 && $0.process.isRunning)',
+     '            $0.status == .running'),
+    ('M80 the wipe retires live entries when its join limit expires (S3-R6-1)', 'stage3', T + 'Services/BashTools.swift',
+     '            if live(e) { retained += 1; continue }\n', ''),
 ]
 
 
