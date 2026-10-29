@@ -25,17 +25,17 @@ enum MemoryReplacementLock {
         return ProfileFileLock.take(url, waitSeconds: 0)
     }
 
-    enum Admission { case admitted(ProfileFileLock?), busy, failed(String) }
+    enum Admission { case admitted(ProfileFileLock), busy, failed(String) }
 
-    /// Standalone writers: bounded wait for a replacement to finish. Never
-    /// creates a root: with no data root yet there is nothing a replacement
-    /// could be deleting (and a pre-migration layout must stay untouched),
-    /// so the writer is admitted without a lock.
+    /// Standalone writers: bounded wait for a replacement to finish, held for
+    /// the writer's whole run. Callers pass their migration/storage gate
+    /// FIRST (a refused pre-migration request must create no root); then the
+    /// data root is established here, so the lock always exists — a writer
+    /// that started before the root existed is still excluded once a later
+    /// root and a replacement appear (Codex stage-3 S3-R16-1).
     static func shared(waitSeconds: Double = 60) -> Admission {
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: StoragePaths.dataRoot.path, isDirectory: &isDir), isDir.boolValue else {
-            return .admitted(nil)
-        }
+        do { try PrivateStorage.ensureDirectory(StoragePaths.dataRoot) }
+        catch { return .failed("cannot create \(StoragePaths.dataRoot.path): \(error.localizedDescription)") }
         switch ProfileFileLock.take(url, waitSeconds: waitSeconds, shared: true) {
         case .acquired(let lock): return .admitted(lock)
         case .busy: return .busy

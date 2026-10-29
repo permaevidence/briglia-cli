@@ -189,6 +189,8 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         // Codex stage-3 S3-R15-1: the ordinary setup wizard.
         await openWizardMakesWipeRefuse(m, check: check)
         await wizardStartedDuringWipeRefuses(m, check: check)
+        // Codex stage-3 S3-R16-1: a writer that starts before the data root exists.
+        await absentRootWriterHoldsTheLock(check: check)
         ClaimScopes.tickSeconds = 2
     }
 
@@ -379,7 +381,7 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
     @MainActor private func standaloneWriterMakesWipeWait(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
         await awaitArchiveIdle(m)
         try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
-        guard case .admitted(let held) = MemoryReplacementLock.shared(waitSeconds: 0), let writer = held else {
+        guard case .admitted(let writer) = MemoryReplacementLock.shared(waitSeconds: 0) else {
             check("S3-R14-1: a standalone writer's shared lock", false, "not acquired"); return
         }
         ConversationManager.admissionDrainSecondsForTesting = 0.5
@@ -519,6 +521,57 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         check("S3-R15-1: a real setup wizard started during a real wipe refuses (exit 75) and the wiped name stays wiped",
               seen.window && seen.status == 75 && !wipe.contains { $0.hasPrefix("ABORTED") } && name == nil,
               "window \(seen.window) exit \(seen.status) name \(name ?? "nil") \(wipe)")
+    }
+
+    /// Codex stage-3 S3-R16-1, Codex's ordering, in a separate fresh
+    /// installation (its own scratch XDG roots, no data root yet): a REAL
+    /// `setup-api apply` child held at the config store's own lock must
+    /// already hold the replacement lock (it established the data root
+    /// after its migration gate), so an exclusive replacement attempt is
+    /// busy while it is pending; it then completes. Before the fix it was
+    /// admitted without any lock while the root was absent.
+    @MainActor private func absentRootWriterHoldsTheLock(check: @escaping (String, Bool, String) -> Void) async {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("r16-\(UUID().uuidString.prefix(8))")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cfg = root.appendingPathComponent("cfg/briglia"), data = root.appendingPathComponent("data/briglia")
+        try? PrivateStorage.ensureDirectory(cfg)
+        try? PrivateStorage.writeAtomically(Data(#"{"user_name":"OLD"}"#.utf8), to: cfg.appendingPathComponent("secrets.json"))
+        let rootAbsentAtStart = !FileManager.default.fileExists(atPath: data.path)
+        guard case .acquired(let storeLock) = ProfileFileLock.take(cfg.appendingPathComponent("secrets.lock")) else {
+            check("S3-R16-1: the child's config-store lock", false, "not acquired"); return
+        }
+        var env = ProcessInfo.processInfo.environment
+        env["XDG_CONFIG_HOME"] = root.appendingPathComponent("cfg").path
+        env["XDG_DATA_HOME"] = root.appendingPathComponent("data").path
+        env["BRIGLIA_REPLACEMENT_WAIT_SECONDS"] = "1"
+        env.removeValue(forKey: "BRIGLIA_PROFILE")
+        let child = Task.detached { () -> (Int32, String) in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+            p.arguments = ["setup-api", "apply"]
+            p.environment = env
+            let input = Pipe(), output = Pipe()
+            p.standardInput = input; p.standardOutput = output; p.standardError = FileHandle.nullDevice
+            do { try p.run() } catch { return (-1, "\(error)") }
+            input.fileHandleForWriting.write(Data(#"{"identity":{"user_name":"R16_NO_ROOT"}}"#.utf8))
+            try? input.fileHandleForWriting.close()
+            let out = output.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return (p.terminationStatus, String(decoding: out, as: UTF8.self))
+        }
+        let lockURL = data.appendingPathComponent("memory-replacement.lock")
+        let by = Date().addingTimeInterval(15)
+        var excluded = false
+        while Date() < by {
+            if FileManager.default.fileExists(atPath: lockURL.path), case .busy = ProfileFileLock.take(lockURL) { excluded = true; break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        storeLock.release()
+        let (status, out) = await child.value
+        let saved = (try? String(contentsOf: cfg.appendingPathComponent("secrets.json"), encoding: .utf8)) ?? ""
+        check("S3-R16-1: a setup-api writer started before the data root existed holds the replacement lock while pending (an exclusive attempt is busy), then completes",
+              rootAbsentAtStart && excluded && status == 0 && out.contains("\"ok\":true") && saved.contains("R16_NO_ROOT"),
+              "absent \(rootAbsentAtStart) excluded \(excluded) exit \(status) \(out.prefix(160))")
     }
 
     /// One pending chunk on disk whose raw message carries `marker`; the

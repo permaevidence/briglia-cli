@@ -94,7 +94,7 @@ struct SetupAPI: AsyncParsableCommand {
             // touch the roots.
             var replacementLock: ProfileFileLock?
             if verb == "apply" || verb == "subscription" {
-                if verb == "apply", let refusal = SetupAPICore.migrationRefusal() { respond(refusal) }
+                if let refusal = SetupAPICore.migrationRefusal() { respond(refusal) }
                 switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
                 case .admitted(let lock): replacementLock = lock
                 case .busy:

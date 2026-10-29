@@ -339,6 +339,9 @@ BREAKS = [
     ('M111 the setup wizard ignores a memory replacement (S3-R15-1)', 'stage3e2e', T + 'CLI/SetupWizard.swift',
      '        defer { replacementLock?.release() }\n        if Self.setupComplete() {',
      '        replacementLock?.release()\n        if Self.setupComplete() {'),
+    ('M112 a standalone writer is admitted without the lock while the data root is absent (S3-R16-1)', 'stage3e2e', T + 'Services/MemoryReplacementLock.swift',
+     '        do { try PrivateStorage.ensureDirectory(StoragePaths.dataRoot) }\n',
+     '        if !FileManager.default.fileExists(atPath: StoragePaths.dataRoot.path), case .acquired(let l) = ProfileFileLock.take(FileManager.default.temporaryDirectory.appendingPathComponent("m112-\\(UUID().uuidString).lock")) { return .admitted(l) }\n        do { try PrivateStorage.ensureDirectory(StoragePaths.dataRoot) }\n'),
     # The round-12 head's behaviour (all three intake-stop fixes removed,
     # test seams kept): Codex's sequence must fail.
     ('M103 the round-12 head: no startup hold, no clear serialization, no deferral (S3-R12-1)', 'stage3e2e', [
