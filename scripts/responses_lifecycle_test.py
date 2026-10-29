@@ -89,7 +89,13 @@ def main():
         assert text.count(anchor) == 1
         text = text.replace(anchor, '        P2Life.recordContext(context)\n' + anchor)
         # Disposable-only auth POST injection drives the real 401 retry owner.
-        text = text.replace('let login = SubscriptionLogin()', 'let login = SubscriptionLogin(post: P2Life.authPost)')
+        # Asserted: since the shared ChatGPT login (several assistants) the
+        # adapter builds ONE login per request; an unasserted replace silently
+        # stopped injecting and the refresh went to the real auth endpoint.
+        anchor = 'var subscriptionLogin = SubscriptionLogin()'
+        assert text.count(anchor) == 1
+        assert 'SubscriptionLogin()' not in text.replace(anchor, '')
+        text = text.replace(anchor, 'var subscriptionLogin = SubscriptionLogin(post: P2Life.authPost)')
         adapter.write_text(text)
         renderer = tree / 'TelegramConcierge/Services/OpenRouterService+Responses.swift'
         text = renderer.read_text()
