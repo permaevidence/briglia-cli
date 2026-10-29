@@ -101,7 +101,12 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
     @MainActor private func successfulUpgradeDeliversBeforeRestart(_ m: ConversationManager, lease: MemberLease,
                                                                   check: @escaping (String, Bool, String) -> Void) async {
         var fds: [Int32] = [0, 0]
-        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else { check("S3-R2-4: socket pair", false, "\(errno)"); return }
+        #if os(Linux)
+        let streamType = Int32(SOCK_STREAM.rawValue)
+        #else
+        let streamType = SOCK_STREAM
+        #endif
+        guard socketpair(AF_UNIX, streamType, 0, &fds) == 0 else { check("S3-R2-4: socket pair", false, "\(errno)"); return }
         let client = ClientHandle(id: 9_001, fd: fds[0])
         final class Seen { var lines: [String]? }
         let seen = Seen()
