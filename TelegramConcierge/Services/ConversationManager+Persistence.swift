@@ -615,14 +615,15 @@ extension ConversationManager {
         // NOT deleted outright (Codex stage-3 S3-R7-1): an ended turn's
         // claims stay protected while the jobs bound to it are still live
         // (e.g. kept by the purge above). A ticker pass releases every claim
-        // no live scope protects; the file goes only once no scope is pending.
+        // no live scope protects; the file goes only once no scope is open
+        // (current, ending or pending — S3-R8-1).
         if MultiAssistant.context() != nil || AssistantRegistry.presence() != .absent {
             AssistantBoard.removeFiles(profile: AssistantProfile.selectedName, includeClaims: false)
             BoardWriter.shared.reset()
             if MultiAssistant.context() != nil {
                 await ClaimScopes.shared.tick()
             }
-            if MultiAssistant.context() == nil || !ClaimScopes.shared.hasPendingScopes {
+            if MultiAssistant.context() == nil || !ClaimScopes.shared.hasOpenScopes {
                 try? FileManager.default.removeItem(at: MultiAssistant.Paths.live.claimsFile(AssistantProfile.selectedName))
             }
         }

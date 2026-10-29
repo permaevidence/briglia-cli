@@ -266,6 +266,11 @@ final class ClaimScopes: @unchecked Sendable {
 
     static func liveJobs() async -> Set<String> {
         if let o = liveJobsOverrideForTesting { return await o() }
+        return await actualLiveJobs()
+    }
+
+    /// The real sample (selftest gates wrap it to hold one sample open).
+    static func actualLiveJobs() async -> Set<String> {
         let bash = await BackgroundProcessRegistry.shared.unsettledEntryIds()
         let agents = await SubagentBackgroundRegistry.shared.liveRunIds()
         return Set(bash.map { "bash:" + $0 }).union(agents.map { "agent:" + $0 })
@@ -397,9 +402,11 @@ final class ClaimScopes: @unchecked Sendable {
 
     var pendingScopesForTesting: [String: Set<String>] { lock.lock(); defer { lock.unlock() }; return pending }
 
-    /// Whether any ended turn or out-of-turn edit still waits for its jobs
-    /// (its claims are still protected).
-    var hasPendingScopes: Bool { lock.lock(); defer { lock.unlock() }; return !pending.isEmpty }
+    /// Whether any scope is still open — the current turn, a turn whose
+    /// end-of-turn liveness sample is in progress (`ending`), or one waiting
+    /// for its jobs (`pending`) — i.e. whether some claim may still be
+    /// protected (Codex stage-3 S3-R8-1: `ending` counts too).
+    var hasOpenScopes: Bool { !openScopes().isEmpty }
 }
 
 // MARK: - In-process per-path serialisation (§7.3)

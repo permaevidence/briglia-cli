@@ -100,12 +100,60 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         print("STAGE3_DONE")
     }
 
-    /// Codex stage-3 S3-R7-1: the real `/deleteuserdata` wipe must not
-    /// delete claims bound to jobs its registry purge kept (join limit
-    /// expired while a queued /stop batch was still terminating them).
+    /// Holds the FIRST liveness sample open (on a continuation) until
+    /// `release()`; it then returns the actual sample. Later samples pass
+    /// straight through.
+    final class FirstSampleGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var used = false, entered = false, released = false
+        private var cont: CheckedContinuation<Void, Never>?
+        func sample() async -> Set<String> {
+            lock.lock()
+            if used { lock.unlock(); return await ClaimScopes.actualLiveJobs() }
+            used = true; entered = true; lock.unlock()
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if released { lock.unlock(); c.resume() } else { cont = c; lock.unlock() }
+            }
+            return await ClaimScopes.actualLiveJobs()
+        }
+        var hasEntered: Bool { lock.lock(); defer { lock.unlock() }; return entered }
+        func release() { lock.lock(); released = true; let c = cont; cont = nil; lock.unlock(); c?.resume() }
+    }
+
+    /// Codex stage-3 S3-R7-1 / S3-R8-1: the real `/deleteuserdata` wipe must
+    /// not delete claims bound to jobs its registry purge kept (join limit
+    /// expired while a queued /stop batch was still terminating them) —
+    /// whether the ended turn's scope is already `pending` or its end-of-turn
+    /// liveness sample is still in progress (`ending`).
     @MainActor private func wipeKeepsProtectedClaims(_ m: ConversationManager,
                                                      check: @escaping (String, Bool, String) -> Void) async {
         guard let ctx = MultiAssistant.context() else { check("S3-R7-1: multi-assistant context", false, "nil"); return }
+        guard let peer = ctx.peers.first, let doc = (try? AssistantRegistry.read(.live)) ?? nil,
+              let peerCtx = MultiAssistant.context(doc: doc, profile: peer.profile, lease: UUID().uuidString.lowercased(),
+                                                   incarnation: "s3r81", paths: ctx.paths) else {
+            check("S3-R7-1: a peer context", false, "peers \(ctx.peers.count)"); return
+        }
+        ClaimScopes.tickSeconds = 3600   // only explicit ticks in this check
+        await wipeTimeoutCase(m, ctx: ctx, peerCtx: peerCtx, gated: true, check: check)
+        await wipeTimeoutCase(m, ctx: ctx, peerCtx: peerCtx, gated: false, check: check)
+        // The ordinary case: nothing live, the wipe removes the claims file.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("s3r71-\(UUID().uuidString.prefix(8))")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = MultiAssistant.canonical(dir.appendingPathComponent("claimed.txt").path)
+        try? FileClaims.reserve(ctx, paths: [file], opId: "wipe2")
+        try? FileClaims.settle(ctx, opId: "wipe2", changed: true, scopes: ["op:wipe2-gone"])
+        let second = await m.deleteAllMemory()
+        check("S3-R7-1: with nothing live, the wipe still removes this assistant's claims file",
+              !FileManager.default.fileExists(atPath: ctx.paths.claimsFile(ctx.me.profile).path)
+              && !second.contains { $0.contains("still stopping") }, "\(second)")
+        ClaimScopes.tickSeconds = 2
+    }
+
+    @MainActor private func wipeTimeoutCase(_ m: ConversationManager, ctx: MultiAssistant.Context, peerCtx: MultiAssistant.Context,
+                                            gated: Bool, check: @escaping (String, Bool, String) -> Void) async {
+        let tag = gated ? "S3-R8-1 (turn-end sample in progress)" : "S3-R7-1 (scope pending)"
         let reg = BackgroundProcessRegistry.shared
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("s3r71-\(UUID().uuidString.prefix(8))")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -115,15 +163,15 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         FileManager.default.createFile(atPath: file, contents: Data("OWNER\n".utf8))
         let turn = UUID(), scope = "turn:" + turn.uuidString.lowercased()
         ClaimScopes.shared.turnStarted(turn)
-        try? FileClaims.reserve(ctx, paths: [file], opId: "wipe1")
-        try? FileClaims.settle(ctx, opId: "wipe1", changed: true, scopes: [scope])
+        try? FileClaims.reserve(ctx, paths: [file], opId: "wipe1-\(gated)")
+        try? FileClaims.settle(ctx, opId: "wipe1-\(gated)", changed: true, scopes: [scope])
         let body = "open(P,\">\",$ARGV[0]); print P $$; close P; while(1){ if(-e $ARGV[1]){ open(F,\">>\",$ARGV[2]); print F \"JOB\\n\"; close F; exit 0 } sleep 0.001 }"
         var jobs: [String] = [], pidFiles: [String] = []
         for i in 0..<6 {
             let pidFile = dir.appendingPathComponent("pid-\(i)").path
             let cmd = "exec /usr/bin/perl -MTime::HiRes=sleep -e '\(body)' \"\(pidFile)\" \"\(trigger)\" \"\(file)\""
             guard let j = try? await reg.start(command: cmd, workdir: dir.path, description: "s3r71-\(i)") else {
-                check("S3-R7-1: start job \(i)", false, ""); return
+                check("\(tag): start job \(i)", false, ""); return
             }
             jobs.append(j.id); pidFiles.append(pidFile)
         }
@@ -131,7 +179,16 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         while !pidFiles.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) && Date() < readyBy {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
+        let gate = FirstSampleGate()
+        if gated { ClaimScopes.liveJobsOverrideForTesting = { await gate.sample() } }
         ClaimScopes.shared.turnEnded(turn)
+        if gated {
+            let enteredBy = Date().addingTimeInterval(5)
+            while !gate.hasEntered && Date() < enteredBy { try? await Task.sleep(nanoseconds: 5_000_000) }
+            check("\(tag): the fixture holds the turn's scope in `ending` (open, not yet pending)",
+                  gate.hasEntered && ClaimScopes.shared.openScopes().contains(scope)
+                  && ClaimScopes.shared.pendingScopesForTesting[scope] == nil, "entered \(gate.hasEntered)")
+        }
         let stop = Task.detached { _ = await reg.stopAllMainOwned() }
         let stampedBy = Date().addingTimeInterval(5)
         while await reg.runningBackgroundJobCount() != 0 && Date() < stampedBy {
@@ -143,27 +200,29 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         let liveAfter = await reg.unsettledEntryIds().intersection(jobs).count
         await ClaimScopes.shared.tick()
         let held = FileClaims.claims(ofSelf: ctx).contains { $0.path == file }
-        check("S3-R7-1: /deleteuserdata reports the background commands it kept",
+        var peerRefused = false
+        do { try FileClaims.reserve(peerCtx, paths: [file], opId: "peer-\(gated)") } catch { peerRefused = true }
+        if !peerRefused { _ = try? FileClaims.settle(peerCtx, opId: "peer-\(gated)", changed: false, scopes: []) }
+        check("\(tag): /deleteuserdata reports the background commands it kept",
               failures.contains { $0.contains("still stopping") } && liveAfter > 0, "live \(liveAfter) failures \(failures)")
-        check("S3-R7-1: the claim bound to those jobs survives the wipe while they are live (a peer edit stays refused)",
-              held && ClaimScopes.shared.pendingScopesForTesting[scope] != nil, "held \(held)")
+        check("\(tag): the claim bound to those jobs survives the wipe while they are live, and a peer's edit is refused",
+              held && peerRefused && ClaimScopes.shared.openScopes().contains(scope), "held \(held) peerRefused \(peerRefused)")
         FileManager.default.createFile(atPath: trigger, contents: Data())
         try? await Task.sleep(nanoseconds: 300_000_000)
         let text = (try? String(contentsOfFile: file, encoding: .utf8)) ?? ""
-        check("S3-R7-1: every job was already signalled (no late write)", !text.contains("JOB"), text.debugDescription)
+        check("\(tag): every job was already signalled (no late write)", !text.contains("JOB"), text.debugDescription)
+        gate.release()
         await stop.value
+        ClaimScopes.liveJobsOverrideForTesting = nil
+        let handedBy = Date().addingTimeInterval(5)
+        while ClaimScopes.shared.pendingScopesForTesting[scope] == nil && ClaimScopes.shared.openScopes().contains(scope) && Date() < handedBy {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
         let cleared = await reg.purgeAllForWipeReporting()
         await ClaimScopes.shared.tick()
-        check("S3-R7-1: once the jobs ended, the claim is released by ordinary scope settlement",
+        check("\(tag): once the jobs ended, the claim is released by ordinary scope settlement",
               cleared.retained == 0 && !FileClaims.claims(ofSelf: ctx).contains { $0.path == file }
-              && ClaimScopes.shared.pendingScopesForTesting[scope] == nil, "retained \(cleared.retained)")
-        // The ordinary case: nothing live, the wipe removes the claims file.
-        try? FileClaims.reserve(ctx, paths: [file], opId: "wipe2")
-        try? FileClaims.settle(ctx, opId: "wipe2", changed: true, scopes: ["op:wipe2-gone"])
-        let second = await m.deleteAllMemory()
-        check("S3-R7-1: with nothing live, the wipe still removes this assistant's claims file",
-              !FileManager.default.fileExists(atPath: ctx.paths.claimsFile(ctx.me.profile).path)
-              && !second.contains { $0.contains("still stopping") }, "\(second)")
+              && !ClaimScopes.shared.openScopes().contains(scope), "retained \(cleared.retained)")
     }
 
     /// Codex stage-3 S3-R2-4: a terminal/app /upgrade whose coordinated

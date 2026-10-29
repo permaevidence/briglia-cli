@@ -256,8 +256,12 @@ BREAKS = [
      '            AssistantBoard.removeFiles(profile: AssistantProfile.selectedName, includeClaims: false)',
      '            AssistantBoard.removeFiles(profile: AssistantProfile.selectedName)'),
     ('M82 the wipe removes the claims file while a scope is still pending (S3-R7-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     '            if MultiAssistant.context() == nil || !ClaimScopes.shared.hasPendingScopes {',
+     '            if MultiAssistant.context() == nil || !ClaimScopes.shared.hasOpenScopes {',
      '            if true {'),
+    # Codex stage-3 round 8.
+    ('M83 the wipe ignores a turn whose end-of-turn sample is in progress (S3-R8-1)', 'stage3e2e', T + 'Services/FileClaims.swift',
+     '    var hasOpenScopes: Bool { !openScopes().isEmpty }',
+     '    var hasOpenScopes: Bool { lock.lock(); defer { lock.unlock() }; return !pending.isEmpty }'),
 ]
 
 
