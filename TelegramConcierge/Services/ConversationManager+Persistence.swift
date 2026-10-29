@@ -496,7 +496,7 @@ extension ConversationManager {
         //     deleted — while background work or an open claim scope could
         //     still need this assistant's file claims. Checked again below,
         //     after the last suspending quiescence step.
-        if let why = await Self.multiAssistantBackgroundWorkRefusal() {
+        if let why = await multiAssistantBusyRefusal() {
             return ["ABORTED: " + why]
         }
 
@@ -567,11 +567,11 @@ extension ConversationManager {
         }
 
         // 0d-bis. The refusal again, at the destructive step: work started
-        //     while the wipe was suspended above refuses too. No suspension
-        //     follows before the claims are removed except the purge, which
-        //     then has nothing of a several-assistant install to stop.
+        //     while the wipe was suspended above refuses too. The gate has
+        //     been up since 0a and admitted input drained at the first check
+        //     (S3-R10-1), so nothing can start work after this one.
         if let hook = Self.wipeBeforeSecondBackgroundCheckForTesting { await hook() }
-        if let why = await Self.multiAssistantBackgroundWorkRefusal() {
+        if let why = await multiAssistantBusyRefusal() {
             await restartEmailPollingAfterAbortedWipe()
             return ["ABORTED: " + why]
         }
@@ -631,8 +631,9 @@ extension ConversationManager {
         CacheDiagnostics.reset()
         // Several assistants (§11): this assistant's own board entry,
         // notices and claims (idle: no edit is reserved). Nothing with one.
-        // The refusal above guarantees no claim scope is open and no job or
-        // subagent is live; the open-scope test is only a synchronous belt.
+        // The refusal above found no open claim scope and no live job or
+        // subagent, with admission closed since; the synchronous open-scope
+        // test is kept as a belt (Codex stage-3 round 10).
         if MultiAssistant.context() != nil || AssistantRegistry.presence() != .absent {
             AssistantBoard.removeFiles(profile: AssistantProfile.selectedName, includeClaims: false)
             BoardWriter.shared.reset()
@@ -913,8 +914,7 @@ extension ConversationManager {
     /// install (no registry, nothing claimed) is unchanged: nil at once.
     static func multiAssistantBackgroundWorkRefusal(settleSeconds: Double = 2,
                                                     outcome: (en: String, it: String) = (" Nothing was deleted.", " Non è stato cancellato nulla.")) async -> String? {
-        guard MultiAssistant.contextOverrideForTesting != nil || AssistantRegistry.presence() != .absent
-              || ClaimScopes.shared.hasOpenScopes else { return nil }
+        guard multiAssistantGateApplies else { return nil }
         let deadline = Date().addingTimeInterval(settleSeconds)
         while true {
             let bash = await BackgroundProcessRegistry.shared.unsettledEntryIds()
@@ -930,17 +930,58 @@ extension ConversationManager {
             var what: [String] = []
             if !bash.isEmpty { what.append("\(bash.count) background command(s)") }
             if !agents.isEmpty { what.append("\(agents.count) subagent(s)") }
-            if what.isEmpty { what.append("file claims still in use") }
-            let list = what.joined(separator: ", ")
-            return "Background jobs are still running (\(list)); stop them first (or use /stop) and try again.\(outcome.en) / Ci sono ancora lavori in background (\(list)); fermali prima (o usa /stop) e riprova.\(outcome.it)"
+            if what.isEmpty { what.append("file claims still in use; if this persists, /restart") }
+            return busyMessage(what.joined(separator: ", "), outcome: outcome)
         }
+    }
+
+    static var multiAssistantGateApplies: Bool {
+        MultiAssistant.contextOverrideForTesting != nil || AssistantRegistry.presence() != .absent
+            || ClaimScopes.shared.hasOpenScopes
+    }
+
+    static func busyMessage(_ list: String, outcome: (en: String, it: String)) -> String {
+        "Background jobs are still running (\(list)); stop them first (or use /stop) and try again.\(outcome.en) / Ci sono ancora lavori in background (\(list)); fermali prima (o usa /stop) e riprova.\(outcome.it)"
+    }
+
+    /// Selftests: the admitted-input drain limit, and how often it waited.
+    nonisolated(unsafe) static var admissionDrainSecondsForTesting: Double?
+    nonisolated(unsafe) static var admissionWaitsForTesting = 0
+
+    /// The wipe / Mind-import refusal (owner decision 2026-10-29), called
+    /// with the restore gate already raised (`beginMindRestore`). Codex
+    /// stage-3 S3-R10-1: the gate stops NEW intake only — an app submission
+    /// copying an attachment, or a poll tick suspended in its channel fetch,
+    /// was admitted before it and can still start a turn (and its jobs)
+    /// later. So, like the browser-settings barrier: let every such input
+    /// leave (bounded), refuse if one started a turn, then check background
+    /// work. The command running this wipe is not counted: a Telegram
+    /// command runs inside the single poll tick (no command capture); a
+    /// terminal/app command runs in a capture, outside any poll tick. Once
+    /// this returns nil the gate stays up, so no input can be admitted
+    /// until the wipe/import ends.
+    func multiAssistantBusyRefusal(outcome: (en: String, it: String) = (" Nothing was deleted.", " Non è stato cancellato nulla.")) async -> String? {
+        guard Self.multiAssistantGateApplies else { return nil }
+        let ownPoll = Self.commandCapture == nil ? min(1, browserSettingsPollIngress) : 0
+        let deadline = ProcessInfo.processInfo.systemUptime + (Self.admissionDrainSecondsForTesting ?? 35)
+        while browserSettingsPollIngress > ownPoll || browserSettingsAppIngress > 0 {
+            Self.admissionWaitsForTesting += 1
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                return Self.busyMessage("a message still being received", outcome: outcome)
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if isTurnActive || activeProcessingTask != nil {
+            return Self.busyMessage("a turn that just started", outcome: outcome)
+        }
+        return await Self.multiAssistantBackgroundWorkRefusal(outcome: outcome)
     }
 
     func quiesceBackgroundWorkForMindRestore(timeoutSeconds: Double = 10) async -> String? {
         if let why = await quiesceSubscriptionLogin(timeoutSeconds: timeoutSeconds) { return why }
         // Several assistants: the same refusal as the wipe, before any
         // subagent is cancelled (owner decision 2026-10-29).
-        if let why = await Self.multiAssistantBackgroundWorkRefusal(outcome: ("", "")) { return why }
+        if let why = await multiAssistantBusyRefusal(outcome: ("", "")) { return why }
         let unquiesced = await SubagentBackgroundRegistry.shared.cancelAllAndQuiesce(timeoutSeconds: timeoutSeconds)
         guard unquiesced.isEmpty else {
             return "background subagents still shutting down (\(unquiesced.joined(separator: ", ")))"
@@ -970,7 +1011,7 @@ extension ConversationManager {
         }
         // …and again after the suspending steps above, right before the
         // import's point of no return.
-        if let why = await Self.multiAssistantBackgroundWorkRefusal(outcome: ("", "")) { return why }
+        if let why = await multiAssistantBusyRefusal(outcome: ("", "")) { return why }
         return nil
     }
 

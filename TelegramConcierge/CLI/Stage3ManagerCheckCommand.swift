@@ -146,6 +146,10 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         await wipeRefusalCase(m, ctx: ctx, peerCtx: peerCtx, mode: .contextLossNoJobs, check: check)
         await wipeRefusesForSubagent(m, check: check)
         await wipeSecondCheckRefuses(m, check: check)
+        await admittedInputRefuses(m, importPath: false, check: check)
+        await admittedInputRefuses(m, importPath: true, check: check)
+        await admittedTurnRefuses(m, check: check)
+        await stuckIngressRefuses(m, check: check)
         check("wipe refusal: every refused wipe deleted nothing (the stored name survives)",
               KeychainHelper.load(key: KeychainHelper.userNameKey) == "Sentinel", KeychainHelper.load(key: KeychainHelper.userNameKey) ?? "nil")
         // The ordinary case: nothing live, the wipe runs and removes this
@@ -156,7 +160,14 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         let file = MultiAssistant.canonical(dir.appendingPathComponent("claimed.txt").path)
         try? FileClaims.reserve(ctx, paths: [file], opId: "wipe2")
         try? FileClaims.settle(ctx, opId: "wipe2", changed: true, scopes: ["op:wipe2-gone"])
+        // The Telegram command running the wipe is its own poll tick (no
+        // command capture): that one ingress is not waited for.
+        m._testSetBrowserSettingsPollIngress(1)
+        let waitsBefore = ConversationManager.admissionWaitsForTesting
         let second = await m.deleteAllMemory()
+        m._testSetBrowserSettingsPollIngress(0)
+        check("S3-R10-1: the wipe's own poll tick (a Telegram command) is not counted as admitted input",
+              ConversationManager.admissionWaitsForTesting == waitsBefore, "waits \(ConversationManager.admissionWaitsForTesting - waitsBefore)")
         check("wipe refusal: with nothing live, the wipe runs and removes this assistant's claims file",
               !FileManager.default.fileExists(atPath: ctx.paths.claimsFile(ctx.me.profile).path)
               && !second.contains { $0.hasPrefix("ABORTED") } && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil, "\(second)")
@@ -332,6 +343,123 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         let settledBy = Date().addingTimeInterval(5)
         while !(await reg.unsettledEntryIds().isEmpty) && Date() < settledBy { try? await Task.sleep(nanoseconds: 20_000_000) }
         _ = await reg.purgeAllForWipeReporting()
+    }
+
+    /// Holds an awaited step until `release()`.
+    final class StepGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entered = false, released = false
+        private var cont: CheckedContinuation<Void, Never>?
+        func wait() async {
+            lock.lock(); entered = true
+            if released { lock.unlock(); return }
+            lock.unlock()
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if released { lock.unlock(); c.resume() } else { cont = c; lock.unlock() }
+            }
+        }
+        var hasEntered: Bool { lock.lock(); defer { lock.unlock() }; return entered }
+        func release() { lock.lock(); released = true; let c = cont; cont = nil; lock.unlock(); c?.resume() }
+    }
+
+    final class DoneMark: @unchecked Sendable { var value = false }
+
+    /// Codex stage-3 S3-R10-1: a REAL app submission admitted before the
+    /// wipe's (or import's) gate went up — suspended in its attachment copy —
+    /// must be waited out; work it launches meanwhile then refuses. The job
+    /// started while the copy is held stands in for the work its turn would
+    /// launch (the copy then fails, so no model call is made).
+    @MainActor private func admittedInputRefuses(_ m: ConversationManager, importPath: Bool,
+                                                 check: @escaping (String, Bool, String) -> Void) async {
+        let tag = importPath ? "S3-R10-1 (app input admitted before a Mind import)" : "S3-R10-1 (app input admitted before the wipe)"
+        let reg = BackgroundProcessRegistry.shared
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("s3r101-\(UUID().uuidString.prefix(8))")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let src = dir.appendingPathComponent("input.txt")
+        FileManager.default.createFile(atPath: src.path, contents: Data("attachment\n".utf8))
+        let copy = StepGate()
+        ConversationManager.copyRegularFileGateForTesting = { await copy.wait() }
+        defer { ConversationManager.copyRegularFileGateForTesting = nil }
+        m._testSetPolling(true)
+        defer { m._testSetPolling(false) }
+        let submit = Task { @MainActor in await m.sendFromApp(text: "hello", attachments: [src]) }
+        let enteredBy = Date().addingTimeInterval(5)
+        while !copy.hasEntered && Date() < enteredBy { try? await Task.sleep(nanoseconds: 5_000_000) }
+        check("\(tag): the submission is admitted and held in its copy", copy.hasEntered && m.browserSettingsAppIngress == 1,
+              "entered \(copy.hasEntered) ingress \(m.browserSettingsAppIngress)")
+        let waits0 = ConversationManager.admissionWaitsForTesting
+        let finished = DoneMark()
+        let gateUp = importPath ? m.beginMindRestore() : true
+        let op = Task { @MainActor () -> [String] in
+            defer { finished.value = true }
+            if importPath {
+                let busy = await m.quiesceBackgroundWorkForMindRestore(timeoutSeconds: 2)
+                return busy.map { [$0] } ?? []
+            }
+            return await m.deleteAllMemory()
+        }
+        let waitBy = Date().addingTimeInterval(10)
+        while !finished.value && ConversationManager.admissionWaitsForTesting == waits0 && Date() < waitBy {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let waited = !finished.value
+        let job = try? await reg.start(command: "exec sleep 30", workdir: dir.path, description: "s3r101-late")
+        try? FileManager.default.removeItem(at: src)   // the copy then fails: no turn, no model call
+        copy.release()
+        let outcome = await submit.value
+        let result = await op.value
+        if importPath && gateUp { m.endMindRestore() }
+        var listed = false
+        if let id = job?.id { listed = await reg.hasEntryForTesting(handleId: id) }
+        let refused = importPath
+            ? (result.first ?? "").hasPrefix("Background jobs are still running (1 background command(s))") && result.count == 1
+            : Self.isWorkRefusal(result) && result[0].contains("1 background command(s)")
+        check("\(tag): it waits for the admitted input, then refuses because of the work it launched (job left running)",
+              gateUp && waited && job != nil && refused && listed, "gate \(gateUp) waited \(waited) result \(result) outcome \(outcome)")
+        if let id = job?.id { _ = await reg.kill(handleId: id) }
+        let settledBy = Date().addingTimeInterval(5)
+        while !(await reg.unsettledEntryIds().isEmpty) && Date() < settledBy { try? await Task.sleep(nanoseconds: 20_000_000) }
+        _ = await reg.purgeAllForWipeReporting()
+    }
+
+    /// S3-R10-1: admitted input that started a turn while the wipe waited
+    /// for it — refused before any work check.
+    @MainActor private func admittedTurnRefuses(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        m.browserSettingsAppIngress += 1
+        let waits0 = ConversationManager.admissionWaitsForTesting
+        let finished = DoneMark()
+        let op = Task { @MainActor () -> [String] in
+            defer { finished.value = true }
+            return await m.deleteAllMemory()
+        }
+        let waitBy = Date().addingTimeInterval(10)
+        while !finished.value && ConversationManager.admissionWaitsForTesting == waits0 && Date() < waitBy {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let turn = Task<Void, Never> { try? await Task.sleep(nanoseconds: 60_000_000_000) }
+        m.activeProcessingTask = turn
+        m.browserSettingsAppIngress -= 1
+        let result = await op.value
+        m.activeProcessingTask = nil
+        turn.cancel()
+        check("S3-R10-1 (admitted input started a turn): the wipe refuses",
+              Self.isWorkRefusal(result) && result[0].contains("a turn that just started"), "\(result)")
+    }
+
+    /// S3-R10-1: input that stays admitted past the drain limit (a terminal
+    /// wipe while a poll tick hangs in its fetch) refuses, nothing deleted.
+    @MainActor private func stuckIngressRefuses(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        ConversationManager.admissionDrainSecondsForTesting = 0.3
+        m._testSetBrowserSettingsPollIngress(1)
+        let result = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        m._testSetBrowserSettingsPollIngress(0)
+        ConversationManager.admissionDrainSecondsForTesting = nil
+        check("S3-R10-1 (a poll tick still in flight under a terminal wipe): the wipe refuses after the drain limit",
+              Self.isWorkRefusal(result) && result[0].contains("a message still being received"), "\(result)")
     }
 
     /// Codex stage-3 S3-R2-4: a terminal/app /upgrade whose coordinated

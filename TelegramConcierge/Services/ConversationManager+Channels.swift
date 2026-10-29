@@ -404,10 +404,14 @@ extension ConversationManager {
     /// the filesystem, so two concurrent copies can never truncate or
     /// interleave into the same file — the loser throws
     /// CopyDestinationExists and the caller picks a fresh name.
+    /// Selftests: suspends an attachment copy before it opens the source.
+    nonisolated(unsafe) static var copyRegularFileGateForTesting: (() async -> Void)?
+
     nonisolated static func copyRegularFile(
         from source: URL, to destination: URL, maxBytes: Int,
         allowEmpty: Bool = false
     ) async throws -> Int {
+        if let gate = copyRegularFileGateForTesting { await gate() }
         struct CopyError: LocalizedError {
             let message: String
             var errorDescription: String? { message }

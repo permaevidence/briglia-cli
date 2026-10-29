@@ -252,18 +252,19 @@ BREAKS = [
     ('M80 the wipe retires live entries when its join limit expires (S3-R6-1)', 'stage3', T + 'Services/BashTools.swift',
      '            if live(e) { retained += 1; continue }\n', ''),
     # Codex stage-3 rounds 7 and 9 (M81, M82, M84) are retired: the
-    # wipe-refusal rule (owner decision 2026-10-29, M85–M90) makes the claim
-    # deletion they mutated unreachable while any scope is open.
+    # wipe-refusal rule (owner decision 2026-10-29, M85–M94) refuses before
+    # the claims step whenever a scope is open, so mutating that step's own
+    # guard is no longer observable (the guard stays as a belt).
     # Codex stage-3 round 8.
     ('M83 the wipe ignores a turn whose end-of-turn sample is in progress (S3-R8-1)', 'stage3e2e', T + 'Services/FileClaims.swift',
      '    var hasOpenScopes: Bool { !openScopes().isEmpty }',
      '    var hasOpenScopes: Bool { lock.lock(); defer { lock.unlock() }; return !pending.isEmpty }'),
     # Owner decision 2026-10-29: the wipe / Mind import refuse while work runs.
     ('M85 the wipe has no refusal before it cancels work (owner 2026-10-29)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     '        if let why = await Self.multiAssistantBackgroundWorkRefusal() {\n            return ["ABORTED: " + why]\n        }\n',
+     '        if let why = await multiAssistantBusyRefusal() {\n            return ["ABORTED: " + why]\n        }\n',
      ''),
     ('M86 the wipe does not re-check at the destructive step (owner 2026-10-29)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     '        if let why = await Self.multiAssistantBackgroundWorkRefusal() {\n            await restartEmailPollingAfterAbortedWipe()\n            return ["ABORTED: " + why]\n        }\n',
+     '        if let why = await multiAssistantBusyRefusal() {\n            await restartEmailPollingAfterAbortedWipe()\n            return ["ABORTED: " + why]\n        }\n',
      ''),
     ('M87 the refusal ignores background commands (owner 2026-10-29)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
      '            let bash = await BackgroundProcessRegistry.shared.unsettledEntryIds()\n',
@@ -275,14 +276,24 @@ BREAKS = [
      '                if !ClaimScopes.shared.hasOpenScopes { return nil }\n',
      '                return nil\n'),
     ('M90 a Mind import does not refuse while work runs (owner 2026-10-29)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     '        // subagent is cancelled (owner decision 2026-10-29).\n        if let why = await Self.multiAssistantBackgroundWorkRefusal(outcome: ("", "")) { return why }\n',
+     '        // subagent is cancelled (owner decision 2026-10-29).\n        if let why = await multiAssistantBusyRefusal(outcome: ("", "")) { return why }\n',
      '        // subagent is cancelled (owner decision 2026-10-29).\n'),
     ('M91 the pre-rule behaviour: no refusal anywhere (owner 2026-10-29)', 'stage3e2e', [
-        (T + 'Services/ConversationManager+Persistence.swift', '        if let why = await Self.multiAssistantBackgroundWorkRefusal() {\n            return ["ABORTED: " + why]\n        }\n', ''),
-        (T + 'Services/ConversationManager+Persistence.swift', '        if let why = await Self.multiAssistantBackgroundWorkRefusal() {\n            await restartEmailPollingAfterAbortedWipe()\n            return ["ABORTED: " + why]\n        }\n', ''),
-        (T + 'Services/ConversationManager+Persistence.swift', '        // subagent is cancelled (owner decision 2026-10-29).\n        if let why = await Self.multiAssistantBackgroundWorkRefusal(outcome: ("", "")) { return why }\n', '        // subagent is cancelled (owner decision 2026-10-29).\n'),
-        (T + 'Services/ConversationManager+Persistence.swift', '        // import\'s point of no return.\n        if let why = await Self.multiAssistantBackgroundWorkRefusal(outcome: ("", "")) { return why }\n', '        // import\'s point of no return.\n'),
+        (T + 'Services/ConversationManager+Persistence.swift', '        if let why = await multiAssistantBusyRefusal() {\n            return ["ABORTED: " + why]\n        }\n', ''),
+        (T + 'Services/ConversationManager+Persistence.swift', '        if let why = await multiAssistantBusyRefusal() {\n            await restartEmailPollingAfterAbortedWipe()\n            return ["ABORTED: " + why]\n        }\n', ''),
+        (T + 'Services/ConversationManager+Persistence.swift', '        // subagent is cancelled (owner decision 2026-10-29).\n        if let why = await multiAssistantBusyRefusal(outcome: ("", "")) { return why }\n', '        // subagent is cancelled (owner decision 2026-10-29).\n'),
+        (T + 'Services/ConversationManager+Persistence.swift', '        // import\'s point of no return.\n        if let why = await multiAssistantBusyRefusal(outcome: ("", "")) { return why }\n', '        // import\'s point of no return.\n'),
     ]),
+    # Codex stage-3 round 10 (S3-R10-1): input admitted before the gate.
+    ('M92 the refusal does not wait for input admitted before the gate (S3-R10-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '        while browserSettingsPollIngress > ownPoll || browserSettingsAppIngress > 0 {',
+     '        while false {'),
+    ('M93 the wipe counts its own Telegram poll tick as admitted input (S3-R10-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '        let ownPoll = Self.commandCapture == nil ? min(1, browserSettingsPollIngress) : 0\n',
+     '        let ownPoll = 0\n'),
+    ('M94 a turn started by admitted input is not refused (S3-R10-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '        if isTurnActive || activeProcessingTask != nil {',
+     '        if false {'),
 ]
 
 
