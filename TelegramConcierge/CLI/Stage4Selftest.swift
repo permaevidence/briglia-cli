@@ -639,33 +639,39 @@ final class Stage4Harness {
         await waitCreation(m)
         ConversationManager.managedBotCreationHookForTesting = nil
         removeExtras(keeping: ["health"])
-        // A failed durable write keeps the update unconfirmed.
-        await m._testProcessUpdate(Self.update(34, ["text": "/newassistant Durable"]))
-        let p3 = ManagedBots.loadPending()
-        let dir = ManagedBots.directory()
-        chmod(dir.path, 0o500)
-        m.inboundDurabilityFailure = false
-        await m._testProcessUpdate(Self.created(35, bot: 9103, username: p3?.suggestedUsername ?? ""))
-        let failed = m.inboundDurabilityFailure
-        chmod(dir.path, 0o700)
-        check("G4 a claim that can't be saved is a durability failure (the update is not acknowledged)",
-              failed && ManagedBots.loadPending()?.phase == .waiting && m.managedBotRetries.count == 1)
-        m.inboundDurabilityFailure = false
-        // S4-R1-1: the stall retries it with the other durable writes; while
-        // it still fails the stall holds, once it lands the claim is there.
-        m.stalledConfirmUpdateId = 35
-        chmod(dir.path, 0o500)
-        await m.retryDurabilityStall(35)
-        let stillStalled = m.stalledConfirmUpdateId == 35
-        chmod(dir.path, 0o700)
-        api.tokens[9103] = S4FakeBotAPI.token(9103)
-        await m.retryDurabilityStall(35)
-        check("G4b the durability stall retries the managed claim before acknowledging (held while failing, claimed once it lands)",
-              stillStalled && m.stalledConfirmUpdateId == nil && m.managedBotRetries.isEmpty
-                && ManagedBots.loadPending()?.phase == .claimed && ManagedBots.loadPending()?.botId == 9103)
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        await waitCreation(m)
-        check("G4c …and the creation then runs", registry()?.record(p3?.profileId ?? "")?.state == "active" && ManagedBots.loadKnown().bots["9103"] != nil)
+        // A failed durable write keeps the update unconfirmed. (A read-only
+        // directory does not stop root, so these rows need an ordinary user;
+        // CI's root container skips them, like the other permission rows.)
+        if getuid() == 0 {
+            print("· G4/G4b/G4c skipped as root (a read-only directory doesn't stop root)")
+        } else {
+            await m._testProcessUpdate(Self.update(34, ["text": "/newassistant Durable"]))
+            let p3 = ManagedBots.loadPending()
+            let dir = ManagedBots.directory()
+            chmod(dir.path, 0o500)
+            m.inboundDurabilityFailure = false
+            await m._testProcessUpdate(Self.created(35, bot: 9103, username: p3?.suggestedUsername ?? ""))
+            let failed = m.inboundDurabilityFailure
+            chmod(dir.path, 0o700)
+            check("G4 a claim that can't be saved is a durability failure (the update is not acknowledged)",
+                  failed && ManagedBots.loadPending()?.phase == .waiting && m.managedBotRetries.count == 1)
+            m.inboundDurabilityFailure = false
+            // S4-R1-1: the stall retries it with the other durable writes; while
+            // it still fails the stall holds, once it lands the claim is there.
+            m.stalledConfirmUpdateId = 35
+            chmod(dir.path, 0o500)
+            await m.retryDurabilityStall(35)
+            let stillStalled = m.stalledConfirmUpdateId == 35
+            chmod(dir.path, 0o700)
+            api.tokens[9103] = S4FakeBotAPI.token(9103)
+            await m.retryDurabilityStall(35)
+            check("G4b the durability stall retries the managed claim before acknowledging (held while failing, claimed once it lands)",
+                  stillStalled && m.stalledConfirmUpdateId == nil && m.managedBotRetries.isEmpty
+                    && ManagedBots.loadPending()?.phase == .claimed && ManagedBots.loadPending()?.botId == 9103)
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            await waitCreation(m)
+            check("G4c …and the creation then runs", registry()?.record(p3?.profileId ?? "")?.state == "active" && ManagedBots.loadKnown().bots["9103"] != nil)
+        }
         // S4-R1-3: the bot record can't be saved → the claim is kept, retry finishes.
         await m._testProcessUpdate(Self.update(40, ["text": "/newassistant Recorded"]))
         let p4 = ManagedBots.loadPending()
@@ -784,6 +790,18 @@ final class Stage4Harness {
               refused.hasPrefix("✖") && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx"
                 && ManagedBots.loadRotation() == nil && !m.managedRotationHold, refused)
         try? ManagedBots.saveRotation(nil)
+        // A refusal before any remote change (S4-R3-2): answered at once, no
+        // lookup of a token that cannot have changed.
+        var lookups = 0
+        ManagedBotRotation.runOverrideForTesting = { action, _, _ in
+            if action == .current { lookups += 1 }
+            throw ManagedBotRotation.Failure(description: "this bot wasn't created with /newassistant for this assistant", code: "not_known")
+        }
+        let definitive = await m.rotateManagedToken(recovering: false)
+        ManagedBotRotation.runOverrideForTesting = nil
+        check("R6b a definitive refusal is reported as such, with no token lookup and nothing pending",
+              lookups == 0 && definitive.contains("wasn't created with /newassistant") && ManagedBots.loadRotation() == nil && !m.managedRotationHold,
+              "lookups=\(lookups) \(definitive)")
         func offsetFile() -> [String: Any]? {
             (try? JSONSerialization.jsonObject(with: FileManager.default.contents(atPath: StoragePaths.dataRoot.appendingPathComponent("telegram_offset.json").path) ?? Data())) as? [String: Any]
         }
