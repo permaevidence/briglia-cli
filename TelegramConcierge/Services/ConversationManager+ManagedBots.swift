@@ -524,7 +524,8 @@ extension ConversationManager {
     }
 
     /// Poll boundary: while intake is held for a rotation that couldn't be
-    /// saved, retry the recovery every 30 s.
+    /// completed, retry it every 30 s. The owner is told when the reason
+    /// changes (locally, and through the bot when one can reach them).
     func retryManagedRotationHoldIfDue(now: Date = Date()) async {
         guard managedRotationHold, !managedRotationInProgress, !isRestoringMind, !admissionPaused else { return }
         if let last = managedRotationLastRetry, now.timeIntervalSince(last) < 30 { return }
@@ -533,6 +534,15 @@ extension ConversationManager {
         defer { managedRotationInProgress = false }
         let outcome = await rotateManagedToken(recovering: true)
         if !managedRotationHold { await notifyBotSwitchProgress(outcome) }
+    }
+
+    /// Release a hold that no longer applies (its bot was replaced, or there
+    /// is no rotation left to complete) and register Telegram again.
+    func endManagedRotationHold() async {
+        guard managedRotationHold else { return }
+        managedRotationHold = false
+        managedRotationHoldReason = nil
+        await updateTelegramChannelRegistration()
     }
 
     /// Startup: an intent left by an interrupted rotation is completed before
@@ -545,97 +555,96 @@ extension ConversationManager {
         print("[ManagedBots] rotation recovery: \(outcome)")
     }
 
-    /// The transaction (§28.6 S4-P4, Codex stage-4 S4-R1-2): same-bot
+    /// The transaction (§28.6 S4-P4, Codex stage-4 S4-R1-2/R2/R3): same-bot
     /// reservation; a durable intent carrying the confirmed cursor BEFORE the
     /// remote call; replace (or recover the live token); the cursor written
     /// under the new token (checked) BEFORE the secret; the secret; the
     /// in-memory token switched with the cursor kept; the intent cleared
-    /// last. Recovery (at startup, before Telegram is registered) repeats the
-    /// cursor write from the intent, so neither a restart nor a crash between
-    /// the writes resumes from 0.
+    /// last. A refusal before any remote change drops the intent. If the
+    /// outcome is uncertain, the stored token is checked with getMe: still
+    /// valid → nothing changed; revoked or unknown → Telegram is held (never
+    /// polled with an unsaved or revoked token) and the recovery retried,
+    /// with the reason shown to the owner.
     func rotateManagedToken(recovering: Bool) async -> String {
         let current = ownBotToken
         guard let idText = AssistantRegistry.normalize(.bot, current), let botId = Int64(idText) else {
+            await endManagedRotationHold()
             return "✖ This assistant has no Telegram bot to give a new token."
+        }
+        // The owner's chat, from the stored pairing (registration may be off
+        // during a hold or before startup registration; S4-R3-1).
+        let owner = Int64((KeychainHelper.load(key: KeychainHelper.telegramChatIdKey) ?? "").trimmingCharacters(in: .whitespaces))
+        let profile = AssistantProfile.selectedName
+        var intent: ManagedBots.RotationIntent
+        if recovering {
+            guard let saved = ManagedBots.loadRotation(), saved.botId == botId else {
+                // Nothing (left) to complete for this bot (S4-R3-3).
+                try? ManagedBots.saveRotation(nil)
+                await endManagedRotationHold()
+                return "token unchanged"
+            }
+            intent = saved
+        }
+        else {
+            let cursor = await telegramService.confirmedCursor()
+            intent = ManagedBots.RotationIntent(botId: botId, startedAt: Date(), lastUpdateId: cursor.lastUpdateId, lastUpdateAt: cursor.lastUpdateAt)
         }
         let ticket: IdentityChange.Ticket
         do { ticket = try IdentityChange.begin(kind: .bot, rawValue: current, mode: .assistant) } catch {
             return "✖ \(error)"
         }
-        let profile = AssistantProfile.selectedName
-        var intent: ManagedBots.RotationIntent
-        if recovering, let saved = ManagedBots.loadRotation(), saved.botId == botId {
-            intent = saved
-        } else if recovering {
-            ticket.abort()
-            try? ManagedBots.saveRotation(nil)   // not this bot's intent any more
-            return "token unchanged"
-        } else {
-            let cursor = await telegramService.confirmedCursor()
-            intent = ManagedBots.RotationIntent(botId: botId, startedAt: Date(), lastUpdateId: cursor.lastUpdateId, lastUpdateAt: cursor.lastUpdateAt)
+        if !recovering {
             do { try ManagedBots.saveRotation(intent) } catch {
                 ticket.abort()
                 return "✖ Couldn't record the token change (\(error.localizedDescription)); nothing was changed."
             }
         }
         var newToken: String?
-        var failure = ""
+        var reason = ""
         if !recovering {
             do { newToken = try await Task.detached { try ManagedBotRotation.run(.replace, botId: botId, profile: profile) }.value }
-            catch { failure = "\(error)" }
+            catch let failure as ManagedBotRotation.Failure where failure.definitive {
+                // Refused before any remote change: the token is the same.
+                ticket.abort()
+                try? ManagedBots.saveRotation(nil)
+                return "✖ \(failure.description)."
+            } catch { reason = "\(error)" }
         }
         if newToken == nil {
             // Lost answer, crash or recovery: ask for the CURRENT token (no
             // second revocation), a few times.
             for attempt in 0..<3 {
-                if attempt > 0 { try? await Task.sleep(nanoseconds: 1_000_000_000) }
-                if let t = try? await Task.detached(operation: { try ManagedBotRotation.run(.current, botId: botId, profile: profile) }).value {
-                    newToken = t
-                    break
-                }
+                if attempt > 0 { try? await Task.sleep(nanoseconds: Self.managedRotationLookupPause) }
+                do { newToken = try await Task.detached(operation: { try ManagedBotRotation.run(.current, botId: botId, profile: profile) }).value; break }
+                catch let failure as ManagedBotRotation.Failure { reason = failure.description; if failure.definitive { break } }
+                catch { reason = "\(error)" }
             }
         }
         guard let newToken else {
             ticket.abort()
-            if recovering {
-                // The stored token may be revoked: hold intake and retry.
-                managedRotationHold = true
-                return "✖ Couldn't recover this bot's token from the first assistant (is Telegram reachable?). Telegram is paused for this assistant; I retry every 30 s."
+            // Did anything change remotely? The stored token answers that.
+            switch await storedTokenStatus(current) {
+            case .valid:
+                try? ManagedBots.saveRotation(nil)
+                await endManagedRotationHold()
+                return recovering ? "token unchanged" : "✖ The first assistant couldn't give a new token (\(reason)); the current one still works."
+            case .revoked, .unknown:
+                return await enterRotationHold(reason: reason, newToken: nil, owner: owner)
             }
-            // Nothing is known to have changed remotely: keep the intent so a
-            // restart re-checks (harmless when the token is still valid).
-            return "✖ The first assistant couldn't give a new token (\(failure)). If this assistant stops answering, restart it — it re-checks the token at startup."
         }
         if newToken == current {
             ticket.abort()
             try? ManagedBots.saveRotation(nil)
-            let wasHeld = managedRotationHold
-            managedRotationHold = false
-            if wasHeld { await updateTelegramChannelRegistration() }
-            return recovering ? "token unchanged" : "✖ Telegram didn't issue a new token (\(failure)); the current one still works."
-        }
-        // A storage failure from here on (S4-R2-1/R2-2): the new token is NOT
-        // used in memory. Telegram intake is held (nothing processed with
-        // either token, so the intent's cursor stays the latest progress) and
-        // the recovery is retried at the poll boundary; the owner hears it
-        // from the new bot directly.
-        func hold(_ what: String) async -> String {
-            ticket.abort()
-            let wasConfigured = isTelegramConfigured
-            managedRotationHold = true
-            if wasConfigured { await updateTelegramChannelRegistration() }
-            if let owner = pairedChatId {
-                _ = try? await ManagedBotAPI.sendMessage(token: newToken, chatId: Int64(owner),
-                    text: "⚠️ I got a new token for this bot but couldn't save \(what) (storage problem). Telegram is paused for me until it can be saved; I retry every 30 s.")
-            }
-            return "⚠️ Telegram issued a new token but I couldn't save \(what); Telegram is paused for this assistant and the change is retried every 30 s."
+            await endManagedRotationHold()
+            return recovering ? "token unchanged" : "✖ Telegram didn't issue a new token (\(reason)); the current one still works."
         }
         // Cursor first (same bot, same update ids), checked; then the secret.
         do {
             if let fault = Self.rotationCursorFaultForTesting { try fault() }
             try TelegramBotService.writeOffsetState(forToken: newToken, lastUpdateId: intent.lastUpdateId, lastUpdateAt: intent.lastUpdateAt)
         } catch {
-            return await hold("the update position")
+            ticket.abort()
+            return await enterRotationHold(reason: "the update position could not be saved (\(error.localizedDescription))", newToken: newToken, owner: owner)
         }
         do {
             try ticket.commit {
@@ -643,14 +652,49 @@ extension ConversationManager {
                 try KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: newToken)
             }
         } catch {
-            return await hold("the token")
+            ticket.abort()
+            return await enterRotationHold(reason: "the token could not be saved (\(error.localizedDescription))", newToken: newToken, owner: owner)
         }
         ticket.finish()
         managedRotationHold = false
+        managedRotationHoldReason = nil
         await telegramService.rebindSameBot(token: newToken)
         await updateTelegramChannelRegistration()
         try? ManagedBots.saveRotation(nil)
         return "✔ New token for this bot: the old one no longer works. Nothing else changed."
+    }
+
+    nonisolated(unsafe) static var managedRotationLookupPause: UInt64 = 1_000_000_000
+
+    enum StoredTokenStatus { case valid, revoked, unknown }
+
+    /// getMe with the stored token: answered → valid; 401/404 → revoked;
+    /// anything else (network) → unknown.
+    func storedTokenStatus(_ token: String) async -> StoredTokenStatus {
+        do { _ = try await ManagedBotAPI.getMe(token: token); return .valid }
+        catch let e as ManagedBotAPI.APIError where e.status == 401 || e.status == 404 { return .revoked }
+        catch { return .unknown }
+    }
+
+    /// Hold Telegram (no polling with either token) with the reason; tell the
+    /// owner through the new bot when there is one, and locally. The hint is
+    /// the way out when retries can't succeed.
+    func enterRotationHold(reason: String, newToken: String?, owner: Int64?) async -> String {
+        let hint = "If this keeps happening: stop this assistant, give it a new bot from @BotFather in its settings (Telegram), and start it again."
+        let text = "⚠️ This assistant's Telegram is paused: its bot's token change could not be completed (\(reason)). I retry every 30 s. \(hint)"
+        let changed = managedRotationHoldReason != reason
+        managedRotationHoldReason = reason
+        if !managedRotationHold {
+            managedRotationHold = true
+            if isTelegramConfigured { await updateTelegramChannelRegistration() }
+        }
+        if changed {
+            showMaintenanceNotice(text)
+            if let newToken, let owner {
+                _ = try? await ManagedBotAPI.sendMessage(token: newToken, chatId: owner, text: text)
+            }
+        }
+        return text
     }
 
     // MARK: - Bot identity cache and the first hello
@@ -690,6 +734,9 @@ extension ConversationManager {
 
     /// `/status` line for the default assistant (several assistants).
     func managedBotStatusLine() -> String? {
+        if managedRotationHold {
+            return "Telegram paused: this bot's token change could not be completed (\(managedRotationHoldReason ?? "unknown")); retried every 30 s. If it keeps failing, stop this assistant and give it a new bot in its settings."
+        }
         guard managedBotsActiveHere else { return nil }
         var line = "Telegram bot management: "
         switch managedBotCapability {
@@ -713,7 +760,14 @@ extension ConversationManager {
 /// separate and never echoed.
 enum ManagedBotRotation {
     enum Action: String { case replace = "replace-token", current = "current-token" }
-    struct Failure: Error, CustomStringConvertible { let description: String }
+    struct Failure: Error, CustomStringConvertible {
+        let description: String
+        /// The first assistant's refusal code (nil = no answer / unknown).
+        var code: String? = nil
+        /// Refused BEFORE any remote change (Codex stage-4 S4-R3-2): the
+        /// token certainly stayed the same.
+        var definitive: Bool { code.map { ["not_known", "manager_changed", "no_manager", "usage"].contains($0) } ?? false }
+    }
 
     nonisolated(unsafe) static var executableOverride: String?
     static let maxOutputBytes = 4096
@@ -753,7 +807,7 @@ enum ManagedBotRotation {
         if p.terminationStatus == 0, let token = json?["token"] as? String, ManagedBots.looksLikeToken(token, botId: botId) {
             return token
         }
-        let code = json?["code"] as? String ?? ""
-        throw Failure(description: messages[code] ?? "the first assistant couldn't change the token")
+        let code = json?["code"] as? String
+        throw Failure(description: messages[code ?? ""] ?? "the first assistant couldn't change the token", code: code)
     }
 }

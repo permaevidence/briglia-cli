@@ -1135,6 +1135,13 @@ extension ConversationManager {
     /// refuse to build its request with the new token — checked at
     /// credential capture), then adopt the new bot.
     func cutOverTelegramBot(to token: String) async {
+        // A held managed-bot token change belonged to the old bot (Codex
+        // stage-4 S4-R3-3): it ends with this switch.
+        if managedRotationHold || ManagedBots.loadRotation() != nil {
+            try? ManagedBots.saveRotation(nil)
+            managedRotationHold = false
+            managedRotationHoldReason = nil
+        }
         parkedOutbound.removeAll { $0.address.kind == .telegram }
         NoticeChannelGenerations.bump(.telegram)
         invalidateNoticeSeries(kind: .telegram)

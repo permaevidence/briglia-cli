@@ -1118,6 +1118,7 @@ class ConversationManager: ObservableObject {
     /// so no progress can be rewound — and the recovery is retried at the
     /// poll boundary until it completes.
     var managedRotationHold = false
+    var managedRotationHoldReason: String?
     var managedRotationLastRetry: Date?
     nonisolated(unsafe) static var rotationSecretFaultForTesting: (() throws -> Void)?
     nonisolated(unsafe) static var rotationCursorFaultForTesting: (() throws -> Void)?

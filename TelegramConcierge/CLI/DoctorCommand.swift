@@ -424,6 +424,12 @@ struct Doctor: AsyncParsableCommand {
             for line in multiLines {
                 if line.problem { check(line.text, ok: false, hint: line.hint) } else { note(line.text) }
             }
+            // Stage 4 (Codex S4-R2): a managed-bot token change waiting to be
+            // saved holds this assistant's Telegram until it completes.
+            if let intent = ManagedBots.loadRotation() {
+                check("a new token for this assistant's bot is waiting to be saved (since \(intent.startedAt)); Telegram is paused until it is", ok: false,
+                      hint: "free disk space and restart this assistant; if its bot was made by your first assistant's previous bot, give it a new bot from @BotFather in its settings (Telegram) — that ends the wait")
+            }
             // Stage 4 (§28.4): can the default bot create assistants
             // (/newassistant), and were the managed bots made by this bot.
             if AssistantProfile.isDefault {

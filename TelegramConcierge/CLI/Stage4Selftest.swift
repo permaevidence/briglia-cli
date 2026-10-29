@@ -195,6 +195,7 @@ final class Stage4Harness {
         AssistantControl.startOverride = { [weak self] p in self?.startedProfiles.append(p); return "started" }
         AssistantControl.stopOverride = { _ in "stopped" }
         ConversationManager.managedBotTokenRetryDelays = [0, 0, 0]
+        ConversationManager.managedRotationLookupPause = 0
         if section("units") { unitsSection() }
         if section("name") { nameSection() }
         if section("supervisor") { supervisorSection() }
@@ -652,13 +653,16 @@ final class Stage4Harness {
         m.inboundDurabilityFailure = false
         // S4-R1-1: the stall retries it with the other durable writes; while
         // it still fails the stall holds, once it lands the claim is there.
+        m.stalledConfirmUpdateId = 35
         chmod(dir.path, 0o500)
-        let stillFailing = m.retryManagedBotWrites()
+        await m.retryDurabilityStall(35)
+        let stillStalled = m.stalledConfirmUpdateId == 35
         chmod(dir.path, 0o700)
         api.tokens[9103] = S4FakeBotAPI.token(9103)
-        let landed = m.retryManagedBotWrites()
+        await m.retryDurabilityStall(35)
         check("G4b the durability stall retries the managed claim before acknowledging (held while failing, claimed once it lands)",
-              !stillFailing && landed && m.managedBotRetries.isEmpty && ManagedBots.loadPending()?.phase == .claimed && ManagedBots.loadPending()?.botId == 9103)
+              stillStalled && m.stalledConfirmUpdateId == nil && m.managedBotRetries.isEmpty
+                && ManagedBots.loadPending()?.phase == .claimed && ManagedBots.loadPending()?.botId == 9103)
         try? await Task.sleep(nanoseconds: 200_000_000)
         await waitCreation(m)
         check("G4c …and the creation then runs", registry()?.record(p3?.profileId ?? "")?.state == "active" && ManagedBots.loadKnown().bots["9103"] != nil)
@@ -738,6 +742,18 @@ final class Stage4Harness {
         guard let rec = registry()?.record("rot") else { check("R0 rotation fixture", false); return }
         var known = ManagedBots.loadKnown()
         check("R1 grant: the assistant made for the bot", ManagedBotGrant.check(botId: botId, profile: "rot", managerBotId: api.managerId, known: known) == .allowed)
+        // Another assistant with the same generation and bot fingerprint in a
+        // scratch registry: only the profile named in the grant may ask.
+        let scratchReg = AssistantRegistry.Paths(root: scratch("grant"))
+        let gen = registry()?.record("rot")?.generation ?? "g"
+        _ = try? AssistantRegistry.withLock(scratchReg) { doc in
+            var a = AssistantRegistry.newRecord(name: "rot", displayName: "Rot"); a.generation = gen; a.bot.current = AssistantRegistry.digest(.bot, "\(botId):x")
+            var b = AssistantRegistry.newRecord(name: "other", displayName: "Other"); b.generation = gen; b.bot.current = AssistantRegistry.digest(.bot, "\(botId):x")
+            doc = AssistantRegistry.Document(version: 1, records: [a, b])
+        }
+        check("R2a grant: an assistant the bot was not made for is refused even when everything else matches",
+              ManagedBotGrant.check(botId: botId, profile: "other", managerBotId: api.managerId, known: known, registryPaths: scratchReg) == .refused("not_known")
+                && ManagedBotGrant.check(botId: botId, profile: "rot", managerBotId: api.managerId, known: known, registryPaths: scratchReg) == .allowed)
         check("R2 grant: another assistant, an unknown bot, another manager are refused",
               ManagedBotGrant.check(botId: botId, profile: "work", managerBotId: api.managerId, known: known) == .refused("not_known")
                 && ManagedBotGrant.check(botId: 1, profile: "rot", managerBotId: api.managerId, known: known) == .refused("not_known")
@@ -764,8 +780,9 @@ final class Stage4Harness {
         // `--for default` is not a usable extra name: the child refuses — the
         // rotation path reports it and nothing changes.
         let refused = await m.rotateManagedToken(recovering: false)
-        check("R6 a rotation the first assistant refuses changes nothing (token kept, intent kept for the restart check)",
-              refused.hasPrefix("✖") && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx", refused)
+        check("R6 a rotation the first assistant refuses (before any remote change) changes nothing and leaves nothing pending",
+              refused.hasPrefix("✖") && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx"
+                && ManagedBots.loadRotation() == nil && !m.managedRotationHold, refused)
         try? ManagedBots.saveRotation(nil)
         func offsetFile() -> [String: Any]? {
             (try? JSONSerialization.jsonObject(with: FileManager.default.contents(atPath: StoragePaths.dataRoot.appendingPathComponent("telegram_offset.json").path) ?? Data())) as? [String: Any]
@@ -830,8 +847,10 @@ final class Stage4Harness {
         ConversationManager.rotationSecretFaultForTesting = { throw AssistantControl.ControlError("disk full") }
         let first = await held.rotateManagedToken(recovering: false)
         await held._svRegisterTelegram()   // any later registration keeps the hold
-        check("R11 the new token can't be saved: Telegram is held (not polled with either token), the intent kept",
-              first.contains("paused") && held.managedRotationHold && !held.isTelegramConfigured
+        let warned = api.sent.contains { $0.method == "sendMessage" && $0.token == api.tokens[myBot] && ($0.body["chat_id"] as? NSNumber)?.int64Value == Self.ownerId
+            && ($0.body["text"] as? String ?? "").contains("paused") }
+        check("R11 the new token can't be saved: Telegram is held (not polled with either token), the intent kept, the owner warned through the new bot",
+              first.contains("paused") && held.managedRotationHold && !held.isTelegramConfigured && warned
                 && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == base && ManagedBots.loadRotation()?.lastUpdateId == 120, first)
         let stillFailing = held.managedRotationHold
         ConversationManager.rotationSecretFaultForTesting = nil
@@ -848,12 +867,45 @@ final class Stage4Harness {
         let boot = ConversationManager()
         _ = await boot.rotateManagedToken(recovering: true)
         await boot._svRegisterTelegram()
-        check("R13 a recovery that can't save at startup keeps Telegram held (the revoked token is not reinstalled)",
-              boot.managedRotationHold && !boot.isTelegramConfigured && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == current2)
+        let bootWarned = api.sent.contains { $0.method == "sendMessage" && $0.token == S4FakeBotAPI.token(myBot, 9) && ($0.body["chat_id"] as? NSNumber)?.int64Value == Self.ownerId }
+        check("R13 a recovery that can't save at startup keeps Telegram held (the revoked token is not reinstalled) and warns the owner (stored pairing)",
+              boot.managedRotationHold && !boot.isTelegramConfigured && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == current2 && bootWarned)
         ConversationManager.rotationCursorFaultForTesting = nil
         await boot.retryManagedRotationHoldIfDue(now: Date().addingTimeInterval(60))
         check("R14 …and completes once storage works (cursor 130)", !boot.managedRotationHold && boot.isTelegramConfigured
               && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == S4FakeBotAPI.token(myBot, 9) && offsetFile()?["lastUpdateId"] as? Int == 130)
+        // S4-R3-2: a definitive refusal at restart (the first assistant's bot
+        // changed). With the stored token still working nothing changed: no
+        // hold, the intent dropped, Telegram on.
+        ManagedBotRotation.runOverrideForTesting = { _, _, _ in
+            throw ManagedBotRotation.Failure(description: "this bot was created by your first assistant's previous bot", code: "manager_changed")
+        }
+        try? KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: base)
+        try? ManagedBots.saveRotation(ManagedBots.RotationIntent(botId: myBot, startedAt: Date(), lastUpdateId: 5, lastUpdateAt: nil))
+        let refusedBoot = ConversationManager()
+        _ = await refusedBoot.rotateManagedToken(recovering: true)
+        await refusedBoot._svRegisterTelegram()
+        check("R15 a definitive refusal at restart with the stored token still working: no hold, nothing pending, Telegram on",
+              !refusedBoot.managedRotationHold && refusedBoot.isTelegramConfigured && ManagedBots.loadRotation() == nil)
+        // …with the stored token revoked: held, with the actual reason and the way out.
+        let revokedOld = S4FakeBotAPI.token(9500, 1)
+        api.tokens[9500] = S4FakeBotAPI.token(9500, 2)
+        try? KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: revokedOld)
+        try? ManagedBots.saveRotation(ManagedBots.RotationIntent(botId: 9500, startedAt: Date(), lastUpdateId: 5, lastUpdateAt: nil))
+        let stuck = ConversationManager()
+        let said = await stuck.rotateManagedToken(recovering: true)
+        await stuck._svRegisterTelegram()
+        check("R16 …with the stored token revoked: held, the reason and the way out (new bot in its settings) are shown",
+              stuck.managedRotationHold && !stuck.isTelegramConfigured && said.contains("previous bot") && said.contains("new bot from @BotFather")
+                && (stuck.managedBotStatusLine() ?? "").contains("previous bot"), said)
+        // S4-R3-3: switching that held assistant to another bot ends the hold.
+        let other = S4FakeBotAPI.token(9600)
+        api.tokens[9600] = other
+        try? KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: other)
+        await stuck.cutOverTelegramBot(to: other)
+        check("R17 a successful switch to another bot ends the hold (intent gone, the new bot polled)",
+              !stuck.managedRotationHold && ManagedBots.loadRotation() == nil && stuck.isTelegramConfigured)
+        ManagedBotRotation.runOverrideForTesting = nil
         try? KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: base)
         try? TelegramBotService.writeOffsetState(forToken: base, lastUpdateId: 0, lastUpdateAt: nil)
         api.tokens[myBot] = nil
