@@ -545,6 +545,9 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         env["XDG_DATA_HOME"] = root.appendingPathComponent("data").path
         env["BRIGLIA_REPLACEMENT_WAIT_SECONDS"] = "1"
         env.removeValue(forKey: "BRIGLIA_PROFILE")
+        // A plain single-assistant installation (Codex's fixture): no
+        // experimental switch, so entry creates no member lease or root.
+        env[AssistantProfile.experimentalKey] = ""
         let child = Task.detached { () -> (Int32, String) in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
