@@ -333,6 +333,9 @@ enum SetupAPICore {
         if let chatId = KeychainHelper.load(key: KeychainHelper.telegramChatIdKey), !chatId.isEmpty {
             telegram["chat_id"] = chatId
         }
+        if let username = KeychainHelper.load(key: KeychainHelper.telegramBotUsernameKey), !username.isEmpty {
+            telegram["bot_username"] = username
+        }
         payload["telegram"] = telegram
 
         let storedBackend = defaults.string(forKey: WebSearchBackend.selectionKey)
@@ -622,6 +625,10 @@ enum SetupAPICore {
                 try applyIdentity(section)
                 applied.append("identity")
             }
+            if let section = request["assistant"] as? [String: Any] {
+                try applyAssistantName(section)
+                applied.append("assistant")
+            }
             if let section = request["telegram"] as? [String: Any] {
                 try applyTelegram(section)
                 applied.append("telegram")
@@ -694,7 +701,7 @@ enum SetupAPICore {
             guard !applied.isEmpty else {
                 throw APIError(code: "empty_request",
                                message: "no recognized sections — expected any of: provider, server, openai, "
-                               + "serper, jina, identity, telegram, email_calendar, "
+                               + "serper, jina, identity, assistant, telegram, email_calendar, "
                                + "web_search_backend, toolchain, mark_complete, openrouter_pin")
             }
         } catch let error as APIError {
@@ -1208,12 +1215,28 @@ enum SetupAPICore {
         guard let name = nonEmptyString(section["user_name"]) else {
             throw APIError(code: "missing_field", message: "identity.user_name is required")
         }
+        // The assistant's own name defaults to "Bree" (same as the wizard) but
+        // a name the user chose (menu, /assistantname, MULTI_ASSISTANT_PLAN
+        // §28.2) is never overwritten by saving the user's name.
+        var batch: [String: String?] = [KeychainHelper.userNameKey: name]
+        if (KeychainHelper.load(key: KeychainHelper.assistantNameKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            batch[KeychainHelper.assistantNameKey] = AssistantName.defaultName
+        }
         do {
-            try KeychainHelper.saveBatch([
-                KeychainHelper.userNameKey: name,
-                KeychainHelper.assistantNameKey: "Bree",  // fixed, same as the wizard
-            ])
+            try KeychainHelper.saveBatch(batch)
         } catch { throw saveFailed(error) }
+    }
+
+    /// `{"assistant": {"name": "Work"}}`: the assistant's own name (§28.2),
+    /// unique among the assistants on this computer; refused while another
+    /// process runs this assistant (rename it there).
+    private static func applyAssistantName(_ section: [String: Any]) throws {
+        guard let name = nonEmptyString(section["name"]) else {
+            throw APIError(code: "missing_field", message: "assistant.name is required")
+        }
+        do { try AssistantName.set(name) } catch let refusal as AssistantName.Refusal {
+            throw APIError(code: "name_refused", message: refusal.description)
+        } catch { throw identityRefused(error) }
     }
 
     /// A bot change through setup-api (menu, phone app) inside a running

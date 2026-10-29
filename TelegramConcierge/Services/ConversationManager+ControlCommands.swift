@@ -59,6 +59,11 @@ extension ConversationManager {
         if let address = telegramAddress {
             noteUserActivity(on: address)
         }
+        // Stage 4 (§28.6 S4-P2): the "use this bot?" confirmation.
+        if managedBotsActiveHere, ManagedBots.parseConfirm(query.data ?? "") != nil {
+            await handleManagedBotConfirmCallback(query, menuMessage: menuMessage)
+            return
+        }
         guard let action = TelegramCommandMenu.decode(query.data ?? "") else {
             // A keyboard from another build or a corrupted payload: say so
             // in place, no chat message.
@@ -251,7 +256,10 @@ extension ConversationManager {
             await handleBoardCommand()
             return true
         case "/commands", "/comandi":
-            try? await sendText(ChatCommandRegistry.commandsListText())
+            var list = ChatCommandRegistry.commandsListText()
+            // Several assistants (§28): listed only while they are available.
+            if CoordinationMode.active { list += "\n\n" + ChatCommandRegistry.assistantsCommandLines(isDefault: AssistantProfile.isDefault) }
+            try? await sendText(list)
             return true
         case "/continua", "/continue":
             await sendPendingContinuationChunk()
@@ -309,6 +317,16 @@ extension ConversationManager {
             return true
         case "/setname":
             await handleSetNameCommand(argument: commandArgument(from: text))
+            return true
+        case "/assistantname", "/nomeassistente":
+            // Several assistants (§28.2): hidden until coordination is active,
+            // so a never-multi install keeps today's behaviour for this text.
+            guard CoordinationMode.active else { return false }
+            await handleAssistantNameCommand(argument: commandArgument(from: text))
+            return true
+        case "/newassistant", "/nuovoassistente":
+            guard CoordinationMode.active else { return false }
+            await handleNewAssistantCommand(argument: commandArgument(from: text))
             return true
         case "/rotateaffinity":
             await handleRotateAffinityCommand()
@@ -883,6 +901,11 @@ extension ConversationManager {
     /// atomic credential write at a poll-loop boundary.
     private func handleSwitchBotCommand(argument: String) async {
         guard replyAddress != nil else { return }
+        // Stage 4 (§28.6 S4-P4): a new token for this same managed bot.
+        if CoordinationMode.active, Self.managedRotationWords.contains(argument.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) {
+            await handleManagedBotRotationRequest()
+            return
+        }
         let action = BotSwitchFlow.decide(
             argument: argument,
             hasPending: pendingBotSwitch != nil,
@@ -1101,7 +1124,7 @@ extension ConversationManager {
     /// Discovery progress reaches the user outside any command window: chat
     /// surfaces via the normal reply path, the terminal via the maintenance
     /// notice line (sendText no-ops for the .app address).
-    private func notifyBotSwitchProgress(_ text: String) async {
+    func notifyBotSwitchProgress(_ text: String) async {
         showMaintenanceNotice(text)
         try? await sendText(text)
     }

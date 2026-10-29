@@ -99,6 +99,17 @@ enum ChatCommandRegistry {
         }
     }
 
+    /// Several assistants (MULTI_ASSISTANT_PLAN §28): appended to /commands
+    /// only while coordination is active, so the listing is unchanged otherwise.
+    static func assistantsCommandLines(isDefault: Bool) -> String {
+        var lines = ["Assistants:",
+                     "/assistantname — Show or change this assistant's own name (asks for confirmation)",
+                     "/board — What the other assistants are working on"]
+        if isDefault { lines.append("/newassistant — Create another assistant with its own Telegram bot, from here ([Name] | cancel | retry)") }
+        else { lines.append("/switchbot newtoken — Give this assistant's bot a new token (assistants made with /newassistant)") }
+        return lines.joined(separator: "\n")
+    }
+
     /// Body of the /commands reply: every public command, grouped.
     static func commandsListText() -> String {
         var lines = ["Briglia commands:"]

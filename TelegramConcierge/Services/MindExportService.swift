@@ -548,12 +548,16 @@ actor MindExportService {
         // deletes the old value and an empty description map still overwrites,
         // so a fresh/lite backup can't inherit the previous Mind's cached
         // file memories or name.
-        try KeychainHelper.saveBatch([
-            KeychainHelper.assistantNameKey: config.persona.assistantName,
+        // With several assistants the assistant's name belongs to the
+        // assistant (unique, in the registry), not to the memory: an import
+        // keeps the current one (§28.6 S4-P6). One assistant: unchanged.
+        var batch: [String: String?] = [
             KeychainHelper.userNameKey: config.persona.userName,
             KeychainHelper.userContextKey: config.persona.userContext,
             KeychainHelper.structuredUserContextKey: config.persona.structuredUserContext,
-        ])
+        ]
+        if !CoordinationMode.multi { batch[KeychainHelper.assistantNameKey] = config.persona.assistantName }
+        try KeychainHelper.saveBatch(batch)
 
         try FileDescriptionsStore.storeData(try JSONEncoder().encode(config.fileDescriptions))
     }

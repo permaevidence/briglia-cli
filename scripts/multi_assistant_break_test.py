@@ -352,6 +352,58 @@ BREAKS = [
         (T + 'Services/ConversationManager+Inbound.swift', '        if isRestoringMind && Self.multiAssistantGateApplies {\n            archiveRecoveryDeferredByRestoreGate = true',
          '        if false {\n            archiveRecoveryDeferredByRestoreGate = true'),
     ]),
+    # Stage 4 (MULTI_ASSISTANT_PLAN §28, §28.6): Assistants page, one name, managed bots.
+    ("M113 a created bot from someone other than the paired owner is accepted", "s4:units", T + "Services/ManagedBots.swift",
+     "        guard let ownerId, event.senderId == ownerId else { return .ignore(\"not sent by the paired owner\") }",
+     "        guard let ownerId else { return .ignore(\"not sent by the paired owner\") }"),
+    ("M114 an expired /newassistant request still accepts a bot", "s4:units", T + "Services/ManagedBots.swift",
+     "        return p.phase == .claimed ? age < claimedTTL : age < pendingTTL",
+     "        _ = age; return true"),
+    ("M115 a bot that already is an assistant is taken again", "s4:units", T + "Services/ManagedBots.swift",
+     "        if known.bots[String(event.botId)] != nil { return .ignore(\"this bot is already an assistant\") }",
+     "        _ = known"),
+    ("M116 any unknown bot of the owner is claimed without confirmation", "s4:managed", T + "Services/ManagedBots.swift",
+     "            if let u = event.botUsername, u.lowercased() == pending.suggestedUsername.lowercased() { return .claim }\n            return .askConfirmation",
+     "            return .claim"),
+    ("M117 a claim that can't be saved is acknowledged anyway", "s4:gates", T + "Services/ConversationManager+ManagedBots.swift",
+     "            } catch {\n                inboundDurabilityFailure = true\n                return\n            }\n            if !startManagedBotCreationIfPossible() {",
+     "            } catch {\n                return\n            }\n            if !startManagedBotCreationIfPossible() {"),
+    ("M118 the assistant is activated before its settings and bot are written", "s4:create", T + "CLI/AssistantControl.swift",
+     "        do {\n            if let hook = afterProvisionalForTesting { try await hook(r.profile) }",
+     "        try? pending.activate(autostart: autostart)\n        do {\n            if let hook = afterProvisionalForTesting { try await hook(r.profile) }"),
+    ("M119 a provisional assistant admits any member", "s4:create", T + "CLI/MemberEntry.swift",
+     "            guard record.state == \"active\" || provisioningAdmits(record, role: role) else {",
+     "            guard record.state == \"active\" || record.state == \"adding\" else {"),
+    ("M120 a creation in progress is not counted by the wipe/import check", "s4:gates", T + "Services/ConversationManager+Persistence.swift",
+     "        if managedBotCreationTask != nil || managedBotCreationOwed {\n            return Self.busyMessage(\"a new assistant being created\", outcome: outcome)",
+     "        if managedBotCreationTask != nil && false {\n            return Self.busyMessage(\"a new assistant being created\", outcome: outcome)"),
+    ("M121 a creation starts while the restore gate is up", "s4:gates", T + "Services/ConversationManager+ManagedBots.swift",
+     "        guard !isRestoringMind, !admissionPaused, !browserSettingsMutation else { return false }",
+     "        guard !admissionPaused, !browserSettingsMutation else { return false }"),
+    ("M122 two assistants may share a name", "s4:name", T + "Services/AssistantName.swift",
+     "            if AssistantRegistry.displayNameTaken(name, in: d, excluding: profile) {\n                throw Refusal(takenMessage(name))\n            }\n            // The record first",
+     "            // The record first"),
+    ("M123 an offline rename ignores a running assistant", "s4:name", T + "Services/AssistantName.swift",
+     "            if mode == .offline, let dir = leases(d.records[i]),",
+     "            if mode == .offline, false, let dir = leases(d.records[i]),"),
+    ("M124 Start does not re-arm a stopped supervisor child", "s4:supervisor", T + "CLI/Supervisor.swift",
+     "            if (r.startRevision ?? 0) > child.revision, child.process == nil {",
+     "            if (r.startRevision ?? 0) > child.revision, child.process == nil, false {"),
+    ("M125 rotation does not keep the cursor under the new token", "s4:rotation", T + "Services/ConversationManager+ManagedBots.swift",
+     "        await telegramService.persistOffsetState(forToken: newToken)\n",
+     "\n"),
+    ("M126 a lost replace answer is retried with a second revocation", "s4:rotation", T + "Services/ConversationManager+ManagedBots.swift",
+     "                if let t = try? await Task.detached(operation: { try ManagedBotRotation.run(.current, botId: botId, profile: profile) }).value {",
+     "                if let t = try? await Task.detached(operation: { try ManagedBotRotation.run(.replace, botId: botId, profile: profile) }).value {"),
+    ("M127 the Assistants page acts while a wipe/import holds the gate", "s4:menu", T + "CLI/Menu/MenuAssistants.swift",
+     "        guard !env.assistants.restoreGateUp() else { return (false, assistantGateMessage) }",
+     "        _ = assistantGateMessage"),
+    ("M128 the default-side child grants a bot to any assistant", "s4:rotation", T + "CLI/ManagedBotCommands.swift",
+     "        guard let entry = known.bots[String(botId)], entry.profile == profile else { return .refused(\"not_known\") }",
+     "        guard let entry = known.bots[String(botId)] else { return .refused(\"not_known\") }"),
+    ("M129 /newassistant is a command with one assistant and the switch off", "s4:invariance", T + "Services/ConversationManager+ControlCommands.swift",
+     "            guard CoordinationMode.active else { return false }\n            await handleNewAssistantCommand(argument: commandArgument(from: text))",
+     "            await handleNewAssistantCommand(argument: commandArgument(from: text))"),
 ]
 
 
@@ -379,7 +431,12 @@ def selftest(binary, workdir, section):
     # The selftest makes its own scratch roots; never the live install.
     env["XDG_CONFIG_HOME"] = str(Path(workdir) / "outer-config")
     env["XDG_DATA_HOME"] = str(Path(workdir) / "outer-data")
-    args = [str(link), "__multi-assistant-selftest"] + (["--only", section] if section else [])
+    if section and section.startswith("s4"):
+        # Stage 4 (MULTI_ASSISTANT_PLAN §28): its own selftest, "s4" = all of it.
+        sub = section[3:]
+        args = [str(link), "__stage4-selftest"] + (["--only", sub] if sub else [])
+    else:
+        args = [str(link), "__multi-assistant-selftest"] + (["--only", section] if section else [])
     return run(args, workdir, timeout=1800, env=env)
 
 
@@ -414,6 +471,9 @@ def main():
         if not args.skip_control:
             r = selftest(binary, work, None)
             ok = r.returncode == 0
+            if ok and (not args.only or any(b[1].startswith("s4") and b[0].split()[0] in args.only.split(",") for b in BREAKS)):
+                r = selftest(binary, work, "s4")
+                ok = r.returncode == 0
             print(("✔" if ok else "✖") + " positive control: unmodified copy passes every section", flush=True)
             if not ok:
                 print((r.stdout + r.stderr)[-3000:])

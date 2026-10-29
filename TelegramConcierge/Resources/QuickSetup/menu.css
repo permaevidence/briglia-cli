@@ -318,3 +318,17 @@ h2.section { font-size: 19px; margin: 26px 0 4px; letter-spacing: -.005em; }
 }
 .small.security { max-width: 620px; margin: 0 0 16px; }
 .small.security.attention { color: var(--warn); }
+
+/* Assistants (several assistants) */
+.acards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; margin: 6px 0 4px; }
+.acard { border: 1.5px solid var(--line); border-radius: 16px; padding: 16px 18px; background: var(--card); display: flex; flex-direction: column; gap: 8px; }
+.acard.on { border-color: var(--ok); }
+.acard .top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.acard .ttl { font-weight: 700; font-size: 17px; }
+.acard .val { color: var(--soft); font-size: 14px; overflow-wrap: anywhere; }
+.acard .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.acard .input-row input { font-size: 15px; padding: 8px 10px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { font: inherit; font-size: 14px; padding: 7px 14px; border-radius: 999px; border: 1.5px solid var(--line); background: var(--card); color: var(--soft); cursor: pointer; }
+.chip.on { border-color: var(--accent-2); color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.check { display: flex; gap: 10px; align-items: center; margin: 4px 0 18px; color: var(--soft); }

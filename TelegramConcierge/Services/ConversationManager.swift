@@ -1099,6 +1099,23 @@ class ConversationManager: ObservableObject {
     /// survive restarts — re-proposing after a restart costs one message.
     var pendingUserNameProposal: String?
 
+    /// Proposed-but-unconfirmed `/assistantname` value (§28.2), in memory.
+    var pendingAssistantNameProposal: String?
+
+    /// Managed bots (MULTI_ASSISTANT_PLAN §28.4, §28.6): the creation of an
+    /// assistant for a bot made with /newassistant (a producer the wipe,
+    /// settings and upgrade checks wait for), the bot it is for, and the last
+    /// known `getMe.can_manage_bots` of this (default) bot.
+    var managedBotCreationTask: Task<Void, Never>?
+    var managedBotCreationBotId: Int64?
+    var managedBotCapability: Bool?
+    /// `/switchbot newtoken` asked; the poll loop runs it at its clean
+    /// boundary (§28.6 S4-P4). In progress = the rotation transaction runs.
+    var pendingManagedRotation = false
+    var managedRotationInProgress = false
+    /// Selftests: runs inside the creation task before the profile is made.
+    nonisolated(unsafe) static var managedBotCreationHookForTesting: (() async -> Void)?
+
     /// Proposed-but-unconfirmed `/importmind` target. In-memory only on
     /// purpose (same rationale as pendingUserNameProposal): the confirmation
     /// exists to catch fat-thumbed sends, not to survive restarts.

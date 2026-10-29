@@ -1024,6 +1024,14 @@ extension ConversationManager {
         if archiveRecoveryTask != nil || !maintenanceActivities.isEmpty {
             return Self.busyMessage("memory maintenance", outcome: outcome)
         }
+        // Stage 4 (§28.4): an assistant being created for a /newassistant bot
+        // (it never starts while the gate is up).
+        if managedBotCreationTask != nil || managedBotCreationOwed {
+            return Self.busyMessage("a new assistant being created", outcome: outcome)
+        }
+        if pendingManagedRotation || managedRotationInProgress {
+            return Self.busyMessage("a bot token change", outcome: outcome)
+        }
         return await Self.multiAssistantBackgroundWorkRefusal(outcome: outcome)
     }
 
@@ -1237,8 +1245,11 @@ extension ConversationManager {
         // Parked for an update (MULTI_ASSISTANT_PLAN §6.4): no settings work
         // may start until the barrier ends (Codex stage-2 R2).
         guard !admissionPaused else { return false }
+        // Stage 4 (§28.6 S4-P7): an assistant being created from the phone or
+        // a bot token change is a producer too.
         guard subscriptionLoginTask == nil, watcherChecksInFlight.isEmpty,
               triageRunsInFlight.isEmpty, activeProcessingTask == nil,
+              managedBotCreationTask == nil, !pendingManagedRotation, !managedRotationInProgress,
               browserSettingsCommandIngress == 0, beginMindRestore() else { return false }
         browserSettingsMutation = true
         // An app attachment copy or Telegram long poll may have crossed its
@@ -1370,6 +1381,9 @@ extension ConversationManager {
         }
         // After a Mind import: repair stubs and restore at the next idle point.
         scheduleSummaryRetentionIdlePass()
+        // Stage 4 (§28.6 S4-P3): a /newassistant creation claimed while the
+        // gate was up starts now.
+        startManagedBotCreationIfPossible()
     }
 
     /// Selftests: runs in reloadAfterMindRestore after the archive

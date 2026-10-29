@@ -32,6 +32,10 @@ final class Supervisor {
         var stopGrace: TimeInterval = 30
         var tick: TimeInterval = 0.5
         var output: (String) -> Void = { print($0); fflush(stdout) }
+        /// Started by the menu's Assistants page (`--extras-only`, §28.3):
+        /// never runs the default assistant (that one belongs to its own
+        /// window or menu).
+        var extrasOnly = false
     }
 
     static var defaultBackoff: [TimeInterval] {
@@ -54,6 +58,11 @@ final class Supervisor {
         var failures: [Date] = []
         var nextStart: Date? = Date()
         var state: String = "starting"   // running | stopped | parked | elsewhere | waiting
+        /// The record generation and start revision this child was armed for
+        /// (§28.6 S4-P5): a newer revision re-arms a stopped/parked child; a
+        /// different generation is a different assistant (remove + re-add).
+        var generation = ""
+        var revision = 0
         init(profile: String, display: String, logURL: URL) { self.profile = profile; self.display = display; self.logURL = logURL }
     }
 
@@ -84,7 +93,8 @@ final class Supervisor {
         guard let doc = (try? AssistantRegistry.read(settings.registryPaths)) ?? nil else {
             return [AssistantRegistry.newRecord(name: AssistantProfile.defaultName, displayName: "Bree")]
         }
-        return doc.records.filter { $0.state == "active" && $0.autostart }
+        return doc.records.filter { $0.state == "active" && $0.autostart
+            && !(settings.extrasOnly && $0.name == AssistantProfile.defaultName) }
     }
 
     func leaseDirectory(_ r: AssistantRegistry.Record) -> URL {
@@ -95,13 +105,41 @@ final class Supervisor {
     /// One pass: reconcile the registry with the children, restart what
     /// crashed (with backoff), tail the logs.
     func tick(now: Date = Date()) {
-        for r in records() {
+        let wanted = records()
+        // A record no longer wanted (autostart off: Stop on the Assistants
+        // page; removed) drops its idle child, so turning autostart on again
+        // starts it afresh instead of leaving a "stopped" child that is never
+        // retried (§28.3).
+        let wantedNames = Set(wanted.map(\.name))
+        for (name, child) in children where !wantedNames.contains(name) && child.process?.isRunning != true {
+            drainLog(child)
+            children.removeValue(forKey: name)
+        }
+        for r in wanted {
+            if let old = children[r.name], old.generation != r.generation, old.process?.isRunning != true {
+                drainLog(old)
+                children.removeValue(forKey: r.name)
+            }
             let child = children[r.name] ?? {
                 let c = Child(profile: r.name, display: r.displayName, logURL: Self.logURL(profile: r.name))
+                c.generation = r.generation
+                c.revision = r.startRevision ?? 0
                 children[r.name] = c
                 return c
             }()
             child.display = r.displayName
+            // A Start issued after this child stopped or parked re-arms it.
+            // (Consumed only once the old process has gone, so a Start racing a
+            // Stop's exit is not lost.)
+            if (r.startRevision ?? 0) > child.revision, child.process == nil {
+                child.revision = r.startRevision ?? 0
+                if child.nextStart == nil {
+                    child.failures = []
+                    child.state = "waiting"
+                    child.nextStart = now
+                    say(child, "start requested")
+                }
+            }
             if let p = child.process {
                 if p.isRunning { continue }
                 child.process = nil

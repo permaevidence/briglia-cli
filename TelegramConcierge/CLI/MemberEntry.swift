@@ -104,11 +104,12 @@ enum MemberEntry {
             guard let record = registryRecord(profile) else {
                 fail("This assistant is not registered on this computer (it may have been removed). Run `briglia profiles list`.")
             }
-            guard record.state == "active" else {
+            guard record.state == "active" || provisioningAdmits(record, role: role) else {
                 fail(record.state == "adding" ? "This assistant is still being set up; try again in a moment."
                                               : "This assistant is being removed.")
             }
             generation = record.generation
+            enteredRole = role
         }
         guard let directory = leaseDirectory(profile: profile, generation: generation) else {
             fail("This assistant is not registered on this computer.")
@@ -182,6 +183,22 @@ enum MemberEntry {
         enter(role: .assistant(kind: kind))
     }
 
+    /// Stage 4 (§28.6 S4-P1): a provisional (`adding`) record admits exactly
+    /// one kind of member — the `__profile-init` child of the add operation
+    /// that published it, identified by `BRIGLIA_PROVISIONING_OP`, while that
+    /// operation's tx lease is still held. Nothing else enters before the
+    /// record is activated.
+    static let provisioningOpKey = "BRIGLIA_PROVISIONING_OP"
+    nonisolated(unsafe) private(set) static var enteredRole: Role?
+
+    static func provisioningAdmits(_ record: AssistantRegistry.Record, role: Role?,
+                                   environment: [String: String] = ProcessInfo.processInfo.environment,
+                                   paths: AssistantRegistry.Paths = .live) -> Bool {
+        guard record.state == "adding", case .session(let kind)? = role, kind == "__profile-init",
+              let op = environment[provisioningOpKey], !op.isEmpty, record.addingOp == op else { return false }
+        return ProfileFileLock.probe(paths.txLease(op)) == .live
+    }
+
     static func registryRecord(_ profile: String) -> AssistantRegistry.Record? {
         (try? AssistantRegistry.read(.live))??.record(profile)
     }
@@ -189,7 +206,8 @@ enum MemberEntry {
     /// Step 3 for extras: the record is still there, active, same generation.
     static func recheckRecord(_ profile: String) {
         guard AssistantProfile.isExtra else { return }
-        guard let record = registryRecord(profile), record.state == "active", record.generation == generation else {
+        guard let record = registryRecord(profile), record.state == "active" || provisioningAdmits(record, role: enteredRole),
+              record.generation == generation else {
             fail("This assistant was removed. / Questo assistente è stato rimosso.")
         }
     }

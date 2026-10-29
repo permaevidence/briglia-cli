@@ -11,7 +11,7 @@ extension ConversationManager {
     func multiAssistantStatusLines() -> [String] {
         guard CoordinationMode.multi, let doc = (try? AssistantRegistry.read(.live)) ?? nil else { return [] }
         let barrier = UpgradeBarrier.current()
-        return Self.multiAssistantStatusLines(
+        var lines = Self.multiAssistantStatusLines(
             doc: doc, me: AssistantProfile.selectedName, waitingFor: upgradeWaitingFor,
             barrier: (barrier?.isActive ?? false) ? barrier : nil, ctx: MultiAssistant.context(),
             chatgptScope: ProviderProfiles.activeProfile() == .chatgpt ? SubscriptionSharing.scopeStatus() : nil,
@@ -19,6 +19,8 @@ extension ConversationManager {
                 guard let dir = MemberLeases.directory(profile: r.name, generation: r.generation) else { return false }
                 return !MemberLeases.users(dir, assistantsOnly: true).isEmpty
             })
+        if !lines.isEmpty, let managed = managedBotStatusLine() { lines.append(managed) }
+        return lines
     }
 
     /// Pure renderer (selftests).

@@ -166,7 +166,7 @@
   var powerConfirm = false;
   function renderPower() {
     var el = $('power'); clear(el); el.className = 'power';
-    if (!S || gone || !S.complete || S.closing || S.startup || view.kind === 'finish' || view.kind === 'welcome' || view.kind === 'loading') { powerConfirm = false; return; }
+    if (!S || gone || !S.complete || S.closing || S.startup || S.menu_child || view.kind === 'finish' || view.kind === 'welcome' || view.kind === 'loading') { powerConfirm = false; return; }
     var paused = !S.running && S.service_was_running;
     var stop = function () { powerConfirm = false; finish('stop'); };
     if (powerConfirm) {
@@ -220,6 +220,7 @@
     else if (view.kind === 'dashboard') v = dashboardView();
     else if (view.kind === 'finish') v = finishView();
     else if (view.kind === 'addlane') v = addLaneView();
+    else if (view.kind === 'addassistant') v = addAssistantView();
     else v = stepView(view.step);
     v.forEach(function (n) { if (n) card.appendChild(n); });
   }
@@ -282,7 +283,9 @@
       h('h1', { text: missing.length ? T('Almost there', 'Ci siamo quasi') : T('Everything’s ready', 'È tutto pronto') }),
       h('p', { class: 'lead', text: missing.length ? (T('Still needed: ', 'Mancano ancora: ') + missing.map(function (s) { return s.title; }).join(', ') + '.') : T('Click anything to change it. Changes are saved right away.', 'Clicca su qualsiasi voce per modificarla. Le modifiche vengono salvate subito.') }),
       notice('dashboard'),
+      childNote(),
       missing.length ? null : paused,
+      assistantsSection(),
       securityNote(),
       lanesSection(),
       h('h2', { class: 'section', text: T('Other settings', 'Altre impostazioni') }),
@@ -297,6 +300,123 @@
       missing.length ? null : h('p', { class: 'small', text: S.platform === 'linux'
         ? T('Start (top right) runs Briglia in the background and at every startup of this computer. Stop keeps it off, also after a restart.', 'Avvia (in alto a destra) fa funzionare Briglia in background e a ogni accensione del computer. Ferma lo tiene spento, anche dopo un riavvio.')
         : T('Start (top right) runs Briglia in the Terminal window you opened this from.', 'Avvia (in alto a destra) fa funzionare Briglia nella finestra del Terminale da cui hai aperto questa pagina.') }),
+    ];
+  }
+
+  // ---------- Assistants (several assistants, MULTI_ASSISTANT_PLAN §28.3) ----------
+  var renaming = null;          // profile whose card shows the rename field
+  var renameValue = '';
+  var addForm = { name: '', profile: '', profileTouched: false, template: '', copy: true, token: '' };
+
+  // A settings page opened for another assistant from the Assistants page.
+  function childNote() {
+    if (!S.menu_child) return null;
+    return h('div', { class: 'notice info' }, [T('These are the settings of the assistant ‘', 'Queste sono le impostazioni dell’assistente ‘') + (S.assistant_name || '') +
+      T('’. Start and stop it from your first assistant’s menu.', '’. Avvialo e fermalo dal menu del tuo primo assistente.')]);
+  }
+
+  function slugify(name) {
+    var t = (name || '').normalize ? name.normalize('NFD').replace(/[̀-ͯ]/g, '') : (name || '');
+    t = t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20).replace(/-+$/, '');
+    return t || 'assistant';
+  }
+
+  function assistantsSection() {
+    var A = S.assistants;
+    if (!A) return null;
+    var cards = A.cards || [];
+    var gate = A.gate ? h('div', { class: 'notice warn' }, [T('Briglia is replacing its memory right now (a wipe or a memory import); the assistants can be changed again in a moment.',
+      'Briglia sta sostituendo la sua memoria (cancellazione o importazione); tra un momento potrai di nuovo modificare gli assistenti.')]) : null;
+    var addBtn = h('button', { class: 'btn secondary', type: 'button', id: 'assistant-add', disabled: inflight > 0 || A.gate || cards.length >= A.max,
+      onclick: function () { addForm = { name: '', profile: '', profileTouched: false, template: '', copy: true, token: '' }; local.assistants = { notice: null }; view = { kind: 'addassistant' }; render(); window.scrollTo(0, 0); } },
+      ['+ ' + T('Add assistant', 'Aggiungi assistente')]);
+    if (cards.length < 2) {
+      return h('div', { class: 'assistants single' }, [notice('assistants'), gate, h('div', { class: 'actions' }, [addBtn])]);
+    }
+    var grid = h('div', { class: 'acards' }, cards.map(function (c) {
+      var state = c.state !== 'active' ? (c.state === 'adding' ? T('Being set up', 'In preparazione') : T('Being removed', 'In rimozione'))
+        : c.running ? T('Running', 'In funzione') : T('Stopped', 'Fermo');
+      var buttons = [];
+      if (!c.is_default && c.state === 'active') {
+        buttons.push(h('button', { class: 'btn secondary small', type: 'button', disabled: inflight > 0 || A.gate,
+          onclick: function () { act('assistant_settings', { profile: c.profile }, 'assistants'); } }, [T('Settings', 'Impostazioni')]));
+        if (!c.running) buttons.push(h('button', { class: 'btn primary small', type: 'button', id: 'start-' + c.profile, disabled: inflight > 0 || A.gate,
+          onclick: function () { act('assistant_start', { profile: c.profile }, 'assistants'); } }, ['▶ ' + T('Start', 'Avvia')]));
+        else buttons.push(h('button', { class: 'btn danger small', type: 'button', id: 'stop-' + c.profile, disabled: inflight > 0 || A.gate,
+          onclick: function () { act('assistant_stop', { profile: c.profile }, 'assistants'); } }, ['■ ' + T('Stop', 'Ferma')]));
+      }
+      if (c.state === 'active') buttons.push(h('button', { class: 'btn ghost small', type: 'button', disabled: inflight > 0 || A.gate,
+        onclick: function () { renaming = c.profile; renameValue = c.name; render(); } }, [T('Rename', 'Rinomina')]));
+      var body = [h('div', { class: 'top' }, [h('span', { class: 'ttl', text: c.name }),
+        h('span', { class: 'badge ' + (c.running ? 'ok' : 'opt'), text: state })]),
+        h('div', { class: 'val', text: [c.bot || (c.has_bot ? T('bot set', 'bot impostato') : T('no Telegram bot yet', 'nessun bot Telegram')), c.model || ''].filter(Boolean).join(' · ') }),
+        c.is_default ? h('div', { class: 'small', text: T('Your first assistant (this menu).', 'Il tuo primo assistente (questo menu).') }) : null];
+      if (renaming === c.profile) {
+        var input = h('input', { type: 'text', id: 'rename-' + c.profile, value: renameValue, maxlength: '40', autocomplete: 'off' });
+        input.addEventListener('input', function () { renameValue = input.value; });
+        body.push(h('div', { class: 'input-row' }, [input,
+          h('button', { class: 'btn primary small', type: 'button', disabled: inflight > 0, onclick: function () {
+            act('assistant_rename', { profile: c.profile, name: renameValue }, 'assistants').then(function (j) { if (j.ok) { renaming = null; render(); } });
+          } }, [T('Save', 'Salva')]),
+          h('button', { class: 'btn ghost small', type: 'button', onclick: function () { renaming = null; render(); } }, [T('Cancel', 'Annulla')])]));
+      } else {
+        body.push(h('div', { class: 'acts' }, buttons));
+      }
+      return h('div', { class: 'acard' + (c.running ? ' on' : '') }, body);
+    }));
+    return h('div', { class: 'assistants' }, [
+      h('h2', { class: 'section', text: T('Assistants', 'Assistenti') }),
+      notice('assistants'), gate, grid,
+      h('div', { class: 'actions' }, [addBtn, h('span', { class: 'small', text: T('Up to ', 'Fino a ') + A.max + T(' assistants on this computer.', ' assistenti su questo computer.') })]),
+    ]);
+  }
+
+  function addAssistantView() {
+    var A = S.assistants || { templates: [] };
+    var f = addForm;
+    var nameIn = h('input', { type: 'text', id: 'assistant-name', value: f.name, maxlength: '40', autocomplete: 'off', placeholder: T('e.g. Work', 'es. Lavoro') });
+    nameIn.addEventListener('input', function () { f.name = nameIn.value; if (!f.profileTouched) { f.profile = slugify(f.name); var p = $('assistant-profile'); if (p) p.value = f.profile; } });
+    var idIn = h('input', { type: 'text', id: 'assistant-profile', value: f.profile, maxlength: '24', autocomplete: 'off' });
+    idIn.addEventListener('input', function () { f.profile = idIn.value; f.profileTouched = true; });
+    var tokIn = h('input', { type: 'password', id: 'assistant-token', value: f.token, autocomplete: 'off', placeholder: '123456789:AA…' });
+    tokIn.addEventListener('input', function () { f.token = tokIn.value; });
+    var templates = h('div', { class: 'chips' }, (A.templates || []).map(function (t) {
+      return h('button', { class: 'chip' + (f.template === t.id ? ' on' : ''), type: 'button', onclick: function () {
+        f.template = f.template === t.id ? '' : t.id;
+        if (f.template) { f.name = t.name; if (!f.profileTouched) f.profile = slugify(t.name); }
+        render();
+      } }, [t.name]);
+    }));
+    var copy = h('input', { type: 'checkbox', id: 'assistant-copy' });
+    copy.checked = f.copy;
+    copy.addEventListener('change', function () { f.copy = copy.checked; });
+    return [
+      h('div', { class: 'eyebrow', text: T('Assistants', 'Assistenti') }),
+      h('h1', { text: T('Add an assistant', 'Aggiungi un assistente') }),
+      h('p', { class: 'lead', text: T('Each assistant is a separate Briglia with its own Telegram bot, memory, reminders and settings. They all run at the same time.',
+        'Ogni assistente è un Briglia a sé, con il suo bot Telegram, la sua memoria, i suoi promemoria e le sue impostazioni. Funzionano tutti insieme.') }),
+      notice('assistants'),
+      h('div', { class: 'input-wrap' }, [h('label', { text: T('A starting point (optional)', 'Un punto di partenza (facoltativo)') }), templates]),
+      h('div', { class: 'input-wrap' }, [h('label', { for: 'assistant-name', text: T('Its name', 'Il suo nome') }), h('div', { class: 'input-row' }, [nameIn])]),
+      h('div', { class: 'input-wrap' }, [h('label', { for: 'assistant-profile', text: T('Short id (for commands; can’t be changed later)', 'Id breve (per i comandi; non si può cambiare dopo)') }), h('div', { class: 'input-row' }, [idIn])]),
+      h('label', { class: 'check', for: 'assistant-copy' }, [copy, ' ' + T('Use the same API keys and AI as your first assistant', 'Usa le stesse chiavi API e la stessa AI del tuo primo assistente')]),
+      h('h2', { class: 'section', text: T('Its own Telegram bot', 'Il suo bot Telegram') }),
+      h('ol', { class: 'howto' }, [
+        h('li', {}, [T('Open ', 'Apri '), link('https://t.me/BotFather', '@BotFather'), T(' and send /newbot.', ' e invia /newbot.')]),
+        h('li', {}, [T('Pick a name and a username ending in “bot”.', 'Scegli un nome e un username che finisca con “bot”.')]),
+        h('li', {}, [T('Paste the token it gives you here.', 'Incolla qui il token che ti dà.')]),
+      ]),
+      h('div', { class: 'input-wrap' }, [h('label', { for: 'assistant-token', text: T('Bot token (you can also add it later)', 'Token del bot (puoi anche aggiungerlo dopo)') }), h('div', { class: 'input-row' }, [tokIn])]),
+      h('p', { class: 'small', text: T('All assistants run as you on this computer: each can read the others’ files, and Briglia only stops its own edit tools from clashing. Use a separate computer user for a hard wall.',
+        'Tutti gli assistenti funzionano come te su questo computer: ognuno può leggere i file degli altri, e Briglia evita solo che i suoi strumenti di modifica si scontrino. Per una separazione netta usa un altro utente del computer.') }),
+      h('div', { class: 'actions' }, [
+        h('button', { class: 'btn primary', type: 'button', id: 'assistant-create', disabled: inflight > 0 || (S.assistants && S.assistants.gate), onclick: function () {
+          act('assistant_add', { name: f.name, profile: f.profile, template: f.template, copy_keys: f.copy, token: f.token.trim() }, 'assistants').then(function (j) {
+            if (j.ok) { local.assistants = { notice: { kind: 'ok', text: j.message } }; backToDashboard(); }
+          });
+        } }, [inflight > 0 ? T('Setting it up…', 'Lo preparo…') : T('Create assistant', 'Crea assistente')]),
+        h('button', { class: 'btn ghost', type: 'button', onclick: function () { backToDashboard(); } }, [T('Cancel', 'Annulla')]),
+      ]),
     ];
   }
 
@@ -335,6 +455,7 @@
         ' · ' + T('changes apply right away, between messages.', 'le modifiche valgono subito, tra un messaggio e l’altro.')])]),
       missing.length ? h('div', { class: 'notice warn' }, [T('Still needed: ', 'Mancano ancora: ') + missing.map(function (s) { return s.title; }).join(', ') + '.']) : null,
       notice('dashboard'),
+      assistantsSection(),
       securityNote(),
       lanesSection(),
       h('h2', { class: 'section', text: T('Other settings', 'Altre impostazioni') }),

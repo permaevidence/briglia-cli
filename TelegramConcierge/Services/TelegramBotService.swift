@@ -96,6 +96,22 @@ actor TelegramBotService {
         }
     }
 
+    /// A managed bot's token rotation (MULTI_ASSISTANT_PLAN §28.6 S4-P4):
+    /// the SAME bot, so the same update-id sequence. The confirmed cursor is
+    /// written under the new token's fingerprint BEFORE the new token is
+    /// stored, so a restart with the new token resumes from it (never from 0,
+    /// which would re-serve updates processed but not yet acknowledged to
+    /// Telegram). The in-memory cursor is kept; `configure` then switches the
+    /// token without touching it.
+    func persistOffsetState(forToken token: String) {
+        loadOffsetStateIfNeeded()
+        let hash = SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16).description
+        let state = OffsetState(lastUpdateId: max(lastUpdateId, 0), lastUpdateAt: lastUpdateAt, tokenHash: hash)
+        if let data = try? JSONEncoder().encode(state) {
+            try? PrivateStorage.writeAtomically(data, to: offsetStateURL)
+        }
+    }
+
     /// Acknowledge ONE update as durably processed: advance the confirmed
     /// cursor to it and persist immediately. Must be called in delivery order
     /// (the poll loop processes a batch strictly sequentially, so it is) —

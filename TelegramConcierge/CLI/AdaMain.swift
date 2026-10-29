@@ -64,7 +64,7 @@ struct AdaCLI: AsyncParsableCommand {
                       LocalToolsInventoryCommand.self, LocalToolsCheckOnceCommand.self, LocalToolsVersionCompareCommand.self,
                       RetiredIntegrationsSelftest.self, PrivateRuntimeSelftest.self,
                       ProfilesCommand.self, WorktreeCommand.self, BoardProbeCommand.self, Stage3ManagerCheckCommand.self, ProfileInitCommand.self, ProfileInfoCommand.self, ProfileIsolationSelftest.self,
-                      ReleaseIdentityCommand.self, MultiAssistantSelftest.self, MindExportOfflineCommand.self, MemberProbeCommand.self, UpgradeReadinessCheckCommand.self, SharedLoginProbeCommand.self],
+                      ReleaseIdentityCommand.self, MultiAssistantSelftest.self, MindExportOfflineCommand.self, MemberProbeCommand.self, ManagedBotCommand.self, ManagedBotProbeCommand.self, Stage4Selftest.self, UpgradeReadinessCheckCommand.self, SharedLoginProbeCommand.self],
         defaultSubcommand: Chat.self
     )
 }
@@ -607,6 +607,11 @@ struct Daemon: AsyncParsableCommand {
     @Flag(name: .customLong("all"), help: .hidden)
     var all = false
 
+    /// With --all: only the extra assistants (the menu's Assistants page
+    /// starts the supervisor this way; MULTI_ASSISTANT_PLAN §28.3).
+    @Flag(name: .customLong("extras-only"), help: .hidden)
+    var extrasOnly = false
+
     func run() async throws {
         if all {
             // The supervisor (MULTI_ASSISTANT_PLAN §4.3): every assistant
@@ -617,7 +622,9 @@ struct Daemon: AsyncParsableCommand {
                 throw ExitCode(2)
             }
             try AssistantProfile.requireDefault("Run the supervisor without --profile: `briglia daemon --all`.")
-            let supervisor = Supervisor()
+            var settings = Supervisor.Settings()
+            settings.extrasOnly = extrasOnly
+            let supervisor = Supervisor(settings: settings)
             if case .refused(let why) = supervisor.acquire() { print("✖ \(why)"); throw ExitCode(1) }
             supervisor.runForever()
         }

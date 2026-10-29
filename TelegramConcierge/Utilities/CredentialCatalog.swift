@@ -67,6 +67,8 @@ enum CredentialCatalog {
         // Telegram pairing
         Entry(key: KeychainHelper.telegramBotTokenKey, treatment: .redact),
         Entry(key: KeychainHelper.telegramChatIdKey, treatment: .notSecret),
+        Entry(key: KeychainHelper.telegramBotUsernameKey, treatment: .notSecret),
+        Entry(key: KeychainHelper.assistantGreetingPendingKey, treatment: .notSecret),
         Entry(key: KeychainHelper.retiredWhatsappOwnerPhoneKey, treatment: .notSecret),  // retired 2026-10-24, until migrated
 
         Entry(key: ProviderProfiles.subscriptionModelKey, treatment: .notSecret),

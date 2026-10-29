@@ -60,6 +60,9 @@ enum AssistantRegistry {
         var activeTx: [String: ActiveTx]
         var bot: Slot
         var inbox: Slot
+        /// Bumped by every Start from the menu (§28.6 S4-P5): a supervisor
+        /// re-arms a stopped or parked child whose record has a newer one.
+        var startRevision: Int? = nil
 
         func slot(_ kind: Kind) -> Slot { kind == .bot ? bot : inbox }
         mutating func setSlot(_ kind: Kind, _ slot: Slot) {
@@ -335,6 +338,7 @@ enum AssistantRegistry {
     /// another assistant, else publish `activeTx` and `pending`. Must be
     /// called before ANY network use of the new identity.
     static func begin(profile: String, kind: Kind, rawValue: String?, paths: Paths = .live,
+                      provisioningOp: String? = nil,
                       precheck: (Record) -> String? = { _ in nil }) throws -> Transaction {
         // nil/empty = a removal: published like any change (startup waits
         // for it, overlapping changes are refused), committed by clearing.
@@ -355,8 +359,13 @@ enum AssistantRegistry {
                     throw RegistryError("this assistant is not registered on this computer")
                 }
                 cleanAll(&d, paths)
-                if d.records[i].state != "active" {
-                    throw RegistryError("this assistant is being removed")
+                // A provisional record accepts a reservation only from its own
+                // add operation (§28.6 S4-P1: the bot is reserved before the
+                // assistant becomes active).
+                let ownProvisional = provisioningOp != nil && d.records[i].state == "adding"
+                    && d.records[i].addingOp == provisioningOp
+                if d.records[i].state != "active" && !ownProvisional {
+                    throw RegistryError(d.records[i].state == "adding" ? "this assistant is still being set up" : "this assistant is being removed")
                 }
                 // The offline-setter rule (§5.6): probed in the SAME critical
                 // section that publishes activeTx, so a starting assistant

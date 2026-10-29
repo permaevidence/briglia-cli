@@ -424,6 +424,24 @@ struct Doctor: AsyncParsableCommand {
             for line in multiLines {
                 if line.problem { check(line.text, ok: false, hint: line.hint) } else { note(line.text) }
             }
+            // Stage 4 (§28.4): can the default bot create assistants
+            // (/newassistant), and were the managed bots made by this bot.
+            if AssistantProfile.isDefault {
+                let manager = (KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let managerId = AssistantRegistry.normalize(.bot, manager).flatMap(Int64.init)
+                if online, !manager.isEmpty {
+                    if let me = try? await ManagedBotAPI.getMe(token: manager) {
+                        note(me.canManageBots ? "Telegram bot management: on (/newassistant works)"
+                                              : "Telegram bot management: off — turn on “Bot Management” for @\(me.username ?? "this bot") in @BotFather to use /newassistant (pasting a token in the menu works without it)")
+                    } else {
+                        note("Telegram bot management: unknown (Telegram did not answer)")
+                    }
+                }
+                for (bot, entry) in ManagedBots.loadKnown().bots.sorted(by: { $0.key < $1.key }) where managerId != nil && entry.managerBotId != managerId {
+                    check("the bot of ‘\(entry.profile)’ (id \(bot)) was created by your first assistant's previous bot", ok: false,
+                          hint: "it keeps working, but /switchbot newtoken can't renew its token; use a new bot from @BotFather with /switchbot <token> if needed")
+                }
+            }
         }
 
         if online {

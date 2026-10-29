@@ -279,6 +279,8 @@ struct MenuEnvironment {
     /// fixes, toolchain installers, AgentMail CLI) — reused as-is so both
     /// setups install exactly the same things.
     var quick = QuickSetupEnvironment()
+    /// The Assistants page (§28.3).
+    var assistants = MenuAssistantsEnvironment()
 
     // MARK: Live implementations
 

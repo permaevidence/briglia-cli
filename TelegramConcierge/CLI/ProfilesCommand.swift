@@ -56,7 +56,7 @@ struct ProfilesCommand: ParsableCommand {
         }
     }
 
-    struct Add: ParsableCommand {
+    struct Add: AsyncParsableCommand {
         static let configuration = CommandConfiguration(commandName: "add", abstract: "Add an assistant.")
 
         @Argument(help: "Profile id: lower-case letters, digits and -, up to 24 characters.")
@@ -74,7 +74,7 @@ struct ProfilesCommand: ParsableCommand {
         @Flag(name: .customLong("bot-token-stdin"), help: "Read the new assistant's own Telegram bot token from standard input.")
         var botTokenStdin = false
 
-        func run() throws {
+        func run() async throws {
             try ProfilesCommand.requireExperimental()
             try ProfilesCommand.requireDefault()
             try IdentityMigration.gateMutatingEntry()
@@ -89,30 +89,11 @@ struct ProfilesCommand: ParsableCommand {
             let homeFolder = home.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath).standardizedFileURL }
                 ?? LandingZone.defaultExtraHome(name)
             do {
-                try ProfileProvisioning.add(name: name, displayName: display, homeFolder: homeFolder, botToken: botToken)
+                try await AssistantControl.create(AssistantControl.CreateRequest(
+                    profile: name, displayName: display, homeFolder: homeFolder, botToken: botToken, copyKeys: copyKeys),
+                    autostart: true)
             } catch {
                 print("✖ \(error)")
-                throw ExitCode(1)
-            }
-            var secrets: [String: String] = [:]
-            if copyKeys { secrets = ProfileProvisioning.copyableSecrets() }
-            secrets[KeychainHelper.assistantNameKey] = display
-            do {
-                try ProfileProvisioning.runInit(profile: name, payload: ["secrets": secrets])
-                if let botToken {
-                    let tx = try AssistantRegistry.begin(profile: name, kind: .bot, rawValue: botToken)
-                    do {
-                        try tx.commit {
-                            try ProfileProvisioning.runInit(profile: name, payload: ["secrets": [KeychainHelper.telegramBotTokenKey: botToken]])
-                        }
-                        try tx.finish()   // nobody consumed the old (absent) bot
-                    } catch {
-                        tx.abort()
-                        throw error
-                    }
-                }
-            } catch {
-                print("✖ The assistant ‘\(display)’ was created, but its settings could not be written: \(error)")
                 throw ExitCode(1)
             }
             print("✔ Added the assistant ‘\(display)’ (profile \(name)). Home folder: \(homeFolder.path)")
@@ -169,7 +150,10 @@ enum ProfileProvisioning {
     /// values `profiles add` sets itself.
     static var initAcceptedKeys: Set<String> {
         Set(copyableSecretKeys + [KeychainHelper.assistantNameKey, KeychainHelper.telegramBotTokenKey,
-                                  ProviderProfiles.subscriptionGenerationKey, SubscriptionSharing.accountFingerprintKey])
+                                  ProviderProfiles.subscriptionGenerationKey, SubscriptionSharing.accountFingerprintKey,
+                                  // Stage 4 (§28.3/§28.4): the owner's chat, the bot's @handle, the greeting flag.
+                                  KeychainHelper.telegramChatIdKey, KeychainHelper.telegramBotUsernameKey,
+                                  KeychainHelper.assistantGreetingPendingKey])
     }
 
     /// Default's values for the allow-list (read in default's process).
@@ -202,13 +186,87 @@ enum ProfileProvisioning {
         }
     }
 
-    /// Create the profile (plan §5.7 `add`): refused at the assistant cap,
-    /// for an invalid/reserved/existing id or a name already in use. Holds
-    /// `machine/identity-tx.lock` (non-blocking) while the registry is created
-    /// and default's current bot/inbox are seeded, so no default identity
-    /// change started before the registry existed can commit after it.
+    /// Create the profile (plan §5.7 `add`) and activate it at once (the
+    /// original one-step behaviour; `profiles add` without stage-4 setup).
     static func add(name: String, displayName: String, homeFolder: URL, botToken: String? = nil,
-                    registryPaths: AssistantRegistry.Paths = .live) throws {
+                    template: String? = nil, registryPaths: AssistantRegistry.Paths = .live) throws {
+        let pending = try beginAdd(name: name, displayName: displayName, homeFolder: homeFolder, botToken: botToken,
+                                   template: template, registryPaths: registryPaths)
+        do { try pending.activate(autostart: true) } catch {
+            pending.rollback()
+            throw error
+        }
+    }
+
+    /// A profile published PROVISIONAL (`adding`) by its operation, which
+    /// holds the tx lease, `machine/identity-tx.lock` and the ChatGPT sharing
+    /// lock until `activate` or `rollback` (§28.6 S4-P1). While it lasts no
+    /// member may enter except this operation's `__profile-init` children
+    /// (`MemberEntry`, `BRIGLIA_PROVISIONING_OP`), and the operation may
+    /// reserve the profile's bot (`AssistantRegistry.begin(provisioningOp:)`).
+    final class PendingAdd {
+        let name: String
+        let op: String
+        let generation: String
+        let registryPaths: AssistantRegistry.Paths
+        let registryExisted: Bool
+        private var adder: ProfileFileLock?
+        private var identity: ProfileFileLock?
+        private var share: ProfileFileLock?
+        private(set) var finished = false
+
+        fileprivate init(name: String, op: String, generation: String, registryPaths: AssistantRegistry.Paths,
+                         registryExisted: Bool, adder: ProfileFileLock, identity: ProfileFileLock, share: ProfileFileLock?) {
+            self.name = name; self.op = op; self.generation = generation; self.registryPaths = registryPaths
+            self.registryExisted = registryExisted; self.adder = adder; self.identity = identity; self.share = share
+        }
+
+        /// The environment entry that admits this operation's init child.
+        var admissionEnvironment: [String: String] { [MemberEntry.provisioningOpKey: op] }
+
+        /// Activate only our own provisional record (same op and generation).
+        func activate(autostart: Bool) throws {
+            precondition(!finished, "provisional add already finished")
+            defer { release() }
+            try AssistantRegistry.withLock(registryPaths) { doc in
+                guard var d = doc, let i = d.index(name), d.records[i].state == "adding",
+                      d.records[i].addingOp == op, d.records[i].generation == generation else {
+                    throw ProvisioningError("‘\(name)’ changed while it was being added; nothing was activated")
+                }
+                d.records[i].state = "active"
+                d.records[i].addingOp = nil
+                d.records[i].autostart = autostart
+                doc = d
+            }
+        }
+
+        /// Undo our own provisional record and its roots (never an active one).
+        func rollback() {
+            guard !finished else { return }
+            defer { release() }
+            ProfileProvisioning.rollbackAdd(name: name, op: op, generation: generation, registryPaths: registryPaths,
+                                            removeRegistry: !registryExisted)
+        }
+
+        private func release() {
+            finished = true
+            adder?.release(); adder = nil
+            try? FileManager.default.removeItem(at: registryPaths.txLease(op))
+            share?.release(); share = nil
+            identity?.release(); identity = nil
+        }
+
+        deinit { if !finished { rollback() } }
+    }
+
+    /// Publish the profile provisional (plan §5.7 `add`): refused at the
+    /// assistant cap, for an invalid/reserved/existing id or a name already in
+    /// use. Holds `machine/identity-tx.lock` (non-blocking) while the registry
+    /// is created and default's current bot/inbox are seeded, so no default
+    /// identity change started before the registry existed can commit after
+    /// it.
+    static func beginAdd(name: String, displayName: String, homeFolder: URL, botToken: String? = nil,
+                         template: String? = nil, registryPaths: AssistantRegistry.Paths = .live) throws -> PendingAdd {
         guard AssistantProfile.isUsableExtraName(name) else {
             throw ProvisioningError("‘\(name)’ is not a valid assistant id (lower-case letters, digits and -, up to 24; not default/all/shared/profiles)")
         }
@@ -220,80 +278,92 @@ enum ProfileProvisioning {
         case .busy: throw ProvisioningError("finish the bot or email change in your first assistant, then try again")
         case .failed(let why): throw ProvisioningError(why)
         }
-        defer { identity.release() }
         // The new extra becomes a sharer of the ChatGPT login (§25.11).
         let share: ProfileFileLock?
-        do { share = try ChatGPTShare.takeLock() } catch { throw ProvisioningError("\(error)") }
-        defer { share?.release() }
+        do { share = try ChatGPTShare.takeLock() } catch { identity.release(); throw ProvisioningError("\(error)") }
         // Codex stage-2 F4: the record is published PROVISIONAL (`adding`,
         // which the entry protocol never admits) under this operation's tx
-        // lease, flipped to `active` only after the unleased re-check passes;
-        // a failed add removes only its own still-provisional record.
-        try PrivateStorage.ensureDirectory(registryPaths.root, mode: 0o700)
-        try PrivateStorage.ensureDirectory(registryPaths.txDir, mode: 0o700)
+        // lease, flipped to `active` only by `activate`; a failed add removes
+        // only its own still-provisional record.
         let op = UUID().uuidString.lowercased()
-        guard case .acquired(let adder) = ProfileFileLock.take(registryPaths.txLease(op)) else {
-            throw ProvisioningError("could not create the lease for adding this assistant")
+        let adder: ProfileFileLock
+        do {
+            try PrivateStorage.ensureDirectory(registryPaths.root, mode: 0o700)
+            try PrivateStorage.ensureDirectory(registryPaths.txDir, mode: 0o700)
+            guard case .acquired(let l) = ProfileFileLock.take(registryPaths.txLease(op)) else {
+                throw ProvisioningError("could not create the lease for adding this assistant")
+            }
+            adder = l
+        } catch {
+            share?.release(); identity.release()
+            throw error
         }
-        defer {
+        func releaseAll() {
             adder.release()
             try? FileManager.default.removeItem(at: registryPaths.txLease(op))
+            share?.release()
+            identity.release()
         }
         var generation = ""
         // A Briglia running without a member lease (started before any
         // registry, switch off) would sit outside every barrier (R1).
         let blocking = UnleasedInstances.findings(registryPaths: registryPaths)
-        if !blocking.isEmpty { throw ProvisioningError(UnleasedInstances.describe(blocking)) }
+        if !blocking.isEmpty { releaseAll(); throw ProvisioningError(UnleasedInstances.describe(blocking)) }
         let registryExisted = AssistantRegistry.exists(registryPaths)
         let defaultBot = KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey)
         let defaultInbox = KeychainHelper.load(key: KeychainHelper.agentMailInboxAddressKey)
         let defaultName = (KeychainHelper.load(key: KeychainHelper.assistantNameKey) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        try AssistantRegistry.withLock(registryPaths) { doc in
-            var d = doc ?? AssistantRegistry.Document(version: 1, records: [])
-            if d.record(AssistantProfile.defaultName) == nil {
-                var seed = AssistantRegistry.newRecord(name: AssistantProfile.defaultName,
-                                                       displayName: defaultName.isEmpty ? "Bree" : defaultName)
-                if let b = defaultBot, let h = AssistantRegistry.digest(.bot, b) { seed.bot.current = h }
-                if let i = defaultInbox, let h = AssistantRegistry.digest(.inbox, i) { seed.inbox.current = h }
-                d.records.insert(seed, at: 0)
+        do {
+            try AssistantRegistry.withLock(registryPaths) { doc in
+                var d = doc ?? AssistantRegistry.Document(version: 1, records: [])
+                if d.record(AssistantProfile.defaultName) == nil {
+                    var seed = AssistantRegistry.newRecord(name: AssistantProfile.defaultName,
+                                                           displayName: defaultName.isEmpty ? "Bree" : defaultName)
+                    if let b = defaultBot, let h = AssistantRegistry.digest(.bot, b) { seed.bot.current = h }
+                    if let i = defaultInbox, let h = AssistantRegistry.digest(.inbox, i) { seed.inbox.current = h }
+                    d.records.insert(seed, at: 0)
+                }
+                AssistantRegistry.cleanAll(&d, registryPaths)
+                // Refused while an upgrade barrier exists (§5.7, §6.3 step 3).
+                if let barrier = UpgradeBarrier.current(), barrier.isActive {
+                    throw ProvisioningError("Briglia is updating; try again in a minute")
+                }
+                guard d.record(name) == nil, !FileManager.default.fileExists(atPath: AssistantProfile.extraConfigRoot(name).path),
+                      !FileManager.default.fileExists(atPath: AssistantProfile.extraDataRoot(name).path) else {
+                    throw ProvisioningError("an assistant with the id ‘\(name)’ already exists")
+                }
+                guard d.records.count < AssistantProfile.maxProfiles else {
+                    throw ProvisioningError("this computer already has \(AssistantProfile.maxProfiles) assistants, the maximum")
+                }
+                guard !AssistantRegistry.displayNameTaken(displayName, in: d) else {
+                    throw ProvisioningError("another assistant is already called ‘\(displayName)’ — choose a different name")
+                }
+                // Early refusal of a bot another assistant holds, before anything
+                // is created (the reservation itself is a transaction later).
+                if let botToken, let h = AssistantRegistry.digest(.bot, botToken),
+                   let owner = AssistantRegistry.holder(of: h, kind: .bot, excluding: name, in: d) {
+                    throw ProvisioningError(AssistantRegistry.conflictMessage(.bot, owner: owner))
+                }
+                let configRoot = AssistantProfile.extraConfigRoot(name)
+                let dataRoot = AssistantProfile.extraDataRoot(name)
+                try PrivateStorage.ensureDirectory(configRoot, mode: 0o700)
+                try PrivateStorage.ensureDirectory(dataRoot, mode: 0o700)
+                let meta = AssistantProfile.Metadata(version: 1, name: name, displayName: displayName,
+                                                     createdAt: Date(), homeFolder: homeFolder.path, template: template)
+                try PrivateStorage.writeAtomically(try AssistantProfile.encodeMetadata(meta),
+                                                   to: AssistantProfile.metadataURL(name), mode: 0o600)
+                try FileManager.default.createDirectory(at: homeFolder, withIntermediateDirectories: true)
+                var record = AssistantRegistry.newRecord(name: name, displayName: displayName)
+                record.state = "adding"
+                record.addingOp = op
+                generation = record.generation
+                d.records.append(record)
+                doc = d
             }
-            AssistantRegistry.cleanAll(&d, registryPaths)
-            // Refused while an upgrade barrier exists (§5.7, §6.3 step 3).
-            if let barrier = UpgradeBarrier.current(), barrier.isActive {
-                throw ProvisioningError("Briglia is updating; try again in a minute")
-            }
-            guard d.record(name) == nil, !FileManager.default.fileExists(atPath: AssistantProfile.extraConfigRoot(name).path),
-                  !FileManager.default.fileExists(atPath: AssistantProfile.extraDataRoot(name).path) else {
-                throw ProvisioningError("an assistant with the id ‘\(name)’ already exists")
-            }
-            guard d.records.count < AssistantProfile.maxProfiles else {
-                throw ProvisioningError("this computer already has \(AssistantProfile.maxProfiles) assistants, the maximum")
-            }
-            guard !AssistantRegistry.displayNameTaken(displayName, in: d) else {
-                throw ProvisioningError("another assistant is already called ‘\(displayName)’ — choose a different name")
-            }
-            // Early refusal of a bot another assistant holds, before anything
-            // is created (the reservation itself is the transaction below).
-            if let botToken, let h = AssistantRegistry.digest(.bot, botToken),
-               let owner = AssistantRegistry.holder(of: h, kind: .bot, excluding: name, in: d) {
-                throw ProvisioningError(AssistantRegistry.conflictMessage(.bot, owner: owner))
-            }
-            let configRoot = AssistantProfile.extraConfigRoot(name)
-            let dataRoot = AssistantProfile.extraDataRoot(name)
-            try PrivateStorage.ensureDirectory(configRoot, mode: 0o700)
-            try PrivateStorage.ensureDirectory(dataRoot, mode: 0o700)
-            let meta = AssistantProfile.Metadata(version: 1, name: name, displayName: displayName,
-                                                 createdAt: Date(), homeFolder: homeFolder.path, template: nil)
-            try PrivateStorage.writeAtomically(try AssistantProfile.encodeMetadata(meta),
-                                               to: AssistantProfile.metadataURL(name), mode: 0o600)
-            try FileManager.default.createDirectory(at: homeFolder, withIntermediateDirectories: true)
-            var record = AssistantRegistry.newRecord(name: name, displayName: displayName)
-            record.state = "adding"
-            record.addingOp = op
-            generation = record.generation
-            d.records.append(record)
-            doc = d
+        } catch {
+            releaseAll()
+            throw error
         }
         afterProvisionalPublish()
         // Publish, then look: an inactive Briglia that took its instance lock
@@ -303,20 +373,13 @@ enum ProfileProvisioning {
         while case let late = UnleasedInstances.findings(registryPaths: registryPaths), !late.isEmpty {
             if Date() >= deadline {
                 rollbackAdd(name: name, op: op, generation: generation, registryPaths: registryPaths, removeRegistry: !registryExisted)
+                releaseAll()
                 throw ProvisioningError(UnleasedInstances.describe(late))
             }
             Thread.sleep(forTimeInterval: 0.2)
         }
-        // Activate only our own provisional record (same op and generation).
-        try AssistantRegistry.withLock(registryPaths) { doc in
-            guard var d = doc, let i = d.index(name), d.records[i].state == "adding",
-                  d.records[i].addingOp == op, d.records[i].generation == generation else {
-                throw ProvisioningError("‘\(name)’ changed while it was being added; nothing was activated")
-            }
-            d.records[i].state = "active"
-            d.records[i].addingOp = nil
-            doc = d
-        }
+        return PendingAdd(name: name, op: op, generation: generation, registryPaths: registryPaths,
+                          registryExisted: registryExisted, adder: adder, identity: identity, share: share)
     }
 
     static var unleasedGraceSeconds: TimeInterval = 5
@@ -348,13 +411,15 @@ enum ProfileProvisioning {
     /// Run `briglia --profile <name> __profile-init` with `payload` (JSON) on
     /// stdin: the profile's own process writes its own secret store.
     static func runInit(profile: String, payload: [String: Any],
-                        executable: String = AgentMailService.brigliaPath()) throws {
+                        executable: String = AgentMailService.brigliaPath(),
+                        extraEnvironment: [String: String] = [:]) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = ["--profile", profile, "__profile-init"]
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: AssistantProfile.environmentKey)
         env[AssistantProfile.experimentalKey] = "1"
+        for (k, v) in extraEnvironment { env[k] = v }
         process.environment = env
         let input = Pipe()
         let output = Pipe()

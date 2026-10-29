@@ -67,6 +67,10 @@ extension ConversationManager {
         let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""
         let jinaKey = KeychainHelper.load(key: KeychainHelper.jinaApiKeyKey) ?? ""
 
+        // Several assistants (§28.6): the name follows the registry, and an
+        // interrupted token rotation is completed before Telegram starts.
+        if CoordinationMode.multi { AssistantName.reconcile() }
+        await recoverManagedRotationIfNeeded()
         await updateTelegramChannelRegistration()
 
         // The in-app chat window is always routable. Text replies are no-ops
@@ -343,6 +347,11 @@ extension ConversationManager {
                     // for the OLD bot is already persisted under its own
                     // token hash before the swap.
                     await performPendingBotSwitchIfReady()
+                    // Same-bot token rotation (§28.6 S4-P4), same boundary.
+                    await performPendingManagedRotationIfReady()
+                    // A claimed /newassistant creation that could not start
+                    // earlier (a gate was up) starts once nothing blocks it.
+                    if managedBotsActiveHere, managedBotCreationTask == nil { startManagedBotCreationIfPossible() }
 
                     if isTelegramConfigured {
                         if let stalledId = stalledConfirmUpdateId {
@@ -650,6 +659,14 @@ extension ConversationManager {
         // ambient output route here until the user writes on another channel.
         if let address = telegramAddress {
             noteUserActivity(on: address)
+        }
+
+        // Stage 4 (§28.6 S4-P2): a bot the owner created for this manager.
+        // Only with coordination active in the default assistant; otherwise
+        // the message takes today's path.
+        if let created = telegramMessage.managedBotCreated, managedBotsActiveHere {
+            await handleManagedBotCreatedMessage(created, sender: telegramMessage.from)
+            return
         }
 
         if let text = telegramMessage.text,

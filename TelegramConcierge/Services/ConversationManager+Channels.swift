@@ -252,6 +252,10 @@ extension ConversationManager {
             }
         }
         isTelegramConfigured = telegramConfigured
+        // Several assistants (§28.3/§28.4): the bot's @handle, default's
+        // bot-management flag, a claimed creation, a first hello (after the
+        // channel is marked configured; nothing with one assistant).
+        if telegramConfigured { refreshTelegramIdentityCache() }
     }
 
     func sendFromApp(text: String, attachments: [URL],

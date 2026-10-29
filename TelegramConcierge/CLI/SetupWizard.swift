@@ -647,8 +647,13 @@ struct SetupWizard {
         if !name.isEmpty {
             save(KeychainHelper.userNameKey, name)
         }
-        save(KeychainHelper.assistantNameKey, "Bree")
-        print("  ✔ Nice to meet you\(name.isEmpty ? "" : ", \(name)")! I'm Bree.")
+        // A name chosen for the assistant (menu, /assistantname; §28.6 S4-P6)
+        // is never reset to Bree by this step.
+        let assistant = AssistantName.current()
+        if (KeychainHelper.load(key: KeychainHelper.assistantNameKey) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            save(KeychainHelper.assistantNameKey, AssistantName.defaultName)
+        }
+        print("  ✔ Nice to meet you\(name.isEmpty ? "" : ", \(name)")! I'm \(assistant).")
     }
 
     // MARK: Step 6 — permissions

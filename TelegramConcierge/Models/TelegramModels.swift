@@ -24,6 +24,11 @@ struct TelegramUpdate: Codable, Identifiable {
     }
 }
 
+/// `ManagedBotCreated {bot}`: the service message in the creator's chat.
+struct TelegramManagedBotCreated: Codable {
+    let bot: TelegramUser
+}
+
 // MARK: - Inline keyboards (command menus)
 
 /// A tap on an inline button. `message` is the menu message the keyboard was
@@ -136,6 +141,9 @@ struct TelegramMessage: Codable {
     let videoNoteState: TelegramFieldState
     /// Album identifier (several messages sent together), lenient.
     let mediaGroupId: String?
+    /// Service message: the sender created a bot managed by this bot
+    /// (Bot API `managed_bot_created`), lenient.
+    let managedBotCreated: TelegramManagedBotCreated?
     /// Allowlisted user-content kinds Briglia cannot read yet, detected by
     /// key presence only (never decoding arbitrary JSON). Service events are
     /// deliberately not in the list.
@@ -168,6 +176,7 @@ struct TelegramMessage: Codable {
         case audio
         case videoNote = "video_note"
         case mediaGroupId = "media_group_id"
+        case managedBotCreated = "managed_bot_created"
     }
 
     /// User-content kinds that get one visible "can't read this yet" reply
@@ -216,6 +225,7 @@ struct TelegramMessage: Codable {
         (audio, audioState) = Self.lenient(TelegramAudio.self, c, .audio)
         (videoNote, videoNoteState) = Self.lenient(TelegramVideoNote.self, c, .videoNote)
         mediaGroupId = (try? c.decodeIfPresent(String.self, forKey: .mediaGroupId)) ?? nil
+        managedBotCreated = (try? c.decodeIfPresent(TelegramManagedBotCreated.self, forKey: .managedBotCreated)) ?? nil
         let probe = try? decoder.container(keyedBy: UnreadableKind.self)
         unreadableKinds = UnreadableKind.allCases.filter { probe?.contains($0) == true }.map(\.rawValue)
     }

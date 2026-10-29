@@ -402,6 +402,12 @@ extension KeychainHelper {
 
     static let telegramBotTokenKey = "telegram_bot_token"
     static let telegramChatIdKey = "telegram_chat_id"
+    /// The bot's @username as last seen by getMe (display only; several
+    /// assistants: the menu's Assistants cards and `/status`).
+    static let telegramBotUsernameKey = "telegram_bot_username"
+    /// Set by `/newassistant` (MULTI_ASSISTANT_PLAN §28.4): the new
+    /// assistant says hello in its own chat at its first start, then clears it.
+    static let assistantGreetingPendingKey = "assistant_greeting_pending"
     /// Retired with the WhatsApp bridge (2026-10-24): read and deleted only by
     /// RetiredIntegrations' one-time migration.
     static let retiredWhatsappOwnerPhoneKey = "whatsapp_owner_phone"

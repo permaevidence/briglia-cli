@@ -212,6 +212,14 @@ final class MenuWorkflow {
     private var requestTasks: [UUID: Task<(Bool, String?), Error>] = [:]
     let validity = MenuValidity()
 
+    // Assistants page (§28.3): each extra's bot/model as its own setup-api
+    // status reported it (refreshed in the background), and the add in progress.
+    struct AssistantDetail { var botUsername: String?; var model: String? }
+    var assistantDetails: [String: AssistantDetail] = [:]
+    var assistantDetailsAt: Date?
+    var assistantDetailsTask: Task<Void, Never>?
+    var assistantsBusy: String?
+
     init(env: MenuEnvironment, runner: SetupJobRunner, serviceWasRunning: Bool = false) {
         self.env = env
         self.runner = runner
@@ -592,6 +600,12 @@ final class MenuWorkflow {
         out["busy"] = busy ?? NSNull()
         out["closing"] = closing ?? NSNull()
         out["security"] = securityNote()
+        // Several assistants (§28.3): absent otherwise, so the page is unchanged.
+        if let assistants = assistantsStatus() { out["assistants"] = assistants }
+        if MenuChild.active {
+            out["menu_child"] = true
+            out["assistant_name"] = AssistantName.current()
+        }
         return out
     }
 
@@ -604,7 +618,7 @@ final class MenuWorkflow {
 
     /// The AI provider part of the page state: the lane shown, what runs,
     /// every lane's saved setup, and the choices the page offers.
-    private func aiStatus() -> [String: Any] {
+    func aiStatus() -> [String: Any] {
         var providers: [String: Any] = [:]
         var chat: [String: Any] = ["configured": laneReady(.chatgpt) || { if case .signedIn = snapshot.chatgpt { return true }; return false }(),
                                    "active": activeLane == .chatgpt]
@@ -765,6 +779,9 @@ final class MenuWorkflow {
              "lane", "provider_key", "provider_model", "provider_host", "provider_use", "effort",
              "server_save", "server_use", "lane_remove", "lane_select": return "ai"
         case "telegram_token", "telegram_wait", "telegram_manual", "telegram_reset", "telegram_confirm": return "telegram"
+        case "assistant_add": return "assistant_add"
+        case "assistant_start", "assistant_stop", "assistant_rename":
+            return "assistant:" + ((body["profile"] as? String) ?? "")
         default: return nil
         }
     }
@@ -780,6 +797,14 @@ final class MenuWorkflow {
         /// Checked before every write; handed to setup-api / the subscription
         /// store, which call it again right before their own writes.
         let checkpoint: @Sendable () throws -> Void = { try validity.check(ticket) }
+        if let result = try await performAssistantAction(action, body, checkpoint: checkpoint) { return result }
+        // A settings page opened for another assistant (§28.3) has no Start
+        // or Stop: that assistant is started and stopped from the first
+        // assistant's Assistants page.
+        if MenuChild.active, action == "finish", ["start", "stop"].contains((body["what"] as? String) ?? "") {
+            return (false, L("Start and stop this assistant from your first assistant\u{2019}s menu (Assistants).",
+                             "Avvia e ferma questo assistente dal menu del tuo primo assistente (Assistenti)."))
+        }
         /// The AI settings this action was chosen against: its write is
         /// refused if they changed before it (see `guardedAIWrite`).
         let basis = Self.aiState(snapshot)

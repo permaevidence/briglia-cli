@@ -31,6 +31,8 @@ extension ConversationManager {
         if !maintenanceActivities.isEmpty || archiveRecoveryTask != nil { return "memory maintenance" }
         if backgroundPruneEngaged && backgroundPruneBlocksExit { return "a background prune" }
         if UpgradeReadiness.convergence > 0 { return "startup setup" }
+        if managedBotCreationTask != nil || managedBotCreationOwed { return "a new assistant being created" }
+        if pendingManagedRotation || managedRotationInProgress { return "a bot token change" }
         if browserSettingsMutation || isRestoringMind || subscriptionLoginTask != nil
             || botSwitchCutoverInProgress { return "a settings change" }
         // Commands already inside the handler (terminal, app socket, Telegram);
