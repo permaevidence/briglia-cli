@@ -576,6 +576,7 @@ extension ConversationManager {
             await restartEmailPollingAfterAbortedWipe()
             return ["ABORTED: " + why]
         }
+        if let hook = Self.wipeAfterFinalCheckForTesting { await hook() }
 
         // Past the last abort point: only now discard the cancelled
         // subagents' queued results — an abort above must leave them
@@ -901,6 +902,9 @@ extension ConversationManager {
 
     /// Selftests: runs between the wipe's two background-work checks.
     nonisolated(unsafe) static var wipeBeforeSecondBackgroundCheckForTesting: (() async -> Void)?
+    /// Selftests: runs right after the wipe's final busy check, before the
+    /// first destructive step (Codex stage-3 S3-R12-1).
+    nonisolated(unsafe) static var wipeAfterFinalCheckForTesting: (() async -> Void)?
 
     /// Owner decision 2026-10-29 (MULTI_ASSISTANT_PLAN A2; replaces the
     /// per-path claim guards of Codex stage-3 S3-R7-1…S3-R9-1): with several
@@ -980,8 +984,20 @@ extension ConversationManager {
         // configure(), before any poll tick exists) runs crash recovery next,
         // which can resume an interrupted turn. One that begins later waits
         // for the gate before recovering (startPolling).
-        if isStartingPolling {
+        if isStartingPolling && !startupHeldByRestoreGate {
             return Self.busyMessage("Briglia still starting up", outcome: outcome)
+        }
+        // The intake stop (owner decision 2026-10-29; Codex stage-3
+        // S3-R12-1): memory maintenance that is running now — archive
+        // recovery, a background archive or prune, consolidation — would
+        // publish the old memory after the wipe. beginMindRestore refuses it
+        // when the gate rises; this catches one that started since (a
+        // startup in configure() schedules archive recovery). Nothing can
+        // start one later: startup holds before configure(), recovery is
+        // deferred while the gate is up, and every other start site is a
+        // turn (held), a poll tick (idle) or a command that checks the gate.
+        if archiveRecoveryTask != nil || !maintenanceActivities.isEmpty {
+            return Self.busyMessage("memory maintenance", outcome: outcome)
         }
         return await Self.multiAssistantBackgroundWorkRefusal(outcome: outcome)
     }
@@ -1308,6 +1324,18 @@ extension ConversationManager {
 
     func endMindRestore() {
         isRestoringMind = false
+        // Intake restarts (owner decision 2026-10-29): archive recovery that a
+        // startup's configure() deferred under the gate runs now, against the
+        // state that exists after the wipe / import (context rebuilt here).
+        if archiveRecoveryDeferredByRestoreGate {
+            archiveRecoveryDeferredByRestoreGate = false
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let items = await self.archiveService.getPromptSummaryItems(recentConsolidatedCount: 5)
+                self.scheduleArchiveRecovery(defaultContext: self.buildSummarizationContext(
+                    chunkSummaries: items, currentMessages: self.messages))
+            }
+        }
         // After a Mind import: repair stubs and restore at the next idle point.
         scheduleSummaryRetentionIdlePass()
     }

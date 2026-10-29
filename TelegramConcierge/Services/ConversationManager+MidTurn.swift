@@ -664,17 +664,23 @@ extension ConversationManager {
             inboundDurabilityFailure = true
         }
 
+        // The history generation this turn belongs to (captured now, not when
+        // its body first runs): a wipe or Mind import bumps it.
+        let historyGeneration = archiveGeneration
         activeProcessingTask = Task { [weak self] in
-            await self?.runActiveProcessing(for: userMessage, runId: runId)
+            await self?.runActiveProcessing(for: userMessage, runId: runId, historyGeneration: historyGeneration)
         }
     }
 
-    /// Selftests: how often a turn body waited for the restore gate.
+    /// Selftests: how often a turn body waited for the restore gate, and how
+    /// many held turns were dropped because the history was replaced.
     nonisolated(unsafe) static var turnsHeldByRestoreGateForTesting = 0
+    nonisolated(unsafe) static var turnsDroppedAfterReplacementForTesting = 0
 
     private func runActiveProcessing(
         for userMessage: Message,
-        runId: UUID
+        runId: UUID,
+        historyGeneration: UInt64
     ) async {
         // Several assistants (Codex stage-3 S3-R10-1/R11-1 audit): the one
         // choke point every turn passes — so no model call, tool call, Bash
@@ -684,9 +690,20 @@ extension ConversationManager {
         // check is visible to it (active run) and refuses the wipe; one
         // started after waits here until the gate drops. /stop still ends
         // the wait. Never-multi installs are unchanged.
+        var heldByGate = false
         while isRestoringMind && Self.multiAssistantGateApplies && !Task.isCancelled {
+            heldByGate = true
             Self.turnsHeldByRestoreGateForTesting += 1
             try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        // The intake stop (owner decision 2026-10-29): a turn that was held
+        // here while a wipe or Mind import replaced the history belongs to
+        // the replaced history — whatever command or producer started it, it
+        // never runs on the new state. The teardown below still runs.
+        let droppedAfterReplacement = heldByGate && archiveGeneration != historyGeneration
+        if droppedAfterReplacement {
+            Self.turnsDroppedAfterReplacementForTesting += 1
+            print("[ConversationManager] Dropped a turn held during a memory wipe/import: its history was replaced")
         }
         defer {
             // Every non-crash exit passes here — answer delivered, /stop,
@@ -764,6 +781,7 @@ extension ConversationManager {
                 drainPendingAmbientTriggers()
             }
         }
+        if droppedAfterReplacement { return }
 
         // Reset the per-turn tool log so /status shows only this turn.
         currentTurnToolLog = []

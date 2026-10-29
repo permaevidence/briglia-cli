@@ -1014,7 +1014,17 @@ actor ConversationArchiveService {
     /// Clear all archived chunks and indices (for memory reset). Returns the
     /// user-profile maintenance files that could not be removed.
     @discardableResult
-    func clearAllArchives() -> [String] {
+    func clearAllArchives() async -> [String] {
+        // Serialized behind the chunk writer (Codex stage-3 S3-R12-1): pending
+        // recovery, archiving and consolidation hold it across their model
+        // calls and publish the index when they resume. Clearing in that
+        // window let a resumed recovery append pre-wipe memory to the wiped
+        // index. Waiting here makes their publication land BEFORE the clear,
+        // which then removes it. Normally nothing holds the writer during a
+        // wipe (the restore gate and the busy checks keep maintenance out),
+        // so this returns at once.
+        await acquireChunkWriter()
+        defer { releaseChunkWriter() }
         // Delete all chunk files
         for chunk in chunkIndex.chunks {
             let fileURL = archiveFolder.appendingPathComponent(chunk.rawContentFileName)
@@ -2576,7 +2586,12 @@ actor ConversationArchiveService {
     
     /// Internal (not private) since v0.2.32 so the provider selftest can
     /// assert the HTTP body this builder sends (auxiliary-body rows).
+    /// Selftests only: replaces the archive model call (no request is built
+    /// or sent). Nil in production.
+    nonisolated(unsafe) static var callLLMOverrideForTesting: ((_ system: String, _ user: String) async throws -> String)?
+
     func callLLM(systemPrompt: String, userPrompt: String, maxTokens: Int? = nil, sharedContextPrompt: String? = nil) async throws -> String {
+        if let override = Self.callLLMOverrideForTesting { return try await override(systemPrompt, userPrompt) }
         if let context = ResponsesAuxiliary.inheritedSnapshot(lane: .archive) {
             var input = [("system", archiveSystemPrefix)]
             if let sharedContextPrompt, !sharedContextPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

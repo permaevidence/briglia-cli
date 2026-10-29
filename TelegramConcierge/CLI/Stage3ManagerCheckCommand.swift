@@ -172,7 +172,203 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         check("wipe refusal: with nothing live, the wipe runs and removes this assistant's claims file",
               !FileManager.default.fileExists(atPath: ctx.paths.claimsFile(ctx.me.profile).path)
               && !second.contains { $0.hasPrefix("ABORTED") } && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil, "\(second)")
+        // The intake stop (owner decision 2026-10-29; Codex stage-3 S3-R12-1).
+        await archiveClearWaitsForRecovery(m, check: check)
+        await lateStartupDoesNotRecoverUnderWipe(m, check: check)
+        await startupHeldBetweenChecksDoesNotRefuse(m, check: check)
+        await maintenanceUnderGateRefuses(m, check: check)
+        await archiveRecoveryDeferredUnderGate(m, check: check)
         ClaimScopes.tickSeconds = 2
+    }
+
+    /// The intake stop: memory maintenance that began after the gate rose
+    /// (here between the two checks) refuses the wipe, nothing deleted.
+    @MainActor private func maintenanceUnderGateRefuses(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+        var activity: UUID?
+        ConversationManager.wipeBeforeSecondBackgroundCheckForTesting = { @MainActor in
+            activity = m.beginMaintenance(.consolidating)
+        }
+        let wipe = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        ConversationManager.wipeBeforeSecondBackgroundCheckForTesting = nil
+        if let activity { m.endMaintenance(activity) }
+        check("intake stop: memory maintenance running at the final check refuses the wipe, nothing deleted",
+              Self.isWorkRefusal(wipe) && wipe[0].contains("memory maintenance")
+              && KeychainHelper.load(key: KeychainHelper.userNameKey) == "Sentinel", "\(wipe)")
+    }
+
+    /// The intake stop: archive recovery requested while the gate is up does
+    /// not start; it is scheduled (with a fresh context) when the gate drops.
+    @MainActor private func archiveRecoveryDeferredUnderGate(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        let gate = m.beginMindRestore()
+        m.scheduleArchiveRecovery(defaultContext: .empty)
+        let notStarted = m.archiveRecoveryTask == nil && m.archiveRecoveryDeferredByRestoreGate
+        if gate { m.endMindRestore() }
+        let by = Date().addingTimeInterval(10)
+        var startedLater = false
+        while Date() < by {
+            if m.archiveRecoveryTask != nil || !m.archiveRecoveryDeferredByRestoreGate { startedLater = true; break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        await awaitArchiveIdle(m)
+        check("intake stop: archive recovery requested under the restore gate starts only after the gate drops",
+              gate && notStarted && startedLater && !m.archiveRecoveryDeferredByRestoreGate, "gate \(gate) deferred \(notStarted) later \(startedLater)")
+    }
+
+    /// One pending chunk on disk whose raw message carries `marker`; the
+    /// manager's archive service reloads it (as at startup).
+    @MainActor private func seedPendingChunk(_ m: ConversationManager, marker: String) async {
+        let folder = m.archiveService.archiveFolderURLForTesting
+        try? PrivateStorage.ensureDirectory(folder)
+        let msg = Message(role: .user, content: "Please remember \(marker) for later.")
+        let raw = "pending_\(UUID().uuidString).json"
+        try? PrivateStorage.writeAtomically(try JSONEncoder().encode([msg]), to: folder.appendingPathComponent(raw))
+        let pending = PendingChunk(id: UUID(), startDate: msg.timestamp.addingTimeInterval(-60), endDate: msg.timestamp,
+                                   tokenCount: 20, messageCount: 1, rawContentFileName: raw, createdAt: Date(),
+                                   sourceMessageIDs: [msg.id])
+        try? PrivateStorage.writeAtomically(try JSONEncoder().encode(PendingChunkIndex(pendingChunks: [pending])),
+                                            to: folder.appendingPathComponent("pending_chunks.json"))
+        await m.archiveService.reloadFromDisk()
+    }
+
+    @MainActor private func archiveIndexContains(_ m: ConversationManager, _ marker: String) -> Bool {
+        let url = m.archiveService.archiveFolderURLForTesting.appendingPathComponent("chunk_index.json")
+        guard let data = try? Data(contentsOf: url) else { return false }
+        return String(decoding: data, as: UTF8.self).contains(marker)
+    }
+
+    /// A synthetic archive model (no request is built or sent): the summary
+    /// of the chunk carrying `marker` waits on `gate`, then returns a valid
+    /// summary that repeats the marker; every other maintenance call answers
+    /// NO_CHANGES.
+    static func installArchiveModel(marker: String, gate: StepGate, seen: DoneMark) {
+        ConversationArchiveService.callLLMOverrideForTesting = { _, user in
+            guard user.contains(marker) else { return "NO_CHANGES" }
+            seen.value = true
+            await gate.wait()
+            return "Summary: the user asked to remember \(marker). " + Array(repeating: "The conversation covered that request in detail.", count: 30).joined(separator: " ")
+        }
+    }
+
+    @MainActor private func awaitArchiveIdle(_ m: ConversationManager) async {
+        let by = Date().addingTimeInterval(30)
+        while (m.archiveRecoveryTask != nil || !m.maintenanceActivities.isEmpty || m.archiveRecoveryDeferredByRestoreGate) && Date() < by {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    /// Codex stage-3 S3-R12-1, storage level: a pending-chunk recovery that
+    /// read pre-wipe memory and is waiting for its summary must not publish
+    /// it into an archive cleared meanwhile. The clear waits for the chunk
+    /// writer (the recovery holds it), so the recovered chunk lands first
+    /// and is then removed.
+    @MainActor private func archiveClearWaitsForRecovery(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        let marker = "R12_STORE_\(UUID().uuidString.prefix(6))"
+        await seedPendingChunk(m, marker: marker)
+        let gate = StepGate(), seen = DoneMark(), cleared = DoneMark()
+        Self.installArchiveModel(marker: marker, gate: gate, seen: seen)
+        defer { ConversationArchiveService.callLLMOverrideForTesting = nil }
+        let archive = m.archiveService
+        let recovery = Task { await archive.recoverPendingChunks() }
+        let by = Date().addingTimeInterval(20)
+        while !gate.hasEntered && Date() < by { try? await Task.sleep(nanoseconds: 10_000_000) }
+        let clear = Task { _ = await archive.clearAllArchives(); cleared.value = true }
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        let clearWaited = !cleared.value
+        gate.release()
+        await recovery.value
+        await clear.value
+        check("S3-R12-1 (storage): clearing the archive waits for a recovery that holds the chunk writer, and the recovered pre-wipe chunk does not survive the clear",
+              seen.value && clearWaited && !archiveIndexContains(m, marker), "summary \(seen.value) clearWaited \(clearWaited) inIndex \(archiveIndexContains(m, marker))")
+    }
+
+    /// Codex stage-3 S3-R12-1, Codex's sequence: a REAL startup begun after
+    /// the wipe's final busy check (gate up). Before the fix configure()
+    /// scheduled archive recovery under the gate, which read a pre-wipe
+    /// pending chunk and published it after the wipe. Now the startup does
+    /// nothing until the gate drops: no archive recovery, no summary request.
+    @MainActor private func lateStartupDoesNotRecoverUnderWipe(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        let marker = "R12_OLD_MEMORY_\(UUID().uuidString.prefix(6))"
+        await seedPendingChunk(m, marker: marker)
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+        let gate = StepGate(), seen = DoneMark()
+        Self.installArchiveModel(marker: marker, gate: gate, seen: seen)
+        defer { ConversationArchiveService.callLLMOverrideForTesting = nil }
+        final class Observed { var held = false, recovery = false, summary = false, configured = false, started = false }
+        let obs = Observed()
+        var startup: Task<Void, Never>?
+        let held0 = ConversationManager.startupHeldBeforeConfigureForTesting
+        ConversationManager.startupAfterConfigureForTesting = { obs.configured = true }
+        ConversationManager.wipeAfterFinalCheckForTesting = { @MainActor in
+            startup = Task { @MainActor in await m.startPolling() }
+            obs.started = true
+            let by = Date().addingTimeInterval(3)
+            while ConversationManager.startupHeldBeforeConfigureForTesting < held0 + 3 && !gate.hasEntered && Date() < by {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            obs.held = m.startupHeldByRestoreGate && m.isStartingPolling
+            obs.recovery = m.archiveRecoveryTask != nil
+            obs.summary = gate.hasEntered
+        }
+        // Codex's ordering: a held summary is released only after the wipe
+        // returns. A watchdog lets it go after 8 s so a build where the
+        // archive clear waits for the recovery's chunk writer cannot hang.
+        let wipeDone = DoneMark()
+        let watchdog = Task { try? await Task.sleep(nanoseconds: 8_000_000_000); if !wipeDone.value { gate.release() } }
+        let wipe = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        wipeDone.value = true
+        watchdog.cancel()
+        ConversationManager.wipeAfterFinalCheckForTesting = nil
+        let oldInIndexAfterWipe = archiveIndexContains(m, marker)
+        gate.release()
+        await startup?.value
+        ConversationManager.startupAfterConfigureForTesting = nil
+        await awaitArchiveIdle(m)
+        m.stopPolling()
+        await awaitArchiveIdle(m)
+        let oldInIndexLater = archiveIndexContains(m, marker)
+        check("S3-R12-1: a real startup begun after the wipe's final check waits before configure(): no archive recovery, no summary request under the gate",
+              obs.started && obs.held && !obs.recovery && !obs.summary && !seen.value,
+              "held \(obs.held) recovery \(obs.recovery) summary \(obs.summary)")
+        check("S3-R12-1: the wipe succeeds and the pre-wipe pending memory never reaches the wiped archive index (also after startup completes)",
+              !wipe.contains { $0.hasPrefix("ABORTED") } && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil
+              && !oldInIndexAfterWipe && !oldInIndexLater && obs.configured,
+              "\(wipe) afterWipe \(oldInIndexAfterWipe) later \(oldInIndexLater) configured \(obs.configured)")
+    }
+
+    /// The intake stop: a startup that begins between the wipe's two busy
+    /// checks waits at the top and is NOT counted as "starting up" (it has
+    /// done nothing); the wipe proceeds, then the startup runs.
+    @MainActor private func startupHeldBetweenChecksDoesNotRefuse(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+        var startup: Task<Void, Never>?
+        let held0 = ConversationManager.startupHeldBeforeConfigureForTesting
+        ConversationManager.wipeBeforeSecondBackgroundCheckForTesting = { @MainActor in
+            startup = Task { @MainActor in await m.startPolling() }
+            let by = Date().addingTimeInterval(3)
+            while ConversationManager.startupHeldBeforeConfigureForTesting == held0 && Date() < by {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        let wipe = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        ConversationManager.wipeBeforeSecondBackgroundCheckForTesting = nil
+        await startup?.value
+        let started = m.pollingTask != nil
+        m.stopPolling()
+        await awaitArchiveIdle(m)
+        check("intake stop: a startup held at the gate (begun between the wipe's checks) does not refuse the wipe, and starts once the gate drops",
+              ConversationManager.startupHeldBeforeConfigureForTesting > held0 && !wipe.contains { $0.hasPrefix("ABORTED") }
+              && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil && started, "\(wipe) started \(started)")
     }
 
     enum WipeMode { case pending, ending, contextLoss, endingNoJobs, contextLossNoJobs }
@@ -501,26 +697,54 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         m.stopPolling()
         check("S3-R11-1: the held startup then completes normally", !m.isStartingPolling && m.error == nil, m.error ?? "")
 
-        // A startup that begins while the gate is up waits before recovery.
-        let idleBy = Date().addingTimeInterval(20)
-        while (m.archiveRecoveryTask != nil || !m.maintenanceActivities.isEmpty) && Date() < idleBy { try? await Task.sleep(nanoseconds: 20_000_000) }
-        let waits0 = ConversationManager.startupRecoveryWaitsForTesting
+        // A startup that begins while the gate is up waits before configure()
+        // (the intake stop, S3-R12-1) — so before any recovery.
+        await awaitArchiveIdle(m)
+        let top0 = ConversationManager.startupHeldBeforeConfigureForTesting
+        let configured = DoneMark()
+        ConversationManager.startupAfterConfigureForTesting = { configured.value = true }
         let gate2 = m.beginMindRestore()
         let finished = DoneMark()
         let late = Task { @MainActor in await m.startPolling(); finished.value = true }
         let waitBy = Date().addingTimeInterval(20)
-        while ConversationManager.startupRecoveryWaitsForTesting == waits0 && !finished.value && Date() < waitBy {
+        while ConversationManager.startupHeldBeforeConfigureForTesting == top0 && !finished.value && Date() < waitBy {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         try? await Task.sleep(nanoseconds: 300_000_000)
-        let heldWhileGated = !finished.value && m.pollingTask == nil && ConversationManager.startupRecoveryWaitsForTesting > waits0
+        let heldWhileGated = !finished.value && !configured.value && m.pollingTask == nil && m.archiveRecoveryTask == nil
+            && m.startupHeldByRestoreGate && ConversationManager.startupHeldBeforeConfigureForTesting > top0
         if gate2 { m.endMindRestore() }
         await late.value
-        check("S3-R11-1: a startup begun under the restore gate holds crash recovery until the gate drops",
-              gate2 && heldWhileGated && finished.value && m.pollingTask != nil, "gate \(gate2) held \(heldWhileGated)")
+        ConversationManager.startupAfterConfigureForTesting = nil
+        check("S3-R11-1/R12-1: a startup begun under the restore gate does nothing (no configure, no recovery) until the gate drops",
+              gate2 && heldWhileGated && finished.value && configured.value && m.pollingTask != nil, "gate \(gate2) held \(heldWhileGated)")
         m.stopPolling()
-        let idle2By = Date().addingTimeInterval(20)
-        while (m.archiveRecoveryTask != nil || !m.maintenanceActivities.isEmpty) && Date() < idle2By { try? await Task.sleep(nanoseconds: 20_000_000) }
+        await awaitArchiveIdle(m)
+
+        // A startup already in configure() when the gate rises (the wipe
+        // refuses it as "starting up") still holds its crash recovery.
+        let waits0 = ConversationManager.startupRecoveryWaitsForTesting
+        let hold3 = StepGate()
+        ConversationManager.startupAfterConfigureForTesting = { await hold3.wait() }
+        let finished3 = DoneMark()
+        let mid = Task { @MainActor in await m.startPolling(); finished3.value = true }
+        let enteredBy = Date().addingTimeInterval(20)
+        while !hold3.hasEntered && Date() < enteredBy { try? await Task.sleep(nanoseconds: 10_000_000) }
+        let gate4 = m.beginMindRestore()
+        hold3.release()
+        let recBy = Date().addingTimeInterval(20)
+        while ConversationManager.startupRecoveryWaitsForTesting == waits0 && !finished3.value && Date() < recBy {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let recoveryHeld = !finished3.value && m.pollingTask == nil && ConversationManager.startupRecoveryWaitsForTesting > waits0
+        if gate4 { m.endMindRestore() }
+        await mid.value
+        ConversationManager.startupAfterConfigureForTesting = nil
+        check("S3-R11-1: a startup already in configure() when the gate rises holds crash recovery until the gate drops",
+              gate4 && recoveryHeld && finished3.value && m.pollingTask != nil, "gate \(gate4) held \(recoveryHeld)")
+        m.stopPolling()
+        await awaitArchiveIdle(m)
 
         // The turn choke point: a turn started (by any producer) while the
         // gate is up runs no body until it drops. Cancelled before release,
@@ -538,6 +762,25 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         await task?.value
         check("S3-R11-1 audit: a turn started under the restore gate runs nothing until the gate drops (or /stop)",
               gate3 && heldTurn && m.activeProcessingTask == nil, "gate \(gate3) held \(heldTurn)")
+
+        // The intake stop: a turn held at the choke point while the history
+        // is replaced (the wipe's / import's generation bump) is dropped when
+        // the gate drops — it never runs on the new state.
+        let dropped0 = ConversationManager.turnsDroppedAfterReplacementForTesting
+        let held5 = ConversationManager.turnsHeldByRestoreGateForTesting
+        let gate5 = m.beginMindRestore()
+        let messages5 = m.messages.map(\.id)
+        m.startActiveProcessing(for: Message(role: .user, content: "s3 intake: pre-wipe input"))
+        let held5By = Date().addingTimeInterval(5)
+        while ConversationManager.turnsHeldByRestoreGateForTesting == held5 && Date() < held5By { try? await Task.sleep(nanoseconds: 10_000_000) }
+        await m.invalidateArchiveJobForReplacedHistory()   // what the wipe / import do
+        let task5 = m.activeProcessingTask
+        if gate5 { m.endMindRestore() }
+        await task5?.value
+        check("intake stop: a turn held while a wipe/import replaced the history is dropped (no model or tool work) and torn down",
+              gate5 && ConversationManager.turnsDroppedAfterReplacementForTesting == dropped0 + 1
+              && m.activeProcessingTask == nil && m.activeRunId == nil && m.messages.map(\.id) == messages5,
+              "gate \(gate5) dropped \(ConversationManager.turnsDroppedAfterReplacementForTesting - dropped0) messages \(messages5.count)→\(m.messages.count)")
     }
 
     /// Codex stage-3 S3-R2-4: a terminal/app /upgrade whose coordinated

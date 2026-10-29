@@ -296,11 +296,39 @@ BREAKS = [
      '        if false {'),
     # Codex stage-3 round 11 (S3-R11-1): startup in progress.
     ('M95 the refusal ignores a startup still in progress (S3-R11-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     '        if isStartingPolling {', '        if false {'),
+     '        if isStartingPolling && !startupHeldByRestoreGate {', '        if false {'),
     ('M96 a startup begun under the restore gate recovers at once (S3-R11-1)', 'stage3e2e', T + 'Services/ConversationManager+Inbound.swift',
-     '        while isRestoringMind && Self.multiAssistantGateApplies {', '        while false {'),
+     '        while isRestoringMind && Self.multiAssistantGateApplies {\n            Self.startupRecoveryWaitsForTesting += 1',
+     '        while false {\n            Self.startupRecoveryWaitsForTesting += 1'),
     ('M97 a turn body runs under the restore gate (S3-R11-1 audit)', 'stage3e2e', T + 'Services/ConversationManager+MidTurn.swift',
      '        while isRestoringMind && Self.multiAssistantGateApplies && !Task.isCancelled {', '        while false {'),
+    # The intake stop (owner decision 2026-10-29; Codex stage-3 S3-R12-1).
+    ('M98 a startup begun under the restore gate runs configure() at once (S3-R12-1)', 'stage3e2e', T + 'Services/ConversationManager+Inbound.swift',
+     '        if isRestoringMind && Self.multiAssistantGateApplies {\n            startupHeldByRestoreGate = true',
+     '        if false {\n            startupHeldByRestoreGate = true'),
+    ('M99 the archive clear does not wait for the chunk writer (S3-R12-1, storage)', 'stage3e2e', T + 'Services/ConversationArchiveService.swift',
+     '        await acquireChunkWriter()\n        defer { releaseChunkWriter() }\n        // Delete all chunk files\n',
+     '        // Delete all chunk files\n'),
+    ('M100 the refusal ignores memory maintenance begun under the gate (intake stop)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '        if archiveRecoveryTask != nil || !maintenanceActivities.isEmpty {\n            return Self.busyMessage("memory maintenance", outcome: outcome)',
+     '        if false {\n            return Self.busyMessage("memory maintenance", outcome: outcome)'),
+    ('M101 a startup held at the gate counts as starting up (intake stop)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '        if isStartingPolling && !startupHeldByRestoreGate {', '        if isStartingPolling {'),
+    ('M102 archive recovery starts under the restore gate (intake stop)', 'stage3e2e', T + 'Services/ConversationManager+Inbound.swift',
+     '        if isRestoringMind && Self.multiAssistantGateApplies {\n            archiveRecoveryDeferredByRestoreGate = true',
+     '        if false {\n            archiveRecoveryDeferredByRestoreGate = true'),
+    ('M104 a turn held while the history was replaced still runs (intake stop)', 'stage3e2e', T + 'Services/ConversationManager+MidTurn.swift',
+     '        if droppedAfterReplacement { return }\n', ''),
+    # The round-12 head's behaviour (all three intake-stop fixes removed,
+    # test seams kept): Codex's sequence must fail.
+    ('M103 the round-12 head: no startup hold, no clear serialization, no deferral (S3-R12-1)', 'stage3e2e', [
+        (T + 'Services/ConversationManager+Inbound.swift', '        if isRestoringMind && Self.multiAssistantGateApplies {\n            startupHeldByRestoreGate = true',
+         '        if false {\n            startupHeldByRestoreGate = true'),
+        (T + 'Services/ConversationArchiveService.swift', '        await acquireChunkWriter()\n        defer { releaseChunkWriter() }\n        // Delete all chunk files\n',
+         '        // Delete all chunk files\n'),
+        (T + 'Services/ConversationManager+Inbound.swift', '        if isRestoringMind && Self.multiAssistantGateApplies {\n            archiveRecoveryDeferredByRestoreGate = true',
+         '        if false {\n            archiveRecoveryDeferredByRestoreGate = true'),
+    ]),
 ]
 
 

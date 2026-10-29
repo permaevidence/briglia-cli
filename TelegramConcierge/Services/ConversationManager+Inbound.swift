@@ -144,6 +144,15 @@ extension ConversationManager {
 
     func scheduleArchiveRecovery(defaultContext: ConversationArchiveService.SummarizationContext) {
         guard archiveRecoveryTask == nil else { return }
+        // The intake stop (owner decision 2026-10-29): no producer starts
+        // while a wipe / Mind import holds the restore gate. The context
+        // built now may describe the history about to be replaced, so it is
+        // rebuilt when the gate drops (endMindRestore). Never-multi installs
+        // are unchanged.
+        if isRestoringMind && Self.multiAssistantGateApplies {
+            archiveRecoveryDeferredByRestoreGate = true
+            return
+        }
         let archiveService = self.archiveService
         archiveRecoveryTask = Task { [weak self] in
             await archiveService.recoverPendingChunks(defaultContext: defaultContext)
@@ -160,6 +169,9 @@ extension ConversationManager {
     /// startup recovery waited for the restore gate.
     nonisolated(unsafe) static var startupAfterConfigureForTesting: (() async -> Void)?
     nonisolated(unsafe) static var startupRecoveryWaitsForTesting = 0
+    /// Selftests: how often a startup waited at the intake stop (before
+    /// configure) for the restore gate.
+    nonisolated(unsafe) static var startupHeldBeforeConfigureForTesting = 0
 
     func startPolling() async {
         // Prevent duplicate polling tasks. The flag must be claimed BEFORE
@@ -175,6 +187,23 @@ extension ConversationManager {
         }
         isStartingPolling = true
         defer { isStartingPolling = false }
+
+        // The intake stop (owner decision 2026-10-29; Codex stage-3
+        // S3-R12-1): with several assistants, a startup that begins while a
+        // /deleteuserdata wipe or Mind import holds the restore gate does
+        // NOTHING until the gate drops — no settings migration, no
+        // configure() (archive recovery, email poller, pinned sessions), no
+        // crash recovery. Held here it is not "starting up" for the wipe's
+        // busy check. A startup already past this point when the gate rises
+        // is counted as in progress and refuses the wipe.
+        if isRestoringMind && Self.multiAssistantGateApplies {
+            startupHeldByRestoreGate = true
+            while isRestoringMind && Self.multiAssistantGateApplies {
+                Self.startupHeldBeforeConfigureForTesting += 1
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            startupHeldByRestoreGate = false
+        }
 
         // gws / WhatsApp retirement (2026-10-24): settings and Briglia's own
         // leftovers, before configure() reads them; notices come later.
@@ -204,8 +233,10 @@ extension ConversationManager {
         // part of that turn's context).
         // Several assistants (Codex stage-3 S3-R11-1): recovery below can
         // resume a turn; never while a /deleteuserdata wipe or Mind import
-        // holds the restore gate (it ends with the operation). Never-multi
-        // installs are unchanged.
+        // holds the restore gate (it ends with the operation). A startup
+        // begun under the gate already waited at the top; this covers one
+        // that was in configure() when the gate rose (the wipe refuses it as
+        // "starting up"). Never-multi installs are unchanged.
         while isRestoringMind && Self.multiAssistantGateApplies {
             Self.startupRecoveryWaitsForTesting += 1
             try? await Task.sleep(nanoseconds: 100_000_000)

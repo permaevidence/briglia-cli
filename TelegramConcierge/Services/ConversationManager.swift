@@ -32,6 +32,16 @@ class ConversationManager: ObservableObject {
     /// await — closes the reentrancy window that used to let two concurrent
     /// startPolling calls both pass the isPolling guard and run two loops.
     var isStartingPolling = false
+    /// Several assistants (owner decision 2026-10-29, the intake stop; Codex
+    /// stage-3 S3-R12-1): a startup that began while a wipe / Mind import
+    /// holds the restore gate waits at the very top of startPolling — before
+    /// configure(), so before archive recovery, the email poller and every
+    /// crash-recovery pass. Such a held startup has done nothing yet, so the
+    /// wipe's busy check does not count it.
+    var startupHeldByRestoreGate = false
+    /// configure() ran while the gate was up: archive recovery is scheduled
+    /// when the gate drops, with a context read then (endMindRestore).
+    var archiveRecoveryDeferredByRestoreGate = false
     var archiveRecoveryTask: Task<Void, Never>?
     var activeProcessingTask: Task<Void, Never>?
     var subscriptionLoginTask: Task<Void, Never>?
