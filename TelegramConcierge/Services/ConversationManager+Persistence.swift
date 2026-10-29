@@ -491,6 +491,15 @@ extension ConversationManager {
             return ["ABORTED: \(why) — nothing was deleted"]
         }
 
+        // 0a-bis. Several assistants (owner decision 2026-10-29, Codex
+        //     stage-3 rounds 6–9): refuse — before anything is cancelled or
+        //     deleted — while background work or an open claim scope could
+        //     still need this assistant's file claims. Checked again below,
+        //     after the last suspending quiescence step.
+        if let why = await Self.multiAssistantBackgroundWorkRefusal() {
+            return ["ABORTED: " + why]
+        }
+
         // 0b. Quiesce background work — cancelling is not enough (Codex
         //     round 2): a cancelled subagent still runs to its commit point
         //     and could re-persist its session or queue a completion AFTER
@@ -557,6 +566,16 @@ extension ConversationManager {
             return ["ABORTED: an AgentMail poll tick is still in flight after 10s — nothing was deleted, and email polling was restarted; try again in a minute"]
         }
 
+        // 0d-bis. The refusal again, at the destructive step: work started
+        //     while the wipe was suspended above refuses too. No suspension
+        //     follows before the claims are removed except the purge, which
+        //     then has nothing of a several-assistant install to stop.
+        if let hook = Self.wipeBeforeSecondBackgroundCheckForTesting { await hook() }
+        if let why = await Self.multiAssistantBackgroundWorkRefusal() {
+            await restartEmailPollingAfterAbortedWipe()
+            return ["ABORTED: " + why]
+        }
+
         // Past the last abort point: only now discard the cancelled
         // subagents' queued results — an abort above must leave them
         // deliverable, or "nothing was deleted" would be a lie
@@ -565,9 +584,9 @@ extension ConversationManager {
 
         // 0e. Purge bash jobs: kill everything and drop registry state —
         //     the already-queued completion notices must die too. A job
-        //     still stopping after the join limit is kept (its file claims
-        //     stay valid, see the claims step below) and reported rather
-        //     than silently dropped.
+        //     still stopping after the join limit is kept and reported
+        //     rather than silently dropped (with several assistants the
+        //     refusal above means there is none).
         let bashPurge = await BackgroundProcessRegistry.shared.purgeAllForWipeReporting()
         if bashPurge.retained > 0 {
             failures.append("\(bashPurge.retained) background command(s) were still stopping after 60 s and were kept; run /deleteuserdata again in a minute to clear them")
@@ -610,22 +629,13 @@ extension ConversationManager {
         RenderedPDFPageCache.shared.removeAll()
         ModelImageCache.shared.removeAll()
         CacheDiagnostics.reset()
-        // Several assistants (§11): this assistant's own board entry and
-        // notices (idle: no edit is reserved). Nothing with one. Claims are
-        // NOT deleted outright (Codex stage-3 S3-R7-1): an ended turn's
-        // claims stay protected while the jobs bound to it are still live
-        // (e.g. kept by the purge above). A ticker pass releases every claim
-        // no live scope protects; the file goes only once no scope is open
-        // (current, ending or pending — S3-R8-1).
+        // Several assistants (§11): this assistant's own board entry,
+        // notices and claims (idle: no edit is reserved). Nothing with one.
+        // The refusal above guarantees no claim scope is open and no job or
+        // subagent is live; the open-scope test is only a synchronous belt.
         if MultiAssistant.context() != nil || AssistantRegistry.presence() != .absent {
             AssistantBoard.removeFiles(profile: AssistantProfile.selectedName, includeClaims: false)
             BoardWriter.shared.reset()
-            if MultiAssistant.context() != nil {
-                await ClaimScopes.shared.tick()
-            }
-            // A nil context (registry briefly unreadable, or a peer being
-            // removed has published `removing`) is not evidence that the
-            // scopes closed (S3-R9-1): only the open scopes decide.
             if !ClaimScopes.shared.hasOpenScopes {
                 try? FileManager.default.removeItem(at: MultiAssistant.Paths.live.claimsFile(AssistantProfile.selectedName))
             }
@@ -887,8 +897,50 @@ extension ConversationManager {
         return subscriptionLoginTask == nil ? nil : "ChatGPT login is still shutting down"
     }
 
+    /// Selftests: runs between the wipe's two background-work checks.
+    nonisolated(unsafe) static var wipeBeforeSecondBackgroundCheckForTesting: (() async -> Void)?
+
+    /// Owner decision 2026-10-29 (MULTI_ASSISTANT_PLAN A2; replaces the
+    /// per-path claim guards of Codex stage-3 S3-R7-1…S3-R9-1): with several
+    /// assistants, `/deleteuserdata` and a Mind import refuse while any
+    /// background Bash job is running, unsettled or still being stopped,
+    /// any subagent run is live, or any claim scope (current, ending,
+    /// pending) is still open — instead of killing that work and then
+    /// deciding which claims it still needs. An open scope with no live
+    /// work gets a short settling window (a turn that just ended closes in
+    /// milliseconds); one that cannot close (e.g. the assistants list is
+    /// unreadable or being rewritten) refuses. Nil = proceed. A never-multi
+    /// install (no registry, nothing claimed) is unchanged: nil at once.
+    static func multiAssistantBackgroundWorkRefusal(settleSeconds: Double = 2,
+                                                    outcome: (en: String, it: String) = (" Nothing was deleted.", " Non è stato cancellato nulla.")) async -> String? {
+        guard MultiAssistant.contextOverrideForTesting != nil || AssistantRegistry.presence() != .absent
+              || ClaimScopes.shared.hasOpenScopes else { return nil }
+        let deadline = Date().addingTimeInterval(settleSeconds)
+        while true {
+            let bash = await BackgroundProcessRegistry.shared.unsettledEntryIds()
+            let agents = await SubagentBackgroundRegistry.shared.liveRunIds()
+            if bash.isEmpty && agents.isEmpty {
+                await ClaimScopes.shared.tick()
+                if !ClaimScopes.shared.hasOpenScopes { return nil }
+                if Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    continue
+                }
+            }
+            var what: [String] = []
+            if !bash.isEmpty { what.append("\(bash.count) background command(s)") }
+            if !agents.isEmpty { what.append("\(agents.count) subagent(s)") }
+            if what.isEmpty { what.append("file claims still in use") }
+            let list = what.joined(separator: ", ")
+            return "Background jobs are still running (\(list)); stop them first (or use /stop) and try again.\(outcome.en) / Ci sono ancora lavori in background (\(list)); fermali prima (o usa /stop) e riprova.\(outcome.it)"
+        }
+    }
+
     func quiesceBackgroundWorkForMindRestore(timeoutSeconds: Double = 10) async -> String? {
         if let why = await quiesceSubscriptionLogin(timeoutSeconds: timeoutSeconds) { return why }
+        // Several assistants: the same refusal as the wipe, before any
+        // subagent is cancelled (owner decision 2026-10-29).
+        if let why = await Self.multiAssistantBackgroundWorkRefusal(outcome: ("", "")) { return why }
         let unquiesced = await SubagentBackgroundRegistry.shared.cancelAllAndQuiesce(timeoutSeconds: timeoutSeconds)
         guard unquiesced.isEmpty else {
             return "background subagents still shutting down (\(unquiesced.joined(separator: ", ")))"
@@ -916,6 +968,9 @@ extension ConversationManager {
         if let why = ToolChargeLedger.settleAllBeforeReplacingHistory() {
             return "pending spend couldn't be saved (\(why)); fix it with `briglia doctor` and retry"
         }
+        // …and again after the suspending steps above, right before the
+        // import's point of no return.
+        if let why = await Self.multiAssistantBackgroundWorkRefusal(outcome: ("", "")) { return why }
         return nil
     }
 
@@ -942,9 +997,10 @@ extension ConversationManager {
     ///   notices (and spill files) would be noise from a vanished context.
     ///   Purged like the wipe does, not merely drained: a job finishing
     ///   AFTER this discard would otherwise queue a fresh notice. Exception
-    ///   (Codex stage-3 S3-R6-1/R7-1): a job still stopping when the purge's
-    ///   join limit expires is kept, so its claims stay protected; its late
-    ///   completion notice can then reach the restored conversation.
+    ///   (Codex stage-3 S3-R6-1): a job still stopping when the purge's join
+    ///   limit expires is kept; its late completion notice can then reach
+    ///   the restored conversation. With several assistants the import
+    ///   refuses while any job is live (owner decision 2026-10-29).
     /// - A watcher check that finished during the barrier persisted a fire
     ///   (or queued an in-memory fallback message); the Mind archive carries
     ///   no outbox/spool, so pending records are pre-import by definition.

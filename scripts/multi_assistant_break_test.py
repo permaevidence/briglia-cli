@@ -251,21 +251,38 @@ BREAKS = [
      '            $0.status == .running'),
     ('M80 the wipe retires live entries when its join limit expires (S3-R6-1)', 'stage3', T + 'Services/BashTools.swift',
      '            if live(e) { retained += 1; continue }\n', ''),
-    # Codex stage-3 round 7.
-    ('M81 /deleteuserdata deletes claims bound to jobs its purge kept (S3-R7-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     '            AssistantBoard.removeFiles(profile: AssistantProfile.selectedName, includeClaims: false)',
-     '            AssistantBoard.removeFiles(profile: AssistantProfile.selectedName)'),
-    ('M82 the wipe removes the claims file while a scope is still pending (S3-R7-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     '            if !ClaimScopes.shared.hasOpenScopes {',
-     '            if true {'),
+    # Codex stage-3 rounds 7 and 9 (M81, M82, M84) are retired: the
+    # wipe-refusal rule (owner decision 2026-10-29, M85–M90) makes the claim
+    # deletion they mutated unreachable while any scope is open.
     # Codex stage-3 round 8.
     ('M83 the wipe ignores a turn whose end-of-turn sample is in progress (S3-R8-1)', 'stage3e2e', T + 'Services/FileClaims.swift',
      '    var hasOpenScopes: Bool { !openScopes().isEmpty }',
      '    var hasOpenScopes: Bool { lock.lock(); defer { lock.unlock() }; return !pending.isEmpty }'),
-    # Codex stage-3 round 9.
-    ('M84 a nil context lets the wipe delete claims of open scopes (S3-R9-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     '            if !ClaimScopes.shared.hasOpenScopes {',
-     '            if MultiAssistant.context() == nil || !ClaimScopes.shared.hasOpenScopes {'),
+    # Owner decision 2026-10-29: the wipe / Mind import refuse while work runs.
+    ('M85 the wipe has no refusal before it cancels work (owner 2026-10-29)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '        if let why = await Self.multiAssistantBackgroundWorkRefusal() {\n            return ["ABORTED: " + why]\n        }\n',
+     ''),
+    ('M86 the wipe does not re-check at the destructive step (owner 2026-10-29)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '        if let why = await Self.multiAssistantBackgroundWorkRefusal() {\n            await restartEmailPollingAfterAbortedWipe()\n            return ["ABORTED: " + why]\n        }\n',
+     ''),
+    ('M87 the refusal ignores background commands (owner 2026-10-29)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '            let bash = await BackgroundProcessRegistry.shared.unsettledEntryIds()\n',
+     '            let bash = Set<String>()\n'),
+    ('M88 the refusal ignores live subagents (owner 2026-10-29)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '            let agents = await SubagentBackgroundRegistry.shared.liveRunIds()\n',
+     '            let agents = Set<String>()\n'),
+    ('M89 the refusal ignores open claim scopes (owner 2026-10-29)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '                if !ClaimScopes.shared.hasOpenScopes { return nil }\n',
+     '                return nil\n'),
+    ('M90 a Mind import does not refuse while work runs (owner 2026-10-29)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '        // subagent is cancelled (owner decision 2026-10-29).\n        if let why = await Self.multiAssistantBackgroundWorkRefusal(outcome: ("", "")) { return why }\n',
+     '        // subagent is cancelled (owner decision 2026-10-29).\n'),
+    ('M91 the pre-rule behaviour: no refusal anywhere (owner 2026-10-29)', 'stage3e2e', [
+        (T + 'Services/ConversationManager+Persistence.swift', '        if let why = await Self.multiAssistantBackgroundWorkRefusal() {\n            return ["ABORTED: " + why]\n        }\n', ''),
+        (T + 'Services/ConversationManager+Persistence.swift', '        if let why = await Self.multiAssistantBackgroundWorkRefusal() {\n            await restartEmailPollingAfterAbortedWipe()\n            return ["ABORTED: " + why]\n        }\n', ''),
+        (T + 'Services/ConversationManager+Persistence.swift', '        // subagent is cancelled (owner decision 2026-10-29).\n        if let why = await Self.multiAssistantBackgroundWorkRefusal(outcome: ("", "")) { return why }\n', '        // subagent is cancelled (owner decision 2026-10-29).\n'),
+        (T + 'Services/ConversationManager+Persistence.swift', '        // import\'s point of no return.\n        if let why = await Self.multiAssistantBackgroundWorkRefusal(outcome: ("", "")) { return why }\n', '        // import\'s point of no return.\n'),
+    ]),
 ]
 
 
