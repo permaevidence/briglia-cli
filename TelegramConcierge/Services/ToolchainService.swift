@@ -129,6 +129,13 @@ enum ToolchainService {
         return linuxInstall(package, manager: manager)
     }
 
+    /// Synchronous apt-get install of one package through the terminal
+    /// hand-off (PythonRuntime's missing python3.X-venv). nil = installed.
+    static func installLinuxPackageSync(_ package: String) -> String? {
+        guard PlatformBinary.find("apt-get") != nil else { return "apt-get not found" }
+        return linuxInstall(package, manager: LinuxPackageManager(name: "apt-get", installArgs: LinuxPackageMap.installArgs(for: "apt-get")))
+    }
+
     /// `sudo <manager> install -y <package>` with inherited stdio (interactive
     /// sudo). Returns nil on success, else a one-line failure. The child must
     /// own the terminal (sudo password, dpkg conffile/trigger prompts), so it

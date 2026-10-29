@@ -72,6 +72,8 @@ struct QuickSetupSelftest: AsyncParsableCommand {
         await t.section("14. keep-awake census") { try await t.census() }
         await t.section("16. package maps + disk floors") { try await t.packagesAndDisk() }
         await t.section("2c. AgentMail pinned release") { try await t.agentMailPinning() }
+        await t.section("17. service start (socket wait)") { try await t.serviceStart() }
+        await t.section("18. python venv package in the menu's apt job") { try await t.venvAptJob() }
 
         print(t.failures == 0 ? "\nquicksetup selftest: all \(t.checks) checks passed"
                               : "\nquicksetup selftest: \(t.failures) of \(t.checks) FAILED")

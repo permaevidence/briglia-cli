@@ -145,6 +145,7 @@ final class RuntimeHarness {
         await section("agentmail: legacy inspect-only, wipe, corrupt state") { try await agentMailLegacy() }
         await section("containment (no redirect out of the data root)") { try await containment() }
         await section("node: selection and private copy") { try await nodeSelection() }
+        await section("python: base choice (pure)") { pythonBaseChoice() }
         await section("python: private venv") { try await pythonEnv() }
         await section("path contract") { pathContract() }
     }
@@ -988,7 +989,7 @@ final class RuntimeHarness {
         _ = await PythonRuntime.converge(trigger: .install)
         let r4dirB = receipt(.python)?.verified
         let minor = found.version.split(separator: ".")[1]
-        try "#!/bin/sh\ncase \"$*\" in *'import sys, venv, ensurepip'*) echo 3.\(minor).99; exit 0;; esac\nexec '\(found.path)' \"$@\"\n".write(to: other, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\ncase \"$*\" in *briglia-base-probe*) echo 3.\(minor).99; echo venv; exit 0;; esac\nexec '\(found.path)' \"$@\"\n".write(to: other, atomically: true, encoding: .utf8)
         // An atomic write replaces the file: corelibs Foundation (Linux) does
         // not carry the old mode over, so the wrapper must be made executable
         // again or the base would simply vanish from the candidate list.
@@ -1018,6 +1019,10 @@ final class RuntimeHarness {
             try (try String(contentsOf: cfg, encoding: .utf8) + "# changed\n").write(to: cfg, atomically: false, encoding: .utf8)
             check("a changed venv → briglia-python refuses (rebuilt at the next start)", { if case .refuse(let w) = PythonRuntime.execDecision() { return w.contains("does not match") }; return false }())
         }
+        print("\n[python: base selection (max 3.14, newest first, too-new base)]")
+        try await pythonBaseSelection(found: found)
+        print("\n[python: missing venv (Debian/Ubuntu python3.X-venv)]")
+        try await pythonMissingVenv(found: found)
         for k in ["BRIGLIA_PYTHON_TEST_BASE_DIRS", "BRIGLIA_PYTHON_MIN_MINOR", "BRIGLIA_PYTHON_TEST_FIND_LINKS", "BRIGLIA_PYTHON_TEST_PROBE", "BRIGLIA_PYTHON_TEST_LOCK"] { unsetenv(k) }
     }
 

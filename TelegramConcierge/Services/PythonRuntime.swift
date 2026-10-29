@@ -45,8 +45,19 @@ enum PythonRuntime {
 
     static var effectiveMinimumMinor: Int { RuntimeSeams.env("BRIGLIA_PYTHON_MIN_MINOR").flatMap(Int.init) ?? minimumMinor }
 
+    /// The newest CPython minor the lock has wheels for. The lock
+    /// (Resources/PythonEnv/requirements.lock) pins binary-only packages
+    /// (numpy, scipy, pillow, lxml, …) whose cp3XX wheels exist only up to
+    /// this minor; a newer interpreter makes pip refuse the lock (2026-10-29:
+    /// Homebrew python3 = 3.15.1 had no numpy 2.5.4 wheel). Raise it only
+    /// after regenerating/verifying the lock for the new minor; the
+    /// `MAX_PYTHON_MINOR` constant in scripts/python_lock.py must match
+    /// (`python_lock.py --check` compares them).
+    static let maximumMinor = 14
+    static var effectiveMaximumMinor: Int { RuntimeSeams.env("BRIGLIA_PYTHON_MAX_MINOR").flatMap(Int.init) ?? maximumMinor }
+
     static func baseCandidates(path: String? = ProcessInfo.processInfo.environment["PATH"]) -> [String] {
-        let names = ["python3", "python3.14", "python3.13", "python3.12", "python3.11"]
+        let names = ["python3"] + stride(from: maximumMinor, through: minimumMinor, by: -1).map { "python3.\($0)" }
         var dirs = (path ?? "").split(separator: ":").map(String.init).filter { $0.hasPrefix("/") }
         if let only = RuntimeSeams.env("BRIGLIA_PYTHON_TEST_BASE_DIRS") {
             dirs = only.split(separator: ":").map(String.init)   // selftests: exactly these directories
@@ -67,28 +78,193 @@ enum PythonRuntime {
         return out
     }
 
-    /// The first user python ≥ 3.11 that has `venv` and `ensurepip`.
-    static func findBase() async -> (Base?, [String]) {
+    /// One candidate interpreter as probed: its version (nil = not a working
+    /// CPython 3) and whether it has `venv` + `ensurepip`.
+    struct Probe: Equatable { let path: String; let version: String?; let hasVenv: Bool
+        var minor: Int? { version.flatMap { v in let p = v.split(separator: ".").compactMap { Int($0) }; return p.count == 3 && p[0] == 3 ? p[1] : nil } }
+    }
+
+    /// The outcome of choosing a base interpreter.
+    struct Selection {
+        var base: Base?
         var reasons: [String] = []
-        for p in baseCandidates() {
-            let r = await RuntimeProcess.run(p, ["-c", "import sys, venv, ensurepip; print('%d.%d.%d' % sys.version_info[:3])"],
-                                             env: ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory()], timeout: 20)
-            let v = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-            let parts = v.split(separator: ".").compactMap { Int($0) }
-            guard r.status == 0, parts.count == 3, parts[0] == 3 else {
-                reasons.append("\(p): no usable venv/ensurepip"); continue
+        /// The newest interpreter found that is newer than `maximumMinor` (only
+        /// reported when nothing supported is usable).
+        var newestUnsupported: String?
+        /// The best supported-version interpreter that lacks venv/ensurepip
+        /// (Debian/Ubuntu without python3.X-venv), when nothing usable exists.
+        var missingVenv: Base?
+    }
+
+    /// Marker the probe carries so selftest fake interpreters can recognise it.
+    static let baseProbeScript = """
+    # briglia-base-probe
+    import sys
+    print('%d.%d.%d' % sys.version_info[:3], flush=True)
+    try:
+        import venv, ensurepip
+    except Exception:
+        sys.exit(3)
+    print('venv', flush=True)
+    """
+
+    static func parseProbe(path: String, status: Int32, stdout: String) -> Probe {
+        let lines = stdout.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        let v: String? = lines.first
+        let parts: [Int] = (v ?? "").split(separator: ".").compactMap { Int(String($0)) }
+        guard let v, parts.count == 3, parts[0] == 3, status == 0 || status == 3 else { return Probe(path: path, version: nil, hasVenv: false) }
+        return Probe(path: path, version: v, hasVenv: status == 0 && lines.contains("venv"))
+    }
+
+    /// Pure choice (unit-tested): among interpreters whose minor is within
+    /// [minimum, maximum] and that have venv, keep the one the current
+    /// environment was built on when it is still offered with the very same
+    /// version (no surprise rebuild of several hundred MB at startup);
+    /// otherwise the newest minor wins (ties: PATH order). Interpreters newer
+    /// than the maximum are never used, whatever `python3` resolves to.
+    static func choose(_ probes: [Probe], recorded: (path: String, version: String)? = nil,
+                       minMinor: Int = effectiveMinimumMinor, maxMinor: Int = effectiveMaximumMinor) -> Selection {
+        var sel = Selection()
+        var supported: [(Probe, Int)] = [], noVenv: [(Probe, Int)] = []
+        var newest: (String, Int)?
+        for p in probes {
+            guard let v = p.version, let m = p.minor else { sel.reasons.append("\(p.path): not a working Python 3"); continue }
+            if m > maxMinor {
+                sel.reasons.append("\(p.path) is \(v), newer than the supported 3.\(maxMinor)")
+                if newest.map({ m > $0.1 }) ?? true { newest = (v, m) }
+                continue
             }
-            guard parts[1] >= effectiveMinimumMinor else { reasons.append("\(p) is \(v), older than 3.\(minimumMinor)"); continue }
-            return (Base(path: p, minor: parts[1], version: v), reasons)
+            if m < minMinor { sel.reasons.append("\(p.path) is \(v), older than 3.\(minMinor)"); continue }
+            if p.hasVenv { supported.append((p, m)) } else { sel.reasons.append("\(p.path): no usable venv/ensurepip"); noVenv.append((p, m)) }
         }
-        return (nil, reasons)
+        func best(_ list: [(Probe, Int)]) -> Probe? {
+            list.enumerated().max { a, b in a.element.1 != b.element.1 ? a.element.1 < b.element.1 : a.offset > b.offset }?.element.0
+        }
+        let sticky = recorded.flatMap { r in supported.first { $0.0.path == r.path && $0.0.version == r.version }?.0 }
+        if let chosen = sticky ?? best(supported), let v = chosen.version, let m = chosen.minor {
+            sel.base = Base(path: chosen.path, minor: m, version: v)
+            return sel
+        }
+        if let nv = best(noVenv), let v = nv.version, let m = nv.minor { sel.missingVenv = Base(path: nv.path, minor: m, version: v) }
+        sel.newestUnsupported = newest?.0
+        return sel
+    }
+
+    static func probeArgs() -> [String] { ["-c", baseProbeScript] }
+    static let probeEnv: () -> [String: String] = { ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory()] }
+
+    static func recordedBase() -> (path: String, version: String)? {
+        guard let extra = ((try? RuntimeFS.readJSON(RuntimeReceipt.self, RuntimePaths.receipt(.python))) ?? nil)?.verifiedRecord?.extra,
+              let p = extra["base"], let v = extra["baseVersion"] else { return nil }
+        return (p, v)
+    }
+
+    static func selectBase() async -> Selection {
+        var probes: [Probe] = []
+        for p in baseCandidates() {
+            let r = await RuntimeProcess.run(p, probeArgs(), env: probeEnv(), timeout: 20)
+            probes.append(parseProbe(path: p, status: r.status, stdout: r.stdout))
+        }
+        return choose(probes, recorded: recordedBase())
+    }
+
+    /// Same, without async (menu job planning).
+    static func selectBaseBlocking() -> Selection {
+        let probes = baseCandidates().map { p -> Probe in
+            let r = RuntimeProcess.runBlocking(p, probeArgs(), env: probeEnv(), cwd: nil, timeout: 20)
+            return parseProbe(path: p, status: r.status, stdout: r.stdout)
+        }
+        return choose(probes, recorded: recordedBase())
+    }
+
+    /// The newest supported user python with `venv` and `ensurepip`.
+    static func findBase() async -> (Base?, [String]) {
+        let s = await selectBase()
+        return (s.base, s.reasons)
     }
 
     static func installHint() -> String {
         #if os(Linux)
-        return "install Python 3.11 or newer with venv support (Debian/Ubuntu: `sudo apt install python3-venv`)"
+        return "install Python 3.\(minimumMinor)–3.\(maximumMinor) with venv support (Debian/Ubuntu: `sudo apt install python3-venv`)"
         #else
-        return "install Python 3.11 or newer (`brew install python`)"
+        return "install Python 3.\(minimumMinor)–3.\(maximumMinor) (`brew install python@3.\(maximumMinor)`)"
+        #endif
+    }
+
+    /// Why nothing usable was found, with the exact next step.
+    static func unavailableMessage(_ s: Selection) -> String {
+        let detail = s.reasons.isEmpty ? "" : " (\(s.reasons.joined(separator: "; ")))"
+        if let mv = s.missingVenv, let pkg = venvPackage(for: mv) {
+            return "Python \(mv.version) has no venv support: install it with `sudo apt install \(pkg)`, then retry" + detail
+        }
+        if let newer = s.newestUnsupported, s.missingVenv == nil {
+            let short = newer.split(separator: ".").prefix(2).joined(separator: ".")
+            #if os(Linux)
+            let how = "install Python 3.\(maximumMinor) (or 3.\(minimumMinor)–3.\(maximumMinor)) with venv support next to it"
+            #else
+            let how = "install Python 3.\(maximumMinor) (`brew install python@3.\(maximumMinor)`); it can stay next to \(short)"
+            #endif
+            return "Python \(short) isn't supported yet — \(how)" + detail
+        }
+        return "no suitable python3: \(installHint())" + detail
+    }
+
+    // MARK: Missing venv (Debian/Ubuntu)
+
+    /// `python3.X-venv` for a distribution (apt-owned) interpreter: only when
+    /// apt-get exists and the interpreter resolves under /usr/bin. nil
+    /// otherwise (other managers ship venv with python; a user-built or
+    /// pyenv interpreter is not apt's to fix).
+    /// The package the menu's terminal job must install before the detached
+    /// `briglia python-env install` can build (nil = none needed/possible).
+    static func venvPackageNeededBlocking() -> String? {
+        let s = selectBaseBlocking()
+        guard s.base == nil, let mv = s.missingVenv else { return nil }
+        return venvPackage(for: mv)
+    }
+
+    static func venvPackage(for base: Base) -> String? {
+        let systemPrefix = RuntimeSeams.env("BRIGLIA_PYTHON_TEST_SYSTEM_PREFIX") ?? "/usr/bin"
+        guard aptAvailable() else { return nil }
+        guard base.resolved.hasPrefix(systemPrefix + "/") else { return nil }
+        return "python3.\(base.minor)-venv"
+    }
+
+    static func aptAvailable() -> Bool {
+        if RuntimeSeams.env("BRIGLIA_PYTHON_TEST_VENV_INSTALLER") != nil { return true }
+        #if os(Linux)
+        return PlatformBinary.find("apt-get") != nil
+        #else
+        return false
+        #endif
+    }
+
+    /// Interactive only: a terminal on stdin (sudo can ask for the password)
+    /// plus sudo + apt-get. The daemon, the agent's Bash tool and detached
+    /// menu jobs never get here; the menu plans the package as its own
+    /// terminal job instead (QuickSetupWorkflow.defaultToolchainJobs).
+    static func canInstallVenvInteractively() -> Bool {
+        if RuntimeSeams.env("BRIGLIA_PYTHON_TEST_VENV_INSTALLER") != nil {
+            return RuntimeSeams.env("BRIGLIA_PYTHON_TEST_INTERACTIVE") == "1"
+        }
+        #if os(Linux)
+        return isatty(STDIN_FILENO) == 1 && PlatformBinary.find("sudo") != nil && PlatformBinary.find("apt-get") != nil
+        #else
+        return false
+        #endif
+    }
+
+    /// `sudo apt-get install -y <pkg>` through the terminal hand-off (the same
+    /// path as the wizard's other system packages). nil = installed.
+    static func installVenvPackage(_ pkg: String) -> String? {
+        if let fake = RuntimeSeams.env("BRIGLIA_PYTHON_TEST_VENV_INSTALLER") {
+            let r = RuntimeProcess.runBlocking(fake, [pkg], env: ["PATH": "/usr/bin:/bin"], cwd: nil, timeout: 60)
+            return r.status == 0 ? nil : "the installer exited with status \(r.status)"
+        }
+        #if os(Linux)
+        return ToolchainService.installLinuxPackageSync(pkg)
+        #else
+        return "not supported on this system"
         #endif
     }
 
@@ -387,8 +563,20 @@ enum PythonRuntime {
     /// builds; startup (`.auto`) only rebuilds an existing venv for a new lock
     /// or moves a machine that had set Python features up the old way.
     static func converge(trigger: RuntimeTrigger, progress: (@Sendable (String) -> Void)? = nil) async -> Status {
-        let (base, reasons) = await findBase()
-        guard let base else { return .unavailable("no suitable python3: \(installHint())" + (reasons.isEmpty ? "" : " (\(reasons.joined(separator: "; ")))")) }
+        var selection = await selectBase()
+        // Debian/Ubuntu: the only supported python lacks python3.X-venv. An
+        // explicit install run from a terminal installs exactly that package
+        // (sudo apt, like the wizard's other system packages) and looks
+        // again — once; never at startup, never without a terminal.
+        if selection.base == nil, trigger == .install, let missing = selection.missingVenv,
+           let pkg = venvPackage(for: missing), canInstallVenvInteractively() {
+            (progress ?? { print("  \($0)") })("Python \(missing.version) needs \(pkg) for Briglia's environment: installing it with sudo apt-get (it may ask for your password)…")
+            if let failure = installVenvPackage(pkg) {
+                return .unavailable("could not install \(pkg) (\(failure)): run `sudo apt install \(pkg)`, then retry")
+            }
+            selection = await selectBase()
+        }
+        guard let base = selection.base else { return .unavailable(unavailableMessage(selection)) }
         guard let pin = pin(base: base) else { return .unavailable("the Python lock is missing from the resource bundle") }
         let spec = spec(base: base, pin: pin)
         if trigger == .auto {

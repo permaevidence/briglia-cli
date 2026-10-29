@@ -98,6 +98,21 @@ def python_lock_cap_checks():
     rc, err = run_check(in_text.replace("pymupdf<2", "pymupdf>=1"), lock_text)
     check("cap break: a non-cap specifier in requirements.in is refused", rc != 0 and "only bare names or name<version caps" in err, err)
 
+    # The supported-Python ceiling (2026-10-29): PythonRuntime.maximumMinor is tied to the lock.
+    swift_text = Path(pl.SWIFT).read_text(encoding="utf-8")
+    check("max minor: PythonRuntime.maximumMinor equals python_lock.MAX_PYTHON_MINOR (3.14)",
+          pl.MAX_PYTHON_MINOR == 14 and re.search(r"(?m)^\s*static let maximumMinor = 14\s*$", swift_text) is not None)
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = Path(tmp) / "PythonRuntime.swift"
+        fake.write_text(re.sub(r"(?m)^(\s*static let maximumMinor = )\d+", r"\g<1>15", swift_text), encoding="utf-8")
+        saved = pl.SWIFT
+        pl.SWIFT = str(fake)
+        try:
+            rc, err = run_check(in_text, lock_text)
+        finally:
+            pl.SWIFT = saved
+    check("max minor break: raising maximumMinor without the lock constant is refused", rc != 0 and "maximumMinor is 3.15" in err, err)
+
 
 def main(argv):
     if len(argv) != 1:

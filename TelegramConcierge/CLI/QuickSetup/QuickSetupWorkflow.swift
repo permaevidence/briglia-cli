@@ -290,6 +290,9 @@ struct QuickSetupEnvironment {
         env.maskSleepTargetsJob = { nil }
     }
 
+    /// Seam: the python3.X-venv package the menu must install (selftests).
+    nonisolated(unsafe) static var venvPackageNeeded: () -> String? = { PythonRuntime.venvPackageNeededBlocking() }
+
     static func defaultToolchainJobs(_ status: ToolchainService.DesktopStatus) -> [SetupJobRunner.Spec] {
         var jobs: [SetupJobRunner.Spec] = []
         let missing = Set(status.mandatoryMissing)
@@ -322,8 +325,11 @@ struct QuickSetupEnvironment {
         if !missing.isDisjoint(with: ["ffmpeg", "ffprobe"]) { logical.append("ffmpeg") }
         if missing.contains("pandoc") { logical.append("pandoc") }
         if !status.libreOffice { logical.append("libreoffice") }
-        if !logical.isEmpty {
-            let packages = logical.map { LinuxPackageMap.package($0, manager: manager.name) }
+        // Debian/Ubuntu python without python3.X-venv: install it in this
+        // terminal job, before the detached python-env job needs it.
+        let venv = (!pipPackages.isEmpty && manager.name == "apt-get") ? venvPackageNeeded() : nil
+        if !logical.isEmpty || venv != nil {
+            let packages = logical.map { LinuxPackageMap.package($0, manager: manager.name) } + (venv.map { [$0] } ?? [])
             jobs.append(.init(row: "toolchain", command: [sudo] + LinuxPackageMap.installCommand(manager: manager.name, managerPath: managerPath, packages: packages),
                               mode: .terminalHandoff, timeout: 2400, environment: ["DEBIAN_FRONTEND": "noninteractive"],
                               label: "\(manager.name) install \(packages.joined(separator: " "))"))

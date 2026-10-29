@@ -32,6 +32,14 @@ IN = os.path.join(DIR, "requirements.in")
 LOCK = os.path.join(DIR, "requirements.lock")
 FLAGS = ["--universal", "--generate-hashes", "--only-binary", ":all:", "--python-version", "3.11", "--no-header"]
 MAGIC = "# briglia-python-lock v1"
+# The newest CPython minor every binary-only entry of the lock has wheels for
+# (numpy, scipy, pillow, lxml, …). Briglia never builds its environment on a
+# newer interpreter (PythonRuntime.maximumMinor must equal this; --check
+# compares them). Raise both only after verifying wheels for the new minor on
+# macOS arm64/x86_64 and Linux x86_64/aarch64 (2026-10-29: 3.15 had no numpy
+# 2.5.4 wheels, so a Homebrew python3 = 3.15 made pip refuse the lock).
+MAX_PYTHON_MINOR = 14
+SWIFT = os.path.join(ROOT, "TelegramConcierge", "Services", "PythonRuntime.swift")
 BOOTSTRAP = {"pip", "setuptools", "wheel"}
 REQ_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)(?:\s*;\s*([^\\]+?))?\s*\\?$")
 
@@ -157,6 +165,15 @@ def check():
                         continue
                     if not ok:
                         problems.append(f"{name}=={r[1]} violates the requirements.in cap <{cap}")
+    try:
+        with open(SWIFT, encoding="utf-8") as f:
+            m = re.search(r"^\s*static let maximumMinor = (\d+)\s*$", f.read(), re.M)
+        if not m:
+            problems.append("PythonRuntime.swift: static let maximumMinor not found")
+        elif int(m.group(1)) != MAX_PYTHON_MINOR:
+            problems.append(f"PythonRuntime.maximumMinor is 3.{m.group(1)} but the lock is verified up to 3.{MAX_PYTHON_MINOR} (MAX_PYTHON_MINOR)")
+    except OSError as e:
+        problems.append(f"cannot read PythonRuntime.swift: {e}")
     keys = [(r[0], r[1], r[2]) for r in rows]
     if len(keys) != len(set(keys)):
         problems.append("duplicate (name, version, marker) rows")

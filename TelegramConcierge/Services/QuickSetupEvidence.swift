@@ -151,7 +151,6 @@ enum QuickSetupEvidence {
 
     // MARK: Service verification (Linux, §4.5 (a)–(d))
 
-    #if os(Linux)
     struct ServiceEvidence: Equatable {
         var active: Bool
         var linger: Bool
@@ -162,23 +161,77 @@ enum QuickSetupEvidence {
     }
 
     nonisolated(unsafe) static var stabilityWindow: TimeInterval = 20
+    /// After `systemctl --user enable --now` the unit is active at once but
+    /// the daemon creates app-chat.sock only once its poller is up (seconds;
+    /// longer on a slow phone or a first start that migrates data). The hello
+    /// is polled for up to this long while the unit stays active and does not
+    /// restart; a single immediate check rolled back healthy starts.
+    nonisolated(unsafe) static var handshakeTimeout: TimeInterval = 60
+    nonisolated(unsafe) static var handshakePollInterval: TimeInterval = 0.5
+
+    /// What the evaluation needs from the system (closures so the logic is
+    /// tested on every platform; Linux wires systemctl and the socket).
+    struct ServiceProbes {
+        var isActive: () -> String              // `systemctl --user is-active`
+        var linger: () -> Bool
+        var restartMarker: () -> String         // NRestarts + ActiveEnterTimestamp
+        var handshake: () -> Bool
+        var sleep: (TimeInterval) async -> Void = { try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
+        var now: () -> Date = { Date() }
+    }
+
+    enum HandshakeWait: Equatable { case answered, unitStopped(String), restarted(String), timedOut }
+
+    /// Poll the hello until it answers, the unit leaves `active`, the unit
+    /// restarts (marker changed from `baseline`) or `timeout` passes.
+    static func waitForHandshake(_ p: ServiceProbes, baseline: String, timeout: TimeInterval, interval: TimeInterval) async -> HandshakeWait {
+        let deadline = p.now().addingTimeInterval(timeout)
+        while true {
+            if p.handshake() { return .answered }
+            let state = p.isActive()
+            if state != "active" { return .unitStopped(state.isEmpty ? "unknown" : state) }
+            let marker = p.restartMarker()
+            if marker != baseline { return .restarted(marker) }
+            if p.now() >= deadline { return .timedOut }
+            await p.sleep(interval)
+        }
+    }
+
+    static func evaluateService(_ p: ServiceProbes) async -> ServiceEvidence {
+        let active = p.isActive() == "active"
+        let linger = p.linger()
+        guard active else { return ServiceEvidence(active: false, linger: linger, handshake: false, stable: false, detail: "service is not active") }
+        guard linger else { return ServiceEvidence(active: true, linger: false, handshake: false, stable: false, detail: "start at boot not confirmed enabled (linger)") }
+        let before = p.restartMarker()
+        switch await waitForHandshake(p, baseline: before, timeout: handshakeTimeout, interval: handshakePollInterval) {
+        case .answered: break
+        case .unitStopped(let state):
+            return ServiceEvidence(active: false, linger: true, handshake: false, stable: false, detail: "the service stopped while starting (\(state))")
+        case .restarted(let marker):
+            return ServiceEvidence(active: true, linger: true, handshake: false, stable: false, detail: "the service restarted while starting (\(marker))")
+        case .timedOut:
+            return ServiceEvidence(active: true, linger: true, handshake: false, stable: false,
+                                   detail: "the app socket did not answer the hello within \(Int(handshakeTimeout)) s (the poller is not up)")
+        }
+        await p.sleep(stabilityWindow)
+        let after = p.restartMarker()
+        guard before == after else { return ServiceEvidence(active: true, linger: true, handshake: true, stable: false, detail: "the service restarted within the stability window (\(after))") }
+        guard p.handshake() else { return ServiceEvidence(active: true, linger: true, handshake: true, stable: false, detail: "the app socket stopped answering during the stability window") }
+        return ServiceEvidence(active: true, linger: true, handshake: true, stable: true, detail: "active, starts at boot, socket answered, stable for \(Int(stabilityWindow)) s")
+    }
+
+    #if os(Linux)
     /// Selftest seams.
     nonisolated(unsafe) static var systemctlShowOverride: (() -> String)?
     nonisolated(unsafe) static var lingerOverride: (() -> Bool)?
     nonisolated(unsafe) static var isActiveOverride: (() -> String)?
 
     static func serviceEvidence() async -> ServiceEvidence {
-        let active = (isActiveOverride?() ?? AgentServiceSupport.run("systemctl", ["--user", "is-active", AgentServiceSupport.userUnitName]).output) == "active"
-        let linger = lingerOverride?() ?? AgentServiceSupport.lingerEnabled()
-        guard active else { return ServiceEvidence(active: false, linger: linger, handshake: false, stable: false, detail: "service is not active") }
-        guard linger else { return ServiceEvidence(active: true, linger: false, handshake: false, stable: false, detail: "start at boot not confirmed enabled (linger)") }
-        guard socketHandshake() else { return ServiceEvidence(active: true, linger: true, handshake: false, stable: false, detail: "the app socket did not answer the hello (the poller is not up)") }
-        let before = systemctlShowOverride?() ?? AgentServiceSupport.run("systemctl", ["--user", "show", "-p", "NRestarts", "-p", "ActiveEnterTimestamp", AgentServiceSupport.userUnitName]).output
-        try? await Task.sleep(nanoseconds: UInt64(stabilityWindow * 1_000_000_000))
-        let after = systemctlShowOverride?() ?? AgentServiceSupport.run("systemctl", ["--user", "show", "-p", "NRestarts", "-p", "ActiveEnterTimestamp", AgentServiceSupport.userUnitName]).output
-        guard before == after else { return ServiceEvidence(active: true, linger: true, handshake: true, stable: false, detail: "the service restarted within the stability window (\(after))") }
-        guard socketHandshake() else { return ServiceEvidence(active: true, linger: true, handshake: true, stable: false, detail: "the app socket stopped answering during the stability window") }
-        return ServiceEvidence(active: true, linger: true, handshake: true, stable: true, detail: "active, starts at boot, socket answered, stable for \(Int(stabilityWindow)) s")
+        await evaluateService(ServiceProbes(
+            isActive: { isActiveOverride?() ?? AgentServiceSupport.run("systemctl", ["--user", "is-active", AgentServiceSupport.userUnitName]).output },
+            linger: { lingerOverride?() ?? AgentServiceSupport.lingerEnabled() },
+            restartMarker: { systemctlShowOverride?() ?? AgentServiceSupport.run("systemctl", ["--user", "show", "-p", "NRestarts", "-p", "ActiveEnterTimestamp", AgentServiceSupport.userUnitName]).output },
+            handshake: { socketHandshake() }))
     }
     #endif
 

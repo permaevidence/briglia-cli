@@ -1107,7 +1107,7 @@ final class MenuWorkflow {
         step("Starting Briglia\u{2026}", "Avvio Briglia\u{2026}")
         var failure = await env.quick.enableService(runner)
         if failure == nil {
-            step("Checking that Briglia is running (about 30 seconds)\u{2026}", "Controllo che Briglia sia in funzione (circa 30 secondi)\u{2026}")
+            step("Checking that Briglia is running (usually under a minute)\u{2026}", "Controllo che Briglia sia in funzione (di solito meno di un minuto)\u{2026}")
             let evidence = await env.quick.serviceEvidence()
             if !evidence.ok { failure = evidence.detail }
         }

@@ -452,7 +452,35 @@ BREAKS = [
     ("M143 the create link does not carry the request's suggested username", "s4:managed", T + "Services/ConversationManager+ManagedBots.swift",
      "                                                        suggestedUsername: request.suggestedUsername, suggestedName: name)",
      "                                                        suggestedUsername: \"\", suggestedName: name)"),
+    # Release fixes (2026-10-29): Python base selection, python3.X-venv, Linux start.
+    # Sections "rt:<name>" run `__private-runtime-selftest --only <name>`,
+    # "qs:<name>" run `__quicksetup-selftest --only <name>`.
+    ("M144 interpreters newer than the lock's 3.14 are accepted", "rt:python", T + "Services/PythonRuntime.swift",
+     "            if m > maxMinor {", "            if m > 99 {"),
+    ("M145 the first supported interpreter wins instead of the newest", "rt:python", T + "Services/PythonRuntime.swift",
+     "        if let chosen = sticky ?? best(supported),", "        if let chosen = sticky ?? supported.first?.0,"),
+    ("M146 the recorded base is kept although its version changed", "rt:python", T + "Services/PythonRuntime.swift",
+     "supported.first { $0.0.path == r.path && $0.0.version == r.version }", "supported.first { $0.0.path == r.path }"),
+    ("M147 only-too-new pythons get the generic hint", "rt:python", T + "Services/PythonRuntime.swift",
+     "        if let newer = s.newestUnsupported, s.missingVenv == nil {", "        if let newer = s.newestUnsupported, s.missingVenv == nil, newer.isEmpty {"),
+    ("M148 a missing python3.X-venv is never installed (old: hint only)", "rt:python", T + "Services/PythonRuntime.swift",
+     "           let pkg = venvPackage(for: missing), canInstallVenvInteractively() {", "           let pkg = venvPackage(for: missing), canInstallVenvInteractively(), pkg.isEmpty {"),
+    ("M149 startup installs system packages too", "rt:python", T + "Services/PythonRuntime.swift",
+     "        if selection.base == nil, trigger == .install, let missing = selection.missingVenv,",
+     "        if selection.base == nil, let missing = selection.missingVenv,"),
+    ("M150 apt is used for interpreters outside the system prefix", "rt:python", T + "Services/PythonRuntime.swift",
+     "        guard base.resolved.hasPrefix(systemPrefix + \"/\") else { return nil }", "        _ = systemPrefix"),
+    ("M151 the hello is checked once (old behaviour: healthy starts rolled back)", "qs:17.", T + "Services/QuickSetupEvidence.swift",
+     "            if p.now() >= deadline { return .timedOut }", "            return .timedOut"),
+    ("M152 a unit that fails while starting is waited on for the full timeout", "qs:17.", T + "Services/QuickSetupEvidence.swift",
+     "            if state != \"active\" { return .unitStopped(state.isEmpty ? \"unknown\" : state) }",
+     "            if state == \"-\" { return .unitStopped(state.isEmpty ? \"unknown\" : state) }"),
+    ("M153 a restart while waiting for the hello is ignored", "qs:17.", T + "Services/QuickSetupEvidence.swift",
+     "            if marker != baseline { return .restarted(marker) }", "            _ = marker"),
 ]
+if sys.platform.startswith("linux"):
+    BREAKS.append(("M154 the menu's apt job leaves out python3.X-venv", "qs:18.", T + "CLI/QuickSetup/QuickSetupWorkflow.swift",
+                   "+ (venv.map { [$0] } ?? [])", "+ []"))
 
 
 def run(cmd, cwd, timeout=None, env=None):
@@ -479,7 +507,10 @@ def selftest(binary, workdir, section):
     # The selftest makes its own scratch roots; never the live install.
     env["XDG_CONFIG_HOME"] = str(Path(workdir) / "outer-config")
     env["XDG_DATA_HOME"] = str(Path(workdir) / "outer-data")
-    if section and section.startswith("s4"):
+    if section and section[:3] in ("rt:", "qs:"):
+        cmd = "__private-runtime-selftest" if section.startswith("rt:") else "__quicksetup-selftest"
+        args = [str(link), cmd, "--only", section[3:]]
+    elif section and section.startswith("s4"):
         # Stage 4 (MULTI_ASSISTANT_PLAN §28): its own selftest, "s4" = all of it.
         sub = section[3:]
         args = [str(link), "__stage4-selftest"] + (["--only", sub] if sub else [])
@@ -522,6 +553,11 @@ def main():
             if ok and (not args.only or any(b[1].startswith("s4") and b[0].split()[0] in args.only.split(",") for b in BREAKS)):
                 r = selftest(binary, work, "s4")
                 ok = r.returncode == 0
+            for extra in sorted({b[1] for b in BREAKS if b[1][:3] in ("rt:", "qs:")
+                                 and (not args.only or b[0].split()[0] in args.only.split(","))}):
+                if ok:
+                    r = selftest(binary, work, extra)
+                    ok = r.returncode == 0
             print(("✔" if ok else "✖") + " positive control: unmodified copy passes every section", flush=True)
             if not ok:
                 print((r.stdout + r.stderr)[-3000:])
