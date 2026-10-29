@@ -182,6 +182,10 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         await continueRefusedDuringImport(m, check: check)
         await setnameRefusedDuringWipe(m, check: check)
         await admittedCommandIsDrained(m, check: check)
+        // Codex stage-3 S3-R14-1/R14-2: other processes and admitted Stops.
+        await standaloneSetupDuringWipe(m, check: check)
+        await standaloneWriterMakesWipeWait(m, check: check)
+        await admittedStopIsDrained(m, check: check)
         ClaimScopes.tickSeconds = 2
     }
 
@@ -316,6 +320,119 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         check("S3-R13-1: the command handler running the wipe is not counted (no wait, the wipe runs)",
               ConversationManager.admissionWaitsForTesting == waits0 && !own.contains { $0.hasPrefix("ABORTED") }
               && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil, "\(own)")
+    }
+
+    /// Runs this executable as a separate process with the same (scratch)
+    /// environment: `args`, `stdin`, extra environment. Returns exit status
+    /// and stdout.
+    static func runChild(_ args: [String], stdin: String, env extra: [String: String]) async -> (Int32, String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        p.arguments = args
+        p.environment = ProcessInfo.processInfo.environment.merging(extra) { $1 }
+        let input = Pipe(), output = Pipe()
+        p.standardInput = input; p.standardOutput = output; p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return (-1, "spawn failed: \(error)") }
+        input.fileHandleForWriting.write(Data(stdin.utf8)); try? input.fileHandleForWriting.close()
+        let reader = Task.detached { output.fileHandleForReading.readDataToEndOfFile() }
+        let data = await reader.value
+        while p.isRunning { try? await Task.sleep(nanoseconds: 20_000_000) }
+        return (p.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+
+    /// Codex stage-3 S3-R14-1, Codex's sequence: a REAL `setup-api apply`
+    /// child process writing the user name, started inside a real wipe after
+    /// the name was deleted, is refused (the wipe holds the replacement lock
+    /// exclusively); the name stays wiped. Once the wipe ended, the same
+    /// child request succeeds.
+    @MainActor private func standaloneSetupDuringWipe(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+        let request = #"{"identity":{"user_name":"R14_NAME_DURING_WIPE"}}"#
+        final class Seen { var window = false, status: Int32 = 0, out = "" }
+        let seen = Seen()
+        ConversationManager.reloadBeforeLoadConversationForTesting = { @MainActor in
+            seen.window = m.isRestoringMind && m.memoryReplacementLock != nil && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil
+            (seen.status, seen.out) = await Self.runChild(["setup-api", "apply"], stdin: request, env: ["BRIGLIA_REPLACEMENT_WAIT_SECONDS": "1"])
+        }
+        let wipe = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        ConversationManager.reloadBeforeLoadConversationForTesting = nil
+        let nameAfterWipe = KeychainHelper.load(key: KeychainHelper.userNameKey)
+        check("S3-R14-1: a real setup-api apply child started during a real wipe is refused (memory_operation_in_progress) and the wiped name stays wiped",
+              seen.window && seen.out.contains("memory_operation_in_progress") && !wipe.contains { $0.hasPrefix("ABORTED") }
+              && nameAfterWipe == nil && m.memoryReplacementLock == nil,
+              "window \(seen.window) child \(seen.status) \(seen.out.prefix(200)) name \(nameAfterWipe ?? "nil") \(wipe)")
+        let (status2, out2) = await Self.runChild(["setup-api", "apply"], stdin: request, env: ["BRIGLIA_REPLACEMENT_WAIT_SECONDS": "1"])
+        check("S3-R14-1: after the wipe the same setup-api request succeeds (the lock was released)",
+              status2 == 0 && out2.contains("\"ok\":true") && KeychainHelper.load(key: KeychainHelper.userNameKey) == "R14_NAME_DURING_WIPE",
+              "\(status2) \(out2.prefix(200))")
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+    }
+
+    /// S3-R14-1, the other order: a standalone writer already holding the
+    /// lock (shared) makes the wipe wait, then refuse with nothing deleted.
+    @MainActor private func standaloneWriterMakesWipeWait(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+        guard case .acquired(let writer) = MemoryReplacementLock.shared(waitSeconds: 0) else {
+            check("S3-R14-1: a standalone writer's shared lock", false, "not acquired"); return
+        }
+        ConversationManager.admissionDrainSecondsForTesting = 0.5
+        let refused = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        ConversationManager.admissionDrainSecondsForTesting = nil
+        writer.release()
+        check("S3-R14-1: a standalone writer holding the replacement lock makes the wipe refuse after the drain limit, nothing deleted",
+              Self.isWorkRefusal(refused) && refused[0].contains("another Briglia command")
+              && KeychainHelper.load(key: KeychainHelper.userNameKey) == "Sentinel" && m.memoryReplacementLock == nil, "\(refused)")
+    }
+
+    /// Codex stage-3 S3-R14-2: an app/terminal Stop that began before the
+    /// gate and is suspended in its registry cutoffs is counted: the wipe
+    /// waits, then refuses with nothing deleted (the queued completion
+    /// survives). A Stop under the gate is refused with a visible text.
+    @MainActor private func admittedStopIsDrained(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+        let completion = SubagentBackgroundRegistry.Completion(
+            handle: .init(id: "subagent_r14_stop", subagentType: "general-purpose", description: "r14 finished", startedAt: Date()),
+            result: SubagentRunner.RunResult(sessionId: "r14-session", isNewSession: true, finalMessage: "r14 result", turnsUsed: 1,
+                                             toolsCalled: [], filesTouched: [], spendUSD: 0, error: nil),
+            completedAt: Date())
+        await SubagentBackgroundRegistry.shared._testEnqueueCompletion(completion)
+        let queued0 = await SubagentBackgroundRegistry.shared._testPendingCompletionsCount()
+        let hold = StepGate()
+        ConversationManager.stopCutoffInterleaveForTesting = { await hold.wait() }
+        let stop = Task { @MainActor in await m.stopFromApp() }
+        let by = Date().addingTimeInterval(10)
+        while !hold.hasEntered && Date() < by { try? await Task.sleep(nanoseconds: 10_000_000) }
+        ConversationManager.admissionDrainSecondsForTesting = 0.25
+        let refused = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        ConversationManager.admissionDrainSecondsForTesting = nil
+        let queuedAfter = await SubagentBackgroundRegistry.shared._testPendingCompletionsCount()
+        hold.release()
+        _ = await stop.value
+        ConversationManager.stopCutoffInterleaveForTesting = nil
+        check("S3-R14-2: a Stop suspended in its cutoffs when the wipe starts is counted: the wipe refuses, nothing deleted (queued result kept)",
+              hold.hasEntered && Self.isWorkRefusal(refused) && refused[0].contains("a command still running")
+              && KeychainHelper.load(key: KeychainHelper.userNameKey) == "Sentinel" && queuedAfter == queued0 && queued0 >= 1,
+              "held \(hold.hasEntered) \(refused) queued \(queued0)→\(queuedAfter)")
+        let gate = m.beginMindRestore()
+        let refusal = await m.stopFromApp()
+        if gate { m.endMindRestore() }
+        check("S3-R14-2: a Stop under the restore gate is refused and returns its EN + IT text for the caller to show",
+              gate && (refusal ?? "").contains("memory operation") && (refusal ?? "").contains("operazione sulla memoria"), refusal ?? "nil")
+        // Settled: the wipe now runs (and clears the queued result).
+        let after = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        check("S3-R14-2: once the Stop finished, the wipe runs",
+              !after.contains { $0.hasPrefix("ABORTED") } && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil, "\(after)")
     }
 
     /// One pending chunk on disk whose raw message carries `marker`; the

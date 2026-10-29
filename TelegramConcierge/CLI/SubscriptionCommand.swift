@@ -36,6 +36,14 @@ struct SubscriptionCommand: AsyncParsableCommand {
             }
         case "login", "select", "cancel", "logout":
             try IdentityMigration.gateMutatingEntry()
+            // The intake stop across processes (Codex stage-3 S3-R14-1).
+            let replacementLock: ProfileFileLock
+            switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
+            case .acquired(let lock): replacementLock = lock
+            case .busy: print("✖ " + MemoryReplacementLock.busyMessage); throw ExitCode(75)
+            case .failed(let why): print("✖ \(why)"); throw ExitCode(1)
+            }
+            defer { replacementLock.release() }
             // Profile changes need daemon exclusion. Logout may invalidate an
             // active session; each queued dispatch checks its captured generation.
             let model = model ?? ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel

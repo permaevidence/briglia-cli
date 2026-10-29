@@ -376,7 +376,10 @@ final class TerminalSession {
             prompt()
 
         case line == "/stop":
-            await manager.stopFromApp()
+            if let refusal = await manager.stopFromApp() {
+                print("  \(refusal)")
+                prompt()
+            }
 
         case line == "/status":
             let state = manager.isTurnActive ? "working" : (manager.isPolling ? "idle, listening" : "stopped")

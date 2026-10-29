@@ -85,6 +85,22 @@ struct SetupAPI: AsyncParsableCommand {
                 respond(SetupAPICore.transportError(
                     "stdin must carry exactly one JSON request object"), exitCode: 64)
             }
+            // The intake stop across processes (Codex stage-3 S3-R14-1):
+            // apply and subscription write state a /deleteuserdata wipe
+            // deletes or a Mind import replaces (names, AgentMail key and
+            // inbox, the ChatGPT login). Held shared for the whole request;
+            // waits (bounded) while the running assistant replaces memory.
+            var replacementLock: ProfileFileLock?
+            if verb == "apply" || verb == "subscription" {
+                switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
+                case .acquired(let lock): replacementLock = lock
+                case .busy:
+                    respond(SetupAPICore.errorResponse(code: "memory_operation_in_progress", message: MemoryReplacementLock.busyMessage))
+                case .failed(let why):
+                    respond(SetupAPICore.errorResponse(code: "memory_operation_lock", message: why))
+                }
+            }
+            defer { replacementLock?.release() }
             switch verb {
             case "subscription": respond(await SubscriptionSetup().perform(object))
             case "probe": respond(await SetupAPICore.probe(object))

@@ -975,10 +975,28 @@ extension ConversationManager {
         // The handler running this wipe/import is not counted.
         let ownCommand = memoryReplacementOwnsCommand ? 1 : 0
         let deadline = ProcessInfo.processInfo.systemUptime + (Self.admissionDrainSecondsForTesting ?? 35)
-        while browserSettingsPollIngress > ownPoll || browserSettingsAppIngress > 0 || browserSettingsCommandIngress > ownCommand {
+        // Other Briglia processes of this profile (S3-R14-1): the exclusive
+        // replacement lock, held until the gate drops. A standalone writer
+        // that holds it shared (setup-api, trigger, …) is waited for like
+        // admitted input; one that starts later waits for us.
+        func replacementLockHeld() -> Bool? {
+            if memoryReplacementLock != nil { return true }
+            switch MemoryReplacementLock.tryExclusive() {
+            case .acquired(let lock): memoryReplacementLock = lock; return true
+            case .busy: return false
+            case .failed: return nil
+            }
+        }
+        while true {
+            guard let locked = replacementLockHeld() else {
+                return Self.busyMessage("the memory-operation lock cannot be taken", outcome: outcome)
+            }
+            let busyIngress = browserSettingsPollIngress > ownPoll || browserSettingsAppIngress > 0 || browserSettingsCommandIngress > ownCommand
+            if locked && !busyIngress { break }
             Self.admissionWaitsForTesting += 1
             if ProcessInfo.processInfo.systemUptime >= deadline {
-                let what = browserSettingsCommandIngress > ownCommand && browserSettingsPollIngress <= ownPoll && browserSettingsAppIngress == 0
+                let what = !locked ? "another Briglia command (setup or trigger) changing this assistant's settings"
+                    : browserSettingsCommandIngress > ownCommand && browserSettingsPollIngress <= ownPoll && browserSettingsAppIngress == 0
                     ? "a command still running" : "a message still being received"
                 return Self.busyMessage(what, outcome: outcome)
             }
@@ -1335,6 +1353,9 @@ extension ConversationManager {
 
     func endMindRestore() {
         isRestoringMind = false
+        // Intake restarts for other Briglia processes too (S3-R14-1).
+        memoryReplacementLock?.release()
+        memoryReplacementLock = nil
         // Intake restarts (owner decision 2026-10-29): archive recovery that a
         // startup's configure() deferred under the gate runs now, against the
         // state that exists after the wipe / import (context rebuilt here).

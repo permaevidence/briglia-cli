@@ -264,12 +264,13 @@ final class ProfileFileLock {
 
     /// Try to take the lock; when `waitSeconds` > 0 retry every 50 ms until
     /// the deadline.
-    static func take(_ url: URL, waitSeconds: Double = 0) -> Outcome {
+    /// `shared`: LOCK_SH (any number of holders; excludes an exclusive one).
+    static func take(_ url: URL, waitSeconds: Double = 0, shared: Bool = false) -> Outcome {
         let fd = open(url.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
         guard fd >= 0 else { return .failed("cannot open \(url.path): \(String(cString: strerror(errno)))") }
         let deadline = Date().addingTimeInterval(waitSeconds)
         while true {
-            if flock(fd, LOCK_EX | LOCK_NB) == 0 { return .acquired(ProfileFileLock(fd: fd, path: url.path)) }
+            if flock(fd, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB) == 0 { return .acquired(ProfileFileLock(fd: fd, path: url.path)) }
             let err = errno
             guard err == EWOULDBLOCK || err == EINTR else {
                 close(fd)

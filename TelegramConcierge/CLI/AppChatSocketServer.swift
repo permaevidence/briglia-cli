@@ -645,8 +645,7 @@ final class AppChatSocketServer {
             }
 
         case "stop":
-            await manager.stopFromApp()
-            ack()
+            if let refusal = await manager.stopFromApp() { nack(refusal) } else { ack() }
 
         case "command":
             guard let commandLine = (object["line"] as? String)?

@@ -46,6 +46,9 @@ class ConversationManager: ObservableObject {
     /// replacement: its own command ingress is not waited for (the wipe and
     /// the import are only ever started from a command handler).
     var memoryReplacementOwnsCommand = false
+    /// Held exclusively by a wipe / Mind import from its first busy check
+    /// until the gate drops (MemoryReplacementLock; Codex stage-3 S3-R14-1).
+    var memoryReplacementLock: ProfileFileLock?
     var archiveRecoveryTask: Task<Void, Never>?
     var activeProcessingTask: Task<Void, Never>?
     var subscriptionLoginTask: Task<Void, Never>?

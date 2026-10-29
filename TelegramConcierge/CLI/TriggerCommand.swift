@@ -24,6 +24,16 @@ struct Trigger: ParsableCommand {
 
     func run() throws {
         try IdentityMigration.gateMutatingEntry()
+        // The intake stop across processes (Codex stage-3 S3-R14-1): wait
+        // (bounded) while the running assistant deletes or imports memory;
+        // the watcher is then validated against the resulting store.
+        let replacementLock: ProfileFileLock
+        switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
+        case .acquired(let lock): replacementLock = lock
+        case .busy: print("✖ " + MemoryReplacementLock.busyMessage); throw ExitCode(75)
+        case .failed(let why): print("✖ \(why)"); throw ExitCode(1)
+        }
+        defer { replacementLock.release() }
         guard let uuid = UUID(uuidString: watcherId.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             throw ValidationError("'\(watcherId)' is not a valid watcher UUID.")
         }

@@ -471,13 +471,22 @@ extension ConversationManager {
     /// Stop button in the app's chat composer — same blanket halt as /stop.
     /// Notification is routed to the app channel (a no-op send): the salvage
     /// path already appends a visible "turn interrupted" message to history.
-    func stopFromApp() async {
-        // The intake stop: same rule as the /stop command (S3-R13-1).
+    /// Returns the refusal text when the stop was refused (the caller shows
+    /// it: the app channel's text replies are no-ops), nil when it ran.
+    @discardableResult
+    func stopFromApp() async -> String? {
+        // The intake stop: same rule as the /stop command (S3-R13-1). A stop
+        // that passes is counted as a command for its whole run (S3-R14-2):
+        // its registry cutoffs suspend before it writes the stop marker, and
+        // a wipe/import must wait for it (no suspension between this check
+        // and the increment).
         if isRestoringMind && Self.multiAssistantGateApplies {
-            try? await sendText(Self.memoryReplacementRefusal, to: Self.appChannelAddress)
-            return
+            return Self.memoryReplacementRefusal
         }
+        browserSettingsCommandIngress += 1
+        defer { browserSettingsCommandIngress -= 1 }
         await stopActiveExecution(notify: Self.appChannelAddress)
+        return nil
     }
 
     // MARK: - App-socket front-end support

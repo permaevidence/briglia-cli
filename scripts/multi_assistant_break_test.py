@@ -286,8 +286,8 @@ BREAKS = [
     ]),
     # Codex stage-3 round 10 (S3-R10-1): input admitted before the gate.
     ('M92 the refusal does not wait for input admitted before the gate (S3-R10-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     '        while browserSettingsPollIngress > ownPoll || browserSettingsAppIngress > 0 || browserSettingsCommandIngress > ownCommand {',
-     '        while false {'),
+     '            let busyIngress = browserSettingsPollIngress > ownPoll || browserSettingsAppIngress > 0 || browserSettingsCommandIngress > ownCommand\n',
+     '            let busyIngress = false\n'),
     ('M93 the wipe counts its own Telegram poll tick as admitted input (S3-R10-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
      '        let ownPoll = Self.commandCapture == nil ? min(1, browserSettingsPollIngress) : 0\n',
      '        let ownPoll = 0\n'),
@@ -324,9 +324,18 @@ BREAKS = [
      '        if isRestoringMind, text.hasPrefix("/"), !Self.commandsDuringMemoryReplacement.contains(token),',
      '        if false, text.hasPrefix("/"), !Self.commandsDuringMemoryReplacement.contains(token),'),
     ('M106 the busy check does not wait for a command admitted before the gate (S3-R13-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     ' || browserSettingsAppIngress > 0 || browserSettingsCommandIngress > ownCommand {', ' || browserSettingsAppIngress > 0 {'),
+     ' || browserSettingsAppIngress > 0 || browserSettingsCommandIngress > ownCommand\n', ' || browserSettingsAppIngress > 0\n'),
     ('M107 the wipe waits for its own command handler (S3-R13-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
      '        let ownCommand = memoryReplacementOwnsCommand ? 1 : 0\n', '        let ownCommand = 0\n'),
+    # Codex stage-3 round 14 (S3-R14-1/R14-2).
+    ('M108 the wipe does not take the cross-process replacement lock (S3-R14-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '            case .acquired(let lock): memoryReplacementLock = lock; return true\n            case .busy: return false\n',
+     '            case .acquired(let lock): lock.release(); return true\n            case .busy: return true\n'),
+    ('M109 setup-api apply ignores a memory replacement in progress (S3-R14-1)', 'stage3e2e', T + 'CLI/SetupAPICommand.swift',
+     '            if verb == "apply" || verb == "subscription" {', '            if false {'),
+    ('M110 an admitted Stop is not counted (S3-R14-2)', 'stage3e2e', T + 'Services/ConversationManager+Channels.swift',
+     '        browserSettingsCommandIngress += 1\n        defer { browserSettingsCommandIngress -= 1 }\n        await stopActiveExecution(notify: Self.appChannelAddress)',
+     '        await stopActiveExecution(notify: Self.appChannelAddress)'),
     # The round-12 head's behaviour (all three intake-stop fixes removed,
     # test seams kept): Codex's sequence must fail.
     ('M103 the round-12 head: no startup hold, no clear serialization, no deferral (S3-R12-1)', 'stage3e2e', [
