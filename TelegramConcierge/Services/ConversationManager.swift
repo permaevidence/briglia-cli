@@ -1113,6 +1113,14 @@ class ConversationManager: ObservableObject {
     /// boundary (§28.6 S4-P4). In progress = the rotation transaction runs.
     var pendingManagedRotation = false
     var managedRotationInProgress = false
+    /// A rotation whose new token could not be saved (Codex stage-4
+    /// S4-R2-1/R2-2): Telegram intake is held — no polling with either token,
+    /// so no progress can be rewound — and the recovery is retried at the
+    /// poll boundary until it completes.
+    var managedRotationHold = false
+    var managedRotationLastRetry: Date?
+    nonisolated(unsafe) static var rotationSecretFaultForTesting: (() throws -> Void)?
+    nonisolated(unsafe) static var rotationCursorFaultForTesting: (() throws -> Void)?
     /// Managed-bot writes that failed with storage problems (Codex stage-4
     /// S4-R1-1): retried by the durability stall before the update that
     /// carried them is acknowledged.

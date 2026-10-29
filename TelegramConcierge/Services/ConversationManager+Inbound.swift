@@ -349,6 +349,7 @@ extension ConversationManager {
                     await performPendingBotSwitchIfReady()
                     // Same-bot token rotation (§28.6 S4-P4), same boundary.
                     await performPendingManagedRotationIfReady()
+                    await retryManagedRotationHoldIfDue()
                     // A claimed /newassistant creation that could not start
                     // earlier (a gate was up) starts once nothing blocks it.
                     if managedBotsActiveHere, managedBotCreationTask == nil { startManagedBotCreationIfPossible() }

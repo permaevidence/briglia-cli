@@ -223,6 +223,13 @@ extension ConversationManager {
         if telegramConfigured, !Self.registryAllowsChannel(.bot, value: token) {
             telegramConfigured = false
         }
+        // A managed-bot token change that couldn't be saved holds Telegram
+        // (Codex stage-4 S4-R2-2): neither the stored (revoked) token nor an
+        // unsaved one is polled until the recovery completes.
+        if telegramConfigured, managedRotationHold {
+            print("[ManagedBots] Telegram held: a token change of this bot is waiting to be saved")
+            telegramConfigured = false
+        }
         // /stop visibility: a token change (or removal) is a new transport
         // identity for visibility notices — bump BEFORE the actor adopts it.
         let tokenIdentity = telegramConfigured ? TelegramBotService.credentialIdentity(token) : nil

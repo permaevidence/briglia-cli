@@ -820,8 +820,42 @@ final class Stage4Harness {
               crashRecovered.hasPrefix("✔") && stillOld != S4FakeBotAPI.token(myBot, 8)
                 && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == S4FakeBotAPI.token(myBot, 8)
                 && offsetFile()?["lastUpdateId"] as? Int == 91, "\(crashRecovered) \(String(describing: offsetFile()))")
-        try? KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx")
-        try? TelegramBotService.writeOffsetState(forToken: "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx", lastUpdateId: 0, lastUpdateAt: nil)
+        // S4-R2-1/R2-2: the new token can't be saved → Telegram is held (no
+        // in-memory fallback, nothing processed), retried until it lands.
+        let base = "\(myBot):AAsyntheticManagerTokenxxxxxxxxxx"
+        try? KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: base)
+        api.tokens[myBot] = base
+        let held = await freshManager()
+        await held.telegramService.confirmProcessed(updateId: 120)
+        ConversationManager.rotationSecretFaultForTesting = { throw AssistantControl.ControlError("disk full") }
+        let first = await held.rotateManagedToken(recovering: false)
+        await held._svRegisterTelegram()   // any later registration keeps the hold
+        check("R11 the new token can't be saved: Telegram is held (not polled with either token), the intent kept",
+              first.contains("paused") && held.managedRotationHold && !held.isTelegramConfigured
+                && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == base && ManagedBots.loadRotation()?.lastUpdateId == 120, first)
+        let stillFailing = held.managedRotationHold
+        ConversationManager.rotationSecretFaultForTesting = nil
+        await held.retryManagedRotationHoldIfDue(now: Date().addingTimeInterval(60))
+        check("R12 once storage works the retry completes: new token stored, cursor from the intent (120), Telegram resumes",
+              stillFailing && !held.managedRotationHold && held.isTelegramConfigured
+                && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == api.tokens[myBot]
+                && offsetFile()?["lastUpdateId"] as? Int == 120 && ManagedBots.loadRotation() == nil, "\(String(describing: offsetFile()))")
+        // Startup with the storage problem still there: held, never the old token.
+        let current2 = KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) ?? ""
+        try? ManagedBots.saveRotation(ManagedBots.RotationIntent(botId: myBot, startedAt: Date(), lastUpdateId: 130, lastUpdateAt: Date()))
+        api.tokens[myBot] = S4FakeBotAPI.token(myBot, 9)
+        ConversationManager.rotationCursorFaultForTesting = { throw AssistantControl.ControlError("disk full") }
+        let boot = ConversationManager()
+        _ = await boot.rotateManagedToken(recovering: true)
+        await boot._svRegisterTelegram()
+        check("R13 a recovery that can't save at startup keeps Telegram held (the revoked token is not reinstalled)",
+              boot.managedRotationHold && !boot.isTelegramConfigured && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == current2)
+        ConversationManager.rotationCursorFaultForTesting = nil
+        await boot.retryManagedRotationHoldIfDue(now: Date().addingTimeInterval(60))
+        check("R14 …and completes once storage works (cursor 130)", !boot.managedRotationHold && boot.isTelegramConfigured
+              && KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) == S4FakeBotAPI.token(myBot, 9) && offsetFile()?["lastUpdateId"] as? Int == 130)
+        try? KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: base)
+        try? TelegramBotService.writeOffsetState(forToken: base, lastUpdateId: 0, lastUpdateAt: nil)
         api.tokens[myBot] = nil
     }
 

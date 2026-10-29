@@ -428,6 +428,13 @@ BREAKS = [
     ("M136 underscores inside a bot's @user_name are stripped", "s4:gates", T + "Services/TelegramBotService.swift",
      "replacingRegexMatches(of: #\"(?<![A-Za-z0-9])_([^_\\n]+)_(?![A-Za-z0-9])\"#, with: \"$1\")",
      "replacingRegexMatches(of: #\"_([^_\\n]+)_\"#, with: \"$1\")"),
+    # Stage 4, Codex implementation round 2 (S4-R2-1, S4-R2-2).
+    ("M137 registration polls the stored token while a token change waits to be saved", "s4:rotation", T + "Services/ConversationManager+Channels.swift",
+     "        if telegramConfigured, managedRotationHold {",
+     "        if telegramConfigured, managedRotationHold, false {"),
+    ("M138 an unsaved new token is used in memory instead of holding Telegram", "s4:rotation", T + "Services/ConversationManager+ManagedBots.swift",
+     "        } catch {\n            return await hold(\"the token\")\n        }",
+     "        } catch {\n            ticket.abort()\n            await telegramService.rebindSameBot(token: newToken)\n            return \"⚠️ using it until restart\"\n        }"),
 ]
 
 
