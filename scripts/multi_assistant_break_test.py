@@ -286,7 +286,7 @@ BREAKS = [
     ]),
     # Codex stage-3 round 10 (S3-R10-1): input admitted before the gate.
     ('M92 the refusal does not wait for input admitted before the gate (S3-R10-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
-     '        while browserSettingsPollIngress > ownPoll || browserSettingsAppIngress > 0 {',
+     '        while browserSettingsPollIngress > ownPoll || browserSettingsAppIngress > 0 || browserSettingsCommandIngress > ownCommand {',
      '        while false {'),
     ('M93 the wipe counts its own Telegram poll tick as admitted input (S3-R10-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
      '        let ownPoll = Self.commandCapture == nil ? min(1, browserSettingsPollIngress) : 0\n',
@@ -319,6 +319,14 @@ BREAKS = [
      '        if false {\n            archiveRecoveryDeferredByRestoreGate = true'),
     ('M104 a turn held while the history was replaced still runs (intake stop)', 'stage3e2e', T + 'Services/ConversationManager+MidTurn.swift',
      '        if droppedAfterReplacement { return }\n', ''),
+    # Codex stage-3 round 13 (S3-R13-1): commands under the gate.
+    ('M105 commands are not refused under the restore gate (S3-R13-1)', 'stage3e2e', T + 'Services/ConversationManager+ControlCommands.swift',
+     '        if isRestoringMind, text.hasPrefix("/"), !Self.commandsDuringMemoryReplacement.contains(token),',
+     '        if false, text.hasPrefix("/"), !Self.commandsDuringMemoryReplacement.contains(token),'),
+    ('M106 the busy check does not wait for a command admitted before the gate (S3-R13-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     ' || browserSettingsAppIngress > 0 || browserSettingsCommandIngress > ownCommand {', ' || browserSettingsAppIngress > 0 {'),
+    ('M107 the wipe waits for its own command handler (S3-R13-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '        let ownCommand = memoryReplacementOwnsCommand ? 1 : 0\n', '        let ownCommand = 0\n'),
     # The round-12 head's behaviour (all three intake-stop fixes removed,
     # test seams kept): Codex's sequence must fail.
     ('M103 the round-12 head: no startup hold, no clear serialization, no deferral (S3-R12-1)', 'stage3e2e', [

@@ -178,6 +178,10 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         await startupHeldBetweenChecksDoesNotRefuse(m, check: check)
         await maintenanceUnderGateRefuses(m, check: check)
         await archiveRecoveryDeferredUnderGate(m, check: check)
+        // Codex stage-3 S3-R13-1: commands under the gate.
+        await continueRefusedDuringImport(m, check: check)
+        await setnameRefusedDuringWipe(m, check: check)
+        await admittedCommandIsDrained(m, check: check)
         ClaimScopes.tickSeconds = 2
     }
 
@@ -204,19 +208,114 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
     /// not start; it is scheduled (with a fresh context) when the gate drops.
     @MainActor private func archiveRecoveryDeferredUnderGate(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
         await awaitArchiveIdle(m)
+        let scheduled0 = ConversationManager.archiveRecoveriesScheduledForTesting
         let gate = m.beginMindRestore()
         m.scheduleArchiveRecovery(defaultContext: .empty)
         let notStarted = m.archiveRecoveryTask == nil && m.archiveRecoveryDeferredByRestoreGate
+            && ConversationManager.archiveRecoveriesScheduledForTesting == scheduled0
         if gate { m.endMindRestore() }
         let by = Date().addingTimeInterval(10)
         var startedLater = false
         while Date() < by {
-            if m.archiveRecoveryTask != nil || !m.archiveRecoveryDeferredByRestoreGate { startedLater = true; break }
+            // A recovery task was actually created (Codex round-13 note).
+            if ConversationManager.archiveRecoveriesScheduledForTesting > scheduled0 { startedLater = true; break }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         await awaitArchiveIdle(m)
         check("intake stop: archive recovery requested under the restore gate starts only after the gate drops",
               gate && notStarted && startedLater && !m.archiveRecoveryDeferredByRestoreGate, "gate \(gate) deferred \(notStarted) later \(startedLater)")
+    }
+
+    @MainActor private func conversationOnDisk(_ m: ConversationManager) -> String {
+        (try? String(contentsOf: m.conversationFileURL, encoding: .utf8)) ?? ""
+    }
+
+    /// Codex stage-3 S3-R13-1, Codex's import sequence: a real Mind import;
+    /// in the window where the imported files are on disk but not yet
+    /// reloaded, a terminal/app `/continue` (which writes the conversation
+    /// directly, with no turn) is refused — the imported history survives.
+    @MainActor private func continueRefusedDuringImport(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        let imported = "R13_IMPORTED_MEMORY_\(UUID().uuidString.prefix(6))", old = "R13_OLD_MEMORY_\(UUID().uuidString.prefix(6))"
+        let tail = "R13_OLD_REPLY_TAIL_\(UUID().uuidString.prefix(6))"
+        m.messages = [Message(role: .user, content: "Remember \(imported)."), Message(role: .assistant, content: "Noted.")]
+        _ = m.saveConversation()
+        let backup = FileManager.default.temporaryDirectory.appendingPathComponent("r13-\(UUID().uuidString.prefix(8)).mind")
+        defer { try? FileManager.default.removeItem(at: backup) }
+        var exported = true
+        do { try await MindExportService.shared.exportMind(to: backup) } catch { exported = false }
+        m.messages = [Message(role: .user, content: "Remember \(old)."), Message(role: .assistant, content: "Noted.")]
+        _ = m.saveConversation()
+        m.pendingContinuationText = tail
+        final class Seen { var window = false, reply: [String] = [] }
+        let seen = Seen()
+        ConversationManager.reloadBeforeLoadConversationForTesting = { @MainActor in
+            let disk = self.conversationOnDisk(m)
+            seen.window = m.isRestoringMind && disk.contains(imported) && !disk.contains(old)
+            seen.reply = await m.handleTerminalCommand("/continue") ?? []
+        }
+        let outcome = await m.performMindImport(from: backup)
+        ConversationManager.reloadBeforeLoadConversationForTesting = nil
+        let disk = conversationOnDisk(m)
+        var ok = false
+        if case .success = outcome { ok = true }
+        check("S3-R13-1: during a real Mind import, a terminal/app /continue is refused (EN + IT) and the imported history survives",
+              exported && ok && seen.window && seen.reply.joined().contains("memory operation") && seen.reply.joined().contains("operazione sulla memoria")
+              && disk.contains(imported) && !disk.contains(old) && !disk.contains(tail),
+              "exported \(exported) outcome \(outcome) window \(seen.window) reply \(seen.reply) imported \(disk.contains(imported)) old \(disk.contains(old))")
+        m.pendingContinuationText = nil
+    }
+
+    /// Codex stage-3 S3-R13-1, Codex's wipe sequence: in the wipe's final
+    /// reload (after the name was deleted), `/setname` + `/setname confirm`
+    /// are refused — the wiped name stays wiped.
+    @MainActor private func setnameRefusedDuringWipe(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+        final class Seen { var window = false, replies: [String] = [] }
+        let seen = Seen()
+        ConversationManager.reloadBeforeLoadConversationForTesting = { @MainActor in
+            seen.window = m.isRestoringMind && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil
+            seen.replies += await m.handleTerminalCommand("/setname R13_NAME_DURING_WIPE") ?? []
+            seen.replies += await m.handleTerminalCommand("/setname confirm") ?? []
+        }
+        let wipe = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        ConversationManager.reloadBeforeLoadConversationForTesting = nil
+        let name = KeychainHelper.load(key: KeychainHelper.userNameKey)
+        check("S3-R13-1: during a real wipe's final reload, /setname and /setname confirm are refused and the wiped name stays wiped",
+              seen.window && !wipe.contains { $0.hasPrefix("ABORTED") } && name == nil
+              && seen.replies.count == 2 && seen.replies.allSatisfy { $0.contains("memory operation") },
+              "window \(seen.window) \(wipe) name \(name ?? "nil") replies \(seen.replies)")
+    }
+
+    /// S3-R13-1: a command admitted before the gate (still in its handler)
+    /// makes the wipe wait, then refuse after the drain limit; the handler
+    /// running the wipe itself is not counted.
+    @MainActor private func admittedCommandIsDrained(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        await awaitArchiveIdle(m)
+        try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
+        ConversationManager.admissionDrainSecondsForTesting = 0.5
+        m.browserSettingsCommandIngress += 1
+        let refused = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        check("S3-R13-1: a command still in its handler when the gate rises makes the wipe refuse after the drain limit, nothing deleted",
+              Self.isWorkRefusal(refused) && refused[0].contains("a command still running")
+              && KeychainHelper.load(key: KeychainHelper.userNameKey) == "Sentinel", "\(refused)")
+        // The /deleteuserdata handler's own ingress is the wipe itself.
+        m.memoryReplacementOwnsCommand = true
+        let waits0 = ConversationManager.admissionWaitsForTesting
+        let own = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        m.memoryReplacementOwnsCommand = false
+        m.browserSettingsCommandIngress -= 1
+        ConversationManager.admissionDrainSecondsForTesting = nil
+        check("S3-R13-1: the command handler running the wipe is not counted (no wait, the wipe runs)",
+              ConversationManager.admissionWaitsForTesting == waits0 && !own.contains { $0.hasPrefix("ABORTED") }
+              && KeychainHelper.load(key: KeychainHelper.userNameKey) == nil, "\(own)")
     }
 
     /// One pending chunk on disk whose raw message carries `marker`; the

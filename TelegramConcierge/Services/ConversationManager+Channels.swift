@@ -472,6 +472,11 @@ extension ConversationManager {
     /// Notification is routed to the app channel (a no-op send): the salvage
     /// path already appends a visible "turn interrupted" message to history.
     func stopFromApp() async {
+        // The intake stop: same rule as the /stop command (S3-R13-1).
+        if isRestoringMind && Self.multiAssistantGateApplies {
+            try? await sendText(Self.memoryReplacementRefusal, to: Self.appChannelAddress)
+            return
+        }
         await stopActiveExecution(notify: Self.appChannelAddress)
     }
 

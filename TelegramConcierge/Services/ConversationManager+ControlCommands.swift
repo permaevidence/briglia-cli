@@ -157,6 +157,9 @@ extension ConversationManager {
         }
     }
 
+    static let commandsDuringMemoryReplacement: Set<String> = ["/status", "/commands", "/comandi"]
+    static let memoryReplacementRefusal = "⏳ A memory operation (/deleteuserdata, /importmind or /exportmind) is in progress; send this again when it finishes. / ⏳ È in corso un'operazione sulla memoria (/deleteuserdata, /importmind o /exportmind); invialo di nuovo quando è finita."
+
     func handleControlCommandIfNeeded(_ text: String) async -> Bool {
         let token = commandToken(from: text)
         // Parked for an update (§6.4, Codex stage-2 R2): terminal/app commands
@@ -169,7 +172,22 @@ extension ConversationManager {
             try? await sendText("Browser settings are being applied. Please retry this command in a moment.")
             return true
         }
-        
+        // The intake stop (owner decision 2026-10-29; Codex stage-3
+        // S3-R13-1): with several assistants, while a /deleteuserdata wipe,
+        // a Mind import or an export holds the restore gate, terminal, app
+        // and Telegram commands are refused at this one entry — commands
+        // write memory directly (/continue saves the conversation, /setname
+        // the name, …) without passing a turn. Only read-only /status and
+        // /commands run. /stop is refused too: no turn or background work can
+        // be running (the operation refused them) and the operation itself is
+        // not cancellable. A command already past this point is counted in
+        // browserSettingsCommandIngress below, which the wipe/import drain.
+        if isRestoringMind, text.hasPrefix("/"), !Self.commandsDuringMemoryReplacement.contains(token),
+           Self.multiAssistantGateApplies {
+            try? await sendText(Self.memoryReplacementRefusal)
+            return true
+        }
+
         browserSettingsCommandIngress += 1
         defer { browserSettingsCommandIngress -= 1 }
         switch token {
@@ -460,7 +478,9 @@ extension ConversationManager {
                 return
             }
             lastWipeNotes = []
+            memoryReplacementOwnsCommand = true
             let failures = await deleteAllMemory()
+            memoryReplacementOwnsCommand = false
             // Several assistants (§25.6): a note that the shared ChatGPT login
             // stays for the others is sent after the result.
             defer { for note in lastWipeNotes { Task { [weak self] in try? await self?.sendText(note) } } }
@@ -714,10 +734,12 @@ extension ConversationManager {
                 try? await sendText("✖ Briglia can't persist state to disk right now (writes failing — check disk space); /importmind is deferred until storage recovers.")
                 return
             }
+            memoryReplacementOwnsCommand = true
             let outcome = await performMindImport(
                 from: URL(fileURLWithPath: pending.path),
                 expectedSHA256: pending.sha256,
                 expectedBytes: pending.bytes)
+            memoryReplacementOwnsCommand = false
             switch outcome {
             case .success(let pausedWatchers):
                 pendingMindImport = nil

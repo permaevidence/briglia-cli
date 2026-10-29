@@ -154,6 +154,7 @@ extension ConversationManager {
             return
         }
         let archiveService = self.archiveService
+        Self.archiveRecoveriesScheduledForTesting += 1
         archiveRecoveryTask = Task { [weak self] in
             await archiveService.recoverPendingChunks(defaultContext: defaultContext)
             await MainActor.run {
@@ -172,6 +173,8 @@ extension ConversationManager {
     /// Selftests: how often a startup waited at the intake stop (before
     /// configure) for the restore gate.
     nonisolated(unsafe) static var startupHeldBeforeConfigureForTesting = 0
+    /// Selftests: archive recovery tasks actually created.
+    nonisolated(unsafe) static var archiveRecoveriesScheduledForTesting = 0
 
     func startPolling() async {
         // Prevent duplicate polling tasks. The flag must be claimed BEFORE

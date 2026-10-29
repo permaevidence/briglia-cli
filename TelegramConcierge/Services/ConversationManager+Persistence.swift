@@ -969,11 +969,18 @@ extension ConversationManager {
     func multiAssistantBusyRefusal(outcome: (en: String, it: String) = (" Nothing was deleted.", " Non è stato cancellato nulla.")) async -> String? {
         guard Self.multiAssistantGateApplies else { return nil }
         let ownPoll = Self.commandCapture == nil ? min(1, browserSettingsPollIngress) : 0
+        // Commands (S3-R13-1): new ones are refused at the dispatcher while
+        // the gate is up; one admitted before it may still be suspended and
+        // write memory when it resumes — wait for it like admitted input.
+        // The handler running this wipe/import is not counted.
+        let ownCommand = memoryReplacementOwnsCommand ? 1 : 0
         let deadline = ProcessInfo.processInfo.systemUptime + (Self.admissionDrainSecondsForTesting ?? 35)
-        while browserSettingsPollIngress > ownPoll || browserSettingsAppIngress > 0 {
+        while browserSettingsPollIngress > ownPoll || browserSettingsAppIngress > 0 || browserSettingsCommandIngress > ownCommand {
             Self.admissionWaitsForTesting += 1
             if ProcessInfo.processInfo.systemUptime >= deadline {
-                return Self.busyMessage("a message still being received", outcome: outcome)
+                let what = browserSettingsCommandIngress > ownCommand && browserSettingsPollIngress <= ownPoll && browserSettingsAppIngress == 0
+                    ? "a command still running" : "a message still being received"
+                return Self.busyMessage(what, outcome: outcome)
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
@@ -1181,6 +1188,10 @@ extension ConversationManager {
             // predate them).
             try resetEarlyWakeStateForReplacedHistory()
         } catch {
+            // Files may already be partly replaced: a turn held at the choke
+            // point must not run on them, and an archive job of the old
+            // history must not commit (round-13 answer 3).
+            archiveGeneration &+= 1
             return .failedApply(error.localizedDescription)
         }
         await reloadAfterMindRestore()
@@ -1340,8 +1351,13 @@ extension ConversationManager {
         scheduleSummaryRetentionIdlePass()
     }
 
+    /// Selftests: runs in reloadAfterMindRestore after the archive
+    /// invalidation, before the conversation is reloaded (Codex S3-R13-1).
+    nonisolated(unsafe) static var reloadBeforeLoadConversationForTesting: (() async -> Void)?
+
     func reloadAfterMindRestore() async {
         await invalidateArchiveJobForReplacedHistory()
+        if let hook = Self.reloadBeforeLoadConversationForTesting { await hook() }
         // BGPRUNE{ A-GEN2
         if backgroundPruneEngaged {
             backgroundPruneHistoryReplaced()

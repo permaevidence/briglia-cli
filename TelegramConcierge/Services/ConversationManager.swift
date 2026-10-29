@@ -42,6 +42,10 @@ class ConversationManager: ObservableObject {
     /// configure() ran while the gate was up: archive recovery is scheduled
     /// when the gate drops, with a context read then (endMindRestore).
     var archiveRecoveryDeferredByRestoreGate = false
+    /// The /deleteuserdata or /importmind command handler that is running the
+    /// replacement: its own command ingress is not waited for (the wipe and
+    /// the import are only ever started from a command handler).
+    var memoryReplacementOwnsCommand = false
     var archiveRecoveryTask: Task<Void, Never>?
     var activeProcessingTask: Task<Void, Never>?
     var subscriptionLoginTask: Task<Void, Never>?
