@@ -86,6 +86,14 @@ enum UnleasedInstances {
             guard e.probe == .live, let s = e.sidecar, s.role == "assistant" else { return false }
             return s.pid == pid && s.processStartTime == start
         }
+        // Stage 4 (§28.3): the holder is THIS process — the standalone menu,
+        // which took the instance lock and entered the protocol with its own
+        // member lease of this profile (a session that refuses and closes on
+        // a barrier). It is coordinated; only another process can be stray.
+        if !owned, pid == getpid(), let mine = MemberEntry.current,
+           mine.directory.standardizedFileURL.path == leases.standardizedFileURL.path {
+            return false
+        }
         return !owned
     }
 

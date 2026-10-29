@@ -33,6 +33,7 @@ GOOD = {
     "jina": "jina_goodkey_0123456789abcdef00",
     "telegram": "123456789:AAgoodtoken0123456789abcdef",
 }
+EXTRA_TOKEN = "987654321:AAextraassistanttoken0123456789"
 CHAT_ID = 5551234567
 
 
@@ -75,6 +76,12 @@ class Mock(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         self.rfile.read(length)
+        # Stage 4 (several assistants): the pasted token's getMe (POST, Bot API).
+        m = re.match(r"/telegram/bot([^/]+)/getMe", self.path)
+        if m:
+            if m.group(1) != EXTRA_TOKEN:
+                return self._send(401, {"ok": False, "description": "Unauthorized"})
+            return self._send(200, {"ok": True, "result": {"id": 987654321, "is_bot": True, "first_name": "Work", "username": "work_test_bot"}})
         if self.path.startswith("/serper/"):
             return self._send(200 if self.headers.get("X-API-KEY") == GOOD["serper"] else 401, {"organic": []})
         return self._send(404, {})
@@ -178,6 +185,7 @@ def main():
             s, _, _ = cl.raw("GET", asset)
             check("asset %s is served" % asset, s == 200)
         st = cl.status()
+        check("one assistant, switch off: no Assistants section in the page state (unchanged page)", "assistants" not in st and "menu_child" not in st)
         check("the page state lists the 9 steps, nothing done", len(st.get("steps", [])) == 9 and not any(x["done"] for x in st["steps"] if x["id"] not in ("computer", "tools")))
         s, _, _ = cl.raw("POST", "/api/menu", {"action": "name", "name": "Evil"}, origin=False)
         check("a POST without the page's origin is refused", s == 403)
@@ -264,8 +272,85 @@ def main():
                 r.proc.kill()
         server.shutdown()
         shutil.rmtree(home, ignore_errors=True)
+    assistants_scenario()
     print("\nmenu headless test: " + ("all checks passed" if FAILS == 0 else "%d FAILED" % FAILS))
     sys.exit(1 if FAILS else 0)
+
+
+def assistants_scenario():
+    """Several assistants (MULTI_ASSISTANT_PLAN §28.3) with the switch on: the
+    Assistants section, Add with a pasted token (validated through the mock
+    Bot API inside its reservation), the cards, a rename through the other
+    assistant's own setup-api child, the Italian page, no token anywhere."""
+    home = tempfile.mkdtemp(prefix="briglia-menu-multi-")
+    env = dict(os.environ)
+    env.update({
+        "HOME": home, "XDG_CONFIG_HOME": home + "/.config", "XDG_DATA_HOME": home + "/.local/share",
+        "TMPDIR": home + "/tmp/", "BRIGLIA_IGNORE_LEGACY_SETUP_FLAG": "1", "BRIGLIA_EXPERIMENTAL_PROFILES": "1",
+        "BRIGLIA_DEV_QUICKSETUP_STUBS": "1", "BRIGLIA_QUICKSETUP_NO_BROWSER": "1", "LANG": "en_US.UTF-8",
+    })
+    env.pop("LC_ALL", None)
+    env.pop("BRIGLIA_PROFILE", None)
+    os.makedirs(home + "/tmp", exist_ok=True)
+    os.makedirs(home + "/.config/briglia", exist_ok=True)
+    with open(home + "/.config/briglia/secrets.json", "w") as f:
+        json.dump({"assistant_name": "Bree", "user_name": "Sofia", "telegram_chat_id": str(CHAT_ID)}, f)
+    os.chmod(home + "/.config/briglia/secrets.json", 0o600)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Mock)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    env["BRIGLIA_DEV_PROBE_BASE"] = "http://127.0.0.1:%d" % server.server_address[1]
+    env["BRIGLIA_TELEGRAM_API_BASE"] = "http://127.0.0.1:%d/telegram/bot" % server.server_address[1]
+    run = Run(env)
+    try:
+        m = run.wait_for(r"http://127\.0\.0\.1:(\d+)/start\?t=([0-9a-f]{32})")
+        check("assistants: the menu starts with the switch on", m is not None, run.out())
+        if not m:
+            return
+        cl = Client(int(m.group(1)))
+        s, h, _ = cl.raw("GET", "/start?t=" + m.group(2))
+        cl.cookie = re.search(r"bqs=([0-9a-f]+)", h.get("Set-Cookie", "")).group(1)
+        cl.act("lang", lang="en")
+        st = cl.status()
+        a = st.get("assistants")
+        check("assistants: the section is offered (Add link) before any second assistant", a is not None and a.get("cards") == [] and a.get("max") == 8, a)
+        s, j = cl.act("assistant_add", name="Work", template="work", copy_keys=True, token="987654321:AAwrongtoken000000000000000")
+        check("assistants: a token Telegram rejects adds nothing", not j.get("ok") and not (j.get("status", {}).get("assistants") or {}).get("cards"), j.get("message"))
+        s, j = cl.act("assistant_add", name="Work", template="work", copy_keys=True, token=EXTRA_TOKEN)
+        cards = (j.get("status", {}).get("assistants") or {}).get("cards") or []
+        names = [c.get("name") for c in cards]
+        check("assistants: Add creates the assistant; two cards (Bree first, then Work, stopped)",
+              j.get("ok") and names == ["Bree", "Work"] and cards[1].get("running") is False and cards[1].get("profile") == "work", j)
+        extra = home + "/.config/briglia-profiles/work/secrets.json"
+        flat = open(extra).read() if os.path.exists(extra) else ""
+        check("assistants: the new assistant's own store holds its name, bot, the owner's chat and the bot's handle",
+              "Work" in flat and EXTRA_TOKEN in flat and str(CHAT_ID) in flat and "work_test_bot" in flat)
+        reg = json.load(open(home + "/.local/share/briglia-shared/registry.json"))
+        work = [r for r in reg["records"] if r["name"] == "work"][0]
+        check("assistants: its record is active with autostart off until Start", work["state"] == "active" and work["autostart"] is False)
+        s, j = cl.act("assistant_add", name="work")
+        check("assistants: a second assistant with the same name is refused", not j.get("ok"))
+        s, j = cl.act("assistant_rename", profile="work", name="Lavoro")
+        cards = (j.get("status", {}).get("assistants") or {}).get("cards") or []
+        check("assistants: rename goes through that assistant's settings", j.get("ok") and any(c.get("name") == "Lavoro" for c in cards), j)
+        s, j = cl.act("assistant_rename", profile="work", name="Bree")
+        check("assistants: a rename to another assistant's name is refused", not j.get("ok"), j.get("message"))
+        s, j = cl.act("lang", lang="it")
+        s, j = cl.act("assistant_start", profile="default")
+        check("assistants: the first assistant isn't started from a card (Italian message)", not j.get("ok") and "pulsante" in j.get("message", ""), j.get("message"))
+        replies = json.dumps(j) + json.dumps(cl.status())
+        check("assistants: no token in the page state", EXTRA_TOKEN not in replies and "AAwrongtoken" not in replies)
+        cl.act("finish", what="quit")
+        try:
+            rc = run.proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            rc = None
+        check("assistants: the menu closes", rc == 0, run.out()[-600:])
+        check("assistants: no token was printed in the terminal", EXTRA_TOKEN not in run.out())
+    finally:
+        if run.proc.poll() is None:
+            run.proc.kill()
+        server.shutdown()
+        shutil.rmtree(home, ignore_errors=True)
 
 
 if __name__ == "__main__":
