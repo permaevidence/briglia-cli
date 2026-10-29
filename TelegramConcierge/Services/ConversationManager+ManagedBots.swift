@@ -191,11 +191,16 @@ extension ConversationManager {
             try? await sendText("✖ Couldn't save the request (\(error.localizedDescription)).")
             return
         }
+        guard let managerUsername = me.username, !managerUsername.isEmpty else {
+            _ = try? ManagedBots.updatePending(requestId: request.requestId) { $0 = nil }
+            try? await sendText("✖ This bot has no username, so Telegram can't open the create-bot dialog for it.")
+            return
+        }
         let text = """
-        Tap the button below to create the bot for «\(name)», then confirm in Telegram (you can change its username there). I'll do the rest. The request expires in 15 minutes; /newassistant cancel drops it.
+        Tap the button below and confirm in Telegram to create the bot for «\(name)» (keep the suggested username, or change it — then I'll ask you to confirm). I'll do the rest. The request expires in 15 minutes; /newassistant cancel drops it.
         """
-        let markup = ManagedBotAPI.requestButtonMarkup(requestId: request.requestId, buttonText: "➕ Create «\(name)»",
-                                                       suggestedName: name, suggestedUsername: request.suggestedUsername)
+        let markup = ManagedBotAPI.deepLinkButtonMarkup(buttonText: "➕ Create «\(name)»", manager: managerUsername,
+                                                        suggestedUsername: request.suggestedUsername, suggestedName: name)
         do {
             try await ManagedBotAPI.sendMessage(token: token, chatId: Int64(owner), text: text, replyMarkup: markup)
         } catch {

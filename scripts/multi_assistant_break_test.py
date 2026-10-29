@@ -448,6 +448,10 @@ BREAKS = [
     ("M142 a switch to another bot leaves the old bot's hold latched", "s4:rotation", T + "Services/ConversationManager+ControlCommands.swift",
      "        if managedRotationHold || ManagedBots.loadRotation() != nil {",
      "        if false {"),
+    # Step 0 (live, 2026-10-29): the invitation is the t.me/newbot deep link.
+    ("M143 the create link does not carry the request's suggested username", "s4:managed", T + "Services/ConversationManager+ManagedBots.swift",
+     "                                                        suggestedUsername: request.suggestedUsername, suggestedName: name)",
+     "                                                        suggestedUsername: \"\", suggestedName: name)"),
 ]
 
 

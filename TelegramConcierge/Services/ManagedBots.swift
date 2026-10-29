@@ -143,6 +143,15 @@ enum ManagedBotAPI {
                 "one_time_keyboard": true, "resize_keyboard": true]
     }
 
+    /// The create-bot invitation as an inline URL button opening the
+    /// `t.me/newbot/<manager>/<username>?name=` deep link (step 0, 2026-10-29:
+    /// the iOS client does not implement the `request_managed_bot` reply
+    /// button yet — it opens a stuck "Forward" sheet — while the deep link
+    /// opens Telegram's create-bot dialog on every client tried).
+    static func deepLinkButtonMarkup(buttonText: String, manager: String, suggestedUsername: String, suggestedName: String) -> [String: Any] {
+        ["inline_keyboard": [[["text": buttonText, "url": newBotLink(manager: manager, suggestedUsername: suggestedUsername, suggestedName: suggestedName)]]]]
+    }
+
     static let removeKeyboardMarkup: [String: Any] = ["remove_keyboard": true]
 
     /// The `t.me/newbot` deep link (an alternative to the button).

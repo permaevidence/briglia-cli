@@ -519,11 +519,11 @@ final class Stage4Harness {
         await m._testProcessUpdate(Self.update(2, ["text": "/newassistant Health"]))
         let pending = ManagedBots.loadPending()
         let button = api.sent.first { $0.method == "sendMessage" && $0.body["reply_markup"] != nil }
-        let req = (((button?.body["reply_markup"] as? [String: Any])?["keyboard"] as? [[[String: Any]]])?.first?.first?["request_managed_bot"]) as? [String: Any]
-        check("B3 the button carries the request (id, name, suggested username) and the request is saved (waiting, owner, manager)",
+        let url = ((((button?.body["reply_markup"] as? [String: Any])?["inline_keyboard"] as? [[[String: Any]]])?.first?.first)?["url"]) as? String ?? ""
+        check("B3 the invitation is a t.me/newbot deep link (manager, the request's suggested username, the name) and the request is saved",
               pending?.phase == .waiting && pending?.name == "Health" && pending?.ownerId == Self.ownerId && pending?.managerBotId == api.managerId
-                && (req?["request_id"] as? NSNumber)?.int32Value == pending?.requestId && req?["suggested_username"] as? String == pending?.suggestedUsername,
-              "\(String(describing: pending)) \(String(describing: req))")
+                && url == "https://t.me/newbot/\(api.managerUsername)/\(pending?.suggestedUsername ?? "-")?name=Health",
+              "\(String(describing: pending)) \(url)")
         // A bot created in another chat / by another sender never reaches the rule.
         api.clear()
         await m._testProcessUpdate(Self.created(3, bot: 9001, username: pending?.suggestedUsername ?? "", from: 999))
