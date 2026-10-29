@@ -141,13 +141,18 @@ struct ManagedBotProbeCommand: AsyncParsableCommand {
         } catch { report["button_sent"] = scrub(error, [manager]); finish() }
         report["suggested_username"] = suggested
         say("tap the button in that chat and confirm")
-        // 4. The events (both shapes requested so the report shows each).
+        // 4. The event, polled with EXACTLY the production subscription
+        // (["message", "callback_query"]; Codex stage-4 round 4): Briglia relies
+        // on the managed_bot_created service message, never on the separate
+        // managed_bot update, so this proves what production will receive.
         var botId: Int64?
         var botUsername: String?
-        var sawMessage = false, sawUpdate = false
-        var messageSender: Int64?, updateCreator: Int64?
-        while Date() < deadline, !(sawMessage && sawUpdate) {
-            for u in (try? await poll(["message", "callback_query", "managed_bot"])) ?? [] {
+        var sawMessage = false
+        var sawUpdate = false
+        var messageSender: Int64?
+        let updateCreator: Int64? = nil
+        while Date() < deadline, !sawMessage {
+            for u in (try? await poll(["message", "callback_query"])) ?? [] {
                 if let m = u["message"] as? [String: Any], let created = m["managed_bot_created"] as? [String: Any],
                    let bot = created["bot"] as? [String: Any] {
                     sawMessage = true
@@ -155,24 +160,11 @@ struct ManagedBotProbeCommand: AsyncParsableCommand {
                     botUsername = bot["username"] as? String
                     messageSender = ((m["from"] as? [String: Any])?["id"] as? NSNumber)?.int64Value
                 }
-                if let mb = u["managed_bot"] as? [String: Any], let bot = mb["bot"] as? [String: Any] {
-                    sawUpdate = true
-                    botId = botId ?? (bot["id"] as? NSNumber)?.int64Value
-                    botUsername = botUsername ?? bot["username"] as? String
-                    updateCreator = ((mb["user"] as? [String: Any])?["id"] as? NSNumber)?.int64Value
-                }
-            }
-            if sawMessage || sawUpdate {
-                // One more short poll for the other shape, then stop waiting.
-                for u in (try? await poll(["message", "callback_query", "managed_bot"])) ?? [] {
-                    if u["managed_bot"] != nil { sawUpdate = true }
-                    if (u["message"] as? [String: Any])?["managed_bot_created"] != nil { sawMessage = true }
-                }
-                break
+                if u["managed_bot"] != nil { sawUpdate = true }   // must not arrive with this subscription
             }
         }
         report["event_message_managed_bot_created"] = sawMessage
-        report["event_update_managed_bot"] = sawUpdate
+        report["managed_bot_update_leaked_through_production_filter"] = sawUpdate
         report["message_sender_is_owner"] = messageSender == owner
         report["update_creator_is_owner"] = updateCreator.map { $0 == owner } ?? false
         report["created_username_equals_suggestion"] = botUsername?.lowercased() == suggested.lowercased()
