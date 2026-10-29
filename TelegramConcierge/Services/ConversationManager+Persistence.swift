@@ -623,7 +623,10 @@ extension ConversationManager {
             if MultiAssistant.context() != nil {
                 await ClaimScopes.shared.tick()
             }
-            if MultiAssistant.context() == nil || !ClaimScopes.shared.hasOpenScopes {
+            // A nil context (registry briefly unreadable, or a peer being
+            // removed has published `removing`) is not evidence that the
+            // scopes closed (S3-R9-1): only the open scopes decide.
+            if !ClaimScopes.shared.hasOpenScopes {
                 try? FileManager.default.removeItem(at: MultiAssistant.Paths.live.claimsFile(AssistantProfile.selectedName))
             }
         }

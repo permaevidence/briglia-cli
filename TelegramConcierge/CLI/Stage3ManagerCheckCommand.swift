@@ -137,6 +137,7 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         ClaimScopes.tickSeconds = 3600   // only explicit ticks in this check
         await wipeTimeoutCase(m, ctx: ctx, peerCtx: peerCtx, gated: true, check: check)
         await wipeTimeoutCase(m, ctx: ctx, peerCtx: peerCtx, gated: false, check: check)
+        await wipeTimeoutCase(m, ctx: ctx, peerCtx: peerCtx, gated: false, contextLoss: true, check: check)
         // The ordinary case: nothing live, the wipe removes the claims file.
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("s3r71-\(UUID().uuidString.prefix(8))")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -152,8 +153,10 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
     }
 
     @MainActor private func wipeTimeoutCase(_ m: ConversationManager, ctx: MultiAssistant.Context, peerCtx: MultiAssistant.Context,
-                                            gated: Bool, check: @escaping (String, Bool, String) -> Void) async {
-        let tag = gated ? "S3-R8-1 (turn-end sample in progress)" : "S3-R7-1 (scope pending)"
+                                            gated: Bool, contextLoss: Bool = false,
+                                            check: @escaping (String, Bool, String) -> Void) async {
+        let tag = contextLoss ? "S3-R9-1 (context lost during the wipe)"
+            : gated ? "S3-R8-1 (turn-end sample in progress)" : "S3-R7-1 (scope pending)"
         let reg = BackgroundProcessRegistry.shared
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("s3r71-\(UUID().uuidString.prefix(8))")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -167,7 +170,7 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         try? FileClaims.settle(ctx, opId: "wipe1-\(gated)", changed: true, scopes: [scope])
         let body = "open(P,\">\",$ARGV[0]); print P $$; close P; while(1){ if(-e $ARGV[1]){ open(F,\">>\",$ARGV[2]); print F \"JOB\\n\"; close F; exit 0 } sleep 0.001 }"
         var jobs: [String] = [], pidFiles: [String] = []
-        for i in 0..<6 {
+        for i in 0..<(contextLoss ? 12 : 6) {
             let pidFile = dir.appendingPathComponent("pid-\(i)").path
             let cmd = "exec /usr/bin/perl -MTime::HiRes=sleep -e '\(body)' \"\(pidFile)\" \"\(trigger)\" \"\(file)\""
             guard let j = try? await reg.start(command: cmd, workdir: dir.path, description: "s3r71-\(i)") else {
@@ -189,6 +192,35 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
                   gate.hasEntered && ClaimScopes.shared.openScopes().contains(scope)
                   && ClaimScopes.shared.pendingScopesForTesting[scope] == nil, "entered \(gate.hasEntered)")
         }
+        // S3-R9-1: the peer's record shows `removing` (what a profile
+        // removal publishes before it checks the peer's leases), so the
+        // context resolves to nil for the whole wipe.
+        // Every other ACTIVE record flips (the harness may have registered
+        // more than one extra); exactly those are restored.
+        var flipped: [String] = []
+        func setPeerState(_ state: String) {
+            try? AssistantRegistry.withLock(.live) { doc in
+                guard var d = doc else { return }
+                if state == "removing" {
+                    flipped = d.records.filter { $0.name != ctx.me.profile && $0.state == "active" }.map(\.name)
+                }
+                for name in flipped {
+                    guard let i = d.index(name) else { continue }
+                    d.records[i].state = state
+                    d.records[i].removingOp = state == "removing" ? "s3r91-paused-removal" : nil
+                }
+                doc = d
+            }
+            MultiAssistant.invalidate()
+        }
+        if contextLoss {
+            let handedBy = Date().addingTimeInterval(5)
+            while ClaimScopes.shared.pendingScopesForTesting[scope] == nil && Date() < handedBy { try? await Task.sleep(nanoseconds: 5_000_000) }
+            setPeerState("removing")
+            check("\(tag): the fixture loses the context while the scope stays open",
+                  MultiAssistant.context() == nil && ClaimScopes.shared.openScopes().contains(scope),
+                  "context \(MultiAssistant.context() != nil) open \(ClaimScopes.shared.openScopes().contains(scope)) flipped \(flipped)")
+        }
         let stop = Task.detached { _ = await reg.stopAllMainOwned() }
         let stampedBy = Date().addingTimeInterval(5)
         while await reg.runningBackgroundJobCount() != 0 && Date() < stampedBy {
@@ -197,6 +229,10 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         await reg._testSetWipeJoinLimit(0.2)
         let failures = await m.deleteAllMemory()
         await reg._testSetWipeJoinLimit(nil)
+        if contextLoss {
+            setPeerState("active")   // the removal refused and restored the record
+            check("\(tag): the context recovers", MultiAssistant.context() != nil, "")
+        }
         let liveAfter = await reg.unsettledEntryIds().intersection(jobs).count
         await ClaimScopes.shared.tick()
         let held = FileClaims.claims(ofSelf: ctx).contains { $0.path == file }
