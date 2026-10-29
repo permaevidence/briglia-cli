@@ -669,10 +669,25 @@ extension ConversationManager {
         }
     }
 
+    /// Selftests: how often a turn body waited for the restore gate.
+    nonisolated(unsafe) static var turnsHeldByRestoreGateForTesting = 0
+
     private func runActiveProcessing(
         for userMessage: Message,
         runId: UUID
     ) async {
+        // Several assistants (Codex stage-3 S3-R10-1/R11-1 audit): the one
+        // choke point every turn passes — so no model call, tool call, Bash
+        // job or subagent can start while a /deleteuserdata wipe, a Mind
+        // import or a settings change holds the restore gate, whichever
+        // producer started the turn. A turn started before the wipe's busy
+        // check is visible to it (active run) and refuses the wipe; one
+        // started after waits here until the gate drops. /stop still ends
+        // the wait. Never-multi installs are unchanged.
+        while isRestoringMind && Self.multiAssistantGateApplies && !Task.isCancelled {
+            Self.turnsHeldByRestoreGateForTesting += 1
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
         defer {
             // Every non-crash exit passes here — answer delivered, /stop,
             // error, context exhaustion — and each of those persisted its

@@ -156,6 +156,11 @@ extension ConversationManager {
     
     // MARK: - Polling Control
     
+    /// Selftests: runs right after startup's configure(); counts how often
+    /// startup recovery waited for the restore gate.
+    nonisolated(unsafe) static var startupAfterConfigureForTesting: (() async -> Void)?
+    nonisolated(unsafe) static var startupRecoveryWaitsForTesting = 0
+
     func startPolling() async {
         // Prevent duplicate polling tasks. The flag must be claimed BEFORE
         // the configure() await: launch fires two near-simultaneous callers
@@ -176,6 +181,7 @@ extension ConversationManager {
         applyRetiredIntegrationsMigration()
 
         await configure()
+        if let hook = Self.startupAfterConfigureForTesting { await hook() }
 
         guard error == nil else { return }
 
@@ -196,6 +202,14 @@ extension ConversationManager {
         // never reached history), then the active-turn marker (skipped when
         // the queue recovery just started a turn — the unanswered message is
         // part of that turn's context).
+        // Several assistants (Codex stage-3 S3-R11-1): recovery below can
+        // resume a turn; never while a /deleteuserdata wipe or Mind import
+        // holds the restore gate (it ends with the operation). Never-multi
+        // installs are unchanged.
+        while isRestoringMind && Self.multiAssistantGateApplies {
+            Self.startupRecoveryWaitsForTesting += 1
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
         restorePendingInboundBuffers()
         // Startup stop pass (§3.9.3) BEFORE queue recovery and turn resume:
         // messages held by an earlier /stop reach history without being

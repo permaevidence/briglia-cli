@@ -568,8 +568,9 @@ extension ConversationManager {
 
         // 0d-bis. The refusal again, at the destructive step: work started
         //     while the wipe was suspended above refuses too. The gate has
-        //     been up since 0a and admitted input drained at the first check
-        //     (S3-R10-1), so nothing can start work after this one.
+        //     been up since 0a, admitted input drained at the first check
+        //     (S3-R10-1) and no startup was in progress (S3-R11-1); a startup
+        //     that begins later holds its crash recovery until the gate drops.
         if let hook = Self.wipeBeforeSecondBackgroundCheckForTesting { await hook() }
         if let why = await multiAssistantBusyRefusal() {
             await restartEmailPollingAfterAbortedWipe()
@@ -959,7 +960,8 @@ extension ConversationManager {
     /// command runs inside the single poll tick (no command capture); a
     /// terminal/app command runs in a capture, outside any poll tick. Once
     /// this returns nil the gate stays up, so no input can be admitted
-    /// until the wipe/import ends.
+    /// until the wipe/import ends, and a startup that begins meanwhile
+    /// holds its crash recovery until then (S3-R11-1).
     func multiAssistantBusyRefusal(outcome: (en: String, it: String) = (" Nothing was deleted.", " Non è stato cancellato nulla.")) async -> String? {
         guard Self.multiAssistantGateApplies else { return nil }
         let ownPoll = Self.commandCapture == nil ? min(1, browserSettingsPollIngress) : 0
@@ -973,6 +975,13 @@ extension ConversationManager {
         }
         if isTurnActive || activeProcessingTask != nil {
             return Self.busyMessage("a turn that just started", outcome: outcome)
+        }
+        // Codex stage-3 S3-R11-1: a startup still in progress (suspended in
+        // configure(), before any poll tick exists) runs crash recovery next,
+        // which can resume an interrupted turn. One that begins later waits
+        // for the gate before recovering (startPolling).
+        if isStartingPolling {
+            return Self.busyMessage("Briglia still starting up", outcome: outcome)
         }
         return await Self.multiAssistantBackgroundWorkRefusal(outcome: outcome)
     }

@@ -294,6 +294,13 @@ BREAKS = [
     ('M94 a turn started by admitted input is not refused (S3-R10-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
      '        if isTurnActive || activeProcessingTask != nil {',
      '        if false {'),
+    # Codex stage-3 round 11 (S3-R11-1): startup in progress.
+    ('M95 the refusal ignores a startup still in progress (S3-R11-1)', 'stage3e2e', T + 'Services/ConversationManager+Persistence.swift',
+     '        if isStartingPolling {', '        if false {'),
+    ('M96 a startup begun under the restore gate recovers at once (S3-R11-1)', 'stage3e2e', T + 'Services/ConversationManager+Inbound.swift',
+     '        while isRestoringMind && Self.multiAssistantGateApplies {', '        while false {'),
+    ('M97 a turn body runs under the restore gate (S3-R11-1 audit)', 'stage3e2e', T + 'Services/ConversationManager+MidTurn.swift',
+     '        while isRestoringMind && Self.multiAssistantGateApplies && !Task.isCancelled {', '        while false {'),
 ]
 
 

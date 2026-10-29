@@ -150,6 +150,7 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         await admittedInputRefuses(m, importPath: true, check: check)
         await admittedTurnRefuses(m, check: check)
         await stuckIngressRefuses(m, check: check)
+        await startupRefuses(m, check: check)
         check("wipe refusal: every refused wipe deleted nothing (the stored name survives)",
               KeychainHelper.load(key: KeychainHelper.userNameKey) == "Sentinel", KeychainHelper.load(key: KeychainHelper.userNameKey) ?? "nil")
         // The ordinary case: nothing live, the wipe runs and removes this
@@ -460,6 +461,83 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         ConversationManager.admissionDrainSecondsForTesting = nil
         check("S3-R10-1 (a poll tick still in flight under a terminal wipe): the wipe refuses after the drain limit",
               Self.isWorkRefusal(result) && result[0].contains("a message still being received"), "\(result)")
+    }
+
+    /// Codex stage-3 S3-R11-1: a REAL startup suspended after configure()
+    /// (before any poll tick, zero poll/app ingress) refuses a terminal/app
+    /// wipe and a Mind import; a startup that begins while the gate is up
+    /// holds its crash recovery until the gate drops. Synthetic, unreachable
+    /// OpenAI-compatible endpoint: nothing is sent anywhere.
+    @MainActor private func startupRefuses(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
+        try? KeychainHelper.saveBatch([
+            KeychainHelper.llmProviderKey: "openai_compatible",
+            KeychainHelper.openAICompatibleBaseURLKey: "http://127.0.0.1:9/v1",
+            KeychainHelper.openAICompatibleModelKey: "synthetic-model",
+            KeychainHelper.openAICompatibleApiKeyKey: "synthetic-key",
+        ])
+        let hold = StepGate()
+        ConversationManager.startupAfterConfigureForTesting = { await hold.wait() }
+        let start = Task { @MainActor in await m.startPolling() }
+        let heldBy = Date().addingTimeInterval(20)
+        while !hold.hasEntered && Date() < heldBy { try? await Task.sleep(nanoseconds: 10_000_000) }
+        await m.startPolling()   // the second caller (terminal session) returns at once
+        check("S3-R11-1: a real startup is held after configure() with no poll/app ingress; a second start returns",
+              hold.hasEntered && m.isStartingPolling && m.browserSettingsPollIngress == 0 && m.browserSettingsAppIngress == 0,
+              "held \(hold.hasEntered) starting \(m.isStartingPolling) error \(m.error ?? "nil")")
+        let wipe = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+            await m.deleteAllMemory()
+        }
+        check("S3-R11-1 (startup in progress): a terminal/app wipe refuses, nothing deleted",
+              Self.isWorkRefusal(wipe) && wipe[0].contains("Briglia still starting up")
+              && KeychainHelper.load(key: KeychainHelper.userNameKey) == "Sentinel", "\(wipe)")
+        let gateUp = m.beginMindRestore()
+        let busy = await m.quiesceBackgroundWorkForMindRestore(timeoutSeconds: 1)
+        if gateUp { m.endMindRestore() }
+        check("S3-R11-1 (startup in progress): a Mind import refuses",
+              gateUp && (busy ?? "").contains("Briglia still starting up"), busy ?? "nil")
+        hold.release()
+        await start.value
+        ConversationManager.startupAfterConfigureForTesting = nil
+        m.stopPolling()
+        check("S3-R11-1: the held startup then completes normally", !m.isStartingPolling && m.error == nil, m.error ?? "")
+
+        // A startup that begins while the gate is up waits before recovery.
+        let idleBy = Date().addingTimeInterval(20)
+        while (m.archiveRecoveryTask != nil || !m.maintenanceActivities.isEmpty) && Date() < idleBy { try? await Task.sleep(nanoseconds: 20_000_000) }
+        let waits0 = ConversationManager.startupRecoveryWaitsForTesting
+        let gate2 = m.beginMindRestore()
+        let finished = DoneMark()
+        let late = Task { @MainActor in await m.startPolling(); finished.value = true }
+        let waitBy = Date().addingTimeInterval(20)
+        while ConversationManager.startupRecoveryWaitsForTesting == waits0 && !finished.value && Date() < waitBy {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let heldWhileGated = !finished.value && m.pollingTask == nil && ConversationManager.startupRecoveryWaitsForTesting > waits0
+        if gate2 { m.endMindRestore() }
+        await late.value
+        check("S3-R11-1: a startup begun under the restore gate holds crash recovery until the gate drops",
+              gate2 && heldWhileGated && finished.value && m.pollingTask != nil, "gate \(gate2) held \(heldWhileGated)")
+        m.stopPolling()
+        let idle2By = Date().addingTimeInterval(20)
+        while (m.archiveRecoveryTask != nil || !m.maintenanceActivities.isEmpty) && Date() < idle2By { try? await Task.sleep(nanoseconds: 20_000_000) }
+
+        // The turn choke point: a turn started (by any producer) while the
+        // gate is up runs no body until it drops. Cancelled before release,
+        // so no model request is made.
+        let held0 = ConversationManager.turnsHeldByRestoreGateForTesting
+        let gate3 = m.beginMindRestore()
+        m.startActiveProcessing(for: Message(role: .user, content: "s3r11 choke point"))
+        let turnHeldBy = Date().addingTimeInterval(5)
+        while ConversationManager.turnsHeldByRestoreGateForTesting == held0 && Date() < turnHeldBy { try? await Task.sleep(nanoseconds: 10_000_000) }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let heldTurn = ConversationManager.turnsHeldByRestoreGateForTesting > held0 + 1 && m.activeProcessingTask != nil
+        let task = m.activeProcessingTask
+        task?.cancel()
+        if gate3 { m.endMindRestore() }
+        await task?.value
+        check("S3-R11-1 audit: a turn started under the restore gate runs nothing until the gate drops (or /stop)",
+              gate3 && heldTurn && m.activeProcessingTask == nil, "gate \(gate3) held \(heldTurn)")
     }
 
     /// Codex stage-3 S3-R2-4: a terminal/app /upgrade whose coordinated
