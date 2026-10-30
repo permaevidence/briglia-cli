@@ -277,7 +277,7 @@ struct SetupWizard {
             Briglia's main brain. You can configure SEVERAL providers and hop
             between them anytime with the /provider command. Recommended:
             OpenRouter — pay as you go, one key for everything; it starts on
-            DeepSeek V4.1 Flash, hosted on Together.
+            DeepSeek V4.1 Flash 1017, hosted on Together.
             """)
             let profiles = ProviderProfiles.Profile.allCases
             for (index, profile) in profiles.enumerated() {

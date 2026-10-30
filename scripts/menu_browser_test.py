@@ -49,8 +49,8 @@ GOOD = {"serper": "srp-good-0123456789abcdef", "jina": "jina_good_0123456789abcd
         "opencode": "oc-good-0123456789abcdef", "openrouter": "sk-or-good-0123456789abcdef"}
 OC_MODELS = [{"id": "glm-5.3-flash", "label": "GLM 5.3 Flash", "recommended": True}, {"id": "kimi-k3", "label": "Kimi K3"},
              {"id": "qwen3.8-max", "label": "Qwen 3.8 Max"}]
-OR_PRESETS = [("default", "deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash", "Together"),
-              ("dsflash1017", "deepseek/deepseek-v4.1-flash-1017", "DeepSeek V4.1 Flash 1017", None),
+OR_PRESETS = [("dsflash1017", "deepseek/deepseek-v4.1-flash-1017", "DeepSeek V4.1 Flash 1017", "Together"),
+              ("default", "deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash", "Together"),
               ("haiku55", "anthropic/claude-haiku-5.5", "Claude Haiku 5.5", "Google Vertex"),
               ("luna", "openai/gpt-6-luna", "GPT-6 Luna", "OpenAI"),
               ("glm53flash", "z-ai/glm-5.3-flash", "GLM 5.3 Flash", "Together")]
@@ -142,8 +142,8 @@ class Fake:
                             "model_label": [m["label"] for m in MODELS if m["id"] == self.chatgpt["model"]][0], "effort": self.chatgpt["effort"],
                             "efforts": ["low", "medium", "high", "xhigh"]}
         ai = {"lane": self.lane(), "active": self.active(), "planned": self.planned, "ready": self.active() is not None, "openai_required": req, "media_via": self.media_via(),
-              "providers": provs, "opencode_models": OC_MODELS, "openrouter_default": "deepseek/deepseek-v4.1-flash",
-              "openrouter_default_label": "DeepSeek V4.1 Flash", "openrouter_default_host": "Together", "openrouter_pin": [], "recommended_lane": "openrouter",
+              "providers": provs, "opencode_models": OC_MODELS, "openrouter_default": "deepseek/deepseek-v4.1-flash-1017",
+              "openrouter_default_label": "DeepSeek V4.1 Flash 1017", "openrouter_default_host": "Together", "openrouter_pin": [], "recommended_lane": "openrouter",
               "servers": [dict(x, model_label=x["model"], active=(x["id"] == self.active_server),
                                efforts=(["low", "medium", "high"] if x["keyed"] and x["id"] == self.active_server else [])) for x in self.servers],
               "active_server": self.active_server, "max_servers": 20, "servers_damaged": False,
@@ -211,7 +211,7 @@ class Fake:
                 p = self.providers[k]
                 p.update({"configured": True, "key": body["key"][:5] + "…" + body["key"][-4:]})
                 if not p["model"]:
-                    p["model"] = "glm-5.3-flash" if k == "opencode" else "deepseek/deepseek-v4.1-flash"
+                    p["model"] = "glm-5.3-flash" if k == "opencode" else "deepseek/deepseek-v4.1-flash-1017"
                 p["model_label"] = {"glm-5.3-flash": "GLM 5.3 Flash"}.get(p["model"], p["model"])
                 if self.active() == k or (self.active() is None and self.may_run(k)):
                     self.use(k)
@@ -726,10 +726,11 @@ def main():
         page.wait_for_selector("#or-presets")
         check("picker: the five OpenRouter presets in order, each with its host behaviour; the default is selected",
               page.locator("#or-presets .choice[data-model]").count() == 5
-              and page.get_attribute("#or-presets .choice[data-model] >> nth=0", "data-model") == "deepseek/deepseek-v4.1-flash"
+              and page.get_attribute("#or-presets .choice[data-model] >> nth=0", "data-model") == "deepseek/deepseek-v4.1-flash-1017"
               and "sel" in page.get_attribute("#or-presets .choice[data-model] >> nth=0", "class")
               and "Together, pinned automatically" in page.inner_text("#or-presets .choice[data-model] >> nth=0")
-              and "nothing pinned automatically" in page.inner_text("#or-presets .choice[data-model] >> nth=1")
+              and "DeepSeek V4.1 Flash 1017" in page.inner_text("#or-presets .choice[data-model] >> nth=0")
+              and "Together, pinned automatically" in page.inner_text("#or-presets .choice[data-model] >> nth=1")
               and page.is_visible("#or-other") and not page.is_visible("#f-or-model"))
         check("picker: the per-model host toggle offers Briglia's host and Let OpenRouter choose",
               page.is_visible("#or-host-briglia >> text=Briglia’s host (Together)") and page.is_visible("#or-host-auto"))

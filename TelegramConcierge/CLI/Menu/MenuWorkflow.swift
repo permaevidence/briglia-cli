@@ -384,7 +384,7 @@ final class MenuWorkflow {
     var lane: MenuLane { plannedLane ?? activeLane ?? fallbackLane }
 
     /// The lane a new user is steered to (owner 2026-10-15): OpenRouter
-    /// (DeepSeek V4.1 Flash, pinned to Together) on a fresh install —
+    /// (DeepSeek V4.1 Flash 1017, pinned to Together) on a fresh install —
     /// nothing active, no provider set up by `briglia setup`, never signed
     /// in to ChatGPT. Every existing setup keeps the old ChatGPT fallback.
     var fallbackLane: MenuLane {
@@ -461,7 +461,7 @@ final class MenuWorkflow {
 
     static let openRouterDefaultModel = ProviderProfiles.openRouterSetupDefaultModel
     /// Plain name of the setup default model for the page text.
-    static let openRouterDefaultLabel = "DeepSeek V4.1 Flash"
+    static let openRouterDefaultLabel = OpenRouterPresets.preset(forModel: openRouterDefaultModel)?.label ?? openRouterDefaultModel
 
     static func modelLabel(_ lane: MenuLane, _ id: String) -> String {
         switch lane {

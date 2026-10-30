@@ -36,7 +36,7 @@ from quicksetup_headless_test import Mock, GOOD, CHAT_ID  # noqa: E402
 
 FAILS = 0
 OR_KEY = "sk-or-flowtest-0123456789abcdef"
-DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash"
+DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash-1017"
 LISTING = {"ok": True}
 
 
@@ -228,7 +228,7 @@ def scenario(label, listing_ok, restart, with_openai=False):
             check(label + ": save says Together couldn't be selected and OpenRouter chooses the host",
                   "Together couldn't be selected" in notices and "OpenRouter chooses the host" in notices, notices)
         store = json.load(open(secrets_path))
-        check(label + ": OpenRouter is active on DeepSeek V4.1 Flash, no OpenCode key stored" + ("" if with_openai else ", no OpenAI key"),
+        check(label + ": OpenRouter is active on DeepSeek V4.1 Flash 1017, no OpenCode key stored" + ("" if with_openai else ", no OpenAI key"),
               store.get("active_provider_profile") == "openrouter" and store.get("openrouter_model") == DEFAULT_MODEL
               and not store.get("opencode_api_key") and bool(store.get("openai_transcription_api_key")) == with_openai, json.dumps({k: store.get(k) for k in ("active_provider_profile", "openrouter_model")}))
         # v0.2.56: hosts are per OpenRouter model (openrouter_providers_by_model).

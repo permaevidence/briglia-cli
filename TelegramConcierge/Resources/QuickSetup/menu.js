@@ -754,7 +754,7 @@
     { id: 'local', name: T('Server (local or online)', 'Server (locale o online)'), text: T('A model on your own computer or network (LM Studio, Ollama, vLLM), or any other OpenAI-compatible provider with its API key. Give each one a name; add as many as you like. For advanced users.', 'Un modello sul tuo computer o nella tua rete (LM Studio, Ollama, vLLM), oppure un altro fornitore compatibile con OpenAI con la sua chiave API. Dai un nome a ciascuno e aggiungine quanti vuoi. Per utenti esperti.') },
   ]; }
   // The OpenRouter setup default, as the server names it.
-  function orDefaultLabel() { return (S && S.ai && S.ai.openrouter_default_label) || 'DeepSeek V4.1 Flash'; }
+  function orDefaultLabel() { return (S && S.ai && S.ai.openrouter_default_label) || 'DeepSeek V4.1 Flash 1017'; }
   function orDefaultHost() { return (S && S.ai && S.ai.openrouter_default_host) || 'Together'; }
   function laneName(id) { return (LANES().filter(function (l) { return l.id === id; })[0] || { name: id }).name; }
   function needList(ln) {

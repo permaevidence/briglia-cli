@@ -14,11 +14,20 @@ enum OpenRouterPresets {
         let autoHostName: String?
     }
 
+    /// The first preset is the setup default (`ProviderProfiles.
+    /// openRouterSetupDefaultModel`). Keys are Telegram callback payloads
+    /// already sent in old menus, so each key stays bound to its model id:
+    /// "default" is the undated V4.1 Flash (the setup default until 0.2.64),
+    /// even though the default is now the 1017 snapshot (owner 2026-10-30).
+    /// The 1017 snapshot auto-pins Together like the old default: on
+    /// 2026-10-30 OpenRouter's public endpoint list showed Together serving
+    /// it with tools, and a 2026-10-25 probe got 8/8 complete multi-tool
+    /// calls there (inference-net dropped tool-call fields).
     static let all: [Preset] = [
-        Preset(key: "default", id: ProviderProfiles.openRouterSetupDefaultModel, label: "DeepSeek V4.1 Flash",
-               autoHost: "together", autoHostName: "Together"),
         Preset(key: "dsflash1017", id: "deepseek/deepseek-v4.1-flash-1017", label: "DeepSeek V4.1 Flash 1017",
-               autoHost: nil, autoHostName: nil),
+               autoHost: "together", autoHostName: "Together"),
+        Preset(key: "default", id: "deepseek/deepseek-v4.1-flash", label: "DeepSeek V4.1 Flash",
+               autoHost: "together", autoHostName: "Together"),
         Preset(key: "haiku55", id: "anthropic/claude-haiku-5.5", label: "Claude Haiku 5.5",
                autoHost: "google-vertex", autoHostName: "Google Vertex"),
         Preset(key: "luna", id: "openai/gpt-6-luna", label: "GPT-6 Luna",

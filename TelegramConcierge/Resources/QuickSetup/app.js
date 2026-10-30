@@ -27,7 +27,7 @@
   // chosen main provider, otherwise among the additional (saved, not
   // active) providers. ChatGPT signs in instead of a key.
   var MAIN_FIELDS = {
-    openrouter: { id: 'openrouter', label: 'OpenRouter key', purpose: 'Runs the main agent. A new OpenRouter key is set up with DeepSeek V4.1 Flash, hosted on Together (pinned when OpenRouter confirms it).', url: 'https://openrouter.ai/keys', urlText: 'openrouter.ai' },
+    openrouter: { id: 'openrouter', label: 'OpenRouter key', purpose: 'Runs the main agent. A new OpenRouter key is set up with DeepSeek V4.1 Flash 1017, hosted on Together (pinned when OpenRouter confirms it).', url: 'https://openrouter.ai/keys', urlText: 'openrouter.ai' },
     opencode: { id: 'opencode', label: 'OpenCode Go key', purpose: 'Runs the main agent (GLM 5.3 Flash by default).', url: 'https://opencode.ai/zen', urlText: 'opencode.ai/zen' }
   };
   var PROVIDER_NAMES = { openrouter: 'OpenRouter', opencode: 'OpenCode Go', chatgpt: 'ChatGPT subscription', custom: 'Custom endpoint', local: 'Local server', openai: 'OpenAI API' };

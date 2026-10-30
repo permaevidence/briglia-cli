@@ -229,6 +229,15 @@ enum OpenRouterPinMap {
         model == "deepseek/deepseek-v4.1-flash" ? ["together"] : nil
     }
 
+    /// D10 (frozen historical rule): the preset models that had an
+    /// automatic host when the per-model map shipped (0.2.56–0.2.64). Only
+    /// these get the m4 upgrade marker, so a preset that gains a host later
+    /// (the 1017 snapshot in 0.2.65) never pins an existing install on
+    /// upgrade. Never follows the catalog.
+    static let d10UpgradeModels: Set<String> = [
+        "deepseek/deepseek-v4.1-flash", "anthropic/claude-haiku-5.5", "openai/gpt-6-luna", "z-ai/glm-5.3-flash",
+    ]
+
     static func migratedProvenance(slugs: [String], model: String) -> Provenance {
         slugs == legacyPresetHost(model) ? .preset : .migrated
     }
@@ -328,7 +337,7 @@ enum OpenRouterPinMap {
         if let model {
             // m4 (D10, option B): no entry for M ("not chosen"); a preset
             // with an auto host gets the upgrade marker.
-            if let preset = OpenRouterPresets.preset(forModel: model), preset.autoHost != nil {
+            if d10UpgradeModels.contains(model) || (broken(36) && OpenRouterPresets.preset(forModel: model)?.autoHost != nil) {
                 map.upgrade = UpgradeMarker(model: model, state: "pending")
             }
         }

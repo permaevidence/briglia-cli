@@ -23,8 +23,10 @@ import Foundation
 enum ProviderProfiles {
     /// The model a NEW OpenRouter setup suggests (wizard, setup-api probe,
     /// quick setup, briglia menu). Vision-capable on OpenRouter. Existing
-    /// profiles keep their stored model.
-    static let openRouterSetupDefaultModel = "deepseek/deepseek-v4.1-flash"
+    /// profiles keep their stored model. Since 0.2.65 (owner 2026-10-30)
+    /// the dated October 17 snapshot "…-1017" (was the undated
+    /// "deepseek/deepseek-v4.1-flash" in 0.2.54–0.2.64).
+    static let openRouterSetupDefaultModel = "deepseek/deepseek-v4.1-flash-1017"
 
 
     enum Profile: String, CaseIterable {

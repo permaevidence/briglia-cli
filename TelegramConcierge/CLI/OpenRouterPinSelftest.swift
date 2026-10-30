@@ -68,6 +68,7 @@ struct OpenRouterPinSelftest: AsyncParsableCommand {
             (33, "V5 active OpenRouter, activate:false, text_only true: both vision slots agree"),
             (34, "V3 a startup migration deferred by a busy lock is retried by the pass, which then pins"),
             (35, "V6 a failed auto-pin on the model in use shows as not applied"),
+            (36, "Z D10 frozen: an upgrading install on 1017 gets no upgrade marker (no host pinned on upgrade)"),
         ]
         var caught = 0
         for (n, label) in breaks {
@@ -166,7 +167,57 @@ final class ORPinSuite {
         removal()
         await upgradePass()
         await reviewRound2()
+        setupDefault0265()
         reset()
+    }
+
+    // MARK: Z. 0.2.65 setup default = the 1017 snapshot (owner 2026-10-30)
+
+    func setupDefault0265() {
+        let together = listing(ds1017, ["together", "inference-net/fp8"])
+        check("Z the setup default is the 1017 snapshot, first preset, auto-pinning Together; key 'default' stays the undated model",
+              ProviderProfiles.openRouterSetupDefaultModel == ds1017 && OpenRouterPresets.all.first?.id == ds1017
+              && OpenRouterPresets.all.first?.autoHost == "together" && OpenRouterPresets.preset(forKey: "default")?.id == dflt
+              && OpenRouterPresets.preset(forModel: dflt)?.autoHost == "together" && MenuWorkflow.openRouterDefaultLabel == "DeepSeek V4.1 Flash 1017")
+        // Fresh store: a first setup on the default model pins Together for 1017.
+        reset([:])
+        let fresh = Result { try Pin.saveOpenRouterProfile(apiKey: "sk-or", model: ProviderProfiles.openRouterSetupDefaultModel, effort: "high", textOnly: false,
+                                                           listing: together, presetHostPin: true, activate: true, listingBasis: basis(), now: now) }
+        check("Z a fresh setup saves the 1017 snapshot pinned to Together",
+              (try? fresh.get())?.outcome == .pinnedPreset(model: ds1017, slug: "together")
+              && snap()[KeychainHelper.openRouterModelKey] == ds1017 && entry(ds1017)?.hosts == ["together"] && entry(ds1017)?.by == .preset
+              && PM.effectivePin(snap(), model: ds1017) == ["together"], "\(fresh) \(snap())")
+        // 0.2.56–0.2.64 install on the undated default with its preset pin: startup migration and a key-only save change nothing.
+        reset(orStore(model: dflt))
+        setEntry(dflt, ["together"], by: .preset)
+        let before = snap()
+        PM.ensureMigrated()
+        let unchangedAtStart = snap() == before
+        let keySave = Result { try Pin.saveOpenRouterProfile(apiKey: "sk-or-new", model: dflt, effort: "high", textOnly: false,
+                                                             listing: nil, presetHostPin: true, activate: true, listingBasis: basis(), now: now) }
+        var expectStore = before
+        expectStore[KeychainHelper.openRouterApiKeyKey] = "sk-or-new"
+        check("Z an existing install on the undated V4.1 Flash keeps its model and Together pin (startup + key change)",
+              unchangedAtStart && (try? keySave.get()) != nil && snap()[KeychainHelper.openRouterModelKey] == dflt
+              && snap()[PM.storageKey] == before[PM.storageKey] && PM.effectivePin(snap(), model: dflt) == ["together"]
+              && PM.effectivePin(snap(), model: ds1017) == nil, "\(keySave) \(snap())")
+        // ≤0.2.55 install on the undated default with the legacy Together pin: D9 migration, model unchanged.
+        reset(orStore(model: dflt, extra: [PM.legacyKey: "together"]))
+        PM.ensureMigrated()
+        check("Z a pre-0.2.56 install on the undated V4.1 Flash migrates its legacy Together pin and keeps its model",
+              snap()[KeychainHelper.openRouterModelKey] == dflt && entry(dflt)?.hosts == ["together"] && entry(dflt)?.by == .preset
+              && entry(ds1017) == nil && map()?.upgrade == nil)
+        // 0.2.56–0.2.64 install already on 1017 (no host decided): nothing written, requests still unpinned.
+        reset(orStore(model: ds1017))
+        setEntry("x/placeholder", nil)
+        let before1017 = snap()
+        PM.ensureMigrated()
+        check("Z an existing install on 1017 without a host decision stays unpinned (no write, no request pin)",
+              snap() == before1017 && PM.effectivePin(snap(), model: ds1017) == nil)
+        // ≤0.2.55 install on 1017 with no pin: the frozen D10 rule gives no upgrade marker.
+        reset(orStore(model: ds1017)); PM.ensureMigrated()
+        check("Z D10 frozen: an upgrading install on 1017 gets no upgrade marker (no host pinned on upgrade)",
+              map()?.upgrade == nil && map()?.models.isEmpty == true && PM.effectivePin(snap(), model: ds1017) == nil, "\(String(describing: map()))")
     }
 
     // MARK: A. codec
@@ -276,7 +327,7 @@ final class ORPinSuite {
         let w5 = KeychainHelper._testWriteCount
         PM.ensureMigrated()
         let m5 = PM.state(snap()) == .absent && KeychainHelper._testWriteCount == w5 ? PM.Map.fresh(iid: "none") : nil
-        check("C m4: the current preset model gets no entry and an upgrade marker only with an auto host",
+        check("C m4: the current preset model gets no entry and an upgrade marker only with a frozen D10 host",
               m4?.models.isEmpty == true && m4?.upgrade == .init(model: dflt, state: "pending")
               && m4b?.upgrade == nil && m4b?.models.isEmpty == true && m4c?.upgrade == nil, "\(String(describing: m4)) \(String(describing: m4b))")
         check("C m5: a fresh store writes nothing (the map stays absent)", m5 != nil)
@@ -344,9 +395,12 @@ final class ORPinSuite {
               { if case .keptUnverified(["novita"], _) = decideOn(user, glm, .failed("x")).1 { return true }; return false }())
         let r6 = decideOn(.init(hosts: [], by: .user, at: "t"), dflt, together)
         check("E row 6: an explicit automatic entry blocks the preset", r6.1 == .automaticKept && r6.0.models[dflt]?.hosts == [])
-        check("E rows 7/8/10: no auto host, other model, or preset pin off → nothing",
-              decideOn(nil, ds1017, together).0.models.isEmpty && decideOn(nil, "v/other", together).0.models.isEmpty
-              && decideOn(nil, dflt, together, preset: false).0.models.isEmpty)
+        check("E rows 8/10: another model, or preset pin off → nothing",
+              decideOn(nil, "v/other", together).0.models.isEmpty
+              && decideOn(nil, dflt, together, preset: false).0.models.isEmpty && decideOn(nil, ds1017, together, preset: false).0.models.isEmpty)
+        let r1017 = decideOn(nil, ds1017, together)
+        check("E row 1 (0.2.65): the 1017 snapshot pins Together like the old default",
+              r1017.1 == .pinnedPreset(model: ds1017, slug: "together") && r1017.0.models[ds1017]?.by == .preset)
         let partial = decideOn(.init(hosts: ["together", "novita"], by: .user, at: "t"), glm, .served([ep("together")]))
         check("E a partially served multi-host entry is released whole", partial.0.models[glm]?.by == .released && partial.0.models[glm]?.was == ["together", "novita"])
         // Row 9 + reset through the public path.
@@ -638,7 +692,8 @@ final class ORPinSuite {
               [pinA, toB, pinB, backA, off, remembered].joined(separator: " | "))
         let listingMenu = await say("/model")
         check("MF terminal /model on OpenRouter lists the presets with their host behaviour",
-              listingMenu.contains("anthropic/claude-haiku-5.5") && listingMenu.contains("Google Vertex") && listingMenu.contains("nothing pinned automatically"), listingMenu)
+              listingMenu.contains("anthropic/claude-haiku-5.5") && listingMenu.contains("Google Vertex")
+              && listingMenu.contains("deepseek/deepseek-v4.1-flash-1017") && listingMenu.contains("Together"), listingMenu)
     }
 
     // MARK: D11. max effort on OpenRouter

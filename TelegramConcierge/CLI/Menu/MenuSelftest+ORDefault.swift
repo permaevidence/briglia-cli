@@ -36,6 +36,7 @@ extension MenuSelftestContext {
 
     func openRouterDefault() async {
         let haiku = "anthropic/claude-haiku-5.5", luna = "openai/gpt-6-luna", glm = "z-ai/glm-5.3-flash", ds1017 = "deepseek/deepseek-v4.1-flash-1017"
+        let plain = "deepseek/deepseek-v4.1-flash"
         // 1. Fresh install: OpenRouter recommended; the picker lists the presets in order with their host state.
         do {
             let w = world()
@@ -43,14 +44,15 @@ extension MenuSelftestContext {
             let rows = presetRows(wf)
             check("or-picker: a fresh install recommends OpenRouter and names the default model and host",
                   ai(wf)["lane"] as? String == "openrouter" && ai(wf)["recommended_lane"] as? String == "openrouter"
-                  && ai(wf)["openrouter_default"] as? String == "deepseek/deepseek-v4.1-flash"
-                  && ai(wf)["openrouter_default_label"] as? String == "DeepSeek V4.1 Flash"
+                  && ai(wf)["openrouter_default"] as? String == ds1017
+                  && ai(wf)["openrouter_default_label"] as? String == "DeepSeek V4.1 Flash 1017"
                   && ai(wf)["openrouter_default_host"] as? String == "Together"
                   && (ai(wf)["openrouter_pin"] as? [String]) == [])
             check("or-picker: five presets in the owner's order, each saying whether/which host is pinned automatically",
-                  rows.map { $0["id"] as? String ?? "" } == [MenuWorkflow.openRouterDefaultModel, ds1017, haiku, luna, glm]
-                  && rows.map { $0["host_state"] as? String ?? "" } == ["auto_will_pin", "none", "auto_will_pin", "auto_will_pin", "auto_will_pin"]
-                  && rows.map { ($0["hosts"] as? [String]) ?? [] } == [["Together"], [], ["Google Vertex"], ["OpenAI"], ["Together"]], "\(rows)")
+                  rows.map { $0["id"] as? String ?? "" } == [MenuWorkflow.openRouterDefaultModel, plain, haiku, luna, glm]
+                  && MenuWorkflow.openRouterDefaultModel == ds1017
+                  && rows.map { $0["host_state"] as? String ?? "" } == ["auto_will_pin", "auto_will_pin", "auto_will_pin", "auto_will_pin", "auto_will_pin"]
+                  && rows.map { ($0["hosts"] as? [String]) ?? [] } == [["Together"], ["Together"], ["Google Vertex"], ["OpenAI"], ["Together"]], "\(rows)")
 
             // 2. First setup → the default preset's host, with the host list and the page's basis.
             let r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]!])
@@ -100,9 +102,10 @@ extension MenuSelftestContext {
             r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": luna])
             check("or-picker: GPT-6 Luna pins openai (the base slug excludes openai/flex and openai/fast)",
                   ok(r2) && orEntry(w, luna)?.hosts == ["openai"] && msg(r2).contains("OpenAI"), msg(r2))
-            w.orHosts[ds1017] = ["deepinfra/fp8", "deepseek"]
-            r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": ds1017])
-            check("or-picker: DeepSeek V4.1 Flash 1017 has no automatic host", ok(r2) && orEntry(w, ds1017) == nil && (ai(wf)["openrouter_pin"] as? [String]) == [])
+            w.orHosts[plain] = ["deepinfra/fp8", "together"]
+            r2 = await act(wf, ["action": "provider_model", "profile": "openrouter", "model": plain])
+            check("or-picker: the undated DeepSeek V4.1 Flash keeps its automatic Together host",
+                  ok(r2) && orEntry(w, plain)?.hosts == ["together"] && orEntry(w, plain)?.by == .preset && (ai(wf)["openrouter_pin"] as? [String]) == ["together"], msg(r2))
         }
 
         // 8. A preset whose host can't be confirmed: automatic, SAID (EN + IT); unreadable list too.
@@ -198,6 +201,23 @@ extension MenuSelftestContext {
             let sec = lastOpenRouterSection(w)
             check("or-picker: switching to the saved OpenRouter lane hands setup-api an explicit skip, the model's host kept",
                   ok(r) && (sec["host_listing"] as? [String: Any])?["skip"] as? Bool == true && w.snap.openRouterPin == ["together"] && w.orHostAsks.isEmpty, "\(sec)")
+        }
+        // 0.2.65: an existing install on the undated V4.1 Flash (0.2.54–0.2.64 default) is not moved to 1017.
+        do {
+            let w = world()
+            orLane(w, model: plain)
+            var store = w.snap.orStore
+            _ = try? OpenRouterProviderPin.applyHostChoice(&store, model: plain, choice: .pin(["together"]), listing: nil,
+                                                           expected: OpenRouterPinMap.RoutingBasis.of(store), now: Date())
+            w.snap.orStore = store
+            let before = w.snap.orStore
+            let wf = await make(w)
+            let opened = w.applied.isEmpty && w.orHostAsks.isEmpty && w.snap.orStore == before
+            let r = await act(wf, ["action": "provider_key", "profile": "openrouter", "key": w.good["openrouter"]! + "-alt"])
+            let sec = lastOpenRouterSection(w)
+            check("or-default 0.2.65: an existing install on the undated V4.1 Flash keeps model and Together pin (menu opened, key replaced)",
+                  opened && ok(r) && sec["model"] as? String == plain && w.snap.providers["openrouter"]?.model == plain
+                  && orEntry(w, plain)?.hosts == ["together"] && orEntry(w, ds1017) == nil && (ai(wf)["openrouter_pin"] as? [String]) == ["together"], "\(sec) \(w.snap.orStore)")
         }
         // Existing installs on other providers are untouched.
         do {
