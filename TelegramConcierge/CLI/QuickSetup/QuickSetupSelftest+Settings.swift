@@ -67,8 +67,12 @@ extension SelftestContext {
         // OpenRouter model change: the destination's host is decided per
         // model; the host list is read through the seam before the gate. A
         // legacy pin equal to the old default host migrates as the default
-        // model's preset entry (D9) and doesn't follow the switch.
-        try KeychainHelper.saveBatch([KeychainHelper.openRouterApiKeyKey: "sk-or-fixture", KeychainHelper.openRouterModelKey: ProviderProfiles.openRouterSetupDefaultModel,
+        // model's preset entry (D9) and doesn't follow the switch. A legacy
+        // single pin only exists on installs from 0.2.55 or earlier, whose
+        // default was the undated model (D9 is frozen to it); since 0.2.65
+        // the setup default is the 1017 snapshot, so name the old model.
+        let legacyDefault = "deepseek/deepseek-v4.1-flash"
+        try KeychainHelper.saveBatch([KeychainHelper.openRouterApiKeyKey: "sk-or-fixture", KeychainHelper.openRouterModelKey: legacyDefault,
                                       OpenRouterProviderPin.storageKey: "together"])
         var listedBeforeGate: [String] = []
         settings.env.openRouterListing = { store, model, _ in
@@ -87,14 +91,14 @@ extension SelftestContext {
         let orMap = OpenRouterPinMap.state(KeychainHelper.loadSnapshot()).map
         check("settings: an OpenRouter switch to a preset its host doesn't serve pins nothing, says so, and the old pin stays with the old model",
               orSaved.0 == 200 && OpenRouterProviderPin.pinnedSlugs().isEmpty && (orSaved.1["message"] as? String ?? "").contains("couldn't be selected")
-              && orMap?.models[ProviderProfiles.openRouterSetupDefaultModel]?.hosts == ["together"]
-              && orMap?.models[ProviderProfiles.openRouterSetupDefaultModel]?.by == .preset
+              && orMap?.models[legacyDefault]?.hosts == ["together"]
+              && orMap?.models[legacyDefault]?.by == .preset
               && listedBeforeGate == ["\(haiku)|gates=0"], "\(orSaved) \(listedBeforeGate) \(String(describing: orMap))")
         check("settings: the OpenRouter save hands setup-api its host list (no fetch inside the gate)",
               ((appliedRequests.last?["provider"] as? [String: Any])?["host_listing"] as? [String: Any])?["model"] as? String == haiku
               && (appliedRequests.last?["provider"] as? [String: Any])?["preset_host_pin"] as? Bool == true)
         check("settings: the handed-over host list carries the basis read before it (Codex finding 1)",
-              ((appliedRequests.last?["provider"] as? [String: Any])?["listing_basis"] as? [String: Any])?["model"] as? String == ProviderProfiles.openRouterSetupDefaultModel)
+              ((appliedRequests.last?["provider"] as? [String: Any])?["listing_basis"] as? [String: Any])?["model"] as? String == legacyDefault)
         // A newer explicit choice written while the list was being read is
         // never released by that older list.
         try KeychainHelper.saveBatch([KeychainHelper.openRouterModelKey: ProviderProfiles.openRouterSetupDefaultModel])
