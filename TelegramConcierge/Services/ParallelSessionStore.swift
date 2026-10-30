@@ -117,6 +117,10 @@ enum ParallelSessionStore {
     /// Test seam: a mint attempt (deliberate-break M2 checks the damaged
     /// path never reaches it).
     nonisolated(unsafe) static var mintCountForTesting = 0
+    /// Test seam: replaces the exclusive temp-file write of a mint (fault
+    /// injection that works as root too, where a read-only directory would
+    /// not stop the write). nil = the real `PrivateStorage.writeExclusive`.
+    nonisolated(unsafe) static var writeTempForTesting: ((Data, URL) throws -> Void)?
 
     private static func mintLocked() throws -> String {
         mintCountForTesting += 1
@@ -126,7 +130,8 @@ enum ParallelSessionStore {
         let dir = fileURL.deletingLastPathComponent()
         try PrivateStorage.ensureDirectory(dir)
         let tmp = dir.appendingPathComponent(".\(fileName).mint-\(UUID().uuidString)")
-        try PrivateStorage.writeExclusive(Data(body.utf8), to: tmp)
+        if let hook = writeTempForTesting { try hook(Data(body.utf8), tmp) }
+        else { try PrivateStorage.writeExclusive(Data(body.utf8), to: tmp) }
         defer { unlink(tmp.path) }
         // link(2) never replaces: if another process minted first, use ITS id.
         if link(tmp.path, fileURL.path) != 0 {

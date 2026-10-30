@@ -81,6 +81,13 @@ BREAKS = [
     # Codex round 2.
     ("K23 a reply during initialize omits the session the stream assigned", "P1.17", S + "ParallelSearchClient.swift",
      "            let replySession = session ?? streamSession", "            let replySession = session; _ = streamSession"),
+    # 0.2.66 CI: S.16 fails the temp write through a seam (root ignores a read-only directory).
+    ("K24 a failed temp write falls back to writing the session file directly", "S.16", S + "ParallelSessionStore.swift",
+     "        if let hook = writeTempForTesting { try hook(Data(body.utf8), tmp) }\n",
+     "        if let hook = writeTempForTesting { do { try hook(Data(body.utf8), tmp) } catch { try Data(body.utf8).write(to: fileURL); return id } }\n"),
+    ("K25 the mint ignores the temp-write seam (S.16 would test nothing)", "S.16", S + "ParallelSessionStore.swift",
+     "        if let hook = writeTempForTesting { try hook(Data(body.utf8), tmp) }\n",
+     "        if let hook = writeTempForTesting, Bool(\"false\") == true { try hook(Data(body.utf8), tmp) }\n"),
 ]
 
 

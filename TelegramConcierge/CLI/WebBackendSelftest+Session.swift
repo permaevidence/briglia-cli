@@ -223,18 +223,26 @@ extension WebBackendSelftest {
         ParallelSessionStore.fsyncDirectoryForTesting = nil
         c.check("S.15 a discard whose directory barrier fails reports the failure (wipe/import never claim a non-durable removal)",
                 discardFailed && ParallelSessionStore.state() == .absent)
-        // Pre-link failure: nothing published, no ID.
-        let locked = root.appendingPathComponent("locked-dir")
-        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
-        chmod(locked.path, 0o500)
-        ParallelSessionStore.fileURLOverrideForTesting = locked.appendingPathComponent("search-session.json")
+        // Pre-link failure: nothing published, no ID. The temp-file write is
+        // failed through a seam (a read-only directory does not stop root,
+        // which is how Linux CI runs). The hook is called with the real temp
+        // path, and the directory must hold no leftovers afterwards.
+        let preLinkDir = root.appendingPathComponent("prelink-dir")
+        try FileManager.default.createDirectory(at: preLinkDir, withIntermediateDirectories: true)
+        ParallelSessionStore.fileURLOverrideForTesting = preLinkDir.appendingPathComponent("search-session.json")
+        var hookCalls = 0
+        ParallelSessionStore.writeTempForTesting = { _, _ in
+            hookCalls += 1
+            throw PrivateStorage.StorageError(description: "injected: temp file can't be created (EACCES)")
+        }
         var preLinkFailed = false
         do { _ = try ParallelSessionStore.idForSearch() } catch { preLinkFailed = true }
-        let lockedState = ParallelSessionStore.state()
-        chmod(locked.path, 0o700)
+        ParallelSessionStore.writeTempForTesting = nil
+        let preLinkState = ParallelSessionStore.state()
+        let preLinkLeftovers = (try? FileManager.default.contentsOfDirectory(atPath: preLinkDir.path)) ?? ["<unreadable>"]
         ParallelSessionStore.fileURLOverrideForTesting = url
         c.check("S.16 a failure before publication (temp file can't be created) returns no ID and publishes nothing",
-                preLinkFailed && lockedState == .absent)
+                hookCalls == 1 && preLinkFailed && preLinkState == .absent && preLinkLeftovers.isEmpty)
 
         // Cross-process mint race: six processes, one file, one ID.
         let raceFile = root.appendingPathComponent("race-\(UUID().uuidString.prefix(6)).json")
