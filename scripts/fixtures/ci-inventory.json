@@ -129,6 +129,19 @@
         "name": "Security Phase 1 (private AgentMail / Node / Python runtimes, pin-freshness release gate)",
         "run": "python3 scripts/security_phase1_test.py .build/debug/briglia"
       }
+    },
+    {
+      "op": "replace",
+      "platform": "macos",
+      "reason": "0.2.66 private CI run 41133169591: GitHub rolled macos-15-arm64 to image 20261028.0489.1, for which no frozen lifecycle fixture existed, so the step failed closed. Add the per-image fixture recorded from the unchanged pinned SOURCE 4dd8613 by the macOS-only recording run 41141625207 (provenance in scripts/fixtures/chat-lifecycle/r2-provenance.json; diff confined to the Apple ICC profile, decoded pixels identical). Only the image case list changes; the gate comparison is unchanged. Coordinator-approved 2026-10-30; Linux unchanged.",
+      "step": {
+        "name": "Chat Completions lifecycle r3 and shipped-client differential gate",
+        "run": "echo \"runner image: $ImageOS $ImageVersion\"\ncase \"$ImageVersion\" in\n  20260829.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2.json ;;\n  20260907.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2-image20260907.json ;;\n  *) echo \"no frozen lifecycle fixture recorded for runner image '$ImageVersion'\"; exit 1 ;;\nesac\npython3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline \"$fixture\"\n"
+      },
+      "with": {
+        "name": "Chat Completions lifecycle r3 and shipped-client differential gate",
+        "run": "echo \"runner image: $ImageOS $ImageVersion\"\ncase \"$ImageVersion\" in\n  20260829.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2.json ;;\n  20260907.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2-image20260907.json ;;\n  20261028.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2-image20261028.json ;;\n  *) echo \"no frozen lifecycle fixture recorded for runner image '$ImageVersion'\"; exit 1 ;;\nesac\npython3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline \"$fixture\"\n"
+      }
     }
   ],
   "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove|replace|job-setup, platform, step, reason}).",

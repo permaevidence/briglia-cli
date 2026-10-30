@@ -38,7 +38,7 @@ class Tests(unittest.TestCase):
             with self.assertRaises(RuntimeError): compare(migrated, bad)
     def test_lifecycle_exactly_the_carriers_lose_one_field(self):
         root = Path(__file__).parent / 'fixtures/chat-lifecycle'
-        for name in ('ci-darwin-arm64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-linux-x86_64-r2.json', 'local-darwin-arm64-r2.json'):
+        for name in ('ci-darwin-arm64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-darwin-arm64-r2-image20261028.json', 'ci-linux-x86_64-r2.json', 'local-darwin-arm64-r2.json'):
             fixtures = json.loads((root / name).read_text())['fixtures']
             migrated = migrate_lifecycle(fixtures)
             self.assertEqual(len(fixtures['captures']), 48)

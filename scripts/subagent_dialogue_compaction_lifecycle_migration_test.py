@@ -7,7 +7,7 @@ from chat_lifecycle_baseline import compare
 from subagent_dialogue_compaction_lifecycle_migration import (
     RULE, migrate_lifecycle, migrate_body, INTRO_OLD, INTRO_NEW, SECTION_ZERO, DIALOGUE_HEADER, MARKER, ROLES, WORK)
 
-FILES = ('ci-darwin-arm64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-linux-x86_64-r2.json', 'local-darwin-arm64-r2.json')
+FILES = ('ci-darwin-arm64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-darwin-arm64-r2-image20261028.json', 'ci-linux-x86_64-r2.json', 'local-darwin-arm64-r2.json')
 
 
 class SubagentDialogueMigrationTests(unittest.TestCase):

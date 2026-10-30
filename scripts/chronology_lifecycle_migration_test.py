@@ -8,7 +8,7 @@ from chronology_lifecycle_migration import (
     RULE, COUNTS, REPLY_TIME, TOOL_NOTE, SUMMARY_HEADER, SUMMARY_LINE, SUMMARY_SOURCE_PREFIX, STAMPS,
     COMPLETED_AT_CONVERSATION, COMPLETED_AT_SESSION, ISSUED_NOTE, RUN_CLOCK, reverse_body, reverse_observations, swift_bytes)
 
-FILES = ('ci-darwin-arm64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-linux-x86_64-r2.json', 'local-darwin-arm64-r2.json')
+FILES = ('ci-darwin-arm64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-darwin-arm64-r2-image20261028.json', 'ci-linux-x86_64-r2.json', 'local-darwin-arm64-r2.json')
 
 
 def body(messages, **extra):

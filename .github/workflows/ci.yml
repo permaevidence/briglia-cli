@@ -263,6 +263,7 @@ jobs:
           case "$ImageVersion" in
             20260829.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2.json ;;
             20260907.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2-image20260907.json ;;
+            20261028.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2-image20261028.json ;;
             *) echo "no frozen lifecycle fixture recorded for runner image '$ImageVersion'"; exit 1 ;;
           esac
           python3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline "$fixture"

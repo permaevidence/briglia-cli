@@ -9,7 +9,7 @@ from output_cap_removal_migration import migrate_lifecycle, migrate_body, verify
 class Tests(unittest.TestCase):
     def test_lifecycle_only_the_probe_loses_its_cap(self):
         root = Path(__file__).parent / 'fixtures/chat-lifecycle'
-        for name in ('ci-darwin-arm64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-linux-x86_64-r2.json', 'local-darwin-arm64-r2.json'):
+        for name in ('ci-darwin-arm64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-darwin-arm64-r2-image20261028.json', 'ci-linux-x86_64-r2.json', 'local-darwin-arm64-r2.json'):
             fixtures = json.loads((root / name).read_text())['fixtures']
             migrated = migrate_lifecycle(fixtures)
             self.assertEqual(len(fixtures['captures']), 48)

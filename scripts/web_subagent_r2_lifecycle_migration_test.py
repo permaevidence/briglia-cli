@@ -10,7 +10,7 @@ from subagent_dialogue_compaction_lifecycle_migration import migrate_lifecycle a
 from web_subagent_r2_lifecycle_migration import (reverse_candidate, reverse_capture_body, verify_migration, RULE, CAPTURES,
                                                  WITH_LINE, WITHOUT_LINE, LINE, MARKDOWN)
 
-FIXTURES = ('local-darwin-arm64-r2.json', 'ci-darwin-arm64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-linux-x86_64-r2.json')
+FIXTURES = ('local-darwin-arm64-r2.json', 'ci-darwin-arm64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-darwin-arm64-r2-image20261028.json', 'ci-linux-x86_64-r2.json')
 R5_RULE = json.loads((Path(__file__).parent / 'fixtures/chat-lifecycle/newest-turn-protection-r5.json').read_text())
 R5_ONLY = ('automatic-protected-0', 'exhausted-protected-0')
 R4_DROPPED = ('loop-exhausted-1',)   # pinned-SOURCE only: the candidate answers loop-exhausted with one request since r4

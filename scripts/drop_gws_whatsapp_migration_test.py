@@ -118,7 +118,7 @@ class DropGwsWhatsAppMigrationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): compare(expected, mutant)
 
     def test_lifecycle_reverse_over_the_frozen_captures(self):
-        for name in ['ci-darwin-arm64-r2.json', 'ci-linux-x86_64-r2.json', 'ci-darwin-arm64-r2-image20260907.json']:
+        for name in ['ci-darwin-arm64-r2.json', 'ci-linux-x86_64-r2.json', 'ci-darwin-arm64-r2-image20260907.json', 'ci-darwin-arm64-r2-image20261028.json']:
             data = json.loads((Path(__file__).parent / 'fixtures/chat-lifecycle' / name).read_text())['fixtures']
             reference = {c['fixture']: base64.b64decode(c['body']) for c in data['captures']}
             # The frozen evidence: the bullet in 22 reference captures (21 +
