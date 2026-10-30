@@ -72,9 +72,11 @@ extension WebBackendSelftest {
         let ok = try await keyed.executeWebQuery(queries: ["keyed query"])
         let serperRequest = reader.requests.first
         let serperBody = serperRequest.map { String(decoding: $0.body, as: UTF8.self) } ?? ""
+        let serperFields = (try? JSONSerialization.jsonObject(with: serperRequest?.body ?? Data()) as? [String: Any]) ?? [:]
         c.check("R.4 with a Serper key: exactly today's Serper request ({q,num:10,autocorrect:true}, X-API-KEY), no Parallel request",
                 ok.context.results.first?.title == "Serper hit" && reader.requests.count == 1
-                && (try? JSONSerialization.jsonObject(with: serperRequest?.body ?? Data()) as? NSDictionary) == ["q": "keyed query", "num": 10, "autocorrect": true]
+                && serperFields.count == 3 && serperFields["q"] as? String == "keyed query" && serperFields["num"] as? Int == 10
+                && serperFields["autocorrect"] as? Bool == true
                 && serperRequest?.headers["x-api-key"] == "srp-synthetic-key"
                 && fake.requests.isEmpty, serperBody)
         serperState.set(401)
