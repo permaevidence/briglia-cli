@@ -47,6 +47,8 @@ enum ChatCommandRegistry {
                     usage: "[on|off]", inMenu: false, category: "Models"),
         ChatCommand(name: "websubagent", description: "Turn the resumable Web research subagent on or off (trial)",
                     usage: "[on|off]", inMenu: false, category: "Models"),
+        ChatCommand(name: "freesearch", description: "Free web search without a Serper.dev key (Parallel): on (default), off, or reset (back to the default; repairs a damaged search session file). A search switch only; a Serper key always takes over",
+                    usage: "[on|off|reset]", inMenu: false, category: "Models"),
         ChatCommand(name: "archiveinline", description: "Wait for memory archiving before replying (on), or archive in the background (off, default)",
                     usage: "[on|off]", inMenu: false, category: "System"),
                     // BGPRUNE{ A-REG

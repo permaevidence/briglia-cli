@@ -44,7 +44,11 @@ actor ToolExecutor {
         for root in markers.checkpointRoots { gitCheckpoints.clearCheckpoint(root: root) }
     }
 
-    let webOrchestrator = WebOrchestrator()
+    /// The web credentials (KEYLESS_WEB plan A.9): ONE reference shared by
+    /// this executor, its orchestrator and every child executor, so a child
+    /// running long work sees a reloaded key on its next service call.
+    let webConfig: WebServiceConfigBox
+    let webOrchestrator: WebOrchestrator
     /// The manager injects ITS archive service (setArchiveService), so
     /// explicit archive reads see the live index, chunks published since
     /// startup, and children retained for a live prompt view (background
@@ -69,9 +73,6 @@ actor ToolExecutor {
     private var subagentDocumentsDirectory: URL?
 
     // Stored so child executors can be configured identically.
-    private var configuredOpenRouterKey: String = ""
-    private var configuredSerperKey: String = ""
-    private var configuredJinaKey: String = ""
 
     private struct RunningProcessEntry {
         let owner: ObjectIdentifier
@@ -139,7 +140,10 @@ actor ToolExecutor {
     /// main agent can find and resume it from `list_sessions` (§4.6).
     private var nestedParentSessionId: String?
 
-    init(outputMode: OutputMode = .mainAgent, depth: Int? = nil) {
+    init(outputMode: OutputMode = .mainAgent, depth: Int? = nil, webConfig: WebServiceConfigBox? = nil) {
+        let box = webConfig ?? WebServiceConfigBox()
+        self.webConfig = box
+        self.webOrchestrator = WebOrchestrator(webConfig: box)
         self.outputMode = outputMode
         self.depth = depth ?? (outputMode == .mainAgent ? 0 : 1)
         self.bashOwner = outputMode == .mainAgent
@@ -284,10 +288,15 @@ actor ToolExecutor {
     // MARK: - Configuration
 
     func configure(openRouterKey: String, serperKey: String, jinaKey: String) async {
-        self.configuredOpenRouterKey = openRouterKey
-        self.configuredSerperKey = serperKey
-        self.configuredJinaKey = jinaKey
-        await webOrchestrator.configure(openRouterKey: openRouterKey, serperKey: serperKey, jinaKey: jinaKey)
+        await install(webConfig: .make(openRouterKey: openRouterKey, serperKey: serperKey, jinaKey: jinaKey))
+    }
+
+    /// Installs a value read earlier (its version is from the read), so a
+    /// slow stale reload never replaces a newer one. Deletion installs
+    /// empty strings like any other value.
+    func install(webConfig value: WebServiceConfig) async {
+        guard webConfig.install(value) else { return }
+        let openRouterKey = value.openRouterKey
         Task { await archiveService.configure(apiKey: openRouterKey) }
     }
 
@@ -302,13 +311,9 @@ actor ToolExecutor {
     /// run on a separate actor queue, eliminating serialization contention
     /// with the parent agent's tool execution.
     func makeChildExecutor() async -> ToolExecutor {
-        let child = ToolExecutor(outputMode: .subagent, depth: depth + 1)
+        // The SAME configuration reference (never copied strings).
+        let child = ToolExecutor(outputMode: .subagent, depth: depth + 1, webConfig: webConfig)
         await child.setArchiveService(archiveService)
-        await child.configure(
-            openRouterKey: configuredOpenRouterKey,
-            serperKey: configuredSerperKey,
-            jinaKey: configuredJinaKey
-        )
         // A nested run reports progress to the runner that owns THIS
         // executor (installed by that runner before its loop; nil at depth 0).
         await child.setNestedProgressHook(nestedProgressHook)

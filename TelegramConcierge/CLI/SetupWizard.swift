@@ -69,8 +69,8 @@ struct SetupWizard {
         var list: [(title: String, run: (SetupWizard) async -> Void)] = [
             ("Main agent model", { await $0.stepMainAgent() }),
             ("OpenAI key (research, voice, images, OCR)", { await $0.stepOpenAI() }),
-            ("Serper key (web search)", { await $0.stepSerper() }),
-            ("Jina key (page reading)", { await $0.stepJina() }),
+            ("Serper key (web search, optional)", { await $0.stepSerper() }),
+            ("Jina key (page reading, optional)", { await $0.stepJina() }),
             ("Your name", { await $0.stepName() }),
             (SetupWizard.permissionsStepTitle, { await $0.stepPermissions() }),
             ("Briglia's toolchain (optional)", { await $0.stepToolchain() }),
@@ -615,24 +615,35 @@ struct SetupWizard {
 
     // MARK: Steps 3–4 — Serper & Jina
 
+    // Both optional (KEYLESS_WEB plan A.8): Enter skips; Briglia then uses
+    // the free keyless services.
     private func stepSerper() async {
-        print("Serper gives Briglia Google search. Free tier: 2,500 queries — https://serper.dev")
-        let key = await WizardIO.askSecretValidated(
-            "Serper API key",
+        print("Briglia can search the web for free with Parallel — no account needed. Searches go to Parallel and may be used to train their models.")
+        print("For more private, better search, add a Serper.dev key (free tier: 2,500 queries — https://serper.dev). Press Enter to skip.")
+        guard let key = await WizardIO.askSecretValidated(
+            "Serper API key (optional)",
             current: KeychainHelper.load(key: KeychainHelper.serperApiKeyKey),
+            optional: true,
             probe: { await Probes.serper(apiKey: $0) }
-        )
+        ) else {
+            print("  ✔ Web search: free (Parallel, no key)")
+            return
+        }
         save(KeychainHelper.serperApiKeyKey, key)
         print("  ✔ Web search enabled")
     }
 
     private func stepJina() async {
-        print("Jina Reader lets Briglia read web pages. Free tier available — https://jina.ai/reader")
-        let key = await WizardIO.askSecretValidated(
-            "Jina API key",
+        print("Briglia reads web pages for free with Jina. For more reliable, better page reading, add a Jina.ai key (free tier available — https://jina.ai/reader). Press Enter to skip.")
+        guard let key = await WizardIO.askSecretValidated(
+            "Jina API key (optional)",
             current: KeychainHelper.load(key: KeychainHelper.jinaApiKeyKey),
+            optional: true,
             probe: { await Probes.jina(apiKey: $0) }
-        )
+        ) else {
+            print("  ✔ Page reading: Jina without a key")
+            return
+        }
         save(KeychainHelper.jinaApiKeyKey, key)
         print("  ✔ Page reading enabled")
     }

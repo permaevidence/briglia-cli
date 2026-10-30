@@ -165,6 +165,7 @@ final class MenuFakeWorld: @unchecked Sendable {
             if body["remove"] as? Bool == true { snap[keyPath: path] = nil }
             else if let k = body["api_key"] as? String { snap[keyPath: path] = WizardIO.masked(k) }
         }
+        if let web = req["web"] as? [String: Any], let on = web["keyless_search"] as? Bool { snap.freeSearchOn = on }
         if let tg = req["telegram"] as? [String: Any] {
             snap.telegramConfigured = true
             snap.telegramChatId = tg["chat_id"] as? String ?? ""
@@ -518,7 +519,8 @@ final class MenuSelftestContext {
         let w = world()
         let wf = await make(w)
         var st = wf.status()
-        check("a fresh install is not complete and every required step is open", st["complete"] as? Bool == false && wf.missingRequired.count == 7)
+        check("a fresh install is not complete and every required step is open", st["complete"] as? Bool == false && wf.missingRequired.count == 5
+              && !wf.isRequired(.serper) && !wf.isRequired(.jina) && wf.isDone(.serper) && wf.isDone(.jina))
         check("the page learns the platform and that a desktop browser is likely", st["platform"] as? String == "macos" && st["browser_likely"] as? Bool == true)
 
         var r = await act(wf, ["action": "name", "name": "  "])
@@ -671,8 +673,24 @@ final class MenuSelftestContext {
         check("the optional OpenAI key is saved", ok(r) && done(wf, "openai") && msg(r).contains("Voice messages"))
         r = await act(wf, ["action": "key_remove", "kind": "openai"])
         check("the OpenAI key can be removed", ok(r) && !done(wf, "openai") && (w.applied.last?["openai"] as? [String: Any])?["remove"] as? Bool == true)
+        // Serper and Jina are optional (KEYLESS_WEB plan A.8): free search
+        // and keyless page reading when no key is saved.
+        check("without keys: web search and page reading are optional and done (free), summaries name the free services",
+              !wf.isRequired(.serper) && !wf.isRequired(.jina) && done(wf, "serper") && done(wf, "jina")
+              && wf.summary(.serper) == "Free (Parallel)" && wf.summary(.jina) == "Free (no key)")
+        r = await act(wf, ["action": "freesearch", "on": false])
+        check("the free-search switch goes through setup-api web.keyless_search; off without a Serper key = web search not done, summary Off",
+              ok(r) && (w.applied.last?["web"] as? [String: Any])?["keyless_search"] as? Bool == false && !done(wf, "serper") && wf.summary(.serper) == "Off"
+              && !wf.isRequired(.serper))
+        r = await act(wf, ["action": "freesearch", "on": true])
+        check("…and back on", ok(r) && done(wf, "serper") && msg(r).contains("Parallel"))
+        r = await act(wf, ["action": "key", "kind": "serper", "key": w.good["serper"]!])
+        check("a Serper key is still accepted and shown", ok(r) && wf.summary(.serper).hasPrefix("Key "))
         r = await act(wf, ["action": "key_remove", "kind": "serper"])
-        check("a required key can't be removed", !ok(r))
+        check("an optional Serper key can be removed: back to free search", ok(r) && (w.applied.last?["serper"] as? [String: Any])?["remove"] as? Bool == true
+              && wf.summary(.serper) == "Free (Parallel)" && msg(r).contains("Parallel"))
+        r = await act(wf, ["action": "key_remove", "kind": "agentmail"])
+        check("other keys still can't be removed this way", !ok(r))
         r = await act(wf, ["action": "key", "kind": "rogue", "key": "x"])
         check("an unknown key kind is refused", !ok(r))
         r = await act(wf, ["action": "key", "kind": "serper", "key": "srp-good\nsecond-line"])

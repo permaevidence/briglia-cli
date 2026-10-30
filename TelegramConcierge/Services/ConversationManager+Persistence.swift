@@ -782,6 +782,10 @@ extension ConversationManager {
         do { try ResponsesUsageStore().clearForWipe() }
         catch { failures.append("Could not clear Responses cache statistics") }
         failures.append(contentsOf: SessionAffinity.deleteForUserDataWipe())
+        // The conversation search ID (KEYLESS_WEB plan A.5): a new
+        // conversation starts, so free search gets a new ID on first use.
+        do { try ParallelSessionStore.discard() }
+        catch { failures.append("Could not delete the free-search session file") }
         // Mid-turn early wake state (crash records, /stop marker, snapshot
         // settlement evidence) — harness state about the wiped history.
         for (url, label) in [(DetachedJobStore.fileURL, "background-job crash records"),
@@ -851,9 +855,8 @@ extension ConversationManager {
             forAgent: "main", allTools: allMcpTools, fallbackPatterns: nil
         )
         let deferredSummaries = await MCPRegistry.shared.serverSummaries(for: deferredServerNames)
-        let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""
         let nativeTools = AvailableTools.all(
-            includeWebSearch: !serperKey.isEmpty,
+            includeWebSearch: KeylessSearchSwitch.current() != .none,
             hasDeferredMCPs: !deferredSummaries.isEmpty
         )
         let allTools = nativeTools + mainMcpTools
@@ -1203,6 +1206,14 @@ extension ConversationManager {
             await MindExportService.shared.discardStagedMind(staged)
             return .failedBeforeApply("\(error)", affinityAdvanced: false)
         }
+        // The imported conversation is another conversation: its first free
+        // search mints a new search ID (KEYLESS_WEB plan A.5). Never exported.
+        do {
+            try ParallelSessionStore.discard()
+        } catch {
+            await MindExportService.shared.discardStagedMind(staged)
+            return .failedBeforeApply("could not discard the free-search session file: \(error)", affinityAdvanced: true)
+        }
 
         await discardPreImportBackgroundOutputs()
         do {
@@ -1283,11 +1294,15 @@ extension ConversationManager {
 
     func reloadBrowserSettings() async {
         let key = KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? ""
+        // The web configuration is read (and versioned) HERE, before any
+        // await, so a slower earlier reload can never install over it.
+        let webSnapshot = KeychainHelper.loadSnapshot()
+        let webConfig = WebServiceConfig.make(openRouterKey: key,
+            serperKey: webSnapshot[KeychainHelper.serperApiKeyKey] ?? "",
+            jinaKey: webSnapshot[KeychainHelper.jinaApiKeyKey] ?? "")
         await openRouterService.configure(apiKey: key)
         await archiveService.configure(apiKey: key)
-        await toolExecutor.configure(openRouterKey: key,
-            serperKey: KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? "",
-            jinaKey: KeychainHelper.load(key: KeychainHelper.jinaApiKeyKey) ?? "")
+        await toolExecutor.install(webConfig: webConfig)
         if let imageKey = KeychainHelper.load(key: KeychainHelper.openAIImageApiKeyKey), !imageKey.isEmpty {
             await OpenAIImageService.shared.configure(apiKey: imageKey,
                 model: KeychainHelper.load(key: KeychainHelper.openAIImageModelKey),

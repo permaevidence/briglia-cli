@@ -1015,8 +1015,10 @@ extension ConversationManager {
     func handleWebSubagentCommand(argument: String) async {
         guard replyAddress != nil else { return }
         let enabled = AvailableTools.webSubagentEnabled
-        let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""
-        let availability = serperKey.isEmpty ? "Web preset available: no (Serper key missing)" : "Web preset available: yes"
+        let webSnapshot = KeychainHelper.loadSnapshot()
+        let availability = (KeylessSearchSwitch.resolve(snapshot: webSnapshot) == .none
+            ? "Web preset available: no (no search service: add a Serper.dev key or /freesearch on)" : "Web preset available: yes")
+            + ". Web services: \(KeylessSearchSwitch.summary(webSnapshot))"
 
         let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if normalized.isEmpty {
@@ -1050,6 +1052,54 @@ extension ConversationManager {
             : "✅ Web research subagent OFF — the legacy web_search and web_research_sweep tools are back from the next message. Re-enable with /websubagent on.")
     }
 
+    /// `/freesearch on|off|reset` (KEYLESS_WEB plan A.7). A SEARCH switch:
+    /// with a Serper key it changes nothing; page reading without a Jina key
+    /// is unaffected. The tool list follows from the next turn; a running
+    /// turn's searches use the new value at their next call.
+    func handleFreeSearchCommand(argument: String) async {
+        guard replyAddress != nil else { return }
+        let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        func describe() -> String {
+            let snapshot = KeychainHelper.loadSnapshot()
+            let stored = KeylessSearchSwitch.stored(snapshot)
+            var lines = ["Free web search (Parallel, no key): \(KeylessSearchSwitch.keylessEnabled(snapshot) ? "ON" : "OFF") (default: \(KeylessSearchSwitch.effectiveDefaultOn ? "on" : "off")\(stored == .unset ? ", not changed" : "")).",
+                         "Now: \(KeylessSearchSwitch.summary(snapshot))."]
+            if KeylessSearchSwitch.effectiveHardDisabled { lines.append("Free search is withdrawn in this version of Briglia.") }
+            if KeylessSearchSwitch.environmentForcesOff { lines.append("\(KeylessSearchSwitch.environmentKey)=0 is set in Briglia's environment, so free search stays off.") }
+            if case .damaged = ParallelSessionStore.state() {
+                lines.append("⚠️ The free-search session file is damaged — send /freesearch reset to repair it.")
+            }
+            lines.append("Free searches go to Parallel and may be used to train their models; add a Serper.dev key in briglia menu for more private, better search.")
+            return lines.joined(separator: "\n")
+        }
+        switch normalized {
+        case "":
+            try? await sendText(describe())
+        case "on", "off":
+            do {
+                try KeychainHelper.save(key: KeychainHelper.keylessSearchKey, value: normalized == "on" ? "true" : "false")
+                try? await sendText("✅ Free web search \(normalized.uppercased()) — from the next message.\n" + describe())
+            } catch {
+                try? await sendText("⚠️ Could not save the setting: \(error.localizedDescription)")
+            }
+        case "reset":
+            do {
+                try KeychainHelper.delete(key: KeychainHelper.keylessSearchKey)
+                let session: String
+                switch try ParallelSessionStore.reset() {
+                case .kept: session = "The search session is fine and was kept."
+                case .minted: session = "A search session was created."
+                case .replaced: session = "The damaged search session file was moved aside and a new session created."
+                }
+                try? await sendText("✅ Free web search is back to the default. \(session)\n" + describe())
+            } catch {
+                try? await sendText("⚠️ Reset failed: \(error.localizedDescription)")
+            }
+        default:
+            try? await sendText("Usage: /freesearch on|off|reset")
+        }
+    }
+
     /// Reply with a chronological snapshot of tool activity in the current
     /// (or most recently completed) turn. Replaces the old always-on
     /// progress-ping model — user pulls the info on demand rather than
@@ -1062,6 +1112,12 @@ extension ConversationManager {
         if LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)) == .openRouter,
            let pin = OpenRouterProviderPin.statusLine() {
             contextLine += "\n" + pin
+        }
+        // Web services (KEYLESS_WEB plan A.8): shown when search or page
+        // reading runs without the user's own key (never model-visible).
+        let webSnapshot = KeychainHelper.loadSnapshot()
+        if (webSnapshot[KeychainHelper.serperApiKeyKey] ?? "").isEmpty || (webSnapshot[KeychainHelper.jinaApiKeyKey] ?? "").isEmpty {
+            contextLine += "\nWeb: " + KeylessSearchSwitch.summary(webSnapshot)
         }
         if let notice = pendingHostNotice {
             contextLine += "\n" + notice
@@ -1307,7 +1363,7 @@ extension ConversationManager {
         defer { endMaintenance(pruneActivityId) }
         let targetTokens = configuredTargetContextTokens()
         let providerIsLMStudio = currentProviderIsLMStudio()
-        let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""
+        let searchService = KeylessSearchSwitch.current()
         let frozenContext = await getFrozenSystemContext()
         // The same automatic-context rule as a turn (§4.1): rows whose
         // sources are still live are left out of the prune-summary request.
@@ -1329,7 +1385,7 @@ extension ConversationManager {
         )
         let deferredSummaries = await MCPRegistry.shared.serverSummaries(for: deferredServerNames)
         let nativeTools = AvailableTools.all(
-            includeWebSearch: !serperKey.isEmpty,
+            includeWebSearch: searchService != .none,
             hasDeferredMCPs: !deferredSummaries.isEmpty
         )
         let toolsForSummary = nativeTools + mainMcpTools

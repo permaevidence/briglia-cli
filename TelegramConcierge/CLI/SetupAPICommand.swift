@@ -286,11 +286,24 @@ enum SetupAPICore {
         // Web research subagent switch (WEB_SUBAGENT_PLAN §4.8): `enabled` is
         // the stored flag, `active` whether it currently applies (subagents
         // on too), `preset_available` whether the Web preset would appear
-        // (web search configured).
-        let serperConfigured = !(KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? "").isEmpty
+        // (a search service is available: a Serper key or free search).
+        let webSnapshot = KeychainHelper.loadSnapshot()
+        let searchService = KeylessSearchSwitch.resolve(snapshot: webSnapshot)
         payload["web_subagent"] = ["enabled": AvailableTools.webSubagentEnabled,
                                    "active": AvailableTools.webSubagentActive,
-                                   "preset_available": serperConfigured && AvailableTools.webSubagentActive] as [String: Any]
+                                   "preset_available": searchService != .none && AvailableTools.webSubagentActive] as [String: Any]
+        // Search service and page reader (KEYLESS_WEB plan A.8; additive).
+        // `keyless_search` is the stored choice: true|false|"default".
+        let storedKeyless: Any
+        switch KeylessSearchSwitch.stored(webSnapshot) {
+        case .on: storedKeyless = true
+        case .off: storedKeyless = false
+        case .unset: storedKeyless = "default"
+        }
+        payload["web"] = ["search_service": searchService.rawValue,
+                          "keyless_search": storedKeyless,
+                          "keyless_search_effective": KeylessSearchSwitch.keylessEnabled(webSnapshot),
+                          "page_reader": (webSnapshot[KeychainHelper.jinaApiKeyKey] ?? "").isEmpty ? "jina-keyless" : "jina-key"] as [String: Any]
 
         func keyStatus(_ storageKey: String) -> [String: Any] {
             guard let value = KeychainHelper.load(key: storageKey), !value.isEmpty else {
@@ -636,6 +649,21 @@ enum SetupAPICore {
             if let section = request["email_calendar"] as? [String: Any] {
                 try await applyEmailCalendar(section, warnings: &warnings, checkpoint: checkpoint)
                 applied.append("email_calendar")
+            }
+            if let section = request["web"] as? [String: Any] {
+                // Only `keyless_search` (true|false|"default"); other web
+                // fields are status-only.
+                guard let value = section["keyless_search"] else {
+                    throw APIError(code: "invalid_value", message: "web section supports {keyless_search: true|false|\"default\"}")
+                }
+                if let flag = value as? Bool {
+                    try KeychainHelper.save(key: KeychainHelper.keylessSearchKey, value: flag ? "true" : "false")
+                } else if let text = value as? String, text == "default" {
+                    try KeychainHelper.delete(key: KeychainHelper.keylessSearchKey)
+                } else {
+                    throw APIError(code: "invalid_value", message: "web.keyless_search must be true, false or \"default\"")
+                }
+                applied.append("web")
             }
             if let backend = request["web_search_backend"] {
                 guard let raw = nonEmptyString(backend),

@@ -65,8 +65,10 @@ extension ConversationManager {
             return FilesLedgerDiff.diff(pre: ledgerPreSnapshot, post: post)
         }
 
-        // Check if tools are available
-        let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""
+        // Check if tools are available: the search service is resolved ONCE
+        // per turn from one coherent snapshot (KEYLESS_WEB plan A.3); only
+        // this flag is frozen, every other part of the tool list stays dynamic.
+        let turnSearchService = KeylessSearchSwitch.current()
 
         // Fetch all context data in PARALLEL for performance.
         // Calendar + email use the frozen session-level cache: populated on first turn,
@@ -233,7 +235,7 @@ extension ConversationManager {
         )
         let initialDeferredSummaries = await MCPRegistry.shared.serverSummaries(for: initialDeferredServerNames)
         let initialNativeTools = AvailableTools.all(
-            includeWebSearch: !serperKey.isEmpty,
+            includeWebSearch: turnSearchService != .none,
             hasDeferredMCPs: !initialDeferredSummaries.isEmpty
         )
         let initialToolsForRound = initialNativeTools + initialMainMcpTools
@@ -437,7 +439,7 @@ extension ConversationManager {
             let deferredSummaries = await MCPRegistry.shared.serverSummaries(for: deferredServerNames)
 
             let nativeTools = AvailableTools.all(
-                includeWebSearch: !serperKey.isEmpty,
+                includeWebSearch: turnSearchService != .none,
                 hasDeferredMCPs: !deferredSummaries.isEmpty
             )
             let toolsForRound = nativeTools + mainMcpTools

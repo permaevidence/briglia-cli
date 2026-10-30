@@ -648,6 +648,7 @@ struct WebSubagentSelftest: AsyncParsableCommand {
         }
         try await Self.runNestingGroups(harness)
         try await Self.runR2Groups(harness)
+        try await Self.runKeylessGroup(harness)
         serverA.divert = nil
         try await Self.runSubscriptionGroups(harness)
         try await Self.runMainModelGroups(harness)

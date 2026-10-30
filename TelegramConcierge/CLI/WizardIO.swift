@@ -65,6 +65,16 @@ enum WizardIO {
         current: String? = nil,
         probe: (String) async -> String?
     ) async -> String {
+        await askSecretValidated(prompt, current: current, optional: false, probe: probe) ?? ""
+    }
+
+    /// `optional: true`: Enter with nothing saved skips the step (returns nil).
+    static func askSecretValidated(
+        _ prompt: String,
+        current: String?,
+        optional: Bool,
+        probe: (String) async -> String?
+    ) async -> String? {
         let saved = current.flatMap { $0.isEmpty ? nil : $0 }
         if let saved {
             print("  Saved key \(masked(saved)) found — press Enter to keep it.")
@@ -76,6 +86,7 @@ enum WizardIO {
                     print("  ✔ keeping the saved key")
                     return saved
                 }
+                if optional { return nil }
                 print("  A key is required here.")
                 continue
             }
@@ -233,6 +244,19 @@ enum Probes {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["q": "ping", "num": 1])
         return await expectHTTP200(request, service: "Serper")
+    }
+
+    /// `briglia doctor --online` without a Serper key: one fixed query
+    /// ("briglia doctor probe") to Parallel under this profile's existing
+    /// search session (never minted here).
+    static func parallelKeyless() async -> String? {
+        guard case .valid(let session) = ParallelSessionStore.state() else { return "no search session yet (created on the first free search)" }
+        do {
+            _ = try await ParallelSearchClient.shared.search(query: "briglia doctor probe", sessionID: session, depth: 1)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     static func jina(apiKey: String) async -> String? {

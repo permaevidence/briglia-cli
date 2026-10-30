@@ -41,8 +41,8 @@ MODELS = [{"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "recommended": True}, {"
           {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"}, {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"}]
 TITLES_IT = {"name": "Il tuo nome", "serper": "Ricerca web", "jina": "Lettura pagine web", "openai": "Voce e immagini",
              "computer": "Questo computer", "tools": "Strumenti documenti e media"}
-TITLES = [("name", "Your name", True), ("ai", "ChatGPT", True), ("telegram", "Telegram", True), ("serper", "Web search", True),
-          ("jina", "Reading web pages", True), ("openai", "Voice & images", False), ("email", "Email", False),
+TITLES = [("name", "Your name", True), ("ai", "ChatGPT", True), ("telegram", "Telegram", True), ("serper", "Web search", False),
+          ("jina", "Reading web pages", False), ("openai", "Voice & images", False), ("email", "Email", False),
           ("computer", "This computer", True), ("tools", "Document & media tools", True)]
 GOOD = {"serper": "srp-good-0123456789abcdef", "jina": "jina_good_0123456789abcdef", "openai": "sk-good-0123456789abcdef",
         "agentmail": "am_good_0123456789abcdef", "telegram": "123456789:AAgoodtoken0123456789",
@@ -64,6 +64,8 @@ class Fake:
         self.chatgpt = {"state": "signed_out", "active": False, "model": "gpt-6.1-sol", "effort": "high", "other_provider": None, "login": None}
         self.telegram = {"configured": False, "chat_id": "", "bot": None, "pending": None}
         self.keys = {"serper": None, "jina": None, "openai": None, "agentmail": None}
+        # Free keyless search (KEYLESS_WEB plan A.7), default on.
+        self.web = {"free_search": True, "free_search_locked": None}
         self.email = {"on": False, "inbox": "", "tool_installed": False}
         self.computer = {"fda": False, "terminal_app": "Terminal", "keep_awake_ok": True,
                          "keep_awake_summary": "Briglia keeps this Mac awake while it runs.", "can_fix_gnome": False, "can_mask": False}
@@ -120,7 +122,7 @@ class Fake:
 
     def done(self, sid):
         return {"name": bool(self.name), "ai": self.active() is not None,
-                "telegram": self.telegram["configured"], "serper": bool(self.keys["serper"]), "jina": bool(self.keys["jina"]),
+                "telegram": self.telegram["configured"], "serper": bool(self.keys["serper"]) or self.web["free_search"], "jina": True,
                 "openai": bool(self.keys["openai"]) or self.media_via() == "openrouter", "email": self.email["on"],
                 "computer": self.computer["fda"] and self.computer["keep_awake_ok"], "tools": self.tools["complete"]}[sid]
 
@@ -159,7 +161,7 @@ class Fake:
         c["models"] = MODELS
         c["model_label"] = [m["label"] for m in MODELS if m["id"] == c["model"]][0]
         return {"platform": self.platform, "lang": self.lang, "complete": all(s["done"] for s in steps if s["required"]), "steps": steps, "name": self.name,
-                "chatgpt": c, "ai": ai, "telegram": self.telegram, "keys": self.keys, "email": self.email, "computer": self.computer,
+                "chatgpt": c, "ai": ai, "telegram": self.telegram, "keys": self.keys, "web": self.web, "email": self.email, "computer": self.computer,
                 "tools": self.tools, "busy": None, "service_was_running": getattr(self, "service_was_running", False), "running": getattr(self, "running", False), "run_mode": getattr(self, "run_mode", None), "browser_likely": True, "closing": self.closing,
                 "startup": getattr(self, "startup", None)}
 
@@ -185,6 +187,12 @@ class Fake:
                     elif self.servers:
                         self.use("local", self.servers[0]["id"])
                 msg = {"serper": "Web search is on.", "jina": "Briglia can now read web pages.", "openai": "Voice messages and image creation are on.", "agentmail": "Email is ready."}[kind]
+        elif a == "freesearch":
+            self.web["free_search"] = bool(body.get("on"))
+            msg = "Free search is on: without a Serper key, Briglia searches with Parallel." if self.web["free_search"] else "Free search is off: without a Serper key, Briglia doesn’t search the web."
+        elif a == "key_remove" and body.get("kind") in ("serper", "jina"):
+            self.keys[body["kind"]] = None
+            msg = "Key removed."
         elif a == "chatgpt_browser":
             self.chatgpt["login"] = {"kind": "browser", "state": "waiting", "url": "https://auth.example/authorize", "code": None}
         elif a == "chatgpt_code":
@@ -417,9 +425,21 @@ def main():
         page.wait_for_selector("text=Is this you?", timeout=8000)
         shot(page, "07-telegram-found")
         page.click("text=Yes, that’s me")
-        page.wait_for_selector("text=Serper lets Briglia search Google")
+        page.wait_for_selector("text=Briglia can search the web for free with Parallel")
         check("confirming saves the chat and moves to web search", f.telegram["chat_id"] == "5551234567")
+        # Optional step (KEYLESS_WEB plan A.8): free search shown, Continue available, a key optional.
+        check("web search is optional: free search is on, with the privacy note and Continue", page.is_visible("text=Free search is on")
+              and page.is_visible("text=may be used to train their models") and page.is_visible("text=Continue →") and page.is_visible("#serper-add"))
+        check("web search and page reading are marked optional in the step list", page.is_visible("#steps li.optional >> text=Web search")
+              and page.is_visible("#steps li.optional >> text=Reading web pages"))
         shot(page, "08-serper")
+        page.click("#freesearch-toggle")
+        page.wait_for_selector("text=Web search is off: free search is switched off")
+        check("the free-search switch turns it off (no key: web search off)", f.web["free_search"] is False)
+        page.click("#freesearch-toggle")
+        page.wait_for_selector("text=Free search is on")
+        check("…and back on", f.web["free_search"] is True)
+        page.click("#serper-add")
         page.fill("#f-serper", "srp-wrong-00000000000000")
         page.wait_for_selector("text=Serper refused this key", timeout=6000)
         check("typing a key checks it automatically (no Verify button, no Enter)", not page.is_visible("text=Verify"))
@@ -428,6 +448,9 @@ def main():
         page.wait_for_selector("text=Web search is on.", timeout=6000)
         shot(page, "10-serper-saved")
         page.click("text=Continue →")
+        page.wait_for_selector("text=Free page reading is on")
+        check("page reading is optional: keyless Jina shown, a key optional", page.is_visible("text=Briglia reads web pages for free with Jina") and page.is_visible("#jina-add"))
+        page.click("#jina-add")
         page.wait_for_selector("#f-jina")
         # Paste = immediate check.
         page.focus("#f-jina")
@@ -958,6 +981,7 @@ def main():
             page.route("**/api/**", api)
             page.goto(base)
             page.click("#steps button:has-text('Web search')")
+            page.click("#serper-add")
             page.wait_for_selector("#f-serper")
             return rf, ctx, page, errors, release, wait_held
 

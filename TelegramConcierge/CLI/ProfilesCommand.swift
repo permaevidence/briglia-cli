@@ -136,7 +136,7 @@ enum ProfileProvisioning {
         KeychainHelper.textOnlyModelEnabledKey, KeychainHelper.visionPreprocessorModelKey,
         KeychainHelper.visionPreprocessorProviderKey, KeychainHelper.visionPreprocessorBackendKey,
         KeychainHelper.visionPreprocessorReasoningEffortKey,
-        KeychainHelper.serperApiKeyKey, KeychainHelper.jinaApiKeyKey,
+        KeychainHelper.serperApiKeyKey, KeychainHelper.jinaApiKeyKey, KeychainHelper.keylessSearchKey,
         KeychainHelper.webSearchOpenAIApiKeyKey, KeychainHelper.webSearchOpenCodeApiKeyKey,
         KeychainHelper.geminiApiKeyKey, KeychainHelper.imageGenerationProviderKey, KeychainHelper.geminiImageModelKey,
         KeychainHelper.geminiImageInputCostPerMillionTokensUSDKey, KeychainHelper.geminiImageOutputTextCostPerMillionTokensUSDKey,

@@ -87,7 +87,11 @@ struct ChatLifecycleSelftest: AsyncParsableCommand {
             KeychainHelper.assistantNameKey: "Fixture Assistant", KeychainHelper.userNameKey: "Fixture User",
             KeychainHelper.emailCalendarProviderKey: "gws",  // literal: builds on the pinned release and on gws-free builds
             KeychainHelper.maxContextTokensKey: "10000", KeychainHelper.targetContextTokensKey: "5000",
-            KeychainHelper.archiveChunkSizeKey: "1000000", KeychainHelper.textOnlyModelEnabledKey: "false"
+            KeychainHelper.archiveChunkSizeKey: "1000000", KeychainHelper.textOnlyModelEnabledKey: "false",
+            // Free search off (KEYLESS_WEB plan A.10): no Serper key here, so
+            // the tools and prompt stay byte-identical to the pinned release.
+            // A literal: the pinned release has no such constant.
+            "ada.web.keylessSearch": "false"
         ]
         for (key, value) in settings { try KeychainHelper.save(key: key, value: value) }
         P0Life.defaults.set(P0Life.instant, forKey: "system_prompt_cache_epoch")

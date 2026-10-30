@@ -183,10 +183,29 @@ struct Doctor: AsyncParsableCommand {
         default:
             note("voice & images: not configured (add an OpenAI key, or use OpenRouter as the main provider)")
         }
-        let serperKey = KeychainHelper.load(key: KeychainHelper.serperApiKeyKey) ?? ""
-        check("Serper key present", ok: !serperKey.isEmpty, hint: "run `briglia setup`, section 3")
-        let jinaKey = KeychainHelper.load(key: KeychainHelper.jinaApiKeyKey) ?? ""
-        check("Jina key present", ok: !jinaKey.isEmpty, hint: "run `briglia setup`, section 4")
+        // Web search and page reading (KEYLESS_WEB plan A.8): both keys are
+        // optional; without them Briglia uses the free keyless services.
+        let webSnapshot = KeychainHelper.loadSnapshot()
+        let serperKey = webSnapshot[KeychainHelper.serperApiKeyKey] ?? ""
+        let jinaKey = webSnapshot[KeychainHelper.jinaApiKeyKey] ?? ""
+        let searchService = KeylessSearchSwitch.resolve(snapshot: webSnapshot)
+        switch searchService {
+        case .serper:
+            check("Serper key present", ok: true)
+        case .parallelKeyless:
+            note("Search: free (Parallel, no key) — searches go to Parallel and may be used to train their models; add a Serper.dev key in briglia menu for more privacy")
+            if case .damaged(let reason) = ParallelSessionStore.state() {
+                check("free-search session file readable (\(reason))", ok: false,
+                      hint: "send /freesearch reset to Briglia (it moves the damaged \(ParallelSessionStore.fileName) aside and starts a new search session), or add a Serper.dev key in briglia menu")
+            }
+        case .none:
+            note("⚠ Search: off — no Serper.dev key and free search is \(KeylessSearchSwitch.effectiveHardDisabled ? "withdrawn in this version" : (KeylessSearchSwitch.environmentForcesOff ? "forced off by \(KeylessSearchSwitch.environmentKey)=0" : "switched off")); add a Serper.dev key in briglia menu\(KeylessSearchSwitch.effectiveHardDisabled ? "" : ", or send /freesearch on")")
+        }
+        if jinaKey.isEmpty {
+            note("Page reading: Jina without a key (18 pages/min, some sites blocked for keyless readers) — add a Jina.ai key in briglia menu for more reliable reading")
+        } else {
+            check("Jina key present", ok: true)
+        }
         note("Telegram: \(TelegramConfig.isConfigured ? "configured" : "not configured (optional)")")
         let backendSource = WebSearchBackend.explicitlyStored != nil
             ? "explicit" : "inferred from keys — set with /websearch"
@@ -198,7 +217,7 @@ struct Doctor: AsyncParsableCommand {
             note("web page-reading backend (extraction, web_fetch; research runs on the main model): \(WebSearchBackend.active.rawValue) — \(WebSearchBackend.active.modelSummary) (\(backendSource))")
         }
         note("web page-reading time limit: \(Int(WebSearchBackend.extractorDeadline)) s per request on every backend, up to 3 attempts (a cut request on OpenRouter or the OpenAI API key counts as an unknown charge in /spend)")
-        note("web subagent: \(AvailableTools.webSubagentEnabled ? "on" : "off"); Web preset available: \(serperKey.isEmpty ? "no (Serper key missing)" : (AvailableTools.webSubagentActive ? "yes" : "no (switch off)"))")
+        note("web subagent: \(AvailableTools.webSubagentEnabled ? "on" : "off"); Web preset available: \(searchService == .none ? "no (no search service)" : (AvailableTools.webSubagentActive ? "yes" : "no (switch off)"))")
         var ocrBackend = KeychainHelper.load(key: KeychainHelper.visionPreprocessorBackendKey)
             ?? (openAIKey.isEmpty ? "openrouter (no OpenAI key)" : "openai")
         if ocrBackend == "openai", MediaRouting.ocrFollowsOpenRouter(stored: mediaSnapshot, openAIKey: OpenRouterService.resolvedOpenAIKey()) {
@@ -467,6 +486,10 @@ struct Doctor: AsyncParsableCommand {
             if !serperKey.isEmpty {
                 let failure = await Probes.serper(apiKey: serperKey)
                 check("Serper key valid", ok: failure == nil, hint: failure)
+            } else if searchService == .parallelKeyless, case .valid = ParallelSessionStore.state() {
+                // One fixed query, under this profile's search session.
+                let failure = await Probes.parallelKeyless()
+                check("free search (Parallel) answers", ok: failure == nil, hint: failure)
             }
             if !jinaKey.isEmpty {
                 let failure = await Probes.jina(apiKey: jinaKey)

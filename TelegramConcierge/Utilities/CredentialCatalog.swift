@@ -90,6 +90,7 @@ enum CredentialCatalog {
         // Web search / extraction
         Entry(key: KeychainHelper.serperApiKeyKey, treatment: .visible),
         Entry(key: KeychainHelper.jinaApiKeyKey, treatment: .visible),
+        Entry(key: KeychainHelper.keylessSearchKey, treatment: .notSecret),
         Entry(key: KeychainHelper.webSearchOpenAIApiKeyKey, treatment: .visible),
         Entry(key: KeychainHelper.webSearchOpenCodeApiKeyKey, treatment: .visible),
 

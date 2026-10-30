@@ -786,9 +786,14 @@ actor WebOrchestrator {
     
     var onProgress: ((ProgressStage) -> Void)?
     
-    private var openRouterApiKey: String = ""
-    private var serperApiKey: String = ""
-    private var jinaApiKey: String = ""
+    /// Shared with the owning executor and its children (KEYLESS_WEB plan
+    /// A.9): each service call reads `current` once at its start.
+    nonisolated let webConfig: WebServiceConfigBox
+    private var openRouterApiKey: String { webConfig.current.openRouterKey }
+
+    init(webConfig: WebServiceConfigBox = WebServiceConfigBox()) {
+        self.webConfig = webConfig
+    }
     
     private let maxWebSearchSteps = 5
     private let maxDeepResearchSteps = 6
@@ -868,9 +873,7 @@ actor WebOrchestrator {
     // MARK: - Configuration
     
     func configure(openRouterKey: String, serperKey: String, jinaKey: String) {
-        self.openRouterApiKey = openRouterKey
-        self.serperApiKey = serperKey
-        self.jinaApiKey = jinaKey
+        webConfig.install(.make(openRouterKey: openRouterKey, serperKey: serperKey, jinaKey: jinaKey))
     }
     
     // MARK: - Tool Interface
@@ -1777,6 +1780,11 @@ actor WebOrchestrator {
         var top: [SerperSearchResp.Top] = []
         var failures: [String] = []
 
+        // The search service for THIS call (KEYLESS_WEB plan A.3), from one
+        // configuration value; the Serper path is literally today's.
+        let config = webConfig.current
+        let service = KeylessSearchSwitch.resolve(serperKey: config.serperKey, snapshot: KeychainHelper.loadSnapshot())
+
         // One failed query must not sink its siblings: collect per-query
         // outcomes instead of letting the first error cancel the group.
         await withTaskGroup(of: (query: String, response: SerperSearchResp?, errorText: String?).self) { group in
@@ -1784,7 +1792,15 @@ actor WebOrchestrator {
                 group.addTask {
                     do {
                         try Task.checkCancellation()
-                        return (q, try await self.serperSearch(q), nil)
+                        switch service {
+                        case .serper:
+                            return (q, try await self.serperSearch(q, apiKey: config.serperKey), nil)
+                        case .parallelKeyless:
+                            return (q, try await self.parallelSearch(q), nil)
+                        case .none:
+                            // No HTTP request, no health record, no breaker effect.
+                            return (q, nil, Self.noSearchServiceMessage)
+                        }
                     } catch is CancellationError {
                         return (q, nil, nil)
                     } catch {
@@ -2344,7 +2360,36 @@ actor WebOrchestrator {
         return estimate > 0 ? estimate : nil
     }
 
-    private func serperSearch(_ q: String) async throws -> SerperSearchResp {
+    static let noSearchServiceMessage = "No search service is configured. Add a Serper.dev key in briglia menu, or turn free search back on (/freesearch on)."
+
+    /// Parallel keyless search for one query (A.4), mapped to Serper's
+    /// `organic[]` shape so every later step is shared.
+    private func parallelSearch(_ q: String) async throws -> SerperSearchResp {
+        let hits: [ParallelSearchHit]
+        do {
+            let sessionID = try ParallelSessionStore.idForSearch()
+            hits = try await ParallelSearchClient.shared.search(query: q, sessionID: sessionID, depth: perQueryDepth)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch ParallelSearchError.busy {
+            // The breaker is open: the failures that opened it were recorded.
+            throw ParallelSearchError.busy
+        } catch {
+            await ToolServiceHealth.shared.recordFailure(.webSearchFree, error: error.localizedDescription, transientOnly: true)
+            throw error
+        }
+        await ToolServiceHealth.shared.recordSuccess(.webSearchFree)
+        if hits.isEmpty {
+            webLog("[WebPipeline] parallel EMPTY (0 results) query=\"\(q)\"")
+        } else {
+            webLog("[WebPipeline] parallel ok results=\(hits.count) query=\"\(q)\"")
+        }
+        return SerperSearchResp(
+            organic: hits.map { SerperSearchResp.Organic(title: $0.title, link: $0.link, snippet: $0.snippet, date: $0.date) },
+            peopleAlsoAsk: nil, topStories: nil, answerBox: nil, knowledgeGraph: nil)
+    }
+
+    private func serperSearch(_ q: String, apiKey serperApiKey: String) async throws -> SerperSearchResp {
         let req = SerperSearchReq(q: q, num: perQueryDepth)
         let data: Data
         do {
@@ -2376,27 +2421,54 @@ actor WebOrchestrator {
         }
     }
     
-    private func fetchWithJinaReader(originalURL: String, includeImageCaptions: Bool = false) async throws -> (title: String?, content: String) {
+    func fetchWithJinaReader(originalURL: String, includeImageCaptions: Bool = false) async throws -> (title: String?, content: String) {
         let target = (originalURL.hasPrefix("http://") || originalURL.hasPrefix("https://")) ? originalURL : "https://\(originalURL)"
         guard let proxyURL = URL(string: Endpoints.jinaReaderBaseURL + target) else { throw URLError(.badURL) }
+        // Key, headers and "is this request keyless" are fixed together,
+        // before any pacing wait (KEYLESS_WEB plan A.6).
+        let jinaApiKey = webConfig.current.jinaKey
+        let keyless = jinaApiKey.isEmpty
         var req = URLRequest(url: proxyURL)
         req.httpMethod = "GET"
         req.timeoutInterval = 120
-        if !jinaApiKey.isEmpty {
+        if !keyless {
             req.setValue("Bearer \(jinaApiKey)", forHTTPHeaderField: "Authorization")
         }
-        // Enable image captioning for vision model context
-        if includeImageCaptions {
+        // Enable image captioning for vision model context. Keyless Jina
+        // refuses this header (HTTP 401), so it is sent only with a key:
+        // keyless pages have no generated image alt text.
+        if includeImageCaptions && !keyless {
             req.setValue("true", forHTTPHeaderField: "x-with-generated-alt")
         }
         let data: Data
         do {
-            data = try await httpDataWithRetry(request: req, label: "jina reader", maxAttempts: 3)
+            if keyless {
+                // Every attempt, retries included, takes a pacing slot.
+                let pacer = JinaKeylessPacer.shared
+                data = try await httpDataWithRetry(request: req, label: "jina reader (no key)", maxAttempts: 3, fetch: { request in
+                    try await pacer.acquire()
+                    return try await URLSession.shared.data(for: request)
+                })
+            } else {
+                data = try await httpDataWithRetry(request: req, label: "jina reader", maxAttempts: 3)
+            }
         } catch {
-            await ToolServiceHealth.shared.recordFailure(.webFetch, error: error.localizedDescription)
+            if keyless {
+                if error is CancellationError { throw error }
+                if let blocked = JinaKeylessDomainBlocked.classify(error) {
+                    // Jina's shared anonymous block: a per-page message,
+                    // neither a health failure nor a success.
+                    webLog("[WebPipeline] jina keyless domain block url=\(target)")
+                    throw blocked
+                }
+                if error is JinaKeylessRateLimited { throw error }
+                await ToolServiceHealth.shared.recordFailure(.webFetchFree, error: error.localizedDescription, transientOnly: true)
+            } else {
+                await ToolServiceHealth.shared.recordFailure(.webFetch, error: error.localizedDescription)
+            }
             throw error
         }
-        await ToolServiceHealth.shared.recordSuccess(.webFetch)
+        await ToolServiceHealth.shared.recordSuccess(keyless ? .webFetchFree : .webFetch)
         let text = String(data: data, encoding: .utf8) ?? ""
         let contentLength = text.trimmingCharacters(in: .whitespacesAndNewlines).count
         if contentLength < 200 {

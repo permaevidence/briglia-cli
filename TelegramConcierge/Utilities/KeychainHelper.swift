@@ -416,6 +416,10 @@ extension KeychainHelper {
     // Web Search Tool Keys
     static let serperApiKeyKey = "serper_api_key"
     static let jinaApiKeyKey = "jina_api_key"
+    /// Free (keyless) web search switch: "true" / "false"; absent = the
+    /// build default (KeylessSearchSwitch). A search switch only: page
+    /// reading without a Jina key is unaffected.
+    static let keylessSearchKey = "ada.web.keylessSearch"
 
     // Low-balance warning thresholds (BalanceMonitor). Empty/unset → built-in
     // defaults ($5 / 200 credits / 1M tokens, settled 2026-07-07).

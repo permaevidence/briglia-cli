@@ -615,10 +615,14 @@
   // The lane being set up or in use is OpenRouter (no OpenAI key needed there).
   function orLane() { return !!(S.ai && S.ai.lane === 'openrouter'); }
   function KEYS() { return {
-    serper: { title: T('Web search', 'Ricerca web'), lead: T('Serper lets Briglia search Google. The free plan includes 2,500 searches — plenty to start.', 'Serper permette a Briglia di cercare su Google. Il piano gratuito include 2.500 ricerche: più che sufficienti per iniziare.'),
+    serper: { title: T('Web search', 'Ricerca web'), lead: T('Briglia can search the web for free with Parallel — no account needed. Searches go to Parallel and may be used to train their models. For more private, better search, add a Serper.dev key.', 'Briglia può cercare sul web gratis con Parallel, senza account. Le ricerche vanno a Parallel e possono essere usate per addestrare i suoi modelli. Per una ricerca più privata e migliore, aggiungi una chiave Serper.dev.'),
+      keyless: true, addLabel: T('Add a Serper.dev key (optional)', 'Aggiungi una chiave Serper.dev (facoltativa)'),
+      keyHow: T('Serper searches Google. Its free plan includes 2,500 searches.', 'Serper cerca su Google. Il piano gratuito include 2.500 ricerche.'),
       steps: [[T('Open ', 'Apri '), link('https://serper.dev/signup', 'serper.dev'), T(' and sign up (free, no card needed).', ' e registrati (gratis, senza carta).')], [T('In the dashboard, open ', 'Nella dashboard apri '), h('b', { text: 'API Key' }), T(' and copy it.', ' e copiala.')], [T('Paste it below. It’s checked automatically.', 'Incollala qui sotto. Viene controllata in automatico.')]],
       placeholder: T('Paste your Serper key', 'Incolla la chiave Serper') },
-    jina: { title: T('Reading web pages', 'Lettura pagine web'), lead: T('Jina lets Briglia open and read web pages. You can start for free.', 'Jina permette a Briglia di aprire e leggere le pagine web. Puoi iniziare gratis.'),
+    jina: { title: T('Reading web pages', 'Lettura pagine web'), lead: T('Briglia reads web pages for free with Jina. For more reliable, better page reading, add a Jina.ai key.', 'Briglia legge le pagine web gratis con Jina. Per una lettura più affidabile e migliore, aggiungi una chiave Jina.ai.'),
+      keyless: true, addLabel: T('Add a Jina.ai key (optional)', 'Aggiungi una chiave Jina.ai (facoltativa)'),
+      keyHow: T('Without a key Jina reads up to about 18 pages a minute, and some sites are sometimes blocked for keyless readers.', 'Senza chiave Jina legge fino a circa 18 pagine al minuto, e alcuni siti a volte sono bloccati per chi legge senza chiave.'),
       steps: [[T('Open ', 'Apri '), link('https://jina.ai/reader', 'jina.ai/reader'), '.'], [T('Copy your API key (it starts with ', 'Copia la tua chiave API (inizia con '), h('b', { text: 'jina_' }), T('). Sign in to keep your free credits.', '). Accedi per conservare i crediti gratuiti.')], [T('Paste it below.', 'Incollala qui sotto.')]],
       placeholder: 'jina_…' },
     openai: S.ai && S.ai.openai_required ? { title: T('OpenAI key', 'Chiave OpenAI'),
@@ -678,11 +682,36 @@
       } else out.push(savedBox(T('Key saved', 'Chiave salvata'), masked));
       var btns = [h('button', { class: 'btn secondary', type: 'button', onclick: function () { st.editing = true; st.value = ''; local[id].notice = null; render(); } }, [T('Paste a new key', 'Incolla una nuova chiave')])];
       if (id === 'openai' && !(S.ai && S.ai.openai_required)) btns.push(h('button', { class: 'btn danger', type: 'button', onclick: function () { act('key_remove', { kind: 'openai' }, id); } }, [T('Remove', 'Rimuovi')]));
+      if (k.keyless) btns.push(h('button', { class: 'btn danger', type: 'button', id: id + '-remove', onclick: function () { act('key_remove', { kind: id }, id); } }, [T('Remove (use the free service)', 'Rimuovi (usa il servizio gratuito)')]));
       if (id === 'email') {
         if (!S.email.tool_installed && S.busy !== 'email_tool') btns.push(h('button', { class: 'btn secondary', type: 'button', onclick: function () { act('email_tool', {}, id); } }, [T('Install the email tool', 'Installa lo strumento email')]));
         btns.push(h('button', { class: 'btn danger', type: 'button', onclick: function () { act('email_off', {}, id); } }, [T('Turn email off', 'Disattiva l’email')]));
       }
       out.push(h('div', { class: 'actions' }, btns));
+      out.push(navButtons(id));
+      return out;
+    }
+    if (k.keyless && !masked && !st.editing) {
+      var web = S.web || {};
+      if (id === 'serper') {
+        if (web.free_search) out.push(savedBox(T('Free search is on', 'Ricerca gratuita attiva'), T('Parallel, no account needed', 'Parallel, senza account')));
+        else out.push(h('div', { class: 'notice warn' }, [T('Web search is off: free search is switched off and there is no Serper key.', 'La ricerca web è disattivata: la ricerca gratuita è spenta e non c’è una chiave Serper.')]));
+        if (!web.free_search_locked) {
+          // Free-search switch (KEYLESS_WEB plan A.7): only matters without a Serper key.
+          out.push(h('p', { class: 'small' }, [
+            web.free_search ? T('Free search: on. ', 'Ricerca gratuita: attiva. ') : T('Free search: off. ', 'Ricerca gratuita: disattivata. '),
+            h('button', { class: 'btn ghost small', type: 'button', id: 'freesearch-toggle', disabled: inflight > 0, onclick: function () { act('freesearch', { on: !web.free_search }, id); } },
+              [web.free_search ? T('Turn off', 'Disattiva') : T('Turn on', 'Attiva')])]));
+        } else {
+          out.push(h('p', { class: 'small', text: web.free_search_locked === 'withdrawn'
+            ? T('Free search isn’t available in this version of Briglia.', 'La ricerca gratuita non è disponibile in questa versione di Briglia.')
+            : T('Free search is forced off by BRIGLIA_KEYLESS_SEARCH=0.', 'La ricerca gratuita è forzata a spenta da BRIGLIA_KEYLESS_SEARCH=0.') }));
+        }
+      } else {
+        out.push(savedBox(T('Free page reading is on', 'Lettura gratuita attiva'), T('Jina, no key needed', 'Jina, senza chiave')));
+      }
+      if (k.keyHow) out.push(h('p', { class: 'small', text: k.keyHow }));
+      out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn secondary', type: 'button', id: id + '-add', onclick: function () { st.editing = true; st.value = ''; render(); } }, [k.addLabel])]));
       out.push(navButtons(id));
       return out;
     }
@@ -699,7 +728,7 @@
     out.push(field(id, { secret: true, placeholder: k.placeholder, label: T('Your key', 'La tua chiave'), checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
       return act('key', { kind: id === 'email' ? 'agentmail' : id, key: v }, id, current);
     } }));
-    if (st.editing && (masked || (id === 'openai' && viaOR()))) out.push(h('button', { class: 'btn ghost', type: 'button', onclick: function () { st.editing = false; render(); } }, [T('Cancel', 'Annulla')]));
+    if (st.editing && (masked || k.keyless || (id === 'openai' && viaOR()))) out.push(h('button', { class: 'btn ghost', type: 'button', onclick: function () { st.editing = false; render(); } }, [T('Cancel', 'Annulla')]));
     out.push(navButtons(id));
     return out;
   }
@@ -733,7 +762,7 @@
     var out = [first];
     if (ln === 'opencode' || ln === 'local') out.push(T('an OpenAI API key with a little credit — Briglia reads web pages with it', 'una chiave API di OpenAI con un po’ di credito: Briglia la usa per leggere le pagine web'));
     out.push(T('Telegram on your phone', 'Telegram sul telefono'));
-    out.push(T('free accounts at serper.dev and jina.ai — we’ll show you exactly where to click', 'due account gratuiti su serper.dev e jina.ai: ti mostriamo esattamente dove cliccare'));
+    out.push(T('optional: free keys from serper.dev and jina.ai for more private search and more reliable page reading — without them Briglia uses free services', 'facoltativo: chiavi gratuite di serper.dev e jina.ai per una ricerca più privata e una lettura più affidabile; senza, Briglia usa servizi gratuiti'));
     return out;
   }
   function laneCard(l, opts) {

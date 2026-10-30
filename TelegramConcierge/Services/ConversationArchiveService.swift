@@ -32,6 +32,11 @@ actor MaintenanceAlertCenter {
         case agentMail
         case webSearch
         case webFetch
+        /// Free web search without a key (Parallel, KEYLESS_WEB plan A.8).
+        case webSearchFree
+        /// Page reading without a Jina key (A.6): its own episode, so keyed
+        /// and keyless failures never clear each other.
+        case webFetchFree
         case imageGeneration
         case transcription
         /// conversation.json exists but cannot be read (mid-turn wake §3.10.2).
@@ -55,6 +60,8 @@ actor MaintenanceAlertCenter {
             case .agentMail: return "AgentMail inbox access"
             case .webSearch: return "web search (serper.dev)"
             case .webFetch: return "web page fetching (jina.ai)"
+            case .webSearchFree: return "free web search (Parallel)"
+            case .webFetchFree: return "free page reading (Jina, no key)"
             case .imageGeneration: return "image generation"
             case .transcription: return MediaRouting.transcription.viaOpenRouter ? "audio transcription (OpenRouter)" : "audio transcription (OpenAI)"
             case .conversationHistory: return "conversation history loading"
@@ -79,6 +86,10 @@ actor MaintenanceAlertCenter {
                 return "Web searches will keep failing until this is fixed — check the serper.dev account credits/API key."
             case .webFetch:
                 return "Fetching web pages will keep failing until this is fixed — check the jina.ai account credits/API key."
+            case .webSearchFree:
+                return "Free web search (Parallel, no key) is failing — try again later, or add a Serper.dev key in briglia menu."
+            case .webFetchFree:
+                return "Free page reading (Jina, no key) is failing — add a Jina.ai key in briglia menu."
             case .imageGeneration:
                 return "Image generation will keep failing until this is fixed — check the image provider's API key and billing in Settings."
             case .transcription:
@@ -350,10 +361,13 @@ actor ToolServiceHealth {
     /// Record one failed call. Alerts the user (via MaintenanceAlertCenter's
     /// transition/escalation logic) immediately for deterministic errors,
     /// after `transientAlertThreshold` consecutive failures otherwise.
-    func recordFailure(_ subsystem: MaintenanceAlertCenter.Subsystem, error: String) async {
+    func recordFailure(_ subsystem: MaintenanceAlertCenter.Subsystem, error: String, transientOnly: Bool = false) async {
         let count = (consecutiveFailures[subsystem.rawValue] ?? 0) + 1
         consecutiveFailures[subsystem.rawValue] = count
-        let deterministic = Self.isDeterministic(error)
+        // Keyless services (no account, so no key or billing a user could
+        // fix): a 401/403 is an ordinary failure, alerting after the streak.
+        let deterministic = !transientOnly && Self.isDeterministic(error)
+        Self.reportHookForTesting?(subsystem, false, deterministic)
         guard deterministic || count >= Self.transientAlertThreshold else { return }
         if let quietUntil = alertQuietUntil[subsystem.rawValue], Date() < quietUntil { return }
         await MaintenanceAlertCenter.shared.reportFailure(subsystem, error: error, deterministic: deterministic)
@@ -362,7 +376,12 @@ actor ToolServiceHealth {
     /// Record one successful call: resets the streak and sends the all-clear
     /// if the user had been alerted about this service. A sent all-clear arms
     /// the anti-flap quiet period for this service.
+    /// Selftest observation seam: every recorded outcome (subsystem,
+    /// success, deterministic). Never set in production.
+    nonisolated(unsafe) static var reportHookForTesting: ((MaintenanceAlertCenter.Subsystem, Bool, Bool) -> Void)?
+
     func recordSuccess(_ subsystem: MaintenanceAlertCenter.Subsystem) async {
+        Self.reportHookForTesting?(subsystem, true, false)
         consecutiveFailures[subsystem.rawValue] = 0
         let recoveryEmitted = await MaintenanceAlertCenter.shared.reportSuccess(subsystem)
         if recoveryEmitted {

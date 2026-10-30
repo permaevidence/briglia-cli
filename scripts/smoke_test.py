@@ -962,6 +962,14 @@ def main():
     result = run_selftest([ADA, "__or-image-selftest"], capture_output=True, text=True, timeout=180)
     check("or-image-selftest (GPT Image 2.5 via OpenRouter)", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    # Keyless web (KEYLESS_WEB_AND_LIVE_MENU_PLAN A.10): Parallel keyless
+    # search client (transport, SSE, expiry, retries, budget, breaker,
+    # concurrency), the conversation search ID, keyless Jina (headers,
+    # typed domain block, pacing), the search-service matrix, no Serper →
+    # Parallel fallback, the shared executor configuration. Loopback fakes.
+    result = run_selftest([ADA, "__web-backend-selftest"], capture_output=True, text=True, timeout=240)
+    check("web-backend-selftest (keyless search and page reading)", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     result = run_selftest([ADA, "__media-routing-selftest"], capture_output=True, text=True, timeout=120)
     check("media-routing-selftest (OpenRouter lane voice/images/OCR routing)", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 

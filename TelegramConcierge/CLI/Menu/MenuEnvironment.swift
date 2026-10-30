@@ -77,6 +77,10 @@ struct MenuSnapshot: Equatable {
     var telegramChatId = ""
     var serperMasked: String?
     var jinaMasked: String?
+    /// Free keyless search (KEYLESS_WEB plan A.7): effective state, and why
+    /// it can't be switched on here (withdrawn / forced off by environment).
+    var freeSearchOn = true
+    var freeSearchLocked: String?
     var openAIMasked: String?
     var emailProvider = "none"
     var agentMailMasked: String?
@@ -344,6 +348,9 @@ struct MenuEnvironment {
         }
         s.serperMasked = masked(KeychainHelper.serperApiKeyKey)
         s.jinaMasked = masked(KeychainHelper.jinaApiKeyKey)
+        s.freeSearchOn = KeylessSearchSwitch.keylessEnabled(store)
+        s.freeSearchLocked = KeylessSearchSwitch.effectiveHardDisabled ? "withdrawn"
+            : (KeylessSearchSwitch.environmentForcesOff ? "environment" : nil)
         s.openAIMasked = masked(KeychainHelper.openAITranscriptionApiKeyKey)
         s.emailProvider = EmailCalendarProvider.current.rawValue
         s.agentMailMasked = masked(KeychainHelper.agentMailApiKeyKey)

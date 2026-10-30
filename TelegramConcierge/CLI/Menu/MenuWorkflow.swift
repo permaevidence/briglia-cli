@@ -412,7 +412,9 @@ final class MenuWorkflow {
 
     func isRequired(_ item: MenuItem) -> Bool {
         switch item {
-        case .email: return false
+        // Optional like email (KEYLESS_WEB plan A.8): without a key Briglia
+        // searches with Parallel and reads pages with Jina, both keyless.
+        case .email, .serper, .jina: return false
         case .openai: return openAIRequired
         default: return true
         }
@@ -476,8 +478,8 @@ final class MenuWorkflow {
         case .name: return !s.userName.isEmpty
         case .ai: return activeLane != nil || s.otherProvider != nil
         case .telegram: return s.telegramConfigured
-        case .serper: return s.serperMasked != nil
-        case .jina: return s.jinaMasked != nil
+        case .serper: return s.serperMasked != nil || s.freeSearchOn
+        case .jina: return true  // a key, or keyless Jina
         case .openai: return s.openAIMasked != nil || mediaViaOpenRouter
         case .email: return s.emailProvider == "agentmail" && s.agentMailMasked != nil
         case .computer: return (env.isLinux || s.fdaGranted) && s.keepAwakeOK
@@ -513,8 +515,9 @@ final class MenuWorkflow {
             case .signedOut: return L("Not signed in", "Accesso non fatto")
             }
         case .telegram: return s.telegramConfigured ? L("Connected", "Collegato") : L("Not connected", "Non collegato")
-        case .serper: return s.serperMasked.map { L("Key", "Chiave") + " \($0)" } ?? L("Not set", "Da impostare")
-        case .jina: return s.jinaMasked.map { L("Key", "Chiave") + " \($0)" } ?? L("Not set", "Da impostare")
+        case .serper: return s.serperMasked.map { L("Key", "Chiave") + " \($0)" }
+            ?? (s.freeSearchOn ? L("Free (Parallel)", "Gratis (Parallel)") : L("Off", "Disattivata"))
+        case .jina: return s.jinaMasked.map { L("Key", "Chiave") + " \($0)" } ?? L("Free (no key)", "Gratis (senza chiave)")
         case .openai:
             if let masked = s.openAIMasked { return L("Key", "Chiave") + " \(masked)" }
             return mediaViaOpenRouter ? L("Via OpenRouter", "Tramite OpenRouter") : L("Not set", "Non impostata")
@@ -574,6 +577,7 @@ final class MenuWorkflow {
         for (k, v) in [("serper", s.serperMasked), ("jina", s.jinaMasked), ("openai", s.openAIMasked), ("agentmail", s.agentMailMasked)] {
             keys[k] = v ?? NSNull()
         }
+        let web: [String: Any] = ["free_search": s.freeSearchOn, "free_search_locked": s.freeSearchLocked ?? NSNull()]
         var tools: [String: Any] = ["checking": toolchain == nil, "installing": busy == "tools", "label": jobLabel, "lines": Array(jobLines.suffix(60))]
         if let t = toolchain { tools["complete"] = t.complete; tools["missing"] = missingTools(t) }
         if let e = toolsError { tools["error"] = e }
@@ -581,7 +585,7 @@ final class MenuWorkflow {
             "platform": env.isLinux ? "linux" : "macos",
             "lang": lang,
             "complete": snapshot.setupComplete || (toolchain != nil && missingRequired.isEmpty),
-            "steps": steps, "name": s.userName, "chatgpt": chatgpt, "ai": aiStatus(), "telegram": tg, "keys": keys,
+            "steps": steps, "name": s.userName, "chatgpt": chatgpt, "ai": aiStatus(), "telegram": tg, "keys": keys, "web": web,
             "email": ["on": isDone(.email), "inbox": s.agentMailInbox, "tool_installed": s.agentMailCLIInstalled] as [String: Any],
             "computer": ["fda": s.fdaGranted, "terminal_app": s.terminalApp, "keep_awake_ok": s.keepAwakeOK,
                          "keep_awake_summary": env.isLinux ? s.keepAwakeSummary : L("Briglia keeps this Mac awake while it runs (a closed lid or a manual sleep still stops it).", "Briglia tiene sveglio questo Mac mentre è in funzione (chiudere il coperchio o mettere in stop lo ferma comunque)."), "can_fix_gnome": s.keepAwakeGnomeFixable,
@@ -771,6 +775,7 @@ final class MenuWorkflow {
         case "key", "key_remove":
             let kind = (body["kind"] as? String) ?? ""
             return kind == "agentmail" ? "email" : "key:\(kind)"
+        case "freesearch": return "key:serper"
         case "email_off": return "email"
         // One slot for everything that changes which AI runs or how: a newer
         // choice (another lane, a sign-out, a new key) voids an older one
@@ -826,6 +831,38 @@ final class MenuWorkflow {
 
         case "key":
             return try await saveKey(kind: str(body, "kind"), key: str(body, "key"), checkpoint: checkpoint)
+
+        case "key_remove" where ["serper", "jina"].contains(str(body, "kind")):
+            // Optional keys (KEYLESS_WEB plan A.8): removing one returns to
+            // the free keyless service.
+            let kind = str(body, "kind")
+            try checkpoint()
+            let result = await env.apply([kind: ["remove": true]], checkpoint)
+            try checkpoint()
+            await reload()
+            guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
+            if kind == "jina" {
+                return (true, L("Key removed. Briglia reads web pages with Jina without a key.", "Chiave rimossa. Briglia legge le pagine web con Jina senza chiave."))
+            }
+            return snapshot.freeSearchOn
+                ? (true, L("Key removed. Briglia searches for free with Parallel.", "Chiave rimossa. Briglia cerca gratis con Parallel."))
+                : (true, L("Key removed. Web search is off (free search is switched off).", "Chiave rimossa. La ricerca web è disattivata (la ricerca gratuita è spenta)."))
+
+        case "freesearch":
+            let on = body["on"] as? Bool ?? true
+            if on, let locked = snapshot.freeSearchLocked {
+                return (false, locked == "withdrawn"
+                    ? L("Free search isn\u{2019}t available in this version of Briglia. Add a Serper.dev key instead.", "La ricerca gratuita non è disponibile in questa versione di Briglia. Aggiungi una chiave Serper.dev.")
+                    : L("Free search is forced off by BRIGLIA_KEYLESS_SEARCH=0 in Briglia\u{2019}s environment.", "La ricerca gratuita è forzata a spenta da BRIGLIA_KEYLESS_SEARCH=0 nell\u{2019}ambiente di Briglia."))
+            }
+            try checkpoint()
+            let result = await env.apply(["web": ["keyless_search": on]], checkpoint)
+            try checkpoint()
+            await reload()
+            guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
+            return (true, on
+                ? L("Free search is on: without a Serper key, Briglia searches with Parallel.", "Ricerca gratuita attiva: senza chiave Serper, Briglia cerca con Parallel.")
+                : L("Free search is off: without a Serper key, Briglia doesn\u{2019}t search the web.", "Ricerca gratuita disattivata: senza chiave Serper, Briglia non cerca sul web."))
 
         case "key_remove":
             guard str(body, "kind") == "openai" else { return (false, L("Only the optional OpenAI key can be removed.", "Si può rimuovere solo la chiave OpenAI, che è facoltativa.")) }

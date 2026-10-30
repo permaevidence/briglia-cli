@@ -282,6 +282,9 @@ extension ConversationManager {
         case "/websubagent":
             await handleWebSubagentCommand(argument: commandArgument(from: text))
             return true
+        case "/freesearch":
+            await handleFreeSearchCommand(argument: commandArgument(from: text))
+            return true
         // BGPRUNE{ A-CMD
         case "/prunebackground":
             await backgroundPruneCommand(argument: commandArgument(from: text))

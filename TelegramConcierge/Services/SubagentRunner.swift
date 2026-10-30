@@ -222,7 +222,9 @@ actor SubagentRunner {
             // The Web researcher owns the pipeline's tools directly and
             // nothing else (WEB_SUBAGENT_PLAN §4.1): no bash, no files, no
             // MCP, no Agent. `web_fetch` with `refresh`.
-            return [AvailableTools.webQuery, AvailableTools.webExtract, AvailableTools.webFetchWithRefresh]
+            // `web_query` describes what the current search service returns
+            // (D14): Serper's description byte for byte with a Serper key.
+            return [AvailableTools.webQuery(for: KeylessSearchSwitch.current()), AvailableTools.webExtract, AvailableTools.webFetchWithRefresh]
         }
         var inventory = parentTools
         // Switch on with web search available: the legacy research tools

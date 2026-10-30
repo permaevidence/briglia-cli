@@ -87,10 +87,10 @@ extension ConversationManager {
 
         await openRouterService.configure(apiKey: apiKey)
         
-        // Configure tool executor if web search keys are available
-        if !serperKey.isEmpty {
-            await toolExecutor.configure(openRouterKey: apiKey, serperKey: serperKey, jinaKey: jinaKey)
-        }
+        // Always configure the tool executor: without a Serper key the web
+        // tools still work (free search, keyless page reading — KEYLESS_WEB
+        // plan A.9). With keys the values are exactly today's.
+        await toolExecutor.configure(openRouterKey: apiKey, serperKey: serperKey, jinaKey: jinaKey)
 
         // Explicit archive reads use THIS archive service (live index,
         // retained children) — background archiving §4.4.
