@@ -22,7 +22,7 @@ extension WebSubagentSelftest {
         func messagesJSON(_ request: WebFixtureServer.Request) -> String { sortedJSON(body(request)["messages"] ?? []) }
         func agentCall(_ arguments: [String: Any]) -> (String, String) { ("Agent", sortedJSON(arguments)) }
 
-        print("23. Keyless Web researcher (free search, D14)")
+        print("30. Keyless Web researcher (free search, D14)")
         // Fake Parallel on the Serper/reader fixture, under /mcp.
         let fake = FakeParallel()
         let baseRoute = serverS.route
@@ -73,28 +73,31 @@ extension WebSubagentSelftest {
         let sessionId = (try? ParallelSessionStore.idForSearch()) ?? ""
         let parallelCalls = fake.requests.filter { $0.method == "tools/call" }
         let sentSession = parallelCalls.first.flatMap { (($0.body["params"] as? [String: Any])?["arguments"] as? [String: Any])?["session_id"] as? String }
-        check("23.1 the actual keyless Web subagent request: tools identical to the keyed request except the web_query description (D14); keyed request carries the Serper description",
+        check("30.1 the actual keyless Web subagent request: tools identical to the keyed request except the web_query description (D14); keyed request carries the Serper description",
               keylessTools.contains("title, excerpt, link") && keylessTools.replacingOccurrences(of: keylessDesc, with: keyedDesc) == keyedTools && keyedTools.contains("answer boxes and knowledge panels")
               && keylessTools != keyedTools, String(keylessTools.prefix(300)))
-        check("23.2 the keyless request's messages (system prompt, task) are byte-identical to the keyed request's",
+        check("30.2 the keyless request's messages (system prompt, task) are byte-identical to the keyed request's",
               keylessRequests.first.map(messagesJSON) == keyedRequests.first.map(messagesJSON) && keylessRequests.count == keyedRequests.count)
-        check("23.3 the researcher's search went to Parallel (one tools/call per query) under the conversation search ID; no Serper call; the run finished with the same answer",
+        check("30.3 the researcher's search went to Parallel (one tools/call per query) under the conversation search ID; no Serper call; the run finished with the same answer",
               keylessRun.error == nil && keyedRun.error == nil && parallelCalls.count == 1 && sentSession == sessionId && !sessionId.isEmpty
               && keylessRun.finalMessage == keyedRun.finalMessage, keylessRun.error ?? "\(parallelCalls.count) calls, session \(sentSession ?? "-")")
         let secondRoundTool = keylessRequests.count > 1 ? (((body(keylessRequests[1])["messages"] as? [[String: Any]]) ?? []).last { $0["role"] as? String == "tool" }?["content"] as? String ?? "") : ""
-        check("23.4 the Parallel results reach the researcher's next round as an ordinary web_query result",
-              secondRoundTool.contains("https://example.test/kappa/0") && secondRoundTool.contains("first excerpt 0"), String(secondRoundTool.prefix(300)))
+        check("30.4 the Parallel results reach the researcher's next round as an ordinary web_query result",
+              secondRoundTool.contains("Result 0 for kappa") && secondRoundTool.contains("first excerpt 0 … second excerpt 0"), String(secondRoundTool.prefix(300)))
 
         // Resumed keyless session: the same variant, the same search ID.
         let (resumed, resumedRequests) = await runWeb(serperKey: "", sessionId: keylessRun.sessionId, prompt: "And kappa again?")
         let resumedCalls = fake.requests.filter { $0.method == "tools/call" }
         let resumedSessions = Set(resumedCalls.compactMap { (($0.body["params"] as? [String: Any])?["arguments"] as? [String: Any])?["session_id"] as? String })
-        check("23.5 a resumed Web session gets the keyless web_query again and searches under the same conversation search ID",
+        check("30.5 a resumed Web session gets the keyless web_query again and searches under the same conversation search ID",
               resumed.error == nil && resumed.sessionId == keylessRun.sessionId && resumedRequests.allSatisfy { toolsJSON($0).contains("title, excerpt, link") }
               && resumedCalls.count == 2 && resumedSessions == [sessionId], resumed.error ?? "\(resumedSessions)")
 
         // Nested delegation from a depth-1 general-purpose subagent.
+        // A fresh fake forgets its sessions: reset the client's transport too
+        // (otherwise its first call is a — correct — expiry recovery).
         serverA.clear(); serverB.clear(); fake.reset()
+        await ParallelSearchClient.shared.installForTesting(send: nil)
         serverA.script([WebFixtureServer.chatBody("delegating", calls: [agentCall(["subagent_type": "Web", "description": "nested kappa", "prompt": "What is kappa?", "deliverable": "short"])]),
                         WebFixtureServer.chatBody("Parent done.")])
         serverB.script(script)
@@ -108,9 +111,9 @@ extension WebSubagentSelftest {
         let nestedRequests = agentRequests(serverB)
         let nestedCalls = fake.requests.filter { $0.method == "tools/call" }
         let nestedSession = nestedCalls.first.flatMap { (($0.body["params"] as? [String: Any])?["arguments"] as? [String: Any])?["session_id"] as? String }
-        check("23.6 a nested Web delegation (depth 2, no Serper key) gets the keyless web_query and searches Parallel under the same conversation ID",
+        check("30.6 a nested Web delegation (depth 2, no Serper key) gets the keyless web_query and searches Parallel under the same conversation ID",
               parent.error == nil && !nestedRequests.isEmpty && nestedRequests.allSatisfy { toolsJSON($0).contains("title, excerpt, link") }
-              && nestedCalls.count == 1 && nestedSession == sessionId, parent.error ?? "\(nestedRequests.count) requests, \(nestedCalls.count) calls")
+              && nestedCalls.count == 1 && nestedSession == sessionId, parent.error ?? "\(nestedRequests.count) requests, \(nestedCalls.count) calls: \(nestedCalls.map { (($0.body["params"] as? [String: Any])?["arguments"] as? [String: Any])?["objective"] as? String ?? "?" }) sessions \(Set(nestedCalls.compactMap { (($0.body["params"] as? [String: Any])?["arguments"] as? [String: Any])?["session_id"] as? String }))")
         _ = state
     }
 }

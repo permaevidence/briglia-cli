@@ -1118,6 +1118,11 @@ extension ConversationManager {
         let webSnapshot = KeychainHelper.loadSnapshot()
         if (webSnapshot[KeychainHelper.serperApiKeyKey] ?? "").isEmpty || (webSnapshot[KeychainHelper.jinaApiKeyKey] ?? "").isEmpty {
             contextLine += "\nWeb: " + KeylessSearchSwitch.summary(webSnapshot)
+            if KeylessSearchSwitch.resolve(snapshot: webSnapshot) == .parallelKeyless {
+                let breaker = await ParallelSearchClient.shared.breakerSummary()
+                if breaker != "ok" { contextLine += " (free search \(breaker))" }
+                if case .damaged = ParallelSessionStore.state() { contextLine += " ⚠️ free-search session file damaged: /freesearch reset" }
+            }
         }
         if let notice = pendingHostNotice {
             contextLine += "\n" + notice

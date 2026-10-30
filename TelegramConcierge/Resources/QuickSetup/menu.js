@@ -121,10 +121,15 @@
     render();
     window.scrollTo(0, 0);
   }
+  // Web search and page reading count as done without a key (free keyless
+  // services, KEYLESS_WEB plan A.8), but the guided setup still stops there
+  // so the choice is seen: Continue, or add a key. They never make a first
+  // run look like a returning one.
+  function freeByDefault(id) { return (id === 'serper' || id === 'jina') && !(S && S.keys && S.keys[id]); }
   function next(from) {
     if (!guided) { edit = null; view = { kind: 'dashboard' }; render(); return; }
     var i = ORDER.indexOf(from);
-    for (var k = i + 1; k < ORDER.length; k++) { if (!isDone(ORDER[k])) { openStep(ORDER[k]); return; } }
+    for (var k = i + 1; k < ORDER.length; k++) { if (!isDone(ORDER[k]) || freeByDefault(ORDER[k])) { openStep(ORDER[k]); return; } }
     var missing = (S.steps || []).filter(function (s) { return s.required && !s.done; });
     if (missing.length === 0) { view = { kind: 'finish' }; }
     else { openStep(missing[0].id); return; }
@@ -232,7 +237,7 @@
   }
 
   function welcomeView() {
-    var fresh = !(S.steps || []).some(function (s) { return s.done && ['computer', 'tools'].indexOf(s.id) < 0; });
+    var fresh = !(S.steps || []).some(function (s) { return s.done && ['computer', 'tools'].indexOf(s.id) < 0 && !freeByDefault(s.id); });
     if (fresh && !langPicked) {
       var pick = function (l) { return function () { if (l === lang()) { langPicked = true; render(); } else setLang(l); }; };
       return [
@@ -247,7 +252,7 @@
       ];
     }
     if (fresh && !lanePicked && !(S.ai && (S.ai.ready || S.ai.planned))) return lanePickView();
-    var back = (S.steps || []).some(function (s) { return s.done && ['computer', 'tools'].indexOf(s.id) < 0; });
+    var back = (S.steps || []).some(function (s) { return s.done && ['computer', 'tools'].indexOf(s.id) < 0 && !freeByDefault(s.id); });
     var left = S.steps.filter(function (s) { return s.required && !s.done; }).length;
     var ln = S.ai ? S.ai.lane : 'chatgpt';
     return [

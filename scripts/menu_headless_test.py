@@ -186,7 +186,10 @@ def main():
             check("asset %s is served" % asset, s == 200)
         st = cl.status()
         check("one assistant, switch off: no Assistants section in the page state (unchanged page)", "assistants" not in st and "menu_child" not in st)
-        check("the page state lists the 9 steps, nothing done", len(st.get("steps", [])) == 9 and not any(x["done"] for x in st["steps"] if x["id"] not in ("computer", "tools")))
+        check("the page state lists the 9 steps, nothing done (web search and page reading: optional, done by the free services)",
+              len(st.get("steps", [])) == 9 and not any(x["done"] for x in st["steps"] if x["id"] not in ("computer", "tools", "serper", "jina"))
+              and all(x["done"] and not x["required"] for x in st["steps"] if x["id"] in ("serper", "jina"))
+              and st.get("web", {}).get("free_search") is True)
         s, _, _ = cl.raw("POST", "/api/menu", {"action": "name", "name": "Evil"}, origin=False)
         check("a POST without the page's origin is refused", s == 403)
 
