@@ -58,6 +58,9 @@ struct SnapshotOwnerSelftest: AsyncParsableCommand {
             try? FileManager.default.removeItem(at: root)
             SnapshotOwnerInputs.defaults.removePersistentDomain(forName: "dev.briglia.snapshot-owner-selftest")
         }
+        // Background pruning explicitly OFF (0.2.66 default ON): requests stay
+        // byte-identical to the pinned release. A literal: older trees lack the constant.
+        SnapshotOwnerInputs.defaults.set(false, forKey: "ada.pruneBackground")
         let server = try CaptureServer(port: 49181); defer { server.stop() }
         let base = "http://127.0.0.1:\(server.port)/v1"
         let values = [KeychainHelper.llmProviderKey: LLMProvider.openAICompatible.rawValue,

@@ -32,11 +32,22 @@ extension ConversationManager {
     nonisolated(unsafe) static var bgPruneWriteSetViolationForTesting: Bool? = nil
 
     var backgroundPruneEngaged: Bool {
-        backgroundPruneJob != nil || switchDefaults.bool(forKey: Self.backgroundPruneDefaultsKey)
+        backgroundPruneJob != nil || backgroundPruneSwitchOn
     }
 
     var backgroundPruneSwitchOn: Bool {
-        switchDefaults.bool(forKey: Self.backgroundPruneDefaultsKey)
+        Self.backgroundPruneSetting(in: switchDefaults)
+    }
+
+    /// Default for installs that never set the switch (0.2.66: ON). The
+    /// key absent means "never set"; any stored value, including an
+    /// explicit `/prunebackground off`, is read exactly as before.
+    static let backgroundPruneDefaultOn = true
+
+    static func backgroundPruneSetting(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: backgroundPruneDefaultsKey) == nil
+            ? backgroundPruneDefaultOn
+            : defaults.bool(forKey: backgroundPruneDefaultsKey)
     }
 
     private func bgPruneLog(_ event: String, _ detail: String = "") {
@@ -1315,10 +1326,10 @@ extension ConversationManager {
         let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if normalized.isEmpty {
             try? await sendText("""
-                Background pruning: \(enabled ? "ON" : "OFF") (default: off).
-                Off: when the context reaches its maximum, I stop, summarize and prune old tool output, then continue (today's behaviour).
+                Background pruning: \(enabled ? "ON" : "OFF") (default: on).
+                Off: when the context reaches its maximum, I stop, summarize and prune old tool output, then continue (the behaviour before 0.2.66).
                 On: the summary is prepared in the background while I keep working with the unchanged conversation; it is applied at the next step. If the context reaches the ceiling (maximum + 100k tokens) before it is ready, I wait for it. Model context windows are not known yet, so the ceiling is not lowered for smaller models: if a request is rejected as too long, I prune at once and resend it once. Requests between the maximum and the ceiling carry more input and can cost more (some providers charge a long-context premium). Turning it off cancels a summary being prepared.
-                Only enable with a model whose context window is at least threshold + 100k (350k by default).
+                Best with a model whose context window is at least threshold + 100k (350k by default); with a smaller model, turn it off.
                 Switch with /prunebackground on or /prunebackground off.
                 """)
             return
@@ -1492,6 +1503,8 @@ extension ConversationManager {
     var bgPruneTestMaintenanceKinds: [MaintenanceActivity.Kind] {
         maintenanceActivities.map(\.kind)
     }
+    var bgPruneTestSwitchOn: Bool { backgroundPruneSwitchOn }
+    var bgPruneTestEngaged: Bool { backgroundPruneEngaged }
     var bgPruneTestObservedBounds: [String: Int] {
         backgroundPruneObservedBounds
     }

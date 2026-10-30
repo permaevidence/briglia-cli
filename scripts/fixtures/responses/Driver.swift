@@ -116,6 +116,9 @@ struct ResponsesLifecycleSelftest: AsyncParsableCommand {
         P2Life.defaults.removePersistentDomain(forName: "dev.briglia.p2.lifecycle")
         defer { P2Life.defaults.removePersistentDomain(forName: "dev.briglia.p2.lifecycle") }
         SetupAPICore.defaults = P2Life.defaults
+        // Background pruning explicitly OFF (0.2.66 default ON): requests stay
+        // byte-identical to the pinned release. A literal: older trees lack the constant.
+        P2Life.defaults.set(false, forKey: "ada.pruneBackground")
         FileDescriptionsStore._testStoreURL = root.appendingPathComponent("descriptions.json")
         let server = try CaptureServer(); defer { server.stop() }
         var key = "synthetic-p2-key", model = "fixture-model", base = "http://127.0.0.1:\(server.port)/v1"

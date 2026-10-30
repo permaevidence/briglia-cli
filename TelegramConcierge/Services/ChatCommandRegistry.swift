@@ -52,7 +52,7 @@ enum ChatCommandRegistry {
         ChatCommand(name: "archiveinline", description: "Wait for memory archiving before replying (on), or archive in the background (off, default)",
                     usage: "[on|off]", inMenu: false, category: "System"),
                     // BGPRUNE{ A-REG
-                    ChatCommand(name: "prunebackground", description: "Prune old tool output in the background while I keep working (on), or wait for it (off, default). Only enable with a model whose context window is at least threshold + 100k (350k by default)",
+                    ChatCommand(name: "prunebackground", description: "Prune old tool output in the background while I keep working (on, default), or wait for it (off). Best with a model whose context window is at least threshold + 100k (350k by default); turn it off for smaller models",
                                 usage: "[on|off]", inMenu: false, category: "System"),
                     // }BGPRUNE
         ChatCommand(name: "keepsummaries", description: "Keep the newest N past-turn summaries in full (1–50, or all); default 3. Send /keepsummaries 3 to return to it. Applies from the next request. More summaries = larger context: each is ~1.3–2.7k tokens (10 ≈ 15–25k, 20 ≈ 30–50k)",

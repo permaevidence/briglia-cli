@@ -83,6 +83,9 @@ struct ChatWireSelftest: AsyncParsableCommand {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         UserDefaults.standard.setVolatileDomain([
             "ada.applyPatchEnabled": false, "ada.shortcutsEnabled": false,
+            // Background pruning explicitly OFF (0.2.66 default ON); a literal
+            // because the pinned release tree has no such constant.
+            "ada.pruneBackground": false,
             KeychainHelper.serviceKeysMetadataDefaultsKey: Data("[]".utf8)
         ], forName: UserDefaults.argumentDomain)
         defer { try? FileManager.default.removeItem(at: root) }

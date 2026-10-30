@@ -142,6 +142,9 @@ struct ActiveCompactionOwnerSelftest: AsyncParsableCommand {
         CompactionTestInputs.protectNewestTurn = protectNewestTurn
         CompactionTestInputs.disableCompaction = disableCompaction; CompactionTestInputs.omitCarried = omitCarried
         defer { CompactionTestInputs.defaults.removePersistentDomain(forName: "dev.briglia.active-compaction-test") }
+        // Background pruning explicitly OFF (0.2.66 default ON): requests stay
+        // byte-identical to the pinned release. A literal: older trees lack the constant.
+        CompactionTestInputs.defaults.set(false, forKey: "ada.pruneBackground")
         let server = try CaptureServer(); defer { server.stop() }
         try KeychainHelper.saveBatch([KeychainHelper.maxContextTokensKey: "250000", KeychainHelper.targetContextTokensKey: "70000",
             KeychainHelper.archiveChunkSizeKey: "1000000", KeychainHelper.emailCalendarProviderKey: "none"].mapValues { Optional($0) })

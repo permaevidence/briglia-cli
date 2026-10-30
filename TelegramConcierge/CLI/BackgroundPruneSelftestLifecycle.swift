@@ -27,10 +27,10 @@ enum BackgroundPruneSelftestLifecycle {
     }
 
     @MainActor static func command(_ h: BackgroundPruneSelftestHarness) async {
-        let manager = await h.freshManager(history: h.prunableHistory(pairs: 2, size: 200), switchOn: nil)
+        let manager = await h.freshManager(history: h.prunableHistory(pairs: 2, size: 200), switchOn: false)
         let help = await manager.bgPruneTestCommand("/prunebackground")
-        h.check("§13 /prunebackground shows the state, default off, and the OFF note",
-                help.contains("Background pruning: OFF (default: off)") && help.contains("Turning it off cancels a summary being prepared."), help)
+        h.check("§13 /prunebackground shows the state, default on, and the OFF note",
+                help.contains("Background pruning: OFF (default: on)") && help.contains("Turning it off cancels a summary being prepared."), help)
         let on = await manager.bgPruneTestCommand("/prunebackground on")
         h.check("D1 /prunebackground on persists ON", on.contains("Background pruning: ON")
                 && UserDefaults.standard.bool(forKey: ConversationManager.backgroundPruneDefaultsKey), on)

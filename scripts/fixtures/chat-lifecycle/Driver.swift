@@ -95,6 +95,9 @@ struct ChatLifecycleSelftest: AsyncParsableCommand {
         ]
         for (key, value) in settings { try KeychainHelper.save(key: key, value: value) }
         P0Life.defaults.set(P0Life.instant, forKey: "system_prompt_cache_epoch")
+        // Background pruning explicitly OFF (0.2.66 default ON): requests stay
+        // byte-identical to the pinned release. A literal: older trees lack the constant.
+        P0Life.defaults.set(false, forKey: "ada.pruneBackground")
         let salt = SessionAffinity.State(version: 1, installSalt: Data((0..<32).map(UInt8.init)).base64EncodedString(), mainConversationId: "33333333-3333-4333-8333-333333333333")
         try PrivateStorage.ensureDirectory(StoragePaths.dataRoot)
         try PrivateStorage.writeAtomically(JSONEncoder().encode(salt), to: SessionAffinity.fileURL)

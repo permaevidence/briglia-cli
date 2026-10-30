@@ -65,7 +65,7 @@ enum BackgroundPruneSelftestUnits {
         }
 
         // E-group: the real chat transport's 400 with a nested OpenRouter body.
-        let manager = await h.freshManager(history: h.prunableHistory(pairs: 2, size: 200), switchOn: nil)
+        let manager = await h.freshManager(history: h.prunableHistory(pairs: 2, size: 200), switchOn: false)
         h.server.script(["{\"error\":{\"message\":\"Input is too long\",\"code\":400,\"metadata\":{\"raw\":\"context_length_exceeded\"}}}"], statuses: [400])
         let error = await manager.bgPruneTestRawSendError()
         h.check("E real chat transport: HTTP 400 nested body → eligible (prefix pinned)",

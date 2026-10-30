@@ -99,7 +99,7 @@ enum BackgroundPruneSelftestApply {
             return h.encoded(kept)
         }
         let frozenIds = Set(history.map(\.id))
-        let off = await h.freshManager(history: history, switchOn: nil)
+        let off = await h.freshManager(history: history, switchOn: false)
         off.bgPruneTestSetLastPromptTokens(60_000)
         _ = await h.turn(off, "equivalence turn")
         let offView = normalized(off._testMessages, ids: frozenIds)
