@@ -55,7 +55,7 @@ struct AdaCLI: AsyncParsableCommand {
                       MigrationRunCommand.self, MigrationSelftest.self,
                       Migrate.self, MigrateProbe.self, MigrateGate.self,
                       AppChatSocketSelftest.self,
-                      CommandMenuSelftest.self, TelegramMenuSelftest.self, ImageToolSelftest.self, MediaRoutingSelftest.self, BotSwitchSelftest.self, TelegramTransportSelftest.self, ParkedOutboundSelftest.self,
+                      CommandMenuSelftest.self, TelegramMenuSelftest.self, ImageToolSelftest.self, MediaRoutingSelftest.self, OpenRouterImageSelftest.self, BotSwitchSelftest.self, TelegramTransportSelftest.self, ParkedOutboundSelftest.self,
                       EmailCalendarSelftest.self, AgentMailKeyCommand.self, AgentMailExecCommand.self, AgentMailCommand.self, PythonExecCommand.self, PythonEnvCommand.self,
                       WebLiveTest.self, QuickSetupSelftest.self, MenuSelftest.self,
                       StageMarkersCommand.self, StageMarkersSelftest.self, SecurityStatusSelftest.self,

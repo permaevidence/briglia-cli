@@ -177,7 +177,7 @@ struct Doctor: AsyncParsableCommand {
         }
         switch MediaRouting.voiceAndImagesVia(stored: mediaSnapshot) {
         case "openrouter":
-            note("voice & images: via OpenRouter (\(OpenAITranscriptionService.Endpoint.openRouter.textModel); images \(OpenRouterImageService.bestModel), fast \(OpenRouterImageService.fastModel))")
+            note("voice & images: via OpenRouter (\(OpenAITranscriptionService.Endpoint.openRouter.textModel); images GPT Image 2.5 \(OpenRouterImageService.fastModel), precise \(OpenRouterImageService.preciseModel))")
         case "openai":
             note("voice & images: via OpenAI (image backend: \(MediaRouting.imageBackend(stored: mediaSnapshot).rawValue))")
         default:

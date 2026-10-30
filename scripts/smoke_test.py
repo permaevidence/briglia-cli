@@ -954,6 +954,17 @@ def main():
     result = run_selftest([ADA, "__image-tool-selftest"], capture_output=True, text=True, timeout=120)
     check("Image tool models, options, request bodies and spend", result.returncode == 0, result.stdout + result.stderr)
 
+    # GPT Image 2.5 through OpenRouter's Image API (OpenRouter lane without
+    # an OpenAI key): options/size, bodies, references, BYOK spend, every
+    # error class (no fallback), the size-passthrough guard, unknown-cost
+    # incidents for timeouts/cancellation, the spend gate, the executor.
+    # Loopback fake server, XDG-isolated.
+    result = run_selftest([ADA, "__or-image-selftest"], capture_output=True, text=True, timeout=180)
+    check("or-image-selftest (GPT Image 2.5 via OpenRouter)", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
+    result = run_selftest([ADA, "__media-routing-selftest"], capture_output=True, text=True, timeout=120)
+    check("media-routing-selftest (OpenRouter lane voice/images/OCR routing)", result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     result = run_selftest([ADA, "__telegram-menu-selftest"], capture_output=True, text=True, timeout=60)
     check("telegram-menu-selftest (inline-keyboard menus for /provider, /model, /effort)", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])

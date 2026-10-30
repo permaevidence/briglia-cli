@@ -610,11 +610,19 @@ enum ToolChargeLedger {
     // process becomes an unknown-amount incident; until that incident is
     // saved, the in-flight record (disk) plus a memory entry keep the
     // obligation, and the snapshot reports it as an open unknown.
+    // OpenRouter Image API requests (OpenRouterImageService, stage
+    // `image-openrouter`) use the same records and rules.
     // A cost found later is kept as a memory-held pending copy and on the
     // incident (`knownAmountUSD`) until the ledger durably holds it: known
     // amounts are never lost and survive /spend accept-unknown.
 
     static let cutRequestDetailPrefix = "web extraction request"
+    /// OpenRouter Image API requests (stage `image-…`) share the same
+    /// write-ahead record and incident rules; only their wording differs.
+    static let imageRequestDetailPrefix = "image generation request"
+    static func detailPrefix(stage: String) -> String {
+        stage.hasPrefix("image") ? imageRequestDetailPrefix : cutRequestDetailPrefix
+    }
     /// Kind of a cut request's charge once its cost is known.
     static let cutRequestChargeKind = "web-cut"
     static var inFlightURL: URL { directory.appendingPathComponent("web-requests-in-flight.json") }
@@ -716,7 +724,7 @@ enum ToolChargeLedger {
         try mutateIncidents("incident-open") { incidents in
             guard !incidents.contains(where: { $0.id == id }) else { return }
             incidents.append(cutIncident(id: id, entry,
-                                         detail: "\(cutRequestDetailPrefix) \(entry.reason) (stage \(entry.stage), host \(entry.provider ?? "unnamed"), generation \(entry.generationId ?? "unknown"))"))
+                                         detail: "\(detailPrefix(stage: entry.stage)) \(entry.reason) (stage \(entry.stage), host \(entry.provider ?? "unnamed"), generation \(entry.generationId ?? "unknown"))"))
         }
     }
 
@@ -767,7 +775,7 @@ enum ToolChargeLedger {
         }
         for (chargeId, entry) in abandonedUnsaved {
             unsaved.append(cutIncident(id: incidentId(chargeId), entry,
-                                       detail: "\(cutRequestDetailPrefix) \(entry.reason) — not saved yet (stage \(entry.stage))"))
+                                       detail: "\(detailPrefix(stage: entry.stage)) \(entry.reason) — not saved yet (stage \(entry.stage))"))
         }
         return (unsaved, problems)
     }
@@ -1234,7 +1242,8 @@ enum ToolChargeLedger {
         var when = incident.periods.isEmpty ? "current totals" : incident.periods.joined(separator: ", ")
         if let through = incident.throughDay, let from = incident.periods.min() { when = "\(from) to \(through)" }
         switch incident.kind {
-        case .unknownAmount where incident.detail?.hasPrefix(cutRequestDetailPrefix) == true:
+        case .unknownAmount where incident.detail?.hasPrefix(cutRequestDetailPrefix) == true
+                               || incident.detail?.hasPrefix(imageRequestDetailPrefix) == true:
             return "unknown cost of a \(incident.detail ?? cutRequestDetailPrefix) (\(when))"
         case .unknownAmount: return "unknown amount for background job \(incident.id.dropFirst("unknown-amount:".count).prefix(8)) (\(when))"
         case .memoryOnly: return "charge lost in a restart for job \(incident.id.dropFirst("memory-only:".count).prefix(8)) (\(when))"

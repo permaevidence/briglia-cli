@@ -580,7 +580,7 @@ struct SetupWizard {
             With OpenRouter as your main provider, your OpenRouter key also covers:
               • web page reading for research (GPT-6 Luna via OpenRouter)
               • voice message transcription (gpt-transcribe via OpenRouter)
-              • image generation (Google Gemini image models via OpenRouter)
+              • image generation (GPT Image 2.5 via OpenRouter)
               • OCR of scanned documents (GPT-6 Luna via OpenRouter)
             An OpenAI API key is optional: if you add one, Briglia uses OpenAI for these instead.
             """)

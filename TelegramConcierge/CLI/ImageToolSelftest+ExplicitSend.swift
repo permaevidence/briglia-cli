@@ -59,7 +59,7 @@ extension ImageToolSelftest {
 
         // Real executor through the OpenRouter-lane seam (recording transport).
         let png = Data(base64Encoded: MediaRoutingSelftest.pngBase64)!
-        let ok = #"{"choices":[{"message":{"content":"","images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,\#(MediaRoutingSelftest.pngBase64)"}}]}}],"usage":{"cost":0.01}}"#
+        let ok = #"{"data":[{"b64_json":"\#(MediaRoutingSelftest.pngBase64)","media_type":"image/png"}],"usage":{"cost":0.01}}"#
         let recorder = MediaRoutingSelftest.Recorder { _ in (200, Data(ok.utf8)) }
         ToolExecutor.openRouterImageServiceOverrideForTesting = OpenRouterImageService(transport: recorder.transport)
         defer { ToolExecutor.openRouterImageServiceOverrideForTesting = nil }

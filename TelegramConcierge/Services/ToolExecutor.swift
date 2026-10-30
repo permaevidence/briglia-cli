@@ -3293,7 +3293,7 @@ extension ToolExecutor {
         )
         // Same decision as the schema (AvailableTools.generateImage): an
         // OpenAI image key keeps today's path; the OpenRouter lane without
-        // one renders through OpenRouter (Gemini image models).
+        // one renders through OpenRouter's Image API (GPT Image 2.5).
         let backend = MediaRouting.imageBackend
         let requestedSize = args.size?.trimmingCharacters(in: .whitespacesAndNewlines)
         
@@ -3319,13 +3319,15 @@ extension ToolExecutor {
                     sourceImageData: sourceImageData,
                     sourceMimeType: sourceMimeType,
                     engine: args.engine,
-                    aspectRatio: args.aspectRatio,
-                    size: requestedSize
+                    quality: args.quality,
+                    background: args.background,
+                    size: requestedSize,
+                    aspectRatio: args.aspectRatio
                 )
                 imageResult = (orResult.data, orResult.mimeType, orResult.spendUSD)
                 imageMetadata = orResult.toolResultMetadata()
-                resolvedImageSize = orResult.size ?? "default"
-                providerName = "OpenRouter (Gemini)"
+                resolvedImageSize = orResult.options.size ?? orResult.options.aspectRatio ?? "default"
+                providerName = "OpenRouter (GPT Image 2.5)"
 
             case .gemini:
                 guard let geminiApiKey = KeychainHelper.load(key: KeychainHelper.geminiApiKeyKey),
@@ -3471,6 +3473,12 @@ extension ToolExecutor {
             return ToolResultMessage(toolCallId: call.id, content: jsonObjectString(["error": message]))
         } catch OpenRouterImageService.ServiceError.invalidOptions(let message) {
             return ToolResultMessage(toolCallId: call.id, content: jsonObjectString(["error": message]))
+        } catch let error as OpenRouterImageService.ServiceError {
+            // A reply that carried a cost but no image still counts its spend.
+            await ToolServiceHealth.shared.recordFailure(.imageGeneration, error: error.localizedDescription)
+            return ToolResultMessage(toolCallId: call.id,
+                                     content: jsonObjectString(["error": "Image generation failed: \(error.localizedDescription)"]),
+                                     spendUSD: error.spendUSD)
         } catch {
             await ToolServiceHealth.shared.recordFailure(.imageGeneration, error: error.localizedDescription)
             return ToolResultMessage(toolCallId: call.id, content: jsonObjectString(["error": "Image generation failed: \(error.localizedDescription)"]))
@@ -4138,7 +4146,8 @@ struct GenerateImageArguments: Codable {
     let outputCompression: Int?
     let background: String?
     let moderation: String?
-    /// OpenRouter (Gemini) schema only.
+    /// Not in any current schema: carried over from the retired Gemini
+    /// OpenRouter schema; the OpenRouter path sends it only without a size.
     let aspectRatio: String?
     
     enum CodingKeys: String, CodingKey {

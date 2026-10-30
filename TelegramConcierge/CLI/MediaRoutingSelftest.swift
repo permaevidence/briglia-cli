@@ -30,8 +30,8 @@ struct MediaRoutingSelftest: AsyncParsableCommand {
             let srt = try await OpenAITranscriptionService().transcribeAudioFileSRT(url: url, apiKey: key, endpoint: .openRouter)
             print("live srt:\n\(srt)")
             let image = try await OpenRouterImageService().generateImage(apiKey: key, prompt: "A tiny green leaf icon on white, flat.",
-                sourceImageData: nil, sourceMimeType: nil, engine: "fast", aspectRatio: "1:1", size: nil)
-            print("live image: \(image.mimeType) \(image.data.count) bytes, model \(image.model), spend \(image.spendUSD.map { String($0) } ?? "nil")")
+                sourceImageData: nil, sourceMimeType: nil, engine: "fast", quality: "low", background: nil, size: "1024x1024")
+            print("live image: \(image.mimeType) \(image.data.count) bytes, model \(image.options.model), spend \(image.spendUSD.map { String($0) } ?? "nil")")
             return
         }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("briglia-media-routing-\(UUID())")
@@ -157,20 +157,18 @@ struct MediaRoutingSelftest: AsyncParsableCommand {
         try set(orLane)
         let tool = AvailableTools.generateImage.function
         let props = tool.parameters.properties
-        c.check("schema: OpenRouter lane without OpenAI → Gemini-via-OpenRouter image schema, same tool name",
-                tool.name == "generate_image" && tool.description.contains("through OpenRouter") && tool.parameters.required == ["prompt"])
-        c.check("schema: OpenRouter image parameters are the Gemini ones",
-                Set(props.keys) == ["prompt", "source_image", "source_image_role", "engine", "aspect_ratio", "size"]
-                && props["engine"]?.enumValues == ["best", "fast"]
-                && props["aspect_ratio"]?.enumValues == OpenRouterImageService.aspectRatios
-                && props["size"]?.enumValues == ["1K", "2K", "4K"])
-        c.check("schema: no GPT Image options leak into the OpenRouter schema",
-                props["quality"] == nil && props["background"] == nil && props["output_format"] == nil && props["moderation"] == nil)
+        c.check("schema: OpenRouter lane without OpenAI → GPT-Image-2.5-via-OpenRouter schema, same tool name",
+                tool.name == "generate_image" && tool.description.contains("GPT Image 2.5 through OpenRouter") && tool.parameters.required == ["prompt"])
+        c.check("schema: OpenRouter image parameters are the OpenAI-style subset the Image API honours",
+                Set(props.keys) == ["prompt", "source_image", "source_image_role", "engine", "size", "quality", "background"]
+                && props["engine"]?.enumValues == ["fast", "precise"])
+        c.check("schema: no unsupported GPT Image options leak into the OpenRouter schema",
+                props["output_format"] == nil && props["moderation"] == nil && props["output_compression"] == nil && props["aspect_ratio"] == nil)
         c.check("schema: transcribe_media says OpenRouter on the lane, OpenAI otherwise",
                 AvailableTools.transcribeMedia.function.description.contains("through OpenRouter")
                 && !AvailableTools.transcribeMedia.function.description.contains("requires the OpenAI key"))
         c.check("schema: the OpenRouter tool is in the main inventory",
-                AvailableTools.coreTools(webSearchAvailable: false).contains { $0.function.name == "generate_image" && $0.function.description.contains("through OpenRouter") })
+                AvailableTools.coreTools(webSearchAvailable: false).contains { $0.function.name == "generate_image" && $0.function.description.contains("GPT Image 2.5 through OpenRouter") })
         let args = try JSONDecoder().decode(GenerateImageArguments.self, from: Data(#"{"prompt":"p","engine":"fast","aspect_ratio":"16:9","size":"2K"}"#.utf8))
         c.check("schema: tool arguments decode aspect_ratio", args.aspectRatio == "16:9" && args.engine == "fast" && args.size == "2K")
     }
@@ -275,75 +273,26 @@ struct MediaRoutingSelftest: AsyncParsableCommand {
 
     static let pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6z8AAAAASUVORK5CYII="
 
+    /// Requests, errors, spend and the executor path are covered in depth by
+    /// `__or-image-selftest`; this keeps the routing-level check.
     static func images(_ c: ResponsesSelftest.Checks) async throws {
-        let generate = try OpenRouterImageService.requestBody(model: OpenRouterImageService.bestModel, prompt: "A red bicycle",
-            sourceImageData: nil, sourceMimeType: nil, aspectRatio: "16:9", size: "2K")
-        c.check("image: generation body (modalities, image_config, usage, plain prompt)",
-                String(decoding: generate, as: UTF8.self) == #"{"image_config":{"aspect_ratio":"16:9","image_size":"2K"},"messages":[{"content":"A red bicycle","role":"user"}],"modalities":["image","text"],"model":"google/gemini-3-pro-image","usage":{"include":true}}"#)
-        let edit = try OpenRouterImageService.requestBody(model: OpenRouterImageService.fastModel, prompt: "Make it yellow",
-            sourceImageData: Data([1, 2, 3]), sourceMimeType: "image/jpeg", aspectRatio: nil, size: nil)
-        c.check("image: edit body puts the input image first, no image_config when unset",
-                String(decoding: edit, as: UTF8.self) == #"{"messages":[{"content":[{"image_url":{"url":"data:image/jpeg;base64,AQID"},"type":"image_url"},{"text":"Make it yellow","type":"text"}],"role":"user"}],"modalities":["image","text"],"model":"google/gemini-3.1-flash-image","usage":{"include":true}}"#)
-        c.check("image: engines map to Pro (best, default) and Flash (fast)",
-                try OpenRouterImageService.resolve(engine: nil, aspectRatio: nil, size: nil).model == "google/gemini-3-pro-image"
-                && OpenRouterImageService.resolve(engine: " FAST ", aspectRatio: nil, size: nil).model == "google/gemini-3.1-flash-image")
-        c.rejects("image: an unknown engine is refused") { _ = try OpenRouterImageService.resolve(engine: "precise", aspectRatio: nil, size: nil) }
-        c.rejects("image: an unsupported aspect ratio is refused") { _ = try OpenRouterImageService.resolve(engine: nil, aspectRatio: "7:3", size: nil) }
-        c.rejects("image: an unsupported size is refused") { _ = try OpenRouterImageService.resolve(engine: nil, aspectRatio: nil, size: "8K") }
-
-        let ok = #"{"choices":[{"message":{"content":"","images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,\#(pngBase64)"}}]}}],"usage":{"cost":0.0672065}}"#
+        let ok = #"{"data":[{"b64_json":"\#(pngBase64)","media_type":"image/png"}],"usage":{"cost":0.0042}}"#
         let recorder = Recorder { _ in (200, Data(ok.utf8)) }
-        let service = OpenRouterImageService(transport: recorder.transport)
-        let result = try await service.generateImage(apiKey: openRouterKey, prompt: "A red bicycle", sourceImageData: nil,
-            sourceMimeType: nil, engine: nil, aspectRatio: "16:9", size: nil)
-        let request = recorder.requests.last!
-        c.check("image: request goes to OpenRouter chat completions with the OpenRouter key",
-                request.url?.absoluteString == "https://openrouter.ai/api/v1/chat/completions"
-                && request.value(forHTTPHeaderField: "Authorization") == "Bearer \(openRouterKey)" && request.httpMethod == "POST")
-        c.check("image: the data-URL image is decoded", result.data == Data(base64Encoded: pngBase64) && result.mimeType == "image/png")
-        c.check("image: spend is OpenRouter's reported usage.cost", result.spendUSD == 0.0672065)
-        recorder.respond = { _ in (402, Data(#"{"error":{"message":"Insufficient credits","code":402}}"#.utf8)) }
-        do { _ = try await service.generateImage(apiKey: openRouterKey, prompt: "p", sourceImageData: nil, sourceMimeType: nil, engine: nil, aspectRatio: nil, size: nil); c.check("image: HTTP errors surface", false) }
-        catch { c.check("image: HTTP errors surface", error.localizedDescription.contains("HTTP 402: Insufficient credits")) }
-        recorder.respond = { _ in (200, Data(#"{"error":{"message":"upstream failed","code":502}}"#.utf8)) }
-        do { _ = try await service.generateImage(apiKey: openRouterKey, prompt: "p", sourceImageData: nil, sourceMimeType: nil, engine: nil, aspectRatio: nil, size: nil); c.check("image: an error inside HTTP 200 surfaces", false) }
-        catch { c.check("image: an error inside HTTP 200 surfaces", error.localizedDescription.contains("upstream failed")) }
-        recorder.respond = { _ in (200, Data(#"{"choices":[{"message":{"content":"I can't draw that."}}],"usage":{"cost":0.001}}"#.utf8)) }
-        do { _ = try await service.generateImage(apiKey: openRouterKey, prompt: "p", sourceImageData: nil, sourceMimeType: nil, engine: nil, aspectRatio: nil, size: nil); c.check("image: no image → the model's words", false) }
-        catch { c.check("image: no image → the model's words", error.localizedDescription.contains("I can't draw that.")) }
-
-        // Through the real tool executor: file saved, attachment, spend.
-        recorder.respond = { _ in (200, Data(ok.utf8)) }
-        ToolExecutor.openRouterImageServiceOverrideForTesting = service
+        ToolExecutor.openRouterImageServiceOverrideForTesting = OpenRouterImageService(transport: recorder.transport)
         defer { ToolExecutor.openRouterImageServiceOverrideForTesting = nil }
         try set(orLane)
-        let images = StoragePaths.dataRoot.appendingPathComponent("images", isDirectory: true)
-        try PrivateStorage.ensureDirectory(images)
-        try Data(base64Encoded: pngBase64)!.write(to: images.appendingPathComponent("source.png"))
         let executor = ToolExecutor(outputMode: .subagent)
         let call = ToolCall(id: "img1", type: "function", function: FunctionCall(name: "generate_image",
-            arguments: #"{"prompt":"Make the background yellow","source_image":"source.png","source_image_role":"edit","engine":"fast","aspect_ratio":"21:9","size":"1K"}"#))
+            arguments: #"{"prompt":"A red bicycle","engine":"fast","size":"1536x1024"}"#))
         let toolResult = try await executor.execute(call)
-        let sent = try JSONSerialization.jsonObject(with: recorder.requests.last!.httpBody!) as! [String: Any]
-        let content = ((sent["messages"] as? [[String: Any]])?.first?["content"] as? [[String: Any]]) ?? []
-        c.check("image tool: OpenRouter lane → one OpenRouter request with the source image and the edit framing",
-                sent["model"] as? String == "google/gemini-3.1-flash-image"
-                && (sent["image_config"] as? [String: String]) == ["aspect_ratio": "21:9", "image_size": "1K"]
-                && (content.first?["image_url"] as? [String: String])?["url"]?.hasPrefix("data:image/png;base64,") == true
-                && (content.last?["text"] as? String)?.hasPrefix("Edit the input image directly") == true)
-        let object = (try? JSONSerialization.jsonObject(with: Data(toolResult.content.utf8))) as? [String: Any] ?? [:]
-        let filename = object["filename"] as? String ?? ""
-        c.check("image tool: result names OpenRouter (Gemini), the model and the saved file",
-                object["success"] as? Bool == true && object["provider"] as? String == "OpenRouter (Gemini)"
-                && object["model"] as? String == "google/gemini-3.1-flash-image" && object["via"] as? String == "openrouter"
-                && FileManager.default.fileExists(atPath: images.appendingPathComponent(filename).path))
+        let request = recorder.requests.last
+        let sent = request.flatMap { try? JSONSerialization.jsonObject(with: $0.httpBody ?? Data()) as? [String: Any] } ?? [:]
+        c.check("image tool: OpenRouter lane → one OpenRouter Image API request (Flare) with the OpenRouter key",
+                recorder.requests.count == 1 && request?.url?.absoluteString == "https://openrouter.ai/api/v1/images"
+                && request?.value(forHTTPHeaderField: "Authorization") == "Bearer \(openRouterKey)"
+                && sent["model"] as? String == "openai/gpt-image-2.5-flare" && sent["size"] as? String == "1536x1024")
         c.check("image tool: the image is attached for the model and spend is recorded",
-                toolResult.fileAttachments.first?.mimeType == "image/png" && toolResult.spendUSD == 0.0672065)
-        let bad = ToolCall(id: "img2", type: "function", function: FunctionCall(name: "generate_image", arguments: #"{"prompt":"p","aspect_ratio":"7:3"}"#))
-        let before = recorder.requests.count
-        let badResult = try await executor.execute(bad)
-        c.check("image tool: invalid options are explained without a request",
-                recorder.requests.count == before && badResult.content.contains("Invalid aspect_ratio"))
+                toolResult.fileAttachments.first?.mimeType == "image/png" && toolResult.spendUSD == 0.0042)
         try set(openAIKeys.merging(orLane) { a, _ in a })
         c.check("image tool: with an OpenAI key the executor takes the OpenAI path (backend decision shared with the schema)",
                 MediaRouting.imageBackend == .openAI)
