@@ -1293,10 +1293,11 @@ extension ConversationManager {
     }
 
     func reloadBrowserSettings() async {
-        let key = KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? ""
-        // The web configuration is read (and versioned) HERE, before any
-        // await, so a slower earlier reload can never install over it.
+        // ONE snapshot for the OpenRouter, Serper and Jina keys; the web
+        // configuration is read (and versioned) HERE, before any await, so a
+        // slower earlier reload can never install over it.
         let webSnapshot = KeychainHelper.loadSnapshot()
+        let key = webSnapshot[KeychainHelper.openRouterApiKeyKey] ?? ""
         let webConfig = WebServiceConfig.make(openRouterKey: key,
             serperKey: webSnapshot[KeychainHelper.serperApiKeyKey] ?? "",
             jinaKey: webSnapshot[KeychainHelper.jinaApiKeyKey] ?? "")

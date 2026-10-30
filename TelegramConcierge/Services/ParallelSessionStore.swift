@@ -34,6 +34,24 @@ enum ParallelSessionStore {
         case damaged(String)
     }
 
+    /// The file's directory entry could not be confirmed durable (a failed
+    /// directory fsync). The ID is NOT used until a later call confirms it;
+    /// the visible file is kept and never re-minted for this reason.
+    struct NotDurable: LocalizedError {
+        let reason: String
+        var errorDescription: String? {
+            "Free search is unavailable right now: its session file could not be saved durably (\(reason)). Try again; if it persists, check the disk and run `briglia doctor`."
+        }
+    }
+
+    /// Test seam: replaces the directory barrier (fault injection).
+    nonisolated(unsafe) static var fsyncDirectoryForTesting: ((String) throws -> Void)?
+    private static func barrier(_ dir: URL) throws {
+        if let hook = fsyncDirectoryForTesting { try hook(dir.path) } else { try PrivateStorage.fsyncDirectory(dir.path) }
+    }
+    /// The ID whose directory entry this process has confirmed durable.
+    nonisolated(unsafe) private static var confirmedID: String?
+
     struct Damaged: LocalizedError {
         let reason: String
         var errorDescription: String? {
@@ -79,10 +97,21 @@ enum ParallelSessionStore {
     static func idForSearch() throws -> String {
         lock.lock(); defer { lock.unlock() }
         switch stateLocked() {
-        case .valid(let id): return id
+        case .valid(let id): return try confirmedLocked(id)
         case .damaged(let reason): throw Damaged(reason: reason)
         case .absent: return try mintLocked()
         }
+    }
+
+    /// An ID is used only once its directory entry is confirmed durable in
+    /// this process (it may have been published by another process, or an
+    /// earlier barrier may have failed): one checked directory fsync.
+    private static func confirmedLocked(_ id: String) throws -> String {
+        if confirmedID == id { return id }
+        do { try barrier(fileURL.deletingLastPathComponent()) }
+        catch { throw NotDurable(reason: "\(error)") }
+        confirmedID = id
+        return id
     }
 
     /// Test seam: a mint attempt (deliberate-break M2 checks the damaged
@@ -104,15 +133,17 @@ enum ParallelSessionStore {
             let code = errno
             if code == EEXIST {
                 switch stateLocked() {
-                case .valid(let other): return other
+                case .valid(let other): return try confirmedLocked(other)
                 case .damaged(let reason): throw Damaged(reason: reason)
                 case .absent: throw Damaged(reason: "\(fileName) vanished while minting")
                 }
             }
             throw PrivateStorage.StorageError(description: "could not create \(fileURL.path): \(String(cString: strerror(code)))")
         }
-        try? PrivateStorage.fsyncDirectory(dir.path)
-        return id
+        // Published: the visible file is kept whatever happens next; it is
+        // used only after its entry is confirmed durable (a failure here
+        // fails this search and a later call confirms the SAME id).
+        return try confirmedLocked(id)
     }
 
     /// `/freesearch reset`, an explicit user action: a DAMAGED file is moved
@@ -122,7 +153,7 @@ enum ParallelSessionStore {
     static func reset() throws -> ResetOutcome {
         lock.lock(); defer { lock.unlock() }
         switch stateLocked() {
-        case .valid(let id): return .kept(id)
+        case .valid(let id): return .kept(try confirmedLocked(id))
         case .absent: return .minted(try mintLocked())
         case .damaged:
             let stamp = Int(Date().timeIntervalSince1970)
@@ -130,15 +161,24 @@ enum ParallelSessionStore {
             guard rename(fileURL.path, aside.path) == 0 else {
                 throw PrivateStorage.StorageError(description: "could not move the damaged \(fileName) aside: \(String(cString: strerror(errno)))")
             }
+            try barrier(fileURL.deletingLastPathComponent())
             return .replaced(try mintLocked())
         }
     }
 
     /// `/deleteuserdata` and Mind import: the conversation ends, so does its ID.
+    /// The deletion is reported only once its directory entry is durable
+    /// (checked fsync), so a wipe or import never claims a removal a crash
+    /// could undo.
     static func discard() throws {
         lock.lock(); defer { lock.unlock() }
-        if unlink(fileURL.path) != 0, errno != ENOENT {
-            throw PrivateStorage.StorageError(description: "could not delete \(fileURL.path): \(String(cString: strerror(errno)))")
+        confirmedID = nil
+        if unlink(fileURL.path) != 0 {
+            guard errno == ENOENT else {
+                throw PrivateStorage.StorageError(description: "could not delete \(fileURL.path): \(String(cString: strerror(errno)))")
+            }
         }
+        let dir = fileURL.deletingLastPathComponent()
+        if FileManager.default.fileExists(atPath: dir.path) { try barrier(dir) }
     }
 }

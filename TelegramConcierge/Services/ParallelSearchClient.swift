@@ -99,7 +99,8 @@ actor ParallelSearchClient {
     }
     var limits = Limits()
 
-    typealias Send = @Sendable (_ request: URLRequest, _ stopAtID: Int?, _ limits: Limits) async throws -> ParallelHTTPReply
+    typealias Send = @Sendable (_ request: URLRequest, _ stopAtID: Int?, _ limits: Limits,
+                                _ onServerRequest: @escaping ServerRequestHandler) async throws -> ParallelHTTPReply
     private var sendOverride: Send?
     private var clock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
@@ -111,7 +112,7 @@ actor ParallelSearchClient {
     }
     private var generation = 0
     private var session: TransportSession?
-    private var initializing: (generation: Int, task: Task<TransportSession, Error>)?
+    private var initializing: (generation: Int, task: Task<Void, Never>)?
     private var nextRPCID = 1
 
     // MARK: Breaker
@@ -181,36 +182,51 @@ actor ParallelSearchClient {
         try await acquireSlot(deadline: deadline)
         defer { releaseSlot() }
 
-        var budget = RequestBudget(maxRequests: limits.maxRequests)
+        let budget = RequestBudget(maxRequests: limits.maxRequests)
         do {
-            let hits = try await searchWithinBudget(query: query, sessionID: sessionID, depth: depth, deadline: deadline, budget: &budget)
+            let hits = try await searchWithinBudget(query: query, sessionID: sessionID, depth: depth, deadline: deadline, budget: budget)
             recordOutcome(success: true, error: nil, probe: isProbe)
             return hits
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as ParallelSearchError {
+            // A caller that cancelled while a shared request failed never
+            // charges that failure to health or the breaker.
+            if Task.isCancelled { throw CancellationError() }
             recordOutcome(success: false, error: error, probe: isProbe)
             throw error
         }
     }
 
-    private struct RequestBudget {
+    /// One logical call's allowance. A reference: server-request replies are
+    /// sent from the transport callback while the stream is still open.
+    final class RequestBudget: @unchecked Sendable {
         let maxRequests: Int
-        var used = 0
+        private let lock = NSLock()
+        private var _used = 0
         var searchAttempts = 0
         var recoveries = 0
+        init(maxRequests: Int) { self.maxRequests = maxRequests }
+        var used: Int { lock.lock(); defer { lock.unlock() }; return _used }
+        /// Takes `n` requests from the allowance, or none at all.
+        func take(_ n: Int) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard _used + n <= maxRequests else { return false }
+            _used += n
+            return true
+        }
     }
 
     private func searchWithinBudget(query: String, sessionID: String, depth: Int, deadline: TimeInterval,
-                                    budget: inout RequestBudget) async throws -> [ParallelSearchHit] {
+                                    budget: RequestBudget) async throws -> [ParallelSearchHit] {
         var lastError: ParallelSearchError = .budget
         while budget.searchAttempts < limits.maxSearchAttempts {
             try Task.checkCancellation()
-            let current = try await ensureSession(deadline: deadline, budget: &budget)
+            let current = try await ensureSession(deadline: deadline, budget: budget)
             budget.searchAttempts += 1
             do {
                 return try await callSearch(query: query, sessionID: sessionID, depth: depth, session: current,
-                                            deadline: deadline, budget: &budget)
+                                            deadline: deadline, budget: budget)
             } catch let failure as CallFailure {
                 switch failure {
                 case .expired:
@@ -246,36 +262,70 @@ actor ParallelSearchClient {
 
     // MARK: Session
 
-    private func ensureSession(deadline: TimeInterval, budget: inout RequestBudget) async throws -> TransportSession {
+    private func ensureSession(deadline: TimeInterval, budget: RequestBudget) async throws -> TransportSession {
         if let session { return session }
-        if let pending = initializing, pending.generation == generation {
-            return try await awaitInitialize(pending.task, deadline: deadline)
+        if initializing?.generation != generation {
+            // This call starts the initialize: its requests count against ITS
+            // budget. The initialize runs on its own and settles EVERY waiter;
+            // a waiter that leaves (cancelled, out of time) never stops it.
+            guard budget.take(2) else { throw ParallelSearchError.budget }
+            let gen = generation
+            let task = Task { [weak self] in
+                guard let self else { return }
+                let result: Result<TransportSession, Error>
+                do { result = .success(try await self.performInitialize(generation: gen, deadline: deadline, budget: budget)) }
+                catch { result = .failure(error) }
+                await self.finishInitialize(generation: gen, result)
+            }
+            initializing = (gen, task)
         }
-        // This call starts the initialize: its requests count against ITS budget.
-        guard budget.used + 2 <= budget.maxRequests else { throw ParallelSearchError.budget }
-        budget.used += 2
-        let gen = generation
-        let task = Task { [weak self] () throws -> TransportSession in
-            guard let self else { throw CancellationError() }
-            return try await self.performInitialize(generation: gen, deadline: deadline)
-        }
-        initializing = (gen, task)
-        return try await awaitInitialize(task, deadline: deadline)
+        return try await waitForInitialize(deadline: deadline)
     }
 
-    private func awaitInitialize(_ task: Task<TransportSession, Error>, deadline: TimeInterval) async throws -> TransportSession {
-        do {
-            let result = try await task.value
-            return result
-        } catch let failure as CallFailure {
-            if case .final(let error) = failure { throw error }
-            if case .retryable(let error, _) = failure { throw error }
-            throw ParallelSearchError.http(404, "session expired during initialize")
+    /// Each waiter settles independently: on the initialize's outcome, its
+    /// own cancellation, or its own deadline — whichever comes first.
+    private func waitForInitialize(deadline: TimeInterval) async throws -> TransportSession {
+        let id = UUID()
+        let remaining = deadline - clock()
+        guard remaining > 0 else { throw ParallelSearchError.deadline }
+        let timer = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            await self?.failInitWaiter(id, with: ParallelSearchError.deadline)
+        }
+        defer { timer.cancel() }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TransportSession, Error>) in
+                if Task.isCancelled { continuation.resume(throwing: CancellationError()); return }
+                initWaiters.append((id, continuation))
+            }
+        } onCancel: {
+            Task { await self.failInitWaiter(id, with: CancellationError()) }
         }
     }
 
-    private func performInitialize(generation gen: Int, deadline: TimeInterval) async throws -> TransportSession {
-        defer { if initializing?.generation == gen { initializing = nil } }
+    private var initWaiters: [(id: UUID, continuation: CheckedContinuation<TransportSession, Error>)] = []
+
+    private func failInitWaiter(_ id: UUID, with error: Error) {
+        guard let index = initWaiters.firstIndex(where: { $0.id == id }) else { return }
+        initWaiters.remove(at: index).continuation.resume(throwing: error)
+    }
+
+    private func finishInitialize(generation gen: Int, _ result: Result<TransportSession, Error>) {
+        if initializing?.generation == gen { initializing = nil }
+        let mapped: Result<TransportSession, Error> = result.mapError { error in
+            switch error as? CallFailure {
+            case .final(let e)?: return e
+            case .retryable(let e, _)?: return e
+            case .expired?: return ParallelSearchError.http(404, "session expired during initialize")
+            case nil: return error
+            }
+        }
+        let waiters = initWaiters
+        initWaiters = []
+        for waiter in waiters { waiter.continuation.resume(with: mapped) }
+    }
+
+    private func performInitialize(generation gen: Int, deadline: TimeInterval, budget: RequestBudget) async throws -> TransportSession {
         let id = takeRPCID()
         let body: [String: Any] = [
             "jsonrpc": "2.0", "id": id, "method": "initialize",
@@ -283,7 +333,8 @@ actor ParallelSearchClient {
                        "clientInfo": ["name": "Briglia", "version": adaCLIVersion]]
         ]
         counters.initializes += 1
-        let reply = try await send(body, sessionID: nil, protocolVersion: nil, stopAtID: id, deadline: deadline)
+        let reply = try await send(body, sessionID: nil, protocolVersion: nil, stopAtID: id, deadline: deadline,
+                                   serverRequests: rejectServerRequests(session: nil, protocolVersion: nil, deadline: deadline, budget: budget))
         if let failure = classifyHTTP(reply, carriedSession: false) { throw failure }
         let message = try responseMessage(reply, id: id)
         if let error = message["error"] as? [String: Any] { throw CallFailure.final(rpcError(error)) }
@@ -315,9 +366,8 @@ actor ParallelSearchClient {
     // MARK: tools/call
 
     private func callSearch(query: String, sessionID: String, depth: Int, session current: TransportSession,
-                            deadline: TimeInterval, budget: inout RequestBudget) async throws -> [ParallelSearchHit] {
-        guard budget.used + 1 <= budget.maxRequests else { throw ParallelSearchError.budget }
-        budget.used += 1
+                            deadline: TimeInterval, budget: RequestBudget) async throws -> [ParallelSearchHit] {
+        guard budget.take(1) else { throw ParallelSearchError.budget }
         let id = takeRPCID()
         let body: [String: Any] = [
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
@@ -325,18 +375,13 @@ actor ParallelSearchClient {
                        "arguments": ["objective": query, "search_queries": [query], "session_id": sessionID] as [String: Any]]
         ]
         counters.searchCalls += 1
+        // Server requests on the stream are answered WHILE it is open (the
+        // server may wait for the answer before it sends the result).
         let reply = try await send(body, sessionID: current.mcpSessionID, protocolVersion: current.protocolVersion,
-                                   stopAtID: id, deadline: deadline)
+                                   stopAtID: id, deadline: deadline,
+                                   serverRequests: rejectServerRequests(session: current.mcpSessionID, protocolVersion: current.protocolVersion,
+                                                                        deadline: deadline, budget: budget))
         if let failure = classifyHTTP(reply, carriedSession: current.mcpSessionID != nil) { throw failure }
-        // Server requests on the stream get a "method not found" reply
-        // (counted in the request budget).
-        for request in serverRequests(reply) {
-            guard budget.used + 1 <= budget.maxRequests else { throw ParallelSearchError.budget }
-            budget.used += 1
-            counters.errorReplies += 1
-            let answer: [String: Any] = ["jsonrpc": "2.0", "id": request, "error": ["code": -32601, "message": "Method not found"]]
-            _ = try? await send(answer, sessionID: current.mcpSessionID, protocolVersion: current.protocolVersion, stopAtID: nil, deadline: deadline)
-        }
         let message = try responseMessage(reply, id: id)
         if let error = message["error"] as? [String: Any] {
             let classified = rpcError(error)
@@ -405,9 +450,24 @@ actor ParallelSearchClient {
     }
 
     private func retryAfter(_ reply: ParallelHTTPReply) -> TimeInterval? {
-        guard let raw = reply.headers["retry-after"]?.trimmingCharacters(in: .whitespaces), let value = TimeInterval(raw),
-              value.isFinite, value >= 0 else { return nil }
-        return value  // not capped: a long wait fails the call rather than retrying early
+        guard let raw = reply.headers["retry-after"] else { return nil }
+        return Self.parseRetryAfter(raw, now: Date())
+    }
+
+    /// RFC 9110 §10.2.3: delay-seconds or an HTTP-date (IMF-fixdate, plus the
+    /// obsolete RFC 850 and asctime forms). Never capped: a long wait fails
+    /// the call rather than retrying early. A past date means "now" (0).
+    static func parseRetryAfter(_ raw: String, now: Date) -> TimeInterval? {
+        let value = raw.trimmingCharacters(in: .whitespaces)
+        if let seconds = TimeInterval(value) { return seconds.isFinite && seconds >= 0 ? seconds : nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        for format in ["EEE',' dd MMM yyyy HH':'mm':'ss 'GMT'", "EEEE',' dd'-'MMM'-'yy HH':'mm':'ss 'GMT'", "EEE MMM d HH':'mm':'ss yyyy"] {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: value) { return max(0, date.timeIntervalSince(now)) }
+        }
+        return nil
     }
 
     private func classifyHTTP(_ reply: ParallelHTTPReply, carriedSession: Bool) -> CallFailure? {
@@ -439,12 +499,32 @@ actor ParallelSearchClient {
         throw CallFailure.final(.badPayload("the event stream ended without a response"))
     }
 
-    private func serverRequests(_ reply: ParallelHTTPReply) -> [Any] {
-        reply.events.compactMap { event -> Any? in
-            guard let object = try? JSONSerialization.jsonObject(with: Data(event.utf8)) as? [String: Any],
-                  object["method"] != nil, let id = object["id"], !(id is NSNull) else { return nil }
-            return id
+    /// The handler the transport calls for each server REQUEST on an open
+    /// stream: one JSON-RPC "method not found" reply by POST, sent at once
+    /// (not awaited by the stream), counted in the call's request budget and
+    /// bounded by its deadline. Over budget: not answered.
+    private nonisolated func rejectServerRequests(session: String?, protocolVersion: String?, deadline: TimeInterval,
+                                                  budget: RequestBudget) -> ServerRequestHandler {
+        { [weak self] requestID in
+            guard let self, budget.take(1) else { return }
+            Task {
+                let answer: [String: Any] = ["jsonrpc": "2.0", "id": requestID.value, "error": ["code": -32601, "message": "Method not found"]]
+                await self.noteErrorReply()
+                _ = try? await self.send(answer, sessionID: session, protocolVersion: protocolVersion, stopAtID: nil, deadline: deadline)
+            }
         }
+    }
+
+    private func noteErrorReply() { counters.errorReplies += 1 }
+
+    /// A JSON-RPC id as received (number or string), for echoing back.
+    struct RPCRequestID: @unchecked Sendable { let value: Any }
+    typealias ServerRequestHandler = @Sendable (RPCRequestID) -> Void
+
+    static func serverRequestID(_ event: String) -> RPCRequestID? {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(event.utf8)) as? [String: Any],
+              object["method"] != nil, let id = object["id"], !(id is NSNull) else { return nil }
+        return RPCRequestID(value: id)
     }
 
     static func rpcID(_ value: Any?) -> Int? {
@@ -458,7 +538,7 @@ actor ParallelSearchClient {
     // MARK: HTTP
 
     private func send(_ body: [String: Any], sessionID: String?, protocolVersion: String?, stopAtID: Int?,
-                      deadline: TimeInterval) async throws -> ParallelHTTPReply {
+                      deadline: TimeInterval, serverRequests: ServerRequestHandler? = nil) async throws -> ParallelHTTPReply {
         let remaining = deadline - clock()
         guard remaining > 0 else { throw CallFailure.final(.deadline) }
         var request = URLRequest(url: Self.endpointURL)
@@ -473,7 +553,7 @@ actor ParallelSearchClient {
         counters.httpRequests += 1
         let sender = sendOverride ?? ParallelHTTPTransport.send
         do {
-            return try await sender(request, stopAtID, limits)
+            return try await sender(request, stopAtID, limits, serverRequests ?? { _ in })
         } catch is CancellationError {
             throw CancellationError()
         } catch let urlError as URLError where urlError.code == .cancelled {
@@ -578,6 +658,7 @@ final class ParallelHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataT
     let refusesRedirects = true
     private let stopAtID: Int?
     private let limits: ParallelSearchClient.Limits
+    private let onServerRequest: ParallelSearchClient.ServerRequestHandler
     private let lock = NSLock()
     private var continuation: CheckedContinuation<ParallelHTTPReply, Error>?
     private var session: URLSession?
@@ -590,12 +671,12 @@ final class ParallelHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataT
     private var parser = SSEParser()
     private var events: [String] = []
 
-    init(stopAtID: Int?, limits: ParallelSearchClient.Limits) {
-        self.stopAtID = stopAtID; self.limits = limits; super.init()
+    init(stopAtID: Int?, limits: ParallelSearchClient.Limits, onServerRequest: @escaping ParallelSearchClient.ServerRequestHandler) {
+        self.stopAtID = stopAtID; self.limits = limits; self.onServerRequest = onServerRequest; super.init()
     }
 
-    static let send: ParallelSearchClient.Send = { request, stopAtID, limits in
-        try await ParallelHTTPTransport(stopAtID: stopAtID, limits: limits).run(request)
+    static let send: ParallelSearchClient.Send = { request, stopAtID, limits, onServerRequest in
+        try await ParallelHTTPTransport(stopAtID: stopAtID, limits: limits, onServerRequest: onServerRequest).run(request)
     }
 
     func run(_ request: URLRequest) async throws -> ParallelHTTPReply {
@@ -674,7 +755,10 @@ final class ParallelHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataT
         let overflow = outcome.overflow
         let done = stopAtID.map { id in outcome.events.contains { SSEParser.isResponse($0, id: id) } } ?? false
         let reply = done ? replyLocked() : nil
+        let requests = outcome.events.compactMap(ParallelSearchClient.serverRequestID)
         lock.unlock()
+        // Answered while the stream is open, each exactly once.
+        for request in requests { onServerRequest(request) }
         if overflow { finish(.failure(ParallelSearchError.badPayload("an event larger than \(limits.eventCap / 1024) KiB"))); return }
         if let reply { finish(.success(reply)) }
     }

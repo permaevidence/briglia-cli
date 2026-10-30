@@ -713,6 +713,10 @@ final class WebFixtureServer: @unchecked Sendable {
         /// Send the headers (declaring a much longer body) and `body`, then
         /// close: the connection drops after the response started.
         var disconnectAfterHeaders = false
+        /// Stream the body in parts (delimited by connection close): each
+        /// part is sent once its condition holds (polled, up to 10 s) —
+        /// a server that waits for something before it continues.
+        var chunks: [(text: String, waitUntil: (@Sendable () -> Bool)?)]? = nil
     }
 
     let port: Int
@@ -906,6 +910,17 @@ final class WebFixtureServer: @unchecked Sendable {
             return
         }
         if let silence = response.silentFor { Thread.sleep(forTimeInterval: silence) }
+        if let chunks = response.chunks {
+            guard send("HTTP/1.1 \(response.status) \(reason)\r\nContent-Type: \(response.contentType)\r\n\(extra)Connection: close\r\n\r\n") else { return }
+            for part in chunks {
+                if let wait = part.waitUntil {
+                    let end = Date().addingTimeInterval(10)
+                    while !wait() && Date() < end { Thread.sleep(forTimeInterval: 0.01) }
+                }
+                guard send(part.text) else { return }
+            }
+            return
+        }
         if let trickle = response.trickle {
             guard send("HTTP/1.1 \(response.status) \(reason)\r\nContent-Type: \(response.contentType)\r\n\(extra)Connection: close\r\n\r\n") else { return }
             let end = Date().addingTimeInterval(trickle.duration)

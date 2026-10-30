@@ -935,6 +935,9 @@ struct MindSelftest: AsyncParsableCommand {
             print("⚠ SKIP: zip/unzip not installed — ordering-regression checks skipped")
         }
 
+        // 8. The conversation search ID (KEYLESS_WEB plan A.5).
+        await searchSessionChecks(check: check)
+
         return failures
     }
 }

@@ -2375,6 +2375,9 @@ actor WebOrchestrator {
             // The breaker is open: the failures that opened it were recorded.
             throw ParallelSearchError.busy
         } catch {
+            // A failure that ends a search its caller already cancelled is
+            // not charged to health.
+            if Task.isCancelled { throw CancellationError() }
             await ToolServiceHealth.shared.recordFailure(.webSearchFree, error: error.localizedDescription, transientOnly: true)
             throw error
         }

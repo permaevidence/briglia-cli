@@ -24,6 +24,9 @@ struct WebBackendSelftest: AsyncParsableCommand {
     @Flag(name: .customLong("live"), help: "Send one real keyless Parallel search and one keyless Jina read instead (no key, free).")
     var live = false
 
+    @Option(name: .customLong("mint-session-at"), help: .hidden)
+    var mintSessionAt: String?
+
     struct Failure: Error, CustomStringConvertible { let description: String }
 
     final class Checker: @unchecked Sendable {
@@ -39,6 +42,13 @@ struct WebBackendSelftest: AsyncParsableCommand {
 
     func run() async throws {
         guard adaCLIVersion.hasSuffix("-dev") else { throw ValidationError("Needs a development build") }
+        if let path = mintSessionAt {
+            // Child of the cross-process mint race (S.17): one idForSearch on
+            // the given file, the ID on stdout.
+            ParallelSessionStore.fileURLOverrideForTesting = URL(fileURLWithPath: path)
+            print((try? ParallelSessionStore.idForSearch()) ?? "ERROR")
+            return
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("briglia-webbackend-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -68,7 +78,9 @@ struct WebBackendSelftest: AsyncParsableCommand {
         try await Self.runParallelTransportGroup(c, fake: fake)
         try await Self.runParallelRetryGroup(c, fake: fake)
         try await Self.runParallelBreakerGroup(c, fake: fake)
+        try await Self.runInitializeCancellationGroup(c, fake: fake)
         try await Self.runSessionGroup(c, fake: fake, root: root)
+        try await Self.runSessionDurabilityGroup(c, root: root)
         try await Self.runJinaGroup(c, reader: reader)
         try await Self.runResolutionGroup(c, fake: fake, reader: reader)
         try await Self.runExecutorGroup(c, fake: fake, reader: reader)
@@ -129,6 +141,12 @@ final class FakeParallel: @unchecked Sendable {
         case expire
         case sse([String])
         case delayed(TimeInterval, Box)
+        /// An SSE stream that first sends a server REQUEST (id), and sends the
+        /// search result only after the client's error reply to it arrived.
+        case sseAwaitingReply(requestID: Int)
+        /// Holds the answer until `count` tools/call requests carrying
+        /// `session` have arrived (an interleaving barrier).
+        case afterSeen(session: String, count: Int, Box)
     }
     final class Box { let reply: Reply; init(_ r: Reply) { reply = r } }
 
@@ -138,6 +156,9 @@ final class FakeParallel: @unchecked Sendable {
     var stateful = true
     var protocolVersion = "2025-06-18"
     var initStatus: Int? = nil
+    /// initialize answers over SSE with a server request first and waits
+    /// for the client's error reply before the initialize result.
+    var initServerRequest: Int? = nil
     private var sessionCounter = 0
     private var validSessions: Set<String> = []
     private var script: [Reply] = []
@@ -150,7 +171,7 @@ final class FakeParallel: @unchecked Sendable {
 
     func reset() {
         lock.lock(); defer { lock.unlock() }
-        stateful = true; protocolVersion = "2025-06-18"; initStatus = nil
+        stateful = true; protocolVersion = "2025-06-18"; initStatus = nil; initServerRequest = nil
         sessionCounter = 0; validSessions = []; script = []; seen = []; inFlight = 0; maxInFlight = 0; defaultDelay = 0; perSession = [:]
     }
     func enqueue(_ replies: [Reply]) { lock.lock(); script.append(contentsOf: replies); lock.unlock() }
@@ -194,8 +215,16 @@ final class FakeParallel: @unchecked Sendable {
                 headers["Mcp-Session-Id"] = sid
             }
             let version = protocolVersion
+            let initRequest = initServerRequest
             lock.unlock()
-            return .init(body: json(["jsonrpc": "2.0", "id": id ?? 0, "result": ["protocolVersion": version, "capabilities": ["tools": [String: Any]()], "serverInfo": ["name": "fake-parallel", "version": "1"]]]), headers: headers)
+            let result = json(["jsonrpc": "2.0", "id": id ?? 0, "result": ["protocolVersion": version, "capabilities": ["tools": [String: Any]()], "serverInfo": ["name": "fake-parallel", "version": "1"]]])
+            if let rid = initRequest {
+                var response = WebFixtureServer.Response(contentType: "text/event-stream", body: "", headers: headers)
+                response.chunks = [("data: {\"id\":\(rid),\"jsonrpc\":\"2.0\",\"method\":\"roots/list\"}\n\n", nil),
+                                   ("data: " + result + "\n\n", { [weak self] in self?.sawErrorReply(rid) ?? true })]
+                return response
+            }
+            return .init(body: result, headers: headers)
         case "notifications/initialized", "<error-reply>":
             return .init(status: 202, contentType: "application/json", body: "")
         case "tools/call":
@@ -221,8 +250,27 @@ final class FakeParallel: @unchecked Sendable {
         }
     }
 
+    func sawErrorReply(_ rid: Int) -> Bool {
+        requests.contains { $0.method == "<error-reply>" && ParallelSearchClient.rpcID($0.body["id"]) == rid }
+    }
+
+    func toolCallCount(session: String) -> Int {
+        requests.filter { $0.method == "tools/call" && $0.headers["mcp-session-id"] == session }.count
+    }
+
     private func respond(_ reply: Reply, id: Any?, sid: String?) -> WebFixtureServer.Response {
         switch reply {
+        case .sseAwaitingReply(let rid):
+            let query = "awaited"
+            let result = json(["jsonrpc": "2.0", "id": id ?? 0, "result": Self.textResult(Self.defaultResults(query, count: 2))])
+            var response = WebFixtureServer.Response(contentType: "text/event-stream", body: "")
+            response.chunks = [("data: {\"id\":\(rid),\"jsonrpc\":\"2.0\",\"method\":\"sampling/createMessage\",\"params\":{}}\n\n", nil),
+                               ("data: " + result + "\n\n", { [weak self] in self?.sawErrorReply(rid) ?? true })]
+            return response
+        case .afterSeen(let session, let count, let box):
+            let end = Date().addingTimeInterval(10)
+            while toolCallCount(session: session) < count && Date() < end { Thread.sleep(forTimeInterval: 0.01) }
+            return respond(box.reply, id: id, sid: sid)
         case .results(let results): return .init(body: json(["jsonrpc": "2.0", "id": id ?? 0, "result": Self.textResult(results)]))
         case .rawResult(let result): return .init(body: json(["jsonrpc": "2.0", "id": id ?? 0, "result": result]))
         case .rpcError(let code, let message): return .init(body: json(["jsonrpc": "2.0", "id": id ?? 0, "error": ["code": code, "message": message]]))

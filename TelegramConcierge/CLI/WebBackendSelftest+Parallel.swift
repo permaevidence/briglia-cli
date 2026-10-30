@@ -75,6 +75,9 @@ extension WebBackendSelftest {
         // A JSON value split over two `data:` lines joins with "\n" — still valid JSON.
         fake.enqueue([.sse(events)])
         let r2 = await search("sse")
+        // The rejection is sent from the stream callback, not awaited by the
+        // search: give it a moment to arrive.
+        for _ in 0..<100 where !fake.sawErrorReply(77) { try await Task.sleep(nanoseconds: 20_000_000) }
         let errorReplies = fake.requests.filter { $0.method == "<error-reply>" }
         c.check("P1.7 SSE: notification skipped, the response matched by id, multi-line data joined",
                 ((try? r2.get()) ?? []).count == 2, "\(r2)")
@@ -119,6 +122,23 @@ extension WebBackendSelftest {
         let r7 = await search("older")
         c.check("P1.14 2025-03-26 accepted; MCP-Protocol-Version carries the negotiated value", (try? r7.get()) != nil
                 && fake.requests.last?.headers["mcp-protocol-version"] == "2025-03-26")
+
+        // A server request that the server WAITS on before it sends the
+        // result: the rejection must go out while the stream is open.
+        await fresh(fake)
+        fake.enqueue([.sseAwaitingReply(requestID: 55)])
+        let awaited = await search("awaited")
+        let replies55 = fake.requests.filter { $0.method == "<error-reply>" && ParallelSearchClient.rpcID($0.body["id"]) == 55 }
+        c.check("P1.16 a server request the server waits on is rejected (-32601) WHILE the stream is open, and the search then completes",
+                ((try? awaited.get()) ?? []).count == 2 && replies55.count == 1
+                && (replies55.first?.body["error"] as? [String: Any])?["code"] as? Int == -32601
+                && replies55.first?.headers["mcp-session-id"] == "S1", "\(awaited)")
+        await fresh(fake)
+        fake.initServerRequest = 66
+        let initAwaited = await search("init stream")
+        let replies66 = fake.requests.filter { $0.method == "<error-reply>" && ParallelSearchClient.rpcID($0.body["id"]) == 66 }
+        c.check("P1.17 an initialize answered over SSE with a server request first: rejected while open, then the session is established and the search succeeds",
+                (try? initAwaited.get()) != nil && replies66.count == 1 && fake.count("initialize") == 1, "\(initAwaited)")
 
         // Body cap.
         await fresh(fake, limits: { var l = ParallelSearchClient.Limits(); l.bodyCap = 4096; return l }())
@@ -206,16 +226,45 @@ extension WebBackendSelftest {
         // Stale-generation failure never clobbers a newer session.
         await fresh(fake)
         _ = await search("warm")   // session S1
-        // Both calls hit S1; A's expiry answers at once, B's 404 only after A re-initialized (S2).
-        fake.setPerSession(["S1": [.expire, .delayed(1.0, .init(.status(404, headers: [:], body: "{}")))]])
+        // Barrier: A's expiry is answered only once B's request on S1 has
+        // ALSO arrived (3 = warm + A + B); B's 404 comes 1 s later, after A
+        // re-initialized to S2.
+        fake.setPerSession(["S1": [.afterSeen(session: "S1", count: 3, .init(.expire)),
+                                   .delayed(1.0, .init(.status(404, headers: [:], body: "{}")))]])
         async let a = search("call A")
-        try await Task.sleep(nanoseconds: 100_000_000)
         async let b = search("call B")
         let (ra, rb) = await (a, b)
         let session = await ParallelSearchClient.shared.sessionForTesting()
-        c.check("P2.12 a late 404 from the OLD session (call B) does not drop the newer session call A established: 2 initializes in total, both calls succeed on S2",
-                (try? ra.get()) != nil && (try? rb.get()) != nil && fake.count("initialize") == 2 && session?.mcpSessionID == "S2",
-                "A \(ra) B \(rb) inits \(fake.count("initialize")) session \(String(describing: session?.mcpSessionID))")
+        c.check("P2.12 a late 404 from the OLD session (both calls provably reached S1) does not drop the newer session: 2 initializes, both calls succeed on S2",
+                (try? ra.get()) != nil && (try? rb.get()) != nil && fake.count("initialize") == 2 && session?.mcpSessionID == "S2"
+                && fake.toolCallCount(session: "S1") == 3 && fake.toolCallCount(session: "S2") == 2,
+                "A \(ra) B \(rb) inits \(fake.count("initialize")) S1 \(fake.toolCallCount(session: "S1")) S2 \(fake.toolCallCount(session: "S2"))")
+
+        // Retry-After as an HTTP-date (RFC 9110 §10.2.3).
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss 'GMT'"
+        await fresh(fake)
+        fake.enqueue([.status(429, headers: ["Retry-After": formatter.string(from: Date().addingTimeInterval(120))], body: "{}"),
+                      .results(FakeParallel.defaultResults("never"))])
+        let t3 = Date()
+        let r11 = await search("date retry-after")
+        c.check("P2.13 429 with an HTTP-date 120 s ahead (past the deadline) → fails at once, one tools/call (never retried early)",
+                (try? r11.get()) == nil && fake.count("tools/call") == 1 && Date().timeIntervalSince(t3) < 5)
+        await fresh(fake)
+        fake.enqueue([.status(429, headers: ["Retry-After": formatter.string(from: Date().addingTimeInterval(-60))], body: "{}")])
+        let t4 = Date()
+        let r12 = await search("past date")
+        c.check("P2.14 429 with an HTTP-date in the past → retried at once (no default backoff), succeeds",
+                (try? r12.get()) != nil && fake.count("tools/call") == 2 && Date().timeIntervalSince(t4) < 0.9, "\(Date().timeIntervalSince(t4))s")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        c.check("P2.15 Retry-After parsing: seconds, IMF-fixdate, RFC 850, asctime, past → 0, garbage → nil",
+                ParallelSearchClient.parseRetryAfter("7", now: now) == 7
+                && ParallelSearchClient.parseRetryAfter(formatter.string(from: now.addingTimeInterval(90)), now: now) == 90
+                && ParallelSearchClient.parseRetryAfter("Friday, 15-Jan-27 08:03:20 GMT", now: now).map { $0 > 0 } == true
+                && ParallelSearchClient.parseRetryAfter("Fri Jan 15 08:03:20 2027", now: now).map { $0 > 0 } == true
+                && ParallelSearchClient.parseRetryAfter(formatter.string(from: now.addingTimeInterval(-5)), now: now) == 0
+                && ParallelSearchClient.parseRetryAfter("soon", now: now) == nil && ParallelSearchClient.parseRetryAfter("-3", now: now) == nil)
     }
 
     static func runParallelBreakerGroup(_ c: Checker, fake: FakeParallel) async throws {
@@ -296,4 +345,99 @@ final class MutableClock: @unchecked Sendable {
     private var value: TimeInterval = 1_000
     var now: TimeInterval { lock.lock(); defer { lock.unlock() }; return value }
     func advance(_ seconds: TimeInterval) { lock.lock(); value += seconds; lock.unlock() }
+}
+
+// Shared initialize vs caller cancellation and deadlines (Codex r1 finding 1).
+extension WebBackendSelftest {
+    final class ScriptedSend: @unchecked Sendable {
+        private let lock = NSLock()
+        var initDelay: TimeInterval = 0
+        var initStatus = 200
+        private var _methods: [String] = []
+        var methods: [String] { lock.lock(); defer { lock.unlock() }; return _methods }
+        func record(_ m: String) { lock.lock(); _methods.append(m); lock.unlock() }
+        var send: ParallelSearchClient.Send {
+            { [self] request, _, _, _ in
+                let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any]) ?? [:]
+                let method = body["method"] as? String ?? "?"
+                record(method)
+                func reply(_ status: Int, _ object: Any?) -> ParallelHTTPReply {
+                    ParallelHTTPReply(status: status, headers: status == 200 && method == "initialize" ? ["mcp-session-id": "X1"] : [:],
+                                      jsonBody: object.map { try! JSONSerialization.data(withJSONObject: $0) } ?? Data(), events: [])
+                }
+                switch method {
+                case "initialize":
+                    if initDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(initDelay * 1_000_000_000)) }
+                    if initStatus != 200 { return reply(initStatus, ["error": "injected"]) }
+                    return reply(200, ["jsonrpc": "2.0", "id": body["id"] ?? 0, "result": ["protocolVersion": "2025-06-18"]])
+                case "notifications/initialized": return reply(202, nil)
+                default:
+                    return reply(200, ["jsonrpc": "2.0", "id": body["id"] ?? 0, "result": FakeParallel.textResult(FakeParallel.defaultResults("s", count: 1))])
+                }
+            }
+        }
+    }
+
+    static func runInitializeCancellationGroup(_ c: Checker, fake: FakeParallel) async throws {
+        print("P4. Shared initialize: cancellation and deadlines per waiter")
+        func isCancel(_ r: Result<[ParallelSearchHit], Error>) -> Bool { if case .failure(let e) = r { return e is CancellationError }; return false }
+        // Three callers share a cold initialize that fails after 600 ms; all
+        // cancel at 100 ms.
+        var script = ScriptedSend()
+        script.initDelay = 0.6; script.initStatus = 503
+        await ParallelSearchClient.shared.installForTesting(send: script.send)
+        let started = Date()
+        let tasks = (0..<3).map { index in Task { await search("cancel \(index)") } }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        tasks.forEach { $0.cancel() }
+        var results: [Result<[ParallelSearchHit], Error>] = []
+        for task in tasks { results.append(await task.value) }
+        let settledIn = Date().timeIntervalSince(started)
+        try await Task.sleep(nanoseconds: 800_000_000)   // the shared initialize fails meanwhile
+        let breaker = await ParallelSearchClient.shared.breakerStateForTesting()
+        c.check("P4.1 cancelled waiters of a shared initialize return CancellationError at once (not after the 600 ms initialize), and its later 503 never reaches the breaker",
+                results.allSatisfy(isCancel) && settledIn < 0.45 && breaker == .closed && script.methods == ["initialize"],
+                "\(results) in \(settledIn)s breaker \(breaker)")
+        // The same through the orchestrator: no health record for a cancelled search.
+        script = ScriptedSend()
+        script.initDelay = 0.6; script.initStatus = 503
+        await ParallelSearchClient.shared.installForTesting(send: script.send)
+        HealthProbe.clear()
+        let orchestrator = WebOrchestrator()
+        await orchestrator.configure(openRouterKey: "", serperKey: "", jinaKey: "")
+        let query = Task { try? await orchestrator.executeWebQuery(queries: ["cancelled query"]) }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        query.cancel()
+        _ = await query.value
+        try await Task.sleep(nanoseconds: 800_000_000)
+        c.check("P4.2 a search cancelled while a shared initialize fails records no .webSearchFree failure", HealthProbe.events(.webSearchFree).isEmpty, "\(HealthProbe.events)")
+        // A surviving joiner still gets the shared session; one initialize only.
+        script = ScriptedSend()
+        script.initDelay = 0.4
+        await ParallelSearchClient.shared.installForTesting(send: script.send)
+        let creator = Task { await search("creator") }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let joiner = Task { await search("joiner") }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        creator.cancel()
+        let creatorResult = await creator.value
+        let joinerResult = await joiner.value
+        c.check("P4.3 the creator cancels, the joiner survives: the shared initialize is not cancelled, the joiner searches on it (one initialize)",
+                isCancel(creatorResult) && ((try? joinerResult.get()) ?? []).count == 1
+                && script.methods.filter { $0 == "initialize" }.count == 1, "\(creatorResult) \(joinerResult) \(script.methods)")
+        // A waiter with less time than the initialize needs fails at its own deadline.
+        script = ScriptedSend()
+        script.initDelay = 2
+        var short = ParallelSearchClient.Limits(); short.totalDeadline = 0.5
+        await ParallelSearchClient.shared.installForTesting(send: script.send, limits: short)
+        let t0 = Date()
+        let late = await search("short deadline")
+        var isDeadline = false
+        if case .failure(let e as ParallelSearchError) = late, e == .deadline { isDeadline = true }
+        c.check("P4.4 a waiter whose deadline is shorter than the initialize fails at its own deadline (~0.5 s), not after 2 s",
+                isDeadline && Date().timeIntervalSince(t0) < 1.2, "\(late) \(Date().timeIntervalSince(t0))s")
+        try await Task.sleep(nanoseconds: 1_700_000_000)   // let the 2 s initialize settle before the next group
+        await ParallelSearchClient.shared.installForTesting(send: nil)
+        _ = fake
+    }
 }

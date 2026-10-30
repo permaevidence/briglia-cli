@@ -64,6 +64,20 @@ BREAKS = [
     ("K16 '.none' still sends Serper an empty key", "R.3", S + "WebOrchestrator.swift",
      "                            return (q, nil, Self.noSearchServiceMessage)",
      "                            return (q, try await self.serperSearch(q, apiKey: \"\"), nil)"),
+    # Codex round 1 (KEYLESS_WEB_IMPL_CODEX_REVIEW_2026-10-30).
+    ("K17 a cancelled caller keeps waiting for the shared initialize", "P4.1", S + "ParallelSearchClient.swift",
+     "            Task { await self.failInitWaiter(id, with: CancellationError()) }", "            _ = id"),
+    ("K18 server requests are answered only after the stream completes", "P1.16", S + "ParallelSearchClient.swift",
+     "        for request in requests { onServerRequest(request) }", "        _ = requests"),
+    ("K19 an HTTP-date Retry-After is ignored", "P2.13", S + "ParallelSearchClient.swift",
+     "        if let seconds = TimeInterval(value) { return seconds.isFinite && seconds >= 0 ? seconds : nil }",
+     "        if let seconds = TimeInterval(value) { return seconds.isFinite && seconds >= 0 ? seconds : nil }; if !value.isEmpty { return nil }"),
+    ("K20 a failed post-link barrier is swallowed", "S.12", S + "ParallelSessionStore.swift",
+     "        return try confirmedLocked(id)\n", "        confirmedID = id; return id\n"),
+    ("K21 a discard is reported without a directory barrier", "S.15", S + "ParallelSessionStore.swift",
+     "        if FileManager.default.fileExists(atPath: dir.path) { try barrier(dir) }", "        _ = dir"),
+    ("K22 an old-session 404 drops a newer session", "P2.12", S + "ParallelSearchClient.swift",
+     "        guard session?.generation == gen || (session == nil && generation == gen) else { return }", "        _ = gen"),
 ]
 
 

@@ -184,3 +184,80 @@ extension WebBackendSelftest {
         await JinaKeylessPacer.shared.configureForTesting()
     }
 }
+
+// Durable publication of the search ID (Codex r1 finding 4) and the
+// cross-process mint race.
+extension WebBackendSelftest {
+    static func runSessionDurabilityGroup(_ c: Checker, root: URL) async throws {
+        print("SD. Search ID durability")
+        struct Injected: Error {}
+        let url = ParallelSessionStore.fileURL
+        defer { ParallelSessionStore.fsyncDirectoryForTesting = nil }
+        try? ParallelSessionStore.discard()
+        // Post-link barrier failure: the ID is not used, the file stays.
+        ParallelSessionStore.fsyncDirectoryForTesting = { _ in throw Injected() }
+        let mints = ParallelSessionStore.mintCountForTesting
+        var notDurable = false
+        do { _ = try ParallelSessionStore.idForSearch() } catch is ParallelSessionStore.NotDurable { notDurable = true } catch {}
+        let visible: String? = { if case .valid(let id) = ParallelSessionStore.state() { return id }; return nil }()
+        c.check("S.12 a failed post-link directory barrier fails the search (NotDurable) and keeps the published file",
+                notDurable && visible != nil && ParallelSessionStore.mintCountForTesting == mints + 1)
+        // Retry confirms the SAME id, never re-mints.
+        ParallelSessionStore.fsyncDirectoryForTesting = nil
+        let retried = try? ParallelSessionStore.idForSearch()
+        c.check("S.13 the next call confirms and uses the SAME id (no new mint)", retried == visible && ParallelSessionStore.mintCountForTesting == mints + 1)
+        // A file published by another process is confirmed before first use.
+        try ParallelSessionStore.discard()
+        let foreign = "12345678-9abc-4def-8123-456789abcdef"
+        try Data("{\"version\":1,\"parallel_session_id\":\"\(foreign)\",\"created\":\"x\"}".utf8).write(to: url)
+        ParallelSessionStore.fsyncDirectoryForTesting = { _ in throw Injected() }
+        var refused = false
+        do { _ = try ParallelSessionStore.idForSearch() } catch is ParallelSessionStore.NotDurable { refused = true } catch {}
+        ParallelSessionStore.fsyncDirectoryForTesting = nil
+        c.check("S.14 an id found on disk (another process's mint) is used only after its directory entry is confirmed",
+                refused && (try? ParallelSessionStore.idForSearch()) == foreign)
+        // Discard durability.
+        ParallelSessionStore.fsyncDirectoryForTesting = { _ in throw Injected() }
+        var discardFailed = false
+        do { try ParallelSessionStore.discard() } catch { discardFailed = true }
+        ParallelSessionStore.fsyncDirectoryForTesting = nil
+        c.check("S.15 a discard whose directory barrier fails reports the failure (wipe/import never claim a non-durable removal)",
+                discardFailed && ParallelSessionStore.state() == .absent)
+        // Pre-link failure: nothing published, no ID.
+        let locked = root.appendingPathComponent("locked-dir")
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        chmod(locked.path, 0o500)
+        ParallelSessionStore.fileURLOverrideForTesting = locked.appendingPathComponent("search-session.json")
+        var preLinkFailed = false
+        do { _ = try ParallelSessionStore.idForSearch() } catch { preLinkFailed = true }
+        let lockedState = ParallelSessionStore.state()
+        chmod(locked.path, 0o700)
+        ParallelSessionStore.fileURLOverrideForTesting = url
+        c.check("S.16 a failure before publication (temp file can't be created) returns no ID and publishes nothing",
+                preLinkFailed && lockedState == .absent)
+
+        // Cross-process mint race: six processes, one file, one ID.
+        let raceFile = root.appendingPathComponent("race-\(UUID().uuidString.prefix(6)).json")
+        let binary = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        var processes: [(Process, Pipe)] = []
+        for _ in 0..<6 {
+            let p = Process()
+            p.executableURL = binary
+            p.arguments = ["__web-backend-selftest", "--mint-session-at", raceFile.path]
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            p.standardError = FileHandle.nullDevice
+            processes.append((p, pipe))
+        }
+        for (p, _) in processes { try p.run() }
+        var ids: [String] = []
+        for (p, pipe) in processes {
+            let out = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            ids.append(String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        let onDisk = (try? JSONSerialization.jsonObject(with: Data(contentsOf: raceFile)) as? [String: Any])?["parallel_session_id"] as? String
+        c.check("S.17 six processes minting at once on one file all get the same ID, the one on disk (link never replaces)",
+                Set(ids).count == 1 && ids.first == onDisk && UUID(uuidString: ids.first ?? "") != nil, "\(ids)")
+    }
+}
