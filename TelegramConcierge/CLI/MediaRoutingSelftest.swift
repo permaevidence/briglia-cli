@@ -17,8 +17,20 @@ struct MediaRoutingSelftest: AsyncParsableCommand {
     /// Live mode (manual, never in CI): one transcription of this audio file
     /// and one fast image through OpenRouter with BRIGLIA_TEST_OPENROUTER_KEY.
     @Option(name: .customLong("live-audio")) var liveAudio: String?
+    /// Live mode (manual, never in CI): ONE Flare low-quality 1024x1024
+    /// image through OpenRouter's Image API with BRIGLIA_TEST_OPENROUTER_KEY.
+    @Flag(name: .customLong("live-image")) var liveImage = false
 
     func run() async throws {
+        if liveImage {
+            guard let key = ProcessInfo.processInfo.environment["BRIGLIA_TEST_OPENROUTER_KEY"], !key.isEmpty else {
+                throw ValidationError("set BRIGLIA_TEST_OPENROUTER_KEY")
+            }
+            let image = try await OpenRouterImageService().generateImage(apiKey: key, prompt: "A tiny green leaf icon on white, flat.",
+                sourceImageData: nil, sourceMimeType: nil, engine: "fast", quality: "low", background: nil, size: "1024x1024")
+            print("live image: \(image.mimeType) \(image.data.count) bytes, \(image.actualSize ?? "?"), model \(image.options.model), byok \(image.byok), spend \(image.spendUSD.map { String($0) } ?? "nil"), notes \(image.options.notes)")
+            return
+        }
         if let liveAudio {
             guard let key = ProcessInfo.processInfo.environment["BRIGLIA_TEST_OPENROUTER_KEY"], !key.isEmpty else {
                 throw ValidationError("set BRIGLIA_TEST_OPENROUTER_KEY")

@@ -298,6 +298,12 @@ extension OpenRouterImageSelftest {
                 && object["requested_size"] as? String == "2048x2048"
                 && object["via"] as? String == "openrouter" && result.fileAttachments.first?.mimeType == "image/png"
                 && near(result.spendUSD, 0.00489))
+        fake.clear(); fake.route = { _ in .init(status: 200, body: #"{"data":[{"b64_json":"eA==","media_type":"image/png"}],"usage":{"cost":0.001}}"#) }
+        let unreadable = try await call(#"{"prompt":"p","size":"2048x2048"}"#)
+        let unreadableObject = (try? JSONSerialization.jsonObject(with: Data(unreadable.content.utf8))) as? [String: Any] ?? [:]
+        c.check("X2b unreadable output bytes → resolution and size 'unknown', never the requested size (Codex r2 note)",
+                unreadableObject["resolution"] as? String == "unknown" && unreadableObject["size"] as? String == "unknown"
+                && unreadableObject["requested_size"] as? String == "2048x2048")
         fake.clear()
         let bad = try await call(#"{"prompt":"p","size":"5000x5000"}"#)
         c.check("X3 an invalid size is explained without a request", fake.requests.isEmpty && bad.content.contains("Invalid image size"))
