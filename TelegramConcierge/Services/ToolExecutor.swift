@@ -3326,7 +3326,7 @@ extension ToolExecutor {
                 )
                 imageResult = (orResult.data, orResult.mimeType, orResult.spendUSD)
                 imageMetadata = orResult.toolResultMetadata()
-                resolvedImageSize = orResult.options.size ?? orResult.options.aspectRatio ?? "default"
+                resolvedImageSize = orResult.actualSize ?? orResult.requestedSize
                 providerName = "OpenRouter (GPT Image 2.5)"
 
             case .gemini:

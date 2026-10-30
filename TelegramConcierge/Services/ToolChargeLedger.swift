@@ -709,7 +709,7 @@ enum ToolChargeLedger {
             try openCutIncident(chargeId: chargeId, entry)
         } catch {
             abandonedUnsaved[chargeId] = entry
-            lastFailure = "could not save the unknown cost of an abandoned web request (\(error.localizedDescription)); kept and retried"
+            lastFailure = "could not save the unknown cost of an abandoned request (\(error.localizedDescription)); kept and retried"
             return false
         }
         do { try mutateInFlight("inflight-end") { $0.removeAll { $0.chargeId == chargeId } } }

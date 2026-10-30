@@ -76,11 +76,17 @@ actor OpenRouterImageService {
         let spendUSD: Double?
         let options: Options
         let byok: Bool
+        /// WIDTHxHEIGHT measured from the returned bytes; nil when unreadable.
+        let actualSize: String?
+
+        /// What was asked for (size, carried-over ratio, or auto).
+        var requestedSize: String { options.size ?? options.aspectRatio ?? "auto" }
 
         func toolResultMetadata() -> [String: Any] {
             [
                 "engine": options.engine, "model": options.model, "quality": options.quality,
-                "background": options.background, "size": options.size ?? options.aspectRatio ?? "auto",
+                "background": options.background, "requested_size": requestedSize,
+                "size": actualSize ?? "unknown",
                 "via": "openrouter", "notes": options.notes,
                 "estimated_spend_usd": spendUSD as Any? ?? NSNull(),
             ]
@@ -214,8 +220,8 @@ actor OpenRouterImageService {
 
     /// `size` is honoured by OpenRouter today but not advertised for these
     /// models. A 400 from OpenRouter ITSELF (no upstream provider named in
-    /// the error metadata) that names size or an unsupported parameter means
-    /// the field stopped passing through: the caller retries once with the
+    /// the error metadata) whose message names `size` means the field
+    /// stopped passing through: the caller retries once with the
     /// nearest aspect ratio. OpenAI's own size-rule 400 (provider "OpenAI",
     /// e.g. "exceeds the current pixel budget") is NOT this case and reaches
     /// the model unchanged, as on the direct path. Pure, selftest seam.
@@ -223,8 +229,7 @@ actor OpenRouterImageService {
         guard sentSize, status == 400, let error else { return false }
         if let provider = error.metadata?.providerName, !provider.isEmpty { return false }
         let message = (error.message ?? "").lowercased()
-        return message.contains("size") || message.contains("parameter") || message.contains("unrecognized")
-            || message.contains("unknown field") || message.contains("not allowed")
+        return message.range(of: #"\bsize\b"#, options: .regularExpression) != nil
     }
 
     /// The exact request body (selftest seam). Only non-default options are sent.
@@ -320,21 +325,43 @@ actor OpenRouterImageService {
     /// The charge of one answered request (pure, selftest seam). BYOK: the
     /// OpenRouter fee plus the provider's charge on the user's key, as one
     /// charge; without a reported upstream cost the provider part is
-    /// estimated from the token counts (GPT Image 2.5 list prices). Not BYOK:
-    /// `usage.cost` (upstream is only a breakdown there), estimated from the
-    /// tokens when absent. nil when nothing usable was reported.
-    static func spendUSD(_ usage: ImagesResponse.Usage?) -> Double? {
-        guard let usage else { return nil }
+    /// estimated from BOTH token counts (GPT Image 2.5 list prices). Not
+    /// BYOK: `usage.cost` (upstream is only a breakdown there), else the
+    /// token estimate. `complete` is false when the reply does not establish
+    /// the whole charge (no usage, a BYOK fee without an upstream cost or
+    /// both token counts, a missing fee): the known part is still counted,
+    /// and the caller keeps an unknown-amount obligation for the rest.
+    static func charge(_ usage: ImagesResponse.Usage?) -> (usd: Double?, complete: Bool) {
+        guard let usage else { return (nil, false) }
         func valid(_ value: Double?) -> Double? { value.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil } }
         let cost = valid(usage.cost?.value)
-        let estimate = tokenEstimateUSD(promptTokens: usage.promptTokens, completionTokens: usage.completionTokens)
-        if usage.isByok == true {
-            let provider = valid(usage.costDetails?.upstreamInferenceCost?.value) ?? estimate
-            guard cost != nil || provider != nil else { return nil }
-            let total = (cost ?? 0) + (provider ?? 0)
+        let estimate = (usage.promptTokens != nil && usage.completionTokens != nil)
+            ? tokenEstimateUSD(promptTokens: usage.promptTokens, completionTokens: usage.completionTokens) : nil
+        func sum(_ a: Double?, _ b: Double?) -> Double? {
+            guard a != nil || b != nil else { return nil }
+            let total = (a ?? 0) + (b ?? 0)
             return total.isFinite ? total : nil
         }
-        return cost ?? estimate
+        if usage.isByok == true {
+            let provider = valid(usage.costDetails?.upstreamInferenceCost?.value) ?? estimate
+            let total = sum(cost, provider)
+            return (total, cost != nil && provider != nil && total != nil)
+        }
+        if let cost { return (cost, true) }
+        return (estimate, estimate != nil)
+    }
+
+    static func spendUSD(_ usage: ImagesResponse.Usage?) -> Double? { charge(usage).usd }
+
+    /// Pixel size of the returned image: the PNG header (what the Image API
+    /// returns), else the platform decoder. nil when unreadable.
+    static func pixelSize(_ data: Data) -> String? {
+        let b = [UInt8](data.prefix(24))
+        if b.count == 24, b[0] == 0x89, b[1] == 0x50, b[2] == 0x4E, b[3] == 0x47, b[12...15].elementsEqual(Array("IHDR".utf8)) {
+            let w = b[16...19].reduce(0) { $0 << 8 | Int($1) }, h = b[20...23].reduce(0) { $0 << 8 | Int($1) }
+            return w > 0 && h > 0 ? "\(w)x\(h)" : nil
+        }
+        return PlatformImage.dimensions(data: data).map { "\($0.width)x\($0.height)" }
     }
 
     /// Prompt tokens at the image-input rate (the higher input rate: the
@@ -384,7 +411,7 @@ actor OpenRouterImageService {
             return request
         }
 
-        var (data, response) = try await send(try makeRequest(options))
+        var (data, response, ticket) = try await send(try makeRequest(options))
         var status = (response as? HTTPURLResponse)?.statusCode ?? 0
         var decoded = try? JSONDecoder().decode(ImagesResponse.self, from: data)
         // Guard for the undocumented `size` passthrough: exactly one retry,
@@ -397,10 +424,16 @@ actor OpenRouterImageService {
                               notes: options.notes + ["size \(sentSize) is not available through OpenRouter right now; rendered at aspect_ratio \(ratio) instead (about 1024–1536 px on the long side)."])
             DebugTelemetry.log(.info, summary: "OpenRouter image size rejected",
                 detail: "size=\(sentSize) refused by OpenRouter (HTTP 400); retrying once at aspect_ratio \(ratio)")
-            (data, response) = try await send(try makeRequest(options))
+            settle(ticket, complete: true)   // OpenRouter's own refusal: nothing rendered
+            (data, response, ticket) = try await send(try makeRequest(options))
             status = (response as? HTTPURLResponse)?.statusCode ?? 0
             decoded = try? JSONDecoder().decode(ImagesResponse.self, from: data)
         }
+        // An error answer renders nothing; a 200 is complete only when its
+        // usage establishes the whole charge (otherwise the remainder stays
+        // an unknown-amount incident).
+        let charge = Self.charge(decoded?.usage)
+        settle(ticket, complete: status != 200 || decoded?.error != nil || charge.complete)
         let errorMessage = decoded?.error?.message
             ?? String(data: data, encoding: .utf8).map { String($0.prefix(300)) } ?? "no error body"
         guard status == 200 else { throw Self.classifyError(status: status, message: errorMessage) }
@@ -408,26 +441,46 @@ actor OpenRouterImageService {
             let code = error.code.map { Int($0.value) } ?? 0
             throw Self.classifyError(status: code > 0 ? code : 500, message: error.message ?? "error in the reply")
         }
-        let spend = Self.spendUSD(decoded?.usage)
+        let spend = charge.usd
         guard let item = decoded?.data?.first, let b64 = item.b64JSON,
               let image = Data(base64Encoded: b64), !image.isEmpty else {
             throw ServiceError.noImage(detail: decoded == nil ? "unreadable reply" : "", spendUSD: spend)
         }
         let mime = (item.mediaType?.isEmpty == false ? item.mediaType : nil) ?? ModelImage.sniff(image).mime
+        let actual = Self.pixelSize(image)
+        if let requested = options.size, let actual, actual != requested {
+            // Reported, never re-rendered: the smaller image may already be billed.
+            options.notes.append("Requested size \(requested) but OpenRouter returned \(actual): the size was not applied.")
+        }
         let result = Result(data: image, mimeType: mime, spendUSD: spend, options: options,
-                            byok: decoded?.usage?.isByok == true)
+                            byok: decoded?.usage?.isByok == true, actualSize: actual)
         DebugTelemetry.log(.info, summary: "OpenRouter image usage",
             detail: "model=\(options.model) engine=\(options.engine) quality=\(options.quality) size=\(options.size ?? options.aspectRatio ?? "auto") edit=\(reference != nil) byok=\(result.byok) prompt_tokens=\(decoded?.usage?.promptTokens.map(String.init) ?? "-") completion_tokens=\(decoded?.usage?.completionTokens.map(String.init) ?? "-") spend=\(spend.map { String(format: "%.6f", $0) } ?? "unknown")")
         return result
     }
 
+    struct Ticket { let chargeId: UUID; let sentAt: Date }
+
+    /// Close the in-flight record of an ANSWERED send: complete → ended;
+    /// otherwise → an unknown-amount incident for what the reply left unknown.
+    private func settle(_ ticket: Ticket, complete: Bool) {
+        if complete {
+            ToolChargeLedger.endInFlight(chargeId: ticket.chargeId)
+        } else {
+            ToolChargeLedger.abandonInFlight(chargeId: ticket.chargeId, generationId: nil, provider: "OpenRouter",
+                                             stage: Self.spendStage, reason: "answered without a complete cost",
+                                             startedAt: ticket.sentAt)
+        }
+    }
+
     /// One paid send: spend gate, write-ahead in-flight record, transport.
-    /// No retry of any kind. A reply (any status) ends the record; a
+    /// No retry of any kind. A reply returns its open record (the caller
+    /// settles it once the usage is read); a
     /// timeout, a cancellation or a connection lost after the request may
     /// have reached OpenRouter becomes an unknown-amount incident; a failure
     /// that demonstrably happened before sending (DNS, connect, TLS) ends
     /// the record without one.
-    private func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    private func send(_ request: URLRequest) async throws -> (Data, URLResponse, Ticket) {
         try Task.checkCancellation()
         if let pause = SpendGate.pauseReason() { throw ServiceError.notSent(pause) }
         let chargeId = UUID()
@@ -436,9 +489,8 @@ actor OpenRouterImageService {
         }
         let sentAt = Date()
         do {
-            let result = try await transport(request)
-            ToolChargeLedger.endInFlight(chargeId: chargeId)
-            return result
+            let (data, response) = try await transport(request)
+            return (data, response, Ticket(chargeId: chargeId, sentAt: sentAt))
         } catch is CancellationError {
             ToolChargeLedger.abandonInFlight(chargeId: chargeId, generationId: nil, provider: "OpenRouter",
                                              stage: Self.spendStage, reason: "cancelled while open", startedAt: sentAt)

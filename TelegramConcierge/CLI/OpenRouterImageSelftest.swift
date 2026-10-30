@@ -133,6 +133,7 @@ struct OpenRouterImageSelftest: AsyncParsableCommand {
     static func near(_ a: Double?, _ b: Double) -> Bool { a.map { abs($0 - b) < 1e-12 } == true }
 
     static func spend(_ c: ResponsesSelftest.Checks) {
+        c.check("$0 pixel size from the PNG header", S.pixelSize(Data(base64Encoded: pngBase64)!) == "1x1" && S.pixelSize(Data("x".utf8)) == nil)
         c.check("$1 BYOK: OpenRouter fee + upstream provider charge as ONE charge (6af22df rule)",
                 near(S.spendUSD(usage(#"{"cost":0.0002,"is_byok":true,"cost_details":{"upstream_inference_cost":0.005}}"#)), 0.0052))
         c.check("$2 BYOK with a zero fee (the probe's shape) records the upstream charge, not $0",
@@ -145,6 +146,16 @@ struct OpenRouterImageSelftest: AsyncParsableCommand {
         c.check("$5 no cost reported: token estimate", near(S.spendUSD(usage(#"{"prompt_tokens":1000,"completion_tokens":1000}"#)), (1000 * 8 + 1000 * 30) / 1_000_000))
         c.check("$6 nothing usable → unknown (nil); no usage → nil",
                 S.spendUSD(usage(#"{}"#)) == nil && S.spendUSD(nil) == nil)
+        func complete(_ json: String) -> Bool { S.charge(usage(json)).complete }
+        c.check("$8 completeness: a reply establishes the whole charge only with a fee plus an upstream cost or both token counts (Codex N1)",
+                complete(#"{"cost":0,"is_byok":true,"cost_details":{"upstream_inference_cost":0.005}}"#)
+                && complete(#"{"prompt_tokens":30,"completion_tokens":158,"cost":0,"is_byok":true}"#)
+                && !complete(#"{"cost":0,"is_byok":true}"#) && !complete(#"{"cost":0,"is_byok":true,"prompt_tokens":30}"#)
+                && !complete(#"{"is_byok":true,"cost_details":{"upstream_inference_cost":0.005}}"#)
+                && complete(#"{"cost":0.01}"#) && complete(#"{"prompt_tokens":1,"completion_tokens":1}"#)
+                && !complete(#"{"prompt_tokens":1}"#) && !complete(#"{}"#) && !S.charge(nil).complete)
+        c.check("$9 a partial reply still counts its known part (fee 0, no tokens → $0 known, remainder unknown)",
+                S.charge(usage(#"{"cost":0,"is_byok":true}"#)).usd == 0 && S.charge(usage(#"{"cost":0,"is_byok":true,"prompt_tokens":30}"#)).usd == 0)
         c.check("$7 non-finite or negative values are not charges",
                 S.spendUSD(usage(#"{"cost":-1,"is_byok":true,"cost_details":{"upstream_inference_cost":"1e400"}}"#)) == nil
                 && near(S.spendUSD(usage(#"{"cost":"0.01"}"#)), 0.01))
@@ -182,9 +193,14 @@ struct OpenRouterImageSelftest: AsyncParsableCommand {
         c.check("E7 size guard: OpenRouter's own 400 naming size/parameters triggers it only when size was sent",
                 S.isSizeFieldRejection(status: 400, error: err(#"{"message":"No provider supports the requested parameter(s): size","code":400}"#), sentSize: true)
                 && S.isSizeFieldRejection(status: 400, error: err(#"{"message":"Unrecognized key: size","code":400,"metadata":{"failed_routing_step":"Validate"}}"#), sentSize: true)
+                && S.isSizeFieldRejection(status: 400, error: err(#"{"message":"Invalid Size","code":400}"#), sentSize: true)
                 && !S.isSizeFieldRejection(status: 400, error: err(#"{"message":"No provider supports the requested parameter(s): size","code":400}"#), sentSize: false))
         c.check("E8 size guard: OpenAI's own size-rule 400 (provider named) is NOT the guard case",
                 !S.isSizeFieldRejection(status: 400, error: err(#"{"message":"Invalid size '3840x3840'. Requested resolution exceeds the current pixel budget.","code":400,"metadata":{"provider_name":"OpenAI"}}"#), sentSize: true))
+        c.check("E9b size guard: refusals that do not name size are not the guard case (Codex N2)",
+                !S.isSizeFieldRejection(status: 400, error: err(#"{"message":"Unsupported parameter: quality","code":400}"#), sentSize: true)
+                && !S.isSizeFieldRejection(status: 400, error: err(#"{"message":"Prompt is not allowed","code":400}"#), sentSize: true)
+                && !S.isSizeFieldRejection(status: 400, error: err(#"{"message":"Unrecognized key: resize_mode","code":400}"#), sentSize: true))
         c.check("E9 size guard: other statuses or unrelated 400s are not the guard case",
                 !S.isSizeFieldRejection(status: 404, error: err(#"{"message":"size","code":404}"#), sentSize: true)
                 && !S.isSizeFieldRejection(status: 400, error: err(#"{"message":"Prompt is required","code":400}"#), sentSize: true)

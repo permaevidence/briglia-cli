@@ -66,6 +66,10 @@ extension OpenRouterImageSelftest {
         c.check("H2 the image, its media type and the BYOK charge come back",
                 ok?.data == Data(base64Encoded: pngBase64) && ok?.mimeType == "image/png" && near(ok?.spendUSD, 0.00489)
                 && ok?.byok == true && ok?.options.size == "3840x2160")
+        c.check("H2b requested vs returned size are reported separately; a mismatch is noted, never re-rendered (Codex N3)",
+                ok?.actualSize == "1x1" && ok?.requestedSize == "3840x2160" && fake.requests.count == 1
+                && (ok?.toolResultMetadata()["size"] as? String) == "1x1" && (ok?.toolResultMetadata()["requested_size"] as? String) == "3840x2160"
+                && ok?.options.notes.contains { $0.contains("Requested size 3840x2160") && $0.contains("1x1") } == true)
         c.check("H3 an answered request leaves no in-flight record and no incident", inFlight().isEmpty && incidents().isEmpty)
 
         // H4 edit
@@ -107,6 +111,22 @@ extension OpenRouterImageSelftest {
             c.check("H8 no image → noImage error that still carries the reported charge", near(se.spendUSD, 0.003))
         } else { c.check("H8 no image → noImage error that still carries the reported charge", false) }
 
+        // H9 an answered 200 whose usage does not establish the whole charge
+        // keeps the known part and an unknown-amount incident (Codex N1).
+        ToolChargeLedger.resetForTesting()
+        fake.clear(); respond(200, okBody(usage: #"{"cost":0,"is_byok":true}"#))
+        let partial = try? await run().get()
+        var list = incidents()
+        c.check("H9 BYOK fee without the provider's charge → image kept, $0 known, unknown-cost incident, no record left",
+                partial != nil && partial?.spendUSD == 0 && list.count == 1
+                && list.first?.detail?.contains("answered without a complete cost") == true && inFlight().isEmpty)
+        ToolChargeLedger.resetForTesting()
+        fake.clear(); respond(200, #"{"data":[{"b64_json":"\#(pngBase64)"}]}"#)
+        _ = await run()
+        list = incidents()
+        c.check("H10 a reply with no usage at all → unknown-cost incident", list.count == 1 && inFlight().isEmpty)
+        ToolChargeLedger.resetForTesting()
+
         try await sizeGuard(c, fake: fake, run: { await run(size: $0) })
         try await unknownCost(c, fake: fake, url: url)
     }
@@ -131,7 +151,7 @@ extension OpenRouterImageSelftest {
         c.check("G2 the result says the size was not available and what was used",
                 retried?.options.notes.contains { $0.contains("3840x2160") && $0.contains("16:9") } == true
                 && retried?.options.size == nil && retried?.options.aspectRatio == "16:9"
-                && (retried?.toolResultMetadata()["size"] as? String) == "16:9")
+                && (retried?.toolResultMetadata()["requested_size"] as? String) == "16:9" && incidents().isEmpty && inFlight().isEmpty)
         // OpenAI's own size-rule 400 reaches the model unchanged.
         fake.clear(); fake.route = { _ in .init(status: 400, body: errorBody(400, "Invalid size '3840x2160'. Requested resolution exceeds the current pixel budget.", provider: "OpenAI")) }
         var outcome = await run("3840x2160")
@@ -274,7 +294,8 @@ extension OpenRouterImageSelftest {
                 && (sent["prompt"] as? String)?.hasPrefix("Edit the input image directly") == true && (sent["input_references"] as? [Any])?.count == 1)
         c.check("X2 result names the engine, model and size; image attached; BYOK charge recorded",
                 object["success"] as? Bool == true && object["provider"] as? String == "OpenRouter (GPT Image 2.5)"
-                && object["model"] as? String == "openai/gpt-image-2.5-sunburst" && object["resolution"] as? String == "2048x2048"
+                && object["model"] as? String == "openai/gpt-image-2.5-sunburst" && object["resolution"] as? String == "1x1"
+                && object["requested_size"] as? String == "2048x2048"
                 && object["via"] as? String == "openrouter" && result.fileAttachments.first?.mimeType == "image/png"
                 && near(result.spendUSD, 0.00489))
         fake.clear()

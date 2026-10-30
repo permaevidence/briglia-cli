@@ -281,6 +281,7 @@ struct MediaRoutingSelftest: AsyncParsableCommand {
         ToolExecutor.openRouterImageServiceOverrideForTesting = OpenRouterImageService(transport: recorder.transport)
         defer { ToolExecutor.openRouterImageServiceOverrideForTesting = nil }
         try set(orLane)
+        try PrivateStorage.ensureDirectory(StoragePaths.dataRoot.appendingPathComponent("images", isDirectory: true))
         let executor = ToolExecutor(outputMode: .subagent)
         let call = ToolCall(id: "img1", type: "function", function: FunctionCall(name: "generate_image",
             arguments: #"{"prompt":"A red bicycle","engine":"fast","size":"1536x1024"}"#))
