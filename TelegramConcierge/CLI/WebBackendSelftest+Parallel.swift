@@ -137,8 +137,9 @@ extension WebBackendSelftest {
         fake.initServerRequest = 66
         let initAwaited = await search("init stream")
         let replies66 = fake.requests.filter { $0.method == "<error-reply>" && ParallelSearchClient.rpcID($0.body["id"]) == 66 }
-        c.check("P1.17 an initialize answered over SSE with a server request first: rejected while open, then the session is established and the search succeeds",
-                (try? initAwaited.get()) != nil && replies66.count == 1 && fake.count("initialize") == 1, "\(initAwaited)")
+        c.check("P1.17 an initialize answered over SSE with a server request first: the rejection goes out while the stream is open WITH the session the response assigned (the fake refuses it otherwise), then the session is established and the search succeeds",
+                (try? initAwaited.get()) != nil && replies66.count == 1 && replies66.first?.headers["mcp-session-id"] == "S1"
+                && fake.sawErrorReply(66) && fake.count("initialize") == 1, "\(initAwaited) \(replies66.map(\.headers))")
 
         // Body cap.
         await fresh(fake, limits: { var l = ParallelSearchClient.Limits(); l.bodyCap = 4096; return l }())
@@ -265,6 +266,11 @@ extension WebBackendSelftest {
                 && ParallelSearchClient.parseRetryAfter("Fri Jan 15 08:03:20 2027", now: now).map { $0 > 0 } == true
                 && ParallelSearchClient.parseRetryAfter(formatter.string(from: now.addingTimeInterval(-5)), now: now) == 0
                 && ParallelSearchClient.parseRetryAfter("soon", now: now) == nil && ParallelSearchClient.parseRetryAfter("-3", now: now) == nil)
+        // RFC 850 two-digit years: within 50 years ahead → that year; further → the previous century.
+        let oct2026 = Date(timeIntervalSince1970: 1_793_318_400)   // 2026-10-30T00:00:00Z
+        c.check("P2.16 RFC 850 two-digit year uses HTTP's 50-year rule relative to now (\"-50\" = 2050, a future delay; \"-99\" = 1999, past → 0)",
+                (ParallelSearchClient.parseRetryAfter("Saturday, 01-Jan-50 00:00:00 GMT", now: oct2026) ?? 0) > 20 * 365 * 86_400
+                && ParallelSearchClient.parseRetryAfter("Friday, 01-Jan-99 00:00:00 GMT", now: oct2026) == 0)
     }
 
     static func runParallelBreakerGroup(_ c: Checker, fake: FakeParallel) async throws {

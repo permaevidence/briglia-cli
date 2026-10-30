@@ -161,6 +161,7 @@ final class FakeParallel: @unchecked Sendable {
     var initServerRequest: Int? = nil
     private var sessionCounter = 0
     private var validSessions: Set<String> = []
+    private var acceptedReplies: [Int] = []
     private var script: [Reply] = []
     private var seen: [Seen] = []
     private var inFlight = 0
@@ -172,7 +173,7 @@ final class FakeParallel: @unchecked Sendable {
     func reset() {
         lock.lock(); defer { lock.unlock() }
         stateful = true; protocolVersion = "2025-06-18"; initStatus = nil; initServerRequest = nil
-        sessionCounter = 0; validSessions = []; script = []; seen = []; inFlight = 0; maxInFlight = 0; defaultDelay = 0; perSession = [:]
+        sessionCounter = 0; validSessions = []; acceptedReplies = []; script = []; seen = []; inFlight = 0; maxInFlight = 0; defaultDelay = 0; perSession = [:]
     }
     func enqueue(_ replies: [Reply]) { lock.lock(); script.append(contentsOf: replies); lock.unlock() }
     func setPerSession(_ map: [String: [Reply]]) { lock.lock(); perSession = map; lock.unlock() }
@@ -225,8 +226,17 @@ final class FakeParallel: @unchecked Sendable {
                 return response
             }
             return .init(body: result, headers: headers)
-        case "notifications/initialized", "<error-reply>":
+        case "notifications/initialized":
             return .init(status: 202, contentType: "application/json", body: "")
+        case "<error-reply>":
+            // A stateful server enforces the session it assigned on EVERY
+            // later request, replies included (also during initialize).
+            lock.lock()
+            let sid = request.headers["mcp-session-id"]
+            let accepted = !stateful || (sid != nil && validSessions.contains(sid!))
+            if accepted, let rid = ParallelSearchClient.rpcID(body["id"]) { acceptedReplies.append(rid) }
+            lock.unlock()
+            return accepted ? .init(status: 202, contentType: "application/json", body: "") : .init(status: 400, body: "{\"error\":\"missing session\"}")
         case "tools/call":
             let sid = request.headers["mcp-session-id"]
             lock.lock()
@@ -250,8 +260,10 @@ final class FakeParallel: @unchecked Sendable {
         }
     }
 
+    /// An error reply for `rid` that the server ACCEPTED (session enforced).
     func sawErrorReply(_ rid: Int) -> Bool {
-        requests.contains { $0.method == "<error-reply>" && ParallelSearchClient.rpcID($0.body["id"]) == rid }
+        lock.lock(); defer { lock.unlock() }
+        return acceptedReplies.contains(rid)
     }
 
     func toolCallCount(session: String) -> Int {

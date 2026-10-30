@@ -463,6 +463,9 @@ actor ParallelSearchClient {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        // RFC 9110 §5.6.7: a two-digit (RFC 850) year more than 50 years
+        // ahead means the most recent past year with those digits.
+        formatter.twoDigitStartDate = Calendar(identifier: .gregorian).date(byAdding: .year, value: -50, to: now)
         for format in ["EEE',' dd MMM yyyy HH':'mm':'ss 'GMT'", "EEEE',' dd'-'MMM'-'yy HH':'mm':'ss 'GMT'", "EEE MMM d HH':'mm':'ss yyyy"] {
             formatter.dateFormat = format
             if let date = formatter.date(from: value) { return max(0, date.timeIntervalSince(now)) }
@@ -505,12 +508,16 @@ actor ParallelSearchClient {
     /// bounded by its deadline. Over budget: not answered.
     private nonisolated func rejectServerRequests(session: String?, protocolVersion: String?, deadline: TimeInterval,
                                                   budget: RequestBudget) -> ServerRequestHandler {
-        { [weak self] requestID in
+        { [weak self] requestID, streamSession in
             guard let self, budget.take(1) else { return }
+            // During initialize the session is not established yet, but the
+            // stream's response headers may already have assigned one: the
+            // reply must carry it (MCP session management).
+            let replySession = session ?? streamSession
             Task {
                 let answer: [String: Any] = ["jsonrpc": "2.0", "id": requestID.value, "error": ["code": -32601, "message": "Method not found"]]
                 await self.noteErrorReply()
-                _ = try? await self.send(answer, sessionID: session, protocolVersion: protocolVersion, stopAtID: nil, deadline: deadline)
+                _ = try? await self.send(answer, sessionID: replySession, protocolVersion: protocolVersion, stopAtID: nil, deadline: deadline)
             }
         }
     }
@@ -519,7 +526,8 @@ actor ParallelSearchClient {
 
     /// A JSON-RPC id as received (number or string), for echoing back.
     struct RPCRequestID: @unchecked Sendable { let value: Any }
-    typealias ServerRequestHandler = @Sendable (RPCRequestID) -> Void
+    /// (request id, the `Mcp-Session-Id` of the response carrying the stream, if any)
+    typealias ServerRequestHandler = @Sendable (RPCRequestID, String?) -> Void
 
     static func serverRequestID(_ event: String) -> RPCRequestID? {
         guard let object = try? JSONSerialization.jsonObject(with: Data(event.utf8)) as? [String: Any],
@@ -553,7 +561,7 @@ actor ParallelSearchClient {
         counters.httpRequests += 1
         let sender = sendOverride ?? ParallelHTTPTransport.send
         do {
-            return try await sender(request, stopAtID, limits, serverRequests ?? { _ in })
+            return try await sender(request, stopAtID, limits, serverRequests ?? { _, _ in })
         } catch is CancellationError {
             throw CancellationError()
         } catch let urlError as URLError where urlError.code == .cancelled {
@@ -756,9 +764,10 @@ final class ParallelHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataT
         let done = stopAtID.map { id in outcome.events.contains { SSEParser.isResponse($0, id: id) } } ?? false
         let reply = done ? replyLocked() : nil
         let requests = outcome.events.compactMap(ParallelSearchClient.serverRequestID)
+        let streamSession = response?.value(forHTTPHeaderField: "Mcp-Session-Id").flatMap { $0.isEmpty ? nil : $0 }
         lock.unlock()
         // Answered while the stream is open, each exactly once.
-        for request in requests { onServerRequest(request) }
+        for request in requests { onServerRequest(request, streamSession) }
         if overflow { finish(.failure(ParallelSearchError.badPayload("an event larger than \(limits.eventCap / 1024) KiB"))); return }
         if let reply { finish(.success(reply)) }
     }
