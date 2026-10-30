@@ -183,6 +183,17 @@ extension OpenRouterImageSelftest {
                 thrown is CancellationError && fake.requests.count == 1 && list.count == 1
                 && list.first?.detail?.contains("cancelled while open") == true && inFlight().isEmpty)
 
+        // U3b a transport that surfaces Swift's CancellationError (Linux
+        // FoundationNetworking, a custom transport) is recorded the same way.
+        ToolChargeLedger.resetForTesting()
+        let cancelling = S(transport: { _ in throw CancellationError() }, endpoint: url, timeout: 30)
+        thrown = nil
+        do { _ = try await cancelling.generateImage(apiKey: key, prompt: "p", sourceImageData: nil, sourceMimeType: nil,
+                                                    engine: nil, quality: nil, background: nil, size: nil) } catch { thrown = error }
+        list = incidents()
+        c.check("U3b a CancellationError from the transport → rethrown, unknown-cost incident, no record left",
+                thrown is CancellationError && list.count == 1 && list.first?.detail?.contains("cancelled while open") == true && inFlight().isEmpty)
+
         // U4 cancelled before sending: nothing sent, nothing opened
         ToolChargeLedger.resetForTesting()
         fake.clear(); fake.route = { _ in .init(status: 200, body: okBody()) }
