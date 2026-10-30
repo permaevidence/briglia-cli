@@ -477,6 +477,12 @@ BREAKS = [
      "            if state == \"-\" { return .unitStopped(state.isEmpty ? \"unknown\" : state) }"),
     ("M153 a restart while waiting for the hello is ignored", "qs:17.", T + "Services/QuickSetupEvidence.swift",
      "            if marker != baseline { return .restarted(marker) }", "            _ = marker"),
+    # 0.2.65 release: the S3-R5-1 fixtures retry a missed receipt-during-grace
+    # ordering (up to 5 attempts). A kill with no grace never offers that
+    # window: the fixture must still FAIL after its last attempt, never pass.
+    ("M155 kill() terminates with no grace (fixture ordering can never be reached)", "stage3", T + "Services/BashTools.swift",
+     "        e.terminationCause = .userKill\n        e.terminationsInFlight += 1\n        await ProcessTree.terminate(e.process, graceNanos: 300_000_000)",
+     "        e.terminationCause = .userKill\n        e.terminationsInFlight += 1\n        await ProcessTree.terminate(e.process, graceNanos: 0)"),
 ]
 if sys.platform.startswith("linux"):
     BREAKS.append(("M154 the menu's apt job leaves out python3.X-venv", "qs:18.", T + "CLI/QuickSetup/QuickSetupWorkflow.swift",

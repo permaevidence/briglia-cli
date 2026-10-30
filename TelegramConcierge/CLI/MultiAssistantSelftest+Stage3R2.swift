@@ -161,6 +161,47 @@ extension ProfileHarness {
               FileClaims.claims(ofSelf: a).isEmpty && !Tripwire.shared.hasWatches)
     }
 
+    final class KillFlag: @unchecked Sendable { var done = false }
+
+    /// Fixture for the S3-R5-1 removal paths: start a job whose child ignores
+    /// SIGTERM, start `kill()` (300 ms grace) and observe the completion
+    /// receipt while that grace still runs. The observation is a setup
+    /// precondition, not a product assertion: on a loaded runner the poller
+    /// can miss the whole grace (private CI, 0.2.65 candidate), so a missed
+    /// ordering is retried with a fresh job (up to 5 attempts) and reported
+    /// as a fixture failure only if it never happens.
+    private func killDuringGrace(_ fx: S3, reg: BackgroundProcessRegistry, body: String, tag: String, label: String)
+        -> (job: BackgroundProcessRegistry.Handle, flag: KillFlag, done: DispatchSemaphore, receipt: BashCompletionReceipt)? {
+        for attempt in 1...5 {
+            let ready = fx.root.appendingPathComponent("child-ready-\(tag)-\(attempt)").path
+            let child = "perl -MTime::HiRes=sleep -e '\(body)' \"\(ready)\" </dev/null >/dev/null 2>&1"
+            guard let job = wait({ try? await reg.start(command: child + " & while :; do sleep 0.02; done",
+                                                         workdir: fx.root.path, description: "s3r51\(tag)") }),
+                  until(10, { FileManager.default.fileExists(atPath: ready) }) else {
+                check("\(label): start the job", false); return nil
+            }
+            let flag = KillFlag()
+            let done = DispatchSemaphore(value: 0)
+            Task.detached { _ = await reg.kill(handleId: job.id); flag.done = true; done.signal() }
+            var receipt: BashCompletionReceipt?
+            let deadline = Date().addingTimeInterval(5)
+            while receipt == nil && !flag.done && Date() < deadline {
+                receipt = wait { await reg.pendingReceipt(handleId: job.id) }
+                if receipt == nil { Thread.sleep(forTimeInterval: 0.001) }
+            }
+            if let receipt, !flag.done {
+                print("  (\(label): fixture ordering reached on attempt \(attempt) of 5)")
+                return (job, flag, done, receipt)
+            }
+            // Ordering missed: let this termination finish, settle its notice, retry.
+            _ = done.wait(timeout: .now() + 10)
+            if let r = wait({ await reg.pendingReceipt(handleId: job.id) }) { _ = wait { await reg.acknowledgeCompletions([r]) } }
+            print("  (\(label): receipt not observed inside the grace on attempt \(attempt); retrying)")
+        }
+        check("\(label): the receipt is published during the termination grace (fixture ordering, 5 attempts)", false)
+        return nil
+    }
+
     /// S3-R5-1, the other retirement path: `removeEntry` (the attached
     /// caller dropping its entry) must not retire an entry while another
     /// termination of it (/stop, kill) is still inside its grace.
@@ -168,28 +209,9 @@ extension ProfileHarness {
         guard let fx = makeS3("r5-remove") else { check("S3-R5-1 removeEntry fixture", false); return }
         defer { fx.release(); resetStage3Seams() }
         let reg = BackgroundProcessRegistry.shared
-        let ready = fx.root.appendingPathComponent("child-ready").path
         let body = "$SIG{TERM}=sub{}; open(R,\">\",$ARGV[0]); close R; while(1){ sleep 0.005 }"
-        let child = "perl -MTime::HiRes=sleep -e '\(body)' \"\(ready)\" </dev/null >/dev/null 2>&1"
-        guard let job = wait({ try? await reg.start(command: child + " & while :; do sleep 0.02; done",
-                                                     workdir: fx.root.path, description: "s3r51rm") }),
-              until(10, { FileManager.default.fileExists(atPath: ready) }) else {
-            check("S3-R5-1 removeEntry: start the job", false); return
-        }
-        final class Flag: @unchecked Sendable { var done = false }
-        let killFlag = Flag()
-        let killDone = DispatchSemaphore(value: 0)
-        Task.detached { _ = await reg.kill(handleId: job.id); killFlag.done = true; killDone.signal() }
-        var receipt: BashCompletionReceipt?
-        let deadline = Date().addingTimeInterval(5)
-        while receipt == nil && !killFlag.done && Date() < deadline {
-            receipt = wait { await reg.pendingReceipt(handleId: job.id) }
-            if receipt == nil { Thread.sleep(forTimeInterval: 0.001) }
-        }
-        guard let receipt, !killFlag.done else {
-            check("S3-R5-1 removeEntry: the receipt is published during the termination grace (fixture ordering)", false)
-            _ = killDone.wait(timeout: .now() + 10); return
-        }
+        guard let first = killDuringGrace(fx, reg: reg, body: body, tag: "rm", label: "S3-R5-1 removeEntry") else { return }
+        let (job, killFlag, killDone, receipt) = (first.job, first.flag, first.done, first.receipt)
         _ = wait { await reg.removeEntry(uuid: receipt.jobUUID) }
         let retained = wait { await reg.hasEntryForTesting(handleId: job.id) }
         let live = wait { await reg.unsettledEntryIds() }.contains(job.id)
@@ -202,26 +224,8 @@ extension ProfileHarness {
 
         // purgeAllForWipe (/deleteuserdata) drops every entry: it first joins
         // a termination already in flight elsewhere instead of dropping it.
-        let ready2 = fx.root.appendingPathComponent("child-ready-2").path
-        let child2 = "perl -MTime::HiRes=sleep -e '\(body)' \"\(ready2)\" </dev/null >/dev/null 2>&1"
-        guard let job2 = wait({ try? await reg.start(command: child2 + " & while :; do sleep 0.02; done",
-                                                      workdir: fx.root.path, description: "s3r51wipe") }),
-              until(10, { FileManager.default.fileExists(atPath: ready2) }) else {
-            check("S3-R5-1 wipe: start the job", false); return
-        }
-        let kill2 = Flag()
-        let kill2Done = DispatchSemaphore(value: 0)
-        Task.detached { _ = await reg.kill(handleId: job2.id); kill2.done = true; kill2Done.signal() }
-        var r2: BashCompletionReceipt?
-        let d2 = Date().addingTimeInterval(5)
-        while r2 == nil && !kill2.done && Date() < d2 {
-            r2 = wait { await reg.pendingReceipt(handleId: job2.id) }
-            if r2 == nil { Thread.sleep(forTimeInterval: 0.001) }
-        }
-        guard r2 != nil, !kill2.done else {
-            check("S3-R5-1 wipe: the receipt is published during the termination grace (fixture ordering)", false)
-            _ = kill2Done.wait(timeout: .now() + 10); return
-        }
+        guard let second = killDuringGrace(fx, reg: reg, body: body, tag: "wipe", label: "S3-R5-1 wipe") else { return }
+        let (job2, kill2Done) = (second.job, second.done)
         _ = wait { await reg.purgeAllForWipe() }
         // Joined: the kill's own task finishes right after the purge returned
         // (without the join the purge returns ~250 ms into the grace).
@@ -239,7 +243,23 @@ extension ProfileHarness {
     /// (which scans only retained entries) dropped it and the claim and the
     /// watch were released before the child's late write.
     private func stage3RetentionDuringTermination() {
-        guard let fx = makeS3("r5-retention") else { check("S3-R5-1 fixture", false); return }
+        // The receipt-during-grace ordering is a setup precondition (see
+        // killDuringGrace): a missed ordering reruns the whole scenario with
+        // fresh fixtures, up to 5 attempts, and fails only if never reached.
+        for attempt in 1...5 {
+            if !retentionDuringTerminationAttempt(attempt) {
+                print("  (S3-R5-1: fixture ordering reached on attempt \(attempt) of 5)")
+                return
+            }
+            print("  (S3-R5-1: receipt not observed inside the grace on attempt \(attempt); retrying)")
+        }
+        check("S3-R5-1: the receipt is published during the termination grace (fixture ordering, 5 attempts)", false)
+    }
+
+    /// One attempt; returns true only when the fixture ordering was missed
+    /// (nothing was asserted, the caller retries).
+    private func retentionDuringTerminationAttempt(_ attempt: Int) -> Bool {
+        guard let fx = makeS3(attempt == 1 ? "r5-retention" : "r5-retention-\(attempt)") else { check("S3-R5-1 fixture", false); return false }
         let reg = BackgroundProcessRegistry.shared
         var pinned: [String] = []
         defer {
@@ -257,13 +277,13 @@ extension ProfileHarness {
         // Fifty finished jobs whose completion notices stay pending (pinned).
         for i in 0..<50 {
             guard let j = wait({ try? await reg.start(command: "true", workdir: fx.root.path, description: "pin\(i)") }) else {
-                check("S3-R5-1: start pinned job \(i)", false); return
+                check("S3-R5-1: start pinned job \(i)", false); return false
             }
             pinned.append(j.id)
         }
         guard until(20, { pinned.allSatisfy { h in wait({ await reg.lifecycleSettledForTesting(handleId: h) }) } }),
               pinned.allSatisfy({ h in wait({ await reg.pendingReceipt(handleId: h) }) != nil }) else {
-            check("S3-R5-1: fifty finished jobs with pending completions", false); return
+            check("S3-R5-1: fifty finished jobs with pending completions", false); return false
         }
         let file = fx.root.appendingPathComponent("retained.txt").path
         let watched = MultiAssistant.canonical(fx.root.appendingPathComponent("watched.txt").path)
@@ -275,14 +295,14 @@ extension ProfileHarness {
         try? FileClaims.reserve(a, paths: [file], opId: "rr1")
         try? FileClaims.settle(a, opId: "rr1", changed: true, scopes: [scope])
         guard let snap = wait({ await Tripwire.snapshot(a) }), snap.files.contains(where: { $0.owned.path == watched }) else {
-            check("S3-R5-1: tripwire snapshot of Work's claim", false); return
+            check("S3-R5-1: tripwire snapshot of Work's claim", false); return false
         }
         let ready = fx.root.appendingPathComponent("child-ready").path
         let body = "$SIG{TERM}=sub{$t=time()+0.25 unless defined $t}; open(R,\">\",$ARGV[1]); close R; while(1){ if(defined $t && time()>=$t){ open(F,\">>\",$ARGV[0]); print F \"LATE\\n\"; close F; $t=1e18 } sleep 0.005 }"
         let child = "perl -MTime::HiRes=time,sleep -e '\(body)' \"\(watched)\" \"\(ready)\" </dev/null >/dev/null 2>&1"
         guard let job = wait({ try? await reg.start(command: child + " & while :; do sleep 0.02; done",
                                                      workdir: fx.root.path, description: "s3r51") }) else {
-            check("S3-R5-1: start the job", false); return
+            check("S3-R5-1: start the job", false); return false
         }
         let jobKey = "bash:" + job.id
         _ = wait { await Tripwire.shared.afterCommand(a, snap) }
@@ -291,7 +311,7 @@ extension ProfileHarness {
               until(10, { FileManager.default.fileExists(atPath: ready) }) else {
             check("S3-R5-1: T pending on the job, watch registered, child running", false)
             _ = wait { await reg.kill(handleId: job.id) }
-            return
+            return false
         }
         final class Flag: @unchecked Sendable { var done = false }
         let killFlag = Flag()
@@ -306,9 +326,12 @@ extension ProfileHarness {
             if receipt == nil { Thread.sleep(forTimeInterval: 0.001) }
         }
         guard let receipt, !killFlag.done else {
-            check("S3-R5-1: the receipt is published during the termination grace (fixture ordering)", false,
-                  "receipt \(receipt != nil) killDone \(killFlag.done)")
-            _ = killDone.wait(timeout: .now() + 10); return
+            // Ordering missed: let the termination finish and release it all (defer), retry.
+            _ = killDone.wait(timeout: .now() + 10)
+            _ = until(10) { !wait({ await ClaimScopes.liveJobs() }).contains(jobKey) }
+            _ = wait { await ClaimScopes.shared.tick() }
+            if let r = wait({ await reg.pendingReceipt(handleId: job.id) }) { _ = wait { await reg.acknowledgeCompletions([r]) } }
+            return true
         }
         let liveBefore = wait { await reg.unsettledEntryIds() }.contains(job.id)
         _ = wait { await reg.acknowledgeCompletions([receipt]) }          // count-cap pass
@@ -338,6 +361,7 @@ extension ProfileHarness {
         _ = wait { await reg._testPruneNow() }
         check("S3-R5-1: once the termination ended, retention may retire the entry again",
               wait { await reg.isExpiredHandle(job.id) })
+        return false
     }
 
     // MARK: S3-R4-1 — the root exits on SIGTERM, a same-group child writes late
