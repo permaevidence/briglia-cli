@@ -1073,8 +1073,9 @@ enum AvailableTools {
     
     static var generateImage: ToolDefinition {
         // MediaRouting: an OpenAI image key keeps today's schema; the
-        // OpenRouter lane without one gets the Gemini-via-OpenRouter schema
-        // (openRouterGenerateImage, OpenRouterImageService.swift).
+        // OpenRouter lane without one gets the GPT Image 2.5 schema of
+        // OpenRouter's Image API (openRouterGenerateImage,
+        // OpenRouterImageService.swift).
         switch MediaRouting.imageBackend {
         case .gemini:
             return geminiGenerateImage

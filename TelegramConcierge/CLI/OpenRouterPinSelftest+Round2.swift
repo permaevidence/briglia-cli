@@ -263,6 +263,10 @@ extension ORPinSuite {
         check("V6 a failed auto-pin on the model in use shows as not applied",
               entry(haiku) == nil && status.state == .autoUnavailable && !OpenRouterPresets.hostClause(status).contains("pinned automatically"),
               "\(status.state) \(OpenRouterPresets.hostClause(status))")
+        check("V6 the not-applied wording is neutral: no host chosen, /orprovider default pins the suggested host",
+              OpenRouterPresets.hostClause(status).contains("no host chosen; /orprovider default pins Briglia's suggested host")
+              && !OpenRouterPresets.hostClause(status).contains("not pinned yet") && !OpenRouterPresets.hostClause(status).contains("retries"),
+              OpenRouterPresets.hostClause(status))
         let other = OpenRouterPresets.hostStatus(model: glm, store: snap())
         check("V6 control: a preset not in use still says its host is pinned when picked", other.state == .autoWillPin)
 

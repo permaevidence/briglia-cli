@@ -97,8 +97,11 @@ enum OpenRouterPresets {
             }
             if let host = preset?.autoHost {
                 // The model IN USE with no entry and no pending operation:
-                // its auto-pin was attempted on the switch and didn't land
-                // (failed or unchecked listing), so it is not applied.
+                // either its auto-pin was attempted on the switch and didn't
+                // land (failed or unchecked listing), or it was already in
+                // use before its preset gained a host (e.g. 1017 on an
+                // upgraded install, outside the frozen D10 list). No host is
+                // chosen; /orprovider default pins the preset host.
                 // Other models: it will be pinned when picked.
                 let inUse = OpenRouterPinMap.effectiveORModel(store) == model && !OpenRouterPinMap.broken(35)
                 return HostStatus(state: autoFailed || inUse ? .autoUnavailable : .autoWillPin, hosts: [host])
@@ -113,7 +116,7 @@ enum OpenRouterPresets {
         switch status.state {
         case .autoWillPin: return "Host: \(names), pinned automatically when picked"
         case .autoPinned: return "Host: \(names) (pinned automatically)"
-        case .autoUnavailable: return "Host: chosen by OpenRouter (Briglia's host \(names) not pinned yet; /orprovider default retries)"
+        case .autoUnavailable: return "Host: chosen by OpenRouter (no host chosen; /orprovider default pins Briglia's suggested host, \(names))"
         case .upgradePending: return "Host: \(names) will be applied when OpenRouter confirms it"
         case .userHost: return "Host: \(names) (your choice)"
         case .userAutomatic: return "Host: chosen by OpenRouter (your choice)"

@@ -438,7 +438,7 @@ extension ConversationManager {
         let lead = same ? "✅ \(destination) is already the model in use." : "✅ Model switched to \(destination) — takes effect from the next message."
         var tail = outcome.chatNote
         if same, let host = preset?.autoHostName, OpenRouterPresets.hostStatus(model: destination, store: KeychainHelper.loadSnapshot()).state == .autoUnavailable {
-            tail += " \(host) isn't pinned for it yet: /orprovider default applies it."
+            tail += " No host chosen; /orprovider default pins Briglia's suggested host, \(host)."
         }
         try? await sendText(lead + visionNote + tail)
     }

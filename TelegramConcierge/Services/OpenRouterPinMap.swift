@@ -335,8 +335,10 @@ enum OpenRouterPinMap {
         var map = Map.fresh(iid: iid())
         map.rev = 0
         if let model {
-            // m4 (D10, option B): no entry for M ("not chosen"); a preset
-            // with an auto host gets the upgrade marker.
+            // m4 (D10, option B): no entry for M ("not chosen"); only the
+            // frozen 0.2.56 host presets (d10UpgradeModels) get the upgrade
+            // marker. A preset that gained a host later (1017) stays "not
+            // chosen" until /orprovider default.
             if d10UpgradeModels.contains(model) || (broken(36) && OpenRouterPresets.preset(forModel: model)?.autoHost != nil) {
                 map.upgrade = UpgradeMarker(model: model, state: "pending")
             }

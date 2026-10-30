@@ -1027,7 +1027,7 @@
     switch (x.host_state) {
       case 'auto_will_pin': return T('Host: ' + hosts + ', pinned automatically when picked', 'Host: ' + hosts + ', fissato in automatico quando lo scegli');
       case 'auto_pinned': return T('Host: ' + hosts + ' (pinned automatically)', 'Host: ' + hosts + ' (fissato in automatico)');
-      case 'auto_unavailable': return T('Host: chosen by OpenRouter (Briglia’s host ' + hosts + ' not pinned yet)', 'Host: lo sceglie OpenRouter (l’host di Briglia ' + hosts + ' non è ancora fissato)');
+      case 'auto_unavailable': return T('Host: chosen by OpenRouter (no host chosen; Briglia suggests ' + hosts + ')', 'Host: lo sceglie OpenRouter (nessun host scelto; Briglia suggerisce ' + hosts + ')');
       case 'upgrade_pending': return T('Host: ' + hosts + ' will be applied when OpenRouter confirms it', 'Host: ' + hosts + ' verrà applicato quando OpenRouter lo conferma');
       case 'user_host': return T('Host: ' + hosts + ' (your choice)', 'Host: ' + hosts + ' (scelto da te)');
       case 'user_automatic': return T('Host: chosen by OpenRouter (your choice)', 'Host: lo sceglie OpenRouter (scelto da te)');
@@ -1099,7 +1099,7 @@
     // One inline span: .notice is a flex row, so loose text/bold children would become columns.
     if (!p.configured && !(S.ai.openrouter_pin || []).length) out.push(h('div', { class: 'notice info', id: 'or-default' }, [h('span', {}, [
       T('Briglia will use ', 'Briglia userà '), h('b', { text: orDefaultLabel() }), T(', running on ', ', in esecuzione su '), h('b', { text: orDefaultHost() }),
-      T(' (currently the fastest, with Zero Data Retention: your messages aren’t stored). You can change it later.', ' (al momento il più veloce, con Zero Data Retention: i tuoi messaggi non vengono conservati). Puoi cambiarlo più tardi.')])]));
+      T(' (with Zero Data Retention: your messages aren’t stored). You can change it later.', ' (con Zero Data Retention: i tuoi messaggi non vengono conservati). Puoi cambiarlo più tardi.')])]));
     out.push(field('ai', { secret: true, label: T('Your OpenRouter key', 'La tua chiave OpenRouter'), placeholder: 'sk-or-…', checkingText: T('Checking your key…', 'Controllo la chiave…'), onSubmit: function (v, current) {
       return act('provider_key', { profile: 'openrouter', key: v }, 'ai', current).then(afterSave);
     } }));
