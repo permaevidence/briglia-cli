@@ -68,7 +68,7 @@ BREAKS = [
     ("K17 a cancelled caller keeps waiting for the shared initialize", "P4.1", S + "ParallelSearchClient.swift",
      "            Task { await self.failInitWaiter(id, with: CancellationError()) }", "            _ = id"),
     ("K18 server requests are answered only after the stream completes", "P1.16", S + "ParallelSearchClient.swift",
-     "        for request in requests { onServerRequest(request) }", "        _ = requests"),
+     "        for request in requests { onServerRequest(request, streamSession) }", "        _ = requests; _ = streamSession"),
     ("K19 an HTTP-date Retry-After is ignored", "P2.13", S + "ParallelSearchClient.swift",
      "        if let seconds = TimeInterval(value) { return seconds.isFinite && seconds >= 0 ? seconds : nil }",
      "        if let seconds = TimeInterval(value) { return seconds.isFinite && seconds >= 0 ? seconds : nil }; if !value.isEmpty { return nil }"),
@@ -78,6 +78,9 @@ BREAKS = [
      "        if FileManager.default.fileExists(atPath: dir.path) { try barrier(dir) }", "        _ = dir"),
     ("K22 an old-session 404 drops a newer session", "P2.12", S + "ParallelSearchClient.swift",
      "        guard session?.generation == gen || (session == nil && generation == gen) else { return }", "        _ = gen"),
+    # Codex round 2.
+    ("K23 a reply during initialize omits the session the stream assigned", "P1.17", S + "ParallelSearchClient.swift",
+     "            let replySession = session ?? streamSession", "            let replySession = session; _ = streamSession"),
 ]
 
 
