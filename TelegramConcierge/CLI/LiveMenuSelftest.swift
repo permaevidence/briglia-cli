@@ -74,11 +74,11 @@ struct LiveMenuSelftest: AsyncParsableCommand {
         try process.run()
         process.waitUntilExit()
         TestPrefsDomains.purge(childName)
-        // The purge makes cfprefsd write an empty shell for the domain a few
-        // seconds later; on a loaded CI runner that took over the default
-        // 30 s once, leaving it behind for smoke's hygiene check. Wait longer:
-        // the sweep returns as soon as the shell appears and is removed.
-        TestPrefsDomains.finalSweep(timeout: 90)
+        // settle: on the macOS CI runner image cfprefsd rewrites this
+        // domain's empty shell after the sweep has removed it (private CI
+        // 41236208722 and 41242111573, smoke hygiene check); keep unlinking
+        // reappearances for 25 s, as RetiredIntegrationsSelftest does.
+        TestPrefsDomains.finalSweep(settle: 25)
         if process.terminationStatus != 0 { throw ExitCode(process.terminationStatus) }
     }
 }
