@@ -779,8 +779,10 @@ enum SettingsSupersede {
     /// is never only in memory. A damaged pending file (staged state
     /// unknown) refuses too.
     static func guardSecretsWrite(_ keys: Set<String>, after: [String: String]) throws {
-        guard !maintenanceWrite, let invalidated = invalidation(keys, after: after),
-              FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) else { return }
+        guard !maintenanceWrite, let invalidated = invalidation(keys, after: after) else { return }
+        let present: Bool
+        do { present = try SettingsPendingStore.presence() } catch { throw InvalidationNotRecorded(cause: .pendingUnreadable) }
+        guard present else { return }
         let doc: SettingsPendingStore.Document
         do { doc = try SettingsPendingStore.read() } catch { throw InvalidationNotRecorded(cause: .pendingUnreadable) }
         let hit = doc.slots.values.compactMap { $0.staged?.change }.filter(invalidated).map(\.id)
@@ -881,7 +883,8 @@ enum SettingsSupersede {
         unflushedLock.unlock()
         let ids = try readTombstonesStrict()
         guard !pending.isEmpty || !ids.isEmpty || tombstoneMaybePresent else { return }
-        if FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) {
+        // Unknown pending state throws here: the evidence is kept (R5-1).
+        if try SettingsPendingStore.presence() {
             try applyDrops { change in ids.contains(change.id) || pending.contains { $0(change) } }
         }
         try writeTombstonesStrict([])
@@ -901,7 +904,8 @@ enum SettingsSupersede {
     }
 
     private static func dropStaged(_ invalidated: @escaping (PreparedChange) -> Bool) {
-        guard FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) else { return }
+        // Absent: nothing staged. Unknown: treated like a failed drop.
+        guard (try? SettingsPendingStore.presence()) != false else { return }
         do { try applyDrops(invalidated) } catch {
             print("[Settings] could not record a superseded waiting change: \(error)")
             unflushedLock.lock(); unflushed.append(invalidated); unflushedLock.unlock()

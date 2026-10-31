@@ -74,7 +74,9 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
     // MARK: Idle scheduler (B.5)
 
     func settingsChangesStaged() -> Bool {
-        guard FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) else { return false }
+        // Absent → nothing staged; unknown → its strict read fails below and
+        // nothing is kicked (an apply would refuse anyway).
+        guard (try? SettingsPendingStore.presence()) != false else { return false }
         return !((try? SettingsPendingStore.read())?.stagedCategories.isEmpty ?? true)
     }
 

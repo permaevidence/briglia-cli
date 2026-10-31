@@ -188,6 +188,11 @@ BREAKS = [
     ("L42 an unsearchable tombstone path reads as absent", "selftest",
      "R4-1: a tombstone behind an unsearchable data folder is unknown", W,
      "            if err == ENOENT { return [] }", "            _ = err; return []"),
+    # Codex implementation review round 5.
+    ("L43 the flush treats an unknown pending file as absent", "selftest",
+     "R5-1: with the pending file unknown, a commit refuses and the tombstone is kept", W,
+     "        if try SettingsPendingStore.presence() {\n            try applyDrops { change in ids.contains",
+     "        if FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) {\n            try applyDrops { change in ids.contains"),
 ]
 
 

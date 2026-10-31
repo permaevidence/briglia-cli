@@ -11,6 +11,7 @@ import Darwin
 /// command reports a saved-but-uncancelled write.
 extension LiveMenuHarness {
     func round3Section() async {
+        await r5UnsearchableConfigRootSection()
         await r4UnsearchableDataRootSection()
         await r3UnreadableTombstoneSection()
         await r3NoPersistenceRefusesSection()
@@ -55,6 +56,41 @@ extension LiveMenuHarness {
             check("R3-1: an \(variant) tombstone refuses further commits (fail closed)",
                   r.state == .refused && store()[KeychainHelper.serperApiKeyKey] != "serper-r3", "\(r.state)")
         }
+    }
+
+    // MARK: R5-1
+
+    /// Codex round 5: an unsearchable CONFIG folder (pending file unknown)
+    /// must not make a flush delete the tombstone; once readable again the
+    /// staged change is dropped, never applied.
+    func r5UnsearchableConfigRootSection() async {
+        reset(Self.routeBase)
+        let configRoot = StoragePaths.configRoot
+        defer {
+            chmod(configRoot.path, 0o700)
+            SettingsSupersede.discardInvalidations()
+        }
+        let owner = FakeSettingsOwner()
+        let writer = SettingsWriter(host: owner)
+        guard let c = await stageModel(writer, owner, "stale/model") else { check("R5-1: fixture", false); return }
+        let before = store()[KeychainHelper.openRouterModelKey]
+        try? PrivateStorage.ensureDirectory(StoragePaths.dataRoot)
+        try? JSONEncoder().encode([c.id]).write(to: SettingsSupersede.tombstoneURL)
+        guard let other = await prepare(label: "Serper key", { try KeychainHelper.save(key: KeychainHelper.serperApiKeyKey, value: "serper-r5") }) else { return }
+        SettingsSupersede._testForgetInMemory()
+        chmod(configRoot.path, 0o600)
+        var presenceThrows = false
+        do { _ = try SettingsPendingStore.presence() } catch { presenceThrows = true }
+        let r = await writer.commit(other)
+        let kept = FileManager.default.fileExists(atPath: SettingsSupersede.tombstoneURL.path)
+        chmod(configRoot.path, 0o700)
+        check("R5-1: with the pending file unknown, a commit refuses and the tombstone is kept",
+              presenceThrows && r.state == .refused && kept, "presence \(presenceThrows) \(r.state) kept \(kept)")
+        let applied = await writer.applyStaged(category: "ai")
+        check("R5-1: once readable, the tombstoned change is dropped, never applied",
+              applied == nil && store()[KeychainHelper.openRouterModelKey] == before
+              && pendingDoc().lastResults.contains { $0.clientRequestId == c.id && $0.state == "dropped" },
+              "applied \(String(describing: applied?.state))")
     }
 
     // MARK: R4-1

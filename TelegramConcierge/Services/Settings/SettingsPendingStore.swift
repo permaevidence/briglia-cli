@@ -129,10 +129,22 @@ enum SettingsPendingStore {
         return try readUnlocked()
     }
 
+    /// Is the pending file there? Only a verified "not found" (lstat
+    /// ENOENT) is absence; a path that can't be looked up (an unsearchable
+    /// configuration folder) throws — unknown, never "no waiting changes"
+    /// (Codex live-menu R5-1).
+    static func presence() throws -> Bool {
+        var st = stat()
+        if lstat(url.path, &st) == 0 { return true }
+        let err = errno
+        if err == ENOENT { return false }
+        throw Damaged(description: "\(url.path) can't be checked: \(String(cString: strerror(err)))")
+    }
+
     private static func readUnlocked() throws -> Document {
         let data: Data
         do { data = try Data(contentsOf: url) } catch {
-            if !FileManager.default.fileExists(atPath: url.path) { return Document() }
+            if try !presence() { return Document() }
             throw Damaged(description: "\(url.path) cannot be read: \(error.localizedDescription)")
         }
         let decoder = JSONDecoder()

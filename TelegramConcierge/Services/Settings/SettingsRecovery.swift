@@ -76,7 +76,7 @@ enum SettingsRecovery {
     @discardableResult
     static func run(secrets provided: [String: String]? = nil,
                     read: (String) throws -> SubscriptionAuthState? = { try SettingsWriter.authStore($0).read() }) throws -> Report {
-        guard FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) else { return Report() }
+        guard try SettingsPendingStore.presence() else { return Report() }
         // The markers are evidence: an unreadable store is UNKNOWN, never
         // "no marker" (Codex live-menu R1-6). With attempts to classify,
         // nothing is decided and every record is kept for a later run. Read
