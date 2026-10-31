@@ -23,6 +23,8 @@ extension ProfileHarness {
         let cases: [([String], [String])] = [
             ([a0, "menu"], [a0, "chat"]),
             ([a0, "quicksetup"], [a0, "chat"]),
+            ([a0, "quicksetup", "--name", "Sofia", "--yes", "--telegram-chat-id", "5551234567", "--no-tools"], [a0, "chat"]),
+            ([a0, "--profile", "health", "quicksetup", "--yes"], [a0, "--profile", "health", "chat"]),
             ([a0, "--profile", "work", "menu"], [a0, "--profile", "work", "chat"]),
             ([a0, "--profile=work", "menu", "--no-open"], [a0, "--profile=work", "chat"]),
             ([a0, "menu", "--profile", "work"], [a0, "chat"]),

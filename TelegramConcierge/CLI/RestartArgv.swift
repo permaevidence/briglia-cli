@@ -4,7 +4,7 @@ import Foundation
 /// barrier's `reexecIfOlder`). Normally the process's own argv, unchanged.
 ///
 /// A terminal chat that began life as `briglia menu` (Start) or
-/// `briglia quicksetup` ("Start Briglia now?") on macOS keeps that original
+/// `briglia quicksetup` (its finish, "Starting Briglia…") on macOS keeps that original
 /// argv, and re-executing it reopens the menu / quick setup instead of the
 /// assistant (2026-10-31: the menu image refused during the committed update
 /// with exit 75 and the assistant never came back). The promotion to an

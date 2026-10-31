@@ -203,6 +203,9 @@ def scenario_interactive(base):
                      "To change anything: briglia menu (browser) or briglia setup (terminal)."]:
             check("interactive: shows " + repr(line[:60]), line in out)
         check("interactive: the removed OpenAI sentence is absent", "No OpenAI key needed" not in out)
+        if sys.platform == "darwin":
+            check("interactive (macOS): the promoted chat restarts as `briglia chat` (RestartArgv), not quicksetup",
+                  "restart command: chat)" in out, out[-400:])
         check("interactive: media tools installed (dev stub job)",
               ("✔ ffmpeg ✔ ImageMagick ✔ poppler ✔ LibreOffice ✔ Python" in out or "✔ media tools ✔ python3-venv" in out)
               and "stub: installing toolchain" in out, out[-1200:])
@@ -242,6 +245,9 @@ def scenario_yes(base):
                            env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
         out = r.stdout + r.stderr
         check("--yes: exit 0 with nothing on stdin", r.returncode == 0, out[-1500:])
+        if sys.platform == "darwin":
+            check("--yes (macOS): restart command drops quicksetup and its options → `chat`",
+                  "restart command: chat)" in out and "--yes)" not in out, out[-400:])
         check("--yes: no prompt shown", "(hidden):" not in out and "\n> " not in out and "press Enter" not in out, out[-800:])
         check("--yes: --telegram-chat-id → no getUpdates scan",
               len([p for p in SEEN["paths"] if "getUpdates" in p]) == before)

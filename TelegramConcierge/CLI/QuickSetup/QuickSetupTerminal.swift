@@ -166,8 +166,13 @@ struct QuickSetup: AsyncParsableCommand {
             #if os(macOS)
             guard let held = started.take() else { throw ExitCode(1) }
             if QuickSetupFlow.devNoStart {
+                // The real promotion runs (it sets the restart command), then
+                // the dev run ends instead of starting the chat.
+                menuLock.release()
+                if let refusal = MemberEntry.promoteToAssistant(kind: "chat") { held.release(); print("✖ \(refusal)"); throw ExitCode(1) }
+                print("(dev build: BRIGLIA_DEV_QUICKSETUP_NO_START=1, the chat is not started; restart command: "
+                      + RestartArgv.current.dropFirst().joined(separator: " ") + ")")
                 held.release()
-                print("(dev build: BRIGLIA_DEV_QUICKSETUP_NO_START=1, the chat is not started)")
                 return
             }
             // The settings window is closed: `briglia menu` now reaches the
@@ -176,7 +181,7 @@ struct QuickSetup: AsyncParsableCommand {
             // The quick setup becomes the running assistant (as the menu's
             // Start): its member lease changes role, and from here every
             // self-restart (/upgrade, /restart) re-executes `briglia chat`
-            // once the wip/restart-argv fix is merged (it hooks promoteToAssistant).
+            // (RestartArgv.switchToChat inside promoteToAssistant).
             if let refusal = MemberEntry.promoteToAssistant(kind: "chat") {
                 held.release(); print("✖ \(refusal)"); throw ExitCode(1)
             }
