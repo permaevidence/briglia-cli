@@ -99,7 +99,7 @@ extension MenuSelftestContext {
         env.toolchainStatus = { ToolchainService.DesktopStatus(doctorRan: true, missing: [], libreOffice: true, mandatoryMissing: []) }
         env.localModels = { base, key in sent(base, key); return .success(["model"]) }
         env.probe = { probed($0) }
-        env.markComplete = {}
+        env.markComplete = { true }
         return env
     }
 

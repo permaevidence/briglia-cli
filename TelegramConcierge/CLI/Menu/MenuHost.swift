@@ -7,11 +7,10 @@ import Darwin
 
 /// The live hub: `briglia menu` while Briglia is running. The running agent
 /// serves the same page (menu.html) itself, like the browser settings host:
-/// no second process, no lease hand-off. Every save waits for the agent's
-/// idle gate (the browser-settings mutation barrier: no turn, subagent,
-/// watcher or maintenance in flight), writes through setup-api /
-/// SubscriptionSetup, reloads the agent's settings and lifts the gate. Stop
-/// ends the running Briglia after the page received its answer.
+/// no second process, no lease hand-off. Every save goes through the agent's
+/// single settings writer (plan Part B): applied now, or staged until the
+/// agent is idle when it changes a route; the agent reloads its settings
+/// itself. Stop ends the running Briglia after the page received its answer.
 @MainActor
 final class MenuHost {
     private static var shared: MenuHost?
@@ -49,55 +48,13 @@ final class MenuHost {
         await menu.start()
     }
 
-    /// The live seams: every write runs inside the agent's settings barrier
-    /// and reloads its settings (AI, tools, email pollers) before lifting
-    /// it; ChatGPT sign-in also refuses while a Telegram login waits.
+    /// The live seams (KEYLESS_WEB_AND_LIVE_MENU plan Part B): the menu's
+    /// default writes are prepared in this process and committed by the
+    /// agent's own settings writer (`SettingsClient.inProcessOwner`) —
+    /// a key replacement applies at once, even mid-task; a change of what
+    /// the model, its tools or the media and email paths use waits for an
+    /// idle point (staged, shown as waiting). No save waits for an idle agent.
     static func wireLive(_ env: inout MenuEnvironment, manager: ConversationManager) {
-        // Saves pass the agent's idle gate and reload its settings; the
-        // agent holds the instance lease, so setup-api writes as its owner.
-        let barrier: (Double, () async throws -> Void) async throws -> Bool = { [weak manager] wait, body in
-            if MenuBarrier.held { try await body(); return true }
-            guard let manager else { return false }
-            let deadline = ProcessInfo.processInfo.systemUptime + wait
-            while !(await manager.beginBrowserSettingsMutation()) {
-                guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
-                try await Task.sleep(nanoseconds: 500_000_000)
-            }
-            do {
-                try await MenuBarrier.$held.withValue(true) { try await body() }
-            } catch {
-                await manager.reloadBrowserSettings()
-                IdentityChange.finishDeferred(quiescent: manager.lastEmailResetQuiescent)
-                manager.endBrowserSettingsMutation()
-                throw error
-            }
-            // Reload (AI, tools, email pollers) before lifting the barrier;
-            // an inbox released by this save is freed only after the poller
-            // moved to the new one (MULTI_ASSISTANT_PLAN §5.6 step 6).
-            await manager.reloadBrowserSettings()
-            IdentityChange.finishDeferred(quiescent: manager.lastEmailResetQuiescent)
-            manager.endBrowserSettingsMutation()
-            return true
-        }
-        env.barrier = barrier
-        env.apply = { request, checkpoint in
-            var result = MenuHost.busyAnswer
-            guard (try? await barrier(0) { result = await SetupAPICore.apply(request, ownsLease: true, checkpoint: checkpoint) }) == true else {
-                return MenuHost.busyAnswer
-            }
-            return result
-        }
-        env.subscription = { request, checkpoint in
-            // Reads (status, the one-request probe) need no gate.
-            guard ["select", "logout"].contains(request["action"] as? String ?? "") else {
-                return await SubscriptionSetup().perform(request, ownsLease: true, checkpoint: checkpoint)
-            }
-            var result = MenuHost.busyAnswer
-            guard (try? await barrier(0) { result = await SubscriptionSetup().perform(request, ownsLease: true, checkpoint: checkpoint) }) == true else {
-                return MenuHost.busyAnswer
-            }
-            return result
-        }
         // Assistants page (§28.3): every action is refused while a wipe or a
         // Mind import holds the restore gate.
         env.assistants.restoreGateUp = { [weak manager] in manager?.isRestoringMind ?? false }

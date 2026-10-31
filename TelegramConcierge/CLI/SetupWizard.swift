@@ -85,17 +85,18 @@ struct SetupWizard {
     }()
 
     func run() async throws {
-        // The intake stop across processes (Codex stage-3 S3-R15-1): the
-        // wizard runs beside a live assistant (it takes no instance lease)
-        // and caches values across prompts (Enter keeps the shown name), so
-        // it holds the shared replacement lock for its WHOLE run — a wizard
-        // already open makes a /deleteuserdata or Mind import wait, then
-        // refuse with nothing deleted; one started during a replacement
-        // waits (bounded) and then refuses before reading anything. Both
-        // entries (`briglia setup`, the quick-setup fallback) pass here.
-        let replacementLock: ProfileFileLock?
+        // The intake stop across processes (Codex stage-3 S3-R15-1) and the
+        // single settings writer (KEYLESS_WEB_AND_LIVE_MENU plan B.4b, B.8):
+        // a wizard started during a replacement waits (bounded) and then
+        // refuses before reading anything. Every step is prepared against an
+        // overlay and committed through the settings writer (forwarded to a
+        // running Briglia, or under a short lease); the shared replacement
+        // lock is held only for the local preparation, never while waiting on
+        // Briglia. The replacement epoch is pinned at the wizard's start, so
+        // a /deleteuserdata or Mind import while the wizard is open refuses
+        // every later save (values shown from before it are never written back).
         switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
-        case .admitted(let lock): replacementLock = lock
+        case .admitted(let lock): lock.release()
         case .busy:
             print("✖ " + MemoryReplacementLock.busyMessage)
             throw ExitCode(75)
@@ -103,7 +104,10 @@ struct SetupWizard {
             print("✖ \(why)")
             throw ExitCode(1)
         }
-        defer { replacementLock?.release() }
+        do { Self.pinnedEpoch = try ReplacementEpoch.read() } catch {
+            print("✖ \(error)")
+            throw ExitCode(1)
+        }
         if Self.setupComplete() {
             await rerunMenu()
             return
@@ -145,12 +149,15 @@ struct SetupWizard {
         for index in startIndex..<steps.count {
             // Marked before the step runs, so dying mid-step re-offers
             // exactly this step on the next `briglia setup`.
-            save(Self.progressKey, String(index))
+            await Self.committing("Setup progress") { save(Self.progressKey, String(index)) }
             printHeader(index: index + 1, total: steps.count, title: steps[index].title)
-            await steps[index].run(self)
+            let step = steps[index]
+            await Self.committing(step.title) { await step.run(self) }
         }
-        try? KeychainHelper.delete(key: Self.progressKey)
-        save(Self.completeKey, "true")
+        await Self.committing("Setup") {
+            try? KeychainHelper.delete(key: Self.progressKey)
+            save(Self.completeKey, "true")
+        }
         printSummary()
         print("\nSetup complete. Start chatting with `briglia`, or run `briglia daemon` for Telegram-only mode.")
     }
@@ -172,7 +179,37 @@ struct SetupWizard {
             }
             let step = steps[number - 1]
             printHeader(index: number, total: steps.count, title: step.title)
-            await step.run(self)
+            await Self.committing(step.title) { await step.run(self) }
+        }
+    }
+
+    // MARK: Settings writer (KEYLESS_WEB_AND_LIVE_MENU plan B.6)
+
+    /// The replacement epoch read when the wizard started (see run()).
+    static var pinnedEpoch: Int?
+
+    /// Runs `body` (prompts, probes and the step's writes) against an overlay
+    /// of the store and commits what it wrote as ONE prepared change through
+    /// the settings writer. Nested calls commit their own change at once
+    /// (a ChatGPT sign-in before the selection that needs it).
+    static func committing(_ label: String, _ body: () async -> Void) async {
+        let prepared: (change: PreparedChange, value: Void)
+        do {
+            prepared = try await SettingsCapture.prepareThrowing(origin: "wizard", label: label, acceptPending: true) { await body() }
+        } catch {
+            print("  ✖ \(label): not saved (\(error.localizedDescription))")
+            return
+        }
+        var change = prepared.change
+        if let pinnedEpoch { change.epoch = min(change.epoch, pinnedEpoch) }
+        guard !change.isEmpty else { return }
+        let result = await SettingsClient.commit(change)
+        switch result.state {
+        case .applied: break
+        case .pending:
+            print("  ⏳ Saved. Briglia is busy with a task, so this applies when it finishes.")
+        default:
+            print("  ✖ \(label): not saved — \(result.message ?? result.state.rawValue)")
         }
     }
 
@@ -233,27 +270,33 @@ struct SetupWizard {
         probeRequest: (([String: Any]) async -> [String: Any])? = nil) async -> Bool {
         print("ChatGPT subscription runs the main agent. Web search, voice and image tools retain separate API billing.")
         let setup = SubscriptionSetup()
-        let lease: InstanceLease
-        switch InstanceLease.acquire(label: "ChatGPT setup") {
-        case .success(let held): lease = held
-        case .failure: print("Stop Briglia before configuring ChatGPT, then retry setup."); return false
-        }
-        defer { lease.release() }
         do {
             let state = try SubscriptionAuthStore().read()
             let signedIn = state?.credential != nil && state?.requiresLogin != true
             print(signedIn ? "ChatGPT: signed in (quota unknown)." : "ChatGPT: sign-in required.")
             let action = ask("Account action: keep, login, or logout", signedIn ? "keep" : "login").lowercased()
             if action == "logout" {
-                try await SubscriptionAuthStore().logout()
+                var failure: Error?
+                await Self.committing("ChatGPT sign-out") {
+                    do { try await SubscriptionAuthStore().logout() } catch { failure = error }
+                }
+                if let failure { throw failure }
                 print("ChatGPT signed out locally. Your subscription is unchanged.")
                 return false
             }
             guard action == "keep" || action == "login" else { print("Unknown account action."); return false }
             if !signedIn || action == "login" {
-                _ = try await login.device { url, code in
-                    print("Open \(url) and enter code: \(code). Enable device login in ChatGPT security settings if needed.")
+                // The publication is its own commit (the selection below
+                // needs the new login on disk).
+                var failure: Error?
+                await Self.committing("ChatGPT sign-in") {
+                    do {
+                        _ = try await login.device { url, code in
+                            print("Open \(url) and enter code: \(code). Enable device login in ChatGPT security settings if needed.")
+                        }
+                    } catch { failure = error }
                 }
+                if let failure { throw failure }
             }
             let model = ask("Model", ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel)
             let effort = ask("Reasoning effort", ProviderProfiles.configuredEffort(.chatgpt) ?? "high")
@@ -279,7 +322,9 @@ struct SetupWizard {
             OpenRouter — pay as you go, one key for everything; it starts on
             DeepSeek V4.1 Flash 1017, hosted on Together.
             """)
-            let profiles = ProviderProfiles.Profile.allCases
+            // OpenRouter first (1, the Enter default), ChatGPT second, then the
+            // rest in their usual order (owner decision 2026-10-30).
+            let profiles = Self.providerMenuOrder
             for (index, profile) in profiles.enumerated() {
                 let hint: String
                 switch profile {
@@ -300,7 +345,7 @@ struct SetupWizard {
                 }
                 print("  \(index + 1). \(hint)\(status)")
             }
-            let recommended = String((profiles.firstIndex(of: .openrouter) ?? 0) + 1)
+            let recommended = "1"
             let choice = WizardIO.ask("Configure which? [\(recommended)]", default: recommended)
             guard let number = Int(choice), profiles.indices.contains(number - 1) else {
                 print("  Please enter a number from 1 to \(profiles.count).")
@@ -322,6 +367,12 @@ struct SetupWizard {
             if !WizardIO.askYesNo("Configure another provider?", default: anotherDefault) { break }
         }
         offerActiveProviderChoice()
+    }
+
+    /// The main-provider list of `briglia setup`: OpenRouter, ChatGPT, then
+    /// every other profile in declaration order.
+    nonisolated static var providerMenuOrder: [ProviderProfiles.Profile] {
+        [.openrouter, .chatgpt] + ProviderProfiles.Profile.allCases.filter { $0 != .openrouter && $0 != .chatgpt }
     }
 
     /// A freshly configured profile becomes active automatically when nothing
@@ -350,14 +401,6 @@ struct SetupWizard {
         let answer = WizardIO.ask("Active provider (\(names)) [\(current.rawValue)]", default: current.rawValue)
         guard answer != current.rawValue,
               let chosen = ProviderProfiles.Profile(rawValue: answer.lowercased()) else { return }
-        var lease: InstanceLease?
-        if chosen == .chatgpt {
-            switch InstanceLease.acquire(label: "ChatGPT setup selection") {
-            case .success(let held): lease = held
-            case .failure: print("Stop Briglia before selecting ChatGPT."); return
-            }
-        }
-        defer { lease?.release() }
         do {
             try ProviderProfiles.activate(chosen)
             print("  ✔ Active provider: \(chosen.displayName)")
@@ -603,7 +646,8 @@ struct SetupWizard {
             probe: { await Probes.openAI(apiKey: $0) }
         )
 
-        Prefs.store.set(WebSearchBackend.openai.rawValue, forKey: WebSearchBackend.selectionKey)
+        save(WebSearchBackend.secretsSelectionKey, WebSearchBackend.openai.rawValue)
+        WebSearchBackend.mirrorSelection(WebSearchBackend.openai.rawValue)
         save(KeychainHelper.webSearchOpenAIApiKeyKey, key)
         save(KeychainHelper.voiceTranscriptionProviderKey, VoiceTranscriptionProvider.openAI.rawValue)
         save(KeychainHelper.openAITranscriptionApiKeyKey, key)

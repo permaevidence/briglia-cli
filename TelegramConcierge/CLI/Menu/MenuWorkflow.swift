@@ -159,6 +159,22 @@ final class MenuWorkflow {
     func L(_ en: String, _ it: String) -> String { lang == "it" ? it : en }
 
     private(set) var snapshot = MenuSnapshot()
+
+    /// Set by a write whose change was staged (see init).
+    final class PendingBox: @unchecked Sendable { var pending = false }
+    private let pendingBox = PendingBox()
+    var pendingNote: String {
+        L("Saved. Briglia is busy with a task, so this change applies when it finishes \u{2014} the page shows it as waiting until then.",
+          "Salvato. Briglia sta lavorando a un compito, quindi questa modifica si applica quando finisce: fino ad allora la pagina la mostra in attesa.")
+    }
+    /// Handover (plan B.10): the running Briglia's own menu link, once a
+    /// Briglia started while this offline page was open.
+    private(set) var handoverLink: String?
+    private(set) var handoverServedAt: Date?
+    /// Bumped when the Telegram pairing step ends: a late confirm of the old
+    /// step writes nothing.
+    private var pairingGeneration = 0
+    private var scanTask: Task<Void, Never>?
     /// The Security note, re-read at most every `securityRefresh` seconds
     /// (the page polls often; the note's sources change slowly).
     private var security: (at: Date, value: [String: Any])?
@@ -221,6 +237,22 @@ final class MenuWorkflow {
     var assistantsBusy: String?
 
     init(env: MenuEnvironment, runner: SetupJobRunner, serviceWasRunning: Bool = false) {
+        // Observe "pending" answers (plan B.5: a route change while Briglia is
+        // busy is staged and applies at the next idle point): the action that
+        // caused it says so instead of claiming the change is in use.
+        var env = env
+        let box = pendingBox
+        let apply = env.apply, subscription = env.subscription
+        env.apply = { request, checkpoint in
+            let reply = await apply(request, checkpoint)
+            if reply["state"] as? String == "pending" { box.pending = true }
+            return reply
+        }
+        env.subscription = { request, checkpoint in
+            let reply = await subscription(request, checkpoint)
+            if reply["state"] as? String == "pending" { box.pending = true }
+            return reply
+        }
         self.env = env
         self.runner = runner
         self.serviceWasRunning = serviceWasRunning
@@ -276,7 +308,7 @@ final class MenuWorkflow {
         loginTask?.cancel()
         loginAttempt = nil
         login = nil
-        telegram = nil
+        await endPairing()
         for t in pending { t.cancel() }
         for t in requestTasks.values { t.cancel() }
         if cancelJob { _ = await runner.cancelRunning() }
@@ -489,9 +521,16 @@ final class MenuWorkflow {
 
     var missingRequired: [MenuItem] { MenuItem.allCases.filter { isRequired($0) && !isDone($0) } }
 
+    private var markCompleteInFlight = false
     private func markCompleteIfReady() {
-        guard !snapshot.setupComplete, toolchain != nil, missingRequired.isEmpty else { return }
-        if (try? env.markComplete()) != nil { snapshot.setupComplete = true }
+        guard !snapshot.setupComplete, toolchain != nil, missingRequired.isEmpty, !markCompleteInFlight else { return }
+        markCompleteInFlight = true
+        let t = Task { @MainActor [weak self] in
+            guard let self else { return }
+            if await self.env.markComplete() { self.snapshot.setupComplete = true }
+            self.markCompleteInFlight = false
+        }
+        pending.append(t)
     }
 
     static func modelLabel(_ id: String) -> String {
@@ -610,7 +649,44 @@ final class MenuWorkflow {
             out["menu_child"] = true
             out["assistant_name"] = AssistantName.current()
         }
+        // Plan Part B: waiting/recent settings results; the pairing step
+        // keeps Briglia off; the handover link of a Briglia that started.
+        out["settings_pending"] = env.pendingLines(lang)
+        out["pairing_holds_off"] = env.live == nil && env.pairing.held
+        if let handoverLink { out["redirect"] = handoverLink; if handoverServedAt == nil { handoverServedAt = now() } }
         return out
+    }
+
+    // MARK: Handover (plan B.10)
+
+    /// A Briglia started while this offline page was open: its mutating
+    /// tickets and jobs are revoked, the page keeps its state endpoint and is
+    /// sent to the running Briglia's own menu.
+    func beginHandover(link: String) async {
+        guard handoverLink == nil, env.live == nil else { return }
+        closing = "handover"
+        validity.revokeAll()
+        loginTask?.cancel()
+        await endPairing()
+        handoverLink = link
+    }
+
+    /// True once the page received the redirect.
+    var handoverDone: Bool {
+        guard handoverLink != nil, let served = handoverServedAt else { return false }
+        return now().timeIntervalSince(served) >= 1
+    }
+
+    /// Ends the Telegram pairing step: invalidates its pending commits, then
+    /// cancels and drains an in-flight getUpdates scan, then releases the
+    /// lease (plan B.9).
+    func endPairing() async {
+        pairingGeneration &+= 1
+        telegram = nil
+        if let scanTask { scanTask.cancel(); await scanTask.value }
+        scanTask = nil
+        scanInFlight = false
+        env.pairing.end()
     }
 
     private func securityNote() -> [String: Any] {
@@ -719,6 +795,7 @@ final class MenuWorkflow {
             guard let self else { return }
             let result = await self.env.telegramScan(token, since)
             self.scanInFlight = false
+            guard !Task.isCancelled else { return }
             guard self.validity.isValid(ticket), var current = self.telegram, current.token == token, current.state == "waiting" else { return }
             switch result {
             case .waiting: break
@@ -728,10 +805,12 @@ final class MenuWorkflow {
                 current.state = "found"; current.chatId = chatId; current.name = name
                 self.telegram = current
             case .failed(let why):
-                self.telegram = nil
                 self.lastTelegramError = self.telegramScanFailure(why)
+                self.scanTask = nil
+                await self.endPairing()
             }
         }
+        scanTask = t
         pending.append(t)
     }
     /// A scan failure surfaces on the next action's reply (and in status).
@@ -752,13 +831,16 @@ final class MenuWorkflow {
         let work = Task { @MainActor in try await self.perform(action, body, g) }
         requestTasks[id] = work
         defer { requestTasks[id] = nil }
-        let result: (Bool, String?)
+        pendingBox.pending = false
+        var result: (Bool, String?)
         do { result = try await work.value }
         catch MenuValidity.Voided.superseded {
             return ["ok": false, "superseded": true, "status": status(generation: g)]
         } catch {
             return nil
         }
+        if result.0, pendingBox.pending { result.1 = pendingNote }
+        pendingBox.pending = false
         var out: [String: Any] = ["ok": result.0, "status": status(generation: g)]
         if let message = result.1 { out["message"] = message }
         return out
@@ -983,6 +1065,12 @@ final class MenuWorkflow {
                 return (false, L("Telegram didn\u{2019}t accept this token. Copy it again from @BotFather (the whole line, like 123456789:AAE\u{2026}).", "Telegram non ha accettato questo token. Copialo di nuovo da @BotFather (l\u{2019}intera riga, tipo 123456789:AAE\u{2026})."))
             }
             lastTelegramError = nil
+            // The pairing step holds the instance lease while it is open
+            // (plan B.9): no Briglia can start polling this bot meanwhile.
+            if env.live == nil, !env.pairing.begin() {
+                return (false, L("Briglia is running right now, so this page can\u{2019}t connect a bot. Send /switchbot to Briglia on Telegram, or stop Briglia and try again.",
+                                 "Briglia è in funzione, quindi questa pagina non può collegare un bot. Invia /switchbot a Briglia su Telegram, oppure ferma Briglia e riprova."))
+            }
             telegram = TelegramPending(token: token, bot: probe["bot_username"] as? String ?? "your_bot", state: "waiting",
                                        since: now(), lastScan: .distantPast)
             return (true, nil)
@@ -1000,7 +1088,7 @@ final class MenuWorkflow {
             return (true, nil)
 
         case "telegram_reset":
-            telegram = nil
+            await endPairing()
             return (true, nil)
 
         case "telegram_confirm":
@@ -1326,7 +1414,18 @@ final class MenuWorkflow {
             let current = await self.env.snapshot()
             let wasInUse = current.activeProfile == ProviderProfiles.Profile.chatgpt.rawValue
             let fresh = current.noLaneActive
-            generation = try await write(checkpoint)
+            // The publication is a settings commit (plan B.5): the running
+            // Briglia (or this process, offline) re-checks the login and the
+            // active-login guard at its decision point. Staged while busy
+            // when it changes the route (ChatGPT in use): it applies at idle.
+            switch try await self.env.publishLogin(write, checkpoint) {
+            case .applied(let published): generation = published
+            case .pending(let message):
+                await self.reload()
+                self.signInSaveOnly = true
+                selection = (true, message ?? self.pendingNote)
+                return
+            }
             await self.reload()
             // Adding ChatGPT while another lane runs only saves the sign-in;
             // the selector switches. A fresh setup, or signing in again to
@@ -2014,6 +2113,7 @@ final class MenuWorkflow {
 
     private func confirmTelegram(chatId: String, checkpoint: @escaping @Sendable () throws -> Void) async throws -> (Bool, String?) {
         guard let p = telegram else { return (false, L("Paste your bot token first.", "Incolla prima il token del bot.")) }
+        let step = pairingGeneration
         switch TelegramPairing.parseChatId(chatId) {
         case .success: break
         case .failure(.notNumeric): return (false, L("Your Telegram ID is a number, like 123456789. Get it from @userinfobot.", "Il tuo ID Telegram è un numero, tipo 123456789. Lo trovi con @userinfobot."))
@@ -2025,11 +2125,15 @@ final class MenuWorkflow {
             if var again = telegram, again.state == "found" { again.state = "waiting"; again.since = now(); again.lastScan = .distantPast; telegram = again }
             return (false, telegramChatFailure(failure, bot: p.bot))
         }
+        // A pairing commit rechecks the step is still open (and its lease held).
+        guard step == pairingGeneration, env.live != nil || env.pairing.held else {
+            return (false, L("The Telegram step was closed. Paste the bot token again.", "Il passaggio Telegram è stato chiuso. Incolla di nuovo il token del bot."))
+        }
         let result = await env.apply(["telegram": ["token": p.token, "chat_id": chatId]], checkpoint)
         try checkpoint()
         await reload()
         guard result["ok"] as? Bool == true else { return (false, applyError(result)) }
-        telegram = nil
+        await endPairing()
         telegramBot = p.bot
         return (true, L("Telegram connected! Your messages to @\(p.bot) reach Briglia while it\u{2019}s running.", "Telegram collegato! I tuoi messaggi a @\(p.bot) arrivano a Briglia mentre è in funzione."))
     }

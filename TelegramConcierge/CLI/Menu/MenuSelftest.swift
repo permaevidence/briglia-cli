@@ -433,7 +433,7 @@ final class MenuSelftestContext {
             return p
         }
         env.openURL = { world.urlsOpened.append($0) }
-        env.markComplete = { world.markedComplete = true }
+        env.markComplete = { world.markedComplete = true; return true }
         env.quick.fullDiskAccessGranted = { world.fda }
         env.quick.openSettingsPane = { world.settingsOpened += 1 }
         env.quick.disableGnomeAutoSuspend = { world.gnomeFixed = true; world.snap.keepAwakeOK = true; return true }

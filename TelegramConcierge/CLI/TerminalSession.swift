@@ -84,14 +84,30 @@ final class TerminalSession {
 
     // MARK: - Startup
 
+    /// Selftest seam: the startup lease grace (10 s).
+    nonisolated(unsafe) static var startupLeaseGraceSeconds: Double = {
+        if adaCLIVersion.hasSuffix("-dev"), let v = Double(ProcessInfo.processInfo.environment["BRIGLIA_TEST_LEASE_GRACE"] ?? "") { return v }
+        return 10
+    }()
+
     private func start(headless: Bool, adopting adopted: InstanceLease?) async throws {
         if let adopted {
             precondition(adopted.held, "adopted lease must be held")
             lease = adopted
         } else {
-            switch InstanceLease.acquire(label: headless ? "daemon" : "chat") {
+            // Startup grace (KEYLESS_WEB_AND_LIVE_MENU plan B.6): a short
+            // settings commit of another process holds the lease for a
+            // moment; wait up to 10 s (100 ms retries) before failing.
+            switch await InstanceLease.acquire(label: headless ? "daemon" : "chat", waitSeconds: Self.startupLeaseGraceSeconds) {
             case .success(let acquired): lease = acquired
             case .failure(let conflict):
+                // The offline menu's Telegram pairing step keeps Briglia off
+                // while it is open (plan B.9): a temporary condition, exit 75
+                // (the supervisor retries without counting a failure).
+                if InstanceLease.holderLabel() == "menu-pairing" {
+                    print("· Briglia stays off while the menu connects Telegram; it starts when that step is finished.")
+                    throw ExitCode(75)
+                }
                 print("✖ \(conflict)")
                 throw ExitCode(1)
             }
@@ -128,6 +144,9 @@ final class TerminalSession {
         // the whole conversation into the terminal.
         printedMessageIds = Set(manager.messages.map(\.id))
 
+        // The settings owner (KEYLESS_WEB_AND_LIVE_MENU plan B.5): crash
+        // recovery of interrupted settings commits before ordinary work.
+        manager.startSettingsOwner()
         await manager.startPolling()
         if let error = manager.error {
             print("✖ \(error)")
@@ -525,8 +544,12 @@ final class TerminalSession {
     // MARK: - Shutdown
 
     private func installSignalHandlers() {
+        let settingsOwner = manager
         let shutdown = ShutdownSignalCoordinator(settle: {
             print("\nShutting down… (press Ctrl-C again to force exit)")
+            // No new settings commit; one already past its first durable
+            // write finishes (plan B.4b shutdown rule).
+            await settingsOwner.settleSettingsForShutdown()
             await BrowserSettingsHost.stopShared()
             await MenuHost.stopShared()
         }, gracefulExit: {

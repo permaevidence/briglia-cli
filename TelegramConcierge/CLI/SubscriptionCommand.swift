@@ -9,6 +9,7 @@ struct SubscriptionCommand: AsyncParsableCommand {
     @Option(help: "Model to save; availability depends on your subscription") var model: String?
     @Option(help: "Reasoning effort") var effort: String?
     @Flag(help: "Activate after login (requires stopped Briglia)") var activate = false
+    @Flag(name: .customLong("accept-pending"), help: "If Briglia is busy, save the change and apply it when it is idle") var acceptPending = false
     @Argument(help: .hidden) var scopeValue: String?
     var scopeArgument: SubscriptionSharing.Scope? { scopeValue.flatMap(SubscriptionSharing.Scope.init(rawValue:)) }
 
@@ -40,63 +41,97 @@ struct SubscriptionCommand: AsyncParsableCommand {
             case .failed(let why): print("✖ \(why)"); throw ExitCode(1)
             }
             defer { scopeLock?.release() }
+            // The scope change is a short commit of this process (plan B.6):
+            // it holds the instance lease for its local work only.
+            let lease: InstanceLease
+            switch await InstanceLease.acquire(label: "settings-commit", waitSeconds: 2) {
+            case .success(let held): lease = held
+            case .failure: print("✖ Stop this assistant before changing its ChatGPT login."); throw ExitCode(1)
+            }
+            defer { lease.release() }
+            do { try SettingsRecovery.run() } catch { print("✖ \(error)"); throw ExitCode(1) }
             do { print(try await SubscriptionSharing.changeScope(to: target)) } catch {
                 print("✖ \(error.localizedDescription)"); throw ExitCode(1)
             }
         case "login", "select", "cancel", "logout":
             try IdentityMigration.gateMutatingEntry()
-            // The intake stop across processes (Codex stage-3 S3-R14-1).
-            let replacementLock: ProfileFileLock?
+            // KEYLESS_WEB_AND_LIVE_MENU plan B.6: the network/device flow runs
+            // first, outside any lock; every local mutation — the login's
+            // publication, select, cancel, logout — is one prepared change
+            // committed by the settings writer (forwarded to a running
+            // Briglia, or under a short instance lease). A route change while
+            // Briglia is busy is refused (`--accept-pending` stages it).
             switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
-            case .admitted(let lock): replacementLock = lock
+            case .admitted(let lock): lock.release()
             case .busy: print("✖ " + MemoryReplacementLock.busyMessage); throw ExitCode(75)
             case .failed(let why): print("✖ \(why)"); throw ExitCode(1)
             }
-            defer { replacementLock?.release() }
-            // Profile changes need daemon exclusion. Logout may invalidate an
-            // active session; each queued dispatch checks its captured generation.
             let model = model ?? ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel
             let effort = effort ?? ProviderProfiles.configuredEffort(.chatgpt) ?? "high"
             if action == "login" || action == "select" {
                 guard ResponsesAdapter.allowedEfforts(model: model).contains(effort) else { throw ValidationError("Unsupported reasoning effort") }
             }
-            var lease: InstanceLease?
-            if action == "select" || activate || (action == "login" && ProviderProfiles.activeProfile() == .chatgpt) {
-                switch InstanceLease.acquire(label: "ChatGPT subscription selection") {
-                case .success(let held): lease = held
-                case .failure: throw ValidationError("Stop Briglia before activating a subscription profile; login without --activate can run separately.")
+            func commit(_ label: String, _ body: () async throws -> Void) async throws -> SettingsCommitResult? {
+                let (change, _) = try await SettingsCapture.prepareThrowing(origin: "subscription", label: label,
+                                                                           acceptPending: acceptPending) { try await body() }
+                guard !change.isEmpty else { return nil }
+                return await SettingsClient.commit(change)
+            }
+            func report(_ result: SettingsCommitResult?, done: String) throws {
+                guard let result else { print(done); return }
+                switch result.state {
+                case .applied: print(done)
+                case .pending: print("Saved. Briglia is busy, so this applies when it finishes its current task.")
+                case .busy: print("✖ Briglia is busy with a task and this changes what it uses. Try again when it is idle, or add --accept-pending."); throw ExitCode(75)
+                default: print("✖ \(result.message ?? "not saved")"); throw ExitCode(1)
                 }
             }
-            defer { lease?.release() }
             if action == "cancel" {
-                if try await store.cancelOwnedPending() == .foreign {
-                    print(SubscriptionSharing.foreignPendingMessage); return
-                }
-                print("Pending ChatGPT login cancelled; existing credentials preserved.")
+                var outcome: SubscriptionAuthStore.OwnedCancel = .none
+                let result = try await commit("ChatGPT login cancel") { outcome = try await store.cancelOwnedPending() }
+                if outcome == .foreign { print(SubscriptionSharing.foreignPendingMessage); return }
+                try report(result, done: "Pending ChatGPT login cancelled; existing credentials preserved.")
                 return
             }
             if action == "logout" {
                 if let sentence = SubscriptionSharing.sharingSentence(signOut: true) { print(sentence) }
-                try await store.logout()
-                print("ChatGPT signed out locally. Saved history remains; queued requests cannot reuse this login.")
+                let result = try await commit("ChatGPT sign-out") { try await store.logout() }
+                try report(result, done: "ChatGPT signed out locally. Saved history remains; queued requests cannot reuse this login.")
                 return
             }
             if action == "login" {
                 if let sentence = SubscriptionSharing.sharingSentence() { print(sentence) }
-                let login = SubscriptionLogin()
+                // The publication is prepared inside the login's final step
+                // and committed right after the network flow ends.
+                var login = SubscriptionLogin()
+                let box = PublishBox()
+                login.commitHook = { direct in
+                    let (change, generation) = try await SettingsCapture.prepareThrowing(origin: "subscription", label: "ChatGPT sign-in",
+                                                                                        acceptPending: acceptPending) { try await direct(nil) }
+                    box.change = change
+                    return generation
+                }
                 if browser {
                     _ = try await login.browser { print("Open this login link on this computer (expires in 5 minutes):\n" + $0) }
                 } else {
                     _ = try await login.device { print("Open " + $0 + " and enter code: " + $1 + "\nWaiting for your authorization (15 minutes maximum).") }
                 }
-                print("ChatGPT login saved. No API key was changed.")
+                if let change = box.change {
+                    try report(await SettingsClient.commit(change), done: "ChatGPT login saved. No API key was changed.")
+                }
             }
-            // Saving never implicitly activates. A stopped daemon can be selected
-            // here; a running daemon uses its existing /provider idle guard.
-            try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil, model: model, effort: effort, textOnly: false)
-            if activate || action == "select" || (lease != nil && ProviderProfiles.activeProfile() == .chatgpt) { try ProviderProfiles.activate(.chatgpt); print("ChatGPT subscription selected.") }
-            else { print("Use /provider chatgpt while idle, or briglia subscription select while stopped.") }
+            // Saving never implicitly activates, except when ChatGPT is
+            // already the active lane (the new login takes effect) or asked.
+            let activates = activate || action == "select" || ProviderProfiles.activeProfile() == .chatgpt
+            let result = try await commit(activates ? "ChatGPT selection" : "ChatGPT model") {
+                try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil, model: model, effort: effort, textOnly: false)
+                if activates { try ProviderProfiles.activate(.chatgpt) }
+            }
+            try report(result, done: activates ? "ChatGPT subscription selected." : "Use /provider chatgpt while idle, or briglia subscription select.")
         default: throw ValidationError("Use login, status, select, cancel, logout, or models")
         }
     }
 }
+
+/// The sign-in's prepared publication, handed out of the login hook.
+private final class PublishBox: @unchecked Sendable { var change: PreparedChange? }

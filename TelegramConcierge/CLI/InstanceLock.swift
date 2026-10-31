@@ -79,16 +79,18 @@ final class InstanceLease {
             var holder = ""
             var buf = [UInt8](repeating: 0, count: 32)
             let n = pread(fd, &buf, buf.count, 0)
-            if n > 0, let text = String(bytes: buf[0..<n], encoding: .utf8) {
-                let pid = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !pid.isEmpty { holder = " (pid \(pid))" }
+            if n > 0, let text = String(bytes: buf[0..<n], encoding: .utf8),
+               let pid = text.split(whereSeparator: { $0 == " " || $0 == "\n" }).first, !pid.isEmpty {
+                holder = " (pid \(pid))"
             }
             close(fd)
             return .failure(LeaseError("another Briglia instance\(holder) is already running — `briglia` chat and "
                 + "`briglia daemon` share one conversation and one Telegram poller, so only "
                 + "one can be active. Quit the other instance first."))
         }
-        let pid = "\(getpid())\n"
+        // `<pid> <label>` (KEYLESS_WEB_AND_LIVE_MENU plan B.9): readers parse
+        // the first token, so the old pid-only format still parses.
+        let pid = "\(getpid()) \(label.replacingOccurrences(of: " ", with: "-").replacingOccurrences(of: "\n", with: ""))\n"
         _ = ftruncate(fd, 0)
         _ = pid.withCString { write(fd, $0, strlen($0)) }
         // Close-on-exec, for two reasons: child processes (background bash,
@@ -100,6 +102,34 @@ final class InstanceLease {
         heldInProcess = true
         return .success(InstanceLease(fd: fd, label: label))
     }
+
+    /// The label the current holder wrote (`menu-pairing`, `daemon`, …), nil
+    /// when absent or unreadable (pid-only files have no label).
+    static func holderLabel(_ url: URL = InstanceLease.lockURL) -> String? {
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var buf = [UInt8](repeating: 0, count: 128)
+        let n = pread(fd, &buf, buf.count, 0)
+        guard n > 0, let text = String(bytes: buf[0..<n], encoding: .utf8) else { return nil }
+        let parts = text.split(whereSeparator: { $0 == " " || $0 == "\n" })
+        return parts.count >= 2 ? String(parts[1]) : nil
+    }
+
+    /// Acquire with a bounded asynchronous wait (100 ms retries): startup
+    /// grace and short commits (plan B.6). `.failure` after the wait.
+    static func acquire(label: String, waitSeconds: Double) async -> Result<InstanceLease, LeaseError> {
+        let deadline = ProcessInfo.processInfo.systemUptime + waitSeconds
+        while true {
+            let result = acquire(label: label)
+            if case .success = result { return result }
+            if heldByThisProcess { return result }
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return result }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    private static var heldByThisProcess: Bool { lock.lock(); defer { lock.unlock() }; return heldInProcess }
 
     /// Release the lease. Idempotent: a second call logs and does nothing.
     func release() {

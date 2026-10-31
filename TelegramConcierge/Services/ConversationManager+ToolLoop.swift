@@ -410,6 +410,11 @@ extension ConversationManager {
 
         toolLoop: for round in 1...maxToolRoundsSafetyLimit {
             try Task.checkCancellation()
+            // Live configuration (KEYLESS_WEB_AND_LIVE_MENU plan B.7): a key
+            // another process saved since the services were configured is
+            // installed before this round's service calls (a cheap stat
+            // otherwise). Route changes never land here mid-turn.
+            await refreshServiceCredentialsIfChanged()
             // /keepsummaries: read once per round; this round's estimate and
             // send (and every resend inside it) compose with this value.
             let roundLimit = KeepSummariesSetting.current()

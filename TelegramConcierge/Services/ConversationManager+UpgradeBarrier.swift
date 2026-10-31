@@ -36,6 +36,9 @@ extension ConversationManager {
         if assistantsMenuOperations > 0 { return "an assistant being changed from the menu" }
         if browserSettingsMutation || isRestoringMind || subscriptionLoginTask != nil
             || botSwitchCutoverInProgress { return "a settings change" }
+        // A settings commit or its reconciliation (plan B.4b: no "parked"
+        // or exec while one is active).
+        if settingsWriterStorage?.gate.isHeld == true || settingsApplyTask != nil { return "a settings change" }
         // Commands already inside the handler (terminal, app socket, Telegram);
         // the initiating /upgrade handler is itself one of them.
         // S2-12: the coordinated /upgrade runs as its own task, so no command
@@ -54,8 +57,18 @@ extension ConversationManager {
     /// at its top (no getUpdates in flight, the last batch processed and
     /// confirmed), app/terminal input and email arrivals are refused or kept
     /// for redelivery. The polling preference is untouched.
-    func pauseAdmission() { admissionPaused = true }
-    func resumeAdmission() { admissionPaused = false }
+    func pauseAdmission() {
+        admissionPaused = true
+        // Settings admission closes with it (plan B.4b): queued writers are
+        // refused at once, a write-free wait is cancelled.
+        settingsWriterStorage?.gate.closeAdmission(reason: Self.updatingRefusal)
+        settingsApplyTask?.cancel()
+    }
+    func resumeAdmission() {
+        admissionPaused = false
+        if settingsWriterStorage?.gate.admissionClosedReason == Self.updatingRefusal { settingsWriterStorage?.gate.reopenAdmission() }
+        kickSettingsApply()
+    }
 
     static let updatingRefusal = "Briglia is updating — try again in a minute."
 

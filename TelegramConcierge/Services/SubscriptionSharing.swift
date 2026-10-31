@@ -299,16 +299,83 @@ enum SubscriptionSharing {
         defer { tx.finish() }
         let current = scope()
         guard current != target else { return "ChatGPT: already \(target == .own ? "its own login" : "the shared login")." }
-        if target == .shared {
-            // own → shared: the own store is signed out first, so no orphaned
-            // rotating token remains; abort on failure.
-            let own = SubscriptionAuthStore(directory: StoragePaths.configRoot)
-            if try own.read() != nil { try await own.logout() }
+        // KEYLESS_WEB_AND_LIVE_MENU plan B.4c: a journaled transition, its
+        // outcome recoverable from evidence (the own store's `lastAttempt`,
+        // the secrets publication marker), never replayed.
+        let attempt = UUID().uuidString
+        let own = SettingsWriter.authStore(StoragePaths.configRoot.path)
+        let direction = target == .shared ? "own->shared" : "shared->own"
+        // Decision point: own→shared signs the own store out first (when it
+        // exists); shared→own never signs the shared store out.
+        let oldOwn: SubscriptionAuthState?
+        do { oldOwn = try own.read() } catch { throw SubscriptionError("ChatGPT (own login) can't be read: \(error.localizedDescription); nothing changed") }
+        let retire = target == .shared && oldOwn != nil
+        var tombstone = SubscriptionAuthState(generation: UUID().uuidString)
+        tombstone.lastAttempt = attempt
+        let record = SettingsPendingStore.Attempt(attempt: attempt, operation: "scope", category: "ai", ticket: nil,
+            clientRequestId: attempt, label: "ChatGPT login scope", authEffect: retire, authKind: retire ? "logout" : nil,
+            storePath: StoragePaths.configRoot.path, oldEvidence: SettingsPendingStore.AuthEvidence(oldOwn),
+            projectedEvidence: retire ? SettingsPendingStore.AuthEvidence(tombstone) : nil, secretsKeys: [scopeKey],
+            steps: ["intent"], direction: direction, retirement: retire ? "own" : "none", startedAt: Date())
+        try SettingsPendingStore.update { $0.attempts[attempt] = record }
+        func finish(_ state: String, _ message: String?) {
+            _ = try? SettingsPendingStore.update { doc in
+                doc.attempts.removeValue(forKey: attempt)
+                doc.appendResult(.init(ticket: nil, clientRequestId: attempt, category: "ai", label: "ChatGPT login scope",
+                                       state: state, message: message, at: Date()))
+            }
         }
-        var noop = WipeResult()
-        clearBinding(&noop, removeScope: false)
-        if !noop.failures.isEmpty { throw SubscriptionError(noop.failures.joined(separator: "; ")) }
-        try KeychainHelper.saveBatch([scopeKey: target == .own ? Scope.own.rawValue : String?.none])
+        if retire {
+            let outcome = try await own.locked { own.writePhased(tombstone) }
+            switch outcome {
+            case .written: break
+            case .notWritten(let error):
+                _ = try? SettingsPendingStore.update { $0.attempts[attempt]?.steps.append("retire-failed-before-replace") }
+                finish("failed", "could not sign out the assistant's own ChatGPT login; nothing changed")
+                throw SubscriptionError("Could not sign out this assistant's own ChatGPT login (\(error.localizedDescription)); nothing changed.")
+            case .writtenUnconfirmed:
+                // Evidence, not the error, decides: re-read under the lock.
+                let after = try? await own.locked { try own.read() }
+                if after?.lastAttempt == attempt {
+                    _ = try? SettingsPendingStore.update { $0.attempts[attempt]?.steps.append("retired-unconfirmed") }
+                    finish("partial", "own ChatGPT login was signed out (not confirmed durable); scope still own")
+                    throw SubscriptionError("This assistant's own ChatGPT login was signed out (not confirmed durable); its login scope is still its own. Run the command again.")
+                }
+                finish(after == nil ? "uncertain" : "failed", after == nil ? "the own login's state can't be read" : "nothing changed")
+                throw SubscriptionError("Could not confirm the sign-out of this assistant's own ChatGPT login; nothing was published.")
+            }
+            SettingsSupersede.subscriptionChanged(store: StoragePaths.configRoot.path)
+            _ = try? SettingsPendingStore.update { $0.attempts[attempt]?.steps.append("own-retired") }
+        }
+        // Publish: ONE secrets mutation — binding cleared, scope keys and the
+        // publication marker — rechecked against the scope it started from.
+        var published = false
+        do {
+            try KeychainHelper.withStoreLock { holding in
+                guard scope(stored: holding.store) == current else { return }
+                var change: [String: String?] = [
+                    ProviderProfiles.subscriptionGenerationKey: nil,
+                    accountFingerprintKey: nil,
+                    scopeKey: target == .own ? Scope.own.rawValue : nil,
+                    SettingsWriter.scopePublishedKey: attempt,
+                ]
+                if holding.store[ProviderProfiles.activeProfileKey] == "chatgpt",
+                   let bound = holding.store[ProviderProfiles.subscriptionGenerationKey],
+                   holding.store[KeychainHelper.openAICompatibleApiKeyKey] == bound {
+                    change[KeychainHelper.openAICompatibleApiKeyKey] = .some(nil)
+                }
+                do { try holding.mutateHolding(change) } catch is PrivateStorage.ReplacedButNotDurable {}
+                published = true
+            }
+        } catch {
+            finish(retire ? "partial" : "failed", retire ? "own login signed out; scope still own" : "nothing changed")
+            throw SubscriptionError("The new login scope could not be saved (\(error.localizedDescription))" + (retire ? "; this assistant's own login was signed out." : "."))
+        }
+        guard published else {
+            finish(retire ? "partial" : "failed", "settings changed")
+            throw SubscriptionError(retire ? "This assistant's own login was signed out, but its scope stays own because settings changed meanwhile." : "Settings changed meanwhile; nothing changed.")
+        }
+        finish("persisted", nil)
         return target == .own
             ? "This assistant now uses its own ChatGPT login: sign in with `briglia --profile \(AssistantProfile.selectedName) subscription login`."
             : "This assistant now uses the shared ChatGPT login; choose ChatGPT again (/provider chatgpt) to use it."

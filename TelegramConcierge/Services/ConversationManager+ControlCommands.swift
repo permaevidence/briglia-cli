@@ -193,8 +193,34 @@ extension ConversationManager {
             return true
         }
 
+        // Settings commands (KEYLESS_WEB_AND_LIVE_MENU plan B.4b): never
+        // commit inside counted ingress. A Telegram command (or a button)
+        // hands its body to a writer task that takes the commit token and
+        // returns now; a terminal/app command (whose replies are captured)
+        // waits for the token here, refused at once if a lifecycle
+        // operation closed settings admission.
+        if Self.settingsCommandTokens.contains(token), !Self.settingsCommandInline {
+            if Self.commandCapture?.isOpen == true {
+                guard let settingsToken = await settingsWriter.gate.acquire() else {
+                    try? await sendText(settingsWriter.gate.admissionClosedReason ?? MemoryReplacementLock.busyMessage)
+                    return true
+                }
+                browserSettingsCommandIngress += 1
+                let handled = await Self.$settingsCommandInline.withValue(true) { await handleControlCommandIfNeeded(text) }
+                browserSettingsCommandIngress -= 1
+                settingsWriter.gate.release(settingsToken)
+                kickSettingsApply()
+                return handled
+            }
+            runSettingsCommand { [weak self] in
+                guard let self else { return }
+                _ = await Self.$settingsCommandInline.withValue(true) { await self.handleControlCommandIfNeeded(text) }
+            }
+            return true
+        }
+
         browserSettingsCommandIngress += 1
-        defer { browserSettingsCommandIngress -= 1 }
+        defer { browserSettingsCommandIngress -= 1; kickSettingsApply() }
         switch token {
         case "/stop":
             await cancelWaitingUpgradeForStop()

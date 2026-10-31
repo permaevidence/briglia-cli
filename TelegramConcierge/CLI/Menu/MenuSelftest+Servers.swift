@@ -243,7 +243,7 @@ extension MenuSelftestContext {
         env.language = "en"
         env.toolchainStatus = { ToolchainService.DesktopStatus(doctorRan: true, missing: [], libreOffice: true, mandatoryMissing: []) }
         env.probe = { _ in ["ok": true] }
-        env.markComplete = {}
+        env.markComplete = { true }
         let wf = MenuWorkflow(env: env, runner: SetupJobRunner(secrets: [:]))
         await wf.start(); await wf.settle()
         check("R4: without an OpenAI key, ChatGPT and OpenRouter are never blocked; OpenCode and servers are",
@@ -282,7 +282,7 @@ extension MenuSelftestContext {
         env.toolchainStatus = { ToolchainService.DesktopStatus(doctorRan: true, missing: [], libreOffice: true, mandatoryMissing: []) }
         env.probe = { _ in ["ok": true] }
         env.localModels = { _, apiKey in apiKey == nil || apiKey == key ? .success(["acme-large", "acme-small"]) : .failure(.http(401)) }
-        env.markComplete = {}
+        env.markComplete = { true }
         env.openURL = { _ in }
         let wf = MenuWorkflow(env: env, runner: SetupJobRunner(secrets: [:]))
         await wf.start()

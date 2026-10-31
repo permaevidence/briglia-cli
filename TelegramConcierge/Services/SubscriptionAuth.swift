@@ -170,8 +170,14 @@ struct SubscriptionAuthState: Codable {
     /// (byte-identical file); older binaries ignore and drop them.
     var signedInBy: String? = nil
     var pendingLoginBy: String? = nil
+    /// The settings-writer attempt that last mutated this state (plan B.4a
+    /// 8.2): written atomically with that mutation, read by crash recovery
+    /// as the evidence that the attempt's auth step happened. Optional and
+    /// omitted when nil; older binaries ignore and drop it.
+    var lastAttempt: String? = nil
     var valid: Bool {
         version == 1 && UUID(uuidString: generation) != nil
+            && (lastAttempt == nil || UUID(uuidString: lastAttempt!) != nil)
             && (pendingLogin == nil || UUID(uuidString: pendingLogin!) != nil)
             && (signedInBy == nil || AssistantProfile.isValidName(signedInBy!))
             && (pendingLoginBy == nil || (pendingLogin != nil && AssistantProfile.isValidName(pendingLoginBy!)))
@@ -191,9 +197,9 @@ struct SubscriptionAuthState: Codable {
     }
     mutating func clearPending() { pendingLogin = nil; pendingLoginBy = nil; deviceChallenge = nil }
     /// A new credential and generation; `signedInBy` from the pending owner.
-    mutating func commitPending(_ credential: SubscriptionCredential) {
+    mutating func commitPending(_ credential: SubscriptionCredential, generation newGeneration: String = UUID().uuidString) {
         let owner = pendingLoginBy
-        generation = UUID().uuidString
+        generation = newGeneration
         self.credential = credential
         requiresLogin = nil
         clearPending()
@@ -287,6 +293,39 @@ struct SubscriptionAuthStore {
         try afterWrite?()
     }
 
+    /// Outcome of a phased write (plan B.4a 8.2): `notWritten` = the file was
+    /// not replaced; `writtenUnconfirmed` = replaced (visible) but its
+    /// durability or the post-write seam failed — handled as written.
+    enum PhasedWriteOutcome {
+        case written
+        case writtenUnconfirmed(Error)
+        case notWritten(Error)
+    }
+
+    /// The settings writer's non-reacquiring write (the caller holds this
+    /// store's lock): `PrivateStorage.writeAtomicallyPhased`, with the
+    /// `beforeWrite`/`afterWrite` seams keeping their replacement phase.
+    func writePhased(_ state: SubscriptionAuthState) -> PhasedWriteOutcome {
+        guard state.valid else { return .notWritten(SubscriptionError("Invalid subscription state")) }
+        do { _ = try read() } catch { return .notWritten(error) }
+        let data: Data
+        do {
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            data = try encoder.encode(state)
+            try beforeWrite?()
+        } catch { return .notWritten(error) }
+        do {
+            _ = try PrivateStorage.writeAtomicallyPhased(data, to: file)
+        } catch let replaced as PrivateStorage.ReplacedButNotDurable {
+            try? afterWrite?()
+            return .writtenUnconfirmed(replaced)
+        } catch {
+            return .notWritten(error)
+        }
+        do { try afterWrite?() } catch { return .writtenUnconfirmed(error) }
+        return .written
+    }
+
     func locked<T>(_ operation: () async throws -> T) async throws -> T {
         try PrivateStorage.ensureDirectory(directory)
         let fd = open(lockFile.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0o600)
@@ -326,7 +365,20 @@ struct SubscriptionAuthStore {
     /// (the menu's action ticket) gets a last say, and throwing writes nothing.
     func commitLogin(_ credential: SubscriptionCredential, pending: String,
                      precondition: (@Sendable () throws -> Void)? = nil) async throws -> String {
-        try await locked {
+        // Preparing a settings change (plan B.5): the publication is recorded
+        // and committed by the settings writer, which re-checks the pending
+        // id under this store's lock at its decision point.
+        if let capture = SettingsCapture.current, !capture.readOnly {
+            guard let state = try read(), state.pendingLogin == pending else {
+                throw SubscriptionError("Login was cancelled or superseded; start login again")
+            }
+            try precondition?()
+            let generation = UUID().uuidString
+            capture.recordSubscription(SettingsSubscriptionOp(kind: .publish, store: directory.path, pending: pending,
+                credential: credential, projectedGeneration: generation, guardActiveLogin: capture.guardActiveLogin))
+            return generation
+        }
+        return try await locked {
             guard var state = try read(), state.pendingLogin == pending else {
                 throw SubscriptionError("Login was cancelled or superseded; start login again")
             }
@@ -334,6 +386,9 @@ struct SubscriptionAuthStore {
             state.commitPending(credential)
             try Task.checkCancellation()
             try write(state)
+            // A user-requested login supersedes staged changes built on the
+            // old one (KEYLESS_WEB_AND_LIVE_MENU plan B.5).
+            SettingsSupersede.subscriptionChanged(store: directory.path)
             return state.generation
         }
     }
@@ -360,21 +415,36 @@ struct SubscriptionAuthStore {
     /// (§25.12): the owner filter and the cancelled id are one operation.
     @discardableResult
     func cancelOwnedPending(profile: String = AssistantProfile.selectedName) async throws -> OwnedCancel {
-        try await locked {
+        if let capture = SettingsCapture.current, !capture.readOnly {
+            guard let state = try read(), let pending = state.pendingLogin else { return .none }
+            guard SubscriptionSharing.pendingOwned(state, by: profile) else { return .foreign }
+            capture.recordSubscription(SettingsSubscriptionOp(kind: .cancel, store: directory.path, pending: pending))
+            return .cancelled
+        }
+        return try await locked {
             guard var state = try read(), state.pendingLogin != nil else { return .none }
             guard SubscriptionSharing.pendingOwned(state, by: profile) else { return .foreign }
             state.clearPending()
             try write(state)
+            SettingsSupersede.subscriptionChanged(store: directory.path)
             return .cancelled
         }
     }
 
     func logout(checkpoint: () throws -> Void = {}) async throws {
+        if let capture = SettingsCapture.current, !capture.readOnly {
+            _ = try read()
+            try checkpoint()
+            capture.recordSubscription(SettingsSubscriptionOp(kind: .logout, store: directory.path,
+                projectedGeneration: UUID().uuidString))
+            return
+        }
         try await locked {
             _ = try read()
             // A durable tombstone prevents late callbacks from recreating auth.
             try checkpoint()
             try write(SubscriptionAuthState(generation: UUID().uuidString))
+            SettingsSupersede.subscriptionChanged(store: directory.path)
         }
     }
 

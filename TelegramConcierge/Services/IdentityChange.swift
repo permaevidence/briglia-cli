@@ -94,6 +94,13 @@ enum IdentityChange {
                       identityLockURL: URL? = nil,
                       ownLease: String? = MemberEntry.current?.uuid,
                       leaseDirectory: ((AssistantRegistry.Record) -> URL?)? = nil) throws -> Ticket {
+        // Preparing a settings change (KEYLESS_WEB_AND_LIVE_MENU plan B.4a
+        // step 5): the reservation happens at commit, in the owner; here the
+        // change is only recorded and its write lands in the overlay.
+        if let capture = SettingsCapture.current, !capture.readOnly {
+            capture.recordIdentity(SettingsIdentityOp(kind: kind.rawValue, value: rawValue))
+            return Ticket(kind: kind, tx: nil, identityLock: nil, ownsIdentityLock: false)
+        }
         guard CoordinationMode.active || AssistantRegistry.exists(paths) else {
             return Ticket(kind: kind, tx: nil, identityLock: nil, ownsIdentityLock: false)
         }

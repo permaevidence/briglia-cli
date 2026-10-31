@@ -151,6 +151,15 @@ final class Supervisor {
                     say(child, "stopped")
                     continue
                 }
+                // Exit 75 (KEYLESS_WEB_AND_LIVE_MENU plan B.9): temporarily
+                // kept off (the menu's Telegram pairing step). Retry after a
+                // fixed 15 s; not a failure, never parks, no backoff index.
+                if status == 75 && p.terminationReason == .exit {
+                    child.state = "waiting"
+                    child.nextStart = now.addingTimeInterval(15)
+                    say(child, "kept off for a moment (the menu is connecting Telegram); retrying in 15 s")
+                    continue
+                }
                 child.failures = child.failures.filter { now.timeIntervalSince($0) < settings.parkWindow } + [now]
                 if child.failures.count >= settings.parkAfter {
                     child.state = "parked"

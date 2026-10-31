@@ -541,6 +541,26 @@ actor FilesystemTools {
             return OpResult(content: jsonError(violation))
         }
 
+        // The harness secret store is committed as a conditional delta
+        // through the settings writer (KEYLESS_WEB_AND_LIVE_MENU plan B.5):
+        // only the keys this edit changed, only if they still hold the values
+        // it was made from; applied at once during the agent's own turn (D21).
+        if HarnessSecretStore.isSecretStore(path) {
+            switch await SettingsAgentEdit.commit(originalText: original, updatedText: updated) {
+            case .refused(let why):
+                return OpResult(content: jsonError(why))
+            case .unchanged:
+                return OpResult(content: jsonError("No changes made. The replacement produced identical content."))
+            case .applied(let keys):
+                await FileTimeTracker.shared.recordRead(path: path)
+                await FilesLedger.shared.record(path: path, origin: .edited, description: nil)
+                return OpResult(content: jsonString([
+                    "success": true, "path": path, "edits_applied": matchedEdits.count,
+                    "keys_changed": keys, "note": SettingsAgentEdit.formattingNote,
+                ]))
+            }
+        }
+
         // --- Phase 4: Write and report ---
         do {
             let finalText = Self.restoreLineEndings(updated, as: originalFile.lineEnding)

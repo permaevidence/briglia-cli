@@ -193,16 +193,29 @@ struct MenuEnvironment {
     }
     /// setup-api probe (same request/response shape).
     var probe: ([String: Any]) async -> [String: Any] = { await SetupAPICore.probe($0) }
-    /// setup-api apply; the menu holds the instance lease for its lifetime.
-    /// The checkpoint is the operation's ticket: setup-api calls it right
-    /// before its writes, so a revoked or superseded action writes nothing.
+    /// setup-api apply, prepared here and committed by the one settings
+    /// writer (KEYLESS_WEB_AND_LIVE_MENU plan Part B): the running Briglia,
+    /// or — when none runs — this process under the instance lease for the
+    /// commit only. The checkpoint is the operation's ticket: it is called
+    /// during preparation and right before the commit, so a revoked or
+    /// superseded action writes nothing. A route change while Briglia is
+    /// busy comes back `state: "pending"` (it applies at the next idle point).
     var apply: ([String: Any], @escaping () throws -> Void) async -> [String: Any] = {
-        await SetupAPICore.apply($0, ownsLease: true, checkpoint: $1)
+        await MenuSettings.apply($0, checkpoint: $1)
     }
     /// Subscription setup actions (status/select/probe/logout), same checkpoint.
     var subscription: ([String: Any], @escaping () throws -> Void) async -> [String: Any] = {
-        await SubscriptionSetup().perform($0, ownsLease: true, checkpoint: $1)
+        await MenuSettings.subscription($0, checkpoint: $1)
     }
+    /// A finished sign-in's publication (a settings commit, plan B.5).
+    var publishLogin: (_ write: SubscriptionLogin.Commit, _ checkpoint: @escaping @Sendable () throws -> Void) async throws -> MenuSettings.Published = {
+        try await MenuSettings.publishLogin($0, checkpoint: $1)
+    }
+    /// The offline menu's Telegram pairing step holds the instance lease
+    /// (plan B.9); the live hub never pairs.
+    var pairing = MenuPairingLease()
+    /// Waiting and recent settings results for the page.
+    var pendingLines: (_ lang: String) -> [String] = { MenuSettings.pendingLines(lang: $0) }
     /// ChatGPT sign-in. `commit` wraps the final credential write (see
     /// `SubscriptionLogin.commitHook`): the menu checks the action is still
     /// valid, refuses to replace a working active login, and on the live
@@ -221,12 +234,10 @@ struct MenuEnvironment {
     var loginBlock: () async -> MenuLoginBlock? = {
         (try? SubscriptionSetup.checkLoginReplacement()) == nil ? .activeLogin : nil
     }
-    /// Runs one write inside the running agent's settings barrier (no turn,
-    /// subagent, watcher or maintenance; Telegram commands refused), waiting
-    /// up to `wait` seconds for it, then reloads the agent's settings. False
-    /// = the agent stayed busy and `body` never ran. Offline (no running
-    /// Briglia) it just runs `body`. Writes inside see `MenuBarrier.held` and
-    /// don't take the barrier again.
+    /// Groups a stale check with the write that depends on it. Since the
+    /// live menu (plan Part B) the settings writer admits every write itself
+    /// (a key replacement now, a route change at an idle point), so this no
+    /// longer waits for an idle agent; it only runs `body`.
     var barrier: (_ wait: Double, _ body: () async throws -> Void) async throws -> Bool = { _, body in
         try await MenuBarrier.$held.withValue(true) { try await body() }
         return true
@@ -267,9 +278,7 @@ struct MenuEnvironment {
         await SetupAPICore.telegramChatProbe(token: $0, chatId: $1)
     }
     var openURL: (String) -> Void = { QuickSetupSession.openBrowser($0) }
-    var markComplete: () throws -> Void = {
-        try KeychainHelper.saveBatch([SetupWizard.completeKey: "true", SetupWizard.progressKey: String?.none])
-    }
+    var markComplete: () async -> Bool = { await MenuSettings.markComplete() }
     /// Linux: whether a systemd user session can run the background service
     /// (the quick setup's preflight check).
     var systemdSessionAvailable: () -> Bool = {

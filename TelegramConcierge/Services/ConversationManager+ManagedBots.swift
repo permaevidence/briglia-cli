@@ -377,6 +377,7 @@ extension ConversationManager {
         managedBotCreationTask = Task { @MainActor [weak self] in
             await self?.runManagedBotCreation(requestId: pending.requestId, manager: manager, owner: owner)
             self?.managedBotCreationTask = nil
+            self?.kickSettingsApply()
             self?.managedBotCreationBotId = nil
         }
         return true
@@ -493,6 +494,7 @@ extension ConversationManager {
 
     func endAssistantsMenuOperation() {
         assistantsMenuOperations = max(0, assistantsMenuOperations - 1)
+        kickSettingsApply()
     }
 
     // MARK: - /switchbot newtoken (§28.6 S4-P4)

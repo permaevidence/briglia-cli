@@ -562,6 +562,54 @@ final class AppChatSocketServer {
                 ack(["url": url])
             } catch { nack("Could not open the menu: \(error.localizedDescription)") }
 
+        case "settings_commit":
+            // A prepared change from a process that is not the owner
+            // (KEYLESS_WEB_AND_LIVE_MENU plan B.6): committed by the one
+            // settings writer; never blocks this client's request loop.
+            guard let raw = object["change"] as? [String: Any],
+                  let data = try? JSONSerialization.data(withJSONObject: raw),
+                  let change = try? PreparedChange.decode(data) else {
+                nack("malformed settings change")
+                return
+            }
+            Task { @MainActor in
+                // Forwarded commits are always classified (D21: the
+                // immediate policy is never taken from a request).
+                let result = await manager.settingsWriter.commit(change, policy: .classify)
+                var event: [String: Any] = ["type": "settings_result"]
+                if let ref { event["ref"] = ref }
+                for (k, v) in result.json { event[k] = v }
+                client.send(event)
+            }
+
+        case "settings_result":
+            guard let id = object["request_id"] as? String else { nack("missing request_id"); return }
+            var event: [String: Any] = ["type": "settings_result"]
+            if let ref { event["ref"] = ref }
+            if let result = manager.settingsWriter.lookup(id) {
+                for (k, v) in result.json { event[k] = v }
+            } else if let doc = try? SettingsPendingStore.read(),
+                      let r = doc.lastResults.last(where: { $0.clientRequestId == id }) {
+                event["state"] = r.state == "applied" || r.state == "persisted" ? "applied" : (r.state == "uncertain" ? "uncertain" : "refused")
+                event["message"] = r.message ?? r.state
+            } else if let doc = try? SettingsPendingStore.read(),
+                      let staged = doc.slots.values.first(where: { $0.staged?.change.id == id || $0.active?.change.id == id }) {
+                event["state"] = "pending"
+                event["ticket"] = staged.staged?.ticket ?? staged.active?.ticket ?? ""
+            } else {
+                // Restart or eviction: still unknown, never "not applied".
+                event["state"] = "uncertain"
+                event["message"] = "no record of this request; the result is unknown"
+            }
+            client.send(event)
+
+        case "settings_cancel":
+            guard let ticket = object["ticket"] as? String else { nack("missing ticket"); return }
+            let outcome = (try? SettingsWriter.cancelStaged(ticket: ticket)) ?? "not found"
+            var event: [String: Any] = ["type": "settings_result", "state": outcome == "cancelled" ? "applied" : "refused", "message": outcome]
+            if let ref { event["ref"] = ref }
+            client.send(event)
+
         case "ping":
             var event: [String: Any] = ["type": "pong"]
             if let ref { event["ref"] = ref }

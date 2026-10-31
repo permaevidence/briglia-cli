@@ -123,6 +123,7 @@ enum KeychainHelper {
     }
 
     static func load(key: String) -> String? {
+        if let capture = SettingsCapture.current { return capture.load(key) }
         lock.lock()
         defer { lock.unlock() }
         return storeLocked()[key]
@@ -132,6 +133,7 @@ enum KeychainHelper {
     /// must never log or persist this in-memory snapshot. Atomic store replacement
     /// gives a complete old-or-new dictionary even across another process's write.
     static func loadSnapshot() -> [String: String] {
+        if let capture = SettingsCapture.current { return capture.snapshot() }
         lock.lock()
         defer { lock.unlock() }
         return storeLocked()
@@ -201,6 +203,11 @@ enum KeychainHelper {
     /// `LOCK_NB` attempt at the sidecar flock; on contention it returns
     /// `.busy` without waiting, sleeping or holding anything (plan §13.7).
     static func tryTransaction(_ change: (inout [String: String]) throws -> Void) throws -> TryResult {
+        if let capture = SettingsCapture.current {
+            var wrote = false
+            try capture.mutate(change, skipUnchanged: true, wrote: &wrote)
+            return wrote ? .wrote : .unchanged
+        }
         guard lock.try() else { return .busy }
         defer { lock.unlock() }
         try? PrivateStorage.ensureDirectory(StoragePaths.configRoot)
@@ -216,6 +223,7 @@ enum KeychainHelper {
         try change(&store)
         guard store != before else { return .unchanged }
         try writeLocked(store)
+        notifyObserver(before: before, after: store)
         return .wrote
     }
 
@@ -232,6 +240,7 @@ enum KeychainHelper {
 
     /// Non-blocking snapshot: nil when the in-process lock is held.
     static func tryLoadSnapshot() -> [String: String]? {
+        if let capture = SettingsCapture.current { return capture.snapshot() }
         guard lock.try() else { return nil }
         defer { lock.unlock() }
         return storeLocked()
@@ -269,6 +278,12 @@ enum KeychainHelper {
     }
 
     private static func mutate(_ change: (inout [String: String]) throws -> Void, skipUnchanged: Bool, wrote: inout Bool) throws {
+        // Preparing a settings change (KEYLESS_WEB_AND_LIVE_MENU plan B.4):
+        // the write lands in the task's overlay, never on disk.
+        if let capture = SettingsCapture.current {
+            try capture.mutate(change, skipUnchanged: skipUnchanged, wrote: &wrote)
+            return
+        }
         // An email-provider change bumps the private-runtime lifecycle
         // generation (plan §7.8.1 step 10, review follow-up): an AgentMail
         // install staged for the old choice is then abandoned at its commit.
@@ -313,6 +328,108 @@ enum KeychainHelper {
         try writeLocked(store)
         wrote = true
         providerChanged = before[emailCalendarProviderKey] != store[emailCalendarProviderKey]
+        notifyObserver(before: before, after: store)
+    }
+
+    // MARK: - Settings writer support (KEYLESS_WEB_AND_LIVE_MENU plan B.4a, B.5)
+
+    /// In-process write observer (the superseding observer, plan B.5): called
+    /// after every successful store write with the keys whose value changed,
+    /// while both store locks are still held, so it runs in write order and
+    /// before the writer returns. Registered only by the settings owner.
+    nonisolated(unsafe) static var writeObserver: ((Set<String>) -> Void)?
+
+    private static func notifyObserver(before: [String: String], after: [String: String]) {
+        guard let observer = writeObserver else { return }
+        var changed = Set<String>()
+        for (k, v) in after where before[k] != v { changed.insert(k) }
+        for k in before.keys where after[k] == nil { changed.insert(k) }
+        if !changed.isEmpty { observer(changed) }
+    }
+
+    /// The capability of the outer synchronous secrets-lock section
+    /// (plan B.4a step 7): the current dictionary, read strictly from disk,
+    /// and a non-reacquiring write. Valid only inside `withStoreLock`.
+    final class StoreLockHolding {
+        fileprivate(set) var store: [String: String]
+        fileprivate var valid = true
+        fileprivate(set) var wrote = false
+        fileprivate init(store: [String: String]) { self.store = store }
+
+        /// One atomic write of `store` with `change` applied (nil = delete).
+        /// Unchanged → no write. Errors before the replacement mean nothing
+        /// was written; `PrivateStorage.ReplacedButNotDurable` means the new
+        /// contents are visible but durability is unconfirmed.
+        func mutateHolding(_ change: [String: String?]) throws {
+            precondition(valid, "StoreLockHolding used outside its section")
+            var next = store
+            for (k, v) in change { if let v { next[k] = v } else { next.removeValue(forKey: k) } }
+            guard next != store else { return }
+            let before = store
+            do {
+                try KeychainHelper.writeLockedPhased(next)
+            } catch let replaced as PrivateStorage.ReplacedButNotDurable {
+                store = next; wrote = true
+                KeychainHelper.notifyObserver(before: before, after: next)
+                throw replaced
+            }
+            store = next
+            wrote = true
+            KeychainHelper.notifyObserver(before: before, after: next)
+        }
+    }
+
+    /// Runs `body` with the in-process lock and the cross-process flock held
+    /// and the store read strictly from disk. `body` must not await and must
+    /// not call back into the public KeychainHelper API (not reentrant).
+    static func withStoreLock<T>(_ body: (StoreLockHolding) throws -> T) throws -> T {
+        var providerChanged = false
+        defer { if providerChanged { RuntimeSelectionStore.bumpGeneration() } }
+        lock.lock()
+        defer { lock.unlock() }
+        try? PrivateStorage.ensureDirectory(StoragePaths.configRoot)
+        let fd = open(lockURL.path, O_CREAT | O_WRONLY, 0o600)
+        guard fd >= 0 else { throw KeychainError.unexpectedStatus(errno) }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else { throw KeychainError.unexpectedStatus(errno) }
+        let holding = StoreLockHolding(store: try readDiskStrict().store)
+        let before = holding.store
+        defer {
+            holding.valid = false
+            providerChanged = before[emailCalendarProviderKey] != holding.store[emailCalendarProviderKey]
+        }
+        return try body(holding)
+    }
+
+    /// The strict on-disk store (for preparing a settings change): absent →
+    /// empty; unreadable or undecodable → throws.
+    static func strictSnapshot() throws -> [String: String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return try readDiskStrict().store
+    }
+
+    private static func writeLockedPhased(_ store: [String: String]) throws {
+        if _testFailWrites { throw KeychainError.unexpectedStatus(EIO) }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(store)
+        do {
+            try PrivateStorage.writeAtomicallyPhased(data, to: storeURL, mode: 0o600)
+        } catch let replaced as PrivateStorage.ReplacedButNotDurable {
+            cache = store; cacheStamp = statStore(); _testWriteCount += 1
+            throw replaced
+        }
+        cache = store
+        cacheStamp = statStore()
+        _testWriteCount += 1
+    }
+
+    /// A cheap identity of the on-disk store (inode, mtime, size), for the
+    /// live-configuration stamp check (plan B.7). nil = absent.
+    static func diskStampToken() -> String? {
+        guard let s = statStore() else { return nil }
+        return "\(s.inode):\(s.mtimeSec).\(s.mtimeNSec):\(s.size)"
     }
 
     private static func storeLocked() -> [String: String] {

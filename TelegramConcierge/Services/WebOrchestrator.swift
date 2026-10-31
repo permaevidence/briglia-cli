@@ -107,6 +107,53 @@ enum WebSearchBackend: String {
     case chatgpt
 
     static let selectionKey = "ada.webSearchBackend"
+    /// Since the live menu (KEYLESS_WEB_AND_LIVE_MENU plan B.4) the choice
+    /// lives in secrets.json, the one atomic store every route input the
+    /// menu or Telegram changes lives in. Reads prefer it; the preference
+    /// above is the fallback for an install not migrated yet and is still
+    /// mirrored (best effort) so a downgraded binary sees the choice.
+    static let secretsSelectionKey = "ada.web.extractionBackend"
+
+    /// The raw stored choice: secrets.json first, then the old preference.
+    static func storedSelection(stored: [String: String]) -> String? {
+        stored[secretsSelectionKey] ?? Prefs.store.string(forKey: selectionKey)
+    }
+
+    /// Saves a /websearch choice: secrets.json (the source of truth) plus the
+    /// best-effort preference mirror.
+    static func saveSelection(_ backend: WebSearchBackend) throws {
+        try KeychainHelper.save(key: secretsSelectionKey, value: backend.rawValue)
+        mirrorSelection(backend.rawValue)
+    }
+
+    /// The downgrade mirror (never while a change is only being prepared).
+    static func mirrorSelection(_ raw: String) {
+        if let capture = SettingsCapture.current {
+            if !capture.readOnly { capture.recordWebBackendMirror(raw) }
+            return
+        }
+        Prefs.store.set(raw, forKey: selectionKey)
+    }
+
+    /// Startup migration: a preference value is copied into secrets.json if
+    /// that has none (the preference stays as the mirror).
+    static func migrateSelectionToSecrets() {
+        guard let raw = Prefs.store.string(forKey: selectionKey), parseSelectable(raw) != nil else { return }
+        _ = try? KeychainHelper.conditionalTransaction { store in
+            if store[secretsSelectionKey] == nil { store[secretsSelectionKey] = raw }
+        }
+    }
+
+    /// Pure resolver over a dictionary (RouteSnapshot): the backend that
+    /// serves the mechanical stages and whether it is the OpenRouter follow.
+    static func selection(stored: [String: String]) -> (backend: WebSearchBackend, followsMainOpenRouter: Bool) {
+        if followsSubscription(stored: stored) { return (.chatgpt, false) }
+        if followsOpenRouter(stored: stored) { return (.openrouter, true) }
+        func has(_ keys: String...) -> Bool { keys.contains { !(stored[$0] ?? "").isEmpty } }
+        return (resolve(override: nil, stored: storedSelection(stored: stored),
+                        hasOpenAIKey: has(KeychainHelper.webSearchOpenAIApiKeyKey, KeychainHelper.openAITranscriptionApiKeyKey, KeychainHelper.openAIImageApiKeyKey),
+                        hasLegacyOpenRouterKey: has(KeychainHelper.openRouterApiKeyKey)), false)
+    }
 
     /// Backends the user can store with /websearch or setup-api. `.chatgpt`
     /// is derived from the main provider, never stored.
@@ -232,7 +279,7 @@ enum WebSearchBackend: String {
     static var configured: WebSearchBackend {
         resolve(
             override: nil,
-            stored: Prefs.store.string(forKey: selectionKey),
+            stored: storedSelection(stored: KeychainHelper.loadSnapshot()),
             hasOpenAIKey: !storedKey(for: .openai).isEmpty,
             hasLegacyOpenRouterKey: !(KeychainHelper.load(key: KeychainHelper.openRouterApiKeyKey) ?? "").isEmpty
         )
@@ -259,7 +306,7 @@ enum WebSearchBackend: String {
     /// An unparseable stored value is not explicit — resolve() ignores it,
     /// so /websearch and doctor must not present it as a saved choice.
     static var explicitlyStored: WebSearchBackend? {
-        parseSelectable(Prefs.store.string(forKey: selectionKey))
+        parseSelectable(storedSelection(stored: KeychainHelper.loadSnapshot()))
     }
 
     /// Pure resolution logic, separated so the selftest can exercise every

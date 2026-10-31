@@ -66,7 +66,8 @@ enum UnleasedInstances {
         var buf = [UInt8](repeating: 0, count: 32)
         let n = pread(fd, &buf, buf.count, 0)
         guard n > 0, let text = String(bytes: buf[0..<n], encoding: .utf8),
-              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else { return nil }
+              let first = text.split(whereSeparator: { $0 == " " || $0 == "\n" }).first,
+              let pid = Int32(first), pid > 0 else { return nil }
         return pid
     }
 

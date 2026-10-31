@@ -1411,6 +1411,14 @@ class ConversationManager: ObservableObject {
     /// the user why. On success the poll loop idles and new turns are
     /// refused until `endMindRestore()`.
     var browserSettingsMutation = false
+    /// The single settings writer (KEYLESS_WEB_AND_LIVE_MENU plan B.3) and
+    /// its idle scheduler (B.5).
+    var settingsWriterStorage: SettingsWriter?
+    var settingsApplyTask: Task<Void, Never>?
+    var settingsApplyAgain = false
+    var settingsRetryScheduled = false
+    /// The secret-store stamp the services were last configured from (B.7).
+    var serviceConfigStamp: String?
     /// Upgrade barrier (MULTI_ASSISTANT_PLAN §6.4): new work is not admitted
     /// while parked for an update. Reversible; never touches the polling
     /// preference.

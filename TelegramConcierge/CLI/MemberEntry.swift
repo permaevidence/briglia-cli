@@ -358,9 +358,15 @@ enum MemberEntry {
                 Thread.sleep(forTimeInterval: poll)
                 if watchStopped || isCoordinator { continue }
                 if let b = UpgradeBarrier.current(), b.state == .open || b.state == .stuck {
-                    // Never cut a settings write in half: wait for the
-                    // secrets lock (every secrets write holds it), then go.
+                    // Never cut a settings write in half: wait for a short
+                    // settings commit of this process (plan B.10), the
+                    // pending-changes lock and the secrets lock (every
+                    // secrets write holds it), then go.
+                    let deadline = Date().addingTimeInterval(30)
+                    while SettingsClient.shortCommitsInProgress > 0 && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
                     KeychainHelper.withSecretsLockForExit {
+                        // Lock order: secrets.lock → settings-pending.lock.
+                        _ = SettingsPendingStore.holdLockForExit()
                         print("\n· \(UpgradeBarrier.updatingMessage)")
                         fflush(stdout)
                         current?.release()

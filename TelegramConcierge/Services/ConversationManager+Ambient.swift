@@ -671,7 +671,7 @@ extension ConversationManager {
     /// produced — write-then-delete ordering closes the old loss window
     /// where a one-shot row vanished before its fire was durably recorded.
     private func runWatcherCheckInBackground(_ reminder: Reminder) async {
-        defer { watcherChecksInFlight.remove(reminder.id) }
+        defer { watcherChecksInFlight.remove(reminder.id); kickSettingsApply() }
         let outcome = await ReminderService.shared.runCheckScript(for: reminder)
         await ReminderService.shared.recordWatcherCheck(id: reminder.id)
 
@@ -840,7 +840,7 @@ extension ConversationManager {
     }
 
     private func runTriageLane(_ lane: String) async {
-        defer { triageRunsInFlight.remove(lane) }
+        defer { triageRunsInFlight.remove(lane); kickSettingsApply() }
 
         let laneRecords = FireOutbox.pending().filter { $0.triageSessionKey == lane }
         guard !laneRecords.isEmpty else { return }

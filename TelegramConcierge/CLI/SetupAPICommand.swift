@@ -92,9 +92,18 @@ struct SetupAPI: AsyncParsableCommand {
             // waits (bounded) while the running assistant replaces memory.
             // The migration refusal comes first: a refused request must not
             // touch the roots.
-            var replacementLock: ProfileFileLock?
             if verb == "apply" || verb == "subscription" {
                 if let refusal = SetupAPICore.migrationRefusal() { respond(refusal) }
+                // KEYLESS_WEB_AND_LIVE_MENU plan B.6: the request is prepared
+                // here (validation, probes; nothing written) under the shared
+                // replacement lock, which is released BEFORE the change is
+                // committed by the one settings writer — forwarded to the
+                // running Briglia, or under a short instance lease when none
+                // runs. A route change while Briglia is busy answers
+                // `agent_busy`, or `state: "pending"` with `accept_pending`.
+                var request = object
+                let acceptPending = request.removeValue(forKey: "accept_pending") as? Bool == true
+                let replacementLock: ProfileFileLock?
                 switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
                 case .admitted(let lock): replacementLock = lock
                 case .busy:
@@ -102,12 +111,18 @@ struct SetupAPI: AsyncParsableCommand {
                 case .failed(let why):
                     respond(SetupAPICore.errorResponse(code: "memory_operation_lock", message: why))
                 }
+                let isApply = verb == "apply"
+                let (change, prepared) = await SettingsCapture.prepare(origin: "setup-api",
+                    label: isApply ? MenuSettings.label(request) : "ChatGPT", acceptPending: acceptPending) {
+                    isApply ? await SetupAPICore.apply(request, ownsLease: true)
+                            : await SubscriptionSetup().perform(request, ownsLease: true)
+                }
+                replacementLock?.release()
+                guard let change, !change.isEmpty else { respond(prepared) }
+                respond(SettingsClient.reply(await SettingsClient.commit(change), prepared: prepared))
             }
-            defer { replacementLock?.release() }
             switch verb {
-            case "subscription": respond(await SubscriptionSetup().perform(object))
             case "probe": respond(await SetupAPICore.probe(object))
-            case "apply": respond(await SetupAPICore.apply(object))
             default: respond(await SetupAPICore.service(object))
             }
         default:
@@ -351,7 +366,7 @@ enum SetupAPICore {
         }
         payload["telegram"] = telegram
 
-        let storedBackend = defaults.string(forKey: WebSearchBackend.selectionKey)
+        let storedBackend = KeychainHelper.load(key: WebSearchBackend.secretsSelectionKey) ?? defaults.string(forKey: WebSearchBackend.selectionKey)
         let resolvedBackend = WebSearchBackend.resolve(
             override: nil,
             stored: storedBackend,
@@ -671,7 +686,7 @@ enum SetupAPICore {
                     throw APIError(code: "invalid_value",
                                    message: "web_search_backend must be openrouter|openai|opencode")
                 }
-                defaults.set(parsed.rawValue, forKey: WebSearchBackend.selectionKey)
+                try saveWebBackend(parsed.rawValue)
                 applied.append("web_search_backend")
             }
             if let section = request["toolchain"] as? [String: Any] {
@@ -1217,7 +1232,19 @@ enum SetupAPICore {
                 KeychainHelper.visionPreprocessorBackendKey: "openai",
             ])
         } catch { throw saveFailed(error) }
-        defaults.set(WebSearchBackend.openai.rawValue, forKey: WebSearchBackend.selectionKey)
+        try saveWebBackend(WebSearchBackend.openai.rawValue)
+    }
+
+    /// /websearch's choice: secrets.json (plan B.4) plus the preference
+    /// mirror for a downgraded binary (recorded, not written, while a change
+    /// is being prepared).
+    static func saveWebBackend(_ raw: String) throws {
+        do { try KeychainHelper.save(key: WebSearchBackend.secretsSelectionKey, value: raw) } catch { throw saveFailed(error) }
+        if let capture = SettingsCapture.current, !capture.readOnly {
+            capture.recordWebBackendMirror(raw)
+        } else {
+            defaults.set(raw, forKey: WebSearchBackend.selectionKey)
+        }
     }
 
     private static func applySimpleKey(

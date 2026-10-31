@@ -744,41 +744,16 @@ extension ConversationManager {
             if activeRunId == nil, activeProcessingTask == nil {
                 recoverStrandedMidTurnBatch()
             }
-            // User messages that arrived too late to steer this turn (during
-            // final text generation, after /stop, or after an error) start a
-            // fresh follow-up turn now so they are never silently dropped.
-            // All queued messages enter history; the last one is the trigger
-            // (the new turn's context window includes them all).
-            if isPolling, activeRunId == nil, activeProcessingTask == nil,
-               workHeldReason == nil, !pendingMidTurnMessages.isEmpty {
-                let queued = pendingMidTurnMessages
-                pendingMidTurnMessages.removeAll()
-                // Id-dedup: a batch requeued after an aborted annotation
-                // render already has its history copies from the drain.
-                messages.append(contentsOf: queued.filter { queuedMessage in
-                    !messages.contains(where: { $0.id == queuedMessage.id })
-                })
-                // Messages sent BEFORE a /stop (O-S1) are kept in history
-                // unchanged, followed by one id-deduplicated harness note,
-                // and do not start a turn (§3.9.3). Only messages that
-                // arrived after the cutoff start the follow-up.
-                let held = appendHeldPreStopNotes(for: queued)
-                noteAppendedToHistory(queued)
-                saveConversation()
-                persistPendingMidTurnQueue()
-                retireSettledStopEntries()
-                if let trigger = queued.last(where: { !held.contains($0.id) }) {
-                    print("[ConversationManager] Starting follow-up turn for \(queued.count) queued mid-turn message(s)")
-                    statusMessage = "Generating response..."
-                    startActiveProcessing(for: trigger)
-                } else {
-                    print("[ConversationManager] Kept \(queued.count) message(s) sent before /stop for the next request (no turn started)")
+            // A settings change staged during this turn is the user's earlier
+            // instruction: it is applied (awaited) before the next queued
+            // message starts a turn (KEYLESS_WEB_AND_LIVE_MENU plan B.5).
+            if !pendingMidTurnMessages.isEmpty, settingsChangesStaged() {
+                Task { @MainActor [weak self] in
+                    await self?.applyPendingSettingsIfAdmissible()
+                    self?.drainQueuedFollowUp()
                 }
-            }
-            // Deferred ambient triggers wait behind user messages; the drain
-            // no-ops if the follow-up turn above just started.
-            if isPolling {
-                drainPendingAmbientTriggers()
+            } else {
+                drainQueuedFollowUp()
             }
         }
         if droppedAfterReplacement { return }
@@ -1361,5 +1336,48 @@ extension ConversationManager {
     func _testCompactLogLabel(_ result: ToolResultMessage) -> String { summarizeToolOutcome(result) }
     func _testSetCheckpointReceipts(_ receipts: [BashCompletionReceipt]) {
         if let run = activeRunId { activeTurnCheckpoints[run]?.completionReceipts = receipts }
+    }
+}
+
+extension ConversationManager {
+    /// The follow-up drain of a finished turn: queued user messages start a
+    /// new turn, then deferred ambient triggers.
+    func drainQueuedFollowUp() {
+        // User messages that arrived too late to steer this turn (during
+        // final text generation, after /stop, or after an error) start a
+        // fresh follow-up turn now so they are never silently dropped.
+        // All queued messages enter history; the last one is the trigger
+        // (the new turn's context window includes them all).
+        if isPolling, activeRunId == nil, activeProcessingTask == nil,
+           workHeldReason == nil, !pendingMidTurnMessages.isEmpty {
+            let queued = pendingMidTurnMessages
+            pendingMidTurnMessages.removeAll()
+            // Id-dedup: a batch requeued after an aborted annotation
+            // render already has its history copies from the drain.
+            messages.append(contentsOf: queued.filter { queuedMessage in
+                !messages.contains(where: { $0.id == queuedMessage.id })
+            })
+            // Messages sent BEFORE a /stop (O-S1) are kept in history
+            // unchanged, followed by one id-deduplicated harness note,
+            // and do not start a turn (§3.9.3). Only messages that
+            // arrived after the cutoff start the follow-up.
+            let held = appendHeldPreStopNotes(for: queued)
+            noteAppendedToHistory(queued)
+            saveConversation()
+            persistPendingMidTurnQueue()
+            retireSettledStopEntries()
+            if let trigger = queued.last(where: { !held.contains($0.id) }) {
+                print("[ConversationManager] Starting follow-up turn for \(queued.count) queued mid-turn message(s)")
+                statusMessage = "Generating response..."
+                startActiveProcessing(for: trigger)
+            } else {
+                print("[ConversationManager] Kept \(queued.count) message(s) sent before /stop for the next request (no turn started)")
+            }
+        }
+        // Deferred ambient triggers wait behind user messages; the drain
+        // no-ops if the follow-up turn above just started.
+        if isPolling {
+            drainPendingAmbientTriggers()
+        }
     }
 }

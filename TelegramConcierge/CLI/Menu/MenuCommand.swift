@@ -35,14 +35,24 @@ struct MenuCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
 
-        // One instance at a time: the menu writes the settings the agent
-        // reads, and signing in switches the provider — both need the lease.
+        // The menu never interrupts Briglia (KEYLESS_WEB_AND_LIVE_MENU plan
+        // Part B): it does NOT hold the instance lease for its lifetime. When
+        // Briglia runs, Briglia serves the menu itself (the live hub); when it
+        // doesn't, every save takes the lease for the commit only, and a
+        // Briglia that starts meanwhile takes this page over (handover).
         var serviceWasRunning = false
-        let lease: InstanceLease
-        switch InstanceLease.acquire(label: "menu") {
-        case .success(let held):
-            lease = held
-        case .failure:
+        // Only the legacy path below (an old Briglia that can't serve the
+        // menu, Linux service paused on request) holds a lease for life.
+        var legacyLease: InstanceLease?
+        // A short settings commit of another process holds the lease for a
+        // moment: that is not a running Briglia.
+        var brigliaRunning = true
+        for _ in 0..<30 {
+            if case .success(let probe) = InstanceLease.acquire(label: "menu-probe") { probe.release(); brigliaRunning = false; break }
+            guard InstanceLease.holderLabel() == "settings-commit" else { break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if brigliaRunning {
             // Briglia is running: it serves the menu itself (the live hub),
             // so nothing has to stop. Older versions can't; fall back below.
             if let link = try? await Task.detached(operation: { try BrowserSettingsHost.requestRunningOwner(type: "menu") }).value {
@@ -83,7 +93,7 @@ struct MenuCommand: AsyncParsableCommand {
                 _ = AgentServiceSupport.run("systemctl", ["--user", "start", AgentServiceSupport.userUnitName])
                 throw ExitCode(1)
             }
-            lease = acquired
+            legacyLease = acquired
             #else
             print("""
             Briglia is already running in another window. Close it first (press Ctrl-C in
@@ -92,7 +102,21 @@ struct MenuCommand: AsyncParsableCommand {
             throw ExitCode(1)
             #endif
         }
-        let leaseBox = QuickSetupSession.LeaseBox(lease)
+        // One offline menu per profile (D16).
+        let menuLock: ProfileFileLock
+        switch ProfileFileLock.take(StoragePaths.dataRoot.appendingPathComponent("menu.lock")) {
+        case .acquired(let l): menuLock = l
+        case .busy:
+            legacyLease?.release()
+            print("The menu is already open in another window. Use that one, or close it (Ctrl-C in its window) and type: briglia menu")
+            throw ExitCode(1)
+        case .failed(let why):
+            legacyLease?.release()
+            print("✖ \(why)")
+            throw ExitCode(1)
+        }
+        defer { withExtendedLifetime(menuLock) {} }
+        let leaseBox = QuickSetupSession.LeaseBox(legacyLease)
         func restartServiceIfPaused() {
             #if os(Linux)
             if serviceWasRunning {
@@ -120,10 +144,12 @@ struct MenuCommand: AsyncParsableCommand {
         var env = MenuEnvironment()
         QuickSetupEnvironment.applyDevStubsIfRequested(&env.quick)
         env.openURL = { QuickSetupSession.openBrowser($0) }
-        // Linux "Start Briglia" hands the lease to the service it starts and
-        // takes it back if that service fails its health check.
-        env.quick.releaseLease = { leaseBox.release() }
-        env.quick.reacquireLease = { leaseBox.reacquire() }
+        // Linux "Start Briglia": the service needs the instance lease. The
+        // menu holds none (only a legacy pause, or an open pairing step,
+        // which Start can't overlap), so there is nothing to take back.
+        let pairing = env.pairing
+        env.quick.releaseLease = { leaseBox.release(); pairing.end() }
+        env.quick.reacquireLease = { legacyLease == nil ? true : leaseBox.reacquire() }
 
         // Authorization (link, cookie, generations) is the quick setup's.
         let auth: QuickSetupWorkflow
@@ -173,8 +199,31 @@ struct MenuCommand: AsyncParsableCommand {
         sigSource.resume()
 
         var closing: String?
+        var lastLeaseProbe = Date.distantPast
+        var handoverStarted: Date?
         while true {
             try? await Task.sleep(nanoseconds: 300_000_000)
+            // Handover (plan B.10): a Briglia started while this page was
+            // open (a terminal, the service): its own menu takes over.
+            if legacyLease == nil, handoverStarted == nil, Date().timeIntervalSince(lastLeaseProbe) >= 2,
+               await menu.closing == nil, !pairing.held, SettingsClient.shortCommitsInProgress == 0 {
+                lastLeaseProbe = Date()
+                if UnleasedInstances.probe(StoragePaths.dataRoot) == .held, !InstanceLease.isHeldInThisProcess,
+                   ["daemon", "chat"].contains(InstanceLease.holderLabel() ?? "") {
+                    if let link = await Self.liveHubLink() {
+                        await menu.beginHandover(link: link)
+                        handoverStarted = Date()
+                        print("\nBriglia started, so it now serves the menu itself. The page moves there; if it doesn't, open:\n  \(link)")
+                    }
+                }
+            }
+            if let started = handoverStarted {
+                if await menu.handoverDone || Date().timeIntervalSince(started) > 30 {
+                    _ = await server.waitForCompletionDelivery()
+                    break
+                }
+                continue
+            }
             if let c = await menu.closing {
                 closing = c
                 _ = await server.waitForCompletionDelivery()
@@ -192,11 +241,32 @@ struct MenuCommand: AsyncParsableCommand {
         sigSource.cancel()
         signal(SIGINT, SIG_DFL)
 
+        if handoverStarted != nil {
+            leaseBox.release()
+            print("This window can be closed.")
+            return
+        }
         if closing == "start" {
             #if os(macOS)
+            // Start takes the lease now (the menu held none); losing the race
+            // to a Briglia that started meanwhile → that Briglia runs.
+            var held = leaseBox.take() ?? pairing.take()
+            if held == nil {
+                switch await InstanceLease.acquire(label: "chat", waitSeconds: 2) {
+                case .success(let l): held = l
+                case .failure:
+                    if let link = await Self.liveHubLink() {
+                        print("\nBriglia is already running. Its menu: \(link)")
+                        QuickSetupSession.openBrowser(link)
+                    } else {
+                        print("\nBriglia is already running in another window.")
+                    }
+                    return
+                }
+            }
             print("\nStarting Briglia. Keep this window open (you can minimize it) and talk to it on Telegram.")
-            print("To change settings later, quit Briglia (Ctrl-C) and type: briglia menu\n")
-            if let held = leaseBox.take() {
+            print("To change settings later, open a new terminal window and type: briglia menu — Briglia keeps running while you do.\n")
+            if let held {
                 // The menu becomes the running assistant: its member lease
                 // changes role without being released, then re-checks the
                 // barrier and the settings admission (MULTI_ASSISTANT_PLAN §4.4).
@@ -210,7 +280,7 @@ struct MenuCommand: AsyncParsableCommand {
             // Only reached after the page's startup passed the service health
             // check (active, starts at boot, socket answers, stable).
             print("\n✓ Briglia is running in the background and starts by itself when this computer turns on.")
-            print("Talk to Briglia on Telegram. To change settings later, type: briglia menu")
+            print("Talk to Briglia on Telegram. To change settings later, type: briglia menu (Briglia keeps running while you do).")
             #endif
             return
         }
@@ -218,6 +288,7 @@ struct MenuCommand: AsyncParsableCommand {
             // "Stop Briglia": it stays off — a paused service is not started
             // again, and on Linux it no longer starts at boot either.
             leaseBox.release()
+            pairing.end()
             #if os(Linux)
             _ = AgentServiceSupport.run("systemctl", ["--user", "disable", "--now", AgentServiceSupport.userUnitName])
             print("■ Briglia is stopped and won't start by itself when this computer turns on.")
@@ -234,8 +305,23 @@ struct MenuCommand: AsyncParsableCommand {
             return
         }
         leaseBox.release()
+        pairing.end()
         restartServiceIfPaused()
         print("Your settings are saved. To change them later, type: briglia menu")
+    }
+
+    /// The running Briglia's own menu link (plan B.10): its socket is
+    /// awaited up to 20 s (the lease precedes the socket); only an
+    /// `http://127.0.0.1:<port>/start` link is accepted.
+    static func liveHubLink() async -> String? {
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            if let link = try? await Task.detached(operation: { try BrowserSettingsHost.requestRunningOwner(type: "menu") }).value {
+                return link
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return nil
     }
 
     #if os(Linux)

@@ -72,7 +72,7 @@ enum ApplyPatch {
 
         // Phase 2: apply all plans. No rollback needed because we didn't touch disk yet.
         // If a disk write itself fails midway, we attempt to revert prior writes using pre-images.
-        var applied: [(path: String, preImage: Data?)] = []
+        var applied: [AppliedStep] = []
         var writtenFiles: [(path: String, oldText: String, newText: String)] = []
         for plan in plans {
             do {
@@ -82,12 +82,12 @@ enum ApplyPatch {
             } catch let e as PatchError {
                 // Attempt rollback.
                 testHookBeforeRollback?()
-                rollback(applied: applied)
-                return OpResult(content: jsonError("patch apply failed mid-write: \(e.message). Rolled back any prior writes."))
+                let notRestored = await rollback(applied: applied)
+                return OpResult(content: jsonError("patch apply failed mid-write: \(e.message). " + Self.rollbackReport(notRestored)))
             } catch {
                 testHookBeforeRollback?()
-                rollback(applied: applied)
-                return OpResult(content: jsonError("patch apply failed mid-write: \(error.localizedDescription). Rolled back any prior writes."))
+                let notRestored = await rollback(applied: applied)
+                return OpResult(content: jsonError("patch apply failed mid-write: \(error.localizedDescription). " + Self.rollbackReport(notRestored)))
             }
         }
 
@@ -505,9 +505,24 @@ enum ApplyPatch {
     /// Commits a single plan to disk. Returns (path, oldText, newText) when
     /// applicable so the caller can post-run LSP diagnostics and a unified
     /// diff against the freshly-saved content. Deletes return nil.
-    private static func commitPlan(_ plan: Plan, applied: inout [(path: String, preImage: Data?)]) async throws -> (path: String, oldText: String, newText: String)? {
+    private static func commitPlan(_ plan: Plan, applied: inout [AppliedStep]) async throws -> (path: String, oldText: String, newText: String)? {
         let fm = FileManager.default
         switch plan.kind {
+        case .write(let path, let newContent, let preImage) where HarnessSecretStore.isSecretStore(path):
+            // The harness secret store: a conditional delta through the
+            // settings writer (KEYLESS_WEB_AND_LIVE_MENU plan B.5).
+            let oldText = preImage.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            let newText = String(data: newContent, encoding: .utf8) ?? ""
+            switch await SettingsAgentEdit.commit(originalText: oldText, updatedText: newText, label: "secrets.json patch") {
+            case .refused(let why): throw PatchError(message: why)
+            case .unchanged: return nil
+            case .applied:
+                applied.append((path: path, preImage: preImage, secretsPostImage: newContent))
+                await FileTimeTracker.shared.recordRead(path: path)
+                await FilesLedger.shared.record(path: path, origin: .edited, description: nil)
+                return (path, oldText, newText)
+            }
+
         case .write(let path, let newContent, let preImage):
             // Symlink and mode handling live in the write, matching
             // write_file/edit_file: the private-storage policy inside
@@ -516,7 +531,7 @@ enum ApplyPatch {
             try MCPAgentRouting.withLockIfRoutingFile(path) {
                 try PrivateStorage.fileToolWrite(newContent, toRequestedPath: path, outsideRoots: .resolveAndPreserveMode)
             }
-            applied.append((path: path, preImage: preImage))
+            applied.append((path: path, preImage: preImage, secretsPostImage: nil))
             await FileTimeTracker.shared.recordRead(path: path)
             await FilesLedger.shared.record(path: path, origin: .edited, description: nil)
             let oldText = preImage.flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -527,14 +542,14 @@ enum ApplyPatch {
             try MCPAgentRouting.withLockIfRoutingFile(path) {
                 try PrivateStorage.fileToolWrite(content, toRequestedPath: path, outsideRoots: .plain)
             }
-            applied.append((path: path, preImage: nil))  // nil preImage = delete on rollback
+            applied.append((path: path, preImage: nil, secretsPostImage: nil))  // nil preImage = delete on rollback
             await FileTimeTracker.shared.recordRead(path: path)
             await FilesLedger.shared.record(path: path, origin: .generated, description: nil)
             return (path, "", String(data: content, encoding: .utf8) ?? "")
 
         case .delete(let path, let preImage):
             try MCPAgentRouting.withLockIfRoutingFile(path) { try fm.removeItem(atPath: path) }
-            applied.append((path: path, preImage: preImage))
+            applied.append((path: path, preImage: preImage, secretsPostImage: nil))
             await FileTimeTracker.shared.forget(path: path)
             await FilesLedger.shared.remove(path: path)
             return nil
@@ -545,8 +560,8 @@ enum ApplyPatch {
                 try PrivateStorage.fileToolWrite(newContent, toRequestedPath: toPath, outsideRoots: .plain)
             }
             try MCPAgentRouting.withLockIfRoutingFile(fromPath) { try fm.removeItem(atPath: fromPath) }
-            applied.append((path: fromPath, preImage: preImage))  // rollback restores the original
-            applied.append((path: toPath, preImage: nil))          // rollback deletes the new file
+            applied.append((path: fromPath, preImage: preImage, secretsPostImage: nil))  // rollback restores the original
+            applied.append((path: toPath, preImage: nil, secretsPostImage: nil))          // rollback deletes the new file
             await FileTimeTracker.shared.forget(path: fromPath)
             await FileTimeTracker.shared.recordRead(path: toPath)
             await FilesLedger.shared.remove(path: fromPath)
@@ -556,14 +571,33 @@ enum ApplyPatch {
         }
     }
 
+    static func rollbackReport(_ notRestored: [String]) -> String {
+        notRestored.isEmpty ? "Rolled back any prior writes." : "Rolled back the other writes; " + notRestored.joined(separator: "; ") + "."
+    }
+
     /// Test seam (selftests only): runs right before a mid-write failure's rollback.
     nonisolated(unsafe) static var testHookBeforeRollback: (() -> Void)?
 
     /// Rollback is a mutation path like the commit: its writes and deletes of
     /// the MCP routing file take the routing lock too, so a restore can never
     /// land between the per-turn migration's byte check and its replacement.
-    private static func rollback(applied: [(path: String, preImage: Data?)]) {
+    typealias AppliedStep = (path: String, preImage: Data?, secretsPostImage: Data?)
+
+    /// Rolls back in reverse order. The secret store is restored with the
+    /// INVERSE conditional delta (plan B.5): only if its keys still hold the
+    /// patch's values; otherwise it is left as it is and reported.
+    private static func rollback(applied: [AppliedStep]) async -> [String] {
+        var notRestored: [String] = []
         for step in applied.reversed() {
+            if let post = step.secretsPostImage {
+                let postText = String(data: post, encoding: .utf8) ?? ""
+                let preText = step.preImage.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                if case .refused = await SettingsAgentEdit.commit(originalText: postText, updatedText: preText, label: "secrets.json patch rollback") {
+                    let keys = SettingsAgentEdit.parse(postText).flatMap { a in SettingsAgentEdit.parse(preText).map { SettingsAgentEdit.delta(from: a, to: $0).keys } } ?? []
+                    notRestored.append("secrets.json was not restored: it changed after the patch (keys: \(keys.joined(separator: ", ")))")
+                }
+                continue
+            }
             if let preImage = step.preImage {
                 // Same write path as the commit: the policy inside Briglia's
                 // roots (the restored file keeps the policy mode), the link
@@ -578,6 +612,7 @@ enum ApplyPatch {
                 }
             }
         }
+        return notRestored
     }
 
     // MARK: - JSON helpers

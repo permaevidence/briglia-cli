@@ -477,6 +477,14 @@ extension ConversationManager {
             catch { failures.append("\(label): \(error.localizedDescription)") }
         }
 
+        // 0-pre. Settings lifecycle (KEYLESS_WEB_AND_LIVE_MENU plan B.4b):
+        //     close settings admission (new commits refused with this
+        //     operation's text), settle the queued writers, cancel a writer
+        //     still in its write-free wait, then hold the commit token for
+        //     the whole wipe.
+        let settingsToken = await beginSettingsLifecycle(reason: "Briglia is deleting its memory; nothing was saved — try again afterwards.")
+        defer { endSettingsLifecycle(settingsToken, reopen: true) }
+
         // 0a. Gate intake for the whole wipe: the Mind-restore flag idles
         //     the poll loop (no reminder dispatch, no completion injection,
         //     no buffer persists) and makes the app composer refuse — the
@@ -486,6 +494,12 @@ extension ConversationManager {
             return ["ABORTED: a turn or memory maintenance became active — nothing was deleted; try again"]
         }
         defer { endMindRestore() }
+        // The replacement lock's exclusive side in every mode (plan B.8):
+        // a standalone writer still preparing (setup-api, the wizard) is
+        // waited for, bounded; one that starts later waits for us.
+        if let why = await acquireReplacementLockEveryMode() {
+            return ["ABORTED: \(why) — nothing was deleted; try again in a moment"]
+        }
 
         if let why = await quiesceSubscriptionLogin(timeoutSeconds: 10) {
             return ["ABORTED: \(why) — nothing was deleted"]
@@ -577,6 +591,14 @@ extension ConversationManager {
             return ["ABORTED: " + why]
         }
         if let hook = Self.wipeAfterFinalCheckForTesting { await hook() }
+
+        // The replacement epoch advances durably BEFORE the first
+        // destructive step (plan B.8): a change prepared before the wipe
+        // can never be committed after it.
+        do { try ReplacementEpoch.advance() } catch {
+            await restartEmailPollingAfterAbortedWipe()
+            return ["ABORTED: the replacement marker couldn't be saved (\(error)) — nothing was deleted"]
+        }
 
         // Past the last abort point: only now discard the cancelled
         // subagents' queued results — an abort above must leave them
@@ -786,6 +808,9 @@ extension ConversationManager {
         // conversation starts, so free search gets a new ID on first use.
         do { try ParallelSessionStore.discard() }
         catch { failures.append("Could not delete the free-search session file") }
+        // Waiting settings changes (plan B.5): deleted (secret-bearing).
+        do { try SettingsPendingStore.remove() }
+        catch { failures.append("Could not delete the waiting settings changes (\(SettingsPendingStore.url.path))") }
         // Mid-turn early wake state (crash records, /stop marker, snapshot
         // settlement evidence) — harness state about the wiped history.
         for (url, label) in [(DetachedJobStore.fileURL, "background-job crash records"),
@@ -1140,6 +1165,10 @@ extension ConversationManager {
         expectedSHA256: String? = nil,
         expectedBytes: Int64? = nil
     ) async -> MindImportOutcome {
+        // Settings lifecycle (KEYLESS_WEB_AND_LIVE_MENU plan B.4b): admission
+        // closed, waiters settled, the commit token held for the import.
+        let settingsToken = await beginSettingsLifecycle(reason: "Briglia is replacing its memory; nothing was saved — try again afterwards.")
+        defer { endSettingsLifecycle(settingsToken, reopen: true) }
         guard beginMindRestore() else { return .refusedGate }
         defer { endMindRestore() }
 
@@ -1190,6 +1219,19 @@ extension ConversationManager {
         if let busy = await quiesceBackgroundWorkForMindRestore(timeoutSeconds: quiesceTimeoutSeconds) {
             await MindExportService.shared.discardStagedMind(staged)
             return .refusedBusy(busy)
+        }
+        if let busy = await acquireReplacementLockEveryMode() {
+            await MindExportService.shared.discardStagedMind(staged)
+            return .refusedBusy(busy)
+        }
+        // The replacement epoch advances durably before anything is replaced
+        // (plan B.8); the waiting settings changes are discarded with it.
+        do {
+            try ReplacementEpoch.advance()
+            try SettingsPendingStore.remove()
+        } catch {
+            await MindExportService.shared.discardStagedMind(staged)
+            return .failedBeforeApply("could not record the memory replacement: \(error)", affinityAdvanced: false)
         }
 
         // Session affinity (plan §8): the importing device's main
@@ -1285,6 +1327,25 @@ extension ConversationManager {
             endBrowserSettingsMutation(); return false
         }
         return true
+    }
+
+    /// Mind import and /deleteuserdata take `MemoryReplacementLock`'s
+    /// exclusive side in every mode (plan B.8); with several assistants the
+    /// refusal below already did. Bounded wait; nil = held.
+    func acquireReplacementLockEveryMode(waitSeconds: Double? = nil) async -> String? {
+        if memoryReplacementLock != nil || Self.multiAssistantGateApplies { return nil }
+        let deadline = ProcessInfo.processInfo.systemUptime + (waitSeconds ?? Self.admissionDrainSecondsForTesting ?? 35)
+        while true {
+            switch MemoryReplacementLock.tryExclusive() {
+            case .acquired(let lock): memoryReplacementLock = lock; return nil
+            case .failed(let why): return "the memory-operation lock cannot be taken (\(why))"
+            case .busy:
+                if ProcessInfo.processInfo.systemUptime >= deadline {
+                    return "another Briglia command (setup or trigger) is changing this assistant's settings"
+                }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
     }
 
     func endBrowserSettingsMutation() {

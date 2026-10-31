@@ -1003,6 +1003,10 @@ actor ConversationArchiveService {
         await backfillSidecars()
     }
 
+    /// A replaced key only (KEYLESS_WEB_AND_LIVE_MENU plan B.7): no file
+    /// sanitation, no backfill — safe while a turn or an archive job runs.
+    func updateAPIKey(_ apiKey: String) { self.apiKey = apiKey }
+
     func configure(apiKey: String) {
         self.apiKey = apiKey
         sanitizeExistingArchiveFiles()

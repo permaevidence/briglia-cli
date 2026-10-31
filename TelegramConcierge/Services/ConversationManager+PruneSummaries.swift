@@ -18,6 +18,8 @@ extension ConversationManager {
     /// Runs the pass at the next main-actor turn (coalesced), so a trigger
     /// inside a transition sees that transition completed first.
     func scheduleSummaryRetentionIdlePass() {
+        // Same idle transitions wake the settings scheduler (plan B.5).
+        kickSettingsApply()
         guard Self.summaryRetentionIdlePassEnabled, !summaryRetentionPassScheduled else { return }
         summaryRetentionPassScheduled = true
         Task { @MainActor [weak self] in

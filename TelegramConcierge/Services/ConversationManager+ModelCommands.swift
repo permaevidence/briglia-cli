@@ -697,13 +697,25 @@ extension ConversationManager {
         guard subscriptionLoginTask == nil else { try? await sendText("Login is already pending; use /subscription cancel first.", to: address); return }
         guard activeRunId == nil, activeProcessingTask == nil else { try? await sendText("Start ChatGPT login when Briglia is idle.", to: address); return }
         let runID = UUID(); subscriptionLoginRunID = runID
+        let writer = settingsWriter
         subscriptionLoginTask = Task { [weak self] in
             guard let self else { return }
             defer {
-                if self.subscriptionLoginRunID == runID { self.subscriptionLoginTask = nil; self.subscriptionLoginRunID = nil }
+                if self.subscriptionLoginRunID == runID { self.subscriptionLoginTask = nil; self.subscriptionLoginRunID = nil; self.kickSettingsApply() }
+            }
+            // The publication runs under the settings commit token (plan
+            // B.5): never beside another settings write, refused while a
+            // memory operation closed settings admission.
+            var login = SubscriptionLogin()
+            login.commitHook = { commit in
+                guard let token = await writer.gate.acquire() else {
+                    throw SubscriptionError(writer.gate.admissionClosedReason ?? MemoryReplacementLock.busyMessage)
+                }
+                defer { writer.gate.release(token) }
+                return try await commit(nil)
             }
             do {
-                _ = try await SubscriptionLogin().device { url, code in
+                _ = try await login.device { url, code in
                     guard self.subscriptionLoginRunID == runID, self.pairedChatId == paired else { throw CancellationError() }
                     try await channel.sendText(chatId: address.chatId, text: "Sign in to your own ChatGPT account at " + url + "\nCode: " + code + "\nExpires in 15 minutes. No access or refresh token should be sent in chat.")
                 }
@@ -934,7 +946,7 @@ extension ConversationManager {
             // Same backend, but only by inference (or an unparseable stored
             // value): persist it so the choice survives whatever key changes
             // drove the inference. No behavior change → no idle guard needed.
-            Prefs.store.set(backend.rawValue, forKey: WebSearchBackend.selectionKey)
+            try? WebSearchBackend.saveSelection(backend)
             try? await sendText("\(backend.displayName) was active by inference — now saved as the explicit choice.\(followNote)")
             return
         }
@@ -947,7 +959,10 @@ extension ConversationManager {
             try? await sendText("⏳ A turn is running — send /websearch \(backend.rawValue) again when Briglia is idle (or /stop first).")
             return
         }
-        Prefs.store.set(backend.rawValue, forKey: WebSearchBackend.selectionKey)
+        do { try WebSearchBackend.saveSelection(backend) } catch {
+            try? await sendText("✖ Could not save the web page-reading backend: \(error.localizedDescription)")
+            return
+        }
         try? await sendText("✅ Web page-reading backend: \(backend.displayName) — \(backend.modelSummary). Takes effect from the next search; the research itself stays on your main model.\(followNote)")
     }
 
@@ -1142,6 +1157,9 @@ extension ConversationManager {
         contextLine += "\n" + SecurityStatusCache.shared.statusLine()
         // Several assistants (§10.3, §25.7): empty with one.
         for line in multiAssistantStatusLines() { contextLine += "\n" + line }
+        // Settings waiting for an idle point, or a recent one that wasn't
+        // applied (KEYLESS_WEB_AND_LIVE_MENU plan B.5): empty otherwise.
+        for line in settingsPendingStatusLines() { contextLine += "\n" + line }
         // BGPRUNE{ A-STATUS
         if backgroundPruneEngaged {
             contextLine += "\n" + backgroundPruneStatusLine()

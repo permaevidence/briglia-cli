@@ -1,0 +1,624 @@
+import Foundation
+
+/// What the settings writer needs from the process it runs in
+/// (KEYLESS_WEB_AND_LIVE_MENU plan B.3): the daemon (the live owner) or a
+/// short offline commit that holds the instance lease.
+@MainActor
+protocol SettingsOwnerHost: AnyObject {
+    var isDaemon: Bool { get }
+    /// The D barrier (B.4a step 2): no turn, command or producer may start
+    /// until `endRouteBarrier`. Offline (no turn can run) it is always held.
+    func beginRouteBarrier() async -> Bool
+    func endRouteBarrier()
+    /// Restore / shutdown / upgrade admission, checked at the decision point.
+    func admissionRefusal() -> String?
+    /// Runtime reconciliation after a durable commit (reload of keys, email
+    /// poller transition, identity finish after poller quiescence).
+    func reconcile(after change: PreparedChange, routeChanged: Bool) async
+    var toolSwitches: SettingsToolSwitches { get }
+}
+
+/// The single settings writer (plan B.3–B.5). `commit` runs the admitted
+/// commit transaction of B.4a in the owner: token → (D barrier) → identity
+/// reservation → subscription locks → a write-free decision point inside
+/// the secrets-lock section → durable effects in order → reconciliation.
+@MainActor
+final class SettingsWriter {
+    nonisolated static let attemptMarkerPrefix = "ada.attempt."
+    nonisolated static let scopePublishedKey = "ada.scope.published"
+    nonisolated static func attemptMarkerKey(_ category: String) -> String { attemptMarkerPrefix + category }
+
+    nonisolated static let epochMessage = "Briglia's data was replaced (memory deleted or imported) while this was open; nothing was saved — reopen the menu and try again."
+    nonisolated static func conflictMessage(_ keys: [String]) -> String {
+        "Your settings changed elsewhere after this was prepared (\(keys.prefix(6).joined(separator: ", "))); nothing was saved — check the current settings and try again."
+    }
+    nonisolated static let supersededMessage = "changed after you saved it; not applied"
+
+    enum Policy {
+        /// Classify at the decision point: S now, D under the barrier or staged.
+        case classify
+        /// The agent's own field edits (D21): applied now even when they
+        /// change a route. Derived only from the internal tool caller.
+        case immediate
+    }
+
+    let gate = SettingsCommitGate()
+    weak var host: SettingsOwnerHost?
+
+    init(host: SettingsOwnerHost?) { self.host = host }
+
+    /// Outcomes by client request id (the last 50), for `settings_result`.
+    private var outcomes: [(id: String, result: SettingsCommitResult)] = []
+
+    func lookup(_ clientRequestId: String) -> SettingsCommitResult? {
+        outcomes.last { $0.id == clientRequestId }?.result
+    }
+
+    private func remember(_ id: String, _ result: SettingsCommitResult) {
+        outcomes.append((id, result))
+        if outcomes.count > 50 { outcomes.removeFirst(outcomes.count - 50) }
+    }
+
+    /// Selftest seams.
+    var beforeDecisionPointForTesting: (() async -> Void)?
+    var duringReconciliationForTesting: (() async -> Void)?
+
+    // MARK: Commit (B.4a)
+
+    func commit(_ change: PreparedChange, policy: Policy = .classify) async -> SettingsCommitResult {
+        if SettingsCapture.current != nil {
+            return await SettingsCapture.$current.withValue(nil) { await commit(change, policy: policy) }
+        }
+        guard let token = await gate.acquire() else {
+            let r = SettingsCommitResult.refused(gate.admissionClosedReason ?? "Briglia is busy; try again in a moment.")
+            remember(change.id, r); return r
+        }
+        defer { gate.release(token); afterRelease() }
+        let r = await commitHolding(token, change, policy: policy)
+        remember(change.id, r)
+        return r
+    }
+
+    /// The same transaction for a caller that already holds the token (a
+    /// lifecycle operation's own writes, B.4b step 5).
+    func commitHolding(_ token: SettingsCommitGate.Token, _ change: PreparedChange, policy: Policy) async -> SettingsCommitResult {
+        guard change.subscription == nil || change.identity == nil else {
+            return .refused("one settings change cannot combine an inbox change with a ChatGPT login change")
+        }
+        if change.isEmpty, let reply = change.replyObject { return SettingsCommitResult(state: .applied, reply: reply) }
+        var dMode = policy == .immediate
+        for _ in 0..<2 {
+            var barrier = false
+            if dMode, policy == .classify {
+                guard let host else { return .refused("settings owner gone") }
+                barrier = await cancellable(token) { await host.beginRouteBarrier() } ?? false
+                guard barrier else {
+                    if gate.admissionClosedReason != nil { return .refused(gate.admissionClosedReason!) }
+                    return stageOrBusy(change)
+                }
+            }
+            let outcome = await run(token, change, attempt: UUID().uuidString, holdsBarrier: barrier || policy == .immediate,
+                                    immediate: policy == .immediate, pending: nil)
+            switch outcome {
+            case .needsBarrier:
+                if barrier { host?.endRouteBarrier() }
+                dMode = true
+                continue
+            case .finished(let result, let routeChanged, let wrote):
+                if wrote, let host {
+                    // The agent's own immediate edits (D21) run mid-turn with
+                    // no barrier: only the light reconciliation (credentials;
+                    // routes are read live by the next request).
+                    await host.reconcile(after: change, routeChanged: routeChanged && barrier)
+                    await duringReconciliationForTesting?()
+                }
+                if barrier { host?.endRouteBarrier() }
+                return result
+            }
+        }
+        return .refused("settings change could not be classified")
+    }
+
+    /// Runs `body` as a child task the lifecycle protocol can cancel
+    /// (B.4b step 3). nil = cancelled.
+    private func cancellable<T: Sendable>(_ token: SettingsCommitGate.Token, _ body: @escaping @MainActor () async -> T) async -> T? {
+        let task = Task { @MainActor () -> T? in
+            let value = await body()
+            return Task.isCancelled ? nil : value
+        }
+        gate.setCancelHandler(token) { task.cancel() }
+        let value = await task.value
+        return value
+    }
+
+    private func afterRelease() {
+        if let host = host as? SettingsApplyKicking { host.kickSettingsApply() }
+    }
+
+    // MARK: Staging (B.5)
+
+    private func stageOrBusy(_ change: PreparedChange) -> SettingsCommitResult {
+        guard change.acceptPending else {
+            return SettingsCommitResult(state: .busy, message: "Briglia is busy with a task right now; this change switches what it uses, so it waits until Briglia is idle. Try again then.")
+        }
+        do {
+            let ticket = try Self.stage(change)
+            return SettingsCommitResult(state: .pending, message: "Saved. Briglia is busy, so this applies when it finishes its current task.", ticket: ticket)
+        } catch {
+            return .refused("Could not save the waiting change: \(error)")
+        }
+    }
+
+    /// Newest wins: a staged change of the same category is replaced (its
+    /// client gets "replaced" in the results); an active attempt is never
+    /// replaced.
+    nonisolated static func stage(_ change: PreparedChange) throws -> String {
+        let ticket = UUID().uuidString
+        try SettingsPendingStore.update { doc in
+            var slot = doc.slots[change.category] ?? SettingsPendingStore.Slot()
+            if let old = slot.staged {
+                doc.appendResult(.init(ticket: old.ticket, clientRequestId: old.change.id, category: change.category,
+                                       label: old.change.label, state: "dropped", message: "replaced by a newer change", at: Date()))
+            }
+            slot.staged = .init(ticket: ticket, change: change, stagedAt: Date())
+            doc.slots[change.category] = slot
+        }
+        return ticket
+    }
+
+    /// Cancel by ticket, staged only.
+    nonisolated static func cancelStaged(ticket: String) throws -> String {
+        try SettingsPendingStore.update { doc in
+            for (category, var slot) in doc.slots {
+                if slot.active?.ticket == ticket { return "already applying" }
+                if let staged = slot.staged, staged.ticket == ticket {
+                    slot.staged = nil
+                    doc.slots[category] = slot.isEmpty ? nil : slot
+                    doc.appendResult(.init(ticket: ticket, clientRequestId: staged.change.id, category: category,
+                                           label: staged.change.label, state: "cancelled", message: nil, at: Date()))
+                    return "cancelled"
+                }
+            }
+            return "not found"
+        }
+    }
+
+    // MARK: Pending apply (B.5)
+
+    /// Applies the staged change of `category` at an idle point: the B.4a
+    /// recipe in D mode. A refused barrier leaves the slot staged.
+    func applyStaged(category: String) async -> SettingsCommitResult? {
+        guard let peek = try? SettingsPendingStore.read(), peek.slots[category]?.staged != nil,
+              peek.slots[category]?.active == nil else { return nil }
+        guard let token = await gate.acquire() else { return nil }
+        defer { gate.release(token) }
+        guard let host else { return nil }
+        guard await cancellable(token, { await host.beginRouteBarrier() }) == true else { return nil }
+        defer { host.endRouteBarrier() }
+        // Claim (step 3): only now, with the barrier held.
+        let attempt = UUID().uuidString
+        let claimed: SettingsPendingStore.Active?
+        do {
+            claimed = try SettingsPendingStore.update { doc -> SettingsPendingStore.Active? in
+                guard var slot = doc.slots[category], let staged = slot.staged, slot.active == nil else { return nil }
+                let active = SettingsPendingStore.Active(ticket: staged.ticket, attempt: attempt, change: staged.change,
+                                                         state: "claimed", claimedAt: Date())
+                slot.staged = nil; slot.active = active
+                doc.slots[category] = slot
+                return active
+            }
+        } catch { return nil }
+        guard let claimed else { return nil }
+        let outcome = await run(token, claimed.change, attempt: attempt, holdsBarrier: true, immediate: false,
+                                pending: (category, claimed.ticket))
+        switch outcome {
+        case .needsBarrier:
+            // Impossible with the barrier held; leave it staged.
+            Self.unclaim(category: category, attempt: attempt)
+            return nil
+        case .finished(let result, let routeChanged, let wrote):
+            if wrote {
+                await host.reconcile(after: claimed.change, routeChanged: routeChanged)
+                await duringReconciliationForTesting?()
+            }
+            if result.state == .refused, gate.admissionClosedReason != nil {
+                Self.unclaim(category: category, attempt: attempt)
+                return nil
+            }
+            Self.finishPending(category: category, attempt: attempt, change: claimed.change,
+                               ticket: claimed.ticket, result: result)
+            return result
+        }
+    }
+
+    /// Cancellation or refusal after the claim and before `intent`: back to staged.
+    nonisolated static func unclaim(category: String, attempt: String) {
+        _ = try? SettingsPendingStore.update { doc in
+            guard var slot = doc.slots[category], let active = slot.active, active.attempt == attempt,
+                  doc.attempts[attempt] == nil else { return }
+            if slot.staged == nil { slot.staged = .init(ticket: active.ticket, change: active.change, stagedAt: active.claimedAt) }
+            slot.active = nil
+            doc.slots[category] = slot
+        }
+    }
+
+    /// After step 10: remove `active` and its attempt, append the result —
+    /// one write.
+    nonisolated static func finishPending(category: String, attempt: String, change: PreparedChange, ticket: String,
+                              result: SettingsCommitResult) {
+        _ = try? SettingsPendingStore.update { doc in
+            if var slot = doc.slots[category], slot.active?.attempt == attempt {
+                slot.active = nil
+                doc.slots[category] = slot.isEmpty ? nil : slot
+            }
+            doc.attempts.removeValue(forKey: attempt)
+            let state: String
+            switch result.state {
+            case .applied: state = "applied"
+            case .refused: state = result.message == supersededMessage ? "dropped" : "failed"
+            case .partial: state = "partial"
+            case .uncertain: state = "uncertain"
+            default: state = "failed"
+            }
+            doc.appendResult(.init(ticket: ticket, clientRequestId: change.id, category: category, label: change.label,
+                                   state: state, message: result.state == .applied ? nil : result.message, at: Date()))
+        }
+    }
+
+    // MARK: The transaction body (B.4a steps 4–8)
+
+    enum Outcome {
+        case needsBarrier
+        case finished(SettingsCommitResult, routeChanged: Bool, wrote: Bool)
+    }
+
+    private struct DecisionAbort: Error { let outcome: SectionOutcome }
+
+    enum SectionOutcome {
+        case needsBarrier
+        case refused(String)
+        case done(routeChanged: Bool, wroteSecrets: Bool, authWritten: Bool, note: String?)
+        case partial(String)
+        case failed(String)
+    }
+
+    private func run(_ token: SettingsCommitGate.Token, _ change: PreparedChange, attempt: String,
+                     holdsBarrier: Bool, immediate: Bool, pending: (category: String, ticket: String)?) async -> Outcome {
+        let switches = host?.toolSwitches ?? SettingsToolSwitches.current()
+        let admission: () -> String? = { [weak self] in self?.host?.admissionRefusal() }
+        let gate = self.gate
+        await beforeDecisionPointForTesting?()
+        // Step 5: identity reservation.
+        var ticket: IdentityChange.Ticket?
+        if let identity = change.identity {
+            guard let kind = AssistantRegistry.Kind(rawValue: identity.kind) else {
+                return .finished(.refused("unknown identity change"), routeChanged: false, wrote: false)
+            }
+            do { ticket = try IdentityChange.begin(kind: kind, rawValue: identity.value) } catch {
+                return .finished(.refused("\(error)"), routeChanged: false, wrote: false)
+            }
+        }
+        // Step 6: subscription locks (sharing lock, then auth stores in the
+        // fixed own → shared order), all outside secrets.lock.
+        let stores = Self.storesToLock(change)
+        var shareLock: ProfileFileLock?
+        if !stores.isEmpty && CoordinationMode.multi {
+            do { shareLock = try await Task.detached { try ChatGPTShare.takeLock() }.value } catch {
+                ticket?.abort()
+                return .finished(.refused(ChatGPTShare.busyMessage), routeChanged: false, wrote: false)
+            }
+        }
+        defer { shareLock?.release() }
+        let section: SectionOutcome
+        do {
+            section = try await Self.withAuthLocks(stores) { () throws -> SectionOutcome in
+                if Task.isCancelled { return .refused(gate.admissionClosedReason ?? "cancelled") }
+                if let ticket {
+                    var inner: SectionOutcome = .refused("identity commit did not run")
+                    do {
+                        try ticket.commit {
+                            inner = try Self.decisionAndEffects(change, attempt: attempt, holdsBarrier: holdsBarrier,
+                                immediate: immediate, pending: pending, switches: switches, admission: admission,
+                                enterDurable: { gate.enterDurablePhase(token) })
+                            if case .done = inner { return }
+                            if case .partial = inner { return }
+                            throw DecisionAbort(outcome: inner)
+                        }
+                    } catch let abort as DecisionAbort {
+                        return abort.outcome
+                    }
+                    return inner
+                }
+                return try Self.decisionAndEffects(change, attempt: attempt, holdsBarrier: holdsBarrier, immediate: immediate,
+                    pending: pending, switches: switches, admission: admission,
+                    enterDurable: { gate.enterDurablePhase(token) })
+            }
+        } catch {
+            ticket?.abort()
+            return .finished(.refused("\(error.localizedDescription)"), routeChanged: false, wrote: false)
+        }
+        switch section {
+        case .needsBarrier:
+            ticket?.abort()
+            return .needsBarrier
+        case .refused(let why):
+            ticket?.abort()
+            return .finished(.refused(why), routeChanged: false, wrote: false)
+        case .failed(let why):
+            ticket?.abort()
+            Self.finishAttempt(attempt, change: change, pending: pending, state: "failed", message: why)
+            return .finished(SettingsCommitResult(state: .error, message: why), routeChanged: false, wrote: false)
+        case .partial(let why):
+            if let ticket { if IdentityChange.processMode == .assistant { IdentityChange.deferFinish(ticket) } else { ticket.finish() } }
+            Self.finishAttempt(attempt, change: change, pending: pending, state: "partial", message: why)
+            return .finished(SettingsCommitResult(state: .partial, message: why), routeChanged: true, wrote: true)
+        case .done(let routeChanged, let wroteSecrets, let authWritten, let note):
+            if let ticket { if IdentityChange.processMode == .assistant { IdentityChange.deferFinish(ticket) } else { ticket.finish() } }
+            if change.wipeAgentMailInstall {
+                do { try AgentMailService.wipePrivateInstall() } catch {
+                    return .finished(SettingsCommitResult(state: .partial, message: "credential removal incomplete: Briglia's private AgentMail CLI copy: \(error)"),
+                                     routeChanged: routeChanged, wrote: true)
+                }
+            }
+            if let mirror = change.webBackendMirror { Prefs.store.set(mirror, forKey: WebSearchBackend.selectionKey) }
+            if pending == nil, change.hasAuthEffect {
+                Self.finishAttempt(attempt, change: change, pending: nil, state: "applied", message: nil)
+            }
+            var reply = change.replyObject ?? ["schema": SetupAPICore.schemaVersion, "ok": true]
+            if let note { reply["note"] = note }
+            return .finished(SettingsCommitResult(state: .applied, reply: reply),
+                             routeChanged: routeChanged, wrote: wroteSecrets || authWritten || change.identity != nil)
+        }
+    }
+
+    /// Immediate commits with an auth effect remove their attempt and add
+    /// their result in one write (pending applies do it in `finishPending`).
+    nonisolated static func finishAttempt(_ attempt: String, change: PreparedChange, pending: (category: String, ticket: String)?,
+                              state: String, message: String?) {
+        guard pending == nil else { return }
+        _ = try? SettingsPendingStore.update { doc in
+            guard doc.attempts.removeValue(forKey: attempt) != nil else { return }
+            doc.appendResult(.init(ticket: nil, clientRequestId: change.id, category: change.category, label: change.label,
+                                   state: state, message: message, at: Date()))
+        }
+    }
+
+    nonisolated static func storesToLock(_ change: PreparedChange) -> [String] {
+        var dirs = Set(change.subscriptionExpectations.map(\.store))
+        if let op = change.subscription { dirs.insert(op.store) }
+        let own = StoragePaths.configRoot.standardizedFileURL.path
+        return dirs.map { URL(fileURLWithPath: $0).standardizedFileURL.path }.sorted { a, b in
+            if a == own { return b != own }
+            if b == own { return false }
+            return a < b
+        }
+    }
+
+    nonisolated static func withAuthLocks<T>(_ stores: [String], _ body: () async throws -> T) async throws -> T {
+        guard let first = stores.first else { return try await body() }
+        let store = SubscriptionAuthStore(directory: URL(fileURLWithPath: first, isDirectory: true))
+        return try await store.locked { try await withAuthLocks(Array(stores.dropFirst()), body) }
+    }
+
+    /// Selftest seams for the durable steps.
+    nonisolated(unsafe) static var authStoreForTesting: ((String) -> SubscriptionAuthStore)?
+    nonisolated(unsafe) static var afterIntentForTesting: (() throws -> Void)?
+    nonisolated(unsafe) static var afterAuthWriteForTesting: (() throws -> Void)?
+    nonisolated(unsafe) static var afterSecretsWriteForTesting: (() throws -> Void)?
+
+    nonisolated static func authStore(_ path: String) -> SubscriptionAuthStore {
+        authStoreForTesting?(path) ?? SubscriptionAuthStore(directory: URL(fileURLWithPath: path, isDirectory: true))
+    }
+
+    /// Steps 7–8: the decision point and the durable effects, inside ONE
+    /// synchronous secrets-lock section (no await).
+    nonisolated static func decisionAndEffects(_ change: PreparedChange, attempt: String, holdsBarrier: Bool, immediate: Bool,
+                                   pending: (category: String, ticket: String)?, switches: SettingsToolSwitches,
+                                   admission: () -> String?, enterDurable: () -> Void) throws -> SectionOutcome {
+        try KeychainHelper.withStoreLock { holding -> SectionOutcome in
+            // 7. Decision point — write-free.
+            let epoch: Int
+            do { epoch = try ReplacementEpoch.read() } catch { return .refused("\(error)") }
+            guard epoch == change.epoch else { return .refused(epochMessage) }
+            if let why = admission() { return .refused(why) }
+            let current = holding.store
+            var conflicts: [String] = []
+            for (key, digest) in change.expected where SettingsDigest.of(current[key]) != digest { conflicts.append(key) }
+            if let digest = change.routeDigest, SettingsKeyRoles.routeDigest(current) != digest, conflicts.isEmpty {
+                conflicts.append("other settings")
+            }
+            guard conflicts.isEmpty else { return .refused(conflictMessage(conflicts.sorted())) }
+            // The live hub keeps refusing Telegram actions (plan B.9): a
+            // running daemon's bot changes only through /switchbot.
+            if ProcessKind.isDaemon, !change.touchedKeys.isDisjoint(with: [KeychainHelper.telegramBotTokenKey, KeychainHelper.telegramChatIdKey]) {
+                return .refused("Briglia is using this Telegram bot right now; use /switchbot to change it.")
+            }
+            for expectation in change.subscriptionExpectations {
+                let state: SubscriptionAuthState?
+                do { state = try authStore(expectation.store).read() } catch { return .refused(error.localizedDescription) }
+                guard let state, state.generation == expectation.generation else {
+                    return .refused("The ChatGPT login changed after this was prepared; nothing was saved — try again.")
+                }
+                if expectation.requireUsable, state.credential == nil || state.requiresLogin == true {
+                    return .refused("Sign in to ChatGPT first.")
+                }
+                if expectation.requireNoPending, state.pendingLogin != nil {
+                    return .refused("Finish the pending ChatGPT login or cancel it first.")
+                }
+            }
+            var oldAuth: SubscriptionAuthState?
+            var newAuth: SubscriptionAuthState?
+            var authNote: String?
+            if let op = change.subscription {
+                do { oldAuth = try authStore(op.store).read() } catch { return .refused(error.localizedDescription) }
+                switch op.kind {
+                case .publish:
+                    guard var state = oldAuth, let pendingId = op.pending, state.pendingLogin == pendingId,
+                          let credential = op.credential, let generation = op.projectedGeneration else {
+                        return .refused("Login was cancelled or superseded; start login again")
+                    }
+                    if let deviceAttempt = op.deviceAttempt, state.deviceChallenge?.pollAttempt != deviceAttempt {
+                        return .refused("Login cancelled or superseded; start again")
+                    }
+                    if op.guardActiveLogin, current[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue,
+                       state.credential != nil, state.requiresLogin != true {
+                        return .refused("Sign out or switch away from ChatGPT before replacing its active login.")
+                    }
+                    state.commitPending(credential, generation: generation)
+                    state.lastAttempt = attempt
+                    newAuth = state
+                    authNote = "ChatGPT login published"
+                case .cancel:
+                    guard var state = oldAuth, let pendingId = op.pending, state.pendingLogin == pendingId else {
+                        return .refused("Login cancelled or superseded; start again")
+                    }
+                    guard SubscriptionSharing.pendingOwned(state) else { return .refused(SubscriptionSharing.foreignPendingMessage) }
+                    state.clearPending()
+                    state.lastAttempt = attempt
+                    newAuth = state
+                    authNote = "pending login cancelled"
+                case .logout:
+                    guard let generation = op.projectedGeneration else { return .refused("malformed sign-out") }
+                    var tomb = SubscriptionAuthState(generation: generation)
+                    tomb.lastAttempt = attempt
+                    newAuth = tomb
+                    authNote = "signed out"
+                }
+            }
+            var projected = current
+            for (k, v) in change.secretsDelta { if let v { projected[k] = v } else { projected.removeValue(forKey: k) } }
+            let factsOld = change.subscription == nil ? SubscriptionRouteFacts.absent : SubscriptionRouteFacts(oldAuth)
+            let factsNew = change.subscription == nil ? SubscriptionRouteFacts.absent : SubscriptionRouteFacts(newAuth)
+            let routeChanged = RouteSnapshot.of(stored: current, subscription: factsOld, switches: switches)
+                != RouteSnapshot.of(stored: projected, subscription: factsNew, switches: switches)
+            if routeChanged && !holdsBarrier && !immediate { return .needsBarrier }
+
+            // 8. Durable effects, in order. After 8.1 nothing restarts.
+            enterDurable()
+            let journal = change.hasAuthEffect || pending != nil
+            let category = pending?.category ?? change.category
+            if journal {
+                let record = SettingsPendingStore.Attempt(
+                    attempt: attempt, operation: pending == nil ? "commit" : "pending-apply", category: category,
+                    ticket: pending?.ticket, clientRequestId: change.id, label: change.label,
+                    authEffect: change.hasAuthEffect, authKind: change.subscription?.kind.rawValue,
+                    storePath: change.subscription?.store,
+                    oldEvidence: change.subscription.map { _ in SettingsPendingStore.AuthEvidence(oldAuth) },
+                    projectedEvidence: newAuth.map { SettingsPendingStore.AuthEvidence($0) },
+                    secretsKeys: change.touchedKeys.sorted(), steps: ["intent"], direction: nil, retirement: nil,
+                    startedAt: Date())
+                do {
+                    try SettingsPendingStore.update { doc in doc.attempts[attempt] = record }
+                } catch {
+                    return .refused("The settings change couldn't be recorded (\(error)); nothing was saved.")
+                }
+                do { try afterIntentForTesting?() } catch { return .failed("interrupted before saving (\(error))") }
+            }
+            var authWritten = false
+            if let op = change.subscription, let newAuth {
+                switch authStore(op.store).writePhased(newAuth) {
+                case .written: authWritten = true
+                case .writtenUnconfirmed: authWritten = true
+                case .notWritten(let error):
+                    return .failed("interrupted before saving: \(error.localizedDescription)")
+                }
+                SettingsSupersede.subscriptionChanged(store: op.store, excludingAttempt: attempt)
+                do { try afterAuthWriteForTesting?() } catch {
+                    return .partial("partly applied: ChatGPT login \(authNote ?? "changed"); settings not saved")
+                }
+            }
+            var delta = change.secretsDelta
+            if journal { delta[attemptMarkerKey(category)] = .some(attempt) }
+            do {
+                try holding.mutateHolding(delta)
+            } catch is PrivateStorage.ReplacedButNotDurable {
+                // Visible: handled as written.
+            } catch {
+                if authWritten { return .partial("partly applied: ChatGPT login \(authNote ?? "changed"); settings not saved (\(error.localizedDescription))") }
+                return .failed("interrupted before saving: \(error.localizedDescription)")
+            }
+            do { try afterSecretsWriteForTesting?() } catch { return .done(routeChanged: routeChanged, wroteSecrets: true, authWritten: authWritten, note: nil) }
+            if journal {
+                _ = try? SettingsPendingStore.update { doc in
+                    doc.attempts[attempt]?.steps.append("secrets-done")
+                    if let category = pending?.category, var slot = doc.slots[category], slot.active?.attempt == attempt {
+                        slot.active?.state = "persisted"
+                        doc.slots[category] = slot
+                    }
+                }
+            }
+            return .done(routeChanged: routeChanged, wroteSecrets: holding.wrote, authWritten: authWritten, note: nil)
+        }
+    }
+}
+
+/// Hosts that want a scheduler kick when the token is released.
+@MainActor
+protocol SettingsApplyKicking: AnyObject {
+    func kickSettingsApply()
+}
+
+/// Which kind of process runs (the decision point refuses a bot change in a
+/// running daemon: use /switchbot).
+enum ProcessKind {
+    nonisolated(unsafe) static var isDaemon = false
+}
+
+// MARK: - Superseding observer (B.5)
+
+/// Drops staged changes a later write invalidates. Registered by the owner
+/// (`KeychainHelper.writeObserver`); runs synchronously in write order,
+/// inside the writer's locks, and persists each drop before returning.
+enum SettingsSupersede {
+    /// Same-account automatic rebinding and other maintenance writes
+    /// (route-neutral) never supersede.
+    @TaskLocal static var maintenanceWrite = false
+
+    /// Selftest seam: observed drops.
+    nonisolated(unsafe) static var onDropForTesting: ((String) -> Void)?
+
+    static func install() {
+        KeychainHelper.writeObserver = { keys in secretsChanged(keys) }
+    }
+
+    static func uninstall() { KeychainHelper.writeObserver = nil }
+
+    static func secretsChanged(_ keys: Set<String>) {
+        guard !maintenanceWrite else { return }
+        let relevant = keys.filter { !$0.hasPrefix(SettingsWriter.attemptMarkerPrefix) }
+        guard !relevant.isEmpty else { return }
+        dropStaged { change in
+            if !relevant.isDisjoint(with: Set(change.expected.keys).union(change.touchedKeys)) { return true }
+            if change.routeDigest != nil,
+               relevant.contains(where: { SettingsKeyRoles.role($0) != .other && !SettingsKeyRoles.maintenanceKeys.contains($0) }) {
+                return true
+            }
+            return false
+        }
+    }
+
+    /// A user-requested login, logout or scope change of `store`.
+    static func subscriptionChanged(store: String, excludingAttempt: String? = nil) {
+        guard !maintenanceWrite else { return }
+        let path = URL(fileURLWithPath: store).standardizedFileURL.path
+        dropStaged { change in
+            if let op = change.subscription, URL(fileURLWithPath: op.store).standardizedFileURL.path == path { return true }
+            return change.subscriptionExpectations.contains { URL(fileURLWithPath: $0.store).standardizedFileURL.path == path }
+        }
+    }
+
+    private static func dropStaged(_ invalidated: (PreparedChange) -> Bool) {
+        guard FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) else { return }
+        _ = try? SettingsPendingStore.update { doc in
+            for (category, var slot) in doc.slots {
+                guard let staged = slot.staged, invalidated(staged.change) else { continue }
+                slot.staged = nil
+                doc.slots[category] = slot.isEmpty ? nil : slot
+                doc.appendResult(.init(ticket: staged.ticket, clientRequestId: staged.change.id, category: category,
+                                       label: staged.change.label, state: "dropped",
+                                       message: SettingsWriter.supersededMessage, at: Date()))
+                onDropForTesting?(staged.ticket)
+            }
+        }
+    }
+}

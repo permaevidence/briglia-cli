@@ -74,9 +74,18 @@
       });
     });
   }
+  // Handover (live menu plan B.10): a Briglia that started while this page
+  // was open serves the menu itself; only a local menu link is followed.
+  function followRedirect() {
+    if (S && typeof S.redirect === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/start\?/.test(S.redirect)) {
+      window.location.replace(S.redirect);
+      return true;
+    }
+    return false;
+  }
   function refresh() {
     return api('GET', '/api/menu/status').then(function (r) {
-      if (r.json && r.json.steps) { S = r.json; if (view.kind === 'loading') start(); render(); }
+      if (r.json && r.json.steps) { S = r.json; if (followRedirect()) return; if (view.kind === 'loading') start(); render(); }
     }).catch(function () {});
   }
   // `current` (optional): false once the field this action came from has
@@ -88,7 +97,7 @@
     return api('POST', '/api/menu', body).then(function (r) {
       inflight--;
       var j = r.json || {};
-      if (j.status && j.status.steps) S = j.status;
+      if (j.status && j.status.steps) { S = j.status; if (followRedirect()) return j; }
       // Replaced on the server by a newer change to the same setting.
       if (j.superseded || (current && !current())) { j.stale = true; render(); return j; }
       if (step) {
@@ -185,8 +194,10 @@
     el.appendChild(h('span', { class: 'dot' }));
     el.appendChild(h('span', { class: 'ptext', text: S.running ? T('Running', 'In funzione') : paused ? T('Paused', 'In pausa') : T('Stopped', 'Fermo') }));
     if (S.running || paused) {
+      // Linux: Stop also turns off start-at-boot (D9), said on the button.
+      var stopLabel = S.platform === 'linux' ? T('Stop (also off at startup until you press Start)', 'Ferma (spenta anche all’avvio finché non premi Avvia)') : T('Stop', 'Ferma');
       el.appendChild(h('button', { class: 'pbtn stop', type: 'button', id: 'power-stop', title: T('Stop Briglia', 'Ferma Briglia'), disabled: inflight > 0,
-        onclick: function () { powerConfirm = true; render(); } }, ['■ ' + T('Stop', 'Ferma')]));
+        onclick: function () { powerConfirm = true; render(); } }, ['■ ' + stopLabel]));
     }
     if (!S.running) {
       el.appendChild(h('button', { class: 'pbtn go', type: 'button', id: 'power-start', title: T('Start Briglia', 'Avvia Briglia'), disabled: inflight > 0,
@@ -218,7 +229,14 @@
     }
     if (!S) { card.appendChild(h('div', { class: 'waiting' }, [h('span', { class: 'spinner' }), T('Loading…', 'Caricamento…')])); return; }
     renderChrome();
+    if (S.closing === 'handover') {
+      card.appendChild(h('div', { class: 'waiting' }, [h('span', { class: 'spinner' }), T('Briglia started — opening its menu…', 'Briglia si è avviata: apro il suo menu…')]));
+      return;
+    }
     if (S.closing) { card.appendChild(closingView()); return; }
+    // Settings waiting for Briglia to finish its task, or a recent one that
+    // was not applied (live menu plan B.5).
+    (S.settings_pending || []).forEach(function (line) { card.appendChild(h('div', { class: 'notice info' }, [line])); });
     if (S.startup) { startupView().forEach(function (n) { if (n) card.appendChild(n); }); return; }
     var v;
     if (view.kind === 'welcome') v = welcomeView();
@@ -1294,6 +1312,7 @@
       out.push(h('div', { class: 'actions' }, [h('a', { class: 'btn primary', href: 'https://t.me/' + p.bot, target: '_blank', rel: 'noopener noreferrer' }, [T('Open @' + p.bot + ' in Telegram ↗', 'Apri @' + p.bot + ' su Telegram ↗')])]));
       out.push(h('div', { class: 'waiting' }, [h('span', { class: 'spinner' }), T('Waiting for your message…', 'Aspetto il tuo messaggio…')]));
       out.push(h('p', { class: 'small', text: T('Briglia will answer that message once it’s running.', 'Briglia risponderà a quel messaggio quando sarà in funzione.') }));
+      if (S.pairing_holds_off) out.push(h('p', { class: 'small', text: T('Briglia stays off while you connect Telegram: it can start again as soon as this step is finished or cancelled.', 'Briglia resta spenta mentre colleghi Telegram: può ripartire appena questo passaggio è finito o annullato.') }));
       out.push(h('div', { class: 'links' }, [
         h('button', { class: 'btn ghost small', type: 'button', onclick: function () { act('telegram_manual', {}, 'telegram'); } }, [T('Type my Telegram ID instead', 'Scrivo io il mio ID Telegram')]),
         h('button', { class: 'btn ghost small', type: 'button', onclick: function () { act('telegram_reset', {}, 'telegram'); } }, [T('Use another bot', 'Usa un altro bot')])]));

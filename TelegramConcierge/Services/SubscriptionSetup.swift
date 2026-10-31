@@ -103,6 +103,17 @@ struct SubscriptionSetup {
             }
             if action == "cancel" {
                 guard let pending = request["pending"] as? String else { throw SubscriptionError("Missing login handle") }
+                if let capture = SettingsCapture.current, !capture.readOnly {
+                    // Preparing (plan B.5): the cancel is committed by the
+                    // settings writer, which re-checks id and owner.
+                    try checkpoint()
+                    guard let state = try store.read(), state.pendingLogin == pending else {
+                        throw SubscriptionError("Login cancelled or superseded; start again")
+                    }
+                    guard SubscriptionSharing.pendingOwned(state) else { throw SubscriptionError(SubscriptionSharing.foreignPendingMessage) }
+                    capture.recordSubscription(SettingsSubscriptionOp(kind: .cancel, store: store.directory.path, pending: pending))
+                    return ok(["state": "cancelled"])
+                }
                 return try await store.locked {
                     try checkpoint(); try Task.checkCancellation()
                     guard var state = try store.read(), state.pendingLogin == pending else {
@@ -143,6 +154,9 @@ struct SubscriptionSetup {
             defer { lease?.release() }
             return try await store.locked {
                 try checkpoint(); try Task.checkCancellation(); try store.validate(generation: state.generation)
+                // Preparing: the commit re-checks this login generation.
+                SettingsCapture.current?.expectSubscription(SettingsSubscriptionExpectation(
+                    store: store.directory.path, generation: state.generation, requireUsable: true, requireNoPending: true))
                 try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil, model: model, effort: effort, textOnly: false)
                 // Explicit selection binds the account too (multi mode, §25.4).
                 let binding = SubscriptionSharing.bindingChanges(for: state)
@@ -215,6 +229,13 @@ struct SubscriptionSetup {
                     throw SubscriptionError("Device login denied or expired; start again")
                 }
                 if let credential {
+                    if let capture = SettingsCapture.current, !capture.readOnly {
+                        // The publication is a settings commit (plan B.5).
+                        capture.recordSubscription(SettingsSubscriptionOp(kind: .publish, store: store.directory.path,
+                            pending: pending, deviceAttempt: attempt, credential: credential,
+                            projectedGeneration: UUID().uuidString, guardActiveLogin: false))
+                        return ok(["state": "signed_in"])
+                    }
                     state.commitPending(credential); try store.write(state)
                     return ok(["state": "signed_in"])
                 }
