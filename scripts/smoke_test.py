@@ -213,6 +213,37 @@ def _test_prefs_domains_since(t0):
     return out
 
 
+def _remove_empty_test_shells(names):
+    """macOS: unlink the files among `names` (throwaway test domains) that
+    are EMPTY plist shells (no keys), and return the names that remain.
+    cfprefsd can flush a purged domain's empty shell minutes after the
+    selftest that purged it has exited (private CI 41236208722 and
+    41242111573: briglia-mw-live-menu-selftest, 42 bytes, keys []), past any
+    in-process wait. A shell carries no data, so the final sweep removes it;
+    a file with keys (real leaked state) or one that cannot be parsed stays
+    and still fails the check."""
+    prefs = os.path.expanduser("~/Library/Preferences")
+    remaining = []
+    for n in names:
+        path = os.path.join(prefs, n)
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            empty = len(data) == 0 or plistlib.loads(data) == {}
+        except FileNotFoundError:
+            continue
+        except Exception:
+            empty = False
+        if empty and n.startswith(TEST_PREFS_PREFIXES):
+            try:
+                os.unlink(path)
+                continue
+            except OSError:
+                pass
+        remaining.append(n)
+    return remaining
+
+
 def _smoke_executable(source):
     """A hard link (copy as fallback) named SMOKE_EXE beside `source`, so the
     resource bundle next to it still resolves."""
@@ -3358,6 +3389,10 @@ def main():
     if leaked:
         time.sleep(15)
         leaked = _test_prefs_domains_since(smoke_started_at)
+    if leaked:
+        # Late empty shells carry no data: remove them; anything with keys
+        # (or unreadable) still fails below.
+        leaked = _remove_empty_test_shells(leaked)
     if leaked is not None:
         check("selftests leave no throwaway preference domains behind",
               not leaked, f"written during this run: {', '.join(sorted(leaked))} "
