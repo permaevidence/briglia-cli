@@ -21,6 +21,7 @@ struct Doctor: AsyncParsableCommand {
         if let b = UpgradeBarrier.current(paths) {
             lines.append("  · update barrier: \(b.state.rawValue) (target \(b.targetVersion), id \(b.id.prefix(8)))\(b.reason.map { " — \($0)" } ?? "")")
             if b.state == .stuck { lines.append("  ✖ " + UpgradeBarrier.stuckMessage) }
+            if let missed = UpgradeBarrier.notRestartedStatusLine(paths: paths, registryPaths: registryPaths) { lines.append("  " + missed) }
         } else {
             lines.append("  ✔ no update in progress")
         }

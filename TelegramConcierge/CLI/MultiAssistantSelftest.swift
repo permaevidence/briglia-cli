@@ -38,6 +38,7 @@ struct MultiAssistantSelftest: ParsableCommand {
         if h.section("round3") { h.stage2Round3Section() }
         if h.section("stage3") { h.stage3Section() }
         if h.section("stage3e2e") { h.stage3ProcessSection() }
+        if h.section("restartargv") { h.restartArgvSection() }
         print("\n\(h.total - h.failures)/\(h.total) multi-assistant checks passed")
         if h.failures > 0 { throw ExitCode(1) }
     }
@@ -58,6 +59,11 @@ struct MemberProbeCommand: ParsableCommand {
     @Flag(name: .customLong("long-lived")) var longLived = false
     @Flag(name: .customLong("promote")) var promote = false
     @Option(name: .customLong("reexec-after")) var reexecAfter: Double?
+    /// RestartArgv: print the restart argv (before and after --promote).
+    @Flag(name: .customLong("print-restart-argv")) var printRestartArgv = false
+    /// Run the real restart path with the dev intercept: prints the argv it
+    /// would exec, then exits 0.
+    @Flag(name: .customLong("restart-now")) var restartNow = false
 
     func run() throws {
         setvbuf(stdout, nil, _IOLBF, 0)
@@ -69,12 +75,35 @@ struct MemberProbeCommand: ParsableCommand {
             info["directory"] = lease.directory.path
         }
         if let g = MemberEntry.generation { info["generation"] = g }
+        if let r = MemberEntry.reexecBarrierId { info["reexecBarrier"] = r }
         let data = try JSONSerialization.data(withJSONObject: info, options: [.sortedKeys])
         print(String(decoding: data, as: UTF8.self))
+        func argvJSON(_ a: [String]) -> String {
+            String(decoding: (try? JSONSerialization.data(withJSONObject: a)) ?? Data(), as: UTF8.self)
+        }
+        if printRestartArgv { print("RESTART_ARGV_BEFORE:" + argvJSON(RestartArgv.current)) }
         if promote, let lease = MemberEntry.current {
             let refusal = MemberEntry.promoteToAssistant(kind: "chat")
             let onDisk = MemberLeases.readSidecar(lease.sidecarURL)
             print("PROMOTED:\(refusal ?? "ok"):\(onDisk?.role ?? "?"):\(onDisk?.sessionKind ?? "?"):\(lease.uuid)")
+        } else if promote {
+            // Single assistant, no coordination: no member lease, same call.
+            print("PROMOTED-UNLEASED:\(MemberEntry.promoteToAssistant(kind: "chat") ?? "ok")")
+        }
+        if printRestartArgv { print("RESTART_ARGV_AFTER:" + argvJSON(RestartArgv.current)) }
+        if restartNow {
+            // restartNow is @MainActor; this command runs off the main thread
+            // (async main services the main queue meanwhile).
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    UpgradeService.restartInterceptForTesting = {
+                        print("RESTART_EXEC:" + argvJSON(UpgradeService.restartArgumentsForTesting ?? []))
+                    }
+                    UpgradeService.restartNow()
+                }
+            }
+            Thread.sleep(forTimeInterval: 30)
+            print("RESTART_NOT_REACHED")
         }
         var ticket: IdentityChange.Ticket?
         if let holdTx {

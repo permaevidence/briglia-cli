@@ -132,6 +132,7 @@ enum MemberEntry {
         // Released at every normal exit (a crash leaves a free lock that the
         // next sweep removes).
         atexit { MemberEntry.releaseAtExit() }
+        acknowledgeReexecFromBarrier(role: role)
         // Dev-only seam: widen the window between publishing the lease and
         // looking at the barrier/registry (race tests, §16 6a/6d).
         if adaCLIVersion.hasSuffix("-dev"), let ms = Double(ProcessInfo.processInfo.environment["BRIGLIA_TEST_ENTRY_PAUSE_MS"] ?? ""), ms > 0 {
@@ -329,12 +330,40 @@ enum MemberEntry {
         return !MemberLeases.users(dir, assistantsOnly: true, except: current?.uuid).isEmpty
     }
 
+    // MARK: Startup re-exec during a committed barrier (Codex R1)
+
+    /// The barrier this image was re-executed for by `reexecIfOlder` (the
+    /// restart marker's counterpart on that path), or nil.
+    nonisolated(unsafe) private(set) static var reexecBarrierId: String?
+
+    /// The new image of a participant re-executed by `reexecIfOlder` acks
+    /// `restarted` under its old lease right away, before startup recovery
+    /// can close the barrier, so closure never records it as not restarted.
+    static func acknowledgeReexecFromBarrier(role: Role, paths: UpgradeBarrier.Paths = .live) {
+        guard let raw = ProcessInfo.processInfo.environment[UpgradeBarrier.reexecFromKey] else { return }
+        unsetenv(UpgradeBarrier.reexecFromKey)
+        let parts = raw.split(separator: " ").map(String.init)
+        guard parts.count == 2, case .assistant = role, let lease = current,
+              let barrier = UpgradeBarrier.current(paths), barrier.id == parts[0], barrier.state == .committed || barrier.state == .closed,
+              barrier.participants?.contains(where: { $0.lease == parts[1] }) == true else { return }
+        reexecBarrierId = barrier.id
+        if barrier.state == .committed {
+            UpgradeBarrier.writeAck(.init(barrierId: barrier.id, incarnation: lease.sidecar.incarnation, state: .restarted,
+                                          reason: nil, releaseSequence: ReleaseSequence.compiled),
+                                    lease: parts[1], paths)
+        }
+    }
+
     // MARK: Promotion (menu → terminal chat, quick setup → chat)
 
     /// Role session → assistant without releasing the lease, then steps
     /// (3)–(4) again (§4.4). Returns a refusal text when the switch must not
     /// happen (a barrier opened meanwhile).
     static func promoteToAssistant(kind: String = "chat") -> String? {
+        // From here on this process is the terminal chat: every self-restart
+        // (including the re-exec just below) must start `briglia chat`, never
+        // the menu / quick setup it was launched as (RestartArgv).
+        RestartArgv.switchToChat()
         guard let lease = current else { return nil }
         do { try lease.update { $0.role = "assistant"; $0.sessionKind = kind } } catch { return "\(error)" }
         stopSessionBarrierWatch()

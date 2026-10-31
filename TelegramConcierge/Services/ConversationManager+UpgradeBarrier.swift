@@ -88,6 +88,12 @@ extension ConversationManager {
     func upgradeMonitorTick(lease: MemberLease, paths: UpgradeBarrier.Paths = .live) async {
         guard let barrier = UpgradeBarrier.current(paths), barrier.isActive else {
             if upgradeParkedFor != nil { upgradeParkedFor = nil; resumeAdmission() }
+            // An assistant that did not come back after the update: one
+            // notice per closed barrier (after the grace, re-checked).
+            if let notice = MissedRestartNotices.pending(me: AssistantProfile.selectedName, paths: paths) {
+                print("[upgrade] \(notice)")
+                await announceMissedRestart(notice)
+            }
             return
         }
         // A dead coordinator (open/committed and `upgrade.lock` free): the

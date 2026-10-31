@@ -1446,6 +1446,12 @@ extension ConversationManager {
         try? await sendText("✅ Briglia restarted and is back online.", to: telegramAddress)
     }
 
+    /// UpgradeBarrier+NotRestarted: a missed restart after an update (own
+    /// start, or another assistant's upgrade monitor).
+    func announceMissedRestart(_ text: String) async {
+        try? await sendText(text, to: telegramAddress)
+    }
+
     /// `/upgrade` — remote self-update: check the release CDN, swap the
     /// installed binary + bundle, and re-exec in place. Refused mid-turn (the
     /// restart would discard the run) and on sudo-owned install dirs (no one

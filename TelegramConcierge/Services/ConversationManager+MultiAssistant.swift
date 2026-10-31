@@ -20,6 +20,7 @@ extension ConversationManager {
                 return !MemberLeases.users(dir, assistantsOnly: true).isEmpty
             })
         if !lines.isEmpty, let managed = managedBotStatusLine() { lines.append(managed) }
+        if let missed = UpgradeBarrier.notRestartedStatusLine() { lines.append(missed) }
         return lines
     }
 
