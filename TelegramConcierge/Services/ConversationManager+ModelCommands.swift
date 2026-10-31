@@ -631,7 +631,9 @@ extension ConversationManager {
         guard upgradePresetPass == nil else { return }
         let pass = OpenRouterUpgradePass(isIdle: { [weak self] in
             guard let self else { return false }
+            // Never beside a settings commit (live menu plan B.4a step 1).
             return self.activeRunId == nil && self.activeProcessingTask == nil && !self.isTurnActive && !self.browserSettingsMutation
+                && self.settingsWriterStorage?.gate.isHeld != true
         }, onCommitted: { [weak self] attempt in
             guard let self else { return }
             self.modelRoutingGeneration += 1

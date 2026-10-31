@@ -148,10 +148,11 @@ enum SubscriptionSharing {
                 if saved[accountFingerprintKey] == nil, bound == captured, let cred = state.credential,
                    state.requiresLogin != true {
                     let fp = fingerprint(cred.account)
-                    try KeychainHelper.conditionalTransaction { s in
+                    // Maintenance (live menu plan B.5): never supersedes.
+                    try SettingsSupersede.$maintenanceWrite.withValue(true) { try KeychainHelper.conditionalTransaction { s in
                         guard s[ProviderProfiles.subscriptionGenerationKey] == captured, s[accountFingerprintKey] == nil else { return }
                         s[accountFingerprintKey] = fp
-                    }
+                    } }
                 }
                 return captured
             }
@@ -166,7 +167,8 @@ enum SubscriptionSharing {
             _testBeforeRebindCommit?()
             let scopeNow = scope(stored: saved)
             var rebound = false
-            try KeychainHelper.conditionalTransaction { s in
+            // Same-account automatic rebind: maintenance, never supersedes.
+            try SettingsSupersede.$maintenanceWrite.withValue(true) { try KeychainHelper.conditionalTransaction { s in
                 // Re-check scope, provider binding and the prior binding.
                 guard scope(stored: s) == scopeNow, scopeNow == .shared || AssistantProfile.isDefault,
                       s[ProviderProfiles.subscriptionGenerationKey] == bound, s[accountFingerprintKey] == oldFp else { return }
@@ -177,7 +179,7 @@ enum SubscriptionSharing {
                     s[KeychainHelper.openAICompatibleApiKeyKey] = state.generation
                 }
                 rebound = true
-            }
+            } }
             return rebound ? state.generation : captured
         }
     }

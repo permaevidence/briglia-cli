@@ -550,10 +550,13 @@ final class SettingsWriter {
                 do { try afterIntentForTesting?() } catch { return .failed("interrupted before saving (\(error))") }
             }
             var authWritten = false
+            // "Visible" vs "confirmed durable" (round-7 note): a replaced but
+            // unconfirmed write is handled as written and reported as such.
+            var unconfirmed = false
             if let op = change.subscription, let newAuth {
                 switch authStore(op.store).writePhased(newAuth) {
                 case .written: authWritten = true
-                case .writtenUnconfirmed: authWritten = true
+                case .writtenUnconfirmed: authWritten = true; unconfirmed = true
                 case .notWritten(let error):
                     return .failed("interrupted before saving: \(error.localizedDescription)")
                 }
@@ -568,6 +571,7 @@ final class SettingsWriter {
                 try holding.mutateHolding(delta)
             } catch is PrivateStorage.ReplacedButNotDurable {
                 // Visible: handled as written.
+                unconfirmed = true
             } catch {
                 if authWritten { return .partial("partly applied: ChatGPT login \(authNote ?? "changed"); settings not saved (\(error.localizedDescription))") }
                 return .failed("interrupted before saving: \(error.localizedDescription)")
@@ -582,7 +586,8 @@ final class SettingsWriter {
                     }
                 }
             }
-            return .done(routeChanged: routeChanged, wroteSecrets: holding.wrote, authWritten: authWritten, note: nil)
+            return .done(routeChanged: routeChanged, wroteSecrets: holding.wrote, authWritten: authWritten,
+                         note: unconfirmed ? "saved; the disk did not confirm the write is durable" : nil)
         }
     }
 }

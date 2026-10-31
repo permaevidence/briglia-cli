@@ -94,5 +94,11 @@ extension LiveMenuHarness {
         let started = childDaemon(grace: "5", timeout: 8)
         check("startup: a short commit within the 10 s grace delays startup instead of failing it",
               !started.output.contains("already running") && !started.output.contains("is already running"), started.output.suffix(300).description)
+        // A commit that outlasts the grace still makes startup fail (exit 1).
+        guard case .success(let long) = InstanceLease.acquire(label: "settings-commit") else { check("startup: lease", false); return }
+        let failed = childDaemon(grace: "0.3", timeout: 15)
+        long.release()
+        check("startup: a commit that outlasts the grace fails startup with exit 1 (contention, not I/O)",
+              failed.status == 1 && failed.output.contains("already running"), "\(failed.status) \(failed.output.suffix(200))")
     }
 }

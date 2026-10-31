@@ -1135,6 +1135,14 @@ def main():
                             capture_output=True, text=True, timeout=300)
     check("menu end-to-end (real server, mock providers)", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
+    # The live menu (KEYLESS_WEB_AND_LIVE_MENU plan Part B): the single
+    # settings writer — capture, classification, staging, superseding, the
+    # idle apply, subscription journal, recovery, the commit token, agent
+    # field edits, forwarding, pairing/exit 75, the daemon-level triggers.
+    result = run_selftest([os.path.abspath(ADA), "__live-menu-selftest"], capture_output=True, text=True, timeout=600)
+    live_out = result.stdout + result.stderr
+    check("live-menu-selftest", result.returncode == 0,
+          ("\n".join(l for l in live_out.splitlines() if l.startswith("✖")) or live_out)[-3000:])
 
     # 3g. companion-app chat socket: the selftest
     # covers rendering rules, the live protocol, privacy withhold/replay,
@@ -1364,11 +1372,12 @@ def main():
             # The wizard has one extra Linux-only step (always-on service),
             # so the step totals in its headers differ per platform.
             total_steps = 8 if sys.platform == "darwin" else 9
-            # Complete step 1 (custom-endpoint profile, menu option 3,
-            # against the mock server; Responses=n, vision=y; Enter declines "configure
-            # another provider"), then close stdin at step 2 — the
-            # FDA-relaunch shape of interruption.
-            step1 = f"3\nhttp://127.0.0.1:{port}/v1\nmock-model\nn\nsk-mock-main\ny\n\n"
+            # Complete step 1 (custom-endpoint profile, menu option 4 —
+            # OpenRouter 1, ChatGPT 2, OpenCode Go 3, custom 4 (owner,
+            # 2026-10-30) — against the mock server; Responses=n, vision=y;
+            # Enter declines "configure another provider"), then close stdin
+            # at step 2 — the FDA-relaunch shape of interruption.
+            step1 = f"4\nhttp://127.0.0.1:{port}/v1\nmock-model\nn\nsk-mock-main\ny\n\n"
             result = subprocess.run([ADA, "setup"], input=step1, capture_output=True,
                                     text=True, timeout=120, env=env)
             interrupted_ok = (result.returncode == 1

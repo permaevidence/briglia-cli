@@ -163,7 +163,8 @@ extension LiveMenuHarness {
             var entered = false
             func beginRouteBarrier() async -> Bool {
                 entered = true
-                while !Task.isCancelled { try? await Task.sleep(nanoseconds: 10_000_000) }
+                var n = 0
+                while !Task.isCancelled && n < 500 { try? await Task.sleep(nanoseconds: 10_000_000); n += 1 }
                 return false
             }
             func endRouteBarrier() {}
@@ -174,7 +175,13 @@ extension LiveMenuHarness {
         let slow = SlowOwner()
         let w2 = SettingsWriter(host: slow)
         let commit = Task { @MainActor in await w2.commit(d) }
-        while !slow.entered { await Task.yield() }
+        var spins = 0
+        while !slow.entered && spins < 400 { try? await Task.sleep(nanoseconds: 5_000_000); spins += 1 }
+        guard slow.entered else {
+            check("lifecycle: the D commit reached the barrier wait", false)
+            commit.cancel(); _ = await commit.value
+            return
+        }
         w2.gate.closeAdmission(reason: "Mind import")
         let r = await commit.value
         check("lifecycle: a holder waiting for the barrier is cancelled → refused, slot staged nothing", r.state == .refused && pendingDoc().slots.isEmpty, "\(r.state)")
