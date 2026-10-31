@@ -228,6 +228,8 @@ enum UpgradeService {
     /// Selftests (development builds only): runs instead of the exec, then
     /// the process exits 0 (the restart never returns).
     nonisolated(unsafe) static var restartInterceptForTesting: (@MainActor () -> Void)?
+    /// Selftests: the argv the intercepted restart would have executed.
+    nonisolated(unsafe) static var restartArgumentsForTesting: [String]?
 
     static func downloadAndStage(_ update: Update, progress: (String) -> Void) async throws -> StagedUpgrade {
         if adaCLIVersion.hasSuffix("-dev"), let override = stageOverrideForTesting { return try await override(update) }
@@ -533,7 +535,11 @@ enum UpgradeService {
     /// reacquires it during normal startup.
     @MainActor
     static func restartNow() -> Never {
+        // RestartArgv: the process's own argv, except for a chat promoted
+        // from the menu / quick setup, which restarts as `briglia chat`.
+        let restartArguments = RestartArgv.current
         if adaCLIVersion.hasSuffix("-dev"), let intercept = restartInterceptForTesting {
+            restartArgumentsForTesting = restartArguments
             intercept()
             fflush(stdout)
             exit(0)
@@ -546,8 +552,7 @@ enum UpgradeService {
         _ = runtimeLock
         fflush(stdout)
         fflush(stderr)
-        let originalArguments = CommandLine.arguments
-        var argv: [UnsafeMutablePointer<CChar>?] = originalArguments.map { strdup($0) }
+        var argv: [UnsafeMutablePointer<CChar>?] = restartArguments.map { strdup($0) }
         argv.append(nil)
         execv(executableURL.path, argv)
         // Only reached when exec itself failed — the swapped binary exists

@@ -483,6 +483,31 @@ BREAKS = [
     ("M155 kill() terminates with no grace (fixture ordering can never be reached)", "stage3", T + "Services/BashTools.swift",
      "        e.terminationCause = .userKill\n        e.terminationsInFlight += 1\n        await ProcessTree.terminate(e.process, graceNanos: 300_000_000)",
      "        e.terminationCause = .userKill\n        e.terminationsInFlight += 1\n        await ProcessTree.terminate(e.process, graceNanos: 0)"),
+    # 2026-10-31 restart argv (UPGRADE_TERMINAL_COORDINATOR_EXIT): a chat
+    # promoted from the menu / quick setup restarts as `chat`; a participant
+    # that never restarted is recorded and surfaced.
+    ("M156 the menu/quick-setup promotion keeps the original restart argv", "restartargv", T + "CLI/MemberEntry.swift",
+     "        RestartArgv.switchToChat()\n", ""),
+    ("M157 restartNow execs the original argv", "restartargv", T + "CLI/UpgradeService.swift",
+     "        let restartArguments = RestartArgv.current\n", "        let restartArguments = CommandLine.arguments\n"),
+    ("M158 reexecIfOlder execs the original argv", "restartargv", T + "CLI/UpgradeBarrier.swift",
+     "exec(rec.executable, RestartArgv.current)", "exec(rec.executable, CommandLine.arguments)"),
+    ("M159 the chat restart argv drops --profile", "restartargv", T + "CLI/RestartArgv.swift",
+     "                out += [first, rest[1]]", "                _ = first"),
+    ("M160 ordinary restarts no longer exec their own argv", "restartargv", T + "CLI/RestartArgv.swift",
+     "    static var current: [String] { override ?? CommandLine.arguments }",
+     "    static var current: [String] { override ?? chatArguments(from: CommandLine.arguments) }"),
+    ("M161 closure stays silent about a participant that never restarted", "restartargv", T + "CLI/UpgradeCoordinator.swift",
+     "            if !notRestarted.contains(p.profile) { notRestarted.append(p.profile) }", "            _ = p"),
+    ("M162 no grace period before reporting", "restartargv", T + "CLI/UpgradeBarrier+NotRestarted.swift",
+     "              let closedAt = barrier.closedAt, now.timeIntervalSince(closedAt) >= grace else { return [] }",
+     "              barrier.closedAt != nil else { return [] }"),
+    ("M163 a running assistant is still reported", "restartargv", T + "CLI/UpgradeBarrier+NotRestarted.swift",
+     "        return list.filter { !running($0) }", "        return list"),
+    ("M164 a slow real restart is told it never restarted", "restartargv", T + "CLI/UpgradeBarrier+NotRestarted.swift",
+     "        return restartedFromBarrier == barrier.id ? nil : barrier", "        return barrier"),
+    ("M165 the other assistants' notice repeats", "restartargv", T + "CLI/UpgradeBarrier+NotRestarted.swift",
+     "        handledBarrier = barrier.id\n", ""),
 ]
 if sys.platform.startswith("linux"):
     BREAKS.append(("M154 the menu's apt job leaves out python3.X-venv", "qs:18.", T + "CLI/QuickSetup/QuickSetupWorkflow.swift",

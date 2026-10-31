@@ -335,6 +335,10 @@ enum MemberEntry {
     /// (3)–(4) again (§4.4). Returns a refusal text when the switch must not
     /// happen (a barrier opened meanwhile).
     static func promoteToAssistant(kind: String = "chat") -> String? {
+        // From here on this process is the terminal chat: every self-restart
+        // (including the re-exec just below) must start `briglia chat`, never
+        // the menu / quick setup it was launched as (RestartArgv).
+        RestartArgv.switchToChat()
         guard let lease = current else { return nil }
         do { try lease.update { $0.role = "assistant"; $0.sessionKind = kind } } catch { return "\(error)" }
         stopSessionBarrierWatch()

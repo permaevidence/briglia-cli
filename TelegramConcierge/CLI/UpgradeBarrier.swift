@@ -58,6 +58,12 @@ enum UpgradeBarrier {
         /// Set at commit: the identity of the installed pair.
         var committedBinarySHA256: String?
         var reason: String?
+        /// Set at closure: profiles whose participant process died after the
+        /// commit without acking `restarted` (UpgradeBarrier+NotRestarted).
+        /// Absent (never encoded) when everyone came back.
+        var notRestarted: [String]? = nil
+        /// When `notRestarted` was recorded.
+        var closedAt: Date? = nil
 
         /// A barrier that still holds admission (or blocks sessions).
         var isActive: Bool { state == .open || state == .committed || state == .stuck }
@@ -292,7 +298,7 @@ enum UpgradeBarrier {
             exit(75)
         }
         setenv(reexecGuardKey, "\(rec.binarySHA256):\(rec.sequence)", 1)
-        exec(rec.executable, CommandLine.arguments)
+        exec(rec.executable, RestartArgv.current)
         // Only reached when exec failed: never continue on the old image.
         FileHandle.standardError.write(Data("✖ Could not start the updated Briglia (\(String(cString: strerror(errno)))); try again in a minute.\n".utf8))
         exit(75)

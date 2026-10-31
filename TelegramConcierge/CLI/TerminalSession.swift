@@ -158,7 +158,8 @@ final class TerminalSession {
 
         // Post-exec restart (/upgrade or /restart re-execs in place): close
         // the loop the old process opened with "I'll confirm when I'm back."
-        if let marker = UpgradeService.consumeRestartMarker() {
+        let restartMarker = UpgradeService.consumeRestartMarker()
+        if let marker = restartMarker {
             if let barrierId = marker.barrierId, let oldLease = marker.oldLease {
                 ConversationManager.acknowledgeUpgradeRestart(barrierId: barrierId, oldLease: oldLease)
             }
@@ -170,6 +171,15 @@ final class TerminalSession {
                 print("✔ Briglia restarted.")
                 await manager.announceRestartCompletion()
             }
+        }
+        // This assistant was recorded as not restarted after an update
+        // (UpgradeBarrier+NotRestarted): say so once, on this start.
+        if CoordinationMode.active,
+           let missed = UpgradeBarrier.resolveOwnMissedRestart(profile: AssistantProfile.selectedName,
+                                                               restartedFromBarrier: restartMarker?.barrierId) {
+            let text = UpgradeBarrier.ownMissedRestartText(version: missed.targetVersion)
+            print(text)
+            await manager.announceMissedRestart(text)
         }
     }
 

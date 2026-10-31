@@ -352,6 +352,7 @@ enum UpgradeCoordinator {
             return .pairMismatch
         }
         let dirs = memberDirectories(settings.registryPaths, defaultDirectory: settings.paths.root.deletingLastPathComponent().appendingPathComponent("members", isDirectory: true))
+        var notRestarted: [String] = []
         for p in barrier.participants ?? [] {
             if let ack = UpgradeBarrier.readAck(p.lease, settings.paths), ack.barrierId == barrier.id, ack.state == .restarted,
                (ack.releaseSequence ?? 0) >= barrier.targetSequence { continue }
@@ -360,8 +361,17 @@ enum UpgradeCoordinator {
             // Dead: closable only when no assistant of that profile still runs an older image.
             let stale = MemberLeases.users(dir, assistantsOnly: true).contains { ($0.sidecar?.releaseSequence ?? 0) < barrier.targetSequence }
             if stale { return .waiting }
+            // Gone without a `restarted` ack: recorded, never silent (it may
+            // also be mid-exec; the surfaces wait a grace period and re-check
+            // that the profile is really not running).
+            if !notRestarted.contains(p.profile) { notRestarted.append(p.profile) }
         }
         barrier.state = .closed
+        if !notRestarted.isEmpty {
+            barrier.notRestarted = notRestarted.sorted()
+            barrier.closedAt = Date()
+            print("[upgrade] closed the update to \(barrier.targetVersion); not restarted: \(barrier.notRestarted!.joined(separator: ", "))")
+        }
         guard (try? UpgradeBarrier.writeBarrier(barrier, settings.paths)) != nil else { return .waiting }
         UpgradeJournal.cleanup(settings.paths)
         UpgradeBarrier.clearAcks(settings.paths)
