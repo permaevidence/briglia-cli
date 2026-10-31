@@ -6,9 +6,10 @@ import Glibc
 import Darwin
 #endif
 
-/// A settings server lives in the conversation owner when one is running.
-/// Otherwise this command holds the same exclusive lease until the server stops.
-/// No competing daemon, restart, or release of the live owner's lease is needed.
+/// Browser settings served by the running Briglia (app-socket request
+/// `browser_settings`, kept for older clients; `briglia menu` is the
+/// settings page now). Its offline mode — `briglia quicksetup` on a set-up
+/// install — was retired in 0.2.67 with the browser Quick Setup.
 @MainActor
 final class BrowserSettingsHost {
     private static var shared: BrowserSettingsHost?
@@ -87,53 +88,6 @@ final class BrowserSettingsHost {
     }
     static func stopShared() async { await shared?.stop() }
 
-    static func runCommand() async throws {
-        // No package manager, disk-install floor, or setup-completion writes.
-        let acquired = InstanceLease.acquire(label: "browser settings")
-        switch acquired {
-        case .failure:
-            do {
-                let link = try await Task.detached { try requestRunningOwner() }.value
-                printAndOpen(link)
-                print("Settings are served by the running Briglia. The page expires after 30 minutes of inactivity.")
-                return
-            } catch {
-                throw BrowserSettingsWorkflow.Invalid(text: "Could not open settings in the running Briglia: \(error.localizedDescription). Update the running process to this version, or stop it and run `briglia quicksetup` again.")
-            }
-        case .success(let lease):
-            let host: BrowserSettingsHost
-            do { host = try BrowserSettingsHost(manager: nil, lease: lease) }
-            catch { lease.release(); throw error }
-            shared = host; host.startTimer()
-            let listener = EnterListener {
-                Task { @MainActor in
-                    _ = await host.auth.rotate()
-                    await host.settings.cancelPendingLogin()
-                    printAndOpen(await host.link())
-                }
-            }
-            printAndOpen(await host.link())
-            print("Press Enter for a new link. Ctrl-C closes settings. Saved changes are kept.")
-            listener.start()
-            let shutdown = ShutdownSignalCoordinator(settle: { await host.stop() }, gracefulExit: {}, forceExit: { exit(130) })
-            var signals: [DispatchSourceSignal] = []
-            for sig in [SIGINT, SIGTERM] {
-                let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-                signal(sig, SIG_IGN)
-                source.setEventHandler { Task { @MainActor in shutdown.request() } }
-                source.resume(); signals.append(source)
-            }
-            while !host.stopped { try? await Task.sleep(nanoseconds: 250_000_000) }
-            listener.stop()
-            for source in signals { source.cancel() }
-            signal(SIGINT, SIG_DFL); signal(SIGTERM, SIG_DFL)
-            print("Browser settings closed. Run `briglia` or `briglia daemon` to start the agent.")
-        }
-    }
-    private static func printAndOpen(_ link: String) {
-        print("\nBriglia settings: \(link)\n")
-        QuickSetupSession.openBrowser(link)
-    }
     /// Asks the running Briglia (over the app socket) to open a local page:
     /// `browser_settings` (quick setup's settings) or `menu` (the live hub).
     nonisolated static func requestRunningOwner(type: String = "browser_settings") throws -> String {

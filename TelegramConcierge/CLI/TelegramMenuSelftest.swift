@@ -195,13 +195,13 @@ struct TelegramMenuSelftest: ParsableCommand {
               && !TelegramPairing.acceptsPolledMessage(chatId: 12345, chatType: "private", fromId: nil, pairedChatId: 12345)
               && !TelegramPairing.acceptsPolledMessage(chatId: 12345, chatType: "private", fromId: 12345, pairedChatId: nil))
 
-        // ---- 8. The ChatGPT list is one source: both browser pages' pickers
+        // ---- 8. The ChatGPT list is one source: the browser settings picker
         // must list exactly these ids, in this order, plus "custom".
         let expected = ResponsesAdapter.subscriptionModelChoices.map(\.id)
         check("chatgpt list: exactly the owner's seven, in order (GPT-6.1 Sol first since v0.2.44)",
               expected == ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"])
         if let quickSetup = Bundle.module.resourceURL?.appendingPathComponent("QuickSetup", isDirectory: true) {
-            for page in ["index.html", "settings.html"] {
+            for page in ["settings.html"] {
                 let html = (try? String(contentsOf: quickSetup.appendingPathComponent(page), encoding: .utf8)) ?? ""
                 let options = Self.subscriptionPickerOptions(in: html)
                 check("chatgpt list: \(page) picker matches the Swift list (+ custom)",

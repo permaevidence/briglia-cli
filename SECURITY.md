@@ -73,9 +73,17 @@ referenced version, unreferenced ones (never deleted automatically) and the
 last bootstrap outcome. The browser itself is still downloaded by Playwright's
 own installer on first use. Entries you edit by hand are left alone.
 
-## Quick setup (the local page)
+## Quick setup and the menu (the local page)
 
-`briglia quicksetup` serves a setup page from the `briglia` process itself
+`briglia quicksetup` runs in the terminal (it works over SSH): keys are
+typed without echo, or — with `--yes` — read once from the environment
+variables `BRIGLIA_OPENROUTER_KEY`, `BRIGLIA_TELEGRAM_TOKEN` and
+`BRIGLIA_AGENTMAIL_KEY` and then removed from the process environment, so no
+installer or child process inherits them; they are never accepted on the
+command line, where other processes could read them. Keys are sent only to
+their providers for verification and stored in `secrets.json`.
+
+`briglia menu` serves a settings page from the `briglia` process itself
 on `127.0.0.1` (ephemeral port) and opens it in your browser. Keys go from
 the page to that process, are sent by it to their providers for
 verification, and are stored in `secrets.json`; they never go to briglia.dev
@@ -102,8 +110,7 @@ processes with a start gate: a child's process-group identity is verified and
 recorded durably before it executes, and a step whose processes cannot be
 confirmed gone after cancellation blocks every further step until you
 recover explicitly. `briglia doctor` reports an interrupted AgentMail install
-transaction; only `briglia agentmail repair` (or quick setup's own preflight)
-settles it.
+transaction; only `briglia agentmail repair` settles it.
 
 ## Self-tests and release builds
 

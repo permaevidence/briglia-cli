@@ -142,6 +142,43 @@
         "name": "Chat Completions lifecycle r3 and shipped-client differential gate",
         "run": "echo \"runner image: $ImageOS $ImageVersion\"\ncase \"$ImageVersion\" in\n  20260829.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2.json ;;\n  20260907.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2-image20260907.json ;;\n  20261028.*) fixture=scripts/fixtures/chat-lifecycle/ci-darwin-arm64-r2-image20261028.json ;;\n  *) echo \"no frozen lifecycle fixture recorded for runner image '$ImageVersion'\"; exit 1 ;;\nesac\npython3 scripts/chat_lifecycle_baseline.py --save-reference chat-lifecycle-reference.json --baseline \"$fixture\"\n"
       }
+    },
+    {
+      "op": "replace",
+      "platform": "linux",
+      "reason": "0.2.67 terminal quick setup (owner spec QUICKSETUP_OPENROUTER_SPEC.md, 2026-10-30): the browser Quick Setup page (index.html/app.js) and its offline browser-settings mode are retired, so their browser tests (quicksetup_browser_test x2, quicksetup_main_provider_browser_test, subscription_browser_test, browser_settings_test) go; the menu browser test stays. The new terminal flow is covered by __quicksetup-selftest section 19 and scripts/quicksetup_terminal_test.py, both inside the smoke step. Owner-approved 2026-10-30/31.",
+      "step": {
+        "name": "Quick-setup browser test",
+        "run": "python3 scripts/quicksetup_browser_test.py .build/debug/briglia\npython3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish\npython3 scripts/quicksetup_main_provider_browser_test.py .build/debug/briglia\npython3 scripts/subscription_browser_test.py\npython3 scripts/menu_browser_test.py\npython3 scripts/browser_settings_test.py .build/debug/briglia\n"
+      },
+      "with": {
+        "name": "Quick-setup browser test",
+        "run": "python3 scripts/menu_browser_test.py\n"
+      }
+    },
+    {
+      "op": "replace",
+      "platform": "macos",
+      "reason": "0.2.67 terminal quick setup (owner spec QUICKSETUP_OPENROUTER_SPEC.md, 2026-10-30): the browser Quick Setup page (index.html/app.js) and its offline browser-settings mode are retired, so their browser tests (quicksetup_browser_test x2, quicksetup_main_provider_browser_test, subscription_browser_test, browser_settings_test) go; the menu browser test stays. The new terminal flow is covered by __quicksetup-selftest section 19 and scripts/quicksetup_terminal_test.py, both inside the smoke step. Owner-approved 2026-10-30/31.",
+      "step": {
+        "continue-on-error": true,
+        "name": "Quick-setup browser test (best effort on the macOS runner)",
+        "run": "python3 -m pip install --break-system-packages playwright==1.55.0 || python3 -m pip install playwright==1.55.0\npython3 -m playwright install chromium\npython3 scripts/quicksetup_browser_test.py .build/debug/briglia\npython3 scripts/quicksetup_browser_test.py .build/debug/briglia --close-at-finish\npython3 scripts/quicksetup_main_provider_browser_test.py .build/debug/briglia\npython3 scripts/subscription_browser_test.py\npython3 scripts/menu_browser_test.py\n"
+      },
+      "with": {
+        "continue-on-error": true,
+        "name": "Quick-setup browser test (best effort on the macOS runner)",
+        "run": "python3 -m pip install --break-system-packages playwright==1.55.0 || python3 -m pip install playwright==1.55.0\npython3 -m playwright install chromium\npython3 scripts/menu_browser_test.py\n"
+      }
+    },
+    {
+      "op": "remove",
+      "platform": "macos",
+      "reason": "0.2.67 terminal quick setup (owner spec QUICKSETUP_OPENROUTER_SPEC.md, 2026-10-30): the browser Quick Setup page (index.html/app.js) and its offline browser-settings mode are retired, so their browser tests (quicksetup_browser_test x2, quicksetup_main_provider_browser_test, subscription_browser_test, browser_settings_test) go; the menu browser test stays. The new terminal flow is covered by __quicksetup-selftest section 19 and scripts/quicksetup_terminal_test.py, both inside the smoke step. Owner-approved 2026-10-30/31.",
+      "step": {
+        "name": "Browser settings browser test",
+        "run": "python3 scripts/browser_settings_test.py .build/debug/briglia"
+      }
     }
   ],
   "comment": "Frozen inventory of the pre-split CI workflow. Re-derived from source.commit by scripts/ci_inventory_test.py on every run. Later CI changes go in `amendments` ({op: add|remove|replace|job-setup, platform, step, reason}).",

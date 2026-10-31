@@ -84,8 +84,9 @@ struct QuickSetup: AsyncParsableCommand {
             print("Briglia is already running. To change its settings, type: briglia menu")
             throw ExitCode(1)
         }
+        let devStubs = QuickSetupFlow.devStubsRequested
         #if os(Linux)
-        if !AgentServiceSupport.systemdUserSessionAvailable() {
+        if !devStubs, !AgentServiceSupport.systemdUserSessionAvailable() {
             print("✖ Quick setup runs Briglia as a background service (systemd user session), which this system can't do. Use: briglia setup")
             throw ExitCode(2)
         }
@@ -113,6 +114,15 @@ struct QuickSetup: AsyncParsableCommand {
         env.language = "en"
         QuickSetupEnvironment.applyDevStubsIfRequested(&env.quick)
         env.openURL = { _ in }
+        if devStubs {
+            // Dev builds only (the end-to-end test): no systemd session or
+            // sleep settings are touched (CI containers have neither).
+            env.systemdSessionAvailable = { true }
+            let snapshot = env.snapshot
+            env.snapshot = { var s = await snapshot(); s.keepAwakeOK = true; return s }
+            let stubTools = env.quick.toolchainStatus   // the stubs' marker-file status
+            env.toolchainStatus = { stubTools() }
+        }
         let pairing = env.pairing
         env.quick.releaseLease = { pairing.end() }
         env.quick.reacquireLease = { true }
@@ -153,6 +163,11 @@ struct QuickSetup: AsyncParsableCommand {
         case .macStarting:
             #if os(macOS)
             guard let held = started.take() else { throw ExitCode(1) }
+            if QuickSetupFlow.devNoStart {
+                held.release()
+                print("(dev build: BRIGLIA_DEV_QUICKSETUP_NO_START=1, the chat is not started)")
+                return
+            }
             // The quick setup becomes the running assistant (as the menu's
             // Start): its member lease changes role, and from here every
             // self-restart (/upgrade, /restart) re-executes `briglia chat`.
@@ -342,6 +357,16 @@ final class QuickSetupFlow {
         self.secrets = secrets
         self.io = io
         self.system = system
+    }
+
+    /// Dev builds only: `BRIGLIA_DEV_QUICKSETUP_STUBS=1` (the system seams'
+    /// stubs, see QuickSetupEnvironment) and `BRIGLIA_DEV_QUICKSETUP_NO_START=1`
+    /// (a Mac run ends instead of starting the chat). Release builds ignore both.
+    nonisolated static var devStubsRequested: Bool {
+        adaCLIVersion.hasSuffix("-dev") && ProcessInfo.processInfo.environment["BRIGLIA_DEV_QUICKSETUP_STUBS"] == "1"
+    }
+    nonisolated static var devNoStart: Bool {
+        adaCLIVersion.hasSuffix("-dev") && ProcessInfo.processInfo.environment["BRIGLIA_DEV_QUICKSETUP_NO_START"] == "1"
     }
 
     var assistant: String { AssistantName.current() }

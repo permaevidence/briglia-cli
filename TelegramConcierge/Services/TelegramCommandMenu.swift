@@ -163,7 +163,7 @@ enum TelegramCommandMenu {
     static func providerMenu(statusLines: [String], configured: [ProviderChoice]) -> Menu {
         var lines = ["Providers — tap one to switch, or /provider <name>:"]
         lines.append(contentsOf: statusLines)
-        lines.append("Add or edit providers with `briglia setup` or `briglia quicksetup` in a terminal.")
+        lines.append("Add or edit providers with `briglia menu` or `briglia setup` in a terminal.")
         let buttons = configured.compactMap { choice -> Button? in
             guard let data = encode(.provider(choice.id)) else { return nil }
             return Button(label: (choice.active ? "✓ " : "") + choice.displayName, data: data)

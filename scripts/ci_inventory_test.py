@@ -831,7 +831,9 @@ WIRE_NEG = "      - name: Wire comparator negative tests\n"
 BROWSER_LINUX = "      - name: Quick-setup browser test\n"
 PLAYWRIGHT_LINUX = "      - name: Install Playwright (browser test of the quick-setup page)\n"
 SMOKE = "      - name: Smoke test\n"
-BROWSER_SETTINGS_MAC = "      - name: Browser settings browser test\n"
+# A macOS-core step that runs the built binary (was the browser-settings
+# step, retired in 0.2.67); an `add` amendment, so outside the frozen order.
+MACOS_CORE_ONLY_STEP = "      - name: Security Phase 0 (dependency inventory, security watch, resolved Swift pins, read-only Security line)\n"
 WIRE_UPLOAD = "      - name: Preserve pinned-release reference\n"
 INV_LINE = "      - name: CI inventory (every pre-split step still runs, unchanged)\n        run: python3 scripts/ci_inventory_test.py\n"
 CHECKOUT = "      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0\n        with:\n          fetch-depth: 0\n"
@@ -989,7 +991,7 @@ def breaks():
         ("22 unknown step in the setup position", lambda t: _insert_after(t, "linux-gates-a", CHECKOUT, "      - run: pip install x\n")),
         ("23 binary consumer moved to a gate job", lambda t: _move(t, "linux-core", "linux-gates-a", WIRE_NEG)),
         ("24 browser block before the Playwright install", _swap_browser),
-        ("25 macOS browser-settings step moved to macos-gates", lambda t: _move(t, "macos-core", "macos-gates", BROWSER_SETTINGS_MAC)),
+        ("25 macOS core step using the binary moved to macos-gates", lambda t: _move(t, "macos-core", "macos-gates", MACOS_CORE_ONLY_STEP)),
         ("26 smoke moved away from the Node job", lambda t: _move(t, "linux-core", "linux-gates-b", SMOKE)),
         ("27 inventory step removed from one core job", lambda t: sub_once(t, INV_LINE, "", job="macos-core")),
         ("28 aggregator: job dropped from needs", lambda t: sub_once(t, "      - macos-gates\n", "", job=agg)),
@@ -1017,7 +1019,7 @@ def breaks():
         ("50 host swap step moved after a gate test", _swap_after_first_gate_test),
         ("51 split moved-lines check removed", lambda t: sub_once(t, SPLIT_STEP, "", job="linux-core")),
         ("52 split moved-lines check pointed at another commit", lambda t: sub_once(t, "--verify-commit 8bd2718", "--verify-commit 0000000", job="linux-core")),
-        ("53 split moved-lines check moved to macOS", lambda t: sub_once(sub_once(t, SPLIT_STEP, "", job="linux-core"), "        run: python3 scripts/browser_settings_test.py .build/debug/briglia\n", "        run: python3 scripts/browser_settings_test.py .build/debug/briglia\n" + SPLIT_STEP, job="macos-core")),
+        ("53 split moved-lines check moved to macOS", lambda t: sub_once(sub_once(t, SPLIT_STEP, "", job="linux-core"), "        run: python3 scripts/smoke_test.py .build/debug/briglia\n", "        run: python3 scripts/smoke_test.py .build/debug/briglia\n" + SPLIT_STEP, job="macos-core")),
         ("54 job-setup amendment builds with two spaces (swift  build)", lambda t: t, _job_setup_run("swift  build -j 2")),
         ("55 job-setup amendment runs a script that builds indirectly", lambda t: t, _job_setup_run("python3 scripts/responses_lifecycle_test.py")),
         ("P1 parser: duplicate key", lambda t: _insert_after(t, "macos-gates", "    runs-on: macos-15\n", "    runs-on: macos-15\n")),

@@ -1101,25 +1101,21 @@ def main():
     check("setup-api-selftest", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
-    # 3f2. desktop quick setup: the offline battery (parser, generations,
-    # workflow enforcement, job runner + start gate, AgentMail transaction,
-    # lease, census, package maps), then the headless end-to-end run of the
-    # real binary against a mock provider server with dev stubs.
+    # 3f2. quick setup (terminal, OpenRouter only, 0.2.67): the offline
+    # battery (the local pages' parser, authorization and generations, job
+    # runner, lease, census, package maps, and section 19: the terminal flow
+    # on the real menu workflow with fakes), then the real binary end to end
+    # against a mock provider server with dev stubs (interactive over a pipe,
+    # and --yes).
     result = run_selftest([os.path.abspath(ADA), "__quicksetup-selftest"],
                             capture_output=True, text=True, timeout=600)
     qs_out = result.stdout + result.stderr
     qs_failed = "\n".join(l for l in qs_out.splitlines() if l.startswith("✖") or "FAILED" in l or "threw" in l)
     check("quicksetup-selftest", result.returncode == 0, (qs_failed or qs_out)[-4000:])
-    result = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "quicksetup_headless_test.py"), os.path.abspath(ADA)],
+    result = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "quicksetup_terminal_test.py"), os.path.abspath(ADA)],
                             capture_output=True, text=True, timeout=600)
-    check("quicksetup headless end-to-end (mock providers, dev stubs)", result.returncode == 0,
-          (result.stdout + result.stderr)[-2500:])
-    # Fresh OpenRouter-only Quick Setup driven to completion (owner
-    # 2026-10-15; Codex round 2: the final check demanded an OpenCode key).
-    result = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "quicksetup_openrouter_flow_test.py"), os.path.abspath(ADA)],
-                            capture_output=True, text=True, timeout=600)
-    check("quicksetup OpenRouter-only flow to completion (mock providers, dev stubs)", result.returncode == 0,
-          (result.stdout + result.stderr)[-2500:])
+    check("quicksetup terminal end-to-end (mock providers, dev stubs)", result.returncode == 0,
+          (result.stdout + result.stderr)[-3000:])
 
     # 3f3. `briglia menu`: the offline battery (Telegram detection, every
     # page action of the real MenuWorkflow with fake services, the router in
