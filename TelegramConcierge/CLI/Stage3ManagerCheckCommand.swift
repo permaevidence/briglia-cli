@@ -465,37 +465,30 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
         }
     }
 
-    /// Codex stage-3 S3-R15-1, first ordering: a real `briglia setup` wizard
-    /// already open at its name prompt (the old name cached as the default)
-    /// makes the wipe wait, then refuse with nothing deleted; Enter then
-    /// keeps the (still present) name.
+    /// Codex stage-3 S3-R15-1, first ordering, under the live-menu writer
+    /// (KEYLESS_WEB_AND_LIVE_MENU plan B.6): a real `briglia setup` wizard
+    /// open at its name prompt holds no replacement lock while it waits for
+    /// input, so the wipe proceeds; the wizard pinned the replacement epoch at
+    /// its start, so the name typed afterwards is refused and never written
+    /// back into the wiped installation.
     @MainActor private func openWizardMakesWipeRefuse(_ m: ConversationManager, check: @escaping (String, Bool, String) -> Void) async {
         await awaitArchiveIdle(m)
         try? KeychainHelper.save(key: KeychainHelper.userNameKey, value: "Sentinel")
         try? KeychainHelper.save(key: SetupWizard.completeKey, value: "true")
         guard let wizard = WizardChild(env: [:]) else { check("S3-R15-1: wizard child", false, "spawn failed"); return }
         wizard.send("5\n")
-        // The wizard holds the shared lock for its whole run: an exclusive
-        // attempt is busy once it is up.
-        let by = Date().addingTimeInterval(20)
-        var holding = false
-        while Date() < by && wizard.process.isRunning {
-            if case .busy = MemoryReplacementLock.tryExclusive() { holding = true; break }
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-        try? await Task.sleep(nanoseconds: 500_000_000)   // let it reach the name prompt
-        ConversationManager.admissionDrainSecondsForTesting = 1
-        let refused = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
+        try? await Task.sleep(nanoseconds: 2_000_000_000)   // let it reach the name prompt
+        let wipe = await ConversationManager.$commandCapture.withValue(ConversationManager.CommandResponseCapture()) {
             await m.deleteAllMemory()
         }
-        ConversationManager.admissionDrainSecondsForTesting = nil
-        let nameDuring = KeychainHelper.load(key: KeychainHelper.userNameKey)
-        wizard.send("\n\n")   // keep the cached name, leave the section menu
+        let nameAfterWipe = KeychainHelper.load(key: KeychainHelper.userNameKey)
+        wizard.send("R15_AFTER_WIPE\n\n")   // a save prepared against the old epoch
         let status = await wizard.finish()
-        check("S3-R15-1: a real setup wizard open at its (cached) name prompt makes the wipe refuse after the drain limit, nothing deleted; Enter keeps the name",
-              holding && Self.isWorkRefusal(refused) && refused[0].contains("another Briglia command") && nameDuring == "Sentinel"
-              && KeychainHelper.load(key: KeychainHelper.userNameKey) == "Sentinel" && m.memoryReplacementLock == nil,
-              "holding \(holding) \(refused) during \(nameDuring ?? "nil") exit \(status)")
+        let name = KeychainHelper.load(key: KeychainHelper.userNameKey)
+        check("S3-R15-1: a real setup wizard open at its name prompt does not block the wipe; its later save is refused by the pinned epoch",
+              !wipe.contains { $0.hasPrefix("ABORTED") } && !Self.isWorkRefusal(wipe) && nameAfterWipe == nil
+              && name == nil && m.memoryReplacementLock == nil,
+              "\(wipe) after-wipe \(nameAfterWipe ?? "nil") name \(name ?? "nil") exit \(status)")
     }
 
     /// Codex stage-3 S3-R15-1, second ordering: a real wizard started during

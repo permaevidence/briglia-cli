@@ -311,7 +311,9 @@ final class SettingsWriter {
                 return .finished(.refused("unknown identity change"), routeChanged: false, wrote: false)
             }
             do { ticket = try IdentityChange.begin(kind: kind, rawValue: identity.value) } catch {
-                var r = SettingsCommitResult.refused("\(error)"); r.code = "busy"
+                // setup-api's code for an identity refusal (running assistant,
+                // identity lock held, value owned by another assistant).
+                var r = SettingsCommitResult.refused("\(error)"); r.code = "identity_refused"
                 return .finished(r, routeChanged: false, wrote: false)
             }
         }

@@ -98,7 +98,14 @@ final class TerminalSession {
             // Startup grace (KEYLESS_WEB_AND_LIVE_MENU plan B.6): a short
             // settings commit of another process holds the lease for a
             // moment; wait up to 10 s (100 ms retries) before failing.
-            switch await InstanceLease.acquire(label: headless ? "daemon" : "chat", waitSeconds: Self.startupLeaseGraceSeconds) {
+            // The free case stays synchronous (no suspension before the
+            // lease, exactly as before); only contention waits.
+            let label = headless ? "daemon" : "chat"
+            var attempt = InstanceLease.acquire(label: label)
+            if case .failure = attempt {
+                attempt = await InstanceLease.acquire(label: label, waitSeconds: Self.startupLeaseGraceSeconds)
+            }
+            switch attempt {
             case .success(let acquired): lease = acquired
             case .failure(let conflict):
                 // The offline menu's Telegram pairing step keeps Briglia off
