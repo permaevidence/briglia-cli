@@ -11,6 +11,7 @@ import Darwin
 /// command reports a saved-but-uncancelled write.
 extension LiveMenuHarness {
     func round3Section() async {
+        await r4UnsearchableDataRootSection()
         await r3UnreadableTombstoneSection()
         await r3NoPersistenceRefusesSection()
         await r3InlineNoteSection()
@@ -54,6 +55,36 @@ extension LiveMenuHarness {
             check("R3-1: an \(variant) tombstone refuses further commits (fail closed)",
                   r.state == .refused && store()[KeychainHelper.serperApiKeyKey] != "serper-r3", "\(r.state)")
         }
+    }
+
+    // MARK: R4-1
+
+    /// Codex round 4: an existing tombstone behind an unsearchable data
+    /// folder is unknown evidence, not absence.
+    func r4UnsearchableDataRootSection() async {
+        reset(Self.routeBase)
+        let dataRoot = StoragePaths.dataRoot
+        defer {
+            chmod(dataRoot.path, 0o700)
+            SettingsSupersede.discardInvalidations()
+        }
+        let owner = FakeSettingsOwner()
+        let writer = SettingsWriter(host: owner)
+        guard let c = await stageModel(writer, owner, "stale/model") else { check("R4-1: fixture", false); return }
+        let before = store()[KeychainHelper.openRouterModelKey]
+        try? PrivateStorage.ensureDirectory(dataRoot)
+        try? JSONEncoder().encode([c.id]).write(to: SettingsSupersede.tombstoneURL)
+        SettingsSupersede._testForgetInMemory()
+        chmod(dataRoot.path, 0o600)
+        var strictThrows = false
+        do { _ = try SettingsSupersede.readTombstonesStrict() } catch { strictThrows = true }
+        let applied = await writer.applyStaged(category: "ai")
+        let stillStaged = pendingDoc().slots["ai"]?.staged?.change.id == c.id
+        chmod(dataRoot.path, 0o700)
+        check("R4-1: a tombstone behind an unsearchable data folder is unknown: nothing applied, the change stays staged, the file is kept",
+              strictThrows && applied == nil && stillStaged && store()[KeychainHelper.openRouterModelKey] == before
+              && SettingsSupersede.tombstonedIds().contains(c.id),
+              "strict \(strictThrows) applied \(String(describing: applied?.state)) staged \(stillStaged)")
     }
 
     // MARK: R3-2

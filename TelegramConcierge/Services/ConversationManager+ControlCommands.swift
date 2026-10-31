@@ -195,7 +195,7 @@ extension ConversationManager {
                 }
                 // Same note as the Telegram path (Codex R3 note).
                 if SettingsSupersede.hasUnflushedInvalidations {
-                    try? await sendText("⚠️ Saved. " + SettingsSupersede.unflushedMessage)
+                    try? await sendText("⚠️ " + SettingsSupersede.unflushedMessage)
                 }
                 settingsWriter.gate.release(settingsToken)
                 kickSettingsApply()

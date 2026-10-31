@@ -184,6 +184,10 @@ BREAKS = [
      "R3 note: an inline terminal/app command reports", S + "ConversationManager+ControlCommands.swift",
      "                // Same note as the Telegram path (Codex R3 note).\n                if SettingsSupersede.hasUnflushedInvalidations {",
      "                if Bool(\"false\") == true {"),
+    # Codex implementation review round 4.
+    ("L42 an unsearchable tombstone path reads as absent", "selftest",
+     "R4-1: a tombstone behind an unsearchable data folder is unknown", W,
+     "            if err == ENOENT { return [] }", "            _ = err; return []"),
 ]
 
 

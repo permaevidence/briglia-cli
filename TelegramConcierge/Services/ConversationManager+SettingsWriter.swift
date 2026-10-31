@@ -148,7 +148,7 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
             // A command whose own write could not cancel a waiting change on
             // disk says so (the write itself is saved).
             if SettingsSupersede.hasUnflushedInvalidations {
-                try? await self.sendText("⚠️ Saved. " + SettingsSupersede.unflushedMessage)
+                try? await self.sendText("⚠️ " + SettingsSupersede.unflushedMessage)
             }
             self.kickSettingsApply()
         }

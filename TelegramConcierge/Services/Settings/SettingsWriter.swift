@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
 
 /// What the settings writer needs from the process it runs in
 /// (KEYLESS_WEB_AND_LIVE_MENU plan B.3): the daemon (the live owner) or a
@@ -753,8 +758,18 @@ enum SettingsSupersede {
         }
     }
 
-    struct InvalidationNotRecorded: Error, CustomStringConvertible {
-        var description: String { "this would supersede a waiting settings change, and that can't be recorded on disk right now (settings-pending file and settings-invalidated file both unwritable); nothing was saved" }
+    struct InvalidationNotRecorded: Error, LocalizedError, CustomStringConvertible {
+        enum Cause { case notRecordable, pendingUnreadable }
+        var cause: Cause = .notRecordable
+        var description: String {
+            switch cause {
+            case .notRecordable:
+                return "this would supersede a waiting settings change, and that can't be recorded on disk right now (the settings-pending and settings-invalidated files can't be written); nothing was saved"
+            case .pendingUnreadable:
+                return "the waiting settings changes can't be read (\(SettingsPendingStore.url.path)), so it isn't known whether this would supersede one; nothing was saved"
+            }
+        }
+        var errorDescription: String? { description }
     }
 
     /// BEFORE a secrets write (inside the store locks, Codex R3-2): every
@@ -767,7 +782,7 @@ enum SettingsSupersede {
         guard !maintenanceWrite, let invalidated = invalidation(keys, after: after),
               FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) else { return }
         let doc: SettingsPendingStore.Document
-        do { doc = try SettingsPendingStore.read() } catch { throw InvalidationNotRecorded() }
+        do { doc = try SettingsPendingStore.read() } catch { throw InvalidationNotRecorded(cause: .pendingUnreadable) }
         let hit = doc.slots.values.compactMap { $0.staged?.change }.filter(invalidated).map(\.id)
         guard !hit.isEmpty else { return }
         do { try applyDrops(invalidated); return } catch {
@@ -812,9 +827,27 @@ enum SettingsSupersede {
     /// Absent = no invalidations; an existing file that can't be read or
     /// decoded is UNKNOWN and throws (Codex R3-1): never "empty".
     static func readTombstonesStrict() throws -> Set<String> {
-        guard FileManager.default.fileExists(atPath: tombstoneURL.path) else { return [] }
+        // Only a verified "not found" is absence (Codex R4-1): a path that
+        // can't be looked up (an unsearchable data folder, EACCES) is unknown.
+        var st = stat()
+        if lstat(tombstoneURL.path, &st) != 0 {
+            let err = errno
+            if err == ENOENT { return [] }
+            throw TombstoneUnknown(reason: String(cString: strerror(err)))
+        }
         let data = try Data(contentsOf: tombstoneURL)
         return Set(try JSONDecoder().decode([String].self, from: data))
+    }
+
+    struct TombstoneUnknown: Error, LocalizedError {
+        let reason: String
+        var errorDescription: String? { "the settings-invalidated file can't be checked (\(reason))" }
+    }
+
+    /// True unless the tombstone is verified absent.
+    private static var tombstoneMaybePresent: Bool {
+        var st = stat()
+        return lstat(tombstoneURL.path, &st) == 0 || errno != ENOENT
     }
 
     /// Best-effort view for tests and /status (unknown → empty).
@@ -822,7 +855,9 @@ enum SettingsSupersede {
 
     private static func writeTombstonesStrict(_ ids: Set<String>) throws {
         if ids.isEmpty {
-            if FileManager.default.fileExists(atPath: tombstoneURL.path) { try FileManager.default.removeItem(at: tombstoneURL) }
+            if unlink(tombstoneURL.path) != 0, errno != ENOENT {
+                throw TombstoneUnknown(reason: String(cString: strerror(errno)))
+            }
             return
         }
         let data = try JSONEncoder().encode(ids.sorted())
@@ -834,7 +869,7 @@ enum SettingsSupersede {
         unflushedLock.lock()
         let inMemory = !unflushed.isEmpty
         unflushedLock.unlock()
-        return inMemory || FileManager.default.fileExists(atPath: tombstoneURL.path)
+        return inMemory || tombstoneMaybePresent
     }
 
     static let unflushedMessage = "A waiting settings change could not be cancelled on disk (the settings-pending file can't be written), so nothing more is saved until that is fixed. Check the configuration folder's permissions and free space, then try again."
@@ -845,7 +880,7 @@ enum SettingsSupersede {
         let pending = unflushed
         unflushedLock.unlock()
         let ids = try readTombstonesStrict()
-        guard !pending.isEmpty || !ids.isEmpty || FileManager.default.fileExists(atPath: tombstoneURL.path) else { return }
+        guard !pending.isEmpty || !ids.isEmpty || tombstoneMaybePresent else { return }
         if FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) {
             try applyDrops { change in ids.contains(change.id) || pending.contains { $0(change) } }
         }
