@@ -95,7 +95,7 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
             if self.settingsChangesStaged(), !self.settingsRetryScheduled {
                 self.settingsRetryScheduled = true
                 Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    try? await Task.sleep(nanoseconds: UInt64(Self.settingsRetrySecondsForTesting * 1_000_000_000))
                     self?.settingsRetryScheduled = false
                     self?.kickSettingsApply()
                 }
@@ -222,6 +222,10 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
                 moderation: snapshot[KeychainHelper.openAIImageModerationKey])
         }
     }
+
+    /// The safety-net retry interval (selftest seam).
+    nonisolated(unsafe) static var settingsRetrySecondsForTesting: Double = 10
+    var settingsApplyInFlight: Bool { settingsApplyTask != nil }
 
     /// Selftest seam: a turn is (not) running.
     func _testSetActiveProcessing(_ on: Bool) { activeProcessingTask = on ? Task {} : nil }

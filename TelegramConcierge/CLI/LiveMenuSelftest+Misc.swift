@@ -148,6 +148,8 @@ extension LiveMenuHarness {
 
     func daemonSection() async {
         reset(Self.routeBase)
+        ConversationManager.settingsRetrySecondsForTesting = 600
+        defer { ConversationManager.settingsRetrySecondsForTesting = 10 }
         let manager = ConversationManager()
         manager.startSettingsOwner()
         defer {
@@ -169,7 +171,12 @@ extension LiveMenuHarness {
             check("daemon: a key replacement mid-turn applies now", rs.state == .applied && store()[KeychainHelper.serperApiKeyKey] == "serper-daemon")
         }
         // The turn ends with no new message: the last blocker clearing kicks
-        // the scheduler and the staged change applies.
+        // the scheduler and the staged change applies. The earlier kicks
+        // (token releases) settle first and the safety-net retry is far
+        // away, so only the idle trigger can apply it.
+        var settle = 0
+        while manager.settingsApplyInFlight && settle < 200 { try? await Task.sleep(nanoseconds: 10_000_000); settle += 1 }
+        check("daemon: the change stays staged while the turn runs (kicks refused)", manager.settingsChangesStaged())
         manager._testSetActiveProcessing(false)
         manager.scheduleSummaryRetentionIdlePass()
         var waited = 0
