@@ -221,7 +221,10 @@ final class SettingsWriter {
                 await host.reconcile(after: claimed.change, routeChanged: routeChanged)
                 await duringReconciliationForTesting?()
             }
-            if result.state == .refused, gate.admissionClosedReason != nil {
+            // Cancellation or an admission refusal after the claim and
+            // before intent: back to staged (plan B.5). A precondition or
+            // epoch refusal drops it with its reason.
+            if result.state == .refused, ["admission", "busy"].contains(result.code ?? "") || gate.admissionClosedReason != nil {
                 Self.unclaim(category: category, attempt: attempt)
                 return nil
             }
@@ -255,7 +258,7 @@ final class SettingsWriter {
             let state: String
             switch result.state {
             case .applied: state = "applied"
-            case .refused: state = result.message == supersededMessage ? "dropped" : "failed"
+            case .refused: state = ["conflict", "epoch"].contains(result.code ?? "") ? "dropped" : "failed"
             case .partial: state = "partial"
             case .uncertain: state = "uncertain"
             default: state = "failed"
@@ -276,7 +279,7 @@ final class SettingsWriter {
 
     enum SectionOutcome {
         case needsBarrier
-        case refused(String)
+        case refused(String, code: String? = nil)
         case done(routeChanged: Bool, wroteSecrets: Bool, authWritten: Bool, note: String?)
         case partial(String)
         case failed(String)
@@ -295,7 +298,8 @@ final class SettingsWriter {
                 return .finished(.refused("unknown identity change"), routeChanged: false, wrote: false)
             }
             do { ticket = try IdentityChange.begin(kind: kind, rawValue: identity.value) } catch {
-                return .finished(.refused("\(error)"), routeChanged: false, wrote: false)
+                var r = SettingsCommitResult.refused("\(error)"); r.code = "busy"
+                return .finished(r, routeChanged: false, wrote: false)
             }
         }
         // Step 6: subscription locks (sharing lock, then auth stores in the
@@ -305,14 +309,15 @@ final class SettingsWriter {
         if !stores.isEmpty && CoordinationMode.multi {
             do { shareLock = try await Task.detached { try ChatGPTShare.takeLock() }.value } catch {
                 ticket?.abort()
-                return .finished(.refused(ChatGPTShare.busyMessage), routeChanged: false, wrote: false)
+                var r = SettingsCommitResult.refused(ChatGPTShare.busyMessage); r.code = "busy"
+                return .finished(r, routeChanged: false, wrote: false)
             }
         }
         defer { shareLock?.release() }
         let section: SectionOutcome
         do {
             section = try await Self.withAuthLocks(stores) { () throws -> SectionOutcome in
-                if Task.isCancelled { return .refused(gate.admissionClosedReason ?? "cancelled") }
+                if Task.isCancelled { return .refused(gate.admissionClosedReason ?? "cancelled", code: "admission") }
                 if let ticket {
                     var inner: SectionOutcome = .refused("identity commit did not run")
                     do {
@@ -341,9 +346,11 @@ final class SettingsWriter {
         case .needsBarrier:
             ticket?.abort()
             return .needsBarrier
-        case .refused(let why):
+        case .refused(let why, let code):
             ticket?.abort()
-            return .finished(.refused(why), routeChanged: false, wrote: false)
+            var r = SettingsCommitResult.refused(why)
+            r.code = code
+            return .finished(r, routeChanged: false, wrote: false)
         case .failed(let why):
             ticket?.abort()
             Self.finishAttempt(attempt, change: change, pending: pending, state: "failed", message: why)
@@ -419,15 +426,15 @@ final class SettingsWriter {
             // 7. Decision point — write-free.
             let epoch: Int
             do { epoch = try ReplacementEpoch.read() } catch { return .refused("\(error)") }
-            guard epoch == change.epoch else { return .refused(epochMessage) }
-            if let why = admission() { return .refused(why) }
+            guard epoch == change.epoch else { return .refused(epochMessage, code: "epoch") }
+            if let why = admission() { return .refused(why, code: "admission") }
             let current = holding.store
             var conflicts: [String] = []
             for (key, digest) in change.expected where SettingsDigest.of(current[key]) != digest { conflicts.append(key) }
             if let digest = change.routeDigest, SettingsKeyRoles.routeDigest(current) != digest, conflicts.isEmpty {
                 conflicts.append("other settings")
             }
-            guard conflicts.isEmpty else { return .refused(conflictMessage(conflicts.sorted())) }
+            guard conflicts.isEmpty else { return .refused(conflictMessage(conflicts.sorted()), code: "conflict") }
             // The live hub keeps refusing Telegram actions (plan B.9): a
             // running daemon's bot changes only through /switchbot.
             if ProcessKind.isDaemon, !change.touchedKeys.isDisjoint(with: [KeychainHelper.telegramBotTokenKey, KeychainHelper.telegramChatIdKey]) {
@@ -437,13 +444,13 @@ final class SettingsWriter {
                 let state: SubscriptionAuthState?
                 do { state = try authStore(expectation.store).read() } catch { return .refused(error.localizedDescription) }
                 guard let state, state.generation == expectation.generation else {
-                    return .refused("The ChatGPT login changed after this was prepared; nothing was saved — try again.")
+                    return .refused("The ChatGPT login changed after this was prepared; nothing was saved — try again.", code: "conflict")
                 }
                 if expectation.requireUsable, state.credential == nil || state.requiresLogin == true {
-                    return .refused("Sign in to ChatGPT first.")
+                    return .refused("Sign in to ChatGPT first.", code: "conflict")
                 }
                 if expectation.requireNoPending, state.pendingLogin != nil {
-                    return .refused("Finish the pending ChatGPT login or cancel it first.")
+                    return .refused("Finish the pending ChatGPT login or cancel it first.", code: "conflict")
                 }
             }
             var oldAuth: SubscriptionAuthState?
@@ -455,14 +462,14 @@ final class SettingsWriter {
                 case .publish:
                     guard var state = oldAuth, let pendingId = op.pending, state.pendingLogin == pendingId,
                           let credential = op.credential, let generation = op.projectedGeneration else {
-                        return .refused("Login was cancelled or superseded; start login again")
+                        return .refused("Login was cancelled or superseded; start login again", code: "conflict")
                     }
                     if let deviceAttempt = op.deviceAttempt, state.deviceChallenge?.pollAttempt != deviceAttempt {
                         return .refused("Login cancelled or superseded; start again")
                     }
                     if op.guardActiveLogin, current[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue,
                        state.credential != nil, state.requiresLogin != true {
-                        return .refused("Sign out or switch away from ChatGPT before replacing its active login.")
+                        return .refused("Sign out or switch away from ChatGPT before replacing its active login.", code: "conflict")
                     }
                     state.commitPending(credential, generation: generation)
                     state.lastAttempt = attempt

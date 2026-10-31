@@ -223,6 +223,9 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
         }
     }
 
+    /// Selftest seam: a turn is (not) running.
+    func _testSetActiveProcessing(_ on: Bool) { activeProcessingTask = on ? Task {} : nil }
+
     // MARK: /status
 
     /// Staged / last results, for /status and the menu page.

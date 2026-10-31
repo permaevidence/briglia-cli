@@ -200,7 +200,12 @@ struct RouteSnapshot: Equatable {
         fields["switch"] = "\(switches.subagents)|\(switches.webSubagent)"
         // The request path's resolvers, evaluated on this dictionary.
         SettingsCapture.evaluate(store: stored) {
-            fields["r:transcription"] = String(describing: MediaRouting.transcription(stored: stored))
+            // Route kinds only, never a credential value.
+            let transcription = MediaRouting.transcription(stored: stored)
+            fields["r:transcription"] = transcription.viaOpenRouter ? "openrouter" : (transcription.key.isEmpty ? "openai-unconfigured" : "openai")
+            let openAIKey = (stored[KeychainHelper.webSearchOpenAIApiKeyKey] ?? stored[KeychainHelper.openAITranscriptionApiKeyKey] ?? "")
+            fields["r:ocr"] = (stored[KeychainHelper.visionPreprocessorBackendKey] ?? "") + "|"
+                + String(MediaRouting.ocrFollowsOpenRouter(stored: stored, openAIKey: openAIKey.trimmingCharacters(in: .whitespacesAndNewlines)))
             fields["r:image"] = String(describing: MediaRouting.imageBackend(stored: stored))
             fields["r:protocol"] = ProviderProfiles.runtimeProtocolValue(stored: stored, model: nil) ?? ""
             fields["r:extraction"] = String(describing: WebSearchBackend.selection(stored: stored))
