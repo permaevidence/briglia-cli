@@ -56,7 +56,14 @@ final class QuickSetupScript {
 
 @MainActor
 enum QuickSetupTerminalBattery {
-    final class Greetings: @unchecked Sendable { var sent: [(token: String, chatId: String, text: String)] = []; var fail: String?; var macStarts = 0; var macRefusal: String? }
+    final class Greetings: @unchecked Sendable {
+        var sent: [(token: String, chatId: String, text: String)] = []; var fail: String?; var macStarts = 0; var macRefusal: String?
+        /// Every setup-marker write the flow made, in order.
+        var markers: [[String: String?]] = []
+        var progress: String?; var complete = false
+        /// The setup reached completion and the handoff cleared the marker.
+        var finished: Bool { complete && progress == nil }
+    }
 
     static func run(tempRoot: URL) async -> (Int, Int) {
         let t = MenuSelftestContext(tempRoot: tempRoot)
@@ -88,6 +95,7 @@ enum QuickSetupTerminalBattery {
         let wf = MenuWorkflow(env: e, runner: SetupJobRunner(secrets: [:]))
         wf.now = { w.clock }
         wf.optionalItems = [.computer, .tools]
+        wf.autoComplete = false   // as the command sets it
         await wf.start()
         await wf.settle()
         return wf
@@ -99,6 +107,12 @@ enum QuickSetupTerminalBattery {
             sendGreeting: { token, chatId, text in g.sent.append((token, chatId, text)); return g.fail },
             botToken: { w.snap.telegramConfigured ? w.good["telegram"] : nil },
             startMac: { g.macStarts += 1; return g.macRefusal },
+            saveMarkers: { changes in
+                g.markers.append(changes)
+                if let p = changes[SetupWizard.progressKey] { g.progress = p }
+                if changes[SetupWizard.completeKey] != nil { g.complete = true }
+                return true
+            },
             sleep: { seconds in w.clock = w.clock.addingTimeInterval(seconds); try? await Task.sleep(nanoseconds: 2_000_000) },
             now: { w.clock })
         s.telegramWait = wait
@@ -151,7 +165,10 @@ enum QuickSetupTerminalBattery {
                     o.contains("✔ Keep awake: this Mac won't sleep while Briglia is running")
                     && o.contains("Installing media tools (ffmpeg, ImageMagick, poppler, LibreOffice, Python packages). This can take 5–15 minutes…")
                     && o.contains("✔ ffmpeg ✔ ImageMagick ✔ poppler ✔ LibreOffice ✔ Python") && FileManager.default.fileExists(atPath: w.toolMarker.path))
-            t.check("qs A: setup marked complete through the menu, then the Mac chat lease taken once", w.markedComplete && g.macStarts == 1)
+            t.check("qs A: progress marker first, completion (marker kept) before the start, marker cleared after the handoff; the page's auto-completion never fired",
+                    g.markers.count == 3 && g.markers[0] == [SetupWizard.progressKey: QuickSetupFlow.progressMarker]
+                    && g.markers[1] == [SetupWizard.completeKey: "true", SetupWizard.progressKey: QuickSetupFlow.progressMarker]
+                    && g.markers[2] == [SetupWizard.progressKey: String?.none] && g.finished && !w.markedComplete && g.macStarts == 1, "\(g.markers)")
             t.check("qs A: Bree's first Telegram message (spec text) to the paired chat",
                     g.sent.count == 1 && g.sent.first?.chatId == chat && g.sent.first?.token == good["telegram"]
                     && g.sent.first?.text == "Hi Sofia, I'm Bree, your assistant on Test Mac. Ask me anything, by text or voice message.", "\(g.sent.map(\.text))")
@@ -188,7 +205,7 @@ enum QuickSetupTerminalBattery {
             t.check("qs B: email skipped, FDA skipped with a note, tools skipped",
                     o.contains("– Email skipped") && o.contains("– Full Disk Access skipped (--yes).") && o.contains("– Media tools skipped (--no-tools).")
                     && !FileManager.default.fileExists(atPath: w.toolMarker.path) && w.settingsOpened == 0)
-            t.check("qs B: setup completes without Full Disk Access or tools (optional in quick setup)", w.markedComplete)
+            t.check("qs B: setup completes without Full Disk Access or tools (optional in quick setup)", g.finished)
             t.check("qs B: summary marks the skipped rows", o.contains("Full Disk Access ✖ · Keep awake ✔ · Media tools skipped") && o.contains("Email: not set"))
             await wf.shutdown()
         }
@@ -204,7 +221,7 @@ enum QuickSetupTerminalBattery {
                                               io: script.io, system: system(w, g)).run()
             t.check("qs C: --yes with a refused OpenRouter key → exit 1 at step 2",
                     result == .failed(1) && script.has("✖ OpenRouter refused this key.") && !script.has("Paste it again") && !script.askedWhenForbidden)
-            t.check("qs C: no provider, Telegram or completion written", !w.applied.contains { $0["provider"] != nil || $0["telegram"] != nil } && !w.markedComplete && g.sent.isEmpty)
+            t.check("qs C: no provider, Telegram or completion written", !w.applied.contains { $0["provider"] != nil || $0["telegram"] != nil } && !g.complete && g.progress == QuickSetupFlow.progressMarker && g.sent.isEmpty)
             await wf.shutdown()
         }
 
@@ -297,7 +314,7 @@ enum QuickSetupTerminalBattery {
             t.check("qs G: no /start within the wait → exit 1 with a clear message",
                     result == .failed(1) && script.has("✖ No /start reached @sofia_test_bot"), script.out)
             t.check("qs G: pairing released, Telegram not saved, setup not complete",
-                    !wf.env.pairing.held && !w.snap.telegramConfigured && !w.markedComplete && w.scanCount > 0)
+                    !wf.env.pairing.held && !w.snap.telegramConfigured && !g.complete && w.scanCount > 0)
             await wf.shutdown()
         }
 
@@ -380,6 +397,42 @@ enum QuickSetupTerminalBattery {
             await wf.shutdown()
         }
 
+        // ── N. Interrupted after Telegram (input closed at Email): not complete, resumable (Codex R1).
+        do {
+            let w = freshWorld(t)
+            let g = Greetings()
+            let wf = await workflow(t, w)
+            let script = QuickSetupScript(answers: ["Sofia"], secrets: [good["openrouter"]!, good["telegram"]!])
+            let result = await QuickSetupFlow(menu: wf, options: QuickSetupOptions(telegramChatId: chat, noTools: true), secrets: QuickSetupSecrets(),
+                                              io: script.io, system: system(w, g)).run()
+            await wf.settle()
+            t.check("qs N: input closed at Email → exit 1; name, OpenRouter and Telegram saved but setup NOT complete (no auto-completion)",
+                    result == .failed(1) && script.has("[4/5] Email") && !script.has("[5/5]") && w.snap.telegramConfigured
+                    && !w.markedComplete && !g.complete && g.progress == QuickSetupFlow.progressMarker, "\(g.markers) \(w.markedComplete)")
+            t.check("qs N: the command's guard resumes such an install; a finished one (or one the menu completed) is a no-op",
+                    !QuickSetupFlow.alreadyFinished(complete: false, progress: QuickSetupFlow.progressMarker)
+                    && !QuickSetupFlow.alreadyFinished(complete: true, progress: QuickSetupFlow.progressMarker)
+                    && QuickSetupFlow.alreadyFinished(complete: true, progress: nil)
+                    && QuickSetupFlow.alreadyFinished(complete: true, progress: "3")
+                    && !QuickSetupFlow.alreadyFinished(complete: false, progress: nil))
+            await wf.shutdown()
+        }
+
+        // ── O. The progress marker can't be saved: nothing else runs.
+        do {
+            let w = freshWorld(t)
+            let g = Greetings()
+            let wf = await workflow(t, w)
+            var sys = system(w, g)
+            sys.saveMarkers = { _ in false }
+            let script = QuickSetupScript(forbidQuestions: true)
+            let result = await QuickSetupFlow(menu: wf, options: QuickSetupOptions(name: "Dev", yes: true, telegramChatId: chat),
+                                              secrets: QuickSetupSecrets(openRouter: good["openrouter"], telegram: good["telegram"]),
+                                              io: script.io, system: sys).run()
+            t.check("qs O: progress marker not saved → exit 1 before any step", result == .failed(1) && w.applied.isEmpty && !script.has("[1/5]"))
+            await wf.shutdown()
+        }
+
         // ── M. A Briglia started meanwhile holds the chat lease: setup saved, told where it runs.
         do {
             let w = freshWorld(t)
@@ -390,7 +443,10 @@ enum QuickSetupTerminalBattery {
                                               secrets: QuickSetupSecrets(openRouter: good["openrouter"], telegram: good["telegram"]),
                                               io: script.io, system: system(w, g)).run()
             t.check("qs M: lease taken elsewhere → exit 1, no greeting, setup kept",
-                    result == .failed(1) && g.sent.isEmpty && w.markedComplete && script.has("✖ Briglia is already running in another window."))
+                    result == .failed(1) && g.sent.isEmpty && g.complete && g.progress == QuickSetupFlow.progressMarker
+                    && script.has("✖ Briglia is already running in another window."))
+            t.check("qs M: …so the next run resumes instead of saying \"already set up\"",
+                    !QuickSetupFlow.alreadyFinished(complete: g.complete, progress: g.progress))
             await wf.shutdown()
         }
     }

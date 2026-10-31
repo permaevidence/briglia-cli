@@ -12,7 +12,9 @@ HOME/XDG roots. Scenarios:
      --no-tools: no prompt, no getUpdates scan, nothing on stdin;
   3. `--yes` missing keys → exit 2 naming the variables, nothing written;
   4. a rerun after setup → "already set up", nothing changed;
-  5. `--yes` with a refused key → exit 1, no provider saved.
+  5. `--yes` with a refused key → exit 1, no provider saved;
+  6. a run interrupted at Email stays incomplete (progress marker kept) and
+     the next run resumes and finishes (Codex round 1, R1).
 
 No key ever appears in the output. Dev builds only (the seams are ignored by
 release builds).
@@ -274,6 +276,38 @@ def scenario_refusals(base):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def scenario_interrupted(base):
+    """Codex round 1 R1: an interrupted run must stay resumable."""
+    home = tempfile.mkdtemp(prefix="briglia-qsi-")
+    try:
+        SEEN["sent"].clear()
+        # name, OpenRouter key, Telegram token — then input closes at Email.
+        r = subprocess.run([ADA, "quicksetup", "--telegram-chat-id", CHAT_ID, "--no-tools"], env=make_env(base, home),
+                           input="Sofia\n" + OR_KEY + "\n" + TG + "\n", capture_output=True, text=True, timeout=180)
+        out = r.stdout + r.stderr
+        store = store_of(home) or {}
+        check("interrupted at Email: exit 1, Telegram saved, setup NOT complete, progress marker kept",
+              r.returncode == 1 and "[4/5] Email" in out and "[5/5]" not in out and "Input closed" in out
+              and store.get("telegram_chat_id") == CHAT_ID and store.get("cli_setup_complete") != "true"
+              and store.get("cli_setup_step_in_progress") == "quick:terminal",
+              out[-800:] + " " + json.dumps({k: store.get(k) for k in ("cli_setup_complete", "cli_setup_step_in_progress")}))
+        no_keys("interrupted", out)
+        # The rerun resumes (saved key and bot kept) and finishes.
+        r = subprocess.run([ADA, "quicksetup", "--yes", "--telegram-chat-id", CHAT_ID, "--no-tools"], env=make_env(base, home),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
+        out = r.stdout + r.stderr
+        store = store_of(home) or {}
+        check("rerun after the interruption resumes and finishes (no 'already set up')",
+              r.returncode == 0 and "already set up" not in out and "✔ Keeping the saved OpenRouter key." in out
+              and "✔ Keeping the Telegram bot that is already connected." in out and "✓ Done!" in out
+              and store.get("cli_setup_complete") == "true" and not store.get("cli_setup_step_in_progress")
+              and len(SEEN["sent"]) == 1, out[-1200:])
+        r = subprocess.run([ADA, "quicksetup"], env=make_env(base, home), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        check("…and a third run is the 'already set up' no-op", r.returncode == 0 and "Briglia is already set up." in r.stdout, r.stdout)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def main():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Mock)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -281,6 +315,7 @@ def main():
     try:
         scenario_interactive(base)
         scenario_yes(base)
+        scenario_interrupted(base)
         scenario_refusals(base)
     finally:
         server.shutdown()

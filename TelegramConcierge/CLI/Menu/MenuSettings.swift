@@ -70,9 +70,17 @@ enum MenuSettings {
 
     @MainActor
     static func markComplete(commit: Commit = defaultCommit) async -> Bool {
+        await saveSetupMarkers([SetupWizard.completeKey: "true", SetupWizard.progressKey: String?.none], commit: commit)
+    }
+
+    /// The setup-completion / setup-progress markers, written by the one
+    /// settings writer (the menu's completion, the terminal quick setup's
+    /// resume marker).
+    @MainActor
+    static func saveSetupMarkers(_ changes: [String: String?], commit: Commit = defaultCommit) async -> Bool {
         let reply = await SettingsClient.prepareAndCommit(origin: "menu", label: "Setup", acceptPending: true, commit: commit) {
             do {
-                try KeychainHelper.saveBatch([SetupWizard.completeKey: "true", SetupWizard.progressKey: String?.none])
+                try KeychainHelper.saveBatch(changes)
                 return ["schema": SetupAPICore.schemaVersion, "ok": true]
             } catch {
                 return SetupAPICore.errorResponse(code: "save_failed", message: "\(error)")

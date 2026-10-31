@@ -530,8 +530,13 @@ final class MenuWorkflow {
     var missingRequired: [MenuItem] { MenuItem.allCases.filter { isRequired($0) && !isDone($0) } }
 
     private var markCompleteInFlight = false
+    /// The page marks setup complete by itself as soon as the required rows
+    /// are done. The terminal quick setup turns this off and writes the
+    /// completion itself at its finish (with its resume marker), so an
+    /// interrupted run isn't "already set up" before its remaining steps.
+    var autoComplete = true
     private func markCompleteIfReady() {
-        guard !snapshot.setupComplete, toolchain != nil, missingRequired.isEmpty, !markCompleteInFlight else { return }
+        guard autoComplete, !snapshot.setupComplete, toolchain != nil, missingRequired.isEmpty, !markCompleteInFlight else { return }
         markCompleteInFlight = true
         let t = Task { @MainActor [weak self] in
             guard let self else { return }

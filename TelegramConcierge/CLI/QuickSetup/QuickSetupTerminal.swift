@@ -67,7 +67,8 @@ struct QuickSetup: AsyncParsableCommand {
             print("✖ \(problem)")
             throw ExitCode(2)
         }
-        if SetupWizard.setupComplete() {
+        if QuickSetupFlow.alreadyFinished(complete: SetupWizard.setupComplete(),
+                                          progress: KeychainHelper.load(key: SetupWizard.progressKey)) {
             print("Briglia is already set up. To change settings, type: briglia menu (browser) or briglia setup (terminal).")
             return
         }
@@ -128,6 +129,7 @@ struct QuickSetup: AsyncParsableCommand {
         env.quick.reacquireLease = { true }
         let menu = MenuWorkflow(env: env, runner: runner)
         menu.optionalItems = [.computer, .tools]
+        menu.autoComplete = false   // the flow writes completion at its finish
         await menu.start()
 
         let started = QuickSetupMacStart()
@@ -322,6 +324,9 @@ final class QuickSetupFlow {
         /// macOS: takes the instance lease the chat runs under; nil = held,
         /// else why not.
         var startMac: () async -> String?
+        /// Writes the setup-completion / progress markers through the one
+        /// settings writer; true = saved.
+        var saveMarkers: ([String: String?]) async -> Bool
         var sleep: (Double) async -> Void
         var now: () -> Date
         /// How long the Telegram step waits for /start.
@@ -335,6 +340,7 @@ final class QuickSetupFlow {
                    sendGreeting: { await QuickSetupFlow.sendTelegram(token: $0, chatId: $1, text: $2) },
                    botToken: { KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey) },
                    startMac: { "not available" },
+                   saveMarkers: { await MenuSettings.saveSetupMarkers($0) },
                    sleep: { try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) },
                    now: { Date() })
         }
@@ -391,8 +397,25 @@ final class QuickSetupFlow {
             + ". Keys go in environment variables, never on the command line."
     }
 
+    /// The setup-progress value of a quick setup that hasn't finished (its
+    /// handoff included): the command resumes instead of "already set up".
+    nonisolated static let progressMarker = "quick:terminal"
+
+    /// A finished installation (complete, no unfinished quick setup): the
+    /// command is a no-op. Complete + this marker = a quick setup interrupted
+    /// after completion was written (e.g. a failed start): resume it.
+    nonisolated static func alreadyFinished(complete: Bool, progress: String?) -> Bool {
+        complete && progress != progressMarker
+    }
+
     func run() async -> Result {
         header()
+        // Durable "a quick setup is in progress" before any step: until the
+        // handoff succeeds, a rerun resumes rather than saying "set up".
+        guard await system.saveMarkers([SetupWizard.progressKey: Self.progressMarker]) else {
+            io.say("✖ Couldn't save the quick setup's progress (see briglia doctor). Nothing else was changed.")
+            return .failed(1)
+        }
         guard await stepName() else { return .failed(1) }
         guard await stepOpenRouter() else { return .failed(1) }
         guard await stepTelegram() else { return .failed(1) }
@@ -783,14 +806,18 @@ final class QuickSetupFlow {
     // MARK: Finish
 
     func finish() async -> Result {
-        // Setup is complete once the required rows are done: mark it now,
-        // through the menu's own completion write.
+        // Every step ran: mark setup complete (Briglia needs it to start),
+        // keeping the progress marker until the handoff below succeeded.
         _ = await toolsStatus()
         _ = await act(["action": "recheck"])
         await menu.settle()
-        guard menu.snapshot.setupComplete else {
-            let missing = menu.missingRequired.map { menu.stepTitle($0) }.joined(separator: ", ")
-            io.say("✖ Setup couldn't be completed" + (missing.isEmpty ? " (the completion couldn't be saved)." : ": \(missing) still missing.") + " Run briglia quicksetup again.")
+        let missing = menu.missingRequired.map { menu.stepTitle($0) }.joined(separator: ", ")
+        guard missing.isEmpty else {
+            io.say("✖ Setup couldn't be completed: \(missing) still missing. Run briglia quicksetup again.")
+            return .failed(1)
+        }
+        guard await system.saveMarkers([SetupWizard.completeKey: "true", SetupWizard.progressKey: Self.progressMarker]) else {
+            io.say("✖ Setup couldn't be marked complete (see briglia doctor). Run briglia quicksetup again.")
             return .failed(1)
         }
         io.say("\nStarting Briglia…")
@@ -801,7 +828,7 @@ final class QuickSetupFlow {
             while menu.closing != "start" {
                 if let startup = status["startup"] as? [String: Any] {
                     if startup["state"] as? String == "failed" {
-                        io.say("✖ \(startup["message"] as? String ?? "Briglia didn't start.")")
+                        io.say("✖ \(startup["message"] as? String ?? "Briglia didn't start.") Setup is saved; run briglia quicksetup again to retry the start.")
                         return .failed(1)
                     }
                     if let step = startup["step"] as? String, !step.isEmpty, step != lastStep { io.say("  \(step)"); lastStep = step }
@@ -818,6 +845,10 @@ final class QuickSetupFlow {
                 io.say("✖ \(refusal) Setup is saved; talk to Briglia there.")
                 return .failed(1)
             }
+        }
+        // Handed over: the quick setup is finished; a rerun is now a no-op.
+        if !(await system.saveMarkers([SetupWizard.progressKey: nil])) {
+            io.say("⚠ Couldn't clear the quick setup's progress marker; briglia quicksetup may offer to run again.")
         }
         await greet()
         io.say(isLinux ? "Briglia is running in the background."

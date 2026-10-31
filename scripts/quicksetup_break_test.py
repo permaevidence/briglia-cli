@@ -8,7 +8,12 @@ and scripts/quicksetup_terminal_test.py pass), then apply one mutation at a
 time, rebuild incrementally and require the NAMED check to be reported as
 failed (✖), not just a non-zero exit. The repository is never modified.
 
-Usage: python3 scripts/quicksetup_break_test.py [--keep-build DIR] [--only Q1,Q2] [--verbose]
+Usage: python3 scripts/quicksetup_break_test.py [--keep-build DIR] [--only Q1,Q2] [--verbose] [--in-place]
+
+--in-place (low disk): mutate the repository's own files and rebuild its
+.build incrementally instead of a scratch copy; each file is restored in a
+`finally`, and the run refuses to start unless the two mutated files are
+clean in git.
 """
 import argparse
 import os
@@ -61,7 +66,13 @@ BREAKS = [
      '        guard ["auto_pinned", "user_host"].contains(host["host_state"] as? String ?? ""),',
      '        guard true,'),
     ("Q15 a set-up install is set up again", "e2e", "rerun: already set up", T,
-     '        if SetupWizard.setupComplete() {', '        if false {'),
+     '        if QuickSetupFlow.alreadyFinished(complete: SetupWizard.setupComplete(),', '        if false && QuickSetupFlow.alreadyFinished(complete: SetupWizard.setupComplete(),'),
+    ("Q16 the command lets the page auto-complete setup early", "e2e", "interrupted at Email", T,
+     '        menu.autoComplete = false   // the flow writes completion at its finish', ''),
+    ("Q17 the command ignores the resume marker", "selftest", "qs N: the command's guard resumes", T,
+     '        complete && progress != progressMarker', '        complete'),
+    ("Q18 completion clears the resume marker before the handoff", "selftest", "qs M: …so the next run resumes", T,
+     '[SetupWizard.completeKey: "true", SetupWizard.progressKey: Self.progressMarker]', '[SetupWizard.completeKey: "true", SetupWizard.progressKey: nil]'),
 ]
 
 
@@ -113,15 +124,24 @@ def main():
     ap.add_argument("--keep-build")
     ap.add_argument("--only")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--in-place", action="store_true")
     args = ap.parse_args()
     work = Path(tempfile.mkdtemp(prefix="bm-qsbreak-", dir="/tmp" if os.path.isdir("/tmp") else None))
-    tree = work / "tree"
-    tree.mkdir()
-    for name in ("Package.swift", "Package.resolved"):
-        shutil.copy2(ROOT / name, tree / name)
-    shutil.copytree(ROOT / "TelegramConcierge", tree / "TelegramConcierge")
-    shutil.copytree(ROOT / "scripts", tree / "scripts")
-    scratch = Path(args.keep_build) if args.keep_build else work / "build"
+    if args.in_place:
+        dirty = run(["git", "status", "--porcelain", "--", T, M], ROOT).stdout.strip()
+        if dirty:
+            print("refusing --in-place: uncommitted changes in " + dirty)
+            return 2
+        tree = ROOT
+        scratch = ROOT / ".build"
+    else:
+        tree = work / "tree"
+        tree.mkdir()
+        for name in ("Package.swift", "Package.resolved"):
+            shutil.copy2(ROOT / name, tree / name)
+        shutil.copytree(ROOT / "TelegramConcierge", tree / "TelegramConcierge")
+        shutil.copytree(ROOT / "scripts", tree / "scripts")
+        scratch = Path(args.keep_build) if args.keep_build else work / "build"
     failures = executed = 0
     try:
         binary = build(tree, scratch)
@@ -151,6 +171,8 @@ def main():
                 (tree / rel).write_text(original)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        if args.in_place:
+            build(tree, scratch)   # leave the restored tree's binary in .build
     print(f"\n{executed - failures}/{executed} deliberate breaks caught")
     return 1 if failures else 0
 
