@@ -195,5 +195,6 @@ extension LiveMenuHarness {
         check("daemon: during a lifecycle operation a settings writer is refused", refusedQueued == nil)
         manager.endSettingsLifecycle(token, reopen: true)
         check("daemon: admission reopens after the operation", gate.admissionClosedReason == nil)
+        await daemonStampSection(manager)
     }
 }

@@ -142,6 +142,8 @@ final class LiveMenuHarness {
         if section("agent-edit") { await agentEditSection() }
         if section("forward") { await forwardSection(); leaseLabelSection() }
         if section("misc") { websearchSection(); orderSection() }
+        if section("extra") { await extraSection(); await pairingSection() }
+        if section("startup") { await startupSection() }
         if section("daemon") { await daemonSection() }
     }
 

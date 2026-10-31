@@ -297,7 +297,9 @@ actor ToolExecutor {
     func install(webConfig value: WebServiceConfig) async {
         guard webConfig.install(value) else { return }
         let openRouterKey = value.openRouterKey
-        Task { await archiveService.configure(apiKey: openRouterKey) }
+        // The key only (live menu plan B.7): an install may run mid-turn; the
+        // archive's file sanitation belongs to its own configure().
+        Task { await archiveService.updateAPIKey(openRouterKey) }
     }
 
     /// Inject the parent's OpenRouterService so the Agent tool can drive a subagent loop.
