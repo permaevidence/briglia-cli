@@ -168,9 +168,13 @@ struct QuickSetup: AsyncParsableCommand {
                 print("(dev build: BRIGLIA_DEV_QUICKSETUP_NO_START=1, the chat is not started)")
                 return
             }
+            // The settings window is closed: `briglia menu` now reaches the
+            // running Briglia's own menu.
+            menuLock.release()
             // The quick setup becomes the running assistant (as the menu's
             // Start): its member lease changes role, and from here every
-            // self-restart (/upgrade, /restart) re-executes `briglia chat`.
+            // self-restart (/upgrade, /restart) re-executes `briglia chat`
+            // once the wip/restart-argv fix is merged (it hooks promoteToAssistant).
             if let refusal = MemberEntry.promoteToAssistant(kind: "chat") {
                 held.release(); print("✖ \(refusal)"); throw ExitCode(1)
             }

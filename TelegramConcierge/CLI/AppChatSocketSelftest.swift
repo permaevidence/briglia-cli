@@ -186,8 +186,9 @@ struct AppChatSocketSelftest: AsyncParsableCommand {
             check("settings: old browser cookie revoked", (revoked as? HTTPURLResponse)?.statusCode == 404)
             http.invalidateAndCancel()
         } else { check("settings: socket launches browser settings", false) }
-        // The actual command must delegate to the existing owner, rather
-        // than opening a second standalone settings process.
+        // `briglia quicksetup` (terminal, 0.2.67) on a set-up install neither
+        // opens a second settings process nor touches the running owner: it
+        // points to `briglia menu` and exits 0.
         try KeychainHelper.save(key: SetupWizard.completeKey, value: "true")
         let ownerLease: InstanceLease
         switch InstanceLease.acquire(label: "settings owner fixture") {
@@ -209,7 +210,8 @@ struct AppChatSocketSelftest: AsyncParsableCommand {
             return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
         }.value
         ownerLease.release()
-        check("settings: real CLI delegates to running owner", launched.0 == 0 && launched.1.contains("Settings are served by the running Briglia"))
+        check("settings: quicksetup on a set-up install points to briglia menu, opens nothing",
+              launched.0 == 0 && launched.1.contains("Briglia is already set up.") && launched.1.contains("briglia menu"), launched.1)
         await BrowserSettingsHost.stopShared()
         check("settings: opening page does not modify conversation", await MainActor.run { manager.messages.count == historyBeforeSettings })
 
