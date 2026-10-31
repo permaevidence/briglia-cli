@@ -74,15 +74,14 @@ enum SettingsAgentEdit {
         }
         let prepared: PreparedChange
         do { prepared = try change(d, label: label) } catch { return .refused("\(error)") }
-        let result: SettingsCommitResult
-        if let owner = immediateOwner {
-            result = await owner(prepared)
-        } else {
+        let commit: @MainActor (PreparedChange) async -> SettingsCommitResult = immediateOwner ?? { change in
             let host = OfflineAgentEditHost()
             let writer = SettingsWriter(host: host)
-            result = await writer.commit(prepared, policy: .immediate)
+            let result = await writer.commit(change, policy: .immediate)
             withExtendedLifetime(host) {}
+            return result
         }
+        let result = await commit(prepared)
         switch result.state {
         case .applied: return .applied(changed: d.keys)
         default:
