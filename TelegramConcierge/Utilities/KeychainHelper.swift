@@ -225,6 +225,7 @@ enum KeychainHelper {
         let before = store
         try change(&store)
         guard store != before else { return .unchanged }
+        try guardWrite(before: before, after: store)
         try writeLocked(store)
         notifyObserver(before: before, after: store)
         return .wrote
@@ -328,6 +329,7 @@ enum KeychainHelper {
         // 0600 is applied to the temp file BEFORE the rename, so the store
         // never exists with a wider mode (PrivateStorage). The stamp is
         // taken still under flock, so it is ours.
+        try guardWrite(before: before, after: store)
         try writeLocked(store)
         wrote = true
         providerChanged = before[emailCalendarProviderKey] != store[emailCalendarProviderKey]
@@ -341,6 +343,20 @@ enum KeychainHelper {
     /// while both store locks are still held, so it runs in write order and
     /// before the writer returns. Registered only by the settings owner.
     nonisolated(unsafe) static var writeObserver: ((Set<String>, [String: String]) -> Void)?
+
+    /// In-process pre-write guard (the superseding guard, Codex R3-2):
+    /// called inside both store locks right BEFORE a write with the keys
+    /// whose value will change and the store as it will be; throwing
+    /// refuses the write (nothing is written).
+    nonisolated(unsafe) static var preWriteGuard: ((Set<String>, [String: String]) throws -> Void)?
+
+    fileprivate static func guardWrite(before: [String: String], after: [String: String]) throws {
+        guard let guardHook = preWriteGuard else { return }
+        var changed = Set<String>()
+        for (k, v) in after where before[k] != v { changed.insert(k) }
+        for k in before.keys where after[k] == nil { changed.insert(k) }
+        if !changed.isEmpty { try guardHook(changed, after) }
+    }
 
     private static func notifyObserver(before: [String: String], after: [String: String]) {
         guard let observer = writeObserver else { return }
@@ -369,6 +385,7 @@ enum KeychainHelper {
             for (k, v) in change { if let v { next[k] = v } else { next.removeValue(forKey: k) } }
             guard next != store else { return }
             let before = store
+            try KeychainHelper.guardWrite(before: before, after: next)
             do {
                 try KeychainHelper.writeLockedPhased(next)
             } catch let replaced as PrivateStorage.ReplacedButNotDurable {

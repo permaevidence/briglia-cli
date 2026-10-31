@@ -241,7 +241,8 @@ final class SettingsWriter {
         // A failed invalidation is retried first; never apply on top of it
         // (nor a change whose invalidation is only recorded as a tombstone).
         do { try SettingsSupersede.flushUnflushedInvalidations() } catch { return nil }
-        if let staged = peek.slots[category]?.staged, SettingsSupersede.tombstonedIds().contains(staged.change.id) { return nil }
+        guard let tombstoned = try? SettingsSupersede.readTombstonesStrict() else { return nil }
+        if let staged = peek.slots[category]?.staged, tombstoned.contains(staged.change.id) { return nil }
         guard await cancellable(token, { await host.beginRouteBarrier() }) == true else { return nil }
         defer { host.endRouteBarrier() }
         // Claim (step 3): only now, with the barrier held.
@@ -728,29 +729,59 @@ enum SettingsSupersede {
     nonisolated(unsafe) static var onDropForTesting: ((String) -> Void)?
 
     static func install() {
+        KeychainHelper.preWriteGuard = { keys, after in try guardSecretsWrite(keys, after: after) }
         KeychainHelper.writeObserver = { keys, after in secretsChanged(keys, after: after) }
     }
 
-    static func uninstall() { KeychainHelper.writeObserver = nil }
+    static func uninstall() { KeychainHelper.writeObserver = nil; KeychainHelper.preWriteGuard = nil }
 
     /// A write of a key in a staged change's preconditions or write set
-    /// drops it — by the EVENT, so A→B→A supersedes too. A change prepared
-    /// from the whole store is also dropped when the store's route state
-    /// (route values, credential presence) no longer matches its basis.
-    static func secretsChanged(_ keys: Set<String>, after: [String: String]) {
-        guard !maintenanceWrite else { return }
+    /// invalidates it — by the EVENT, so A→B→A supersedes too. A change
+    /// prepared from the whole store is also invalidated when the store's
+    /// route state (route values, credential presence) or, for a
+    /// transaction basis, its values no longer match.
+    static func invalidation(_ keys: Set<String>, after: [String: String]) -> ((PreparedChange) -> Bool)? {
         let relevant = keys.filter { !$0.hasPrefix(SettingsWriter.attemptMarkerPrefix) }
-        guard !relevant.isEmpty else { return }
-        var digest: String?
-        dropStaged { change in
+        guard !relevant.isEmpty else { return nil }
+        let routeAfter = SettingsKeyRoles.routeDigest(after)
+        let storeAfter = SettingsDigest.ofStore(after)
+        return { change in
             if !relevant.isDisjoint(with: Set(change.expected.keys).union(change.touchedKeys)) { return true }
-            if let basis = change.storeDigest, SettingsDigest.ofStore(after) != basis { return true }
-            if let basis = change.routeDigest {
-                if digest == nil { digest = SettingsKeyRoles.routeDigest(after) }
-                return digest != basis
-            }
+            if let basis = change.storeDigest, storeAfter != basis { return true }
+            if let basis = change.routeDigest { return routeAfter != basis }
             return false
         }
+    }
+
+    struct InvalidationNotRecorded: Error, CustomStringConvertible {
+        var description: String { "this would supersede a waiting settings change, and that can't be recorded on disk right now (settings-pending file and settings-invalidated file both unwritable); nothing was saved" }
+    }
+
+    /// BEFORE a secrets write (inside the store locks, Codex R3-2): every
+    /// staged change the write invalidates is dropped durably first; when
+    /// the pending file can't be written its id goes to the tombstone file;
+    /// when neither can be written the write is refused — so an invalidation
+    /// is never only in memory. A damaged pending file (staged state
+    /// unknown) refuses too.
+    static func guardSecretsWrite(_ keys: Set<String>, after: [String: String]) throws {
+        guard !maintenanceWrite, let invalidated = invalidation(keys, after: after),
+              FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) else { return }
+        let doc: SettingsPendingStore.Document
+        do { doc = try SettingsPendingStore.read() } catch { throw InvalidationNotRecorded() }
+        let hit = doc.slots.values.compactMap { $0.staged?.change }.filter(invalidated).map(\.id)
+        guard !hit.isEmpty else { return }
+        do { try applyDrops(invalidated); return } catch {
+            print("[Settings] could not record a superseded waiting change: \(error)")
+        }
+        do { try writeTombstonesStrict(readTombstonesStrict().union(hit)) } catch { throw InvalidationNotRecorded() }
+        unflushedLock.lock(); unflushed.append(invalidated); unflushedLock.unlock()
+    }
+
+    /// After a write: anything the guard did not already settle (the guard
+    /// is the authority; this is the same rule, best effort).
+    static func secretsChanged(_ keys: Set<String>, after: [String: String]) {
+        guard !maintenanceWrite, let invalidated = invalidation(keys, after: after) else { return }
+        dropStaged(invalidated)
     }
 
     /// A user-requested login, logout or scope change of `store`.
@@ -770,24 +801,33 @@ enum SettingsSupersede {
     // (A→B→A) can make it look valid again. The ids of the staged changes
     // they hit are also kept in `dataRoot/settings-invalidated.json` (a
     // different folder than the pending file), so an owner that exits and
-    // a new one that starts keep honouring them; when even that file can't
-    // be written, the in-memory record is all there is (crash-only limit).
+    // a new one that starts keep honouring them. A write whose invalidation
+    // can be recorded in neither file is refused before it happens
+    // (`guardSecretsWrite`), so no invalidation lives only in memory.
     private static let unflushedLock = NSLock()
     nonisolated(unsafe) private static var unflushed: [(PreparedChange) -> Bool] = []
 
     static var tombstoneURL: URL { StoragePaths.dataRoot.appendingPathComponent("settings-invalidated.json") }
 
-    static func tombstonedIds() -> Set<String> {
-        guard let data = try? Data(contentsOf: tombstoneURL),
-              let ids = try? JSONDecoder().decode([String].self, from: data) else { return [] }
-        return Set(ids)
+    /// Absent = no invalidations; an existing file that can't be read or
+    /// decoded is UNKNOWN and throws (Codex R3-1): never "empty".
+    static func readTombstonesStrict() throws -> Set<String> {
+        guard FileManager.default.fileExists(atPath: tombstoneURL.path) else { return [] }
+        let data = try Data(contentsOf: tombstoneURL)
+        return Set(try JSONDecoder().decode([String].self, from: data))
     }
 
-    private static func writeTombstones(_ ids: Set<String>) {
-        if ids.isEmpty { try? FileManager.default.removeItem(at: tombstoneURL); return }
-        guard let data = try? JSONEncoder().encode(ids.sorted()) else { return }
-        try? PrivateStorage.ensureDirectory(StoragePaths.dataRoot)
-        _ = try? PrivateStorage.writeAtomically(data, to: tombstoneURL, mode: 0o600)
+    /// Best-effort view for tests and /status (unknown → empty).
+    static func tombstonedIds() -> Set<String> { (try? readTombstonesStrict()) ?? [] }
+
+    private static func writeTombstonesStrict(_ ids: Set<String>) throws {
+        if ids.isEmpty {
+            if FileManager.default.fileExists(atPath: tombstoneURL.path) { try FileManager.default.removeItem(at: tombstoneURL) }
+            return
+        }
+        let data = try JSONEncoder().encode(ids.sorted())
+        try PrivateStorage.ensureDirectory(StoragePaths.dataRoot)
+        _ = try PrivateStorage.writeAtomically(data, to: tombstoneURL, mode: 0o600)
     }
 
     static var hasUnflushedInvalidations: Bool {
@@ -804,15 +844,15 @@ enum SettingsSupersede {
         unflushedLock.lock()
         let pending = unflushed
         unflushedLock.unlock()
-        let ids = tombstonedIds()
+        let ids = try readTombstonesStrict()
         guard !pending.isEmpty || !ids.isEmpty || FileManager.default.fileExists(atPath: tombstoneURL.path) else { return }
         if FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) {
             try applyDrops { change in ids.contains(change.id) || pending.contains { $0(change) } }
         }
+        try writeTombstonesStrict([])
         unflushedLock.lock()
         unflushed.removeFirst(min(pending.count, unflushed.count))
         unflushedLock.unlock()
-        writeTombstones([])
     }
 
     /// Selftest seam: a new owner process (the in-memory record is gone).
@@ -834,7 +874,7 @@ enum SettingsSupersede {
             // changes were invalidated, outside the pending file.
             if let doc = try? SettingsPendingStore.read() {
                 let hit = doc.slots.values.compactMap { $0.staged?.change }.filter(invalidated).map(\.id)
-                if !hit.isEmpty { writeTombstones(tombstonedIds().union(hit)) }
+                if !hit.isEmpty, let known = try? readTombstonesStrict() { try? writeTombstonesStrict(known.union(hit)) }
             }
         }
     }

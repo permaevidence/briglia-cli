@@ -193,6 +193,10 @@ extension ConversationManager {
                 let handled = await Self.$settingsCommandToken.withValue(settingsToken) {
                     await Self.$settingsCommandInline.withValue(true) { await handleControlCommandIfNeeded(text) }
                 }
+                // Same note as the Telegram path (Codex R3 note).
+                if SettingsSupersede.hasUnflushedInvalidations {
+                    try? await sendText("⚠️ Saved. " + SettingsSupersede.unflushedMessage)
+                }
                 settingsWriter.gate.release(settingsToken)
                 kickSettingsApply()
                 return handled
