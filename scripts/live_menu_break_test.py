@@ -76,7 +76,7 @@ BREAKS = [
      "            if w.lifecycle { kept.append(w) } else { w.resume.resume(returning: nil) }",
      "            kept.append(w)"),
     ("L13 a Telegram settings command commits inside counted ingress", "selftest",
-     "daemon: a Telegram settings command returns at once", S + "ConversationManager+ControlCommands.swift",
+     "daemon: the command waits for the token instead of writing", S + "ConversationManager+ControlCommands.swift",
      "        if Self.settingsCommandTokens.contains(token), !Self.settingsCommandInline {",
      "        if Self.settingsCommandTokens.contains(token), !Self.settingsCommandInline, Bool(\"false\") == true {"),
     ("L14 no handover when Briglia starts", "headless",
@@ -121,7 +121,23 @@ def build(tree, scratch):
     return Path(out) / "briglia"
 
 
+class Timed:
+    """A test killed at its deadline: still judged by the ✖ lines it printed."""
+    def __init__(self, exc):
+        out = exc.stdout or ""
+        self.stdout = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+        self.stderr = "timed out"
+        self.returncode = -9
+
+
 def test(kind, binary, tree, workdir):
+    try:
+        return _test(kind, binary, tree, workdir)
+    except subprocess.TimeoutExpired as exc:
+        return Timed(exc)
+
+
+def _test(kind, binary, tree, workdir):
     env = {k: v for k, v in os.environ.items() if not k.startswith("BRIGLIA_")}
     # Both tests make their own scratch roots; never the live install.
     env["XDG_CONFIG_HOME"] = str(Path(workdir) / "outer-config")

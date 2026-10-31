@@ -118,8 +118,10 @@ extension LiveMenuHarness {
         let waiter = Task { @MainActor in waiterGot = .some(await gate.acquire()) }
         await Task.yield(); await Task.yield()
         gate.closeAdmission(reason: "wipe")
-        await waiter.value
+        var polls = 0
+        while waiterGot == nil && polls < 200 { try? await Task.sleep(nanoseconds: 10_000_000); polls += 1 }
         check("lifecycle: a queued writer is settled with a refusal", waiterGot == .some(nil))
+        if waiterGot == nil { gate.release(holder); _ = await waiter.value; return }
         check("lifecycle: the holder's write-free wait is cancelled", cancelled)
         let refused = await gate.acquire()
         check("lifecycle: a new writer is refused at once while admission is closed", refused == nil)
