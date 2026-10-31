@@ -136,9 +136,20 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
             // operation (Codex live-menu R1-5): it may already have written,
             // and its handler writes directly. The lifecycle waits for it
             // (bodies are bounded: a reply, a reload, at most a host listing).
+            // A failed invalidation blocks direct command writes too (R2-2).
+            do { try SettingsSupersede.flushUnflushedInvalidations() } catch {
+                writer.gate.release(token)
+                try? await self.sendText("⚠️ " + SettingsSupersede.unflushedMessage)
+                return
+            }
             writer.gate.enterDurablePhase(token)
             await Self.$settingsCommandToken.withValue(token) { await body() }
             writer.gate.release(token)
+            // A command whose own write could not cancel a waiting change on
+            // disk says so (the write itself is saved).
+            if SettingsSupersede.hasUnflushedInvalidations {
+                try? await self.sendText("⚠️ Saved. " + SettingsSupersede.unflushedMessage)
+            }
             self.kickSettingsApply()
         }
     }

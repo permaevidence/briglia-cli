@@ -51,19 +51,29 @@ final class SettingsWriter {
     private var outcomes: [(id: String, result: SettingsCommitResult)] = []
 
     func lookup(_ clientRequestId: String) -> SettingsCommitResult? {
-        guard let cached = outcomes.last(where: { $0.id == clientRequestId })?.result else { return nil }
+        guard let index = outcomes.lastIndex(where: { $0.id == clientRequestId }) else { return nil }
+        let cached = outcomes[index].result
+        guard cached.state == .pending else { return cached }
         // A remembered "pending" answer is superseded by the staged change's
-        // terminal result once it was applied, dropped or cancelled.
-        if cached.state == .pending, let doc = try? SettingsPendingStore.read(),
-           let r = doc.lastResults.last(where: { $0.clientRequestId == clientRequestId }) {
+        // terminal result once it was applied, dropped or cancelled; it is
+        // only an answer while a slot still holds that change.
+        let doc = (try? SettingsPendingStore.read()) ?? .init()
+        if let r = doc.lastResults.last(where: { $0.clientRequestId == clientRequestId }) {
+            let terminal: SettingsCommitResult
             switch r.state {
-            case "applied", "persisted": return SettingsCommitResult(state: .applied, message: r.message)
-            case "partial": return SettingsCommitResult(state: .partial, message: r.message)
-            case "uncertain": return SettingsCommitResult(state: .uncertain, message: r.message)
-            default: return SettingsCommitResult(state: .refused, message: r.message ?? r.state)
+            case "applied", "persisted": terminal = SettingsCommitResult(state: .applied, message: r.message)
+            case "partial": terminal = SettingsCommitResult(state: .partial, message: r.message)
+            case "uncertain": terminal = SettingsCommitResult(state: .uncertain, message: r.message)
+            default: terminal = SettingsCommitResult(state: .refused, message: r.message ?? r.state)
             }
+            outcomes[index].result = terminal
+            return terminal
         }
-        return cached
+        if doc.slots.values.contains(where: { $0.staged?.change.id == clientRequestId || $0.active?.change.id == clientRequestId }) {
+            return cached
+        }
+        outcomes.remove(at: index)
+        return nil
     }
 
     private func remember(_ id: String, _ result: SettingsCommitResult) {
@@ -90,14 +100,7 @@ final class SettingsWriter {
             remember(change.id, r); return r
         }
         defer { gate.release(token); afterRelease() }
-        var r = await commitHolding(token, change, policy: policy, stillValid: stillValid)
-        if r.state == .applied, SettingsSupersede.hasUnflushedInvalidations {
-            // This write is saved and visible; the waiting change it
-            // superseded could not be marked on disk (R1-4).
-            let note = "Saved. " + SettingsSupersede.unflushedMessage
-            r.message = note
-            if r.reply != nil { r.reply?["note"] = note }
-        }
+        let r = await commitHolding(token, change, policy: policy, stillValid: stillValid)
         remember(change.id, r)
         return r
     }
@@ -106,6 +109,19 @@ final class SettingsWriter {
     /// lifecycle operation's own writes, B.4b step 5).
     func commitHolding(_ token: SettingsCommitGate.Token, _ change: PreparedChange, policy: Policy,
                        stillValid: (@Sendable () throws -> Void)? = nil) async -> SettingsCommitResult {
+        var r = await commitHoldingCore(token, change, policy: policy, stillValid: stillValid)
+        if r.state == .applied, SettingsSupersede.hasUnflushedInvalidations {
+            // This write is saved and visible; the waiting change it
+            // superseded could not be marked on disk (R1-4, R2-2).
+            let note = "Saved. " + SettingsSupersede.unflushedMessage
+            r.message = note
+            if r.reply != nil { r.reply?["note"] = note }
+        }
+        return r
+    }
+
+    private func commitHoldingCore(_ token: SettingsCommitGate.Token, _ change: PreparedChange, policy: Policy,
+                                   stillValid: (@Sendable () throws -> Void)? = nil) async -> SettingsCommitResult {
         guard change.subscription == nil || change.identity == nil else {
             return .refused("one settings change cannot combine an inbox change with a ChatGPT login change")
         }
@@ -222,8 +238,10 @@ final class SettingsWriter {
         guard let token = await gate.acquire() else { return nil }
         defer { gate.release(token) }
         guard let host else { return nil }
-        // A failed invalidation is retried first; never apply on top of it.
+        // A failed invalidation is retried first; never apply on top of it
+        // (nor a change whose invalidation is only recorded as a tombstone).
         do { try SettingsSupersede.flushUnflushedInvalidations() } catch { return nil }
+        if let staged = peek.slots[category]?.staged, SettingsSupersede.tombstonedIds().contains(staged.change.id) { return nil }
         guard await cancellable(token, { await host.beginRouteBarrier() }) == true else { return nil }
         defer { host.endRouteBarrier() }
         // Claim (step 3): only now, with the barrier held.
@@ -358,15 +376,7 @@ final class SettingsWriter {
         // Step 6: subscription locks (sharing lock, then auth stores in the
         // fixed own → shared order), all outside secrets.lock.
         let stores = Self.storesToLock(change)
-        var shareLock: ProfileFileLock?
-        if !stores.isEmpty && CoordinationMode.multi {
-            do { shareLock = try await Task.detached { try ChatGPTShare.takeLock() }.value } catch {
-                ticket?.abort()
-                var r = SettingsCommitResult.refused(ChatGPTShare.busyMessage); r.code = "busy"; r.preDecision = true
-                return .finished(r, routeChanged: false, wrote: false)
-            }
-        }
-        defer { shareLock?.release() }
+        let needsShare = !stores.isEmpty && CoordinationMode.multi
         let section: SectionOutcome
         let reached = DecisionReached()
         do {
@@ -376,7 +386,11 @@ final class SettingsWriter {
             // never reaches this child (Codex R1-5).
             let ticketBox = TicketBox(ticket)
             let locked = Task { @MainActor () throws -> SectionOutcome in
-              try await Self.withAuthLocks(stores) { () throws -> SectionOutcome in
+              // The sharing lock (multi mode) is taken here too, by
+              // non-blocking attempts between cancellable sleeps (Codex R2-4).
+              let shareLock = needsShare ? try await Self.takeShareLockCancellable() : nil
+              defer { shareLock?.release() }
+              return try await Self.withAuthLocks(stores) { () throws -> SectionOutcome in
                 let ticket = ticketBox.ticket
                 reached.value = true
                 if Task.isCancelled { return .refused(gate.admissionClosedReason ?? "cancelled", code: "admission") }
@@ -403,6 +417,10 @@ final class SettingsWriter {
             }
             gate.setCancelHandler(token) { locked.cancel() }
             section = try await locked.value
+        } catch is ShareLockBusy {
+            ticket?.abort()
+            var r = SettingsCommitResult.refused(ChatGPTShare.busyMessage); r.code = "busy"; r.preDecision = true
+            return .finished(r, routeChanged: false, wrote: false)
         } catch {
             ticket?.abort()
             var r = SettingsCommitResult.refused(error is CancellationError
@@ -468,6 +486,22 @@ final class SettingsWriter {
             if a == own { return b != own }
             if b == own { return false }
             return a < b
+        }
+    }
+
+    struct ShareLockBusy: Error {}
+
+    /// `ChatGPTShare.takeLock` polls synchronously; this takes the same lock
+    /// with non-blocking attempts and cancellable sleeps, within the same
+    /// overall wait.
+    nonisolated static func takeShareLockCancellable() async throws -> ProfileFileLock? {
+        let deadline = ProcessInfo.processInfo.systemUptime + ChatGPTShare.waitSeconds
+        while true {
+            try Task.checkCancellation()
+            do { return try ChatGPTShare.takeLock(wait: 0) } catch is ChatGPTShare.Busy {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw ShareLockBusy() }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
         }
     }
 
@@ -729,17 +763,38 @@ enum SettingsSupersede {
         }
     }
 
-    // Invalidations that could not be persisted (Codex live-menu R1-4).
-    // Until they are, every commit and every pending apply of this process
-    // first retries them and refuses when that still fails: a stale staged
-    // change is never applied and no later write (A→B→A) can make it look
-    // valid again.
+    // Invalidations that could not be persisted (Codex live-menu R1-4,
+    // R2-2). Until they are, every commit, every Telegram settings command
+    // and every pending apply first retries them and refuses when that still
+    // fails: a stale staged change is never applied and no later write
+    // (A→B→A) can make it look valid again. The ids of the staged changes
+    // they hit are also kept in `dataRoot/settings-invalidated.json` (a
+    // different folder than the pending file), so an owner that exits and
+    // a new one that starts keep honouring them; when even that file can't
+    // be written, the in-memory record is all there is (crash-only limit).
     private static let unflushedLock = NSLock()
     nonisolated(unsafe) private static var unflushed: [(PreparedChange) -> Bool] = []
 
+    static var tombstoneURL: URL { StoragePaths.dataRoot.appendingPathComponent("settings-invalidated.json") }
+
+    static func tombstonedIds() -> Set<String> {
+        guard let data = try? Data(contentsOf: tombstoneURL),
+              let ids = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return Set(ids)
+    }
+
+    private static func writeTombstones(_ ids: Set<String>) {
+        if ids.isEmpty { try? FileManager.default.removeItem(at: tombstoneURL); return }
+        guard let data = try? JSONEncoder().encode(ids.sorted()) else { return }
+        try? PrivateStorage.ensureDirectory(StoragePaths.dataRoot)
+        _ = try? PrivateStorage.writeAtomically(data, to: tombstoneURL, mode: 0o600)
+    }
+
     static var hasUnflushedInvalidations: Bool {
-        unflushedLock.lock(); defer { unflushedLock.unlock() }
-        return !unflushed.isEmpty
+        unflushedLock.lock()
+        let inMemory = !unflushed.isEmpty
+        unflushedLock.unlock()
+        return inMemory || FileManager.default.fileExists(atPath: tombstoneURL.path)
     }
 
     static let unflushedMessage = "A waiting settings change could not be cancelled on disk (the settings-pending file can't be written), so nothing more is saved until that is fixed. Check the configuration folder's permissions and free space, then try again."
@@ -749,13 +804,25 @@ enum SettingsSupersede {
         unflushedLock.lock()
         let pending = unflushed
         unflushedLock.unlock()
-        guard !pending.isEmpty else { return }
+        let ids = tombstonedIds()
+        guard !pending.isEmpty || !ids.isEmpty || FileManager.default.fileExists(atPath: tombstoneURL.path) else { return }
         if FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) {
-            try applyDrops { change in pending.contains { $0(change) } }
+            try applyDrops { change in ids.contains(change.id) || pending.contains { $0(change) } }
         }
         unflushedLock.lock()
         unflushed.removeFirst(min(pending.count, unflushed.count))
         unflushedLock.unlock()
+        writeTombstones([])
+    }
+
+    /// Selftest seam: a new owner process (the in-memory record is gone).
+    static func _testForgetInMemory() { unflushedLock.lock(); unflushed = []; unflushedLock.unlock() }
+
+    /// `/deleteuserdata` and Mind import: the pending file is gone, so are
+    /// the invalidations that referred to it.
+    static func discardInvalidations() {
+        unflushedLock.lock(); unflushed = []; unflushedLock.unlock()
+        try? FileManager.default.removeItem(at: tombstoneURL)
     }
 
     private static func dropStaged(_ invalidated: @escaping (PreparedChange) -> Bool) {
@@ -763,6 +830,12 @@ enum SettingsSupersede {
         do { try applyDrops(invalidated) } catch {
             print("[Settings] could not record a superseded waiting change: \(error)")
             unflushedLock.lock(); unflushed.append(invalidated); unflushedLock.unlock()
+            // Reads still work when writes don't: remember WHICH staged
+            // changes were invalidated, outside the pending file.
+            if let doc = try? SettingsPendingStore.read() {
+                let hit = doc.slots.values.compactMap { $0.staged?.change }.filter(invalidated).map(\.id)
+                if !hit.isEmpty { writeTombstones(tombstonedIds().union(hit)) }
+            }
         }
     }
 

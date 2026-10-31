@@ -191,6 +191,7 @@ enum SettingsPendingStore {
 
     /// `/deleteuserdata` deletes the file; Mind import discards it.
     static func remove() throws {
+        SettingsSupersede.discardInvalidations()
         processLock.lock(); defer { processLock.unlock() }
         let fd = open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         defer { if fd >= 0 { close(fd) } }

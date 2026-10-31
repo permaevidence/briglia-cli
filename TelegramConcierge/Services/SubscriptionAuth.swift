@@ -267,6 +267,8 @@ struct SubscriptionAuthStore {
         let state = try readStored()
         if let capture = SettingsCapture.current, !capture.readOnly {
             capture.recordSubscriptionBasis(store: directory.path, generation: state?.generation)
+            // The login this preparation publishes is what later reads see.
+            if let projected = capture.projectedAuth(store: directory.path) { return projected }
         }
         return state
     }
@@ -389,6 +391,9 @@ struct SubscriptionAuthStore {
             let generation = UUID().uuidString
             capture.recordSubscription(SettingsSubscriptionOp(kind: .publish, store: directory.path, pending: pending,
                 credential: credential, projectedGeneration: generation, guardActiveLogin: capture.guardActiveLogin))
+            var projected = state
+            projected.commitPending(credential, generation: generation)
+            capture.projectAuth(store: directory.path, projected)
             return generation
         }
         return try await locked {

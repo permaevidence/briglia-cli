@@ -114,6 +114,30 @@ final class SettingsCaptureBox: @unchecked Sendable {
         expectations.append(e)
     }
 
+    /// The auth state this preparation will publish (Codex R2-1): later
+    /// reads of that store inside the same preparation see the projected
+    /// login, while the recorded basis stays the real one.
+    private var projected: [String: SubscriptionAuthState] = [:]
+
+    func projectAuth(store: String, _ state: SubscriptionAuthState) {
+        lock.lock(); defer { lock.unlock() }
+        projected[URL(fileURLWithPath: store).standardizedFileURL.path] = state
+    }
+
+    func projectedAuth(store: String) -> SubscriptionAuthState? {
+        lock.lock(); defer { lock.unlock() }
+        return projected[URL(fileURLWithPath: store).standardizedFileURL.path]
+    }
+
+    /// A selection consumed "usable" (and maybe "no pending login"): checked
+    /// again under the auth lock (Codex R2-3). Not recorded for the login
+    /// this change itself publishes (its publish op is validated instead).
+    func expectUsableLogin(store: String, generation: String, requireNoPending: Bool) {
+        if projectedAuth(store: store)?.generation == generation { return }
+        expectSubscription(SettingsSubscriptionExpectation(store: store, generation: generation,
+                                                           requireUsable: true, requireNoPending: requireNoPending))
+    }
+
     func expectSubscription(_ expectation: SettingsSubscriptionExpectation) {
         lock.lock(); defer { lock.unlock() }
         if !expectations.contains(expectation) { expectations.append(expectation) }

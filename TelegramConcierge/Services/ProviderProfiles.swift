@@ -305,6 +305,8 @@ enum ProviderProfiles {
             guard apiKey == nil, baseURL == nil, let state = try SubscriptionAuthStore().read(), state.credential != nil, state.requiresLogin != true else {
                 throw SubscriptionError("Use briglia subscription login to connect ChatGPT; tokens and custom URLs are not accepted")
             }
+            SettingsCapture.current?.expectUsableLogin(store: SubscriptionAuthStore().directory.path,
+                                                       generation: state.generation, requireNoPending: false)
             changes[subscriptionModelKey] = model
             changes[subscriptionEffortKey] = effort
             changes[subscriptionTextOnlyKey] = textOnly ? "true" : "false"
@@ -375,6 +377,8 @@ enum ProviderProfiles {
                   let state = try SubscriptionAuthStore().read(), state.generation == generation, state.credential != nil, state.requiresLogin != true, state.pendingLogin == nil else {
                 throw SubscriptionError("Subscription login changed before activation; retry selection")
             }
+            SettingsCapture.current?.expectUsableLogin(store: SubscriptionAuthStore().directory.path,
+                                                       generation: generation, requireNoPending: true)
             changes[KeychainHelper.openAICompatibleBaseURLKey] = SubscriptionEndpoint.inference
             changes[KeychainHelper.openAICompatibleModelKey] = model
             // Runtime slot contains only an opaque login generation, never OAuth.

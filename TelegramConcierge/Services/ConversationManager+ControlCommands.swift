@@ -185,6 +185,11 @@ extension ConversationManager {
                     try? await sendText(settingsWriter.gate.admissionClosedReason ?? MemoryReplacementLock.busyMessage)
                     return true
                 }
+                do { try SettingsSupersede.flushUnflushedInvalidations() } catch {
+                    settingsWriter.gate.release(settingsToken)
+                    try? await sendText("⚠️ " + SettingsSupersede.unflushedMessage)
+                    return true
+                }
                 let handled = await Self.$settingsCommandToken.withValue(settingsToken) {
                     await Self.$settingsCommandInline.withValue(true) { await handleControlCommandIfNeeded(text) }
                 }
