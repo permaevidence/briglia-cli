@@ -25,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import fcntl
 
 BRIGLIA = os.path.abspath(sys.argv[1])
 FAILS = 0
@@ -248,8 +249,12 @@ def main():
         m2 = run2.wait_for(r"http://127\.0\.0\.1:(\d+)/start\?t=([0-9a-f]{32})")
         check("a second run starts", m2 is not None, run2.out())
         run3 = Run(env)
-        check("a parallel menu is refused with instructions", run3.wait_for(r"already running", timeout=20) is not None, run3.out())
+        # D16 (live menu plan): one offline menu per profile (menu.lock).
+        check("a parallel menu is refused with instructions", run3.wait_for(r"already open in another window", timeout=20) is not None, run3.out())
         run3.proc.wait(timeout=10)
+        # The offline menu never holds the instance lease for its lifetime
+        # (live menu plan B.3): a Briglia could start right now.
+        check("the open offline menu holds no instance lease", lease_free(home), "instance.lock held by the menu")
         if m2:
             cl2 = Client(int(m2.group(1)))
             s, h, _ = cl2.raw("GET", "/start?t=" + m2.group(2))
@@ -276,8 +281,118 @@ def main():
         server.shutdown()
         shutil.rmtree(home, ignore_errors=True)
     assistants_scenario()
+    handover_scenario()
     print("\nmenu headless test: " + ("all checks passed" if FAILS == 0 else "%d FAILED" % FAILS))
     sys.exit(1 if FAILS else 0)
+
+
+def lease_free(home):
+    path = home + "/.local/share/briglia/instance.lock"
+    if not os.path.exists(path):
+        return True
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def handover_scenario():
+    """Live menu plan B.10: Briglia starts while the offline menu is open —
+    the page is handed to the running Briglia's own menu (the live hub), the
+    offline menu exits by itself, and saves keep working without stopping
+    Briglia."""
+    # A short path: the app socket lives under the data root and sun_path
+    # is ~104 bytes.
+    home = tempfile.mkdtemp(prefix="bmh-", dir="/tmp" if os.path.isdir("/tmp") else None)
+    env = dict(os.environ)
+    env.update({
+        "HOME": home, "XDG_CONFIG_HOME": home + "/.config", "XDG_DATA_HOME": home + "/.local/share",
+        "TMPDIR": home + "/tmp/", "BRIGLIA_IGNORE_LEGACY_SETUP_FLAG": "1",
+        "BRIGLIA_DEV_QUICKSETUP_STUBS": "1", "BRIGLIA_QUICKSETUP_NO_BROWSER": "1", "LANG": "en_US.UTF-8",
+        "BRIGLIA_TEST_NO_BROWSER_BOOTSTRAP": "1",
+    })
+    for k in [k for k in env if k.startswith("BRIGLIA_EXPERIMENTAL")]:
+        env.pop(k)
+    env.pop("LC_ALL", None)
+    os.makedirs(home + "/tmp", exist_ok=True)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Mock)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    env["BRIGLIA_DEV_PROBE_BASE"] = "http://127.0.0.1:%d" % server.server_address[1]
+    config_dir = home + "/.config/briglia"
+    os.makedirs(config_dir, exist_ok=True)
+    with open(config_dir + "/secrets.json", "w") as f:
+        json.dump({
+            "llm_provider": "openai_compatible",
+            "openai_compatible_base_url": "http://127.0.0.1:%d/v1" % server.server_address[1],
+            "openai_compatible_model": "mock-model",
+            "openai_compatible_api_key": "handover-test-key",
+            "assistant_name": "Bree",
+            "user_name": "Sofia",
+            "cli_setup_complete": "true",
+        }, f)
+    os.chmod(config_dir + "/secrets.json", 0o600)
+    menu = Run(env)
+    daemon = None
+    try:
+        m = menu.wait_for(r"http://127\.0\.0\.1:(\d+)/start\?t=([0-9a-f]{32})")
+        check("handover: the offline menu opens", m is not None, menu.out())
+        if not m:
+            return
+        cl = Client(int(m.group(1)))
+        s, h, _ = cl.raw("GET", "/start?t=" + m.group(2))
+        cl.cookie = re.search(r"bqs=([0-9a-f]+)", h.get("Set-Cookie", "")).group(1)
+        check("handover: the offline page says Briglia isn't running", cl.status().get("running") is False)
+        s, j = cl.act("key", kind="serper", key=GOOD["serper"])
+        check("handover: an offline save commits under a short lease", j.get("ok"), j)
+        check("handover: the lease is released after the save", lease_free(home))
+        daemon = subprocess.Popen([BRIGLIA, "daemon"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True)
+        redirect = None
+        for _ in range(240):
+            try:
+                st = cl.status()
+            except OSError:
+                break
+            if st.get("redirect"):
+                redirect = st["redirect"]
+                break
+            time.sleep(0.25)
+        check("handover: the page is sent to the running Briglia's own menu",
+              redirect is not None and re.match(r"^http://127\.0\.0\.1:\d+/start\?t=", redirect or "") is not None, redirect)
+        try:
+            rc = menu.proc.wait(timeout=40)
+        except subprocess.TimeoutExpired:
+            rc = None
+        check("handover: the offline menu exits by itself", rc == 0, menu.out()[-600:])
+        check("handover: the terminal says Briglia now serves the menu", "now serves the menu itself" in menu.out())
+        if redirect:
+            mm = re.match(r"^http://127\.0\.0\.1:(\d+)/start\?t=([0-9a-f]+)", redirect)
+            live = Client(int(mm.group(1)))
+            s, h, _ = live.raw("GET", "/start?t=" + mm.group(2))
+            cookie = re.search(r"bqs=([0-9a-f]+)", h.get("Set-Cookie", ""))
+            live.cookie = cookie.group(1) if cookie else None
+            st = live.status()
+            check("handover: the live menu reports Briglia running", st.get("running") is True)
+            s, j = live.act("key", kind="jina", key=GOOD["jina"])
+            check("handover: a save on the live menu applies while Briglia keeps running", j.get("ok") and daemon.poll() is None, j)
+            flat = open(config_dir + "/secrets.json").read()
+            check("handover: both saves are in secrets.json", GOOD["serper"] in flat and GOOD["jina"] in flat)
+    finally:
+        if menu.proc.poll() is None:
+            menu.proc.kill()
+        if daemon is not None and daemon.poll() is None:
+            daemon.send_signal(signal.SIGTERM)
+            try:
+                daemon.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+        server.shutdown()
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def assistants_scenario():

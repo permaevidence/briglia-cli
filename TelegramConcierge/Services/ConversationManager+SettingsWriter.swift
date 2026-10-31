@@ -62,7 +62,7 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
         SettingsSupersede.install()
         serviceConfigStamp = Self.serviceCredentialDigest(KeychainHelper.loadSnapshot())
         let writer = settingsWriter
-        SettingsClient.inProcessOwner = { change in await writer.commit(change) }
+        SettingsClient.inProcessOwner = { change, stillValid in await writer.commit(change, stillValid: stillValid) }
         SettingsAgentEdit.immediateOwner = { change in await writer.commit(change, policy: .immediate) }
         kickSettingsApply()
     }

@@ -107,20 +107,23 @@ enum SettingsClient {
     /// code "owner_protocol_unsupported" so the menu can hand over).
     /// The running owner of THIS process (the daemon / terminal chat): its
     /// writer is used directly, never a second, offline writer.
-    nonisolated(unsafe) static var inProcessOwner: (@MainActor (PreparedChange) async -> SettingsCommitResult)?
+    nonisolated(unsafe) static var inProcessOwner: (@MainActor (PreparedChange, (@Sendable () throws -> Void)?) async -> SettingsCommitResult)?
 
+    /// `stillValid` reaches the decision point of an in-process commit (the
+    /// running owner of this process, or a short offline commit); a
+    /// forwarded commit checks it right before sending.
     @MainActor
-    static func commit(_ change: PreparedChange) async -> SettingsCommitResult {
+    static func commit(_ change: PreparedChange, stillValid: (@Sendable () throws -> Void)? = nil) async -> SettingsCommitResult {
         // A commit never runs inside a preparation overlay (a wizard step
         // that commits a nested sign-in first): it reads and writes the store.
         if SettingsCapture.current != nil {
-            return await SettingsCapture.$current.withValue(nil) { await commit(change) }
+            return await SettingsCapture.$current.withValue(nil) { await commit(change, stillValid: stillValid) }
         }
-        if let owner = inProcessOwner { return await owner(change) }
+        if let owner = inProcessOwner { return await owner(change, stillValid) }
         // A process already holding the lease (the menu's Telegram pairing
         // step, quick setup) is the owner for this moment.
         if InstanceLease.isHeldInThisProcess {
-            return await commitLocally(change)
+            return await commitLocally(change, stillValid: stillValid)
         }
         // Offline prefix (B.4b): replacement lock shared → short lease.
         let replacement: ProfileFileLock?
@@ -136,10 +139,11 @@ enum SettingsClient {
         switch await InstanceLease.acquire(label: "settings-commit", waitSeconds: leaseWaitSecondsForTesting ?? 2) {
         case .success(let lease):
             defer { lease.release(); replacement?.release() }
-            return await commitLocally(change)
+            return await commitLocally(change, stillValid: stillValid)
         case .failure:
             // Release the replacement lock BEFORE waiting on the owner.
             replacement?.release()
+            do { try stillValid?() } catch { return .refused("this action was superseded; nothing was saved") }
             return await forward(change)
         }
     }
@@ -147,7 +151,7 @@ enum SettingsClient {
     /// Local commit under a held lease (same code: admission, epoch,
     /// preconditions, classification; no turn, so D applies now).
     @MainActor
-    static func commitLocally(_ change: PreparedChange) async -> SettingsCommitResult {
+    static func commitLocally(_ change: PreparedChange, stillValid: (@Sendable () throws -> Void)? = nil) async -> SettingsCommitResult {
         shortCommitsInProgress += 1
         defer { shortCommitsInProgress -= 1 }
         do { try SettingsRecovery.run() } catch {
@@ -158,7 +162,7 @@ enum SettingsClient {
         defer { if installed { SettingsSupersede.uninstall() } }
         let host = OfflineSettingsHost()
         let writer = SettingsWriter(host: host)
-        let result = await writer.commit(change)
+        let result = await writer.commit(change, stillValid: stillValid)
         withExtendedLifetime(host) {}
         return result
     }
@@ -234,8 +238,8 @@ enum SettingsClient {
     /// short lease). A failed preparation commits nothing.
     @MainActor
     static func prepareAndCommit(origin: String, label: String, acceptPending: Bool,
-                                 checkpoint: () throws -> Void = {},
-                                 commit: (PreparedChange) async -> SettingsCommitResult = { await SettingsClient.commit($0) },
+                                 checkpoint: @escaping () throws -> Void = {},
+                                 commit: @MainActor (PreparedChange, (@Sendable () throws -> Void)?) async -> SettingsCommitResult = { change, _ in await SettingsClient.commit(change) },
                                  _ body: () async -> [String: Any]) async -> [String: Any] {
         let (change, prepared) = await SettingsCapture.prepare(origin: origin, label: label, acceptPending: acceptPending, body)
         guard let change else { return prepared }
@@ -245,6 +249,15 @@ enum SettingsClient {
             r["applied"] = [String]()
             return r
         }
-        return reply(await commit(change), prepared: prepared)
+        let sendableCheckpoint = UncheckedCheckpoint(checkpoint)
+        return reply(await commit(change, { try sendableCheckpoint.call() }), prepared: prepared)
     }
+}
+
+/// Carries a (main-actor) checkpoint closure into the writer's decision
+/// point, which runs synchronously on the same actor.
+final class UncheckedCheckpoint: @unchecked Sendable {
+    private let body: () throws -> Void
+    init(_ body: @escaping () throws -> Void) { self.body = body }
+    func call() throws { try body() }
 }

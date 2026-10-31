@@ -124,9 +124,12 @@ extension SubscriptionSelftest {
             var login = SubscriptionLogin(store: store)
             login.post = { path, _, _ in
                 if path.hasSuffix("usercode") {
+                    // The live menu (plan B.6): the wizard holds no instance
+                    // lease while the human signs in; its commits take it
+                    // (offline) for the commit only, or go to a running Briglia.
                     switch InstanceLease.acquire(label: "wizard regression contender") {
-                    case .success(let lease): lease.release(); c.check("wizard owns instance lease during login", false)
-                    case .failure: c.check("wizard owns instance lease during login", true)
+                    case .success(let lease): lease.release(); c.check("wizard holds no instance lease while the human signs in", true)
+                    case .failure: c.check("wizard holds no instance lease while the human signs in", false)
                     }
                     return (Data(#"{"device_auth_id":"wizard","user_code":"TEST","interval":1}"#.utf8), 200)
                 }
@@ -140,10 +143,15 @@ extension SubscriptionSelftest {
                 probes += 1
                 // The real device flow has committed the new generation. This
                 // is exactly where the old wizard's early activate threw.
+                // Live menu (plan B.5): a login published while ChatGPT is the
+                // active lane moves the runtime binding in the same commit, so
+                // an early activate no longer fails; after a sign-out (the
+                // binding points at nothing) it still does.
+                let rebound = mode != "logged-out"
                 do {
                     try ProviderProfiles.activate(.chatgpt)
-                    c.check("old activation order rejects a newly committed login", false)
-                } catch { c.check("old activation order rejects a newly committed login", true) }
+                    c.check(rebound ? "a published login rebinds the active lane (early activate works)" : "old activation order rejects a newly committed login", rebound)
+                } catch { c.check(rebound ? "a published login rebinds the active lane (early activate works)" : "old activation order rejects a newly committed login", !rebound) }
                 c.check("wizard retains chosen model and effort at probe", request["model"] as? String == "gpt-5.6-terra" && request["effort"] as? String == "medium")
                 return ["ok": true, "generation": (try? store.read()?.generation) ?? ""]
             })

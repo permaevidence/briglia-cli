@@ -142,17 +142,22 @@ struct SubscriptionRouteFacts: Equatable {
     var present: Bool
     var requiresLogin: Bool
     var accountFingerprint: String?
+    /// The login generation running requests are bound to and validate:
+    /// a new login while ChatGPT is the active lane replaces it, so it is a
+    /// route change even for the same account (it waits for an idle point).
+    var generation: String?
 
     static let absent = SubscriptionRouteFacts(present: false, requiresLogin: false, accountFingerprint: nil)
 
-    init(present: Bool, requiresLogin: Bool, accountFingerprint: String?) {
+    init(present: Bool, requiresLogin: Bool, accountFingerprint: String?, generation: String? = nil) {
         self.present = present; self.requiresLogin = requiresLogin; self.accountFingerprint = accountFingerprint
+        self.generation = generation
     }
 
     init(_ state: SubscriptionAuthState?) {
         guard let state, let credential = state.credential else { self = .absent; return }
         self.init(present: true, requiresLogin: state.requiresLogin == true,
-                  accountFingerprint: SubscriptionSharing.fingerprint(credential.account))
+                  accountFingerprint: SubscriptionSharing.fingerprint(credential.account), generation: state.generation)
     }
 }
 
@@ -195,7 +200,7 @@ struct RouteSnapshot: Equatable {
         // account signing in again is a credential replacement; a different
         // account, a sign-out or activating ChatGPT changes the route.
         if stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue {
-            fields["sub"] = subscription.present ? "account|\(subscription.accountFingerprint ?? "")" : "absent"
+            fields["sub"] = subscription.present ? "account|\(subscription.accountFingerprint ?? "")|\(subscription.generation ?? "")" : "absent"
         }
         fields["switch"] = "\(switches.subagents)|\(switches.webSubagent)"
         // The request path's resolvers, evaluated on this dictionary.

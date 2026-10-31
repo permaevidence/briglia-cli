@@ -91,6 +91,10 @@ enum CredentialCatalog {
         Entry(key: KeychainHelper.serperApiKeyKey, treatment: .visible),
         Entry(key: KeychainHelper.jinaApiKeyKey, treatment: .visible),
         Entry(key: KeychainHelper.keylessSearchKey, treatment: .notSecret),
+        // /websearch's choice (live menu plan B.4) and the settings writer's
+        // bookkeeping (attempt markers, scope publication marker).
+        Entry(key: WebSearchBackend.secretsSelectionKey, treatment: .notSecret),
+        Entry(key: SettingsWriter.scopePublishedKey, treatment: .notSecret),
         Entry(key: KeychainHelper.webSearchOpenAIApiKeyKey, treatment: .visible),
         Entry(key: KeychainHelper.webSearchOpenCodeApiKeyKey, treatment: .visible),
 
@@ -200,6 +204,7 @@ enum CredentialCatalog {
         Family(prefix: KeychainHelper.serviceKeyPrefix, treatment: .redact),
         // MCP server secrets: `mcp_env_<server>_<variable>` (MCPRegistry).
         Family(prefix: "mcp_env_", treatment: .visible),
+        Family(prefix: SettingsWriter.attemptMarkerPrefix, treatment: .notSecret),
     ]
 
     static func treatment(forKey key: String) -> Treatment? {

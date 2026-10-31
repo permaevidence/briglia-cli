@@ -184,7 +184,9 @@ extension MenuSelftestContext {
                 await m.shutdown()
             }
             do {
-                // 2. A turn runs across the whole commit wait: nothing written.
+                // 2. A turn runs across the whole sign-in (live menu plan
+                // B.5): the new login of the lane in use is a route change,
+                // staged — nothing written while the turn runs.
                 let old = try await seed(active: true, usable: false)
                 let gate = MenuGate()
                 let m = liveWorkflow(gate)
@@ -193,13 +195,20 @@ extension MenuSelftestContext {
                 _ = await waitArrived(gate)
                 manager._testSetTriageLane("menu-round2-busy", inFlight: true)
                 gate.open(); await m.settle()
-                manager._testSetTriageLane("menu-round2-busy", inFlight: false)
                 let state = try store.read()
                 check("sign-in: an agent busy for the whole wait keeps the old login and runtime",
-                      ok(r) && state?.generation == old && state?.pendingLogin == nil && state?.requiresLogin == true && runtimeGeneration() == old,
+                      ok(r) && state?.generation == old && state?.requiresLogin == true && runtimeGeneration() == old,
                       "store \(state?.generation ?? "nil") runtime \(runtimeGeneration() ?? "nil")")
-                check("sign-in: the page says the new sign-in wasn't saved because Briglia was busy",
-                      loginState(m)?["state"] as? String == "error" && (loginState(m)?["message"] as? String) == m.signInRefusedMessage(.busy))
+                let waiting = (m.status()["settings_pending"] as? [String]) ?? []
+                check("sign-in: the page shows the new sign-in as waiting for Briglia to be idle",
+                      waiting.contains { $0.contains("ChatGPT sign-in") } && loginState(m)?["state"] as? String != "error", "\(waiting)")
+                // Idle: the staged login and the switch to it land together.
+                manager._testSetTriageLane("menu-round2-busy", inFlight: false)
+                _ = await manager.settingsWriter.applyStaged(category: "ai")
+                let applied = try store.read()
+                check("sign-in: at the idle point the staged login and Briglia's binding land together",
+                      applied?.generation != old && applied?.credential != nil && runtimeGeneration() == applied?.generation,
+                      "store \(applied?.generation ?? "nil") runtime \(runtimeGeneration() ?? "nil")")
                 await m.shutdown()
             }
             do {
@@ -215,6 +224,9 @@ extension MenuSelftestContext {
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 let midway = try store.read()?.generation
                 manager._testSetTriageLane("menu-round2-turn", inFlight: false)
+                // The triage lane's end kicks the idle scheduler in the
+                // running daemon (runTriageLane's defer).
+                _ = await manager.settingsWriter.applyStaged(category: "ai")
                 await m.settle()
                 let state = try store.read()
                 check("sign-in: nothing is written while the turn still runs", midway == old)
@@ -324,10 +336,10 @@ extension MenuSelftestContext {
                 while !lockGate.hasArrived { try? await Task.sleep(nanoseconds: 5_000_000) }
                 tokenGate.open()
                 for _ in 0..<400 {
-                    if manager.isRestoringMind { break }
+                    if manager.settingsWriter.gate.isHeld { break }
                     try? await Task.sleep(nanoseconds: 5_000_000)
                 }
-                check("sign-in: the commit reached the live barrier while the auth lock was held", manager.isRestoringMind)
+                check("sign-in: the commit reached the settings writer while the auth lock was held", manager.settingsWriter.gate.isHeld)
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 _ = await act(m, ["action": "lane", "lane": "openrouter"], settle: false)
                 lockGate.open(); try await holder.value

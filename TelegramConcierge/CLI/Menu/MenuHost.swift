@@ -55,6 +55,15 @@ final class MenuHost {
     /// the model, its tools or the media and email paths use waits for an
     /// idle point (staged, shown as waiting). No save waits for an idle agent.
     static func wireLive(_ env: inout MenuEnvironment, manager: ConversationManager) {
+        // Every commit goes to THIS agent's writer.
+        let commit: MenuSettings.Commit = { [weak manager] change, stillValid in
+            guard let manager else { return .refused("Briglia has stopped; nothing was saved.") }
+            return await manager.settingsWriter.commit(change, stillValid: stillValid)
+        }
+        env.apply = { await MenuSettings.apply($0, checkpoint: $1, commit: commit) }
+        env.subscription = { await MenuSettings.subscription($0, checkpoint: $1, commit: commit) }
+        env.publishLogin = { try await MenuSettings.publishLogin($0, checkpoint: $1, commit: commit) }
+        env.markComplete = { await MenuSettings.markComplete(commit: commit) }
         // Assistants page (§28.3): every action is refused while a wipe or a
         // Mind import holds the restore gate.
         env.assistants.restoreGateUp = { [weak manager] in manager?.isRestoringMind ?? false }

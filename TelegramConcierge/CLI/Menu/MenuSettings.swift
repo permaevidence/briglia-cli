@@ -23,9 +23,12 @@ enum MenuSettings {
         return "Settings"
     }
 
+    typealias Commit = @MainActor (PreparedChange, (@Sendable () throws -> Void)?) async -> SettingsCommitResult
+    static let defaultCommit: Commit = { await SettingsClient.commit($0, stillValid: $1) }
+
     @MainActor
-    static func apply(_ request: [String: Any], checkpoint: @escaping () throws -> Void) async -> [String: Any] {
-        await SettingsClient.prepareAndCommit(origin: "menu", label: label(request), acceptPending: true, checkpoint: checkpoint) {
+    static func apply(_ request: [String: Any], checkpoint: @escaping () throws -> Void, commit: Commit = defaultCommit) async -> [String: Any] {
+        await SettingsClient.prepareAndCommit(origin: "menu", label: label(request), acceptPending: true, checkpoint: checkpoint, commit: commit) {
             await SetupAPICore.apply(request, ownsLease: true, checkpoint: checkpoint)
         }
     }
@@ -33,13 +36,13 @@ enum MenuSettings {
     /// Reads (status, probe) and the login network flow (start, poll's
     /// waiting) run directly; select, logout and cancel are commits.
     @MainActor
-    static func subscription(_ request: [String: Any], checkpoint: @escaping () throws -> Void) async -> [String: Any] {
+    static func subscription(_ request: [String: Any], checkpoint: @escaping () throws -> Void, commit: Commit = defaultCommit) async -> [String: Any] {
         let action = request["action"] as? String ?? ""
         guard ["select", "logout", "cancel", "poll"].contains(action) else {
             return await SubscriptionSetup().perform(request, ownsLease: true, checkpoint: checkpoint)
         }
         let label = action == "logout" ? "ChatGPT sign-out" : action == "select" ? "ChatGPT model" : "ChatGPT sign-in"
-        return await SettingsClient.prepareAndCommit(origin: "menu", label: label, acceptPending: true, checkpoint: checkpoint) {
+        return await SettingsClient.prepareAndCommit(origin: "menu", label: label, acceptPending: true, checkpoint: checkpoint, commit: commit) {
             await SubscriptionSetup().perform(request, ownsLease: true, checkpoint: checkpoint)
         }
     }
@@ -51,13 +54,13 @@ enum MenuSettings {
     /// the pending id are re-checked at the commit's decision point.
     @MainActor
     static func publishLogin(_ write: SubscriptionLogin.Commit,
-                             checkpoint: @escaping @Sendable () throws -> Void) async throws -> Published {
+                             checkpoint: @escaping @Sendable () throws -> Void, commit: Commit = defaultCommit) async throws -> Published {
         let (change, generation) = try await SettingsCapture.prepareThrowing(origin: "menu", label: "ChatGPT sign-in",
                                                                             acceptPending: true, guardActiveLogin: true) {
             try await write(checkpoint)
         }
         try checkpoint()
-        let result = await SettingsClient.commit(change)
+        let result = await commit(change, checkpoint)
         switch result.state {
         case .applied: return .applied(generation)
         case .pending: return .pending(result.message)
@@ -66,8 +69,8 @@ enum MenuSettings {
     }
 
     @MainActor
-    static func markComplete() async -> Bool {
-        let reply = await SettingsClient.prepareAndCommit(origin: "menu", label: "Setup", acceptPending: true) {
+    static func markComplete(commit: Commit = defaultCommit) async -> Bool {
+        let reply = await SettingsClient.prepareAndCommit(origin: "menu", label: "Setup", acceptPending: true, commit: commit) {
             do {
                 try KeychainHelper.saveBatch([SetupWizard.completeKey: "true", SetupWizard.progressKey: String?.none])
                 return ["schema": SetupAPICore.schemaVersion, "ok": true]

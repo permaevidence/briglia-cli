@@ -184,12 +184,17 @@ extension LiveMenuHarness {
               differs(base, base.filter { $0.key != KeychainHelper.serperApiKeyKey }))
         check("classify: a model change is D", differs(base, base.merging([KeychainHelper.openRouterModelKey: "openai/gpt-6-luna"]) { $1 }))
         check("classify: the user's name is S", !differs(base, base.merging([KeychainHelper.userNameKey: "Other"]) { $1 }))
-        let usable = SubscriptionRouteFacts(present: true, requiresLogin: false, accountFingerprint: "fp-a")
-        let relogin = SubscriptionRouteFacts(present: true, requiresLogin: false, accountFingerprint: "fp-a")
-        let other = SubscriptionRouteFacts(present: true, requiresLogin: false, accountFingerprint: "fp-b")
+        let usable = SubscriptionRouteFacts(present: true, requiresLogin: false, accountFingerprint: "fp-a", generation: "g1")
+        let relogin = SubscriptionRouteFacts(present: true, requiresLogin: false, accountFingerprint: "fp-a", generation: "g2")
+        let other = SubscriptionRouteFacts(present: true, requiresLogin: false, accountFingerprint: "fp-b", generation: "g2")
         check("classify: a ChatGPT login for another lane is S (OpenRouter active)", !differs(base, base, .absent, usable))
         var chat = base; chat[ProviderProfiles.activeProfileKey] = "chatgpt"
-        check("classify: the same account signing in again while ChatGPT runs is S", !differs(chat, chat, usable, relogin))
+        // Deviation from the plan's "same account = S": running requests
+        // validate the bound generation, so a new login while ChatGPT runs
+        // waits for an idle point (and moves the binding with it).
+        check("classify: a new login of the same account while ChatGPT runs is D (new generation)", differs(chat, chat, usable, relogin))
+        check("classify: an expired login refreshed in place (same generation) is S",
+              !differs(chat, chat, usable, SubscriptionRouteFacts(present: true, requiresLogin: true, accountFingerprint: "fp-a", generation: "g1")))
         check("classify: a different account while ChatGPT runs is D", differs(chat, chat, usable, other))
         check("classify: signing out the active ChatGPT login is D", differs(chat, chat, usable, .absent))
         check("classify: activating ChatGPT is D", differs(base, chat, usable, usable))

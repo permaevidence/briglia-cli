@@ -65,23 +65,28 @@ final class SettingsWriter {
 
     // MARK: Commit (B.4a)
 
-    func commit(_ change: PreparedChange, policy: Policy = .classify) async -> SettingsCommitResult {
+    /// `stillValid`: the in-process caller's own validity (the menu's action
+    /// ticket), re-checked at the decision point — a revoked or superseded
+    /// action writes nothing even after it reached the writer.
+    func commit(_ change: PreparedChange, policy: Policy = .classify,
+                stillValid: (@Sendable () throws -> Void)? = nil) async -> SettingsCommitResult {
         if SettingsCapture.current != nil {
-            return await SettingsCapture.$current.withValue(nil) { await commit(change, policy: policy) }
+            return await SettingsCapture.$current.withValue(nil) { await commit(change, policy: policy, stillValid: stillValid) }
         }
         guard let token = await gate.acquire() else {
             let r = SettingsCommitResult.refused(gate.admissionClosedReason ?? "Briglia is busy; try again in a moment.")
             remember(change.id, r); return r
         }
         defer { gate.release(token); afterRelease() }
-        let r = await commitHolding(token, change, policy: policy)
+        let r = await commitHolding(token, change, policy: policy, stillValid: stillValid)
         remember(change.id, r)
         return r
     }
 
     /// The same transaction for a caller that already holds the token (a
     /// lifecycle operation's own writes, B.4b step 5).
-    func commitHolding(_ token: SettingsCommitGate.Token, _ change: PreparedChange, policy: Policy) async -> SettingsCommitResult {
+    func commitHolding(_ token: SettingsCommitGate.Token, _ change: PreparedChange, policy: Policy,
+                       stillValid: (@Sendable () throws -> Void)? = nil) async -> SettingsCommitResult {
         guard change.subscription == nil || change.identity == nil else {
             return .refused("one settings change cannot combine an inbox change with a ChatGPT login change")
         }
@@ -98,7 +103,7 @@ final class SettingsWriter {
                 }
             }
             let outcome = await run(token, change, attempt: UUID().uuidString, holdsBarrier: barrier || policy == .immediate,
-                                    immediate: policy == .immediate, pending: nil)
+                                    immediate: policy == .immediate, pending: nil, stillValid: stillValid)
             switch outcome {
             case .needsBarrier:
                 if barrier { host?.endRouteBarrier() }
@@ -286,9 +291,17 @@ final class SettingsWriter {
     }
 
     private func run(_ token: SettingsCommitGate.Token, _ change: PreparedChange, attempt: String,
-                     holdsBarrier: Bool, immediate: Bool, pending: (category: String, ticket: String)?) async -> Outcome {
+                     holdsBarrier: Bool, immediate: Bool, pending: (category: String, ticket: String)?,
+                     stillValid: (@Sendable () throws -> Void)? = nil) async -> Outcome {
         let switches = host?.toolSwitches ?? SettingsToolSwitches.current()
-        let admission: () -> String? = { [weak self] in self?.host?.admissionRefusal() }
+        let hostAdmission: () -> String? = { [weak self] in self?.host?.admissionRefusal() }
+        let admission: () -> String? = {
+            if let why = hostAdmission() { return why }
+            do { try stillValid?() } catch {
+                return (error as? SetupAPICore.CheckpointRevoked)?.message ?? "this action was superseded; nothing was saved"
+            }
+            return nil
+        }
         let gate = self.gate
         await beforeDecisionPointForTesting?()
         // Step 5: identity reservation.
@@ -492,8 +505,23 @@ final class SettingsWriter {
                     authNote = "signed out"
                 }
             }
+            // A login published while ChatGPT is the active lane moves the
+            // runtime binding with it, in the same secrets mutation: running
+            // requests validate the bound generation, so the new login and
+            // Briglia's switch to it land together (never a binding left on
+            // the replaced generation).
+            var secretsDelta = change.secretsDelta
+            if let op = change.subscription, op.kind == .publish, let oldGen = oldAuth?.generation, let newGen = newAuth?.generation,
+               current[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue {
+                if current[KeychainHelper.openAICompatibleApiKeyKey] == oldGen, secretsDelta[KeychainHelper.openAICompatibleApiKeyKey] == nil {
+                    secretsDelta[KeychainHelper.openAICompatibleApiKeyKey] = .some(newGen)
+                }
+                if current[ProviderProfiles.subscriptionGenerationKey] == oldGen, secretsDelta[ProviderProfiles.subscriptionGenerationKey] == nil {
+                    secretsDelta[ProviderProfiles.subscriptionGenerationKey] = .some(newGen)
+                }
+            }
             var projected = current
-            for (k, v) in change.secretsDelta { if let v { projected[k] = v } else { projected.removeValue(forKey: k) } }
+            for (k, v) in secretsDelta { if let v { projected[k] = v } else { projected.removeValue(forKey: k) } }
             let factsOld = change.subscription == nil ? SubscriptionRouteFacts.absent : SubscriptionRouteFacts(oldAuth)
             let factsNew = change.subscription == nil ? SubscriptionRouteFacts.absent : SubscriptionRouteFacts(newAuth)
             let routeChanged = RouteSnapshot.of(stored: current, subscription: factsOld, switches: switches)
@@ -534,7 +562,7 @@ final class SettingsWriter {
                     return .partial("partly applied: ChatGPT login \(authNote ?? "changed"); settings not saved")
                 }
             }
-            var delta = change.secretsDelta
+            var delta = secretsDelta
             if journal { delta[attemptMarkerKey(category)] = .some(attempt) }
             do {
                 try holding.mutateHolding(delta)
