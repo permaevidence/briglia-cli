@@ -1297,7 +1297,9 @@ extension ConversationManager {
 
     /// Shares the existing ingress/maintenance barrier, without cancelling work
     /// or replacing memory. Only a short mutation + service reload holds it.
-    func beginBrowserSettingsMutation() async -> Bool {
+    /// `ownCommandIngress`: the caller is itself a settings command body
+    /// (its own counted ingress does not make Briglia busy).
+    func beginBrowserSettingsMutation(ownCommandIngress: Int = 0) async -> Bool {
         // Parked for an update (MULTI_ASSISTANT_PLAN §6.4): no settings work
         // may start until the barrier ends (Codex stage-2 R2).
         guard !admissionPaused else { return false }
@@ -1307,7 +1309,7 @@ extension ConversationManager {
               triageRunsInFlight.isEmpty, activeProcessingTask == nil,
               managedBotCreationTask == nil, !managedBotCreationOwed, !pendingManagedRotation, !managedRotationInProgress,
               assistantsMenuOperations == 0,
-              browserSettingsCommandIngress == 0, beginMindRestore() else { return false }
+              browserSettingsCommandIngress <= ownCommandIngress, beginMindRestore() else { return false }
         browserSettingsMutation = true
         // An app attachment copy or Telegram long poll may have crossed its
         // ingress check before we raised the gate. Let it exit, then recheck

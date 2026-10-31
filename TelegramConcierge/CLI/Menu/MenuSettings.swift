@@ -127,10 +127,14 @@ final class MenuPairingLease: @unchecked Sendable {
         return false
     }
 
+    /// The lease is released after a local settings commit that borrowed it
+    /// (a save during the pairing step) has ended (Codex live-menu R1-1).
     func end() {
-        lock.lock(); defer { lock.unlock() }
-        if let lease, lease.held { lease.release() }
+        lock.lock()
+        let held = lease
         lease = nil
+        lock.unlock()
+        if let held, held.held { SettingsClient.releaseAfterLocalCommits { held.release() } }
     }
 
     /// Hands the held lease to a caller (macOS Start right after pairing).

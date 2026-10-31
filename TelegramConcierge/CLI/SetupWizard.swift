@@ -202,7 +202,7 @@ struct SetupWizard {
         }
         var change = prepared.change
         if let pinnedEpoch { change.epoch = min(change.epoch, pinnedEpoch) }
-        guard !change.isEmpty else { return }
+        guard !change.isNoop else { return }
         let result = await SettingsClient.commit(change)
         switch result.state {
         case .applied: break

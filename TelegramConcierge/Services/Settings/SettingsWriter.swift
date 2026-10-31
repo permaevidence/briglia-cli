@@ -51,7 +51,19 @@ final class SettingsWriter {
     private var outcomes: [(id: String, result: SettingsCommitResult)] = []
 
     func lookup(_ clientRequestId: String) -> SettingsCommitResult? {
-        outcomes.last { $0.id == clientRequestId }?.result
+        guard let cached = outcomes.last(where: { $0.id == clientRequestId })?.result else { return nil }
+        // A remembered "pending" answer is superseded by the staged change's
+        // terminal result once it was applied, dropped or cancelled.
+        if cached.state == .pending, let doc = try? SettingsPendingStore.read(),
+           let r = doc.lastResults.last(where: { $0.clientRequestId == clientRequestId }) {
+            switch r.state {
+            case "applied", "persisted": return SettingsCommitResult(state: .applied, message: r.message)
+            case "partial": return SettingsCommitResult(state: .partial, message: r.message)
+            case "uncertain": return SettingsCommitResult(state: .uncertain, message: r.message)
+            default: return SettingsCommitResult(state: .refused, message: r.message ?? r.state)
+            }
+        }
+        return cached
     }
 
     private func remember(_ id: String, _ result: SettingsCommitResult) {
@@ -78,7 +90,14 @@ final class SettingsWriter {
             remember(change.id, r); return r
         }
         defer { gate.release(token); afterRelease() }
-        let r = await commitHolding(token, change, policy: policy, stillValid: stillValid)
+        var r = await commitHolding(token, change, policy: policy, stillValid: stillValid)
+        if r.state == .applied, SettingsSupersede.hasUnflushedInvalidations {
+            // This write is saved and visible; the waiting change it
+            // superseded could not be marked on disk (R1-4).
+            let note = "Saved. " + SettingsSupersede.unflushedMessage
+            r.message = note
+            if r.reply != nil { r.reply?["note"] = note }
+        }
         remember(change.id, r)
         return r
     }
@@ -90,7 +109,12 @@ final class SettingsWriter {
         guard change.subscription == nil || change.identity == nil else {
             return .refused("one settings change cannot combine an inbox change with a ChatGPT login change")
         }
-        if change.isEmpty, let reply = change.replyObject { return SettingsCommitResult(state: .applied, reply: reply) }
+        do { try SettingsSupersede.flushUnflushedInvalidations() } catch {
+            return .refused(SettingsSupersede.unflushedMessage)
+        }
+        if change.isNoop, change.expected.isEmpty, change.subscriptionExpectations.isEmpty, let reply = change.replyObject {
+            return SettingsCommitResult(state: .applied, reply: reply)
+        }
         var dMode = policy == .immediate
         for _ in 0..<2 {
             var barrier = false
@@ -198,6 +222,8 @@ final class SettingsWriter {
         guard let token = await gate.acquire() else { return nil }
         defer { gate.release(token) }
         guard let host else { return nil }
+        // A failed invalidation is retried first; never apply on top of it.
+        do { try SettingsSupersede.flushUnflushedInvalidations() } catch { return nil }
         guard await cancellable(token, { await host.beginRouteBarrier() }) == true else { return nil }
         defer { host.endRouteBarrier() }
         // Claim (step 3): only now, with the barrier held.
@@ -229,8 +255,13 @@ final class SettingsWriter {
             // Cancellation or an admission refusal after the claim and
             // before intent: back to staged (plan B.5). A precondition or
             // epoch refusal drops it with its reason.
-            if result.state == .refused, ["admission", "busy"].contains(result.code ?? "") || gate.admissionClosedReason != nil {
-                Self.unclaim(category: category, attempt: attempt)
+            if result.state == .refused, !wrote,
+               result.preDecision || ["admission", "busy"].contains(result.code ?? "") || gate.admissionClosedReason != nil {
+                guard Self.unclaim(category: category, attempt: attempt) else {
+                    // The slot could not be put back: keep it claimed (the
+                    // journal shows no intent, so recovery restages it).
+                    return result
+                }
                 return nil
             }
             Self.finishPending(category: category, attempt: attempt, change: claimed.change,
@@ -240,13 +271,20 @@ final class SettingsWriter {
     }
 
     /// Cancellation or refusal after the claim and before `intent`: back to staged.
-    nonisolated static func unclaim(category: String, attempt: String) {
-        _ = try? SettingsPendingStore.update { doc in
-            guard var slot = doc.slots[category], let active = slot.active, active.attempt == attempt,
-                  doc.attempts[attempt] == nil else { return }
-            if slot.staged == nil { slot.staged = .init(ticket: active.ticket, change: active.change, stagedAt: active.claimedAt) }
-            slot.active = nil
-            doc.slots[category] = slot
+    @discardableResult
+    nonisolated static func unclaim(category: String, attempt: String) -> Bool {
+        do {
+            try SettingsPendingStore.update { doc in
+                guard var slot = doc.slots[category], let active = slot.active, active.attempt == attempt,
+                      doc.attempts[attempt] == nil else { return }
+                if slot.staged == nil { slot.staged = .init(ticket: active.ticket, change: active.change, stagedAt: active.claimedAt) }
+                slot.active = nil
+                doc.slots[category] = slot
+            }
+            return true
+        } catch {
+            print("[Settings] could not return a claimed change to staged: \(error)")
+            return false
         }
     }
 
@@ -313,7 +351,7 @@ final class SettingsWriter {
             do { ticket = try IdentityChange.begin(kind: kind, rawValue: identity.value) } catch {
                 // setup-api's code for an identity refusal (running assistant,
                 // identity lock held, value owned by another assistant).
-                var r = SettingsCommitResult.refused("\(error)"); r.code = "identity_refused"
+                var r = SettingsCommitResult.refused("\(error)"); r.code = "identity_refused"; r.preDecision = true
                 return .finished(r, routeChanged: false, wrote: false)
             }
         }
@@ -324,14 +362,23 @@ final class SettingsWriter {
         if !stores.isEmpty && CoordinationMode.multi {
             do { shareLock = try await Task.detached { try ChatGPTShare.takeLock() }.value } catch {
                 ticket?.abort()
-                var r = SettingsCommitResult.refused(ChatGPTShare.busyMessage); r.code = "busy"
+                var r = SettingsCommitResult.refused(ChatGPTShare.busyMessage); r.code = "busy"; r.preDecision = true
                 return .finished(r, routeChanged: false, wrote: false)
             }
         }
         defer { shareLock?.release() }
         let section: SectionOutcome
+        let reached = DecisionReached()
         do {
-            section = try await Self.withAuthLocks(stores) { () throws -> SectionOutcome in
+            // The lock waits run in a child the gate can cancel (closing
+            // admission) until the durable phase starts; `enterDurable`
+            // clears that handler, and a cancellation of the CALLER's task
+            // never reaches this child (Codex R1-5).
+            let ticketBox = TicketBox(ticket)
+            let locked = Task { @MainActor () throws -> SectionOutcome in
+              try await Self.withAuthLocks(stores) { () throws -> SectionOutcome in
+                let ticket = ticketBox.ticket
+                reached.value = true
                 if Task.isCancelled { return .refused(gate.admissionClosedReason ?? "cancelled", code: "admission") }
                 if let ticket {
                     var inner: SectionOutcome = .refused("identity commit did not run")
@@ -352,10 +399,18 @@ final class SettingsWriter {
                 return try Self.decisionAndEffects(change, attempt: attempt, holdsBarrier: holdsBarrier, immediate: immediate,
                     pending: pending, switches: switches, admission: admission,
                     enterDurable: { gate.enterDurablePhase(token) })
+              }
             }
+            gate.setCancelHandler(token) { locked.cancel() }
+            section = try await locked.value
         } catch {
             ticket?.abort()
-            return .finished(.refused("\(error.localizedDescription)"), routeChanged: false, wrote: false)
+            var r = SettingsCommitResult.refused(error is CancellationError
+                ? (gate.admissionClosedReason ?? "cancelled; nothing was saved") : "\(error.localizedDescription)")
+            if error is CancellationError { r.code = "admission" }
+            // A lock that could not be taken: nothing was evaluated.
+            r.preDecision = !reached.value
+            return .finished(r, routeChanged: false, wrote: false)
         }
         switch section {
         case .needsBarrier:
@@ -446,6 +501,9 @@ final class SettingsWriter {
             let current = holding.store
             var conflicts: [String] = []
             for (key, digest) in change.expected where SettingsDigest.of(current[key]) != digest { conflicts.append(key) }
+            if let digest = change.storeDigest, SettingsDigest.ofStore(current) != digest, conflicts.isEmpty {
+                conflicts.append("other settings")
+            }
             if let digest = change.routeDigest, SettingsKeyRoles.routeDigest(current) != digest, conflicts.isEmpty {
                 conflicts.append("other settings")
             }
@@ -458,6 +516,13 @@ final class SettingsWriter {
             for expectation in change.subscriptionExpectations {
                 let state: SubscriptionAuthState?
                 do { state = try authStore(expectation.store).read() } catch { return .refused(error.localizedDescription) }
+                if expectation.generation.isEmpty {
+                    // Prepared against an absent store: still absent.
+                    guard state == nil else {
+                        return .refused("The ChatGPT login changed after this was prepared; nothing was saved — try again.", code: "conflict")
+                    }
+                    continue
+                }
                 guard let state, state.generation == expectation.generation else {
                     return .refused("The ChatGPT login changed after this was prepared; nothing was saved — try again.", code: "conflict")
                 }
@@ -611,6 +676,15 @@ enum ProcessKind {
 /// Drops staged changes a later write invalidates. Registered by the owner
 /// (`KeychainHelper.writeObserver`); runs synchronously in write order,
 /// inside the writer's locks, and persists each drop before returning.
+/// Carries the identity ticket into the lock child (same actor).
+final class TicketBox: @unchecked Sendable {
+    let ticket: IdentityChange.Ticket?
+    init(_ ticket: IdentityChange.Ticket?) { self.ticket = ticket }
+}
+
+/// Set once the transaction reached its decision point (inside every lock).
+final class DecisionReached: @unchecked Sendable { var value = false }
+
 enum SettingsSupersede {
     /// Same-account automatic rebinding and other maintenance writes
     /// (route-neutral) never supersede.
@@ -636,6 +710,7 @@ enum SettingsSupersede {
         var digest: String?
         dropStaged { change in
             if !relevant.isDisjoint(with: Set(change.expected.keys).union(change.touchedKeys)) { return true }
+            if let basis = change.storeDigest, SettingsDigest.ofStore(after) != basis { return true }
             if let basis = change.routeDigest {
                 if digest == nil { digest = SettingsKeyRoles.routeDigest(after) }
                 return digest != basis
@@ -654,9 +729,45 @@ enum SettingsSupersede {
         }
     }
 
-    private static func dropStaged(_ invalidated: (PreparedChange) -> Bool) {
+    // Invalidations that could not be persisted (Codex live-menu R1-4).
+    // Until they are, every commit and every pending apply of this process
+    // first retries them and refuses when that still fails: a stale staged
+    // change is never applied and no later write (A→B→A) can make it look
+    // valid again.
+    private static let unflushedLock = NSLock()
+    nonisolated(unsafe) private static var unflushed: [(PreparedChange) -> Bool] = []
+
+    static var hasUnflushedInvalidations: Bool {
+        unflushedLock.lock(); defer { unflushedLock.unlock() }
+        return !unflushed.isEmpty
+    }
+
+    static let unflushedMessage = "A waiting settings change could not be cancelled on disk (the settings-pending file can't be written), so nothing more is saved until that is fixed. Check the configuration folder's permissions and free space, then try again."
+
+    /// Retries the failed invalidations; throws when they still can't be saved.
+    static func flushUnflushedInvalidations() throws {
+        unflushedLock.lock()
+        let pending = unflushed
+        unflushedLock.unlock()
+        guard !pending.isEmpty else { return }
+        if FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) {
+            try applyDrops { change in pending.contains { $0(change) } }
+        }
+        unflushedLock.lock()
+        unflushed.removeFirst(min(pending.count, unflushed.count))
+        unflushedLock.unlock()
+    }
+
+    private static func dropStaged(_ invalidated: @escaping (PreparedChange) -> Bool) {
         guard FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) else { return }
-        _ = try? SettingsPendingStore.update { doc in
+        do { try applyDrops(invalidated) } catch {
+            print("[Settings] could not record a superseded waiting change: \(error)")
+            unflushedLock.lock(); unflushed.append(invalidated); unflushedLock.unlock()
+        }
+    }
+
+    private static func applyDrops(_ invalidated: (PreparedChange) -> Bool) throws {
+        try SettingsPendingStore.update { doc in
             for (category, var slot) in doc.slots {
                 guard let staged = slot.staged, invalidated(staged.change) else { continue }
                 slot.staged = nil

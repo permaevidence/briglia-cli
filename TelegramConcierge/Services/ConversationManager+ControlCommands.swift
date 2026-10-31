@@ -185,7 +185,9 @@ extension ConversationManager {
                     try? await sendText(settingsWriter.gate.admissionClosedReason ?? MemoryReplacementLock.busyMessage)
                     return true
                 }
-                let handled = await Self.$settingsCommandInline.withValue(true) { await handleControlCommandIfNeeded(text) }
+                let handled = await Self.$settingsCommandToken.withValue(settingsToken) {
+                    await Self.$settingsCommandInline.withValue(true) { await handleControlCommandIfNeeded(text) }
+                }
                 settingsWriter.gate.release(settingsToken)
                 kickSettingsApply()
                 return handled

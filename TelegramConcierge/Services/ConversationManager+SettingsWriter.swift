@@ -15,7 +15,11 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
 
     var isDaemon: Bool { true }
 
-    func beginRouteBarrier() async -> Bool { await beginBrowserSettingsMutation() }
+    func beginRouteBarrier() async -> Bool {
+        // A settings command body committing its own change (/subscription
+        // logout) runs inside its own counted ingress.
+        await beginBrowserSettingsMutation(ownCommandIngress: Self.settingsCommandToken != nil ? 1 : 0)
+    }
 
     func endRouteBarrier() { endBrowserSettingsMutation() }
 
@@ -128,9 +132,12 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
                 try? await self.sendText(writer.gate.admissionClosedReason ?? MemoryReplacementLock.busyMessage)
                 return
             }
-            let work = Task { @MainActor in await body() }
-            writer.gate.setCancelHandler(token) { work.cancel() }
-            await work.value
+            // A started command body is never cancelled by a lifecycle
+            // operation (Codex live-menu R1-5): it may already have written,
+            // and its handler writes directly. The lifecycle waits for it
+            // (bodies are bounded: a reply, a reload, at most a host listing).
+            writer.gate.enterDurablePhase(token)
+            await Self.$settingsCommandToken.withValue(token) { await body() }
             writer.gate.release(token)
             self.kickSettingsApply()
         }
@@ -138,6 +145,27 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
 
     /// Set while a settings command body runs under the commit token.
     @TaskLocal static var settingsCommandInline = false
+    /// The token a settings command body runs under (its own transaction
+    /// commits use `commitHolding` with it; the gate is not reentrant).
+    @TaskLocal static var settingsCommandToken: SettingsCommitGate.Token?
+
+    /// A settings command's prepared change through the transaction: under
+    /// the command's token when it holds one, else a normal commit.
+    func commitFromSettingsCommand(_ change: PreparedChange) async -> SettingsCommitResult {
+        if let token = Self.settingsCommandToken {
+            return await settingsWriter.commitHolding(token, change, policy: .classify)
+        }
+        return await settingsWriter.commit(change)
+    }
+
+    /// The reply for a settings command whose commit did not apply.
+    static func settingsCommandRefusal(_ r: SettingsCommitResult) -> String {
+        switch r.state {
+        case .busy: return r.message ?? "Briglia is busy with a task; try again when it finishes."
+        case .pending: return r.message ?? "Saved; it applies when the current task finishes."
+        default: return r.message ?? "Not saved."
+        }
+    }
 
     /// The commands whose body writes route settings (they run as writer tasks).
     static let settingsCommandTokens: Set<String> = [
@@ -150,11 +178,12 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
 
     /// Mind import, /deleteuserdata, shutdown and the upgrade barrier: close
     /// settings admission (new writers refused at once), settle the queued
-    /// writers, cancel the holder's write-free wait, then take the token.
+    /// writers, cancel the holder's write-free wait (barrier, locks — never
+    /// a durable phase, never the pending-apply task itself), then take the
+    /// token.
     func beginSettingsLifecycle(reason: String) async -> SettingsCommitGate.Token {
         let gate = settingsWriter.gate
         gate.closeAdmission(reason: reason)
-        settingsApplyTask?.cancel()
         return await gate.acquireForLifecycle()
     }
 
@@ -163,7 +192,6 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
     func settleSettingsForShutdown(timeoutSeconds: Double = 8) async {
         guard let writer = settingsWriterStorage else { return }
         writer.gate.closeAdmission(reason: "Briglia is stopping; try again when it is back.")
-        settingsApplyTask?.cancel()
         let deadline = ProcessInfo.processInfo.systemUptime + timeoutSeconds
         while writer.gate.isHeld && ProcessInfo.processInfo.systemUptime < deadline {
             try? await Task.sleep(nanoseconds: 50_000_000)

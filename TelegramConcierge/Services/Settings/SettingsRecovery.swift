@@ -52,6 +52,12 @@ enum SettingsRecovery {
         }
     }
 
+    /// Recovery could not read its evidence; the journal is unchanged.
+    struct RecoveryDeferred: Error, CustomStringConvertible {
+        let reason: String
+        var description: String { "the settings store can't be read (\(reason)); interrupted settings changes are kept and recovered once it is readable" }
+    }
+
     /// Scope transitions (B.4c truth table), parameterized by direction.
     static func classifyScope(_ record: SettingsPendingStore.Attempt, evidence: AuthEvidence, published: Bool)
         -> (state: String, message: String) {
@@ -68,11 +74,21 @@ enum SettingsRecovery {
     /// Recovers every journaled attempt and every claimed-but-not-started
     /// pending apply. `secrets`: the current store (markers).
     @discardableResult
-    static func run(secrets: [String: String] = (try? KeychainHelper.strictSnapshot()) ?? [:],
+    static func run(secrets provided: [String: String]? = nil,
                     read: (String) throws -> SubscriptionAuthState? = { try SettingsWriter.authStore($0).read() }) throws -> Report {
         guard FileManager.default.fileExists(atPath: SettingsPendingStore.url.path) else { return Report() }
+        // The markers are evidence: an unreadable store is UNKNOWN, never
+        // "no marker" (Codex live-menu R1-6). With attempts to classify,
+        // nothing is decided and every record is kept for a later run. Read
+        // OUTSIDE the pending lock (lock order: secrets, then pending).
+        var secrets: [String: String]? = provided
+        if secrets == nil, !((try SettingsPendingStore.read()).attempts.isEmpty) {
+            do { secrets = try KeychainHelper.strictSnapshot() } catch { throw RecoveryDeferred(reason: "\(error)") }
+        }
         return try SettingsPendingStore.update { doc -> Report in
             var report = Report()
+            guard doc.attempts.isEmpty || secrets != nil else { throw RecoveryDeferred(reason: "an attempt appeared while recovering") }
+            let secrets = secrets ?? [:]
             for (id, record) in doc.attempts.sorted(by: { $0.value.startedAt < $1.value.startedAt }) {
                 let evidence = authEvidence(record, read: read)
                 let outcome: (state: String, message: String)

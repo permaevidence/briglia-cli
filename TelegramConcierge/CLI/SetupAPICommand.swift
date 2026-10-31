@@ -118,7 +118,7 @@ struct SetupAPI: AsyncParsableCommand {
                             : await SubscriptionSetup().perform(request, ownsLease: true)
                 }
                 replacementLock?.release()
-                guard let change, !change.isEmpty else { respond(prepared) }
+                guard let change, !change.isNoop else { respond(prepared) }
                 respond(SettingsClient.reply(await SettingsClient.commit(change), prepared: prepared))
             }
             switch verb {

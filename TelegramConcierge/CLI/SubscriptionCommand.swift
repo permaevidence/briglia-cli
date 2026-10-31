@@ -74,7 +74,7 @@ struct SubscriptionCommand: AsyncParsableCommand {
             func commit(_ label: String, _ body: () async throws -> Void) async throws -> SettingsCommitResult? {
                 let (change, _) = try await SettingsCapture.prepareThrowing(origin: "subscription", label: label,
                                                                            acceptPending: acceptPending) { try await body() }
-                guard !change.isEmpty else { return nil }
+                guard !change.isNoop else { return nil }
                 return await SettingsClient.commit(change)
             }
             func report(_ result: SettingsCommitResult?, done: String) throws {

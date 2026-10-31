@@ -22,6 +22,12 @@ enum SettingsDigest {
         return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// The whole store's values (attempt markers excluded): the basis of a
+    /// preparation that ran a dictionary transaction.
+    static func ofStore(_ store: [String: String]) -> String {
+        of(pairs: store.filter { !$0.key.hasPrefix(SettingsWriter.attemptMarkerPrefix) })
+    }
+
     /// One digest of several key/value pairs, order-independent.
     static func of(pairs: [String: String]) -> String {
         let body = pairs.keys.sorted().map { "\($0)=\(of(pairs[$0]))" }.joined(separator: "\n")
@@ -116,9 +122,26 @@ struct SettingsSubscriptionOp: Codable, Equatable {
 /// was validated against this generation).
 struct SettingsSubscriptionExpectation: Codable, Equatable {
     var store: String
+    /// "" = the store had no state (absent) when the change was prepared.
     var generation: String
     var requireUsable: Bool
     var requireNoPending: Bool
+    /// Recorded automatically from a preparation's read (R1-3).
+    var basis: Bool = false
+
+    init(store: String, generation: String, requireUsable: Bool, requireNoPending: Bool) {
+        self.store = store; self.generation = generation
+        self.requireUsable = requireUsable; self.requireNoPending = requireNoPending
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        store = try c.decode(String.self, forKey: .store)
+        generation = try c.decode(String.self, forKey: .generation)
+        requireUsable = try c.decode(Bool.self, forKey: .requireUsable)
+        requireNoPending = try c.decode(Bool.self, forKey: .requireNoPending)
+        basis = try c.decodeIfPresent(Bool.self, forKey: .basis) ?? false
+    }
 }
 
 struct PreparedChange: Codable {
@@ -138,6 +161,11 @@ struct PreparedChange: Codable {
     /// When preparation read the whole store: the digest of its route and
     /// credential keys (plan B.4 "every key whose value it was prepared from").
     var routeDigest: String?
+    /// The whole store's values when preparation ran a dictionary
+    /// transaction (`SettingsDigest.ofStore`; R1-7).
+    var storeDigest: String?
+    /// No net write, but explicit writes/transaction reads to validate.
+    var validateOnly: Bool?
     /// `ReplacementEpoch` read before preparation (plan B.8).
     var epoch: Int
     var identity: SettingsIdentityOp?
@@ -157,6 +185,8 @@ struct PreparedChange: Codable {
     var touchedKeys: Set<String> { Set(writes.keys).union(deletes) }
     var hasAuthEffect: Bool { subscription != nil }
     var isEmpty: Bool { writes.isEmpty && deletes.isEmpty && identity == nil && subscription == nil && !wipeAgentMailInstall }
+    /// Nothing to write AND nothing to validate: the caller may skip the commit.
+    var isNoop: Bool { isEmpty && validateOnly != true }
 
     /// The secrets mutation in `mutateHolding` form.
     var secretsDelta: [String: String?] {
@@ -227,6 +257,10 @@ struct SettingsCommitResult {
     var code: String?
     /// The prepared reply (setup-api shape), returned on `applied`.
     var reply: [String: Any]?
+    /// Refused before the decision point (identity reservation, sharing or
+    /// auth lock, barrier): nothing was evaluated or written, so a claimed
+    /// pending change goes back to staged (plan B.5, Codex R1-6).
+    var preDecision = false
 
     static func refused(_ message: String) -> SettingsCommitResult { .init(state: .refused, message: message) }
 

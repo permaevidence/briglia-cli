@@ -301,6 +301,9 @@ extension ConversationManager {
         }
 
         let parts = argument.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        // A lane is a route setting: never changed while a turn runs (the same
+        // idle rule as /model, Codex live-menu R1-2).
+        if !parts.isEmpty, await refuseSettingsWriteWhileBusy("/subagentmodels \(argument)") { return }
         if parts.count == 1, parts[0].lowercased() == "off" {
             do {
                 try SubagentModelLanes.setModel(.cheapVision, model: nil, provider: provider)
@@ -680,14 +683,26 @@ extension ConversationManager {
         }
         if action == "cancel" || action == "logout" {
             subscriptionLoginRunID = nil; subscriptionLoginTask?.cancel(); subscriptionLoginTask = nil
+            // Both go through the settings transaction (Codex live-menu R1-2):
+            // the store mutation is prepared (recorded, not executed), then
+            // classified and committed under this command's token — a sign-out
+            // of the login a running turn uses waits for idle (busy reply).
             do {
                 if action == "logout" {
                     let sentence = SubscriptionSharing.sharingSentence(signOut: true)
-                    try await SubscriptionAuthStore().logout()
-                    try? await sendText("ChatGPT signed out locally." + (sentence.map { " " + $0 } ?? ""), to: address)
+                    let prepared = try await SettingsCapture.prepareThrowing(origin: "telegram", label: "ChatGPT sign-out") {
+                        try await SubscriptionAuthStore().logout()
+                    }
+                    let r = await commitFromSettingsCommand(prepared.change)
+                    try? await sendText(r.state == .applied ? "ChatGPT signed out locally." + (sentence.map { " " + $0 } ?? "")
+                                        : Self.settingsCommandRefusal(r), to: address)
                 } else {
-                    let outcome = try await SubscriptionAuthStore().cancelOwnedPending()
-                    try? await sendText(outcome == .foreign ? SubscriptionSharing.foreignPendingMessage : "ChatGPT login cancelled.", to: address)
+                    let prepared = try await SettingsCapture.prepareThrowing(origin: "telegram", label: "ChatGPT login cancel") {
+                        try await SubscriptionAuthStore().cancelOwnedPending()
+                    }
+                    let r = await commitFromSettingsCommand(prepared.change)
+                    try? await sendText(r.state != .applied ? Self.settingsCommandRefusal(r)
+                                        : prepared.value == .foreign ? SubscriptionSharing.foreignPendingMessage : "ChatGPT login cancelled.", to: address)
                 }
             } catch { try? await sendText(error.localizedDescription, to: address) }
             return
@@ -705,16 +720,23 @@ extension ConversationManager {
             defer {
                 if self.subscriptionLoginRunID == runID { self.subscriptionLoginTask = nil; self.subscriptionLoginRunID = nil; self.kickSettingsApply() }
             }
-            // The publication runs under the settings commit token (plan
-            // B.5): never beside another settings write, refused while a
-            // memory operation closed settings admission.
+            // The publication and the profile save are ONE prepared change,
+            // committed through the settings writer (Codex live-menu R1-2):
+            // classified (a new generation of the active ChatGPT lane is D and
+            // waits for idle, staged), journaled, never beside another write.
             var login = SubscriptionLogin()
-            login.commitHook = { commit in
-                guard let token = await writer.gate.acquire() else {
-                    throw SubscriptionError(writer.gate.admissionClosedReason ?? MemoryReplacementLock.busyMessage)
+            let box = TelegramPublishBox()
+            login.commitHook = { direct in
+                let (change, generation) = try await SettingsCapture.prepareThrowing(origin: "telegram", label: "ChatGPT sign-in",
+                                                                                    acceptPending: true) {
+                    let generation = try await direct(nil)
+                    try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil,
+                        model: ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel,
+                        effort: ProviderProfiles.configuredEffort(.chatgpt) ?? "high", textOnly: false)
+                    return generation
                 }
-                defer { writer.gate.release(token) }
-                return try await commit(nil)
+                box.change = change
+                return generation
             }
             do {
                 _ = try await login.device { url, code in
@@ -722,11 +744,16 @@ extension ConversationManager {
                     try await channel.sendText(chatId: address.chatId, text: "Sign in to your own ChatGPT account at " + url + "\nCode: " + code + "\nExpires in 15 minutes. No access or refresh token should be sent in chat.")
                 }
                 try Task.checkCancellation()
-                guard self.subscriptionLoginRunID == runID, self.pairedChatId == paired else { throw CancellationError() }
-                try ProviderProfiles.saveProfile(.chatgpt, apiKey: nil, baseURL: nil,
-                    model: ProviderProfiles.configuredModel(.chatgpt) ?? ResponsesAdapter.subscriptionDefaultModel,
-                    effort: ProviderProfiles.configuredEffort(.chatgpt) ?? "high", textOnly: false)
-                try await channel.sendText(chatId: address.chatId, text: "ChatGPT login saved. Send /provider chatgpt when idle to activate this login, including if ChatGPT is already selected. If ChatGPT is already selected, turns will keep failing until you send /provider chatgpt.")
+                guard self.subscriptionLoginRunID == runID, self.pairedChatId == paired, let change = box.change else { throw CancellationError() }
+                let r = await writer.commit(change)
+                switch r.state {
+                case .applied:
+                    try await channel.sendText(chatId: address.chatId, text: "ChatGPT login saved. Send /provider chatgpt when idle to activate this login, including if ChatGPT is already selected. If ChatGPT is already selected, turns will keep failing until you send /provider chatgpt.")
+                case .pending:
+                    try await channel.sendText(chatId: address.chatId, text: "ChatGPT login saved. Briglia is busy with a task, so it takes effect when the task finishes.")
+                default:
+                    try await channel.sendText(chatId: address.chatId, text: "ChatGPT login not saved: " + Self.settingsCommandRefusal(r))
+                }
             } catch {
                 if !Task.isCancelled, self.subscriptionLoginRunID == runID {
                     try? await channel.sendText(chatId: address.chatId, text: "ChatGPT login failed: " + error.localizedDescription)
@@ -1073,6 +1100,14 @@ extension ConversationManager {
     /// with a Serper key it changes nothing; page reading without a Jina key
     /// is unaffected. The tool list follows from the next turn; a running
     /// turn's searches use the new value at their next call.
+    /// The idle rule of the Telegram settings commands that write a route
+    /// setting directly (their bodies run under the commit token).
+    func refuseSettingsWriteWhileBusy(_ again: String) async -> Bool {
+        guard activeRunId != nil || activeProcessingTask != nil else { return false }
+        try? await sendText("⏳ A turn is running — send \(again) again when Briglia is idle (or /stop first).")
+        return true
+    }
+
     func handleFreeSearchCommand(argument: String) async {
         guard replyAddress != nil else { return }
         let normalized = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1093,6 +1128,7 @@ extension ConversationManager {
         case "":
             try? await sendText(describe())
         case "on", "off":
+            if await refuseSettingsWriteWhileBusy("/freesearch \(normalized)") { return }
             do {
                 try KeychainHelper.save(key: KeychainHelper.keylessSearchKey, value: normalized == "on" ? "true" : "false")
                 try? await sendText("✅ Free web search \(normalized.uppercased()) — from the next message.\n" + describe())
@@ -1100,6 +1136,7 @@ extension ConversationManager {
                 try? await sendText("⚠️ Could not save the setting: \(error.localizedDescription)")
             }
         case "reset":
+            if await refuseSettingsWriteWhileBusy("/freesearch reset") { return }
             do {
                 try KeychainHelper.delete(key: KeychainHelper.keylessSearchKey)
                 let session: String
@@ -1552,6 +1589,7 @@ extension ConversationManager {
         if currentProvider == provider {
             switchedMessage = "✅ Voice transcription already set to \(providerDisplayName)."
         } else {
+            if await refuseSettingsWriteWhileBusy("/transcribe_\(provider == .openAI ? "openai" : "local")") { return }
             do {
                 try KeychainHelper.save(
                     key: KeychainHelper.voiceTranscriptionProviderKey,
@@ -1719,3 +1757,6 @@ extension ConversationManager {
         }
     }
 }
+
+/// The Telegram sign-in's prepared publication, handed out of the login hook.
+final class TelegramPublishBox: @unchecked Sendable { var change: PreparedChange? }

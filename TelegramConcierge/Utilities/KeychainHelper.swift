@@ -119,6 +119,7 @@ enum KeychainHelper {
     nonisolated(unsafe) private static var cacheStamp: DiskStamp?
 
     static func save(key: String, value: String) throws {
+        if let capture = SettingsCapture.current { try capture.write([key: value]); return }
         try mutate { $0[key] = value }
     }
 
@@ -140,6 +141,7 @@ enum KeychainHelper {
     }
 
     static func delete(key: String) throws {
+        if let capture = SettingsCapture.current { try capture.write([key: nil]); return }
         try mutate { $0.removeValue(forKey: key) }
     }
 
@@ -159,6 +161,7 @@ enum KeychainHelper {
     /// a mid-sequence failure can't leave half the keys switched — the store
     /// either commits every change or none.
     static func saveBatch(_ changes: [String: String?]) throws {
+        if let capture = SettingsCapture.current { try capture.write(changes); return }
         try mutate { store in
             for (key, value) in changes {
                 if let value {

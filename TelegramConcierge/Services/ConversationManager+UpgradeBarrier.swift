@@ -61,8 +61,9 @@ extension ConversationManager {
         admissionPaused = true
         // Settings admission closes with it (plan B.4b): queued writers are
         // refused at once, a write-free wait is cancelled.
+        // The pending-apply task is NOT cancelled directly (Codex R1-5): the
+        // gate cancels only its write-free waits; a durable apply finishes.
         settingsWriterStorage?.gate.closeAdmission(reason: Self.updatingRefusal)
-        settingsApplyTask?.cancel()
     }
     func resumeAdmission() {
         admissionPaused = false

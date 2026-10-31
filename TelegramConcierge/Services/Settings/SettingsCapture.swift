@@ -9,7 +9,8 @@ import Foundation
 /// overlay only. Identity reservations, subscription-store writes and the
 /// private AgentMail wipe are recorded instead of executed. The result is a
 /// pure description — the secrets keys to set and delete, the preconditions
-/// (the digest of every key it wrote or read), the identity and subscription
+/// (the digest of every key it explicitly wrote or read via `load`; the
+/// whole store's values for a dictionary transaction), the identity and subscription
 /// operations — that `SettingsWriter` commits in the owner.
 ///
 /// The overlay is task-local: other tasks of the same process (a running
@@ -21,6 +22,9 @@ final class SettingsCaptureBox: @unchecked Sendable {
     private var reads = Set<String>()
     private var touched = Set<String>()
     private var wholeStoreRead = false
+    /// A dictionary transaction ran: its reads are not observable, so the
+    /// whole store's values are its basis (Codex live-menu R1-7).
+    private var transactionRead = false
     /// Evaluation mode (pure resolvers over a dictionary): writes throw.
     let readOnly: Bool
     private var identityOp: SettingsIdentityOp?
@@ -55,10 +59,23 @@ final class SettingsCaptureBox: @unchecked Sendable {
         return overlay
     }
 
+    /// Explicit key writes (`save`, `delete`, `saveBatch`): every named key
+    /// is recorded as written — even when the value does not change — so a
+    /// save of the current value still re-checks it at commit.
+    func write(_ changes: [String: String?]) throws {
+        if readOnly { throw ReadOnlyWrite() }
+        lock.lock(); defer { lock.unlock() }
+        for (key, value) in changes {
+            touched.insert(key)
+            if let value { overlay[key] = value } else { overlay.removeValue(forKey: key) }
+        }
+    }
+
     func mutate(_ change: (inout [String: String]) throws -> Void, skipUnchanged: Bool, wrote: inout Bool) throws {
         if readOnly { throw ReadOnlyWrite() }
         lock.lock()
         var next = overlay
+        transactionRead = true
         lock.unlock()
         // The closure may read the store (the real store does not allow it;
         // the overlay does no harm) — it runs outside the box lock.
@@ -83,6 +100,18 @@ final class SettingsCaptureBox: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         if subscriptionOp != nil { refusal = "one settings change can hold only one ChatGPT login operation" }
         subscriptionOp = op
+    }
+
+    /// The auth state a preparation read (nil generation = absent store):
+    /// one basis per store, the last read wins (the preparation's own flow
+    /// state writes never change the generation).
+    func recordSubscriptionBasis(store: String, generation: String?) {
+        lock.lock(); defer { lock.unlock() }
+        let path = URL(fileURLWithPath: store).standardizedFileURL.path
+        expectations.removeAll { $0.basis && URL(fileURLWithPath: $0.store).standardizedFileURL.path == path }
+        var e = SettingsSubscriptionExpectation(store: store, generation: generation ?? "", requireUsable: false, requireNoPending: false)
+        e.basis = true
+        expectations.append(e)
     }
 
     func expectSubscription(_ expectation: SettingsSubscriptionExpectation) {
@@ -115,6 +144,10 @@ final class SettingsCaptureBox: @unchecked Sendable {
             change.expected[key] = SettingsDigest.of(base[key])
         }
         if wholeStoreRead { change.routeDigest = SettingsKeyRoles.routeDigest(base) }
+        if transactionRead { change.storeDigest = SettingsDigest.ofStore(base) }
+        // Written keys whose net value did not change: nothing to write, but
+        // the commit still validates them (and any transaction basis).
+        if change.writes.isEmpty, change.deletes.isEmpty, !touched.isEmpty || transactionRead { change.validateOnly = true }
         change.identity = identityOp
         change.subscription = subscriptionOp
         change.subscriptionExpectations = expectations

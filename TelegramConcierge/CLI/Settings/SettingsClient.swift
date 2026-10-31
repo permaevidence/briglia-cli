@@ -87,13 +87,65 @@ final class OfflineSettingsHost: SettingsOwnerHost {
     var toolSwitches: SettingsToolSwitches { SettingsToolSwitches.current() }
 }
 
+/// The single offline owner of this process: one host, one writer, one
+/// commit token for every local commit (R1-1).
+@MainActor
+enum OfflineOwner {
+    static let host = OfflineSettingsHost()
+    static let writer = SettingsWriter(host: host)
+}
+
+/// FIFO mutual exclusion for local commits of this process (main actor).
+@MainActor
+enum OfflineCommitQueue {
+    private static var busy = false
+    private static var waiters: [CheckedContinuation<Void, Never>] = []
+    static var isBusyForTesting: Bool { busy }
+    static var waitingForTesting: Int { waiters.count }
+
+    static func acquire() async {
+        if !busy { busy = true; return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    static func release() {
+        if waiters.isEmpty { busy = false } else { waiters.removeFirst().resume() }
+    }
+}
+
 /// The writer side of every process that is NOT a running owner: the
 /// standalone menu, `setup-api`, `briglia setup`, `briglia subscription`
 /// (plan B.6). It forwards a prepared change to the running daemon, or —
 /// when none runs — takes the instance lease for the commit only.
 enum SettingsClient {
     /// Short commits in progress in this process (the upgrade exit waits).
-    nonisolated(unsafe) static var shortCommitsInProgress = 0
+    /// Commits are serialized (at most one), and a lease release requested
+    /// while one runs is deferred until it ends (`releaseAfterLocalCommits`).
+    static var shortCommitsInProgress: Int { localLock.lock(); defer { localLock.unlock() }; return localInFlight }
+    private static let localLock = NSLock()
+    nonisolated(unsafe) private static var localInFlight = 0
+    nonisolated(unsafe) private static var deferredReleases: [() -> Void] = []
+
+    /// Runs `release` (an instance lease this process holds: the menu's
+    /// pairing lease, a legacy lease) now, or — while a local commit that
+    /// borrowed it is running — right after that commit ends, so a commit
+    /// never continues without the lease (Codex live-menu review R1-1).
+    static func releaseAfterLocalCommits(_ release: @escaping () -> Void) {
+        localLock.lock()
+        if localInFlight > 0 { deferredReleases.append(release); localLock.unlock(); return }
+        localLock.unlock()
+        release()
+    }
+
+    private static func beginLocal() { localLock.lock(); localInFlight += 1; localLock.unlock() }
+    private static func endLocal() {
+        localLock.lock()
+        localInFlight -= 1
+        let run = localInFlight == 0 ? deferredReleases : []
+        if localInFlight == 0 { deferredReleases = [] }
+        localLock.unlock()
+        for release in run { release() }
+    }
     nonisolated(unsafe) private static var lastShortLease: TimeInterval = 0
     /// Selftest seam: the lease acquisition wait.
     nonisolated(unsafe) static var leaseWaitSecondsForTesting: Double?
@@ -120,8 +172,16 @@ enum SettingsClient {
             return await SettingsCapture.$current.withValue(nil) { await commit(change, stillValid: stillValid) }
         }
         if let owner = inProcessOwner { return await owner(change, stillValid) }
+        // One local commit at a time in this process (R1-1): the lease
+        // decision, recovery, observer, commit and the short lease's release
+        // run as one unit; a second save waits its turn and then decides
+        // again (forward or local) on what is true at that moment.
+        await OfflineCommitQueue.acquire()
+        var queueHeld = true
+        defer { if queueHeld { OfflineCommitQueue.release() } }
         // A process already holding the lease (the menu's Telegram pairing
-        // step, quick setup) is the owner for this moment.
+        // step, quick setup) is the owner for this moment; its release waits
+        // for this commit (`releaseAfterLocalCommits`).
         if InstanceLease.isHeldInThisProcess {
             return await commitLocally(change, stillValid: stillValid)
         }
@@ -141,10 +201,12 @@ enum SettingsClient {
             defer { lease.release(); replacement?.release() }
             return await commitLocally(change, stillValid: stillValid)
         case .failure:
-            // Release the replacement lock BEFORE waiting on the owner.
+            // Release the replacement lock and the queue BEFORE waiting on
+            // the owner.
             replacement?.release()
-            do { try stillValid?() } catch { return .refused("this action was superseded; nothing was saved") }
-            return await forward(change)
+            queueHeld = false
+            OfflineCommitQueue.release()
+            return await forward(change, stillValid: stillValid)
         }
     }
 
@@ -152,29 +214,31 @@ enum SettingsClient {
     /// preconditions, classification; no turn, so D applies now).
     @MainActor
     static func commitLocally(_ change: PreparedChange, stillValid: (@Sendable () throws -> Void)? = nil) async -> SettingsCommitResult {
-        shortCommitsInProgress += 1
-        defer { shortCommitsInProgress -= 1 }
+        beginLocal()
+        defer { endLocal() }
         do { try SettingsRecovery.run() } catch {
             return .refused("The waiting settings changes can't be read (\(error)).")
         }
         let installed = KeychainHelper.writeObserver == nil
         if installed { SettingsSupersede.install() }
         defer { if installed { SettingsSupersede.uninstall() } }
-        let host = OfflineSettingsHost()
-        let writer = SettingsWriter(host: host)
-        let result = await writer.commit(change, stillValid: stillValid)
-        withExtendedLifetime(host) {}
-        return result
+        // One writer (one commit token) per process for every local commit.
+        return await OfflineOwner.writer.commit(change, stillValid: stillValid)
     }
 
     /// Forward to the live owner; retried up to 20 s while a daemon starts
     /// (its lease precedes its socket). Never falls back to a local write.
-    static func forward(_ change: PreparedChange) async -> SettingsCommitResult {
+    /// `stillValid` is checked before EVERY attempt known not to have sent
+    /// anything (R1-8). Submission = the request was written to a connected
+    /// owner socket; after that a local revocation can no longer cancel it,
+    /// and the answer (or a single lookup) is the outcome.
+    static func forward(_ change: PreparedChange, stillValid: (@Sendable () throws -> Void)? = nil) async -> SettingsCommitResult {
         guard let data = try? change.encoded(), let object = try? JSONSerialization.jsonObject(with: data) else {
             return .refused("settings change could not be encoded")
         }
         let deadline = ProcessInfo.processInfo.systemUptime + (socketRetrySecondsForTesting ?? 20)
         while true {
+            do { try stillValid?() } catch { return .refused("this action was superseded; nothing was saved") }
             do {
                 let reply = try await Task.detached {
                     try OwnerSocket.request(["type": "settings_commit", "change": object], timeout: 300)
@@ -243,7 +307,7 @@ enum SettingsClient {
                                  _ body: () async -> [String: Any]) async -> [String: Any] {
         let (change, prepared) = await SettingsCapture.prepare(origin: origin, label: label, acceptPending: acceptPending, body)
         guard let change else { return prepared }
-        if change.isEmpty { return prepared }
+        if change.isNoop { return prepared }
         do { try checkpoint() } catch {
             var r = SetupAPICore.errorResponse(code: "superseded", message: (error as? SetupAPICore.CheckpointRevoked)?.message ?? "\(error)")
             r["applied"] = [String]()

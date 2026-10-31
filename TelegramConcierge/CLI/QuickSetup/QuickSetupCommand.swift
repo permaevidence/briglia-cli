@@ -556,7 +556,11 @@ enum QuickSetupSession {
         private let lock = NSLock()
         private var lease: InstanceLease?
         init(_ l: InstanceLease?) { lease = l }
-        func release() { lock.lock(); let l = lease; lease = nil; lock.unlock(); l?.release() }
+        func release() {
+            lock.lock(); let l = lease; lease = nil; lock.unlock()
+            // A local settings commit borrowing this lease finishes first.
+            if let l { SettingsClient.releaseAfterLocalCommits { l.release() } }
+        }
         func reacquire() -> Bool {
             lock.lock(); defer { lock.unlock() }
             if lease != nil { return true }

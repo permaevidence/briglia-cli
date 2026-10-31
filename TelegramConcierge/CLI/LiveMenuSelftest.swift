@@ -145,6 +145,7 @@ final class LiveMenuHarness {
         if section("extra") { await extraSection(); await pairingSection() }
         if section("startup") { await startupSection() }
         if section("daemon") { await daemonSection() }
+        if section("round1") { await round1Section() }
     }
 
     // MARK: Fixtures

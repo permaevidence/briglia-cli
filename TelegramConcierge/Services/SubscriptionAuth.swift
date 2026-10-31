@@ -258,7 +258,20 @@ struct SubscriptionAuthStore {
     var beforeWrite: (() throws -> Void)? = nil
     var afterWrite: (() throws -> Void)? = nil
 
+    /// A read inside a settings preparation records the exact auth basis it
+    /// saw (generation, or absent) as an expectation the decision point
+    /// re-checks under the auth lock (Codex live-menu R1-3): every
+    /// preparation that consumes the login — selection, logout, profile
+    /// changes, activation — is protected, not only setup-api's select.
     func read() throws -> SubscriptionAuthState? {
+        let state = try readStored()
+        if let capture = SettingsCapture.current, !capture.readOnly {
+            capture.recordSubscriptionBasis(store: directory.path, generation: state?.generation)
+        }
+        return state
+    }
+
+    private func readStored() throws -> SubscriptionAuthState? {
         let fd = open(file.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
         if fd < 0 {
             if errno == ENOENT { return nil }
