@@ -15,7 +15,7 @@ import prefs_normalize
 LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 
 ROOT = wire.ROOT
-CM_DEFAULTS = 13  # UserDefaults.standard accesses across the ConversationManager family
+CM_DEFAULTS = 11  # UserDefaults.standard accesses across the ConversationManager family (13 before the live menu moved /websearch's two writes to WebSearchBackend.saveSelection)
 parser = argparse.ArgumentParser()
 parser.add_argument('--reuse', type=Path)
 args = parser.parse_args()

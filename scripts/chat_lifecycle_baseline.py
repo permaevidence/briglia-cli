@@ -26,6 +26,11 @@ ROOT = wire.ROOT
 # the pinned reference and on 0.2.58/0.2.59 (frozen evidence key
 # "TelegramConcierge/Services/ConversationManager.swift:defaults" = 13).
 CM_DEFAULTS = 13
+# Live menu (KEYLESS_WEB_AND_LIVE_MENU_PLAN Part B): the /websearch choice moved
+# into secrets.json (WebSearchBackend.saveSelection, outside the family), so
+# the two `Prefs.store.set(… selectionKey)` writes left
+# ConversationManager+ModelCommands.swift: the candidate family has 11.
+CM_CANDIDATE_DEFAULTS = 11
 FIXTURES = ROOT / "scripts/fixtures/chat-lifecycle"
 
 
@@ -49,7 +54,7 @@ def freeze_fallback_prompt_day(tree):
             "let currentDate = dateFormatter.string(from: turnStartDate ?? Date(timeIntervalSince1970: 1788609600))")
 
 
-def instrument(tree):
+def instrument(tree, cm_defaults=CM_DEFAULTS):
     evidence = {}
     # Stage-1 profile trees reach preferences through Prefs (= the standard
     # domain for default); map them back so accesses are counted per file
@@ -100,7 +105,7 @@ def instrument(tree):
         if "UserDefaults = .standard" in text:
             evidence[str(path.relative_to(tree)) + ":defaults-default"] = text.count("UserDefaults = .standard")
             path.write_text(text.replace("UserDefaults = .standard", "UserDefaults = P0Life.defaults"))
-    evidence[cmp.MAIN + ":defaults"] = cmp.replace_all_counted(tree, "UserDefaults.standard", "P0Life.defaults", CM_DEFAULTS)
+    evidence[cmp.MAIN + ":defaults"] = cmp.replace_all_counted(tree, "UserDefaults.standard", "P0Life.defaults", cm_defaults)
     cmp.replace_all_counted(tree, "UserDefaults = .standard", "UserDefaults = P0Life.defaults", 0)
     cmp.replace_once(tree, "let now = Date()\n        UserDefaults.standard.set(now, forKey: systemPromptTimestampKey)".replace("UserDefaults.standard", "P0Life.defaults"),
             "let now = P0Life.instant\n        P0Life.defaults.set(now, forKey: systemPromptTimestampKey)")
@@ -202,6 +207,21 @@ REVIEWED_DEFAULTS_DELTAS = {
     # preferences suite through the named-domain API (Prefs.domains), never
     # the standard domain's keys.
     "TelegramConcierge/CLI/ProfilesCommand+Lifecycle.swift:defaults": (None, 1),
+    # Live menu (KEYLESS_WEB_AND_LIVE_MENU_PLAN Part B): the /websearch choice
+    # is stored in secrets.json (`ada.web.extractionBackend`) and only MIRRORED
+    # to the old preference for downgrade. Its writers moved: the two
+    # `/websearch` writes left ConversationManager+ModelCommands.swift and the
+    # wizard's one left SetupWizard.swift (the key is no longer touched there:
+    # None = no access left in that file); WebSearchBackend gains the mirror
+    # write / migration read (2 -> 3); the settings writer applies a captured
+    # mirror (1); SettingsToolSwitches.current reads the tool switches through
+    # one `UserDefaults = Prefs.store` default parameter (1). No preference
+    # key was added or removed.
+    "TelegramConcierge/Services/ConversationManager.swift:defaults": (13, 11),
+    "TelegramConcierge/CLI/SetupWizard.swift:defaults": (1, None),
+    "TelegramConcierge/Services/WebOrchestrator.swift:defaults": (2, 3),
+    "TelegramConcierge/Services/Settings/SettingsWriter.swift:defaults": (None, 1),
+    "TelegramConcierge/Services/Settings/RouteSnapshot.swift:defaults-default": (None, 1),
 }
 
 
@@ -353,7 +373,7 @@ def main():
                         name = os.fsdecode(raw)
                         (tree / name).parent.mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(ROOT / name, tree / name, follow_symlinks=False)
-            evidence = instrument(tree)
+            evidence = instrument(tree, CM_DEFAULTS if label == "reference" else CM_CANDIDATE_DEFAULTS)
             if label == "reference":
                 reference_evidence = reviewed_defaults_delta(evidence)
             elif reference_evidence is not None and evidence != reference_evidence:
