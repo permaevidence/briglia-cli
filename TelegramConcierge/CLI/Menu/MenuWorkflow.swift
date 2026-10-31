@@ -442,7 +442,15 @@ final class MenuWorkflow {
         return mediaViaOpenRouter ? "openrouter" : nil
     }
 
+    /// Rows a host treats as optional on top of the page's own rules: the
+    /// terminal quick setup lets the user skip Full Disk Access and the
+    /// media tools (spec: "Enter without enabling it = skip", `--no-tools`,
+    /// no Homebrew → continue), so setup can complete without them. Empty
+    /// for the menu page, whose rules are unchanged.
+    var optionalItems: Set<MenuItem> = []
+
     func isRequired(_ item: MenuItem) -> Bool {
+        if optionalItems.contains(item) { return false }
         switch item {
         // Optional like email (KEYLESS_WEB plan A.8): without a key Briglia
         // searches with Parallel and reads pages with Jina, both keyless.
@@ -1071,7 +1079,11 @@ final class MenuWorkflow {
                 return (false, L("Briglia is running right now, so this page can\u{2019}t connect a bot. Send /switchbot to Briglia on Telegram, or stop Briglia and try again.",
                                  "Briglia è in funzione, quindi questa pagina non può collegare un bot. Invia /switchbot a Briglia su Telegram, oppure ferma Briglia e riprova."))
             }
-            telegram = TelegramPending(token: token, bot: probe["bot_username"] as? String ?? "your_bot", state: "waiting",
+            // `manual`: the chat ID is already known (quick setup's
+            // --telegram-chat-id), so the step opens in the "type your ID"
+            // state and never scans the bot.
+            telegram = TelegramPending(token: token, bot: probe["bot_username"] as? String ?? "your_bot",
+                                       state: body["manual"] as? Bool == true ? "manual" : "waiting",
                                        since: now(), lastScan: .distantPast)
             return (true, nil)
 

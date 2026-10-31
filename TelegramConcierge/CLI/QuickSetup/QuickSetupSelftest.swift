@@ -18,7 +18,7 @@ import Darwin
 struct QuickSetupSelftest: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "__quicksetup-selftest",
-        abstract: "Internal: verify the desktop quick setup (server, workflow, runner, installer, lease).",
+        abstract: "Internal: verify the terminal quick setup and the local pages\u{2019} server, authorization, runner and lease.",
         shouldDisplay: false
     )
 
@@ -62,18 +62,15 @@ struct QuickSetupSelftest: AsyncParsableCommand {
         await t.section("1. parser") { try await t.parser() }
         await t.section("2. server, authorization, generations") { try await t.serverAndGenerations() }
         await t.section("3c. browser settings") { try await t.browserSettings(); try await t.browserSettingsShutdown(); try await t.browserSettingsSignals() }
-        await t.section("3b. subscription workflow") { try await t.subscriptionWorkflow() }
-        await t.section("3. workflow enforcement") { try await t.workflowEnforcement() }
-        await t.section("7. mandatory rows fail closed") { try await t.mandatoryRows() }
         await t.section("8. job runner") { try await t.runner() }
-        await t.section("9. static page") { try await t.staticPage() }
-        await t.section("11. refusals") { try await t.refusals() }
-        await t.section("13/15. finish, completion order, lease") { try await t.finishAndLease() }
+        await t.section("9. static pages") { try await t.staticPage() }
+        await t.section("13/15. lease, completion delivery") { try await t.finishAndLease() }
         await t.section("14. keep-awake census") { try await t.census() }
         await t.section("16. package maps + disk floors") { try await t.packagesAndDisk() }
         await t.section("2c. AgentMail pinned release") { try await t.agentMailPinning() }
         await t.section("17. service start (socket wait)") { try await t.serviceStart() }
         await t.section("18. python venv package in the menu's apt job") { try await t.venvAptJob() }
+        await t.section("19. terminal quick setup") { try await t.terminalQuickSetup() }
 
         print(t.failures == 0 ? "\nquicksetup selftest: all \(t.checks) checks passed"
                               : "\nquicksetup selftest: \(t.failures) of \(t.checks) FAILED")
@@ -121,131 +118,6 @@ final class SelftestContext: @unchecked Sendable {
     }
 
     /// A stubbed environment: no network, no system mutation.
-    func stubEnv(linux: Bool = false) -> (env: QuickSetupEnvironment, store: StoreBox) {
-        let store = StoreBox()
-        var env = QuickSetupEnvironment()
-        env.isLinux = linux
-        env.probe = { req in
-            let kind = req["kind"] as? String ?? ""
-            let key = (req["api_key"] as? String) ?? (req["token"] as? String) ?? ""
-            if kind == "telegram_chat" {
-                if key != "tg-good" { return ["ok": false, "reason": "bad token"] }
-                if (req["chat_id"] as? String) != "5551234567" { return ["ok": false, "reason": "chat not found — open @bot, send /start, then Retry", "reason_code": "chat_not_found"] }
-                return ["ok": true, "bot_username": "test_bot", "chat_title": "Sofia", "chat_username": "sofia"]
-            }
-            if key.hasSuffix("-good") { return ["ok": true] }
-            return ["ok": false, "reason": "\(kind): rejected"]
-        }
-        env.apply = { req, checkpoint in
-            do { try checkpoint() } catch { return ["ok": false, "error": ["code": "superseded", "message": "superseded"]] }
-            for (k, v) in req {
-                guard let section = v as? [String: Any] else { continue }
-                store.applied.append(k == "provider" ? (section["profile"] as? String ?? "provider") : k)
-                if k == "provider", section["profile"] as? String == "opencode" { store.values[ProviderProfiles.opencodeApiKeyKey] = section["api_key"] as? String; store.values[ProviderProfiles.opencodeModelKey] = section["model"] as? String }
-                if k == "provider", section["profile"] as? String == "openrouter" { store.values[KeychainHelper.openRouterApiKeyKey] = section["api_key"] as? String; store.activations.append(section["activate"] as? Bool ?? true) }
-                if k == "provider", section["profile"] as? String == "custom" { store.values[ProviderProfiles.customApiKeyKey] = section["api_key"] as? String; store.values[ProviderProfiles.customBaseURLKey] = section["base_url"] as? String; store.values[ProviderProfiles.customModelKey] = section["model"] as? String; store.activations.append(section["activate"] as? Bool ?? true) }
-                if k == "openai" { store.values[KeychainHelper.openAITranscriptionApiKeyKey] = section["api_key"] as? String }
-                if k == "serper" { store.values[KeychainHelper.serperApiKeyKey] = section["api_key"] as? String }
-                if k == "jina" { store.values[KeychainHelper.jinaApiKeyKey] = section["api_key"] as? String }
-                if k == "identity" { store.values[KeychainHelper.userNameKey] = section["user_name"] as? String }
-                if k == "telegram" { store.values[KeychainHelper.telegramBotTokenKey] = section["token"] as? String; store.values[KeychainHelper.telegramChatIdKey] = section["chat_id"] as? String }
-                if k == "email_calendar" { store.values[KeychainHelper.agentMailApiKeyKey] = section["api_key"] as? String; store.values[KeychainHelper.emailCalendarProviderKey] = "agentmail"; store.installCLI = section["install_cli"] as? Bool }
-            }
-            return ["ok": true, "applied": Array(req.keys)]
-        }
-        env.storedValue = { store.values[$0] ?? nil }
-        env.saveBatch = { changes in
-            if let f = store.saveFailure { try f(changes, store) }
-            for (k, v) in changes {
-                if let v { store.values[k] = v } else { store.values.removeValue(forKey: k) }
-            }
-        }
-        env.fsyncConfigDirectory = { store.fsyncCalls += 1; if store.fsyncFails > 0 { store.fsyncFails -= 1; throw NSError(domain: "t", code: 1, userInfo: [NSLocalizedDescriptionKey: "injected fsync failure"]) } }
-        env.fullDiskAccessGranted = { store.fda }
-        env.terminalAppName = { "Terminal" }
-        env.openSettingsPane = { store.settingsOpened += 1 }
-        env.keepAwakeHeld = { store.keepAwake }
-        env.autoSuspendVerdict = { store.verdict }
-        env.disableGnomeAutoSuspend = { store.gnomeDisabled = true; store.verdict = .noDetectedIdleAutoSuspend(.gnomeNothing(lidPresent: false)); return true }
-        env.toolchainStatus = { store.toolchain }
-        env.toolchainJobs = { _ in store.toolchainJobs }
-        env.maskSleepTargetsJob = { store.maskJob }
-        env.installAgentMail = { _, _, _ in store.agentMailInstalled = true; return nil }
-        env.agentMailInstalled = { store.agentMailInstalled }
-        env.installUnit = { store.unitInstalled = true; if let e = store.unitFailure { throw e } }
-        env.enableService = { _ in store.serviceStarted = true; return store.enableFailure }
-        env.serviceEvidence = { store.serviceEvidence }
-        env.stopService = { store.stopCalls += 1; return store.stopOK }
-        env.releaseLease = { store.releaseCalls += 1; store.progressAtRelease = store.values[SetupWizard.progressKey] ?? nil; store.unitInstalledAtRelease = store.unitInstalled }
-        env.reacquireLease = { store.reacquireCalls += 1; return true }
-        env.log = { _ in }
-        return (env, store)
-    }
-
-    /// Every setup-api payload a save sent, in order (round 4 checks).
-    final class PayloadLog: @unchecked Sendable {
-        private let lock = NSLock()
-        private var items: [[String: Any]] = []
-        func append(_ p: [String: Any]) { lock.lock(); items.append(p); lock.unlock() }
-        var all: [[String: Any]] { lock.lock(); defer { lock.unlock() }; return items }
-    }
-
-    final class StoreBox: @unchecked Sendable {
-        var values: [String: String?] = [:]
-        /// A saved configuration, as the recheck step expects it.
-        func seedConfigured() {
-            for key in [ProviderProfiles.opencodeApiKeyKey, KeychainHelper.openAITranscriptionApiKeyKey, KeychainHelper.serperApiKeyKey,
-                        KeychainHelper.jinaApiKeyKey, KeychainHelper.telegramBotTokenKey, KeychainHelper.telegramChatIdKey, KeychainHelper.userNameKey] {
-                values[key] = "configured"
-            }
-            // The final check follows the stored main provider (Codex round 4
-            // R1): a saved OpenCode setup has its profile marker and model.
-            values[ProviderProfiles.activeProfileKey] = ProviderProfiles.Profile.opencode.rawValue
-            values[ProviderProfiles.opencodeModelKey] = OpenCodeGo.defaultModel
-        }
-        var applied: [String] = []
-        var activations: [Bool] = []
-        var installCLI: Bool?
-        var saveFailure: (([String: String?], StoreBox) throws -> Void)?
-        var fsyncCalls = 0
-        var fsyncFails = 0
-        var fda = true
-        var keepAwake = true
-        var verdict: AutoSuspendCensus.Verdict = .sleepImpossible
-        var gnomeDisabled = false
-        var toolchain = ToolchainService.DesktopStatus(doctorRan: true, missing: [], libreOffice: true, mandatoryMissing: [])
-        var toolchainJobs: [SetupJobRunner.Spec] = []
-        var maskJob: SetupJobRunner.Spec?
-        var agentMailInstalled = true
-        var unitInstalled = false
-        var unitFailure: Error?
-        var serviceStarted = false
-        var enableFailure: String?
-        var serviceEvidence: (ok: Bool, linger: Bool, detail: String) = (true, true, "stub ok")
-        var stopCalls = 0
-        var stopOK = true
-        var releaseCalls = 0
-        var progressAtRelease: String?
-        var unitInstalledAtRelease = false
-        var reacquireCalls = 0
-        var settingsOpened = 0
-    }
-
-    func goodRequest(opencode: String = "oc-good", chat: String = "5551234567", agentmail: Bool = true) -> QuickSetupRequest {
-        var values: [QuickSetupField: QuickSetupRequest.Value] = [
-            .opencode: .key(opencode), .openai: .key("oa-good"), .serper: .key("sp-good"), .jina: .key("ji-good"),
-            .telegram: .telegram(token: "tg-good", chatId: chat),
-        ]
-        if agentmail { values[.agentmail] = .key("am-good") }
-        return QuickSetupRequest(name: "Sofia Bruni", values: values)
-    }
-
-    func makeWorkflow(_ env: QuickSetupEnvironment, resume: QuickSetupWorkflow.ResumeMode = .fresh) throws -> (QuickSetupWorkflow, SetupJobRunner) {
-        let runner = SetupJobRunner()
-        let wf = try QuickSetupWorkflow(env: env, runner: runner, resume: resume)
-        return (wf, runner)
-    }
-
     // MARK: 1. Parser
 
     func parser() async throws {
@@ -352,10 +224,13 @@ final class SelftestContext: @unchecked Sendable {
         return (r.status, r.headers, js)
     }
 
-    func startServer(_ wf: QuickSetupWorkflow) throws -> (QuickSetupHTTPServer, QuickSetupRouter) {
+    /// The page server with browser settings attached (the router serves a
+    /// page only with the menu or settings attached since 0.2.67).
+    func startServer(_ wf: PageAuthorizer) async throws -> (QuickSetupHTTPServer, QuickSetupRouter) {
         let pageDir = QuickSetupPreflight.pageDirectory() ?? tempDir("page")
         let portBox = QuickSetupSession.PortBox()
         let router = QuickSetupRouter(workflow: wf, pageDirectory: pageDir) { portBox.port }
+        router.settings = await MainActor.run { BrowserSettingsWorkflow(auth: wf) }
         let server = QuickSetupHTTPServer { await router.handle($0) }
         try server.start()
         portBox.port = server.port
@@ -371,9 +246,8 @@ final class SelftestContext: @unchecked Sendable {
     }
 
     func serverAndGenerations() async throws {
-        let (env, store) = stubEnv()
-        let (wf, _) = try makeWorkflow(env)
-        let (server, _) = try startServer(wf)
+        let wf = try PageAuthorizer(runner: SetupJobRunner())
+        let (server, _) = try await startServer(wf)
         defer { server.stop() }
         let port = server.port
         check("bound to an ephemeral port", port > 0)
@@ -388,7 +262,7 @@ final class SelftestContext: @unchecked Sendable {
         var r = request(port: port, method: "GET", path: "/api/status")
         check("no cookie → 404", r.status == 404)
         r = request(port: port, method: "GET", path: "/api/status", cookie: cookie)
-        check("status with cookie → 200 phase intro", r.status == 200 && r.json["phase"] as? String == "intro")
+        check("status with cookie → 200 (the attached settings page answers)", r.status == 200)
         check("ordinary/unauthorized responses do not signal completion", !server.hasDeliveredCompletion)
         check("§5.7 headers on every response", (r.headers["content-security-policy"] ?? "").hasPrefix("default-src 'none'") && r.headers["x-content-type-options"] == "nosniff" && r.headers["cache-control"] == "no-store" && r.headers["x-frame-options"] == "DENY" && r.headers["referrer-policy"] == "no-referrer" && r.headers["connection"] == "close")
         r = request(port: port, method: "GET", path: "/api/status", cookie: cookie, host: "localhost:\(port)")
@@ -437,9 +311,9 @@ final class SelftestContext: @unchecked Sendable {
         // Expired token (clock seam).
         _ = await wf.rotate()
         let t2 = await wf.launchToken
-        QuickSetupWorkflow.clock = { Date().addingTimeInterval(400) }
+        PageAuthorizer.clock = { Date().addingTimeInterval(400) }
         check("expired token → 404", exchange(port: port, token: t2).status == 404)
-        QuickSetupWorkflow.clock = { Date() }
+        PageAuthorizer.clock = { Date() }
         _ = await wf.rotate()
         let t3 = await wf.launchToken
         let ex3 = exchange(port: port, token: t3)
@@ -448,77 +322,26 @@ final class SelftestContext: @unchecked Sendable {
         let c3 = ex3.cookie ?? ""
         check("only the newest cookie works", request(port: port, method: "GET", path: "/api/status", cookie: c3).status == 200)
 
-        // Async revocation: verify aborted by a rotation between two awaits.
-        let gate = AsyncGate()
-        var slowEnv = env
-        let originalProbe = env.probe
-        slowEnv.probe = { req in
-            if (req["kind"] as? String) == "opencode" { await gate.wait() }
-            return await originalProbe(req)
+        // Rotation during a running installer job cancels and reaps it before
+        // the new link (the menu shares this runner with its installers).
+        do {
+            let runner4 = SetupJobRunner()
+            let wf4 = try PageAuthorizer(runner: runner4)
+            let job4 = Task { await runner4.run(SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "sleep 30"], mode: .detached, timeout: 60, label: "slow")) }
+            for _ in 0..<50 { if runner4.currentJob != nil { break }; try? await Task.sleep(nanoseconds: 50_000_000) }
+            check("job running", runner4.currentJob != nil)
+            let before = Date()
+            let rotation = await wf4.rotate()
+            let result4 = await job4.value
+            check("rotation cancelled and reaped the job before returning (no poison)",
+                  rotation.poison == nil && !rotation.randomnessFailed && runner4.currentJob == nil && !result4.ok && Date().timeIntervalSince(before) < 10)
+            check("no journal left after the cancelled job", !FileManager.default.fileExists(atPath: SetupJobRunner.journalURL.path))
         }
-        let (wf2, _) = try makeWorkflow(slowEnv)
-        let g = await wf2.generation
-        let req = goodRequest()
-        let verifyTask = Task { try await wf2.verify(req, generation: g) }
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        _ = await wf2.rotate()
-        gate.open()
-        var superseded = false
-        do { _ = try await verifyTask.value } catch is QuickSetupWorkflow.Superseded { superseded = true } catch {}
-        check("verify: rotation between awaits → Superseded", superseded)
-        let st = await wf2.status()
-        let rows = (st["rows"] as? [[String: Any]]) ?? []
-        check("verify rows not marked ok after the abort", !rows.contains { $0["state"] as? String == "ok" }, "\(rows)")
-        // Save: rotation injected between two sections leaves exactly the earlier ones saved.
-        let (wf3, _) = try makeWorkflow(env)
-        let g3 = await wf3.generation
-        _ = try await wf3.verify(req, generation: g3)
-        let phase3 = await wf3.phase
-        check("stub verify → verified", phase3 == .verified)
-        var rotEnv = env
-        let rotatingApply = env.apply
-        rotEnv.apply = { r, cp in
-            if r["serper"] != nil { Task { _ = await wf3Box.value?.rotate() }; try? await Task.sleep(nanoseconds: 150_000_000) }
-            return await rotatingApply(r, cp)
-        }
-        let (wf3b, _) = try makeWorkflow(rotEnv)
-        wf3Box.value = wf3b
-        let g3b = await wf3b.generation
-        _ = try await wf3b.verify(req, generation: g3b)
-        var superseded3 = false
-        do { _ = try await wf3b.save(req, generation: g3b) } catch is QuickSetupWorkflow.Superseded { superseded3 = true } catch {}
-        let saved = (await wf3b.status())["saved_sections"] as? [String] ?? []
-        check("save: rotation while serper applies → superseded at serper's checkpoint; exactly provider + openai saved",
-              superseded3 && saved == ["openai", "provider"] && !store.applied.contains("serper") && !store.applied.contains("jina"), "\(saved) \(store.applied)")
-        // Rotation during a running job cancels and reaps before the new link.
-        let (wf4, runner4) = try makeWorkflow(env)
-        let (server4, _) = try startServer(wf4)
-        defer { server4.stop() }
-        store.toolchain = ToolchainService.DesktopStatus(doctorRan: true, missing: ["pandoc"], libreOffice: true, mandatoryMissing: ["pandoc"])
-        store.toolchainJobs = [SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "sleep 30"], mode: .detached, timeout: 60, label: "slow")]
-        let g4 = await wf4.generation
-        _ = try await wf4.verify(req, generation: g4)
-        _ = try await wf4.save(req, generation: g4)
-        let phase4s = await wf4.phase
-        check("phase system after save", phase4s == .system)
-        for row in ["agentmail_cli", "fda", "keepawake"] {
-            _ = try await wf4.systemRun(row: row, option: nil, generation: g4)
-            try? await Task.sleep(nanoseconds: 300_000_000)
-        }
-        _ = try await wf4.systemRun(row: "toolchain", option: nil, generation: g4)
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        check("job running", runner4.currentJob != nil)
-        let before = Date()
-        let rotation = await wf4.rotate()
-        check("rotation cancelled and reaped the job before returning (no poison)", rotation.poison == nil && !rotation.randomnessFailed && runner4.currentJob == nil && Date().timeIntervalSince(before) < 20)
-        let rowsAfter = (await wf4.status())["system_rows"] as? [[String: Any]] ?? []
-        check("toolchain row failed under the old generation", rowsAfter.first { $0["id"] as? String == "toolchain" }?["state"] as? String == "failed", "\(rowsAfter)")
-        check("no journal left after the cancelled job", !FileManager.default.fileExists(atPath: SetupJobRunner.journalURL.path))
 
         // Atomic authorization: the cookie check and the generation it
         // authorizes are one call; after a rotation the old cookie yields
         // nothing, and the new cookie yields the new generation.
-        let (wf5, _) = try makeWorkflow(env)
+        let wf5 = try PageAuthorizer(runner: SetupJobRunner())
         let c5 = await wf5.exchange(token: await wf5.launchToken)
         let g5 = await wf5.authorizedGeneration(cookie: c5)
         _ = await wf5.rotate()
@@ -527,9 +350,9 @@ final class SelftestContext: @unchecked Sendable {
         let g5b = await wf5.authorizedGeneration(cookie: c5b)
         check("authorizedGeneration: old cookie → nil after rotation; new cookie → new generation", g5 == 1 && stale5 == nil && g5b == 2, "\(String(describing: g5)) \(String(describing: stale5)) \(String(describing: g5b))")
         // RNG failure during rotation: revoked, nothing issued, nothing reused.
-        QuickSetupWorkflow.randomHexFails = true
+        PageAuthorizer.randomHexFails = true
         let failed = await wf5.rotate()
-        QuickSetupWorkflow.randomHexFails = false
+        PageAuthorizer.randomHexFails = false
         let tokenAfter = await wf5.launchToken
         let deadCookie = await wf5.authorizedGeneration(cookie: c5b)
         let deadExchange = await wf5.exchange(token: "0123456789abcdef0123456789abcdef")
@@ -537,44 +360,37 @@ final class SelftestContext: @unchecked Sendable {
         let recovered = await wf5.rotate()
         let tokenRecovered = await wf5.launchToken
         check("next rotation issues a fresh link", !recovered.randomnessFailed && !tokenRecovered.isEmpty)
-        // Step-by-step handoff revokes the page's authorization.
-        let (wf6, _) = try makeWorkflow(env)
-        let c6 = await wf6.exchange(token: await wf6.launchToken)
-        let g6 = await wf6.authorizedGeneration(cookie: c6)!
-        let (st6, _) = try await wf6.stepByStep(generation: g6)
-        let wizard6 = await wf6.wizardRequested
-        let revoked6 = await wf6.authorizedGeneration(cookie: c6)
-        check("step-by-step: 200, wizard requested, cookie revoked", st6 == 200 && wizard6 && revoked6 == nil)
-        // In-flight settling: a verify suspended in a probe unwinds before rotate() returns.
-        let gate7 = AsyncGate()
-        var env7 = env
-        let base7 = env.probe
-        env7.probe = { r in if (r["kind"] as? String) == "serper" { await gate7.wait() }; return await base7(r) }
-        let (wf7, _) = try makeWorkflow(env7)
-        let g7 = await wf7.generation
-        let t7 = Task { try await wf7.verify(self.goodRequest(), generation: g7) }
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        let inFlightBefore = await wf7.inFlightOperations
-        Task { try? await Task.sleep(nanoseconds: 300_000_000); gate7.open() }
-        _ = await wf7.rotate()
-        let inFlightAfter = await wf7.inFlightOperations
-        _ = try? await t7.value
-        check("rotate() waits for the in-flight verify to unwind (in-flight 1 → 0)", inFlightBefore == 1 && inFlightAfter == 0, "\(inFlightBefore) \(inFlightAfter)")
+        // In-flight settling: an operation of the old generation unwinds
+        // before rotate() mints the new link.
+        do {
+            let wf7 = try PageAuthorizer(runner: SetupJobRunner())
+            let g7 = await wf7.generation
+            try await wf7.beginSettingsOperation(g7)
+            let inFlightBefore = await wf7.inFlightOperations
+            Task { try? await Task.sleep(nanoseconds: 300_000_000); await wf7.endSettingsOperation() }
+            let started = Date()
+            _ = await wf7.rotate()
+            let inFlightAfter = await wf7.inFlightOperations
+            check("rotate() waits for the in-flight operation to unwind (in-flight 1 → 0)",
+                  inFlightBefore == 1 && inFlightAfter == 0 && Date().timeIntervalSince(started) >= 0.25, "\(inFlightBefore) \(inFlightAfter)")
+            var stale = false
+            do { try await wf7.beginSettingsOperation(g7) } catch is PageAuthorizer.Superseded { stale = true }
+            check("an operation of the old generation can't begin after the rotation", stale)
+            check("the synchronous checkpoint refuses the old generation too", (try? wf7.checkpointSync(g7)) == nil)
+        }
 
         // Revocation is immediate: while a rotation is blocked on a job that
         // ignores SIGTERM, the old cookie and token are already dead, and
         // a concurrent second rotation is serialized behind the first.
-        let (wf8, runner8) = try makeWorkflow(env, resume: .system)
+        let runner8 = SetupJobRunner()
+        let wf8 = try PageAuthorizer(runner: runner8)
         let c8 = await wf8.exchange(token: await wf8.launchToken)
         let g8 = await wf8.authorizedGeneration(cookie: c8)!
-        store.toolchain = ToolchainService.DesktopStatus(doctorRan: true, missing: ["pandoc"], libreOffice: true, mandatoryMissing: ["pandoc"])
-        store.toolchainJobs = [SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "trap '' TERM; sleep 30"], mode: .detached, timeout: 60, label: "stubborn")]
         SetupJobRunner.termGrace = 3
-        for row in ["agentmail_cli", "fda", "keepawake"] { _ = try await wf8.systemRun(row: row, option: nil, generation: g8); try? await Task.sleep(nanoseconds: 200_000_000) }
-        let (stRun8, jsRun8) = try await wf8.systemRun(row: "toolchain", option: nil, generation: g8)
-        try? await Task.sleep(nanoseconds: 400_000_000)
-        let rows8 = (await wf8.status())["system_rows"] as? [[String: Any]] ?? []
-        check("stubborn job running", runner8.currentJob != nil, "run=\(stRun8) \(jsRun8) rows=\(rows8)")
+        let job8 = Task { await runner8.run(SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "trap '' TERM; sleep 30"], mode: .detached, timeout: 60, label: "stubborn")) }
+        for _ in 0..<50 { if runner8.currentJob != nil { break }; try? await Task.sleep(nanoseconds: 50_000_000) }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        check("stubborn job running", runner8.currentJob != nil)
         let oldToken8 = await wf8.launchToken
         let rot1 = Task { await wf8.rotate() }
         try? await Task.sleep(nanoseconds: 300_000_000)   // rotation is now blocked in the SIGTERM grace
@@ -584,6 +400,7 @@ final class SelftestContext: @unchecked Sendable {
         let rot2 = Task { await wf8.rotate() }
         let r1 = await rot1.value
         let r2 = await rot2.value
+        _ = await job8.value
         SetupJobRunner.termGrace = 5
         let finalToken = await wf8.launchToken
         check("during a blocked rotation: old cookie → nil, old token → no exchange, no token issued yet", duringCookie == nil && duringExchange == nil && duringToken.isEmpty)
@@ -593,531 +410,24 @@ final class SelftestContext: @unchecked Sendable {
         check("the new link authorizes the new generation only", g8b == g8 + 2, "\(String(describing: g8b))")
     }
 
-    // MARK: 3. Workflow enforcement
-
-    func workflowEnforcement() async throws {
-        let (env, store) = stubEnv()
-        let (wf, _) = try makeWorkflow(env)
-        let g = await wf.generation
-        let req = goodRequest()
-        var (st, js) = try await wf.save(req, generation: g)
-        check("save before verify → 409", st == 409)
-        (st, js) = try await wf.finish(generation: g)
-        check("finish before system-complete → 409", st == 409)
-        (st, js) = try await wf.systemRun(row: "toolchain", option: nil, generation: g)
-        check("system/run before system phase → 409", st == 409)
-        (st, js) = try await wf.verify(goodRequest(opencode: "oc-bad"), generation: g)
-        let rows = (js["rows"] as? [[String: Any]] ?? []).reduce(into: [String: String]()) { $0[$1["id"] as? String ?? ""] = $1["state"] as? String }
-        let phaseAfterBad = await wf.phase
-        check("failed probe blocks save: only opencode failed", rows["opencode"] == "failed" && rows["openai"] == "ok" && rows["telegram"] == "ok" && phaseAfterBad == .intro)
-        (st, js) = try await wf.save(goodRequest(opencode: "oc-bad"), generation: g)
-        check("save with a failed row → 409", st == 409, "\(js)")
-        (st, js) = try await wf.verify(req, generation: g)
-        let phaseAll = await wf.phase
-        check("all verified", phaseAll == .verified)
-        (st, js) = try await wf.save(goodRequest(opencode: "oc-good2"), generation: g)
-        check("save with a value that differs from the verified one → 409 naming it", st == 409 && (js["fields"] as? [String]) == ["opencode"])
-        let phaseBack = await wf.phase
-        check("…and the phase drops back to intro", phaseBack == .intro)
-        (st, js) = try await wf.verify(req, generation: g)
-        var keptReq = req
-        keptReq.values[.serper] = .kept
-        (st, js) = try await wf.save(keptReq, generation: g)
-        check("client-declared kept for a field the server did not mark kept → 409", st == 409 && js["error"] as? String == "kept")
-        // Telegram token verified with chat A cannot be saved with chat B.
-        (st, js) = try await wf.verify(req, generation: g)
-        (st, js) = try await wf.save(goodRequest(chat: "5551234568"), generation: g)
-        check("telegram verified with chat A cannot be saved with chat B", st == 409 && (js["fields"] as? [String]) == ["telegram"])
-        (st, js) = try await wf.verify(req, generation: g)
-        do {
-            let edited = goodRequest(opencode: "oc-bad")
-            let (_, j) = try await wf.verify(edited, generation: g)
-            let r = (j["rows"] as? [[String: Any]] ?? []).first { $0["id"] as? String == "opencode" }
-            let phaseEdited = await wf.phase
-            check("editing a verified row re-probes it and un-verifies on failure", r?["state"] as? String == "failed" && phaseEdited == .intro)
-            _ = try await wf.verify(req, generation: g)
-        }
-        // Unknown JSON field, custom requires all three.
-        var threw = false
-        do { _ = try QuickSetupRequest.parse(["name": "x", "bogus": 1, "opencode": ["value": "a"], "openai": ["value": "a"], "serper": ["value": "a"], "jina": ["value": "a"], "telegram": ["token": "t", "chat_id": "1"]]) } catch { threw = true }
-        check("unknown JSON field → parse error (400)", threw)
-        threw = false
-        do { _ = try QuickSetupRequest.parse(["name": "x", "opencode": ["value": "a"], "openai": ["value": "a"], "serper": ["value": "a"], "jina": ["value": "a"], "telegram": ["token": "t", "chat_id": "1"], "custom": ["api_key": "k", "base_url": "u"]]) } catch { threw = true }
-        check("custom endpoint requires key + base URL + model", threw)
-        threw = false
-        do { _ = try QuickSetupRequest.parse(["name": "x", "opencode": ["kept": true, "value": "a"], "openai": ["value": "a"], "serper": ["value": "a"], "jina": ["value": "a"], "telegram": ["token": "t", "chat_id": "1"]]) } catch { threw = true }
-        check("kept must be alone in its object", threw)
-        let parsedCustom = try QuickSetupRequest.parse(["name": "x", "opencode": ["value": "a"], "openai": ["value": "a"], "serper": ["value": "a"], "jina": ["value": "a"], "telegram": ["token": "t", "chat_id": "1"], "custom": ["api_key": "k", "base_url": "u", "model": "m"]])
-        let customPayload = QuickSetupWorkflow.applyPayload(section: "custom", request: parsedCustom)?["provider"] as? [String: Any]
-        check("custom endpoint without the vision key → text_only false (vision by default, like the wizard)", customPayload?["text_only"] as? Bool == false)
-        let parsedCustomTextOnly = try QuickSetupRequest.parse(["name": "x", "opencode": ["value": "a"], "openai": ["value": "a"], "serper": ["value": "a"], "jina": ["value": "a"], "telegram": ["token": "t", "chat_id": "1"], "custom": ["api_key": "k", "base_url": "u", "model": "m", "vision": false]])
-        let customTextOnlyPayload = QuickSetupWorkflow.applyPayload(section: "custom", request: parsedCustomTextOnly)?["provider"] as? [String: Any]
-        check("custom endpoint with the vision checkbox cleared → text_only true", customTextOnlyPayload?["text_only"] as? Bool == true)
-        // Payload shapes.
-        var full = goodRequest()
-        full.values[.openrouter] = .key("or-good")
-        full.values[.custom] = .custom(key: "c-good", baseURL: "http://x/v1", model: "m", vision: true)
-        let (wfP, _) = try makeWorkflow(env)
-        let gP = await wfP.generation
-        _ = try await wfP.verify(full, generation: gP)
-        (st, js) = try await wfP.save(full, generation: gP)
-        let phaseP = await wfP.phase
-        check("full save → system phase", st == 200 && phaseP == .system, "\(js)")
-        check("AgentMail present ⇒ email_calendar section with install_cli false", store.applied.contains("email_calendar") && store.installCLI == false)
-        // Owner 2026-10-15: a fresh setup with an OpenRouter key runs on
-        // OpenRouter (DeepSeek V4.1 Flash, default host asked for); the
-        // OpenCode key given too is saved, not active.
-        check("fresh setup with both keys: OpenRouter saved active, custom inactive", store.activations == [true, false], "\(store.activations)")
-        check("section order: OpenRouter (main) first, identity/telegram before email, OpenCode + custom as alternatives last",
-              store.applied.suffix(3) == ["email_calendar", "opencode", "custom"] && store.applied.first == "openrouter", "\(store.applied)")
-        // An existing install (a provider already active) keeps OpenCode as the main provider.
-        let (envE, storeE) = stubEnv()
-        storeE.values[ProviderProfiles.activeProfileKey] = "opencode"
-        let (wfE, _) = try makeWorkflow(envE)
-        let gE = await wfE.generation
-        _ = try await wfE.verify(full, generation: gE)
-        _ = try await wfE.save(full, generation: gE)
-        // When Together can't be confirmed, the save reply tells the page.
-        var (envN, _) = stubEnv()
-        let innerApply = envN.apply
-        envN.apply = { req, checkpoint in
-            var r = await innerApply(req, checkpoint)
-            if (req["provider"] as? [String: Any])?["profile"] as? String == "openrouter" {
-                r["openrouter_host_pin"] = ["result": "default_skipped", "reason": "couldn't read OpenRouter's host list (HTTP 503)"]
-            }
-            return r
-        }
-        let (wfN, _) = try makeWorkflow(envN)
-        let gN = await wfN.generation
-        _ = try await wfN.verify(full, generation: gN)
-        let savedN = try await wfN.save(full, generation: gN)
-        check("fresh OpenRouter setup whose default host couldn't be confirmed: the save reply says Together couldn't be selected",
-              savedN.0 == 200 && ((savedN.1["notices"] as? [String]) ?? []).contains { $0.contains("Together couldn't be selected") && $0.contains("OpenRouter chooses the host") }, "\(savedN.1)")
-        // Round 3: no OpenAI key is fine only when OpenRouter runs Briglia.
-        var orNoOpenAI = goodRequest(agentmail: false)
-        orNoOpenAI.values[.opencode] = nil; orNoOpenAI.values[.openai] = nil; orNoOpenAI.values[.openrouter] = .key("or-good")
-        let (envF, storeF) = stubEnv()
-        let (wfF, _) = try makeWorkflow(envF)
-        let gF = await wfF.generation
-        _ = try await wfF.verify(orNoOpenAI, generation: gF)
-        let savedF = try await wfF.save(orNoOpenAI, generation: gF)
-        check("fresh OpenRouter setup without an OpenAI key saves, says voice/images go through OpenRouter, saves no OpenAI section",
-              savedF.0 == 200 && !storeF.applied.contains("openai") && storeF.applied.first == "openrouter"
-              && ((savedF.1["notices"] as? [String]) ?? []).contains { $0.contains("No OpenAI key") }, "\(savedF.1) \(storeF.applied)")
-        let (envX, storeX) = stubEnv()
-        storeX.values[ProviderProfiles.activeProfileKey] = "opencode"
-        let (wfX, _) = try makeWorkflow(envX)
-        let gX = await wfX.generation
-        _ = try await wfX.verify(orNoOpenAI, generation: gX)
-        let savedX = try await wfX.save(orNoOpenAI, generation: gX)
-        check("existing OpenCode install without an OpenAI key: save refused (openai_required), nothing written",
-              savedX.0 == 409 && savedX.1["error"] as? String == "openai_required" && storeX.applied.isEmpty, "\(savedX.1) \(storeX.applied)")
-        // Round 4 (Codex round 3 R1): the OpenAI rule follows the provider the
-        // save leaves running, not the one stored before it. An existing
-        // OpenRouter install given a new OpenCode key (no `main`: the older
-        // inference activates OpenCode) without an OpenAI key is refused
-        // before anything is written.
-        func seededOpenRouter() -> (QuickSetupEnvironment, StoreBox, () -> [[String: Any]]) {
-            let (env0, box) = stubEnv()
-            box.values[ProviderProfiles.activeProfileKey] = "openrouter"
-            box.values[KeychainHelper.openRouterApiKeyKey] = "or-good"
-            box.values[KeychainHelper.openRouterModelKey] = ProviderProfiles.openRouterSetupDefaultModel
-            var env1 = env0
-            let inner = env0.apply
-            let payloads = PayloadLog()
-            env1.apply = { req, checkpoint in payloads.append(req); return await inner(req, checkpoint) }
-            return (env1, box, { payloads.all })
-        }
-        var switchNoOpenAI = goodRequest(agentmail: false)
-        switchNoOpenAI.values[.openai] = nil; switchNoOpenAI.values[.openrouter] = .kept
-        do {
-            let (envS, storeS, _) = seededOpenRouter()
-            let before = storeS.values
-            let (wfS, _) = try makeWorkflow(envS)
-            let gS = await wfS.generation
-            _ = try await wfS.verify(switchNoOpenAI, generation: gS)
-            let savedS = try await wfS.save(switchNoOpenAI, generation: gS)
-            check("R4 existing OpenRouter + new OpenCode key (activates OpenCode) without OpenAI: refused openai_required, store untouched",
-                  savedS.0 == 409 && savedS.1["error"] as? String == "openai_required" && storeS.applied.isEmpty && storeS.values == before,
-                  "\(savedS.1) \(storeS.applied)")
-            // The same request with the OpenAI key added saves, and OpenCode runs.
-            var withKey = switchNoOpenAI; withKey.values[.openai] = .key("oa-good")
-            _ = try await wfS.verify(withKey, generation: gS)
-            let savedS2 = try await wfS.save(withKey, generation: gS)
-            check("R4 … then with the OpenAI key added: saved, OpenCode activated, OpenAI saved",
-                  savedS2.0 == 200 && storeS.applied.first == "opencode" && storeS.applied.contains("openai"), "\(savedS2.1) \(storeS.applied)")
-        }
-        // Explicit `main` (what the page sends): OpenRouter stays main, the new
-        // OpenCode key is saved inactive, no OpenAI key needed.
-        do {
-            let (envM, storeM, payloads) = seededOpenRouter()
-            var keepOR = switchNoOpenAI; keepOR.main = .openrouter
-            let (wfM, _) = try makeWorkflow(envM)
-            let gM = await wfM.generation
-            _ = try await wfM.verify(keepOR, generation: gM)
-            let savedM = try await wfM.save(keepOR, generation: gM)
-            let providerPayloads = payloads().compactMap { $0["provider"] as? [String: Any] }
-            check("R4 main=openrouter on an OpenRouter install + new OpenCode key, no OpenAI: saved; OpenCode saved inactive, nothing activated",
-                  savedM.0 == 200 && providerPayloads.count == 1 && providerPayloads[0]["profile"] as? String == "opencode"
-                  && providerPayloads[0]["activate"] as? Bool == false && storeM.values[ProviderProfiles.activeProfileKey] == "openrouter",
-                  "\(savedM.1) \(providerPayloads)")
-            // main=opencode with the same form: refused (OpenCode would run, no OpenAI key).
-            let (envO, storeO, _) = seededOpenRouter()
-            var toOC = switchNoOpenAI; toOC.main = .opencode
-            let (wfO, _) = try makeWorkflow(envO)
-            let gO = await wfO.generation
-            _ = try await wfO.verify(toOC, generation: gO)
-            let savedO = try await wfO.save(toOC, generation: gO)
-            check("R4 main=opencode without an OpenAI key: refused openai_required before any write",
-                  savedO.0 == 409 && savedO.1["error"] as? String == "openai_required" && storeO.applied.isEmpty, "\(savedO.1) \(storeO.applied)")
-        }
-        // R2: on a fresh install the explicit choice is obeyed exactly.
-        do {
-            var both = goodRequest(agentmail: false)
-            both.values[.openrouter] = .key("or-good")
-            for (choice, expected) in [(QuickSetupRequest.MainChoice.opencode, "opencode"), (.openrouter, "openrouter")] {
-                let (envB, _) = stubEnv()
-                var env2 = envB
-                let inner = envB.apply
-                let log = PayloadLog()
-                env2.apply = { req, cp in log.append(req); return await inner(req, cp) }
-                var req = both; req.main = choice
-                let (wfB, _) = try makeWorkflow(env2)
-                let gB = await wfB.generation
-                _ = try await wfB.verify(req, generation: gB)
-                let savedB = try await wfB.save(req, generation: gB)
-                let provs = log.all.compactMap { $0["provider"] as? [String: Any] }
-                let activated = provs.filter { $0["activate"] as? Bool == true }.map { $0["profile"] as? String ?? "" }
-                let inactive = provs.filter { $0["activate"] as? Bool == false }.map { $0["profile"] as? String ?? "" }
-                check("R4 fresh install, both keys, main=\(expected): only \(expected) activated, the other saved inactive",
-                      savedB.0 == 200 && activated == [expected] && inactive == [expected == "opencode" ? "openrouter" : "opencode"],
-                      "\(savedB.1) \(provs)")
-            }
-            // A kept key for a provider that isn't running is not silently switched to.
-            let (envK, storeK) = stubEnv()
-            storeK.values[ProviderProfiles.activeProfileKey] = "opencode"
-            storeK.values[KeychainHelper.openRouterApiKeyKey] = "or-good"
-            var keptInactive = goodRequest(agentmail: false)
-            keptInactive.values[.opencode] = nil; keptInactive.values[.openrouter] = .kept; keptInactive.main = .openrouter
-            let (wfK, _) = try makeWorkflow(envK)
-            let gK = await wfK.generation
-            _ = try await wfK.verify(keptInactive, generation: gK)
-            let savedK = try await wfK.save(keptInactive, generation: gK)
-            check("R4 main=openrouter with only a kept key while OpenCode runs: refused main_inactive, nothing written",
-                  savedK.0 == 409 && savedK.1["error"] as? String == "main_inactive" && storeK.applied.isEmpty, "\(savedK.1) \(storeK.applied)")
-        }
-        // The plan itself (pure).
-        do {
-            func plan(_ r: QuickSetupRequest, _ active: String?) -> QuickSetupWorkflow.MainPlan? { try? QuickSetupWorkflow.mainPlan(r, activeProfile: active).get() }
-            var r = goodRequest(agentmail: false); r.values[.opencode] = nil; r.values[.openrouter] = .key("k")
-            check("R4 plan: no main, fresh, new OpenRouter key → OpenRouter activated", plan(r, nil)?.main == .openrouter && plan(r, nil)?.activation == .openRouterKey)
-            check("R4 plan: no main, OpenCode install, new OpenRouter key → OpenCode stays, nothing activated", plan(r, "opencode")?.main == .opencode && plan(r, "opencode")?.activation == QuickSetupWorkflow.Activation.none)
-            var c = r; c.main = .current
-            check("R4 plan: main=current on a custom-endpoint install → custom stays", plan(c, "custom")?.main == .custom && plan(c, "custom")?.activation == QuickSetupWorkflow.Activation.none)
-            check("R4 plan: main=current on a fresh install is refused", plan(c, nil) == nil)
-            var oc = r; oc.main = .opencode
-            check("R4 plan: main=opencode without an OpenCode key is refused", plan(oc, nil) == nil)
-        }
-        // Round 5 (Codex round 4 R1): "Keep current" on a provider outside the
-        // selector saves only when that provider is complete, and the final
-        // check then asks for that provider's own values, never OpenCode's.
-        do {
-            func keepCurrent(_ seed: [String: String]) async throws -> ((Int, [String: Any]), StoreBox, QuickSetupWorkflow) {
-                let (envC, storeC) = stubEnv()
-                for (k, v) in seed { storeC.values[k] = v }
-                var req = goodRequest(agentmail: false); req.values[.opencode] = nil; req.main = .current
-                let (wfC, _) = try makeWorkflow(envC)
-                let gC = await wfC.generation
-                _ = try await wfC.verify(req, generation: gC)
-                return (try await wfC.save(req, generation: gC), storeC, wfC)
-            }
-            let custom: [String: String] = [ProviderProfiles.activeProfileKey: "custom", ProviderProfiles.customBaseURLKey: "http://127.0.0.1:9/v1",
-                                            ProviderProfiles.customApiKeyKey: "ck", ProviderProfiles.customModelKey: "m"]
-            let (savedC, storeC, _) = try await keepCurrent(custom)
-            check("R5 main=current on a complete custom endpoint: saved, nothing activated, no OpenCode key written",
-                  savedC.0 == 200 && storeC.activations.isEmpty && !storeC.applied.contains("opencode")
-                  && (storeC.values[ProviderProfiles.opencodeApiKeyKey] ?? nil) == nil, "\(savedC.1) \(storeC.applied)")
-            let finalKeys = QuickSetupWorkflow.requiredStoredKeys(activeProfile: storeC.values[ProviderProfiles.activeProfileKey] ?? nil) ?? []
-            check("R5 … and every value the final check asks for is stored",
-                  !finalKeys.isEmpty && finalKeys.allSatisfy { !((storeC.values[$0] ?? nil) ?? "").isEmpty },
-                  "\(finalKeys.filter { ((storeC.values[$0] ?? nil) ?? "").isEmpty })")
-            var noModel = custom; noModel.removeValue(forKey: ProviderProfiles.customModelKey)
-            let (savedI, storeI, _) = try await keepCurrent(noModel)
-            check("R5 main=current on an incomplete custom endpoint: refused main_incomplete before any write",
-                  savedI.0 == 409 && savedI.1["error"] as? String == "main_incomplete" && storeI.applied.isEmpty, "\(savedI.1) \(storeI.applied)")
-            let local: [String: String] = [ProviderProfiles.activeProfileKey: "local", KeychainHelper.lmStudioBaseURLKey: "http://127.0.0.1:9/v1",
-                                           KeychainHelper.lmStudioModelKey: "m"]
-            let (savedL, storeL, _) = try await keepCurrent(local)
-            check("R5 main=current on a keyless local server: saved, nothing activated", savedL.0 == 200 && storeL.activations.isEmpty, "\(savedL.1)")
-            let platform: [String: String] = [ProviderProfiles.activeProfileKey: "openai", ProviderProfiles.openaiApiKeyKey: "pk"]
-            let (savedP, storeP, _) = try await keepCurrent(platform)
-            check("R5 main=current on an OpenAI API profile without its model: refused main_incomplete",
-                  savedP.0 == 409 && savedP.1["error"] as? String == "main_incomplete" && storeP.applied.isEmpty, "\(savedP.1)")
-            // No main, a kept OpenCode key on an install with no provider: no
-            // main provider can result, so the save is refused, not completed
-            // as if OpenCode ran.
-            let (envZ, storeZ) = stubEnv()
-            storeZ.values[ProviderProfiles.opencodeApiKeyKey] = "oc-good"   // stored, but no profile marker
-            var keptOnly = goodRequest(agentmail: false); keptOnly.values[.opencode] = .kept
-            let (wfZ, _) = try makeWorkflow(envZ)
-            let gZ = await wfZ.generation
-            _ = try await wfZ.verify(keptOnly, generation: gZ)
-            let savedZ = try await wfZ.save(keptOnly, generation: gZ)
-            check("R5 no main, nothing running, only a kept OpenCode key: refused main_missing before any write",
-                  savedZ.0 == 409 && savedZ.1["error"] as? String == "main_missing" && storeZ.applied.isEmpty, "\(savedZ.1) \(storeZ.applied)")
-        }
-        // Parser: `main` is validated and decides which provider entry is required.
-        do {
-            let base: [String: Any] = ["name": "x", "serper": ["value": "a"], "jina": ["value": "a"], "telegram": ["token": "t", "chat_id": "1"]]
-            var a = base; a["main"] = "openrouter"; a["openrouter"] = ["value": "k"]
-            check("R4 parse: main=openrouter with its key and no OpenAI parses", (try? QuickSetupRequest.parse(a))?.main == .openrouter)
-            var b = base; b["main"] = "opencode"; b["opencode"] = ["value": "k"]; b["openrouter"] = ["value": "k"]
-            check("R4 parse: main=opencode without OpenAI is refused even with an OpenRouter key", (try? QuickSetupRequest.parse(b)) == nil)
-            var d = base; d["main"] = "openrouter"; d["opencode"] = ["value": "k"]; d["openai"] = ["value": "a"]
-            check("R4 parse: main=openrouter without an OpenRouter entry is refused", (try? QuickSetupRequest.parse(d)) == nil)
-            var e = a; e["main"] = "bogus"
-            check("R4 parse: an unknown main is refused", (try? QuickSetupRequest.parse(e)) == nil)
-            var f = a; f["chatgpt"] = ["model": "gpt-6.1-sol", "effort": "high", "generation": UUID().uuidString]; f["openai"] = ["value": "a"]
-            check("R4 parse: a ChatGPT login with main≠chatgpt is refused", (try? QuickSetupRequest.parse(f)) == nil)
-        }
-        check("existing install with both keys: OpenCode stays main, OpenRouter saved inactive",
-              storeE.applied.first == "opencode" && storeE.applied.contains("openrouter") && storeE.activations.first == false, "\(storeE.applied) \(storeE.activations)")
-        check("progress marker quick:system written", store.values[SetupWizard.progressKey] == "quick:system")
-        let sys = (await wfP.status())["system_rows"] as? [[String: Any]] ?? []
-        check("system rows: agentmail_cli, fda, keepawake, toolchain (macOS shape)", sys.map { $0["id"] as? String ?? "" } == ["agentmail_cli", "fda", "keepawake", "toolchain"], "\(sys)")
-        // Kept values: stored value not re-sent; replaced value re-probed.
-        store.values[KeychainHelper.serperApiKeyKey] = "stored-serper"
-        let (wfK, _) = try makeWorkflow(env)
-        let keptK = await wfK.kept
-        check("stored serper key is marked kept at start", keptK.contains(.serper))
-        var kreq = goodRequest()
-        kreq.values[.serper] = .kept
-        let gK = await wfK.generation
-        store.applied = []
-        _ = try await wfK.verify(kreq, generation: gK)
-        _ = try await wfK.save(kreq, generation: gK)
-        check("kept serper: no serper section sent", !store.applied.contains("serper") && store.values[KeychainHelper.serperApiKeyKey] == "stored-serper")
-        // Stale probe: a slow probe for r=1 answers after the field was edited.
-        let gate = AsyncGate()
-        var slowEnv = env
-        let base = env.probe
-        let counter = Counter()
-        slowEnv.probe = { r in
-            if (r["kind"] as? String) == "serper", counter.next() == 1 { await gate.wait() }
-            return await base(r)
-        }
-        let (wfS, _) = try makeWorkflow(slowEnv)
-        let gS = await wfS.generation
-        let first = Task { try await wfS.verify(self.goodRequest(), generation: gS) }
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        var edited = goodRequest()
-        edited.values[.serper] = .key("sp-bad")
-        let second = try await wfS.verify(edited, generation: gS)
-        gate.open()
-        _ = try? await first.value
-        let serperRow = (second.1["rows"] as? [[String: Any]] ?? []).first { $0["id"] as? String == "serper" }
-        let latest = ((await wfS.status())["rows"] as? [[String: Any]] ?? []).first { $0["id"] as? String == "serper" }
-        check("stale probe result (r=1, ok) does not mark the edited field (r=2, bad) verified",
-              serperRow?["state"] as? String == "failed" && latest?["state"] as? String == "failed", "\(String(describing: latest))")
-        let (stS, _) = try await wfS.save(goodRequest(), generation: gS)
-        check("save after a stale-probe race is refused", stS == 409)
-        // Per-key (partial) verification: the page verifies each key as it is filled in.
-        threw = false
-        do { _ = try QuickSetupRequest.parse(["openai": ["value": "a"]]) } catch { threw = true }
-        check("strict parse (save) still requires the name and the required keys", threw)
-        let partialOne = try? QuickSetupRequest.parse(["openai": ["value": "a"]], partial: true)
-        check("partial parse (verify) accepts one key without a name", partialOne?.values.count == 1 && partialOne?.name == "")
-        threw = false
-        do { _ = try QuickSetupRequest.parse(["name": "x", "custom": ["api_key": "k"]], partial: true) } catch { threw = true }
-        check("partial parse still validates every field it carries", threw)
-        threw = false
-        do { _ = try QuickSetupRequest.parse(["opencode": ["value": "a"], "bogus": 1], partial: true) } catch { threw = true }
-        check("partial parse still rejects unknown fields", threw)
-        do {
-            var countingEnv = env
-            let inner = env.probe
-            let probes = Counter()
-            countingEnv.probe = { r in _ = probes.next(); return await inner(r) }
-            let (wfPart, _) = try makeWorkflow(countingEnv)
-            let gPart = await wfPart.generation
-            let full = goodRequest()
-            let nameBefore = await wfPart.storedName
-            var partial = QuickSetupRequest(name: "", values: [.openai: full.values[.openai]!])
-            var (stPart, jsPart) = try await wfPart.verify(partial, generation: gPart)
-            check("partial verify of one key → 200 with only that row", stPart == 200 && (jsPart["rows"] as? [[String: Any]])?.map { $0["id"] as? String ?? "" } == ["openai"], "\(jsPart)")
-            let nameAfterPartial = await wfPart.storedName
-            check("a nameless partial verify keeps the stored name", nameAfterPartial == nameBefore)
-            (stPart, _) = try await wfPart.save(full, generation: gPart)
-            check("save after a partial verify of a subset → 409", stPart == 409)
-            partial.values[.serper] = full.values[.serper]
-            _ = try await wfPart.verify(partial, generation: gPart)
-            check("adding a key probes only the new key (verified ones are not re-probed)", probes.next() == 3)
-            partial.values[.serper] = nil
-            _ = try await wfPart.verify(partial, generation: gPart)
-            let rowsAfterRemoval = ((await wfPart.status())["rows"] as? [[String: Any]] ?? []).map { $0["id"] as? String ?? "" }
-            check("a key cleared from the page loses its verification", rowsAfterRemoval == ["openai"], "\(rowsAfterRemoval)")
-            _ = try await wfPart.verify(full, generation: gPart)
-            (stPart, jsPart) = try await wfPart.save(full, generation: gPart)
-            check("once the partial verifies cover the full request, save succeeds", stPart == 200, "\(jsPart)")
-        }
-    }
-
-    // MARK: 7. Mandatory rows
-
-    func mandatoryRows() async throws {
-        // macOS shape.
-        do {
-            let (env, store) = stubEnv()
-            store.fda = false
-            let (wf, _) = try makeWorkflow(env, resume: .system)
-            let g = await wf.generation
-            _ = try await wf.systemRun(row: "fda", option: nil, generation: g)
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            var rows = (await wf.status())["system_rows"] as? [[String: Any]] ?? []
-            check("FDA not granted → row failed with the open-settings offer", rows.first?["state"] as? String == "failed" && rows.first?["offer"] as? String == "open_settings")
-            _ = try await wf.openSettings(generation: g)
-            check("open-settings runs the pane URL only while fda is the current row", store.settingsOpened == 1)
-            let (stNext, _) = try await wf.systemRun(row: "toolchain", option: nil, generation: g)
-            check("a row that is not next → 409", stNext == 409)
-            store.fda = true
-            _ = try await wf.systemRun(row: "fda", option: nil, generation: g)
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            store.keepAwake = false
-            _ = try await wf.systemRun(row: "keepawake", option: nil, generation: g)
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            rows = (await wf.status())["system_rows"] as? [[String: Any]] ?? []
-            check("macOS keep-awake without the assertion → failed", rows[1]["state"] as? String == "failed")
-            store.keepAwake = true
-            _ = try await wf.systemRun(row: "keepawake", option: nil, generation: g)
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            store.toolchain = ToolchainService.DesktopStatus(doctorRan: false, missing: [], libreOffice: true, mandatoryMissing: [])
-            _ = try await wf.systemRun(row: "toolchain", option: nil, generation: g)
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            rows = (await wf.status())["system_rows"] as? [[String: Any]] ?? []
-            check("doctor cannot run → toolchain row failed", rows[2]["state"] as? String == "failed", "\(rows[2])")
-            store.toolchain = ToolchainService.DesktopStatus(doctorRan: true, missing: ["html-to-pdf engine"], libreOffice: true, mandatoryMissing: [])
-            _ = try await wf.systemRun(row: "toolchain", option: nil, generation: g)
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            let phaseTC = await wf.phase
-            check("html-to-pdf engine missing alone → ok, phase systemComplete", phaseTC == .systemComplete)
-        }
-        // Linux shape: keep-awake verdicts and the mask offer.
-        do {
-            let (env, store) = stubEnv(linux: true)
-            let (wf, _) = try makeWorkflow(env, resume: .system)
-            let g = await wf.generation
-            let ids = (await wf.systemRows).map(\.id)
-            check("Linux rows: keepawake, toolchain (agentmail only when chosen)", ids == ["keepawake", "toolchain"], "\(ids)")
-            store.verdict = .maySuspend(reason: "desktop session KDE with a power manager Briglia cannot read")
-            _ = try await wf.systemRun(row: "keepawake", option: nil, generation: g)
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            var rows = (await wf.status())["system_rows"] as? [[String: Any]] ?? []
-            check("KDE → not ok, mask offered", rows[0]["state"] as? String == "failed" && rows[0]["offer"] as? String == "mask")
-            store.verdict = .maySuspend(reason: "GNOME auto-suspend is on (sleep-inactive-ac-type=suspend, sleep-inactive-battery-type=suspend)")
-            _ = try await wf.systemRun(row: "keepawake", option: nil, generation: g)
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            rows = (await wf.status())["system_rows"] as? [[String: Any]] ?? []
-            check("GNOME auto-suspend → no-sudo fix applied first, then ok", store.gnomeDisabled && rows[0]["state"] as? String == "ok")
-            // Mask path through a (stub) handoff job would need a tty; the job itself is exercised in the runner section.
-            store.toolchain = ToolchainService.DesktopStatus(doctorRan: true, missing: ["pandoc"], libreOffice: false, mandatoryMissing: ["pandoc"])
-            // Two steps: the first succeeds and prints; the second fails the way brew does
-            // (progress on stdout, an `Error:` line on stderr, non-zero exit). The row must
-            // carry the failing step's own last lines, not the first step's or the ▶ markers.
-            store.toolchainJobs = [
-                SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "echo first-step-line"], mode: .detached, timeout: 30, label: "first install"),
-                SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "echo '==> Downloading LibreOffice'; echo; echo \"Error: It seems there is already an App at '/Applications/LibreOffice.app'.\" >&2; exit 3"], mode: .detached, timeout: 30, label: "failing install"),
-            ]
-            _ = try await wf.systemRun(row: "toolchain", option: nil, generation: g)
-            for _ in 0..<50 { try? await Task.sleep(nanoseconds: 100_000_000); let rs = await wf.systemRows; if rs[1].state != "running" { break } }
-            rows = (await wf.status())["system_rows"] as? [[String: Any]] ?? []
-            check("failing installer → toolchain row failed with the exit status", rows[1]["state"] as? String == "failed" && (rows[1]["reason"] as? String ?? "").contains("status 3"), "\(rows[1])")
-            let output = rows[1]["output"] as? [String] ?? []
-            check("failed row carries the step's last output lines (brew's Error: line)", output.contains { $0.hasPrefix("Error: It seems there is already an App") } && output.contains("==> Downloading LibreOffice"), "\(output)")
-            check("output excerpt is scoped to the failing step (no earlier step, no ▶ marker, no blank line)", !output.contains("first-step-line") && !output.contains { $0.hasPrefix("▶") } && !output.contains(""), "\(output)")
-            store.toolchainJobs = [SetupJobRunner.Spec(row: "toolchain", command: ["/bin/sh", "-c", "echo ok"], mode: .detached, timeout: 30, label: "install")]
-            _ = try await wf.systemRun(row: "toolchain", option: nil, generation: g)
-            for _ in 0..<50 { try? await Task.sleep(nanoseconds: 100_000_000); let rs = await wf.systemRows; if rs[1].state != "running" { break } }
-            rows = (await wf.status())["system_rows"] as? [[String: Any]] ?? []
-            check("installer ok but doctor still missing → row failed (evidence-based)", rows[1]["state"] as? String == "failed" && (rows[1]["reason"] as? String ?? "").contains("still missing"), "\(rows[1])")
-            check("a Retry clears the previous step's output excerpt (installer exited 0)", rows[1]["output"] == nil, "\(rows[1])")
-        }
-    }
-
-    // MARK: 9. Static page
+    // MARK: 9. Static pages
 
     func staticPage() async throws {
         guard let dir = QuickSetupPreflight.pageDirectory() else { check("page directory in the bundle", false); return }
-        let html = (try? String(contentsOf: dir.appendingPathComponent("index.html"), encoding: .utf8)) ?? ""
-        let js = (try? String(contentsOf: dir.appendingPathComponent("app.js"), encoding: .utf8)) ?? ""
-        let css = (try? String(contentsOf: dir.appendingPathComponent("app.css"), encoding: .utf8)) ?? ""
-        check("page files present", !html.isEmpty && !js.isEmpty && !css.isEmpty)
-        check("no inline script", !html.contains("<script>") && html.range(of: "<script(?![^>]*src=)", options: .regularExpression) == nil)
-        check("no inline style / on* handlers", !html.contains("<style") && html.range(of: " on[a-z]+=", options: .regularExpression) == nil && !html.contains("style=\""))
-        for banned in ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "localStorage", "sessionStorage", "eval("] {
-            check("app.js does not use \(banned)", !js.contains(banned))
+        let fm = FileManager.default
+        check("the retired browser Quick Setup page is gone (no index.html / app.js in the bundle)",
+              !fm.fileExists(atPath: dir.appendingPathComponent("index.html").path) && !fm.fileExists(atPath: dir.appendingPathComponent("app.js").path))
+        for page in ["menu.html", "settings.html"] {
+            let html = (try? String(contentsOf: dir.appendingPathComponent(page), encoding: .utf8)) ?? ""
+            check("\(page) present", !html.isEmpty)
+            check("\(page): no inline script", !html.contains("<script>") && html.range(of: "<script(?![^>]*src=)", options: .regularExpression) == nil)
+            check("\(page): no inline style / on* handlers", !html.contains("<style") && html.range(of: " on[a-z]+=", options: .regularExpression) == nil && !html.contains("style=\""))
         }
-        check("secret inputs set autocomplete off", js.contains("autocomplete = 'off'") || js.contains("autocomplete=\"off\""))
-        let allowed = ["https://opencode.ai/zen", "https://platform.openai.com/api-keys", "https://serper.dev", "https://jina.ai", "https://t.me/BotFather", "https://t.me/userinfobot", "https://agentmail.to", "https://openrouter.ai/keys", "https://auth.openai.com/codex/device"]
-        let urlRegex = try NSRegularExpression(pattern: "https?://[A-Za-z0-9./_-]+")
-        let urls = urlRegex.matches(in: js, range: NSRange(js.startIndex..., in: js)).map { String(js[Range($0.range, in: js)!]) }
-        let foreign = urls.filter { u in !allowed.contains(u) && !u.hasPrefix("https://my-server.example") && u != "http://127.0.0.1" }
-        check("app.js external URLs are only the documented anchors", foreign.isEmpty, "\(foreign)")
-        check("index.html has no external URLs", html.range(of: "https?://", options: .regularExpression) == nil)
-        check("anchors open with noopener noreferrer", js.contains("rel = 'noopener noreferrer'"))
-        check("keys verify automatically: no manual Verify button, the page sends partial verifies",
-              !html.contains("btn-verify") && js.contains("partial: true") && html.contains("id=\"btn-save\""))
+        check("app.css (the settings page's stylesheet) is still shipped", fm.fileExists(atPath: dir.appendingPathComponent("app.css").path))
     }
 
-    // MARK: 11. Refusals
 
-    func refusals() async throws {
-        func refusal(_ configure: () -> Void, isLinux: Bool) -> String {
-            QuickSetupPreflight.isUbuntuTouchOverride = false
-            QuickSetupPreflight.setupCompleteOverride = false
-            QuickSetupPreflight.brewPresentOverride = true
-            QuickSetupPreflight.pythonOverride = .init(present: true, pipOK: true)
-            QuickSetupPreflight.packageManagerOverride = ("apt-get", true)
-            QuickSetupPreflight.sudoPresentOverride = true
-            QuickSetupPreflight.systemdSessionOverride = true
-            QuickSetupEvidence.statvfsOverride = { _ in (1, "/", 100 * QuickSetupEvidence.gb) }
-            QuickSetupPreflight.pageDirectoryOverride = tempRoot
-            configure()
-            defer {
-                QuickSetupPreflight.isUbuntuTouchOverride = nil; QuickSetupPreflight.setupCompleteOverride = nil
-                QuickSetupPreflight.brewPresentOverride = nil; QuickSetupPreflight.pythonOverride = nil
-                QuickSetupPreflight.packageManagerOverride = nil; QuickSetupPreflight.sudoPresentOverride = nil
-                QuickSetupPreflight.systemdSessionOverride = nil; QuickSetupEvidence.statvfsOverride = nil
-                QuickSetupPreflight.pageDirectoryOverride = nil
-            }
-            do { try QuickSetupPreflight.check(isLinux: isLinux); return "" } catch { return "\(error)" }
-        }
-        check("Ubuntu Touch → app message", refusal({ QuickSetupPreflight.isUbuntuTouchOverride = true }, isLinux: true).contains("Briglia app"))
-        check("setup complete → use briglia setup", refusal({ QuickSetupPreflight.setupCompleteOverride = true }, isLinux: false).contains("already set up"))
-        check("macOS without Homebrew → brew.sh", refusal({ QuickSetupPreflight.brewPresentOverride = false }, isLinux: false).contains("brew.sh"))
-        check("macOS with broken pip → CLT hint", refusal({ QuickSetupPreflight.pythonOverride = .init(present: true, pipOK: false) }, isLinux: false).contains("xcode-select"))
-        check("Linux without a package manager → sudo/pm message", refusal({ QuickSetupPreflight.packageManagerOverride = ("", false) }, isLinux: true).contains("package manager"))
-        check("Linux without pip → distribution hint", refusal({ QuickSetupPreflight.pythonOverride = .init(present: true, pipOK: false) }, isLinux: true).contains("python3-pip"))
-        check("Linux without a systemd user session → use briglia setup", refusal({ QuickSetupPreflight.systemdSessionOverride = false }, isLinux: true).contains("systemd user service"))
-        check("disk below floor → names the mount and the numbers", refusal({ QuickSetupEvidence.statvfsOverride = { _ in (1, "/", 1 * QuickSetupEvidence.gb) } }, isLinux: false).contains("free on /"))
-        let home = NSHomeDirectory()
-        check("disk information unreadable for a destination → refusal naming it (never silently omitted)",
-              refusal({ QuickSetupEvidence.statvfsOverride = { path in path == home ? nil : (1, "/", 100 * QuickSetupEvidence.gb) } }, isLinux: false).contains("cannot read the free space on \(home)"))
-        check("all clear → no refusal", refusal({}, isLinux: false).isEmpty)
-        check("all clear (Linux) → no refusal", refusal({}, isLinux: true).isEmpty)
-        // Second instance: the session lock.
-        let fd = QuickSetupSession.takeSessionLock()
-        check("session lock taken", fd != nil)
-        if let fd {
-            QuickSetupSession.writeSessionLock(fd: fd, port: 4242)
-            let content = (try? String(contentsOf: QuickSetupSession.lockFileURL, encoding: .utf8)) ?? ""
-            check("quicksetup.lock holds pid, port and a token-free hint", content.contains("pid ") && content.contains("port 4242") && !content.contains("t="))
-            let second = QuickSetupSession.takeSessionLock()
-            check("second instance refused by the session lock", second == nil)
-            close(fd)
-        }
-    }
-
-    // MARK: 13/15. Finish, completion order, lease
+    // MARK: 13/15. Lease, completion delivery
 
     func finishAndLease() async throws {
         // Lease semantics.
@@ -1144,143 +454,35 @@ final class SelftestContext: @unchecked Sendable {
         check("a lease dropped without release() is released in deinit, then logged (release before log)", dropObserved && releasedBeforeLog)
         InstanceLease.onUnexpectedDrop = nil
 
-        // Linux completion order.
-        let (env, store) = stubEnv(linux: true)
-        store.seedConfigured()
-        store.agentMailInstalled = true
-        let (wf, _) = try makeWorkflow(env, resume: .system)
-        let g = await wf.generation
-        for row in ["keepawake", "toolchain"] {
-            _ = try await wf.systemRun(row: row, option: nil, generation: g)
-            for _ in 0..<50 { try? await Task.sleep(nanoseconds: 50_000_000); if (await wf.systemRows).first(where: { $0.id == row })?.state != "running" { break } }
+        // Completion delivery (the menu's closing reply): the command may tear
+        // down only after an authorized completing response was fully written.
+        let doneAuth = try PageAuthorizer(runner: SetupJobRunner())
+        let completionServer = QuickSetupHTTPServer { req in
+            guard await doneAuth.authorizedGeneration(cookie: req.cookieBQS) != nil else {
+                if req.path == "/start", let t = QuickSetupHTTPServer.startToken(fromQuery: req.query), let c = await doneAuth.exchange(token: t) {
+                    return QuickSetupHTTPServer.Response(status: 303, headers: [("Location", "/"), ("Set-Cookie", "bqs=\(c); HttpOnly; SameSite=Strict; Path=/")])
+                }
+                return .status(404)
+            }
+            var r = QuickSetupHTTPServer.Response(status: 200, headers: [("Content-Type", "application/json")], body: Data("{\"closing\":\"start\"}".utf8))
+            r.completesSetup = true
+            return r
         }
-        let phaseSC = await wf.phase
-        check("system complete", phaseSC == .systemComplete)
-        let (st, _) = try await wf.finish(generation: g)
-        check("finish accepted", st == 202)
-        for _ in 0..<100 { try? await Task.sleep(nanoseconds: 50_000_000); if await wf.isDone { break } }
-        let doneL = await wf.isDone
-        check("finish reached done", doneL)
-        // The CLI may tear down only after an authorized DONE status was
-        // fully written. No observer still has a bounded grace period.
-        let (completionServer, _) = try startServer(wf)
+        try completionServer.start()
         defer { completionServer.stop() }
         let waitStart = ProcessInfo.processInfo.systemUptime
         let unseen = await completionServer.waitForCompletionDelivery(timeout: 0.08)
         check("closed-tab completion wait is bounded", !unseen && ProcessInfo.processInfo.systemUptime - waitStart < 1)
-        let rejected = request(port: completionServer.port, method: "GET", path: "/api/status")
-        check("unauthorized DONE poll cannot release completion wait", rejected.status == 404 && !completionServer.hasDeliveredCompletion)
+        let rejected = request(port: completionServer.port, method: "GET", path: "/api/menu/status")
+        check("unauthorized poll cannot release completion wait", rejected.status == 404 && !completionServer.hasDeliveredCompletion)
         let failedWrite = completionServer.writeResponse(.init(status: 200, completesSetup: true), to: -1)
         check("failed response write cannot release completion wait", !failedWrite && !completionServer.hasDeliveredCompletion)
-        let completionToken = await wf.launchToken
-        let completionCookie = exchange(port: completionServer.port, token: completionToken).cookie
-        let delivered = request(port: completionServer.port, method: "GET", path: "/api/status", cookie: completionCookie)
+        let completionCookie = exchange(port: completionServer.port, token: await doneAuth.launchToken).cookie
+        let delivered = request(port: completionServer.port, method: "GET", path: "/api/menu/status", cookie: completionCookie)
         let observed = await completionServer.waitForCompletionDelivery(timeout: 0.08)
-        check("authorized DONE reaches client before completion release", delivered.status == 200 && delivered.json["phase"] as? String == "done" && observed)
-
-        check("lease released exactly once, after the unit was installed and quick:handoff was on disk",
-              store.releaseCalls == 1 && store.unitInstalledAtRelease && store.progressAtRelease == "quick:handoff")
-        check("service started after the release, evidence checked", store.serviceStarted)
-        check("complete written together with progress deletion", store.values[SetupWizard.completeKey] == "true" && store.values[SetupWizard.progressKey] == nil)
-        // Old-or-new: post-rename fsync failure at step 9 → barrier retried; three failures → failed, not done.
-        do {
-            let (env2, store2) = stubEnv(linux: false)
-            store2.seedConfigured()
-            let (wf2, _) = try makeWorkflow(env2, resume: .system)
-            let g2 = await wf2.generation
-            for row in ["fda", "keepawake", "toolchain"] {
-                _ = try await wf2.systemRun(row: row, option: nil, generation: g2)
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
-            store2.saveFailure = { changes, s in
-                if changes[SetupWizard.completeKey] != nil {
-                    for (k, v) in changes { if let v { s.values[k] = v } else { s.values.removeValue(forKey: k) } }   // new state present (rename happened)
-                    throw NSError(domain: "t", code: 1, userInfo: [NSLocalizedDescriptionKey: "injected post-rename fsync failure"])
-                }
-            }
-            store2.fsyncFails = 3
-            _ = try await wf2.finish(generation: g2)
-            for _ in 0..<100 {
-                try? await Task.sleep(nanoseconds: 50_000_000)
-                let failed = (await wf2.finishSteps).contains(where: { $0.state == "failed" })
-                let done = await wf2.isDone
-                if failed || done { break }
-            }
-            let steps = await wf2.finishSteps
-            let done2 = await wf2.isDone
-            check("barrier failing three times → complete step failed, Done not shown", steps.last?.state == "failed" && !done2 && store2.fsyncCalls == 3, "\(steps.last?.reason ?? "") calls=\(store2.fsyncCalls)")
-            store2.saveFailure = nil
-            store2.fsyncFails = 0
-            _ = try await wf2.finish(generation: g2)
-            for _ in 0..<100 { try? await Task.sleep(nanoseconds: 50_000_000); if await wf2.isDone { break } }
-            let doneRetry = await wf2.isDone
-            check("Retry after the barrier succeeds → done", doneRetry)
-        }
-        // Pre-rename failure → old state, three retries, save_failed naming the old state.
-        do {
-            let (env3, store3) = stubEnv(linux: false)
-            store3.seedConfigured()
-            let (wf3, _) = try makeWorkflow(env3, resume: .system)
-            let g3 = await wf3.generation
-            for row in ["fda", "keepawake", "toolchain"] {
-                _ = try await wf3.systemRun(row: row, option: nil, generation: g3)
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
-            var attempts = 0
-            store3.saveFailure = { changes, _ in
-                if changes[SetupWizard.completeKey] != nil { attempts += 1; throw NSError(domain: "t", code: 1, userInfo: [NSLocalizedDescriptionKey: "disk full"]) }
-            }
-            _ = try await wf3.finish(generation: g3)
-            for _ in 0..<100 { try? await Task.sleep(nanoseconds: 50_000_000); let fs = await wf3.finishSteps; if fs.contains(where: { $0.state == "failed" }) { break } }
-            let last = (await wf3.finishSteps).last
-            check("pre-rename failure → 1+3 attempts, save_failed naming the old state", attempts == 4 && last?.state == "failed" && (last?.reason ?? "").contains("old state"), "\(attempts) \(last?.reason ?? "")")
-        }
-        // Constrained resume: regressed evidence → stop service, reacquire, back to quick:system.
-        do {
-            let (env4, store4) = stubEnv(linux: true)
-            store4.seedConfigured()
-            store4.values[SetupWizard.progressKey] = "quick:handoff"
-            store4.toolchain = ToolchainService.DesktopStatus(doctorRan: true, missing: ["pandoc"], libreOffice: true, mandatoryMissing: ["pandoc"])
-            let (wf4, _) = try makeWorkflow(env4, resume: .handoff)
-            let phaseH = await wf4.phase
-            check("handoff resume starts in finishing", phaseH == .finishing)
-            let g4 = await wf4.generation
-            _ = try await wf4.finish(generation: g4)
-            for _ in 0..<100 { try? await Task.sleep(nanoseconds: 50_000_000); let ph = await wf4.phase; if ph == .system { break } }
-            let phase4 = await wf4.phase
-            check("regressed toolchain → service stopped, lease reacquired, progress reverted to quick:system, no steps 7–10 run",
-                  store4.stopCalls == 1 && store4.reacquireCalls == 1 && store4.values[SetupWizard.progressKey] == "quick:system" && phase4 == .system && store4.values[SetupWizard.completeKey] == nil)
-            let (env5, store5) = stubEnv(linux: true)
-            store5.seedConfigured()
-            store5.values[SetupWizard.progressKey] = "quick:handoff"
-            store5.toolchain = ToolchainService.DesktopStatus(doctorRan: true, missing: ["pandoc"], libreOffice: true, mandatoryMissing: ["pandoc"])
-            store5.stopOK = false
-            let (wf5, _) = try makeWorkflow(env5, resume: .handoff)
-            _ = try await wf5.finish(generation: await wf5.generation)
-            for _ in 0..<100 { try? await Task.sleep(nanoseconds: 50_000_000); let fs = await wf5.finishSteps; if fs.contains(where: { $0.state == "failed" }) { break } }
-            let first5 = (await wf5.finishSteps).first
-            check("service that refuses to stop → resume fails naming it", first5?.state == "failed" && (first5?.reason ?? "").contains("could not be stopped"))
-            // Healthy handoff resume runs only steps 7–10.
-            let (env6, store6) = stubEnv(linux: true)
-            store6.seedConfigured()
-            store6.values[SetupWizard.progressKey] = "quick:handoff"
-            let (wf6, _) = try makeWorkflow(env6, resume: .handoff)
-            _ = try await wf6.finish(generation: await wf6.generation)
-            for _ in 0..<100 { try? await Task.sleep(nanoseconds: 50_000_000); if await wf6.isDone { break } }
-            let done6 = await wf6.isDone
-            check("healthy handoff resume → done without reinstalling the unit or releasing a lease", done6 && !store6.unitInstalled && store6.releaseCalls == 0 && store6.values[SetupWizard.completeKey] == "true")
-            // Service evidence failures.
-            let (env7, store7) = stubEnv(linux: true)
-            store7.seedConfigured()
-            store7.values[SetupWizard.progressKey] = "quick:handoff"
-            store7.serviceEvidence = (false, false, "start at boot not confirmed enabled (linger)")
-            let (wf7, _) = try makeWorkflow(env7, resume: .handoff)
-            _ = try await wf7.finish(generation: await wf7.generation)
-            for _ in 0..<100 { try? await Task.sleep(nanoseconds: 50_000_000); let fs = await wf7.finishSteps; if fs.contains(where: { $0.state == "failed" }) { break } }
-            let failedStep = (await wf7.finishSteps).first { $0.state == "failed" }
-            check("service active but linger absent → service step failed", failedStep?.id == "service" && (failedStep?.reason ?? "").contains("linger"))
-        }
+        check("authorized completing reply reaches the client before completion release", delivered.status == 200 && delivered.json["closing"] as? String == "start" && observed)
     }
+
 
     // MARK: 14. Census
 
@@ -1381,7 +583,3 @@ final class Counter: @unchecked Sendable {
     func next() -> Int { lock.lock(); defer { lock.unlock() }; n += 1; return n }
 }
 
-final class WorkflowBox: @unchecked Sendable {
-    var value: QuickSetupWorkflow?
-}
-nonisolated(unsafe) let wf3Box = WorkflowBox()

@@ -215,37 +215,30 @@ extension SelftestContext {
             ManagedPlaywright.ProcessGroups.membersOverride = nil
             check("enumeration failing but the group gone (ESRCH) → not poisoned", result2.ok && !r2.isPoisoned, "\(result2.outcome) \(result2.enumerationFailed)")
         }
-        // Workflow-level poison: 409 on mutating routes, recheck route.
+        // Runner-level poison (the menu's installers share it): a survivor
+        // whose death can't be confirmed blocks further jobs until a recheck
+        // clears it; the page authorizer still issues new links meanwhile.
         do {
-            let (env, store) = stubEnv()
-            let (wf, r) = try makeWorkflow(env, resume: .system)
+            let r = fresh()
+            let auth = try PageAuthorizer(runner: r)
             var fakePid: Int32 = 0
             SetupJobRunner.onJournalPersisted = { fakePid = $0 }
             var shift: UInt64 = 0
             ManagedPlaywright.ProcessGroups.membersOverride = { pgid in [.init(identity: .init(pid: pgid > 0 ? pgid : fakePid, startTime: 777 + shift), zombie: false)] }
-            store.toolchain = ToolchainService.DesktopStatus(doctorRan: true, missing: ["pandoc"], libreOffice: true, mandatoryMissing: ["pandoc"])
-            store.toolchainJobs = [job("true", label: "x")]
-            let g = await wf.generation
-            for row in ["fda", "keepawake"] { _ = try await wf.systemRun(row: row, option: nil, generation: g); try? await Task.sleep(nanoseconds: 200_000_000) }
-            _ = try await wf.systemRun(row: "toolchain", option: nil, generation: g)
-            for _ in 0..<100 { try? await Task.sleep(nanoseconds: 50_000_000); if r.isPoisoned { break } }
+            _ = await r.run(job("true", label: "x"))
+            for _ in 0..<100 { if r.isPoisoned { break }; try? await Task.sleep(nanoseconds: 50_000_000) }
             SetupJobRunner.onJournalPersisted = nil
-            check("workflow poisoned after the unconfirmed survivor", r.isPoisoned)
-            let (s1, _) = try await wf.systemRun(row: "toolchain", option: nil, generation: g)
-            let (s2, _) = try await wf.finish(generation: g)
-            let (s3, _) = try await wf.stepByStep(generation: g)
-            check("system/run, finish, stepbystep → 409 while poisoned", s1 == 409 && s2 == 409 && s3 == 409, "\(s1) \(s2) \(s3)")
-            let statusP = await wf.status()
-            check("status still readable and reports the survivors", (statusP["poisoned"] as? [String: Any]) != nil)
-            _ = await wf.rotate()
-            let tokenP = await wf.launchToken
+            check("runner poisoned after the unconfirmed survivor", r.isPoisoned)
+            let blocked = await r.run(job("true", label: "y"))
+            check("a new job is refused while poisoned", !blocked.ok)
+            _ = await auth.rotate()
+            let tokenP = await auth.launchToken
             check("a new link is still issued while poisoned", !tokenP.isEmpty)
-            let (_, still) = await wf.recoverRecheck()
-            check("recheck with the survivor still listed → still poisoned", !(still["poisoned"] is NSNull))
+            check("recheck with the survivor still listed → still poisoned", r.recheckPoison() != nil)
             shift = 5
-            let (_, cleared) = await wf.recoverRecheck()
+            let cleared = r.recheckPoison()
             ManagedPlaywright.ProcessGroups.membersOverride = nil
-            check("recheck with a different start time → cleared", cleared["poisoned"] is NSNull)
+            check("recheck with a different start time → cleared", cleared == nil && !r.isPoisoned)
             let poisonK = r.signalSurvivorsAndRecheck()
             check("terminal K after clearing is a no-op", poisonK == nil)
         }

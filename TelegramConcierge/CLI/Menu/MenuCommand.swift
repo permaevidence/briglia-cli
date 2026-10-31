@@ -25,7 +25,6 @@ struct MenuCommand: AsyncParsableCommand {
         AdaCLI.prepareIO()
         try IdentityMigration.gateMutatingEntry()
         IdentityMigration.warnLegacyEnvironment()
-        QuickSetupSession.applyPreflightDevStubsIfRequested()
         if QuickSetupPreflight.isUbuntuTouchOverride ?? AgentServiceSupport.isUbuntuTouch() {
             print("On a phone, use the Briglia app instead.")
             throw ExitCode(2)
@@ -152,8 +151,8 @@ struct MenuCommand: AsyncParsableCommand {
         env.quick.reacquireLease = { legacyLease == nil ? true : leaseBox.reacquire() }
 
         // Authorization (link, cookie, generations) is the quick setup's.
-        let auth: QuickSetupWorkflow
-        do { auth = try QuickSetupWorkflow(env: env.quick, runner: runner, resume: .fresh) } catch {
+        let auth: PageAuthorizer
+        do { auth = try PageAuthorizer(runner: runner) } catch {
             print("✖ \(error.localizedDescription)")
             leaseBox.release(); restartServiceIfPaused()
             throw ExitCode(2)
@@ -331,7 +330,7 @@ struct MenuCommand: AsyncParsableCommand {
     }
     #endif
 
-    static func printLink(auth: QuickSetupWorkflow, port: UInt16, open: Bool, again: Bool) async {
+    static func printLink(auth: PageAuthorizer, port: UInt16, open: Bool, again: Bool) async {
         let token = await auth.launchToken
         guard !token.isEmpty else {
             print("✖ Cannot create a secure link on this system. Press Ctrl-C and type `briglia menu` again.")

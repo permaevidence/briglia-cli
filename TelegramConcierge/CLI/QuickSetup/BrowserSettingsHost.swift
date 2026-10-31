@@ -12,7 +12,7 @@ import Darwin
 @MainActor
 final class BrowserSettingsHost {
     private static var shared: BrowserSettingsHost?
-    let auth: QuickSetupWorkflow
+    let auth: PageAuthorizer
     let settings: BrowserSettingsWorkflow
     let server: QuickSetupHTTPServer
     private var lease: InstanceLease?
@@ -26,7 +26,7 @@ final class BrowserSettingsHost {
               ["settings.html", "settings.js"].allSatisfy({ FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path) }) else {
             throw BrowserSettingsWorkflow.Invalid(text: "Browser settings resources are missing. Reinstall Briglia.")
         }
-        auth = try QuickSetupWorkflow(env: QuickSetupEnvironment(), runner: SetupJobRunner(secrets: [:]), resume: .fresh)
+        auth = try PageAuthorizer(runner: SetupJobRunner(secrets: [:]))
         var env = BrowserSettingsWorkflow.Environment()
         if let manager {
             env.running = true

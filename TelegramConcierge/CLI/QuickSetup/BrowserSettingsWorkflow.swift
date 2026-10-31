@@ -30,12 +30,12 @@ final class BrowserSettingsWorkflow {
         var reload: () async -> Void = {}
         var running = false
     }
-    let auth: QuickSetupWorkflow
+    let auth: PageAuthorizer
     var env: Environment
     private var busy = false
     private var receipt: (digest: Data, generation: Int, time: Date)?
     private var pending: String?
-    init(auth: QuickSetupWorkflow, env: Environment = Environment()) { self.auth = auth; self.env = env }
+    init(auth: PageAuthorizer, env: Environment = Environment()) { self.auth = auth; self.env = env }
     private func failure(_ code: String, _ message: String) -> [String: Any] {
         ["ok": false, "error": code, "message": message]
     }
@@ -43,7 +43,7 @@ final class BrowserSettingsWorkflow {
         do { try await auth.beginSettingsOperation(g) } catch { return (404, [:]) }
         let result: (Int, [String: Any])
         do { result = try await perform(verb, body: body, generation: g) }
-        catch is QuickSetupWorkflow.Superseded { result = (404, [:]) }
+        catch is PageAuthorizer.Superseded { result = (404, [:]) }
         catch is SetupAPICore.CheckpointRevoked { result = (404, [:]) }
         catch { result = (400, failure("invalid_request", error.localizedDescription)) }
         await auth.endSettingsOperation()

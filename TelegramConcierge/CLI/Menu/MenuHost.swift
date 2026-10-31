@@ -14,7 +14,7 @@ import Darwin
 @MainActor
 final class MenuHost {
     private static var shared: MenuHost?
-    let auth: QuickSetupWorkflow
+    let auth: PageAuthorizer
     let menu: MenuWorkflow
     let server: QuickSetupHTTPServer
     private var watcher: Task<Void, Never>?
@@ -34,7 +34,7 @@ final class MenuHost {
         }
         var env = MenuEnvironment()
         let runner = SetupJobRunner(secrets: [:])
-        auth = try QuickSetupWorkflow(env: env.quick, runner: runner, resume: .fresh)
+        auth = try PageAuthorizer(runner: runner)
         let mode = Self.runMode()
         env.live = MenuLive(mode: mode, stop: { MenuHost.stopRunningBriglia(mode: mode) })
         Self.wireLive(&env, manager: manager)

@@ -242,7 +242,7 @@ enum PythonRuntime {
     /// Interactive only: a terminal on stdin (sudo can ask for the password)
     /// plus sudo + apt-get. The daemon, the agent's Bash tool and detached
     /// menu jobs never get here; the menu plans the package as its own
-    /// terminal job instead (QuickSetupWorkflow.defaultToolchainJobs).
+    /// terminal job instead (QuickSetupEnvironment.defaultToolchainJobs).
     static func canInstallVenvInteractively() -> Bool {
         if RuntimeSeams.env("BRIGLIA_PYTHON_TEST_VENV_INSTALLER") != nil {
             return RuntimeSeams.env("BRIGLIA_PYTHON_TEST_INTERACTIVE") == "1"

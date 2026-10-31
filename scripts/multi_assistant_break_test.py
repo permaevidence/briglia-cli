@@ -485,7 +485,7 @@ BREAKS = [
      "        e.terminationCause = .userKill\n        e.terminationsInFlight += 1\n        await ProcessTree.terminate(e.process, graceNanos: 0)"),
 ]
 if sys.platform.startswith("linux"):
-    BREAKS.append(("M154 the menu's apt job leaves out python3.X-venv", "qs:18.", T + "CLI/QuickSetup/QuickSetupWorkflow.swift",
+    BREAKS.append(("M154 the menu's apt job leaves out python3.X-venv", "qs:18.", T + "CLI/QuickSetup/QuickSetupEnvironment.swift",
                    "+ (venv.map { [$0] } ?? [])", "+ []"))
 
 

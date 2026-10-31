@@ -17,7 +17,7 @@ extension SelftestContext {
             do { try KeychainHelper.saveBatch(restore) }
             catch { check("settings: restore isolated fixtures", false) }
         }
-        let auth = try QuickSetupWorkflow(env: QuickSetupEnvironment(), runner: SetupJobRunner(secrets: [:]), resume: .fresh)
+        let auth = try PageAuthorizer(runner: SetupJobRunner(secrets: [:]))
         let g = await auth.generation
         var env = BrowserSettingsWorkflow.Environment()
         var probes: [[String: Any]] = []

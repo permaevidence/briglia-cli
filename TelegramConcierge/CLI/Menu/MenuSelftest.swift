@@ -1101,7 +1101,7 @@ final class MenuSelftestContext {
         do {
             let w = world(); let wf = await make(w)
             let current = MenuGenerationBox()
-            wf.validity.authCheck = { g in if g != current.value { throw QuickSetupWorkflow.Superseded() } }
+            wf.validity.authCheck = { g in if g != current.value { throw PageAuthorizer.Superseded() } }
             let gate = MenuGate(); w.holds[w.good["serper"]!] = gate
             let t = await parked(wf, gate, ["action": "key", "kind": "serper", "key": w.good["serper"]!], generation: 1)
             current.value = 2
@@ -1171,7 +1171,7 @@ final class MenuSelftestContext {
         let wf = MenuWorkflow(env: e, runner: runner)
         await wf.start(); await wf.settle()
         var qe = QuickSetupEnvironment(); qe.storedValue = { _ in nil }
-        guard let auth = try? QuickSetupWorkflow(env: qe, runner: runner, resume: .fresh) else { check("rotation: authorizer", false); return }
+        guard let auth = try? PageAuthorizer(runner: runner) else { check("rotation: authorizer", false); return }
         let token = await auth.launchToken
         guard let cookie = await auth.exchange(token: token) else { check("rotation: exchange", false); return }
         let router = QuickSetupRouter(workflow: auth, pageDirectory: tempRoot) { 4242 }
@@ -1339,7 +1339,7 @@ final class MenuSelftestContext {
         let wf = await make(w)
         var qenv = QuickSetupEnvironment()
         qenv.storedValue = { _ in nil }
-        guard let auth = try? QuickSetupWorkflow(env: qenv, runner: SetupJobRunner(secrets: [:]), resume: .fresh) else {
+        guard let auth = try? PageAuthorizer(runner: SetupJobRunner(secrets: [:])) else {
             check("quick-setup authorization builds", false); return
         }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("menu-page-\(UUID().uuidString)")

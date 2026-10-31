@@ -8,7 +8,7 @@ struct Setup: AsyncParsableCommand {
         abstract: "Interactive setup wizard: providers, keys, permissions, channels."
     )
 
-    @Flag(name: .customLong("quick"), help: "Run the browser-based quick setup instead (same as `briglia quicksetup`).")
+    @Flag(name: .customLong("quick"), help: "Run the quick setup instead: OpenRouter, Telegram and free web search (same as `briglia quicksetup`).")
     var quick = false
 
     func run() async throws {
@@ -16,7 +16,7 @@ struct Setup: AsyncParsableCommand {
         try IdentityMigration.gateMutatingEntry()
         IdentityMigration.warnLegacyEnvironment()
         if quick {
-            try await QuickSetupSession.runInteractive()
+            try await QuickSetup.runTerminal(QuickSetupOptions())
             return
         }
         try await SetupWizard().run()
@@ -114,17 +114,7 @@ struct SetupWizard {
         }
 
         var startIndex = 0
-        if let saved = KeychainHelper.load(key: Self.progressKey), saved.hasPrefix("quick:") {
-            print("""
-
-            A quick setup (`briglia quicksetup`) was interrupted; run it again to
-            continue where it stopped — everything already verified is saved.
-            """)
-            if !WizardIO.askYesNo("Use this step-by-step wizard instead?", default: false) {
-                print("Run: briglia quicksetup")
-                return
-            }
-        } else if let saved = KeychainHelper.load(key: Self.progressKey),
+        if let saved = KeychainHelper.load(key: Self.progressKey),
            let interrupted = Int(saved), (1..<steps.count).contains(interrupted) {
             print("""
 
@@ -1121,7 +1111,6 @@ struct SetupWizard {
 
     private func printSummary() { Self.printSummaryStatic() }
 
-    /// Shared with `briglia quicksetup`.
     nonisolated static func printSummaryStatic() {
         func mask(_ key: String) -> String {
             guard let value = KeychainHelper.load(key: key), !value.isEmpty else { return "—" }
