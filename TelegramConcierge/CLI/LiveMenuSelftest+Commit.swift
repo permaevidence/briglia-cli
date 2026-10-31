@@ -144,6 +144,19 @@ extension LiveMenuHarness {
         // Cancel by ticket.
         check("cancel: a staged change is cancelled by its ticket", (try? SettingsWriter.cancelStaged(ticket: t4 ?? "")) == "cancelled" && pendingDoc().slots["ai"] == nil)
         check("cancel: an unknown ticket is not found", (try? SettingsWriter.cancelStaged(ticket: "nope")) == "not found")
+        // A change prepared from the whole store: a key replacement keeps
+        // it; a route change drops it.
+        reset(Self.routeBase)
+        SettingsSupersede.install()
+        if let whole = await prepare(label: "AI model", {
+            _ = KeychainHelper.loadSnapshot(); try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: "whole/model")
+        }) {
+            let t = await writer.commit(whole).ticket
+            try? KeychainHelper.save(key: KeychainHelper.serperApiKeyKey, value: "serper-replaced-meanwhile")
+            check("supersede: a key replaced meanwhile keeps a staged whole-store change", pendingDoc().slots["ai"]?.staged?.ticket == t)
+            try? KeychainHelper.save(key: KeychainHelper.voiceTranscriptionProviderKey, value: "local")
+            check("supersede: a route change elsewhere drops a staged whole-store change", pendingDoc().slots["ai"] == nil)
+        }
         // A subscription login supersedes a change prepared against it.
         reset(Self.routeBase)
         SettingsSupersede.install()

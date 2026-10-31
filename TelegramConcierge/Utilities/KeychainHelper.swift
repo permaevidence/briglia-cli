@@ -337,14 +337,14 @@ enum KeychainHelper {
     /// after every successful store write with the keys whose value changed,
     /// while both store locks are still held, so it runs in write order and
     /// before the writer returns. Registered only by the settings owner.
-    nonisolated(unsafe) static var writeObserver: ((Set<String>) -> Void)?
+    nonisolated(unsafe) static var writeObserver: ((Set<String>, [String: String]) -> Void)?
 
     private static func notifyObserver(before: [String: String], after: [String: String]) {
         guard let observer = writeObserver else { return }
         var changed = Set<String>()
         for (k, v) in after where before[k] != v { changed.insert(k) }
         for k in before.keys where after[k] == nil { changed.insert(k) }
-        if !changed.isEmpty { observer(changed) }
+        if !changed.isEmpty { observer(changed, after) }
     }
 
     /// The capability of the outer synchronous secrets-lock section

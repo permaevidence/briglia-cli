@@ -625,6 +625,55 @@ def main():
         check("live: Stop says Briglia is shutting down", lv.closing == "stop" and not errors, errors)
         ctx.close()
 
+        # ---- live menu (KEYLESS_WEB_AND_LIVE_MENU plan Part B) ----
+        pv = Fake(platform="linux")
+        pv.running, pv.run_mode = True, "service"
+        pv.name = "Sofia"; pv.chatgpt.update({"state": "signed_in", "active": True}); pv.telegram.update({"configured": True, "chat_id": "5551234567", "bot": "sofia_test_bot"})
+        pv.keys.update({"serper": "srp-g…cdef", "jina": "jina_…cdef"}); pv.computer["fda"] = True; pv.tools.update({"complete": True, "missing": []})
+        extra = {"settings_pending": ["Waiting: AI model applies when Briglia finishes its current task."]}
+        pv_status = pv.status
+        pv.status = lambda: dict(pv_status(), **extra)
+        ctx, page, errors = session(pv)
+        page.wait_for_selector("text=Briglia is running")
+        check("live menu: a change waiting for Briglia to be idle is shown as waiting",
+              page.is_visible(".notice.info:has-text('applies when Briglia finishes its current task')"))
+        check("live menu: on Linux the Stop button says Briglia also stays off at startup (D9)",
+              "also off at startup" in page.inner_text("#power-stop"))
+        shot(page, "75-live-waiting")
+        extra["redirect"] = "http://127.0.0.1:%d/start?t=feedface" % server.server_address[1]
+        try:
+            page.wait_for_url("**/start?t=feedface", timeout=15000)
+            moved = True
+        except Exception:
+            moved = False
+        check("handover: the page follows the running Briglia's menu link", moved, page.url)
+        ctx.close()
+        # A redirect that isn't a local menu link is never followed.
+        hv = Fake()
+        hv.name = "Sofia"; hv.chatgpt.update({"state": "signed_in", "active": True}); hv.telegram.update({"configured": True, "chat_id": "5551234567", "bot": "sofia_test_bot"})
+        hv.computer["fda"] = True; hv.tools.update({"complete": True, "missing": []})
+        hv_status = hv.status
+        hv.status = lambda: dict(hv_status(), redirect="https://example.invalid/start?t=x")
+        ctx, page, errors = session(hv)
+        page.wait_for_selector("text=Everything’s ready")
+        page.wait_for_timeout(2500)
+        check("handover: a non-local redirect is ignored", page.url.startswith(base.split("/menu.html")[0]), page.url)
+        ctx.close()
+        # The offline Telegram step keeps Briglia off and says so.
+        tp = Fake()
+        tp.name = "Sofia"; tp.chatgpt.update({"state": "signed_in", "active": True})
+        tp.computer["fda"] = True; tp.tools.update({"complete": True, "missing": []})
+        tp.telegram.update({"configured": False, "pending": {"bot": "sofia_test_bot", "state": "waiting"}})
+        tp_status = tp.status
+        tp.status = lambda: dict(tp_status(), pairing_holds_off=True)
+        ctx, page, errors = session(tp)
+        page.wait_for_selector("#steps")
+        page.click("#steps button:has-text('Telegram')")
+        page.wait_for_selector("text=Waiting for your message")
+        check("pairing: the Telegram step says Briglia stays off while it is open", page.is_visible("text=Briglia stays off while you connect Telegram"))
+        check("live menu: no page errors", not errors, errors)
+        ctx.close()
+
         # ---- OpenRouter lane: no OpenAI key needed (owner, 2026-09-25) ----
         orf = Fake()
         ctx, page, errors = session(orf)

@@ -129,10 +129,18 @@ enum SettingsKeyRoles {
     /// while a change is staged does not refuse it.
     static let maintenanceKeys: Set<String> = [ProviderProfiles.subscriptionGenerationKey, SubscriptionSharing.accountFingerprintKey]
 
-    /// Digest of the route and credential keys (values) of `store`.
+    /// Digest of the route state of `store` a whole-store preparation was
+    /// computed from: route values and credential PRESENCE (a key replaced
+    /// by another key does not invalidate it; a key added or removed does).
     static func routeDigest(_ store: [String: String]) -> String {
         var pairs: [String: String] = [:]
-        for (k, v) in store where role(k) != .other && !maintenanceKeys.contains(k) { pairs[k] = v }
+        for (k, v) in store where !maintenanceKeys.contains(k) {
+            switch role(k) {
+            case .route: pairs[k] = v
+            case .credential: if !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { pairs[k] = "present" }
+            case .other: break
+            }
+        }
         return SettingsDigest.of(pairs: pairs)
     }
 }

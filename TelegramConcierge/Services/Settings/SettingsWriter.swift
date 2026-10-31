@@ -613,20 +613,25 @@ enum SettingsSupersede {
     nonisolated(unsafe) static var onDropForTesting: ((String) -> Void)?
 
     static func install() {
-        KeychainHelper.writeObserver = { keys in secretsChanged(keys) }
+        KeychainHelper.writeObserver = { keys, after in secretsChanged(keys, after: after) }
     }
 
     static func uninstall() { KeychainHelper.writeObserver = nil }
 
-    static func secretsChanged(_ keys: Set<String>) {
+    /// A write of a key in a staged change's preconditions or write set
+    /// drops it — by the EVENT, so A→B→A supersedes too. A change prepared
+    /// from the whole store is also dropped when the store's route state
+    /// (route values, credential presence) no longer matches its basis.
+    static func secretsChanged(_ keys: Set<String>, after: [String: String]) {
         guard !maintenanceWrite else { return }
         let relevant = keys.filter { !$0.hasPrefix(SettingsWriter.attemptMarkerPrefix) }
         guard !relevant.isEmpty else { return }
+        var digest: String?
         dropStaged { change in
             if !relevant.isDisjoint(with: Set(change.expected.keys).union(change.touchedKeys)) { return true }
-            if change.routeDigest != nil,
-               relevant.contains(where: { SettingsKeyRoles.role($0) != .other && !SettingsKeyRoles.maintenanceKeys.contains($0) }) {
-                return true
+            if let basis = change.routeDigest {
+                if digest == nil { digest = SettingsKeyRoles.routeDigest(after) }
+                return digest != basis
             }
             return false
         }
