@@ -206,7 +206,7 @@ struct MenuCommand: AsyncParsableCommand {
             // Handover (plan B.10): a Briglia started while this page was
             // open (a terminal, the service): its own menu takes over.
             if legacyLease == nil, handoverStarted == nil, Date().timeIntervalSince(lastLeaseProbe) >= 2,
-               await menu.closing == nil, !pairing.held, SettingsClient.shortCommitsInProgress == 0 {
+               await menu.closing == nil, await menu.busy != "starting", !pairing.held, SettingsClient.shortCommitsInProgress == 0 {
                 lastLeaseProbe = Date()
                 if UnleasedInstances.probe(StoragePaths.dataRoot) == .held, !InstanceLease.isHeldInThisProcess,
                    ["daemon", "chat"].contains(InstanceLease.holderLabel() ?? "") {
