@@ -196,5 +196,30 @@ extension LiveMenuHarness {
         manager.endSettingsLifecycle(token, reopen: true)
         check("daemon: admission reopens after the operation", gate.admissionClosedReason == nil)
         await daemonStampSection(manager)
+        await daemonWipeSection(manager)
+    }
+}
+
+extension LiveMenuHarness {
+    /// A wipe with a staged change and a change prepared before it (never-
+    /// multi mode): the waiting change is deleted, the epoch advanced before
+    /// anything was destroyed, the earlier-prepared change refused after.
+    func daemonWipeSection(_ manager: ConversationManager) async {
+        manager._testSetActiveProcessing(true)
+        if let staged = await prepare(label: "AI model", { try KeychainHelper.save(key: KeychainHelper.openRouterModelKey, value: "pre/wipe") }) {
+            let r = await SettingsClient.commit(staged)
+            check("wipe: the change is staged before the wipe", r.state == .pending, "\(r.state)")
+        }
+        let early = await prepare(label: "Serper key", { try KeychainHelper.save(key: KeychainHelper.serperApiKeyKey, value: "serper-pre-wipe") })
+        manager._testSetActiveProcessing(false)
+        let before = (try? ReplacementEpoch.read()) ?? -1
+        _ = await manager.deleteAllMemory()
+        check("wipe: the waiting settings changes are deleted", !FileManager.default.fileExists(atPath: SettingsPendingStore.url.path))
+        check("wipe: the replacement epoch advanced", (try? ReplacementEpoch.read()) == before + 1)
+        if let early {
+            let r = await SettingsClient.commit(early)
+            check("wipe: a change prepared before the wipe is refused after it", r.state == .refused && r.message == SettingsWriter.epochMessage, "\(r.state) \(r.message ?? "")")
+        }
+        check("wipe: settings admission is open again after the wipe", manager.settingsWriter.gate.admissionClosedReason == nil)
     }
 }
