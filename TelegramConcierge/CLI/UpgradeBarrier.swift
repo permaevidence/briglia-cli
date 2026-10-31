@@ -270,6 +270,9 @@ enum UpgradeBarrier {
     /// installed release re-execs the binary on disk (same argv). Returns
     /// only when no re-exec is needed.
     static let reexecGuardKey = "BRIGLIA_REEXEC_GUARD"
+    /// `<barrier id> <old lease uuid>` set by `reexecIfOlder` for the new
+    /// image; consumed (and unset) by `MemberEntry.enter`.
+    static let reexecFromKey = "BRIGLIA_REEXEC_FROM_BARRIER"
 
     /// §6.1: a member whose RUNNING image (its compiled/loaded sequence, read
     /// once at start) is older than the disk-validated installed release
@@ -298,6 +301,13 @@ enum UpgradeBarrier {
             exit(75)
         }
         setenv(reexecGuardKey, "\(rec.binarySHA256):\(rec.sequence)", 1)
+        // A participant of a committed barrier restarting this way carries
+        // the barrier and its old lease across the exec, so the new image
+        // acks `restarted` for it (it is not a missed restart; Codex R1).
+        if let barrier = current(paths), barrier.state == .committed, let lease = MemberEntry.current,
+           barrier.participants?.contains(where: { $0.lease == lease.uuid }) == true {
+            setenv(reexecFromKey, "\(barrier.id) \(lease.uuid)", 1)
+        }
         exec(rec.executable, RestartArgv.current)
         // Only reached when exec failed: never continue on the old image.
         FileHandle.standardError.write(Data("✖ Could not start the updated Briglia (\(String(cString: strerror(errno)))); try again in a minute.\n".utf8))

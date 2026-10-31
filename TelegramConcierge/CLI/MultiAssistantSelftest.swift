@@ -75,6 +75,7 @@ struct MemberProbeCommand: ParsableCommand {
             info["directory"] = lease.directory.path
         }
         if let g = MemberEntry.generation { info["generation"] = g }
+        if let r = MemberEntry.reexecBarrierId { info["reexecBarrier"] = r }
         let data = try JSONSerialization.data(withJSONObject: info, options: [.sortedKeys])
         print(String(decoding: data, as: UTF8.self))
         func argvJSON(_ a: [String]) -> String {

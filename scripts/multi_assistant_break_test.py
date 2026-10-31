@@ -506,6 +506,10 @@ BREAKS = [
      "        return list.filter { !running($0) }", "        return list"),
     ("M164 a slow real restart is told it never restarted", "restartargv", T + "CLI/UpgradeBarrier+NotRestarted.swift",
      "        return restartedFromBarrier == barrier.id ? nil : barrier", "        return barrier"),
+    ("M166 the re-executed image does not ack `restarted` for its old lease", "restartargv", T + "CLI/MemberEntry.swift",
+     "        acknowledgeReexecFromBarrier(role: role)\n", ""),
+    ("M167 reexecIfOlder does not carry the barrier across the exec", "restartargv", T + "CLI/UpgradeBarrier.swift",
+     "            setenv(reexecFromKey, \"\\(barrier.id) \\(lease.uuid)\", 1)", "            _ = barrier"),
     ("M165 the other assistants' notice repeats", "restartargv", T + "CLI/UpgradeBarrier+NotRestarted.swift",
      "        handledBarrier = barrier.id\n", ""),
 ]

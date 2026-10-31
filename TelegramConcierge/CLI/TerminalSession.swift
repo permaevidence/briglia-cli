@@ -176,7 +176,7 @@ final class TerminalSession {
         // (UpgradeBarrier+NotRestarted): say so once, on this start.
         if CoordinationMode.active,
            let missed = UpgradeBarrier.resolveOwnMissedRestart(profile: AssistantProfile.selectedName,
-                                                               restartedFromBarrier: restartMarker?.barrierId) {
+                                                               restartedFromBarrier: restartMarker?.barrierId ?? MemberEntry.reexecBarrierId) {
             let text = UpgradeBarrier.ownMissedRestartText(version: missed.targetVersion)
             print(text)
             await manager.announceMissedRestart(text)

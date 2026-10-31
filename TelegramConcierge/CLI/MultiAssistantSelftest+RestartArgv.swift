@@ -123,6 +123,80 @@ extension ProfileHarness {
         clearBarrier()
 
         notRestartedChecks()
+        startupReexecIsNotMissed()
+    }
+
+    /// Codex R1: a late starter enrolled in an open barrier, re-executed by
+    /// `reexecIfOlder` on commit (no restart marker), must not be recorded
+    /// or told that it did not restart.
+    func startupReexecIsNotMissed() {
+        let fm = FileManager.default
+        let install = root.appendingPathComponent("ra-up-install", isDirectory: true)
+        try? fm.removeItem(at: install)
+        try? fm.createDirectory(at: install, withIntermediateDirectories: true)
+        let realExe = UpgradeService.executableURL
+        let besideExe = realExe.deletingLastPathComponent().appendingPathComponent(BundleCheck.bundleName)
+        let realBundle = fm.fileExists(atPath: besideExe.path) ? besideExe : Bundle.module.bundleURL
+        let exe = install.appendingPathComponent(Self.exeName)
+        let bundle = install.appendingPathComponent(BundleCheck.bundleName)
+        guard link(realExe.path, exe.path) == 0 || (try? fm.copyItem(at: realExe, to: exe)) != nil,
+              (try? fm.copyItem(at: realBundle, to: bundle)) != nil else { check("RA6: fixture", false); return }
+        let seqFile = bundle.appendingPathComponent(ReleaseSequence.testFileName)
+        try? "123".write(to: seqFile, atomically: true, encoding: .utf8)
+        defer {
+            try? fm.removeItem(at: barrierPaths.installed); clearBarrier(); UpgradeBarrier.clearAcks(barrierPaths)
+            try? fm.removeItem(at: install)
+        }
+        guard case .acquired(let lock) = ProfileFileLock.take(barrierPaths.lock, waitSeconds: 5) else { check("RA6: upgrade.lock", false); return }
+        var held: ProfileFileLock? = lock
+        defer { held?.release() }
+        UpgradeBarrier.clearAcks(barrierPaths)
+        var barrier = UpgradeBarrier.Record(id: "ra6", state: .open, targetVersion: "test-124", targetSequence: 124, openedAt: Date(),
+                                            coordinator: .init(lease: "gone", pid: 1, processStartTime: "x"), participants: [],
+                                            committedBinarySHA256: nil, reason: nil)
+        try? UpgradeBarrier.writeBarrier(barrier, barrierPaths)
+        let p = Process()
+        p.executableURL = exe
+        p.arguments = ["__member-probe", "--assistant", "--hold", "4"]
+        var e = env
+        e[ReleaseSequence.testKey] = "1"
+        e["BRIGLIA_TEST_NO_BROWSER_BOOTSTRAP"] = "1"
+        p.environment = e
+        p.currentDirectoryURL = root
+        let out = Pipe()
+        p.standardOutput = out; p.standardError = out; p.standardInput = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { check("RA6: probe starts", false); return }
+        let child = MAChild(process: p, pipe: out)
+        defer { child.kill() }
+        // Late enrollment: the starter parks and acks; the coordinator adds it.
+        var parked: (String, UpgradeBarrier.Ack)?
+        let deadline = Date().addingTimeInterval(20)
+        while parked == nil, Date() < deadline {
+            for name in (try? fm.contentsOfDirectory(atPath: barrierPaths.ackDir.path)) ?? [] where name.hasSuffix(".json") {
+                let uuid = String(name.dropLast(5))
+                if let ack = UpgradeBarrier.readAck(uuid, barrierPaths), ack.barrierId == "ra6", ack.state == .parked { parked = (uuid, ack) }
+            }
+            if parked == nil { usleep(100_000) }
+        }
+        guard let (oldLease, ack) = parked else { check("RA6: the late starter parks", false, child.output); return }
+        try? "124".write(to: seqFile, atomically: true, encoding: .utf8)
+        guard let sha = UpgradeBarrier.sha256(file: exe), let bh = UpgradeBarrier.bundleHash(bundle),
+              (try? UpgradeBarrier.writeFile(UpgradeBarrier.Installed(version: "test-124", sequence: 124, executable: exe.resolvingSymlinksInPath().path,
+                                                                      binarySHA256: sha, bundleHash: bh), to: barrierPaths.installed)) != nil
+        else { check("RA6: installed record", false); return }
+        barrier.participants = [.init(profile: AssistantProfile.defaultName, generation: nil, lease: oldLease, incarnation: ack.incarnation, coordinator: false)]
+        barrier.state = .committed
+        barrier.committedBinarySHA256 = sha
+        try? UpgradeBarrier.writeBarrier(barrier, barrierPaths)
+        held?.release(); held = nil
+        let done = child.waitFor(40) { $0.contains("PROBE_DONE") }
+        let after = UpgradeBarrier.current(barrierPaths)
+        check("RA6: the late starter re-execs into the new image and the barrier closes",
+              done && after?.state == .closed && child.output.contains("\"reexecBarrier\":\"ra6\""), child.output)
+        check("RA6: a successful startup re-exec is not recorded as not restarted",
+              after?.notRestarted == nil, "\(String(describing: after))")
+        check("RA6: and its own start does not tell the user it failed to restart",
+              UpgradeBarrier.resolveOwnMissedRestart(profile: AssistantProfile.defaultName, restartedFromBarrier: "ra6", paths: barrierPaths) == nil)
     }
 
     /// Part 2: an assistant gone after the commit without a `restarted` ack.
