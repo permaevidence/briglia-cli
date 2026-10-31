@@ -10,6 +10,16 @@ import Darwin
 /// nowhere is refused before it happens, and the inline terminal/app
 /// command reports a saved-but-uncancelled write.
 extension LiveMenuHarness {
+    /// These sections fake an unreadable or unwritable folder with chmod.
+    /// Root (Linux CI containers) ignores file modes, so there the faked
+    /// condition never happens; the checks are skipped with a note instead
+    /// of failing. macOS (non-root) runs them all.
+    func skipModeDependent(_ label: String) -> Bool {
+        guard geteuid() == 0 else { return false }
+        print("· skipped as root (file modes are not enforced): \(label)")
+        return true
+    }
+
     func round3Section() async {
         await r5UnsearchableConfigRootSection()
         await r4UnsearchableDataRootSection()
@@ -30,6 +40,7 @@ extension LiveMenuHarness {
 
     func r3UnreadableTombstoneSection() async {
         for variant in ["unreadable", "malformed"] {
+            if variant == "unreadable", skipModeDependent("R3-1 unreadable") { continue }
             reset(Self.routeBase)
             defer {
                 chmod(SettingsSupersede.tombstoneURL.path, 0o600)
@@ -64,6 +75,7 @@ extension LiveMenuHarness {
     /// must not make a flush delete the tombstone; once readable again the
     /// staged change is dropped, never applied.
     func r5UnsearchableConfigRootSection() async {
+        if skipModeDependent("R5-1") { return }
         reset(Self.routeBase)
         let configRoot = StoragePaths.configRoot
         defer {
@@ -98,6 +110,7 @@ extension LiveMenuHarness {
     /// Codex round 4: an existing tombstone behind an unsearchable data
     /// folder is unknown evidence, not absence.
     func r4UnsearchableDataRootSection() async {
+        if skipModeDependent("R4-1") { return }
         reset(Self.routeBase)
         let dataRoot = StoragePaths.dataRoot
         defer {
@@ -126,6 +139,7 @@ extension LiveMenuHarness {
     // MARK: R3-2
 
     func r3NoPersistenceRefusesSection() async {
+        if skipModeDependent("R3-2") { return }
         reset(Self.routeBase)
         SettingsSupersede.install()
         let dataRoot = StoragePaths.dataRoot
