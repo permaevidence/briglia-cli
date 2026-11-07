@@ -168,6 +168,10 @@ enum SIWCPlanState {
 
     enum Outcome: Equatable { case success, failure(SIWCError) }
 
+    /// Late results: only the episode the request started under may change
+    /// the state (§5.1 item 6).
+    static func sameEpisode(_ entry: SIWCPlanEntry, _ ticket: Ticket) -> Bool { entry.episode == ticket.episode }
+
     enum Transition: Equatable {
         case none
         case opened(episode: Int, state: SIWCPlanEntry.State)
@@ -207,7 +211,7 @@ enum SIWCPlanState {
         // Fast path (no lock): nothing to change for the common answer.
         if let current = try? read(store) {
             let entry = current.entries[fp] ?? SIWCPlanEntry()
-            if entry.episode != ticket.episode { return .none }
+            if !sameEpisode(entry, ticket) { return .none }
             if target == nil, !(ticket.userTurn && entry.retryAllowed == true) { return .none }
             if target == entry.state, !(ticket.userTurn && entry.retryAllowed == true) { return .none }
         }
@@ -216,7 +220,7 @@ enum SIWCPlanState {
             var entry = file.entries[fp] ?? SIWCPlanEntry()
             // Late results: the episode and the credential generation must
             // still be the ones the request started under.
-            guard entry.episode == ticket.episode else { return Transition.none }
+            guard sameEpisode(entry, ticket) else { return Transition.none }
             if let current = try? store.readTokens()?.record(ticket.clientId), current.generation != ticket.generation {
                 return .none
             }

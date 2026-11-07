@@ -504,7 +504,7 @@ final class TerminalSession {
                 // message enters history.
                 print("\n  \u{1B}[2m· queued for the running turn — read within a few seconds\u{1B}[0m")
                 prompt()
-            case .heldForRecovery(let notice):
+            case .heldForRecovery(let notice), .intercepted(let notice):
                 print("\n  \(notice)")
                 prompt()
             case .accepted:

@@ -20,6 +20,8 @@ struct SIWCSelftest: AsyncParsableCommand {
     /// unless those roots are the script's scratch roots.
     @Flag(name: .customLong("older-fixture")) var olderFixture = false
     @Flag(name: .customLong("resolve")) var resolveRoute = false
+    /// Stage D Telegram rows, inside the isolated child (its own HOME).
+    @Flag(name: .customLong("telegram-child")) var telegramChild = false
 
     final class Checks {
         var total = 0, failed = 0
@@ -44,6 +46,12 @@ struct SIWCSelftest: AsyncParsableCommand {
         AdaCLI.prepareIO()
         guard adaCLIVersion.hasSuffix("-dev") else { throw ValidationError("Development build required") }
         if let worker { try await Self.refreshWorker(URL(fileURLWithPath: worker)); return }
+        if telegramChild {
+            guard (ProcessInfo.processInfo.environment["CFFIXED_USER_HOME"] ?? "").contains("/tg-") else {
+                throw ValidationError("refusing: not the stage D Telegram child's roots")
+            }
+            try await Self.telegramChild(); return
+        }
         if olderFixture || resolveRoute {
             guard (ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"] ?? "").contains("briglia-siwc-older-") else {
                 throw ValidationError("refusing: not the older-binary script's scratch roots")
@@ -79,6 +87,9 @@ struct SIWCSelftest: AsyncParsableCommand {
             ("c-activity", Self.stageCActivityTests), ("c-writer", Self.stageCWriterTests), ("c-logout", Self.stageCLogoutTests),
             ("c-recovery", Self.stageCRecoveryTests), ("c-wipe", Self.stageCWipeTests), ("c-notes", Self.stageCNotesTests),
             ("c-round1", Self.stageCRound1Tests), ("c-round2", Self.stageCRound2Tests),
+            // Stage D (surfaces, plan state and notices).
+            ("d-plan", Self.stageDPlanTests), ("d-plan2", Self.stageDPlanStatesTests), ("d-plan3", Self.stageDPlanTransportTests),
+            ("d-flow", Self.stageDFlowTests), ("d-surface", Self.stageDSurfaceTests), ("d-telegram", Self.stageDTelegramTests),
         ]
         for (name, group) in groups where only == nil || only == name {
             print("— \(name)")

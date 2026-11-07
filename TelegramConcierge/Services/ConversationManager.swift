@@ -479,6 +479,10 @@ class ConversationManager: ObservableObject {
         /// history could not be read: no turn starts until history loads.
         /// Same durability promise as `.accepted`; the string explains why.
         case heldForRecovery(String)
+        /// A Sign in with ChatGPT callback address (SIWC plan §3.4): handed to
+        /// the paste parser and answered with this fixed text; it never
+        /// reaches history, the mid-turn queue or the model.
+        case intercepted(String)
         case refused(String)
     }
 

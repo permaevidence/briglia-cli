@@ -99,13 +99,13 @@ extension ConversationManager {
         }
         _ = await SIWCSurface.setOptIn(true, origin: "telegram")
         if telegram, let chat = Int(address.chatId) {
-            let text = "Sign in to ChatGPT (\(SIWCSurface.label)): \(url)\n\nAfter you approve, your browser shows a page that can't load. That's expected: copy that page's address and paste it here. \(SIWCFlow.pasteHint) The link expires in 10 minutes.\n\(SIWCFlow.telegramCaveat)\nIf ChatGPT shows an error instead, send /subscription failed."
+            let text = "Sign in with ChatGPT here: \(url)\n\nAfter you approve, your browser shows a page that can't load. That's expected: copy that page's address and paste it here. \(SIWCFlow.pasteHint) The link expires in 10 minutes.\n\(SIWCFlow.telegramCaveat)\nIf ChatGPT shows an error instead, send /subscription failed."
             do { try await telegramService.sendMessageNoPreview(chatId: chat, text: text) } catch {
                 _ = await SIWCFlow.shared.cancel()
                 try? await sendText("The sign-in link couldn't be sent; nothing was started. Try again.")
             }
         } else {
-            try? await sendText("Open this link in a browser on this computer to sign in to ChatGPT (\(SIWCSurface.label)):\n\(url)\nIt expires in 10 minutes. /subscription cancel stops it; if ChatGPT shows an error, /subscription failed.")
+            try? await sendText("Open this link in a browser on this computer to sign in with ChatGPT:\n\(url)\nIt expires in 10 minutes. /subscription cancel stops it; if ChatGPT shows an error, /subscription failed.")
         }
     }
 
@@ -136,7 +136,7 @@ extension ConversationManager {
         // A paste that finished a sign-in this chat started is reported by
         // that sign-in's own result message; anything else gets the reply.
         if hadNotifier, !SIWCFlow.shared.isWaiting, SIWCFlow.shared.lastFinishNotified { return }
-        try? await telegramService.sendMessage(chatId: chatId, text: reply)
+        try? await telegramService.sendMessageNoPreview(chatId: chatId, text: reply)
     }
 
     // MARK: Plan-state notices (§5.1, D23) and the invitation (D2)

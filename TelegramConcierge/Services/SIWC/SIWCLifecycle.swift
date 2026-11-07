@@ -57,6 +57,9 @@ final class SIWCActivity: @unchecked Sendable {
 
     func finish(_ attemptId: String) { lock.lock(); attempts[attemptId] = nil; lock.unlock() }
 
+    /// Still owned by this process (not cancelled by quiescence or a wipe).
+    func has(_ attemptId: String) -> Bool { lock.lock(); defer { lock.unlock() }; return attempts[attemptId] != nil }
+
     func beginSettle() { lock.lock(); settles += 1; lock.unlock() }
     func endSettle() { lock.lock(); settles = max(0, settles - 1); lock.unlock() }
     func beginRevoke() { lock.lock(); revokes += 1; lock.unlock() }

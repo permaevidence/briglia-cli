@@ -46,7 +46,11 @@ extension ConversationManager {
         // The outer turn (runId) keeps the registration through its final
         // delivery and cleanup (Codex stage-C round 2); without one, this
         // call owns it.
-        let siwcJob = try SIWCFence.shared.registerCurrentTask(snapshot.siwc, userTurn: true)
+        // Only a turn the user's own message started may make the plan's one
+        // attempt in limit_reached (SIWC plan §5.1); ambient turns (watchers,
+        // reminders, email) are background work for the plan state.
+        let userTextTurn = messages.last(where: { $0.id == currentUserMessageId })?.kind == .userText
+        let siwcJob = try SIWCFence.shared.registerCurrentTask(snapshot.siwc, userTurn: userTextTurn)
         let ownsSIWCJob = salvageRunId == nil
         if let runId = salvageRunId, let siwcJob { siwcTurnJobs[runId] = siwcJob }
         defer { if ownsSIWCJob { SIWCFence.shared.unregisterJob(siwcJob) } }

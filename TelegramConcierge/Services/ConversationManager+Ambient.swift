@@ -941,6 +941,13 @@ extension ConversationManager {
         }
 
         if let error = result.error {
+            // A paused ChatGPT plan (SIWC plan §5.1 item 2): the fires stay
+            // in the outbox (at-least-once) and are triaged after recovery;
+            // the plan-state notice is the one message.
+            if SIWCPlanState.isPause(error) {
+                print("[ConversationManager] Triage paused (ChatGPT plan) — \(runnable.count) batch(es) stay pending")
+                return
+            }
             for item in runnable {
                 escalateTriageRecord(item.record, reason: "the triage run failed (\(error))", sessionId: result.sessionId)
             }

@@ -118,6 +118,9 @@ extension SIWCSelftest {
         }
         let limit = await failing(SIWCErrors.classify(status: 429, body: Data(#"{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}"#.utf8))!)
         c.check("errors: usage limit → no retry, no API billing, limit message", (limit.0 as? SIWCError)?.kind == .limitReached && limit.1 == 1)
+        // Stage D: that answer paused the plan for background lanes; the rows
+        // below exercise the transport itself, so they start from a fresh state.
+        clearPlanState(sourceA2.store)
         let refused = await failing(SIWCErrors.classify(status: 400, body: Data(#"{"detail":"System messages are not allowed"}"#.utf8))!)
         c.check("errors: a system-item refusal stops the request (no resend, no rewrite)", (refused.0 as? SIWCError)?.kind == .routeIncompatible && refused.1 == 1)
         let unsupported = await failing(SIWCErrors.classify(status: 400, body: Data(#"{"error":{"code":"unsupported_capability","param":"input[3]"}}"#.utf8))!)

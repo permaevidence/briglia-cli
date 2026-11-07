@@ -630,8 +630,6 @@ actor TelegramBotService {
 
     // MARK: - Sign in with ChatGPT (SIWC plan §3.4, §5.1 item 4)
 
-    nonisolated(unsafe) static var siwcRequestInterceptForTesting: (@Sendable (String, Data) -> Void)?
-
     private struct NoPreviewMessage: Encodable {
         struct Preview: Encodable { let isDisabled = true; enum CodingKeys: String, CodingKey { case isDisabled = "is_disabled" } }
         let chatId: Int
@@ -644,7 +642,6 @@ actor TelegramBotService {
     /// `link_preview_options.is_disabled`.
     func sendMessageNoPreview(chatId: Int, text: String) async throws {
         let body = NoPreviewMessage(chatId: chatId, text: truncateToUTF16Limit(text, limit: 4096))
-        if let intercept = Self.siwcRequestInterceptForTesting { intercept("sendMessage", try JSONEncoder().encode(body)); return }
         try await postJSON(method: "sendMessage", body: body)
     }
 
@@ -657,7 +654,6 @@ actor TelegramBotService {
     /// Best-effort deletion of a pasted sign-in address (§3.4 inbound).
     func deleteMessage(chatId: Int, messageId: Int) async throws {
         let body = DeleteMessage(chatId: chatId, messageId: messageId)
-        if let intercept = Self.siwcRequestInterceptForTesting { intercept("deleteMessage", try JSONEncoder().encode(body)); return }
         try await postJSON(method: "deleteMessage", body: body, timeout: 5)
     }
 

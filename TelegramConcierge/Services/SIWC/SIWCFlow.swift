@@ -57,6 +57,7 @@ struct SIWCWriterAccess {
 @MainActor
 final class SIWCFlow {
     static let shared = SIWCFlow()
+    init() {}
 
     enum Mode: String { case browser, paste }
 
@@ -99,6 +100,7 @@ final class SIWCFlow {
     static let policyDenied = "ChatGPT refused this sign-in because of an account or workspace policy (3p_delegated_access_policy_denied). Briglia hasn't changed anything. You can try another ChatGPT account, ask your workspace admin, or choose a different route in settings."
     static let unrecognizedRefusal = "ChatGPT refused this sign-in (unrecognized reason). Briglia hasn't changed anything."
     static let pasteHint = "Paste the address within about 5 minutes."
+    static let cancelledElsewhere = "This ChatGPT sign-in was cancelled (a memory operation or a reset stopped it). Start it again."
     static let firstUseNotice = "You're using your ChatGPT plan. Briglia appears in ChatGPT Settings → Usage, where you can set its limit (Manage usage: chatgpt.com/settings/usage). " + SIWCPlanState.creditsNote
     static let telegramCaveat = "The sign-in code passes through Telegram's servers; the menu on the computer (or the phone app) avoids that when you can use it."
 
@@ -116,6 +118,10 @@ final class SIWCFlow {
     var makeSignIn: () -> SIWCSignIn = { SIWCSignIn(store: SIWCStore.resolved()) }
     var writer = SIWCWriterAccess.live
     var commitActivation: (PreparedChange) async -> SettingsCommitResult = { await SettingsClient.commit($0) }
+    /// Exchange + ID-token check (stage A); a selftest may answer it.
+    var exchange: (SIWCSignIn, SIWCAttempt, String, String) async throws -> SIWCSignInResult = { signIn, attempt, code, clientId in
+        try await signIn.exchange(attempt, code: code, clientId: clientId)
+    }
     var startListener: Bool = true
     var pollNanos: UInt64 = 200_000_000
     var clock: () -> Int = { Int(Date().timeIntervalSince1970) }
@@ -192,6 +198,11 @@ final class SIWCFlow {
     /// Poll the listener until a callback, the expiry or a cancel.
     private func watch(_ s: Session) async {
         while !Task.isCancelled, session === s, !s.finished {
+            // Cancelled from outside (Mind import / wipe quiescence).
+            if !SIWCActivity.shared.has(s.attempt.id) {
+                await end(s, state: "cancelled", message: Self.cancelledElsewhere, outcome: "cancelled", cancelAttempt: false)
+                return
+            }
             if clock() >= s.attempt.expiresAt {
                 await end(s, state: "failed", message: CallbackPaste.Rejection.expired.rawValue + " " + Self.browserFailedHelp, outcome: "expired")
                 return
@@ -214,6 +225,10 @@ final class SIWCFlow {
             return status.outcome == "expired" ? CallbackPaste.Rejection.expired.rawValue + " Start again with /subscription login."
                                                : CallbackPaste.Rejection.noneWaiting.rawValue
         }
+        if !SIWCActivity.shared.has(s.attempt.id) {
+            await end(s, state: "cancelled", message: Self.cancelledElsewhere, outcome: "cancelled", cancelAttempt: false)
+            return CallbackPaste.Rejection.noneWaiting.rawValue
+        }
         if clock() >= s.attempt.expiresAt {
             await end(s, state: "failed", message: CallbackPaste.Rejection.expired.rawValue, outcome: "expired")
             return CallbackPaste.Rejection.expired.rawValue + " Start again with /subscription login."
@@ -235,7 +250,7 @@ final class SIWCFlow {
             status.state = "finishing"
             await s.listener?.stop()
             let result: SIWCSignInResult
-            do { result = try await s.signIn.exchange(s.attempt, code: code, clientId: clientId) } catch {
+            do { result = try await exchange(s.signIn, s.attempt, code, clientId) } catch {
                 await end(s, state: "failed", message: (error as? SIWCError)?.message ?? "ChatGPT sign-in failed; nothing was saved. Try again.", outcome: "error")
                 return
             }

@@ -169,6 +169,7 @@ extension SIWCSelftest {
         SIWCModels.resetForTests()
         SIWCModels.fetchOverride = { _ in (Data(#"{"error":{"code":"user_not_eligible"}}"#.utf8), 403) }
         await c.rejectsKind("dev6: a definitive refusal of the model list stops the lane", .notAvailable) { try await SIWCModels.requireListed("gpt-6-luna", source: source6) }
+        clearPlanState(source6.store)   // stage D: that refusal opened not_available
         SIWCModels.fetchOverride = { _ in (Data(), 502) }
         c.check("dev6: a temporarily unavailable list lets the request decide", (try? await SIWCModels.requireListed("gpt-6-luna", source: source6)) != nil)
     }

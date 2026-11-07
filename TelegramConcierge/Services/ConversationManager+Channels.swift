@@ -269,6 +269,11 @@ extension ConversationManager {
                      policy: AttachmentPolicy = .appSocket) async -> AppSubmitOutcome {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty else { return .refused("empty message") }
+        // The paste interceptor in front of the terminal and app inputs (SIWC
+        // plan §3.4): held back before any gate, buffer or persistence.
+        if attachments.isEmpty, CallbackPaste.looksLikeCallback(trimmed) {
+            return .intercepted(await SIWCFlow.shared.paste(text))
+        }
 
         // The composer bypasses the poll loop, so it needs its own restore gate.
         guard !admissionPaused else { return .refused(Self.updatingRefusal) }

@@ -661,6 +661,10 @@ final class AppChatSocketServer {
                 // Durably held (history unreadable): same ack, plus the
                 // explanation for the app to show.
                 ack(["held_until_history_loads": true, "notice": notice])
+            case .intercepted(let notice):
+                // A ChatGPT sign-in address: taken by the sign-in, never
+                // saved; the app shows the fixed answer.
+                ack(["intercepted": true, "notice": notice])
             case .refused(let reason):
                 nack(reason)
             }
@@ -694,6 +698,8 @@ final class AppChatSocketServer {
                         ack(["transcription": transcription, "queued_mid_turn": true])
                     case .heldForRecovery(let notice):
                         ack(["transcription": transcription, "held_until_history_loads": true, "notice": notice])
+                    case .intercepted(let notice):
+                        ack(["intercepted": true, "notice": notice])
                     case .refused(let reason):
                         nack(reason)
                     }
