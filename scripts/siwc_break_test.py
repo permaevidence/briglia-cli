@@ -408,7 +408,7 @@ BREAKS = [
     ("D39 cancel during a publication races it instead of waiting for its outcome", "R2: cancel while the save returns", W + "SIWCFlow.swift",
      "        if status.state == \"finishing\" || status.state == \"cancelling\" {\n            return await waitForEnd()\n        }",
      "        if false {\n            return await waitForEnd()\n        }", "d-round1"),
-    ("D40 a paste during a cancel is still accepted", "R2: a paste during the cancel is refused", W + "SIWCFlow.swift",
+    ("D40 a paste during a cancel is still accepted", "R2: a paste during the cancel (its writer not yet run)", W + "SIWCFlow.swift",
      "        status.state = \"cancelling\"   // a paste arriving now is refused\n", "", "d-round1"),
 ]
 
