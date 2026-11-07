@@ -143,16 +143,30 @@ enum SIWCPlanState {
 
     /// The gate before every SIWC send. Throws (nothing sent) in a blocking
     /// state per the rules above; otherwise returns the ticket `observe` needs.
-    static func admit(_ source: SIWCCredentialSource, userTurn: Bool) throws -> Ticket {
-        let entry = (try? read(source.store))?.entries[SIWCEndpoint.registrationFingerprint(clientId: source.clientId)] ?? SIWCPlanEntry()
+    /// `claim` = this user turn's one recovery send is still unused (and is
+    /// used now); it is asked only in a blocking state.
+    static func admit(_ source: SIWCCredentialSource, userTurn: Bool, claim: () -> Bool = { true }) throws -> Ticket {
+        let fp = SIWCEndpoint.registrationFingerprint(clientId: source.clientId)
+        let entry = (try? read(source.store))?.entries[fp] ?? SIWCPlanEntry()
         switch entry.state {
         case .ok: break
         case .limitReached:
-            guard userTurn else { throw SIWCError(.limitReached, pausedLimitMessage) }
+            guard userTurn, claim() else { throw SIWCError(.limitReached, pausedLimitMessage) }
         case .signInRequired:
             throw SIWCError(.signInRequired, SubscriptionSharing.decorateRevocation(pausedSignInMessage))
         case .notAvailable:
-            guard userTurn, entry.retryAllowed == true else { throw SIWCError(.notAvailable, pausedNotAvailableMessage) }
+            guard userTurn, entry.retryAllowed == true, claim() else { throw SIWCError(.notAvailable, pausedNotAvailableMessage) }
+            // The allowance is consumed atomically, under the store lock,
+            // before the send: a second admission (another round, another
+            // sharer) finds it used; an unclassified failure can't keep it.
+            let consumed = mutate(source.store) { file -> Bool in
+                guard var e = file.entries[fp], sameEpisode(e, Ticket(storeDirectory: source.storeDirectory, clientId: source.clientId,
+                      generation: source.generation, episode: entry.episode, userTurn: true)), e.state == .notAvailable, e.retryAllowed == true else { return false }
+                e.retryAllowed = nil
+                file.entries[fp] = e
+                return true
+            } ?? false
+            guard consumed else { throw SIWCError(.notAvailable, pausedNotAvailableMessage) }
         }
         return Ticket(storeDirectory: source.storeDirectory, clientId: source.clientId, generation: source.generation,
                       episode: entry.episode, userTurn: userTurn)
@@ -160,8 +174,11 @@ enum SIWCPlanState {
 
     /// Whether the current task is a user turn (the main turn's registered
     /// job); subagents, web runs, archive and watcher jobs are background.
+    /// A user turn gets ONE send in a blocking state (Codex D-R4).
     static func admitCurrent(_ source: SIWCCredentialSource) throws -> Ticket {
-        try admit(source, userTurn: SIWCFence.shared.currentTaskIsUserTurn(source.fenceKey))
+        let key = source.fenceKey
+        return try admit(source, userTurn: SIWCFence.shared.currentTaskIsUserTurn(key),
+                         claim: { SIWCFence.shared.claimRecoveryAttempt(key) })
     }
 
     // MARK: Observe

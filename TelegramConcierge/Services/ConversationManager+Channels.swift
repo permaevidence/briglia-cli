@@ -270,8 +270,10 @@ extension ConversationManager {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty else { return .refused("empty message") }
         // The paste interceptor in front of the terminal and app inputs (SIWC
-        // plan §3.4): held back before any gate, buffer or persistence.
-        if attachments.isEmpty, CallbackPaste.looksLikeCallback(trimmed) {
+        // plan §3.4): held back before any gate, buffer or persistence. With
+        // attachments the WHOLE submission is held back (Codex stage-D R1):
+        // nothing is copied, stored or queued.
+        if CallbackPaste.looksLikeCallback(trimmed) {
             return .intercepted(await SIWCFlow.shared.paste(text))
         }
 

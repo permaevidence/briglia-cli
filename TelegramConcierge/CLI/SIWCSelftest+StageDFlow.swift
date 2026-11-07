@@ -13,7 +13,7 @@ extension SIWCSelftest {
         flow.pollNanos = 20_000_000
         flow.makeSignIn = { SIWCSignIn(store: SIWCStore.resolved(), auth: fake.client, hostPaths: .live, ownerLease: { nil }) }
         flow.writer = SIWCWriterAccess(run: { body in await body(writer); return nil })
-        flow.commitActivation = { await writer.commit($0) }
+        flow.commitActivation = { await writer.commit($0, stillValid: $1) }
         flow.exchange = { _, attempt, code, clientId in
             exchanged(code, clientId)
             return SIWCSignInResult(clientId: clientId, newRegistration: attempt.newRegistration, tokens: t(), claims: claims(sub: sub))

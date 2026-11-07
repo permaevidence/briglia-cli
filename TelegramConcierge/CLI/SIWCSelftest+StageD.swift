@@ -131,7 +131,11 @@ extension SIWCSelftest {
             _ = try SIWCPlanState.admit(source, userTurn: false)
         }
         let t2 = try? SIWCPlanState.admit(source, userTurn: true)
-        c.check("plan: after a user action the next user turn is admitted once", t2 != nil && entry().retryAllowed == true)
+        c.check("plan: after a user action the next user turn is admitted once (the allowance is consumed at admission)",
+                t2 != nil && entry().retryAllowed == nil)
+        await c.rejectsKind("plan: a second admission (another round, another sharer) finds the allowance used", .notAvailable) {
+            _ = try SIWCPlanState.admit(source, userTurn: true)
+        }
         _ = SIWCPlanState.observe(t2, .failure(SIWCError(.notAvailable, SIWCError.notEligibleMessage)))
         await c.rejectsKind("plan: the one attempt failed again → no further attempt", .notAvailable) {
             _ = try SIWCPlanState.admit(source, userTurn: true)

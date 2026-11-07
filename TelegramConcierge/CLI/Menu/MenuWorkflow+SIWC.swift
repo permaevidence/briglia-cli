@@ -8,7 +8,7 @@ import Foundation
 
 extension MenuWorkflow {
     static let siwcActions: Set<String> = ["siwc_method", "siwc_continue", "siwc_paste", "siwc_cancel", "siwc_failed",
-                                           "siwc_logout", "siwc_use"]
+                                           "siwc_logout", "siwc_use", "siwc_switch_legacy"]
 
     /// The card's data (merged into `chatgpt.siwc`).
     func siwcPayload() -> [String: Any] {
@@ -21,6 +21,10 @@ extension MenuWorkflow {
             "manage_usage": SIWCSurface.manageUsageURL,
             "flow": siwcFlow.status.json,
         ]
+        // The flow's own outcome in the page's language, so a callback error,
+        // the timeout or "saved but not switched" shows after polling too
+        // (Codex D-R6), not only as an action's answer.
+        if let message = siwcMessage(siwcFlow.status.message) { out["flow_message"] = message }
         if let invite = SIWCSurface.invitation(stored) { out["invitation"] = invite }
         if let state = info.planState, info.selected {
             var entry = SIWCPlanEntry(); entry.state = state; entry.reason = info.planReason
@@ -36,7 +40,7 @@ extension MenuWorkflow {
 
     func planText(_ entry: SIWCPlanEntry) -> String {
         switch entry.state {
-        case .ok: return L("Using ChatGPT plan · Manage usage", "Usa il piano ChatGPT · Gestisci utilizzo")
+        case .ok: return L("Using ChatGPT plan", "Usa il piano ChatGPT")   // the Manage usage link follows
         case .limitReached: return L("Usage limit reached. Briglia is paused until your plan has room again. Review your plan or this app's limit in ChatGPT settings.",
                                      "Limite di utilizzo raggiunto. Briglia è in pausa finché il piano non ha di nuovo spazio. Controlla il piano o il limite di questa app nelle impostazioni di ChatGPT.")
         case .signInRequired: return L("Your ChatGPT sign-in for Briglia has expired or was revoked. Sign in again.",
@@ -59,6 +63,12 @@ extension MenuWorkflow {
             "Signed in. Briglia now uses ChatGPT (Sign in with ChatGPT).": "Accesso fatto. Ora Briglia usa ChatGPT (Accedi con ChatGPT).",
             SIWCError.planUsageOffMessage: "Questo accesso a ChatGPT non include l\u{2019}uso del piano. Attiva l\u{2019}uso del piano (accedi di nuovo e consentilo) o scegli un altro metodo.",
             "ChatGPT sign-in cancelled.": "Accesso a ChatGPT annullato.",
+            CallbackPaste.Rejection.expired.rawValue + " " + SIWCFlow.browserFailedHelp: "Questo link di accesso è scaduto. Se ChatGPT ha mostrato una pagina di errore, il messaggio lì spiega il motivo. Briglia non ha ricevuto un motivo. Puoi riprovare, usare un altro account o scegliere un altro metodo nelle impostazioni.",
+            CallbackPaste.Rejection.expired.rawValue: "Questo link di accesso è scaduto.",
+            SIWCFlow.savedNotSwitchedMessage: "Accesso annullato. ChatGPT aveva già restituito l\u{2019}accesso, quindi è salvato, ma Briglia non è passata a usarlo. Usa “Usa ChatGPT per Briglia” se lo vuoi.",
+            SIWCFlow.cancelledElsewhere: "Questo accesso a ChatGPT è stato annullato (da un\u{2019}operazione sulla memoria o da un ripristino). Ricomincia.",
+            SIWCFlow.ownerChangedMessage: "Briglia si è avviata mentre accedevi, quindi questo accesso non è stato salvato. Accedi di nuovo dal Briglia in funzione.",
+            "Signed in. Briglia is busy with a task, so it switches to Sign in with ChatGPT when the task finishes.": "Accesso fatto. Briglia è occupata, quindi passerà ad Accedi con ChatGPT quando finisce il lavoro in corso.",
             "Signed out of ChatGPT (Sign in with ChatGPT).": "Disconnesso da ChatGPT (Accedi con ChatGPT).",
             SIWCLogoutOutcome.unconfirmedMessage: "Disconnesso su questo computer; la disconnessione remota non è confermata. Scollega Briglia in Impostazioni ChatGPT → Utilizzo (chatgpt.com/settings/usage).",
         ]
@@ -99,10 +109,10 @@ extension MenuWorkflow {
             // only shows that method's sign-in (§2.1 "Choose sign-in method").
             let route = str(body, "route")
             guard route == "siwc" || route == "legacy" else { return (false, L("Unknown choice.", "Scelta sconosciuta.")) }
-            if route == "legacy", SIWCSurface.route() == "siwc" {
-                return (false, L("Briglia uses Sign in with ChatGPT now. Sign in with the legacy method below to switch back.",
-                                 "Briglia ora usa Accedi con ChatGPT. Accedi con il metodo precedente qui sotto per tornare indietro."))
-            }
+            // On the SIWC route, choosing legacy only shows its sign-in; the
+            // route and the login stay until the user completes the switch
+            // there (Codex D-R7).
+            if route == "legacy", SIWCSurface.route() == "siwc" { return (true, nil) }
             let r = await SIWCSurface.setOptIn(route == "siwc", origin: "menu")
             await reload()
             return r.state == .applied ? (true, nil) : (false, r.message ?? L("Not saved.", "Non salvato."))
@@ -138,6 +148,24 @@ extension MenuWorkflow {
                                       : L("Saved. Briglia switches when its current task finishes.", "Salvato. Briglia passa al nuovo accesso quando finisce il lavoro in corso."))
             case .failure(let why): return (false, why)
             }
+        case "siwc_switch_legacy":
+            // The explicit switch back: the legacy selection (it removes the
+            // SIWC selection keys, stage C), then the opt-in is cleared.
+            guard SIWCSurface.legacyLoginPresent() else {
+                return (false, L("Sign in with the legacy method first.", "Accedi prima con il metodo precedente."))
+            }
+            let stored = KeychainHelper.loadSnapshot()
+            let saved = stored[ChatGPTRoute.siwcModelKey] ?? ResponsesAdapter.subscriptionDefaultModel
+            let model = ResponsesAdapter.subscriptionModelChoices.contains { $0.id == saved } ? saved : ResponsesAdapter.subscriptionDefaultModel
+            var effort = stored[ChatGPTRoute.siwcEffortKey] ?? "high"
+            if !ResponsesAdapter.allowedEfforts(model: model).contains(effort) { effort = "high" }
+            let result = await env.subscription(["action": "select", "model": model, "effort": effort], {})
+            guard result["ok"] as? Bool == true else { await reload(); return (false, applyError(result)) }
+            _ = await SIWCSurface.setOptIn(false, origin: "menu")
+            await reload()
+            return (true, result["state"] as? String == "pending"
+                    ? L("Saved. Briglia switches to the legacy sign-in when its current task finishes.", "Salvato. Briglia passa all\u{2019}accesso precedente quando finisce il lavoro in corso.")
+                    : L("Briglia now uses ChatGPT (legacy Codex sign-in).", "Ora Briglia usa ChatGPT (accesso Codex precedente)."))
         default:
             return (false, L("Unknown action.", "Azione sconosciuta."))
         }

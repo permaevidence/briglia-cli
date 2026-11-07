@@ -91,8 +91,11 @@ extension ConversationManager {
                 try? await sendText("Use the paired private Telegram chat, or briglia menu on the computer."); return
             }
         }
+        // The result goes back through the bot this command came from, never
+        // through a replacement (Codex D-R3).
+        let generation = telegram ? NoticeChannelGenerations.current(.telegram) : nil
         let status = await SIWCFlow.shared.start(mode: telegram ? .paste : .browser, onFinish: { [weak self] final in
-            Task { @MainActor in await self?.reportSIWCFinish(final, to: address) }
+            Task { @MainActor in await self?.reportSIWCFinish(final, to: address, generation: generation) }
         })
         guard status.state == "waiting", let url = status.url else {
             try? await sendText(status.message ?? "ChatGPT sign-in could not start."); return
@@ -100,7 +103,7 @@ extension ConversationManager {
         _ = await SIWCSurface.setOptIn(true, origin: "telegram")
         if telegram, let chat = Int(address.chatId) {
             let text = "Sign in with ChatGPT here: \(url)\n\nAfter you approve, your browser shows a page that can't load. That's expected: copy that page's address and paste it here. \(SIWCFlow.pasteHint) The link expires in 10 minutes.\n\(SIWCFlow.telegramCaveat)\nIf ChatGPT shows an error instead, send /subscription failed."
-            do { try await telegramService.sendMessageNoPreview(chatId: chat, text: text) } catch {
+            do { try await telegramService.sendNoticeNoPreview(chatId: chat, text: text, expectedGeneration: generation ?? 0) } catch {
                 _ = await SIWCFlow.shared.cancel()
                 try? await sendText("The sign-in link couldn't be sent; nothing was started. Try again.")
             }
@@ -109,7 +112,7 @@ extension ConversationManager {
         }
     }
 
-    func reportSIWCFinish(_ final: SIWCFlow.Status, to address: ChannelAddress) async {
+    func reportSIWCFinish(_ final: SIWCFlow.Status, to address: ChannelAddress, generation: UInt64? = nil) async {
         var text = final.message ?? "ChatGPT sign-in finished."
         if final.firstUse, final.outcome == "signed_in" || final.outcome == "pending" { text += "\n\n" + SIWCFlow.firstUseNotice }
         if final.outcome == "plan_usage_off" { text += "\nTo allow it, send /subscription login official again and accept plan usage." }
@@ -119,6 +122,11 @@ extension ConversationManager {
         }
         if final.outcome == "browser_error" || final.outcome == "browser_failed" || final.outcome == "expired" {
             text += "\nTo choose a different sign-in method: /subscription method."
+        }
+        if let generation, address.kind == .telegram, let chat = Int(address.chatId) {
+            do { try await telegramService.sendNoticeNoPreview(chatId: chat, text: text, expectedGeneration: generation) }
+            catch { print("[SIWC] sign-in result not sent: the bot changed or the send failed") }
+            return
         }
         try? await sendText(text, to: address)
     }
@@ -165,30 +173,44 @@ extension ConversationManager {
         siwcNoticeDelivery = true
         defer { siwcNoticeDelivery = false }
         let store = SIWCStore.resolved()
+        // Bound at the start (Codex D-R3): this bot generation, this
+        // destination, this paired chat; rechecked after every await and at
+        // credential capture by the transport.
+        let generation = NoticeChannelGenerations.current(.telegram)
         let destination = SIWCNoticeDestination.current
+        guard let address = telegramAddress, let chat = pairedChatId else { return }
+        func stillBound() -> Bool {
+            NoticeChannelGenerations.current(.telegram) == generation && pairedChatId == chat
+                && SIWCNoticeDestination.identity(token: KeychainHelper.load(key: KeychainHelper.telegramBotTokenKey), chat: pairedChatId) == destination
+        }
         // The store lock (bounded) is never waited for on the main actor.
         let due = await Task.detached { SIWCPlanState.pendingNotices(store, destination: destination) }.value
         for notice in due {
-            guard SIWCPlanState.stillDue(store, notice), let chat = pairedChatId,
-                  destination == SIWCNoticeDestination.current else { continue }
+            guard stillBound(), SIWCPlanState.stillDue(store, notice) else { continue }
             var text = notice.text
+            var startedFlow = false
             // The sign-in notice carries its own paste-back link (§5.1 item 4).
             if !notice.recovery, notice.state == .signInRequired, !SIWCFlow.shared.isWaiting {
                 let status = await SIWCFlow.shared.start(mode: .paste, onFinish: { [weak self] final in
-                    Task { @MainActor in
-                        guard let self, let address = self.telegramAddress else { return }
-                        await self.reportSIWCFinish(final, to: address)
-                    }
+                    Task { @MainActor in await self?.reportSIWCFinish(final, to: address, generation: generation) }
                 })
                 if status.state == "waiting", let url = status.url {
-                    text = SIWCPlanState.signInNotice + " Sign in again: \(url)\nPaste the address your browser ends on here. \(SIWCFlow.pasteHint)"
+                    startedFlow = true
+                    text = SIWCPlanState.signInNotice + " Sign in again: \(url)\nPaste the address your browser ends on here. \(SIWCFlow.pasteHint)\n\(SIWCFlow.telegramCaveat)"
                 }
             }
+            // Recheck after the await: a newer episode or a replaced bot
+            // drops this notice (and the sign-in it opened).
+            guard stillBound(), SIWCPlanState.stillDue(store, notice) else {
+                if startedFlow { _ = await SIWCFlow.shared.cancel() }
+                continue
+            }
             do {
-                try await telegramService.sendMessageNoPreview(chatId: chat, text: text)
+                try await telegramService.sendNoticeNoPreview(chatId: chat, text: text, expectedGeneration: generation)
                 _ = await Task.detached { SIWCPlanState.markDelivered(store, notice) }.value
             } catch {
-                print("[SIWC] plan notice not delivered now; it stays queued")
+                if startedFlow { _ = await SIWCFlow.shared.cancel() }
+                print("[SIWC] plan notice not delivered now; it stays queued unless the bot changed")
             }
         }
     }

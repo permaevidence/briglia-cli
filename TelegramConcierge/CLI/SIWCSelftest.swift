@@ -90,6 +90,7 @@ struct SIWCSelftest: AsyncParsableCommand {
             // Stage D (surfaces, plan state and notices).
             ("d-plan", Self.stageDPlanTests), ("d-plan2", Self.stageDPlanStatesTests), ("d-plan3", Self.stageDPlanTransportTests),
             ("d-flow", Self.stageDFlowTests), ("d-surface", Self.stageDSurfaceTests), ("d-telegram", Self.stageDTelegramTests),
+            ("d-round1", Self.stageDRound1Tests),
         ]
         for (name, group) in groups where only == nil || only == name {
             print("— \(name)")

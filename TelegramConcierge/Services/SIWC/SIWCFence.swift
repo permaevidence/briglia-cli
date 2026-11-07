@@ -126,6 +126,8 @@ final class SIWCFence: @unchecked Sendable {
     /// Jobs that are a user's turn (the main turn), for the plan-state gate
     /// (§5.1: a user turn may make the one attempt; background lanes never).
     private var userTurnJobs: Set<UUID> = []
+    /// User-turn jobs that already used their one plan-recovery send.
+    private var recoveryUsed: Set<UUID> = []
 
     struct JobToken { let key: String; let id: UUID }
 
@@ -148,7 +150,19 @@ final class SIWCFence: @unchecked Sendable {
 
     func unregisterJob(_ token: JobToken?) {
         guard let token else { return }
-        lock.lock(); jobs[token.key]?[token.id] = nil; userTurnJobs.remove(token.id); lock.unlock()
+        lock.lock(); jobs[token.key]?[token.id] = nil; userTurnJobs.remove(token.id); recoveryUsed.remove(token.id); lock.unlock()
+    }
+
+    /// The current user-turn job's ONE plan-recovery send (§5.1): true the
+    /// first time, false for every later send or retry of that turn, and
+    /// false when the current task is not a user-turn job (Codex D-R4).
+    func claimRecoveryAttempt(_ key: String) -> Bool {
+        withUnsafeCurrentTask { task -> Bool in
+            guard let task else { return false }
+            lock.lock(); defer { lock.unlock() }
+            guard let id = (jobs[key] ?? [:]).first(where: { userTurnJobs.contains($0.key) && $0.value == task })?.key else { return false }
+            return recoveryUsed.insert(id).inserted
+        }
     }
 
     /// True when the CURRENT task is a registered user-turn job of `key`
@@ -173,5 +187,5 @@ final class SIWCFence: @unchecked Sendable {
     func jobCount(_ key: String) -> Int { lock.lock(); defer { lock.unlock() }; return jobs[key]?.count ?? 0 }
 
     /// Selftests only.
-    func resetForTests() { lock.lock(); epochs = [:]; fenced = []; inflight = [:]; jobs = [:]; userTurnJobs = []; lock.unlock() }
+    func resetForTests() { lock.lock(); epochs = [:]; fenced = []; inflight = [:]; jobs = [:]; userTurnJobs = []; recoveryUsed = []; lock.unlock() }
 }

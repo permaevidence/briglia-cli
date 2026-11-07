@@ -137,6 +137,20 @@ extension SIWCSelftest {
         c.check("interceptor: terminal and app chat inputs hold a callback back too (fixed answer, not in history or any file)",
                 interceptedBoth && manager._testMessages.isEmpty && !scanRoots("TERM-SECRET") && !scanRoots("APP-SECRET"))
 
+        // R1: percent-encoded names (the parser decodes them) and a callback
+        // sent together with an attachment are held back too.
+        let encoded = "http://127.0.0.1:5555/auth/callback?%63ode=ENCODED-CANARY&%73tate=S&client_id=oaiappReviewD"
+        await manager._testProcessUpdate(update(108, encoded))
+        let attachment = FileManager.default.temporaryDirectory.appendingPathComponent("siwc-r1-\(UUID().uuidString).txt")
+        try Data("ATTACHMENT-CANARY".utf8).write(to: attachment)
+        let withFile = await manager.sendFromApp(text: "?code=ATTACH-SECRET&state=zz", attachments: [attachment], policy: .appSocket)
+        let encodedApp = await manager.sendFromApp(text: encoded.replacingOccurrences(of: "ENCODED", with: "APPENC"), attachments: [], policy: .terminal)
+        let r1Intercepted: Bool = { if case .intercepted = withFile, case .intercepted = encodedApp { return true }; return false }()
+        c.check("R1: encoded parameter names and callbacks with an attachment are held back (whole submission, nothing copied or stored)",
+                r1Intercepted && manager._testMessages.isEmpty && !scanRoots("ENCODED-CANARY") && !scanRoots("APPENC-CANARY")
+                && !scanRoots("ATTACH-SECRET") && !scanRoots("ATTACHMENT-CANARY"))
+        try? FileManager.default.removeItem(at: attachment)
+
         // 2. /subscription login official: the paste-back link.
         await manager._testProcessUpdate(update(102, "/subscription login official"))
         func waitFor(_ condition: () -> Bool) async { for _ in 0..<150 where !condition() { try? await Task.sleep(nanoseconds: 20_000_000) } }
@@ -195,12 +209,23 @@ extension SIWCSelftest {
         try? await Task.sleep(nanoseconds: 300_000_000)
         await manager.deliverSIWCNotices()
         c.check("notices: the recovery notice is pushed once", sent().filter { $0 == SIWCPlanState.recoveryNotice }.count == 1)
-        // sign_in_required: the notice carries its own paste-back link.
+        // R3: the bot is replaced while the notice prepares its sign-in
+        // link: nothing goes out through the new bot, the notice stays queued
+        // for its own destination, the link's sign-in is cancelled.
+        let realMake = SIWCFlow.shared.makeSignIn
+        SIWCFlow.shared.makeSignIn = { NoticeChannelGenerations.bump(.telegram); return realMake() }
+        let beforeR3 = sent().count
         try await source.store.requireLogin(source.clientId, generation: source.generation)
-        let t3 = try SIWCPlanState.admit(source, userTurn: false)
-        _ = SIWCPlanState.observe(t3, .failure(SIWCError(.signInRequired, SIWCError.signInMessage)))
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        await manager.deliverSIWCNotices()
+        let tR3 = try SIWCPlanState.admit(source, userTurn: false)
+        _ = SIWCPlanState.observe(tR3, .failure(SIWCError(.signInRequired, SIWCError.signInMessage)))   // its delivery starts now
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        SIWCFlow.shared.makeSignIn = realMake
+        let fp = SIWCEndpoint.registrationFingerprint(clientId: source.clientId)
+        c.check("R3: a bot replaced during delivery → no notice through it, still queued, its sign-in cancelled",
+                sent().count == beforeR3 && (try? SIWCPlanState.read(source.store))?.entries[fp]?.entryNotice == "queued"
+                && !SIWCFlow.shared.isWaiting, "\(sent().suffix(2))")
+        // sign_in_required: the notice carries its own paste-back link.
+        await manager.deliverSIWCNotices()   // the same queued notice, now through its own bot
         let signInNotice = log.all.last { $0.0 == "sendMessage" && (($0.1["text"] as? String) ?? "").hasPrefix(SIWCPlanState.signInNotice) }
         let noticeText = signInNotice?.1["text"] as? String ?? ""
         let nq = query(noticeText.components(separatedBy: .whitespacesAndNewlines).first { $0.hasPrefix(SIWCEndpoint.authorizeURL) })
@@ -219,6 +244,22 @@ extension SIWCSelftest {
         await manager.deliverSIWCNotices()
         c.check("notices: queued for another bot → dropped, not sent through this one", sent().count == count5)
         SIWCPlanState.profileForTesting = nil
+
+        // R3: a sign-in started from Telegram answers through the bot it
+        // started on; after a bot replacement the result is not sent.
+        try resetLive()
+        try KeychainHelper.save(key: KeychainHelper.telegramBotTokenKey, value: token)
+        try KeychainHelper.save(key: KeychainHelper.telegramChatIdKey, value: String(chat))
+        SIWCFlow.shared.resetForTests()
+        await manager._testProcessUpdate(update(120, "/subscription login official"))
+        await waitFor { SIWCFlow.shared.isWaiting }
+        let rs = SIWCFlow.shared.status
+        NoticeChannelGenerations.bump(.telegram)
+        let beforeFinish = sent().count
+        await manager._testProcessUpdate(update(121, callbackURL(rs, code: "R3-FINISH")))
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        c.check("R3: the sign-in result is not sent through a replaced bot", !sent().dropFirst(beforeFinish).contains { $0.hasPrefix("Signed in.") },
+                "\(sent().suffix(2))")
 
         // 6. Invitation (D2): once.
         try resetLive()

@@ -100,6 +100,8 @@ final class SIWCFlow {
     static let policyDenied = "ChatGPT refused this sign-in because of an account or workspace policy (3p_delegated_access_policy_denied). Briglia hasn't changed anything. You can try another ChatGPT account, ask your workspace admin, or choose a different route in settings."
     static let unrecognizedRefusal = "ChatGPT refused this sign-in (unrecognized reason). Briglia hasn't changed anything."
     static let pasteHint = "Paste the address within about 5 minutes."
+    static let cancelledMessage = "ChatGPT sign-in cancelled."
+    static let savedNotSwitchedMessage = "Sign-in cancelled. ChatGPT had already returned the login, so it is saved, but Briglia did not switch to it. Use /subscription use or “Use ChatGPT” in briglia menu if you want it."
     static let cancelledElsewhere = "This ChatGPT sign-in was cancelled (a memory operation or a reset stopped it). Start it again."
     static let firstUseNotice = "You're using your ChatGPT plan. Briglia appears in ChatGPT Settings → Usage, where you can set its limit (Manage usage: chatgpt.com/settings/usage). " + SIWCPlanState.creditsNote
     static let telegramCaveat = "The sign-in code passes through Telegram's servers; the menu on the computer (or the phone app) avoids that when you can use it."
@@ -117,7 +119,11 @@ final class SIWCFlow {
 
     var makeSignIn: () -> SIWCSignIn = { SIWCSignIn(store: SIWCStore.resolved()) }
     var writer = SIWCWriterAccess.live
-    var commitActivation: (PreparedChange) async -> SettingsCommitResult = { await SettingsClient.commit($0) }
+    /// The activation commit; `stillValid` reaches the writer's decision
+    /// point (a cancelled or superseded sign-in never activates, Codex D-R2).
+    var commitActivation: (PreparedChange, (@Sendable () throws -> Void)?) async -> SettingsCommitResult = {
+        await SettingsClient.commit($0, stillValid: $1)
+    }
     /// Exchange + ID-token check (stage A); a selftest may answer it.
     var exchange: (SIWCSignIn, SIWCAttempt, String, String) async throws -> SIWCSignInResult = { signIn, attempt, code, clientId in
         try await signIn.exchange(attempt, code: code, clientId: clientId)
@@ -128,7 +134,17 @@ final class SIWCFlow {
 
     // MARK: Session
 
+    /// Lock-protected: read at the writer's decision point (any actor).
+    final class Validity: @unchecked Sendable {
+        private let lock = NSLock()
+        private var revoked = false
+        func revoke() { lock.lock(); revoked = true; lock.unlock() }
+        var isRevoked: Bool { lock.lock(); defer { lock.unlock() }; return revoked }
+        func check() throws { if isRevoked { throw SIWCError(.local, SIWCFlow.cancelledMessage) } }
+    }
+
     private final class Session {
+        let validity = Validity()
         let id = UUID()
         let attempt: SIWCAttempt
         let signIn: SIWCSignIn
@@ -166,9 +182,9 @@ final class SIWCFlow {
         // A returning sign-in reuses the store's active registration (unless
         // it is broken, or the user asked for a new one).
         var expected: String? = nil
-        if !newRegistration, let registrations = try? signIn.store.readRegistrations(), let active = registrations.active,
-           (try? signIn.store.readTokens())?.record(active)?.invalidClient != true {
-            expected = active
+        if !newRegistration, let target = SIWCSurface.savedTarget(signIn.store),
+           (try? signIn.store.readTokens())?.record(target)?.invalidClient != true {
+            expected = target
         }
         var listener: SIWCCallbackListener? = nil
         var port = 0
@@ -254,6 +270,13 @@ final class SIWCFlow {
                 await end(s, state: "failed", message: (error as? SIWCError)?.message ?? "ChatGPT sign-in failed; nothing was saved. Try again.", outcome: "error")
                 return
             }
+            // Cancelled while exchanging: nothing is saved; the issued
+            // refresh token is revoked best effort.
+            if s.validity.isRevoked {
+                if let refresh = result.tokens?.refresh { await s.signIn.revokeBestEffort(refresh, clientId: result.clientId) }
+                await s.signIn.cancel(s.attempt)
+                return
+            }
             await publish(result, s)
         }
     }
@@ -276,6 +299,12 @@ final class SIWCFlow {
             await end(s, state: "failed", message: why, outcome: "error"); return
         }
         let store = s.signIn.store
+        // Cancelled while the save ran: the published login stays (a save
+        // is route-neutral) but nothing is activated, and the user is told.
+        if s.validity.isRevoked {
+            if session === s { status = Status(state: "cancelled", mode: s.mode, message: Self.savedNotSwitchedMessage, outcome: "saved") }
+            return
+        }
         guard result.tokens != nil else {
             await end(s, state: "done", message: SIWCError.planUsageOffMessage, outcome: "plan_usage_off")
             return
@@ -283,12 +312,16 @@ final class SIWCFlow {
         SIWCPlanState.signedIn(store, clientId: result.clientId)
         var message: String
         var outcome = "signed_in"
-        switch await activate(store: store, clientId: result.clientId, origin: "siwc") {
+        switch await activate(store: store, clientId: result.clientId, origin: "siwc", validity: s.validity) {
         case .success(let applied):
             message = applied ? "Signed in. Briglia now uses ChatGPT (Sign in with ChatGPT)."
                               : "Signed in. Briglia is busy with a task, so it switches to Sign in with ChatGPT when the task finishes."
             if !applied { outcome = "pending" }
         case .failure(let why):
+            if s.validity.isRevoked {
+                if session === s { status = Status(state: "cancelled", mode: s.mode, message: Self.savedNotSwitchedMessage, outcome: "saved") }
+                return
+            }
             message = "Your ChatGPT sign-in is saved, but switching to it was not applied: \(why) Use /subscription use, or Use ChatGPT in briglia menu."
             outcome = "saved"
         }
@@ -305,21 +338,22 @@ final class SIWCFlow {
     /// or staged until idle. Model/effort: this assistant's SIWC choices, or
     /// the default for new sign-ins.
     func activate(store: SIWCStore = SIWCStore.resolved(), clientId: String? = nil, origin: String,
-                  model newModel: String? = nil, effort newEffort: String? = nil) async -> ActivationResult {
+                  model newModel: String? = nil, effort newEffort: String? = nil, validity: Validity? = nil) async -> ActivationResult {
         let stored = KeychainHelper.loadSnapshot()
         let model = newModel ?? stored[ChatGPTRoute.siwcModelKey] ?? ResponsesAdapter.subscriptionDefaultModel
         var effort = newEffort ?? stored[ChatGPTRoute.siwcEffortKey] ?? "high"
         if !ResponsesAdapter.allowedEfforts(model: model).contains(effort) { effort = ResponsesAdapter.allowedEfforts(model: model).first ?? "high" }
         let change: PreparedChange
         do {
-            change = try SIWCSettings.prepareActivation(store: store, clientId: clientId, model: model, effort: effort,
+            change = try SIWCSettings.prepareActivation(store: store, clientId: clientId ?? SIWCSurface.savedTarget(store), model: model, effort: effort,
                                                         textOnly: stored[ChatGPTRoute.siwcTextOnlyKey] == "true",
                                                         origin: origin, acceptPending: true)
         } catch { return .failure((error as? SIWCError)?.message ?? "\(error)") }
-        let r = await commitActivation(change)
+        let r = await commitActivation(change, validity.map { v in { try v.check() } })
+        if let validity, validity.isRevoked, r.state != .applied, r.state != .pending { return .failure(Self.savedNotSwitchedMessage) }
         switch r.state {
         case .applied:
-            if let id = clientId ?? (try? store.readRegistrations())?.active { SIWCPlanState.userAction(store, clientId: id) }
+            if let id = clientId ?? SIWCSurface.savedTarget(store) { SIWCPlanState.userAction(store, clientId: id) }
             return .success(applied: true)
         case .pending: return .success(applied: false)
         default: return .failure(r.message ?? "not applied.")
@@ -331,6 +365,9 @@ final class SIWCFlow {
         guard let s = session, !s.finished else {
             return Status(state: "idle", message: "No ChatGPT sign-in is waiting.")
         }
+        // First: a save or activation still running for this session can no
+        // longer switch Briglia to it (Codex D-R2).
+        s.validity.revoke()
         s.task?.cancel()
         await s.listener?.stop()
         var result = SettingsCommitResult(state: .applied, message: nil)

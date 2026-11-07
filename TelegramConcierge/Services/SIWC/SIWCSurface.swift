@@ -61,6 +61,21 @@ enum SIWCSurface {
         var twoEntriesNote = false
     }
 
+    /// The saved login the surfaces act on: the store's active registration,
+    /// or — when none is active yet (a first identity-only sign-in, or a save
+    /// whose activation did not apply) — the most recently saved one (Codex
+    /// D-R5). Display, re-consent and "Use ChatGPT" target it; it is never
+    /// the routing pointer and saving never moves that pointer.
+    static func savedTarget(_ store: SIWCStore) -> String? {
+        guard let registrations = try? store.readRegistrations(), !registrations.registrations.isEmpty else { return nil }
+        if let active = registrations.active { return active }
+        let tokens = try? store.readTokens()
+        return registrations.registrations.max { a, b in
+            let ta = tokens?.record(a.clientId)?.savedAt ?? a.createdAt, tb = tokens?.record(b.clientId)?.savedAt ?? b.createdAt
+            return ta < tb
+        }?.clientId
+    }
+
     static func info(stored: [String: String] = KeychainHelper.loadSnapshot(), store: SIWCStore = SIWCStore.resolved()) -> Info {
         var out = Info()
         let resolved = ChatGPTRoute.resolve(stored: stored)
@@ -70,7 +85,7 @@ enum SIWCSurface {
         let tokens = try? store.readTokens(), registrations = try? store.readRegistrations()
         out.registrations = registrations?.registrations.count ?? 0
         out.pendingSignIn = (tokens?.pendingLogin != nil) && (tokens?.pendingExpiresAt ?? 0) > Int(Date().timeIntervalSince1970)
-        let clientId = registrations?.active
+        let clientId = savedTarget(store)
         guard let clientId, let registration = registrations?.registration(clientId) else {
             out.login = out.registrations > 0 ? "signed_out" : "none"
             return out

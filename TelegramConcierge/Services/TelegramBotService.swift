@@ -645,6 +645,22 @@ actor TelegramBotService {
         try await postJSON(method: "sendMessage", body: body)
     }
 
+    /// The same, bound to the bot identity a notice was queued for (Codex
+    /// D-R3): the channel generation is checked and the request built from
+    /// the current token with no suspension in between, so a notice delayed
+    /// behind a bot replacement is never sent through the new bot.
+    func sendNoticeNoPreview(chatId: Int, text: String, expectedGeneration: UInt64) async throws {
+        guard NoticeChannelGenerations.current(.telegram) == expectedGeneration else { throw NoticeTransportError.credentialsChanged }
+        guard !botToken.isEmpty else { throw TelegramError.notConfigured }
+        var request = URLRequest(url: URL(string: "\(baseURL)\(botToken)/sendMessage")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(NoPreviewMessage(chatId: chatId, text: truncateToUTF16Limit(text, limit: 4096)))
+        let (data, response) = try await transportData(for: request)
+        try checkSendMessageResponse(data: data, response: response)
+    }
+
     private struct DeleteMessage: Encodable {
         let chatId: Int
         let messageId: Int

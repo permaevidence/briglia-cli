@@ -1231,7 +1231,9 @@
   }
 
   // ---------- Sign in with ChatGPT (SIWC plan §2.1, §3.2, §3.10, §5.1) ----------
-  var siwcUI = { selector: false, firstUseSeen: false, paste: '' };
+  // method: 'legacy' = the legacy method is shown while Sign in with
+  // ChatGPT is still the route (nothing switches until the user does).
+  var siwcUI = { selector: false, firstUseSeen: false, paste: '', method: null };
   function siwcOpen(extra) {
     // Open the tab inside the click (popup blockers), point it once the
     // server has the link; with no tab the link is shown on the page.
@@ -1243,13 +1245,13 @@
   }
   function methodSelector() {
     var sw = (S.chatgpt || {}).siwc || {};
-    var pick = function (route) { return function () { siwcUI.selector = false; act('siwc_method', { route: route }, 'ai'); }; };
+    var pick = function (route) { return function () { siwcUI.selector = false; siwcUI.method = route === 'legacy' ? 'legacy' : null; act('siwc_method', { route: route }, 'ai'); }; };
     return h('div', { class: 'siwc-selector' }, [
       h('p', { class: 'small', text: T('Choose how Briglia signs in to ChatGPT. Choosing doesn’t switch anything until you sign in.', 'Scegli come Briglia accede a ChatGPT. La scelta non cambia nulla finché non accedi.') }),
       h('div', { class: 'choices' }, [
-        h('button', { class: 'choice' + (sw.opted_in ? ' sel' : ''), type: 'button', id: 'siwc-pick-siwc', onclick: pick('siwc') },
+        h('button', { class: 'choice' + (sw.opted_in && siwcUI.method !== 'legacy' ? ' sel' : ''), type: 'button', id: 'siwc-pick-siwc', onclick: pick('siwc') },
           [h('div', { class: 'n', text: T('ChatGPT (Sign in with ChatGPT)', 'ChatGPT (Accedi con ChatGPT)') }), h('div', { class: 's', text: T('OpenAI’s official sign-in for apps. Preview.', 'L’accesso ufficiale di OpenAI per le app. Anteprima.') })]),
-        h('button', { class: 'choice' + (!sw.opted_in ? ' sel' : ''), type: 'button', id: 'siwc-pick-legacy', onclick: pick('legacy') },
+        h('button', { class: 'choice' + (!sw.opted_in || siwcUI.method === 'legacy' ? ' sel' : ''), type: 'button', id: 'siwc-pick-legacy', onclick: pick('legacy') },
           [h('div', { class: 'n', text: T('ChatGPT (legacy Codex sign-in)', 'ChatGPT (accesso Codex precedente)') }), h('div', { class: 's', text: T('The sign-in Briglia has used so far.', 'L’accesso usato finora da Briglia.') })]),
       ]),
       h('div', { class: 'actions' }, [h('button', { class: 'btn ghost small', type: 'button', onclick: function () { siwcUI.selector = false; render(); } }, [T('Close', 'Chiudi')])]),
@@ -1287,6 +1289,11 @@
     if (siwcUI.selector) { out.push(methodSelector()); return out; }
     if (f.state === 'waiting' || f.state === 'finishing') return out.concat(siwcWaiting(sw, f));
     if (sw.notice) out.push(h('div', { class: 'notice warn' }, [sw.notice]));
+    // The flow's own outcome (a browser callback error, the timeout, saved
+    // but not switched): shown after polling, not only after a button.
+    if (sw.flow_message && (f.state === 'failed' || f.state === 'cancelled' || (f.state === 'done' && f.outcome !== 'signed_in'))) {
+      out.push(h('div', { class: 'notice ' + (f.state === 'done' ? 'info' : 'warn'), id: 'siwc-flow-message' }, [sw.flow_message]));
+    }
     if (f.first_use && f.state === 'done' && !siwcUI.firstUseSeen) {
       out.push(h('div', { class: 'notice info', id: 'siwc-first-use' }, [h('div', {}, [
         h('strong', { text: T('You’re using your ChatGPT plan', 'Stai usando il tuo piano ChatGPT') }),
@@ -1338,12 +1345,32 @@
     return out;
   }
 
+  // The legacy method while Sign in with ChatGPT is the route (Codex D-R7).
+  function legacyPanel(out, sw) {
+    out.push(h('div', { class: 'eyebrow', id: 'siwc-legacy-route', text: T('ChatGPT (legacy Codex sign-in)', 'ChatGPT (accesso Codex precedente)') }));
+    out.push(h('p', { class: 'small', text: T('Briglia uses Sign in with ChatGPT until you switch here.', 'Briglia usa Accedi con ChatGPT finché non cambi qui.') }));
+    if (sw.legacy_login) {
+      out.push(savedBox(T('Your legacy ChatGPT login is saved', 'Il tuo accesso ChatGPT precedente è salvato'), ''));
+      out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', id: 'siwc-switch-legacy', disabled: inflight > 0, onclick: function () { act('siwc_switch_legacy', {}, 'ai').then(function (j) { if (j.ok) siwcUI.method = null; render(); }); } }, [T('Switch to the legacy sign-in', 'Passa all’accesso precedente')])]));
+    } else {
+      out.push(h('div', { class: 'actions' }, [
+        h('button', { class: 'btn dark', type: 'button', id: 'siwc-legacy-browser', disabled: inflight > 0, onclick: function () { act('chatgpt_browser', {}, 'ai'); } }, [T('Sign in (legacy)', 'Accedi (precedente)')]),
+        h('button', { class: 'btn secondary', type: 'button', disabled: inflight > 0, onclick: function () { act('chatgpt_code', {}, 'ai'); } }, [T('Use a code instead', 'Usa un codice')]),
+      ]));
+      out.push(h('p', { class: 'small', text: T('Signing in here switches Briglia to the legacy sign-in.', 'Accedendo qui Briglia passa all’accesso precedente.') }));
+    }
+    out.push(h('div', { class: 'actions' }, [chooseMethodButton()]));
+    return out;
+  }
+
   function chatgptView(st) {
     var c = S.chatgpt || {};
     var out = stepHeader('ai', null, T('Sign in to ChatGPT', 'Accedi a ChatGPT'), T('Briglia thinks with your ChatGPT subscription (Plus or Pro). You don’t pay per message: it counts toward your normal ChatGPT limits, and Briglia’s web research uses it too.', 'Briglia ragiona con il tuo abbonamento ChatGPT (Plus o Pro). Non paghi a messaggio: conta nei normali limiti di ChatGPT, e anche le ricerche web di Briglia lo usano.'));
     out.push(notice('ai'));
     var sw = c.siwc || {};
-    if (sw.opted_in || sw.route === 'siwc' || ((sw.flow || {}).state === 'waiting')) {
+    var legacyShown = siwcUI.method === 'legacy' && sw.route === 'siwc';
+    if (legacyShown && !c.login) { legacyPanel(out, sw); out.push(navButtons('ai')); return out; }
+    if (!legacyShown && (sw.opted_in || sw.route === 'siwc' || ((sw.flow || {}).state === 'waiting'))) {
       siwcView(out);
       out.push(switchRow());
       out.push(navButtons('ai'));

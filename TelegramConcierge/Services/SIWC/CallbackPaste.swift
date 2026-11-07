@@ -53,6 +53,31 @@ enum CallbackPaste {
     /// or `error` is held back before persistence, whether or not an attempt
     /// is pending. Only `parse` decides acceptance.
     static func looksLikeCallback(_ text: String) -> Bool {
+        // A superset of what `parse` accepts (Codex stage-D R1): the parser
+        // percent-decodes parameter names, so the recognizer also looks at a
+        // leniently decoded copy (twice, so nothing decoded once can hide).
+        let once = lenientlyDecoded(text), twice = lenientlyDecoded(once)
+        return [text, once, twice].contains(where: recognizes)
+    }
+
+    /// Decode every valid `%HH` once; invalid escapes stay as they are.
+    static func lenientlyDecoded(_ text: String) -> String {
+        guard text.contains("%") else { return text }
+        var bytes: [UInt8] = []
+        let utf8 = Array(text.utf8)
+        var i = 0
+        func hex(_ b: UInt8) -> UInt8? {
+            switch b { case 48...57: return b - 48; case 65...70: return b - 55; case 97...102: return b - 87; default: return nil }
+        }
+        while i < utf8.count {
+            if utf8[i] == 37, i + 2 < utf8.count, let h = hex(utf8[i + 1]), let l = hex(utf8[i + 2]) {
+                bytes.append(h << 4 | l); i += 3
+            } else { bytes.append(utf8[i]); i += 1 }
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    private static func recognizes(_ text: String) -> Bool {
         let lower = text.lowercased()
         guard lower.contains("code=") || lower.contains("state=") || lower.contains("error=")
                 || lower.contains("c%6fde") || lower.contains("st%61te") else { return false }
