@@ -1230,10 +1230,126 @@
     return out;
   }
 
+  // ---------- Sign in with ChatGPT (SIWC plan §2.1, §3.2, §3.10, §5.1) ----------
+  var siwcUI = { selector: false, firstUseSeen: false, paste: '' };
+  function siwcOpen(extra) {
+    // Open the tab inside the click (popup blockers), point it once the
+    // server has the link; with no tab the link is shown on the page.
+    var tab = (S.browser_likely !== false && !(extra && extra.mode === 'paste')) ? window.open('', '_blank') : null;
+    act('siwc_continue', extra || {}, 'ai').then(function (j) {
+      var f = (((j.status || S).chatgpt || {}).siwc || {}).flow || {};
+      if (tab) { if (j.ok && f.url) { try { tab.location = f.url; } catch (e) {} } else { try { tab.close(); } catch (e) {} } }
+    });
+  }
+  function methodSelector() {
+    var sw = (S.chatgpt || {}).siwc || {};
+    var pick = function (route) { return function () { siwcUI.selector = false; act('siwc_method', { route: route }, 'ai'); }; };
+    return h('div', { class: 'siwc-selector' }, [
+      h('p', { class: 'small', text: T('Choose how Briglia signs in to ChatGPT. Choosing doesn’t switch anything until you sign in.', 'Scegli come Briglia accede a ChatGPT. La scelta non cambia nulla finché non accedi.') }),
+      h('div', { class: 'choices' }, [
+        h('button', { class: 'choice' + (sw.opted_in ? ' sel' : ''), type: 'button', id: 'siwc-pick-siwc', onclick: pick('siwc') },
+          [h('div', { class: 'n', text: T('ChatGPT (Sign in with ChatGPT)', 'ChatGPT (Accedi con ChatGPT)') }), h('div', { class: 's', text: T('OpenAI’s official sign-in for apps. Preview.', 'L’accesso ufficiale di OpenAI per le app. Anteprima.') })]),
+        h('button', { class: 'choice' + (!sw.opted_in ? ' sel' : ''), type: 'button', id: 'siwc-pick-legacy', onclick: pick('legacy') },
+          [h('div', { class: 'n', text: T('ChatGPT (legacy Codex sign-in)', 'ChatGPT (accesso Codex precedente)') }), h('div', { class: 's', text: T('The sign-in Briglia has used so far.', 'L’accesso usato finora da Briglia.') })]),
+      ]),
+      h('div', { class: 'actions' }, [h('button', { class: 'btn ghost small', type: 'button', onclick: function () { siwcUI.selector = false; render(); } }, [T('Close', 'Chiudi')])]),
+    ]);
+  }
+  function chooseMethodButton() {
+    return h('button', { class: 'btn ghost small', type: 'button', id: 'siwc-choose', onclick: function () { siwcUI.selector = true; render(); } }, [T('Choose sign-in method', 'Scegli il metodo di accesso')]);
+  }
+  function siwcWaiting(sw, f) {
+    var out = [];
+    if (f.state === 'finishing') { out.push(h('div', { class: 'waiting' }, [h('span', { class: 'spinner' }), T('Signed in — getting Briglia ready…', 'Accesso fatto: preparo Briglia…')])); return out; }
+    if (f.mode === 'paste') {
+      out.push(h('p', { text: T('Open this link on any device and sign in:', 'Apri questo link su qualsiasi dispositivo e accedi:') }));
+      out.push(h('p', {}, [link(f.url, T('Sign-in page', 'Pagina di accesso'))]));
+      out.push(h('p', { class: 'small', text: T('After you approve, the browser shows a page that can’t load. That’s expected: copy its address and paste it below within about 5 minutes.', 'Dopo l’approvazione il browser mostra una pagina che non si carica. È normale: copia il suo indirizzo e incollalo qui sotto entro circa 5 minuti.') }));
+    } else {
+      out.push(h('div', { class: 'waiting' }, [h('span', { class: 'spinner' }), T('A ChatGPT tab opened — sign in there and approve Briglia.', 'Si è aperta una scheda di ChatGPT: accedi lì e approva Briglia.')]));
+      out.push(h('p', { class: 'small' }, [T('Nothing opened? ', 'Non si è aperto nulla? '), h('a', { href: f.url, target: '_blank', rel: 'noopener noreferrer', text: T('Open the sign-in page', 'Apri la pagina di accesso') }), '.']));
+      out.push(h('p', { class: 'small', text: T('Signing in on another device? Paste the address its browser ends on:', 'Accedi da un altro dispositivo? Incolla l’indirizzo su cui finisce il suo browser:') }));
+    }
+    var box = h('input', { type: 'text', id: 'siwc-paste', value: siwcUI.paste, autocomplete: 'off', spellcheck: 'false', placeholder: '127.0.0.1:…/auth/callback?code=…',
+      oninput: function (e) { siwcUI.paste = e.target.value; } });
+    out.push(h('div', { class: 'field' }, [box]));
+    out.push(h('div', { class: 'actions' }, [
+      h('button', { class: 'btn primary', type: 'button', id: 'siwc-paste-go', disabled: inflight > 0, onclick: function () { var t = siwcUI.paste; siwcUI.paste = ''; act('siwc_paste', { text: t }, 'ai'); } }, [T('Finish sign-in', 'Completa l’accesso')]),
+      h('button', { class: 'btn secondary', type: 'button', id: 'siwc-failed', onclick: function () { act('siwc_failed', {}, 'ai'); } }, [T('Sign-in failed in the browser', 'L’accesso non è riuscito nel browser')]),
+      h('button', { class: 'btn ghost', type: 'button', onclick: function () { act('siwc_cancel', {}, 'ai'); } }, [T('Cancel', 'Annulla')]),
+    ]));
+    return out;
+  }
+  function siwcView(out) {
+    var sw = (S.chatgpt || {}).siwc || {};
+    var f = sw.flow || {};
+    out.push(h('div', { class: 'eyebrow', id: 'siwc-route', text: T('ChatGPT (Sign in with ChatGPT)', 'ChatGPT (Accedi con ChatGPT)') + (sw.scope ? ' · ' + sw.scope : '') }));
+    if (siwcUI.selector) { out.push(methodSelector()); return out; }
+    if (f.state === 'waiting' || f.state === 'finishing') return out.concat(siwcWaiting(sw, f));
+    if (sw.notice) out.push(h('div', { class: 'notice warn' }, [sw.notice]));
+    if (f.first_use && f.state === 'done' && !siwcUI.firstUseSeen) {
+      out.push(h('div', { class: 'notice info', id: 'siwc-first-use' }, [h('div', {}, [
+        h('strong', { text: T('You’re using your ChatGPT plan', 'Stai usando il tuo piano ChatGPT') }),
+        h('p', { class: 'small', text: T('Briglia appears in ChatGPT Settings → Usage, where you can set its limit. If “use credits after reaching plan limits” is on for Briglia, ChatGPT may keep answering on credits and Briglia can’t see it.', 'Briglia compare in Impostazioni ChatGPT → Utilizzo, dove puoi impostarne il limite. Se “usa i crediti dopo aver raggiunto i limiti del piano” è attivo per Briglia, ChatGPT può continuare a rispondere con i crediti e Briglia non può saperlo.') }),
+        h('div', { class: 'actions' }, [link(sw.manage_usage, T('Manage usage', 'Gestisci utilizzo')),
+          h('button', { class: 'btn secondary small', type: 'button', onclick: function () { siwcUI.firstUseSeen = true; render(); } }, [T('Got it', 'Ho capito')])])])]));
+    }
+    if (sw.plan_text && sw.login === 'signed_in') {
+      var ok = sw.plan_state === 'ok';
+      out.push(h('div', { class: ok ? 'small siwc-plan' : 'notice warn', id: 'siwc-plan' }, [sw.plan_text, ' ', link(sw.manage_usage, T('Manage usage', 'Gestisci utilizzo'))]));
+    }
+    if (sw.two_entries) out.push(h('p', { class: 'small', text: sw.two_entries }));
+    var cont = function (label, extra, cls) { return h('button', { class: 'btn ' + (cls || 'dark'), type: 'button', id: 'siwc-continue', disabled: inflight > 0, onclick: function () { siwcOpen(extra); } }, [label]); };
+    var continueLabel = T('Continue with ChatGPT', 'Continua con ChatGPT');
+    if (sw.login === 'signed_in' && sw.selected) {
+      var c0 = S.chatgpt || {};
+      out.push(savedBox(T('Signed in', 'Accesso fatto'), c0.active ? T('Briglia thinks with ', 'Briglia ragiona con ') + (c0.model_label || '') : T('Briglia uses your ChatGPT plan', 'Briglia usa il tuo piano ChatGPT')));
+      if (c0.active) {
+        out.push(h('div', { class: 'choices' }, (c0.models || []).map(function (m) {
+          return h('button', { class: 'choice' + (m.id === c0.model ? ' sel' : ''), type: 'button', disabled: inflight > 0,
+            onclick: function () { if (m.id !== c0.model) act('chatgpt_model', { model: m.id }, 'ai'); } },
+            [h('div', { class: 'n', text: m.label }), h('div', { class: 's', text: m.id === c0.model ? T('In use', 'In uso') : (m.recommended ? T('Recommended', 'Consigliato') : '') })]);
+        })));
+        out.push(effortRow('chatgpt'));
+      }
+      out.push(h('div', { class: 'actions' }, [
+        h('button', { class: 'btn secondary', type: 'button', onclick: function () { siwcOpen({ 'new': true }); } }, [T('Use a different account', 'Usa un altro account')]),
+        h('button', { class: 'btn danger', type: 'button', id: 'siwc-logout', onclick: function () { act('siwc_logout', {}, 'ai'); } }, [T('Sign out', 'Esci')]),
+      ]));
+      if (sw.legacy_login) out.push(h('p', { class: 'small' }, [T('Your legacy ChatGPT login is still saved on this computer. ', 'Il tuo accesso ChatGPT precedente è ancora salvato su questo computer. '),
+        h('a', { href: '#', id: 'siwc-legacy-signout', onclick: function (e) { e.preventDefault(); act('chatgpt_logout', {}, 'ai'); } }, [T('Sign out of it', 'Esci da quello')]), '.']));
+    } else if (sw.login === 'signed_in') {
+      if (sw.invitation) out.push(h('div', { class: 'notice info' }, [T('Use your ChatGPT plan in this app · Continue with ChatGPT', 'Usa il tuo piano ChatGPT in questa app · Continua con ChatGPT')]));
+      out.push(savedBox(T('Signed in, but not in use', 'Accesso fatto, ma non in uso'), ''));
+      out.push(h('div', { class: 'actions' }, [h('button', { class: 'btn primary', type: 'button', id: 'siwc-use', onclick: function () { act('siwc_use', {}, 'ai'); } }, [T('Use ChatGPT for Briglia', 'Usa ChatGPT per Briglia')])]));
+    } else if (sw.login === 'plan_usage_off') {
+      out.push(h('div', { class: 'notice warn' }, [T('This sign-in doesn’t include plan usage. Allow it to use your ChatGPT plan, or choose another method.', 'Questo accesso non include l’uso del piano. Consentilo per usare il piano ChatGPT, o scegli un altro metodo.')]));
+      out.push(h('div', { class: 'actions' }, [cont(T('Allow plan usage', 'Consenti l’uso del piano'), { consent: true })]));
+    } else if (sw.login === 'invalid_client') {
+      out.push(h('div', { class: 'notice warn' }, [T('This ChatGPT sign-in’s app registration is broken. Register Briglia again; nothing is replaced until you do.', 'La registrazione di questa app in ChatGPT non funziona. Registra di nuovo Briglia; nulla viene sostituito finché non lo fai.')]));
+      out.push(h('div', { class: 'actions' }, [cont(T('Register Briglia again', 'Registra di nuovo Briglia'), { 'new': true })]));
+    } else {
+      if (sw.invitation) out.push(h('div', { class: 'notice info' }, [T('Use your ChatGPT plan in this app · Continue with ChatGPT', 'Usa il tuo piano ChatGPT in questa app · Continua con ChatGPT')]));
+      if (sw.login === 'sign_in_required') out.push(h('div', { class: 'notice warn' }, [T('Your ChatGPT sign-in for Briglia has expired or was revoked. Sign in again.', 'L’accesso a ChatGPT per Briglia è scaduto o è stato revocato. Accedi di nuovo.')]));
+      out.push(h('p', { class: 'small', text: T('Briglia uses your ChatGPT plan through OpenAI’s official sign-in. Tested on a personal plan; some workspaces may not allow it.', 'Briglia usa il tuo piano ChatGPT tramite l’accesso ufficiale di OpenAI. Provato su un piano personale; alcuni spazi di lavoro potrebbero non consentirlo.') }));
+      out.push(h('div', { class: 'actions' }, [cont(continueLabel, {}), h('button', { class: 'btn secondary', type: 'button', onclick: function () { siwcOpen({ mode: 'paste' }); } }, [T('Sign in on another device', 'Accedi da un altro dispositivo')])]));
+    }
+    out.push(h('div', { class: 'actions' }, [chooseMethodButton()]));
+    return out;
+  }
+
   function chatgptView(st) {
     var c = S.chatgpt || {};
     var out = stepHeader('ai', null, T('Sign in to ChatGPT', 'Accedi a ChatGPT'), T('Briglia thinks with your ChatGPT subscription (Plus or Pro). You don’t pay per message: it counts toward your normal ChatGPT limits, and Briglia’s web research uses it too.', 'Briglia ragiona con il tuo abbonamento ChatGPT (Plus o Pro). Non paghi a messaggio: conta nei normali limiti di ChatGPT, e anche le ricerche web di Briglia lo usano.'));
     out.push(notice('ai'));
+    var sw = c.siwc || {};
+    if (sw.opted_in || sw.route === 'siwc' || ((sw.flow || {}).state === 'waiting')) {
+      siwcView(out);
+      out.push(switchRow());
+      out.push(navButtons('ai'));
+      return out;
+    }
+    if (siwcUI.selector) { out.push(methodSelector()); out.push(navButtons('ai')); return out; }
     var login = c.login;
     if (login && login.state === 'error' && login.message) out.push(h('div', { class: 'notice bad' }, [login.message]));
     if (login && (login.state === 'waiting' || login.state === 'finishing')) {
@@ -1267,6 +1383,7 @@
       out.push(h('div', { class: 'actions' }, [
         h('button', { class: 'btn secondary', type: 'button', onclick: function () { act('chatgpt_logout', { again: true }, 'ai'); } }, [T('Use a different account', 'Usa un altro account')]),
         h('button', { class: 'btn danger', type: 'button', onclick: function () { act('chatgpt_logout', {}, 'ai'); } }, [T('Sign out', 'Esci')]),
+        chooseMethodButton(),
       ]));
       out.push(switchRow());
       out.push(navButtons('ai'));
@@ -1278,6 +1395,7 @@
     var codeBtn = h('button', { class: 'btn secondary', type: 'button', disabled: inflight > 0, onclick: function () { act('chatgpt_code', {}, 'ai'); } }, [T('Use a code instead', 'Usa un codice')]);
     out.push(h('div', { class: 'actions' }, S.browser_likely === false ? [codeBtn, browserBtn] : [browserBtn, codeBtn]));
     out.push(h('p', { class: 'small', text: T('“Use a code” works from your phone or another computer.', '“Usa un codice” funziona dal telefono o da un altro computer.') }));
+    out.push(h('div', { class: 'actions' }, [chooseMethodButton()]));
     out.push(switchRow());
     out.push(navButtons('ai'));
     return out;
@@ -1402,7 +1520,7 @@
   // ---------- polling ----------
   function tick() {
     if (gone) return;
-    var fast = S && (S.busy || (S.chatgpt && S.chatgpt.login) || (S.telegram && S.telegram.pending && S.telegram.pending.state === 'waiting') ||
+    var fast = S && (S.busy || (S.chatgpt && S.chatgpt.login) || (S.chatgpt && S.chatgpt.siwc && S.chatgpt.siwc.flow && /waiting|finishing/.test(S.chatgpt.siwc.flow.state || '')) || (S.telegram && S.telegram.pending && S.telegram.pending.state === 'waiting') ||
       (S.tools && (S.tools.checking || S.tools.installing)) || (view.kind === 'step' && view.step === 'computer'));
     // Don't redraw under the user's typing.
     var typing = document.activeElement && document.activeElement.tagName === 'INPUT';

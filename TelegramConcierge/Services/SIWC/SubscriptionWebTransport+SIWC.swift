@@ -56,10 +56,15 @@ extension SubscriptionWebTransport {
         var usedAccess: String?
         var didRefreshAfter401 = false
         var attempt = 0
+        // Plan state (§5.1): web stages are background lanes (no send while
+        // the plan is paused); the answer is recorded with its episode.
+        var planTicket: SIWCPlanState.Ticket?
         while true {
             try Task.checkCancellation()
             do {
                 if let deadline, deadline.remaining <= 0 { throw deadline.exceeded(requestInFlight: false) }
+                planTicket = nil
+                planTicket = try SIWCPlanState.admit(source, userTurn: false)
                 try ResponsesAdapter.siwcPreSend(source, request: request)
                 let tokens = try await source.store.credential(clientId: source.clientId, generation: source.generation,
                                                               refresh: ResponsesAdapter.siwcRefresher(source, budget: nil))
@@ -75,15 +80,20 @@ extension SubscriptionWebTransport {
                 let bytes: Data
                 if let deadline { bytes = try await deadline.race(send) } else { bytes = try await send() }
                 try SIWCFence.shared.check(source.fenceKey, capturedEpoch: source.epoch)
-                return try siwcValidatedTerminal(bytes, advertised: advertised)
+                let validated = try siwcValidatedTerminal(bytes, advertised: advertised)
+                SIWCPlanState.observe(planTicket, .success)
+                return validated
             } catch {
                 try Task.checkCancellation()
                 if error is ExtractorDeadlineExceeded { throw error }
+                if let failure = error as? SIWCError { SIWCPlanState.observe(planTicket, .failure(failure)) }
                 if let failure = error as? SIWCError, failure.kind != .transient { throw failure }
                 if case ResponsesFailure.http(401, _) = error {
                     guard !didRefreshAfter401 else {
                         try await source.store.requireLogin(source.clientId, generation: source.generation, rejectedAccess: usedAccess)
-                        throw SIWCError(.signInRequired, SubscriptionSharing.decorateRevocation(SIWCError.signInMessage))
+                        let failure = SIWCError(.signInRequired, SubscriptionSharing.decorateRevocation(SIWCError.signInMessage))
+                        SIWCPlanState.observe(planTicket, .failure(failure))
+                        throw failure
                     }
                     didRefreshAfter401 = true
                     _ = try await source.store.credential(clientId: source.clientId, generation: source.generation,

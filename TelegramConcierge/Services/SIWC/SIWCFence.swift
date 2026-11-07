@@ -123,12 +123,15 @@ final class SIWCFence: @unchecked Sendable {
     /// job is registered, and the job unregisters from inside its own task
     /// before that task can finish, under this lock.
     private var jobs: [String: [UUID: UnsafeCurrentTask]] = [:]
+    /// Jobs that are a user's turn (the main turn), for the plan-state gate
+    /// (§5.1: a user turn may make the one attempt; background lanes never).
+    private var userTurnJobs: Set<UUID> = []
 
     struct JobToken { let key: String; let id: UUID }
 
     /// Register the CURRENT task as a job of `source` (nil source = no job).
     /// A fenced registration refuses at once (signed out).
-    func registerCurrentTask(_ source: SIWCCredentialSource?) throws -> JobToken? {
+    func registerCurrentTask(_ source: SIWCCredentialSource?, userTurn: Bool = false) throws -> JobToken? {
         guard let source else { return nil }
         return try withUnsafeCurrentTask { task -> JobToken? in
             guard let task else { return nil }
@@ -138,13 +141,24 @@ final class SIWCFence: @unchecked Sendable {
             }
             let id = UUID()
             jobs[source.fenceKey, default: [:]][id] = task
+            if userTurn { userTurnJobs.insert(id) }
             return JobToken(key: source.fenceKey, id: id)
         }
     }
 
     func unregisterJob(_ token: JobToken?) {
         guard let token else { return }
-        lock.lock(); jobs[token.key]?[token.id] = nil; lock.unlock()
+        lock.lock(); jobs[token.key]?[token.id] = nil; userTurnJobs.remove(token.id); lock.unlock()
+    }
+
+    /// True when the CURRENT task is a registered user-turn job of `key`
+    /// (child tasks, detached work and other jobs are not).
+    func currentTaskIsUserTurn(_ key: String) -> Bool {
+        withUnsafeCurrentTask { task -> Bool in
+            guard let task else { return false }
+            lock.lock(); defer { lock.unlock() }
+            return (jobs[key] ?? [:]).contains { userTurnJobs.contains($0.key) && $0.value == task }
+        }
     }
 
     /// Cancel every registered job of `key` (after the fence).
@@ -159,5 +173,5 @@ final class SIWCFence: @unchecked Sendable {
     func jobCount(_ key: String) -> Int { lock.lock(); defer { lock.unlock() }; return jobs[key]?.count ?? 0 }
 
     /// Selftests only.
-    func resetForTests() { lock.lock(); epochs = [:]; fenced = []; inflight = [:]; jobs = [:]; lock.unlock() }
+    func resetForTests() { lock.lock(); epochs = [:]; fenced = []; inflight = [:]; jobs = [:]; userTurnJobs = []; lock.unlock() }
 }

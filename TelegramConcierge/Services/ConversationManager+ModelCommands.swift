@@ -663,7 +663,9 @@ extension ConversationManager {
     /// Device codes are delivered only to the captured paired private chat;
     /// never added to model history or parked for delivery after expiration.
     func handleSubscriptionCommand(argument: String) async {
-        let action = argument.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        // Sign in with ChatGPT first (SIWC plan §3.10); the legacy flow below
+        // is unchanged and also reachable with the word `legacy`.
+        guard let action = await handleSIWCSubscription(argument) else { return }
         if action.isEmpty || action == "status" {
             do {
                 let state = try SubscriptionAuthStore().read()
@@ -810,6 +812,11 @@ extension ConversationManager {
             return
         }
         modelRoutingGeneration += 1
+        // A user action: a ChatGPT plan "not available" state allows the
+        // next turn one attempt (SIWC plan §5.1 item 6).
+        if profile == .chatgpt, SIWCSurface.route() == "siwc", let active = (try? SIWCStore.resolved().readRegistrations())?.active {
+            SIWCPlanState.userAction(SIWCStore.resolved(), clientId: active)
+        }
 
         // OpenRouterService holds the OpenRouter key in memory (set once at
         // startup) — refresh it so a hop works without a restart.
@@ -1194,6 +1201,9 @@ extension ConversationManager {
         // Security (auto-update plan, Phase 0): read-only; the host check
         // runs in the background at most every 6 h, /status never waits.
         contextLine += "\n" + SecurityStatusCache.shared.statusLine()
+        // Sign in with ChatGPT (SIWC plan §5, §5.1, D2): route, plan state,
+        // the invitation, a waiting sign-in. Empty when none applies.
+        for line in SIWCSurface.statusLines(waiting: SIWCFlow.shared.isWaiting) { contextLine += "\n" + line }
         // Several assistants (§10.3, §25.7): empty with one.
         for line in multiAssistantStatusLines() { contextLine += "\n" + line }
         // Settings waiting for an idle point, or a recent one that wasn't

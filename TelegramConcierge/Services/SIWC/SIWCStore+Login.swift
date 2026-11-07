@@ -324,7 +324,7 @@ extension SIWCStore {
     /// stays (harmless, like the legacy one).
     func removeFiles() throws -> [String] {
         var failed: [String] = []
-        for url in [tokenFile, registrationsFile, keyFile] {
+        for url in [tokenFile, registrationsFile, keyFile, directory.appendingPathComponent(SIWCEndpoint.planFileName)] {
             do {
                 if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
             } catch { failed.append(url.lastPathComponent) }

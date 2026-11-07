@@ -426,6 +426,9 @@ class ConversationManager: ObservableObject {
     /// One maintenance notice per process when a detach record fails.
     var detachRecordFailureShown = false
     var pairedChatId: Int?
+    /// Sign in with ChatGPT plan notices are being delivered (one pass at a time).
+    var siwcNoticeDelivery = false
+    var lastSIWCNoticeCheck = Date.distantPast
     /// The Telegram update_id whose processUpdate call is currently on the
     /// stack. Lets /upgrade — which exec-restarts and never returns — confirm
     /// exactly its own update instead of the whole fetched batch (later

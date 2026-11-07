@@ -160,6 +160,9 @@ enum SettingsClient {
     /// The running owner of THIS process (the daemon / terminal chat): its
     /// writer is used directly, never a second, offline writer.
     nonisolated(unsafe) static var inProcessOwner: (@MainActor (PreparedChange, (@Sendable () throws -> Void)?) async -> SettingsCommitResult)?
+    /// The running owner's writer itself (SIWC save, cancel and sign-out are
+    /// writer entry points that are never a `PreparedChange`).
+    nonisolated(unsafe) static var inProcessWriter: SettingsWriter?
 
     /// `stillValid` reaches the decision point of an in-process commit (the
     /// running owner of this process, or a short offline commit); a

@@ -332,6 +332,14 @@ extension ConversationManager {
                     // completions they belong to are delivered.
                     settleToolCharges()
 
+                    // Sign in with ChatGPT plan notices still queued (a failed
+                    // send is retried; SIWC plan §5.1 item 6), once a minute.
+                    if Date().timeIntervalSince(lastSIWCNoticeCheck) > 60 {
+                        lastSIWCNoticeCheck = Date()
+                        await deliverSIWCNotices()
+                        await sendSIWCInvitationIfDue()
+                    }
+
                     // Check for completed background subagents
                     await checkBackgroundSubagentCompletions()
 
@@ -667,6 +675,15 @@ extension ConversationManager {
         // the message takes today's path.
         if let created = telegramMessage.managedBotCreated, managedBotsActiveHere {
             await handleManagedBotCreatedMessage(created, sender: telegramMessage.from)
+            return
+        }
+
+        // Sign in with ChatGPT paste-back (SIWC plan §3.4): anything that
+        // looks like a sign-in callback is held back here, before commands,
+        // buffers, history, the mid-turn queue or the model — whether or not
+        // a sign-in is waiting.
+        if let text = telegramMessage.text, CallbackPaste.looksLikeCallback(text) {
+            await interceptSIWCPaste(text, chatId: telegramMessage.chat.id, messageId: telegramMessage.messageId)
             return
         }
 

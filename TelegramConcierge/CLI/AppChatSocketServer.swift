@@ -610,6 +610,16 @@ final class AppChatSocketServer {
             if let ref { event["ref"] = ref }
             client.send(event)
 
+        case "siwc":
+            // Sign in with ChatGPT (SIWC plan §3.10): this daemon owns the
+            // attempt; a pasted address stays inside this request.
+            Task { @MainActor in
+                var event = await SIWCRemote.handle(object)
+                event["type"] = "siwc_result"
+                if let ref { event["ref"] = ref }
+                client.send(event)
+            }
+
         case "ping":
             var event: [String: Any] = ["type": "pong"]
             if let ref { event["ref"] = ref }

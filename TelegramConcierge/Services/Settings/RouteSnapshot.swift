@@ -84,6 +84,8 @@ enum SettingsKeyRoles {
         KeychainHelper.openRouterSpendLimitBoostDefaultsKey,
         // Settings-writer bookkeeping (plan B.4a 8.3, B.4c step 5).
         SettingsWriter.scopePublishedKey,
+        // Sign in with ChatGPT preview opt-in and the one-time invitation (stage D).
+        SIWCSurface.optInKey, SIWCSurface.invitedKey,
     ]
 
     // MARK: Generated key families

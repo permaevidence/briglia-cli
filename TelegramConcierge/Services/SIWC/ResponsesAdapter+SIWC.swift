@@ -113,10 +113,15 @@ extension ResponsesAdapter {
         var usedAccess: String?
         var didRefreshAfter401 = false
         var attempt = 0, dispatch = 0, silenceTimeouts = 0
+        // Plan state (§5.1): the gate before every send and retry; the
+        // classified answer is recorded with the episode it started under.
+        var planTicket: SIWCPlanState.Ticket?
         while attempt < 4 {
             try Task.checkCancellation()
             do {
                 try context.sendBudget?.requireCapacity()
+                planTicket = nil
+                planTicket = try SIWCPlanState.admitCurrent(source)
                 try Self.siwcPreSend(source, request: request)
                 let tokens = try await source.store.credential(clientId: source.clientId, generation: source.generation,
                                                               refresh: Self.siwcRefresher(source, budget: context.authBudget))
@@ -152,6 +157,7 @@ extension ResponsesAdapter {
                 let round = try ResponsesRoundDecoder.decode(bytes, scope: context.responsesScope, receipt: receipt,
                                                              allowedTools: allowed, requiredNamespace: SIWCEndpoint.namespace)
                 completed = true
+                SIWCPlanState.observe(planTicket, .success)
                 if !round.calls.isEmpty {
                     var assistant = AssistantToolCallMessage(content: round.text, toolCalls: round.calls, producedByModel: context.provenance)
                     assistant.responsesReplay = round.metadata.envelope
@@ -163,10 +169,13 @@ extension ResponsesAdapter {
                     promptTokens: round.inputTokens, completionTokens: round.outputTokens, spendUSD: nil, responses: round.metadata)
             } catch {
                 try Task.checkCancellation()
+                if let failure = error as? SIWCError { SIWCPlanState.observe(planTicket, .failure(failure)) }
                 if case ResponsesFailure.http(401, _) = error {
                     guard !didRefreshAfter401 else {
                         try await source.store.requireLogin(source.clientId, generation: source.generation, rejectedAccess: usedAccess)
-                        throw SIWCError(.signInRequired, SubscriptionSharing.decorateRevocation(SIWCError.signInMessage))
+                        let failure = SIWCError(.signInRequired, SubscriptionSharing.decorateRevocation(SIWCError.signInMessage))
+                        SIWCPlanState.observe(planTicket, .failure(failure))
+                        throw failure
                     }
                     try context.sendBudget?.requireCapacity()
                     didRefreshAfter401 = true
@@ -235,9 +244,14 @@ enum SIWCModels {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         try SessionAffinity.decorate(&request, apiKey: source.affinityKey, lane: .probe(UUID()))
         request.timeoutInterval = 30
+        // The model list is a background send for the plan-state gate.
+        let planTicket = try SIWCPlanState.admit(source, userTurn: false)
         try ResponsesAdapter.siwcPreSend(source, request: request)
-        let tokens = try await source.store.credential(clientId: source.clientId, generation: source.generation,
+        let tokens: SIWCTokens
+        do {
+            tokens = try await source.store.credential(clientId: source.clientId, generation: source.generation,
                                                        refresh: ResponsesAdapter.siwcRefresher(source, budget: nil))
+        } catch let failure as SIWCError { SIWCPlanState.observe(planTicket, .failure(failure)); throw failure }
         try ResponsesAdapter.siwcPreSend(source, request: request)
         request.setValue("Bearer " + tokens.access, forHTTPHeaderField: "Authorization")
         let override = adaCLIVersion.hasSuffix("-dev") ? fetchOverride : nil
@@ -250,9 +264,12 @@ enum SIWCModels {
             return (reply.0, reply.1)
         }
         guard status == 200 else {
-            throw SIWCErrors.classify(status: status, body: data) ?? SIWCError(.transient, "ChatGPT's model list is unavailable (HTTP \(status)).")
+            let failure = SIWCErrors.classify(status: status, body: data) ?? SIWCError(.transient, "ChatGPT's model list is unavailable (HTTP \(status)).")
+            SIWCPlanState.observe(planTicket, .failure(failure))
+            throw failure
         }
         let models = try parse(data)
+        SIWCPlanState.observe(planTicket, .success)
         try SIWCFence.shared.check(source.fenceKey, capturedEpoch: source.epoch)
         lock.lock(); cache[source.fenceKey] = (Date(), models); lock.unlock()
         return models

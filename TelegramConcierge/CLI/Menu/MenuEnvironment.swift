@@ -318,6 +318,20 @@ struct MenuEnvironment {
         var s = MenuSnapshot()
         s.userName = KeychainHelper.load(key: KeychainHelper.userNameKey) ?? ""
         let active = ProviderProfiles.activeProfile()
+        let siwcStored = KeychainHelper.loadSnapshot()
+        if SIWCSurface.route(siwcStored) == "siwc" {
+            // Sign in with ChatGPT selected (SIWC plan §3.10): its own login
+            // and model keys; the legacy login does not decide this lane.
+            switch SIWCSurface.info(stored: siwcStored).login {
+            case "signed_in":
+                s.chatgpt = .signedIn(active: active == .chatgpt,
+                                      model: siwcStored[ChatGPTRoute.siwcModelKey] ?? ResponsesAdapter.subscriptionDefaultModel,
+                                      effort: siwcStored[ChatGPTRoute.siwcEffortKey] ?? "high",
+                                      generation: siwcStored[ChatGPTRoute.siwcGenerationKey] ?? "")
+            case "signed_out", "none": s.chatgpt = .signedOut
+            default: s.chatgpt = .loginRequired
+            }
+        } else {
         let status = await SubscriptionSetup().perform(["action": "status"])
         switch status["state"] as? String {
         case "signed_in":
@@ -327,6 +341,7 @@ struct MenuEnvironment {
                                   generation: status["generation"] as? String ?? "")
         case "login_required": s.chatgpt = .loginRequired
         default: s.chatgpt = .signedOut
+        }
         }
         if let active, active != .chatgpt, ProviderProfiles.isConfigured(active) {
             s.otherProvider = active.displayName

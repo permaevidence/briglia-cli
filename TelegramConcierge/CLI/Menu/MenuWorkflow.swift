@@ -186,6 +186,8 @@ final class MenuWorkflow {
     // ChatGPT sign-in in progress.
     struct Login { var kind: String; var state: String; var url: String?; var code: String?; var message: String? }
     private(set) var login: Login?
+    /// Sign in with ChatGPT sign-in of the process serving this page (SIWC plan §3.10).
+    var siwcFlow: SIWCFlow = .shared
     private var loginTask: Task<Void, Never>?
     private var loginAttempt: UUID?
 
@@ -609,6 +611,7 @@ final class MenuWorkflow {
         case .signedOut: chatgpt["state"] = "signed_out"
         }
         if let other = s.otherProvider { chatgpt["other_provider"] = other }
+        chatgpt["siwc"] = siwcPayload()
         if let login {
             var l: [String: Any] = ["kind": login.kind, "state": login.state]
             if let u = login.url { l["url"] = u }
@@ -859,7 +862,7 @@ final class MenuWorkflow {
         return out
     }
 
-    private func str(_ body: [String: Any], _ key: String) -> String {
+    func str(_ body: [String: Any], _ key: String) -> String {
         ((body[key] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -898,6 +901,10 @@ final class MenuWorkflow {
         /// store, which call it again right before their own writes.
         let checkpoint: @Sendable () throws -> Void = { try validity.check(ticket) }
         if let result = try await performAssistantAction(action, body, checkpoint: checkpoint) { return result }
+        if Self.siwcActions.contains(action) { return await performSIWC(action, body) }
+        // On the Sign in with ChatGPT route the legacy ChatGPT writes would
+        // switch the route back; model/effort go through an SIWC activation.
+        if let handled = await performSIWCRouteEdit(action, body) { return handled }
         // A settings page opened for another assistant (§28.3) has no Start
         // or Stop: that assistant is started and stopped from the first
         // assistant's Assistants page.

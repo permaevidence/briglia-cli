@@ -199,6 +199,9 @@ actor MaintenanceAlertCenter {
     /// Returns true if an alert was emitted for this call.
     @discardableResult
     func reportFailure(_ subsystem: Subsystem, error: String, deterministic: Bool, pendingItems: Int = 0) async -> Bool {
+        // A paused ChatGPT plan (SIWC plan §5.1 item 2) is not a maintenance
+        // fault: the plan-state notice is the one message; no episode here.
+        if SIWCPlanState.isPause(error) { return false }
         let now = Date()
         var alertText: String? = nil
 
@@ -362,6 +365,7 @@ actor ToolServiceHealth {
     /// transition/escalation logic) immediately for deterministic errors,
     /// after `transientAlertThreshold` consecutive failures otherwise.
     func recordFailure(_ subsystem: MaintenanceAlertCenter.Subsystem, error: String, transientOnly: Bool = false) async {
+        if SIWCPlanState.isPause(error) { return }   // SIWC plan §5.1 item 2
         let count = (consecutiveFailures[subsystem.rawValue] ?? 0) + 1
         consecutiveFailures[subsystem.rawValue] = count
         // Keyless services (no account, so no key or billing a user could
@@ -895,7 +899,7 @@ actor ConversationArchiveService {
                             return
                         } catch {
                             lastError = error
-                            if ArchiveError.isDeterministicFailure(error) { break }
+                            if ArchiveError.isDeterministicFailure(error) || SIWCPlanState.isPause(error) { break }
                             if attempt < maintenanceRetryLimit {
                                 let delay = min(2.0 * pow(2.0, Double(attempt - 1)), 30.0)
                                 print("[ArchiveService] Recovery summary failed (attempt \(attempt)): \(error). Retrying in \(Int(delay))s...")
@@ -1789,7 +1793,7 @@ actor ConversationArchiveService {
                     return
                 } catch {
                     lastError = error
-                    if ArchiveError.isDeterministicFailure(error) { break }
+                    if ArchiveError.isDeterministicFailure(error) || SIWCPlanState.isPause(error) { break }
                     if attempt < consolidationRetryLimit {
                         let delay = min(2.0 * pow(2.0, Double(attempt - 1)), 30.0)
                         print("[ArchiveService] Consolidation failed (attempt \(attempt)): \(error). Retrying in \(Int(delay))s...")
@@ -2030,7 +2034,7 @@ actor ConversationArchiveService {
                 return nil
             } catch {
                 lastError = error
-                if ArchiveError.isDeterministicFailure(error) { break }
+                if ArchiveError.isDeterministicFailure(error) || SIWCPlanState.isPause(error) { break }
                 if attempt < maintenanceRetryLimit {
                     let delay = min(2.0 * pow(2.0, Double(attempt - 1)), 30.0)
                     print("[ArchiveService] \(kind == .rolling ? "Rolling" : "Sealed") meta-summary failed (attempt \(attempt)): \(error). Retrying in \(Int(delay))s...")
@@ -2040,7 +2044,8 @@ actor ConversationArchiveService {
         }
 
         guard let summary else {
-            metaSummaryBackoffUntil = Date().addingTimeInterval(metaSummaryRetryCooldown)
+            // A paused ChatGPT plan does not start the cooldown (§5.1 item 2).
+            if !SIWCPlanState.isPause(lastError) { metaSummaryBackoffUntil = Date().addingTimeInterval(metaSummaryRetryCooldown) }
             let errorText = lastError.map { $0.localizedDescription } ?? "unknown error"
             print("[ArchiveService] Giving up on \(kind == .rolling ? "rolling" : "sealed") meta-summary this pass: \(errorText)")
             await MaintenanceAlertCenter.shared.reportFailure(
@@ -2118,7 +2123,7 @@ actor ConversationArchiveService {
                     return
                 } catch {
                     lastError = error
-                    if ArchiveError.isDeterministicFailure(error) { break }
+                    if ArchiveError.isDeterministicFailure(error) || SIWCPlanState.isPause(error) { break }
                     if attempt < maintenanceRetryLimit {
                         let delay = min(2.0 * pow(2.0, Double(attempt - 1)), 30.0)
                         print("[ArchiveService] Pending meta-summary recovery failed (attempt \(attempt)): \(error). Retrying in \(Int(delay))s...")
@@ -2420,7 +2425,7 @@ actor ConversationArchiveService {
                 return false
             } catch {
                 lastError = error
-                if ArchiveError.isDeterministicFailure(error) { break }
+                if ArchiveError.isDeterministicFailure(error) || SIWCPlanState.isPause(error) { break }
                 if attempt < maintenanceRetryLimit {
                     let delay = min(2.0 * pow(2.0, Double(attempt - 1)), 30.0)
                     print("[ArchiveService] User context append failed (attempt \(attempt)): \(error). Retrying in \(Int(delay))s...")

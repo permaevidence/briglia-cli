@@ -246,6 +246,13 @@ struct Doctor: AsyncParsableCommand {
                 }
             } catch { check("ChatGPT subscription credential storage", ok: false, hint: error.localizedDescription) }
         }
+        // Sign in with ChatGPT (SIWC plan §3.10): both files of every store,
+        // integrity, plan state, host consistency. Never a token, the host ID
+        // or an email.
+        if let route = SIWCSurface.route() { note("ChatGPT route: " + (route == "siwc" ? SIWCSurface.label : SIWCSurface.legacyLabel)) }
+        for line in SIWCSurface.doctorLines() {
+            if line.problem { check(line.text, ok: false, hint: line.hint ?? "") } else { note(line.text) }
+        }
 
         // MCP routing references (mcp-routing.json routes, agents' mcp_tools
         // patterns): unresolved or malformed entries are kept verbatim by the

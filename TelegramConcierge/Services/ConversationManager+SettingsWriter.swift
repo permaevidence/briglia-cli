@@ -67,7 +67,9 @@ extension ConversationManager: SettingsOwnerHost, SettingsApplyKicking {
         serviceConfigStamp = Self.serviceCredentialDigest(KeychainHelper.loadSnapshot())
         let writer = settingsWriter
         SettingsClient.inProcessOwner = { change, stillValid in await writer.commit(change, stillValid: stillValid) }
+        SettingsClient.inProcessWriter = writer
         SettingsAgentEdit.immediateOwner = { change in await writer.commit(change, policy: .immediate) }
+        startSIWCSurfaces()
         kickSettingsApply()
     }
 

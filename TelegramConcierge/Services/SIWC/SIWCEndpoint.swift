@@ -47,7 +47,9 @@ enum SIWCEndpoint {
     static let keyFileName = "subscription-siwc.key"
 
     /// Every SIWC file name of one store directory (file tools, wipe).
-    static let storeFileNames = [registrationsFileName, tokenFileName, lockFileName, keyFileName]
+    /// Plan state per registration (§5.1, stage D).
+    static let planFileName = "subscription-siwc-plan.json"
+    static let storeFileNames = [registrationsFileName, tokenFileName, lockFileName, keyFileName, planFileName]
 
     /// Pending browser/paste-back attempts expire after 10 minutes (§3.4).
     static let attemptLifetime: TimeInterval = 600

@@ -470,6 +470,11 @@ enum ProviderProfiles {
         let modelKey: String
         let textOnlyKey: String
         switch profile {
+        // On the Sign in with ChatGPT route the choice is kept under the SIWC
+        // keys: a legacy `subscription_model` would let an older binary use
+        // the legacy login again (SIWC plan §3.8 R1).
+        case .chatgpt where value(ChatGPTRoute.routeKey) == "siwc":
+            modelKey = ChatGPTRoute.siwcModelKey; textOnlyKey = ChatGPTRoute.siwcTextOnlyKey
         case .chatgpt: modelKey = subscriptionModelKey; textOnlyKey = subscriptionTextOnlyKey
         case .openai: modelKey = openaiModelKey; textOnlyKey = openaiTextOnlyKey
         case .opencode: modelKey = opencodeModelKey; textOnlyKey = opencodeTextOnlyKey
@@ -488,6 +493,7 @@ enum ProviderProfiles {
         guard let profile = activeProfile() else { return }
         let key: String
         switch profile {
+        case .chatgpt where value(ChatGPTRoute.routeKey) == "siwc": key = ChatGPTRoute.siwcEffortKey
         case .chatgpt: key = subscriptionEffortKey
         case .openai: key = openaiEffortKey
         case .opencode: key = opencodeReasoningEffortKey

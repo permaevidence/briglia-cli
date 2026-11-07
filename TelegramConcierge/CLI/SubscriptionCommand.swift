@@ -10,12 +10,17 @@ struct SubscriptionCommand: AsyncParsableCommand {
     @Option(help: "Reasoning effort") var effort: String?
     @Flag(help: "Activate after login (requires stopped Briglia)") var activate = false
     @Flag(name: .customLong("accept-pending"), help: "If Briglia is busy, save the change and apply it when it is idle") var acceptPending = false
+    /// Sign in with ChatGPT during the opt-in release (SIWC plan §3.10).
+    @Flag(name: .customLong("official"), help: .hidden) var official = false
+    /// The legacy Codex sign-in explicitly (when Sign in with ChatGPT is in use).
+    @Flag(name: .customLong("legacy"), help: .hidden) var legacyRoute = false
     @Argument(help: .hidden) var scopeValue: String?
     var scopeArgument: SubscriptionSharing.Scope? { scopeValue.flatMap(SubscriptionSharing.Scope.init(rawValue:)) }
 
     func run() async throws {
         AdaCLI.prepareIO()
         let store = SubscriptionAuthStore()
+        if try await runSIWCIfChosen() { return }
         switch action {
         case "status":
             if let state = try store.read(), state.credential != nil, state.requiresLogin != true {
@@ -131,6 +136,41 @@ struct SubscriptionCommand: AsyncParsableCommand {
         default: throw ValidationError("Use login, status, select, cancel, logout, or models")
         }
     }
+}
+
+extension SubscriptionCommand {
+    /// Sign in with ChatGPT: `--official`, or this assistant already on that
+    /// route / opted in (never with `--legacy`). True = handled.
+    func runSIWCIfChosen() async throws -> Bool {
+        guard !legacyRoute, ["login", "logout", "cancel", "failed", "use", "status"].contains(action) else { return false }
+        let stored = KeychainHelper.loadSnapshot()
+        let onRoute = SIWCSurface.route(stored) == "siwc"
+        let chosen: Bool
+        switch action {
+        case "login": chosen = official || SIWCSurface.optedIn(stored)
+        case "logout": chosen = official || onRoute
+        case "status": chosen = official || SIWCSurface.optedIn(stored)
+        default: chosen = official || action == "use" || action == "failed"
+        }
+        guard chosen else { return false }
+        if action != "status" {
+            try IdentityMigration.gateMutatingEntry()
+            switch MemoryReplacementLock.shared(waitSeconds: MemoryReplacementLock.standaloneWaitSeconds) {
+            case .admitted(let lock): lock.release()
+            case .busy: print("✖ " + MemoryReplacementLock.busyMessage); throw ExitCode(75)
+            case .failed(let why): print("✖ \(why)"); throw ExitCode(1)
+            }
+        }
+        let code: Int32 = action == "login" ? await SIWCTerminal.login() : await SIWCTerminal.simple(action)
+        if action == "status" {
+            let legacy = try? store().read()
+            print("\(SIWCSurface.legacyLabel): " + (legacy?.credential == nil ? "signed out" : "signed in"))
+        }
+        if code != 0 { throw ExitCode(code) }
+        return true
+    }
+
+    private func store() -> SubscriptionAuthStore { SubscriptionAuthStore() }
 }
 
 /// The sign-in's prepared publication, handed out of the login hook.

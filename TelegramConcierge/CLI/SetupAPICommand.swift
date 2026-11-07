@@ -94,6 +94,12 @@ struct SetupAPI: AsyncParsableCommand {
             // touch the roots.
             if verb == "apply" || verb == "subscription" {
                 if let refusal = SetupAPICore.migrationRefusal() { respond(refusal) }
+                // Sign in with ChatGPT actions (SIWC plan §3.10): forwarded
+                // to a running owner, or this process waits as the owner. No
+                // replacement lock or lease is held while the human waits.
+                if verb == "subscription", let action = object["action"] as? String, SIWCSetupAPI.actions.contains(action) {
+                    respond(await SIWCSetupAPI.perform(object))
+                }
                 // KEYLESS_WEB_AND_LIVE_MENU plan B.6: the request is prepared
                 // here (validation, probes; nothing written) under the shared
                 // replacement lock, which is released BEFORE the change is
@@ -233,7 +239,9 @@ enum SetupAPICore {
         ProviderProfiles.ensureMigrated()
         var payload = base(ok: true)
         payload["version"] = adaCLIVersion
-        payload["subscription_setup"] = ["supported": true, "auth": "device_code", "quota": "unknown"]
+        payload["subscription_setup"] = ["supported": true, "auth": "device_code", "quota": "unknown",
+                                         "siwc_auth": ["browser_callback", "paste_back"]]
+        for (key, value) in SIWCSetupAPI.statusFields() { payload[key] = value }
         payload["platform"] = platformKey
         payload["is_ubuntu_touch"] = AgentServiceSupport.isUbuntuTouch()
         payload["wakelock_supported"] = AgentServiceSupport.wakeLockSupported()
