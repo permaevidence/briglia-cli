@@ -165,7 +165,7 @@ extension SIWCSelftest {
             defer { SIWCFence.shared.unregisterJob(token ?? nil) }
             while !Task.isCancelled { try? await Task.sleep(nanoseconds: 20_000_000) }   // "tool work"
             flag.cancelled = Task.isCancelled
-            try? await Task.sleep(nanoseconds: 100_000_000)                                // its own cleanup
+            try? await Task.sleep(nanoseconds: 800_000_000)                                // its own cleanup
             flag.ended = true
         }
         let other = SIWCCredentialSource(storeDirectory: root.appendingPathComponent("jobs-other"), clientId: "oaiappJobsOther",
