@@ -2712,6 +2712,10 @@ actor WebOrchestrator {
         section: (index: Int, total: Int)? = nil,
         executionID: UUID
     ) async throws -> String {
+        // Entry point when called alone: own the run state (SIWC round 2 R5).
+        let ownsState = executionStates[executionID] == nil
+        if ownsState { executionStates[executionID] = ExecutionState() }
+        defer { if ownsState { executionStates.removeValue(forKey: executionID) } }
         let titleLine = pageTitle.map { "Page title: \($0)\n" } ?? ""
         var systemMsg = """
         You extract information from a web page to answer the user's specific prompt.
@@ -2774,6 +2778,10 @@ actor WebOrchestrator {
         postCap: Int,
         executionID: UUID
     ) async throws -> String {
+        // Entry point when called alone: own the run state (SIWC round 2 R5).
+        let ownsState = executionStates[executionID] == nil
+        if ownsState { executionStates[executionID] = ExecutionState() }
+        defer { if ownsState { executionStates.removeValue(forKey: executionID) } }
         let totalChars = markdown.count
         let step = webFetchChunkChars - chunkOverlapChars
         let totalChunks = totalChars <= webFetchChunkChars
