@@ -132,6 +132,8 @@ extension SIWCSelftest {
         c.check("menu: “Choose sign-in method” → Sign in with ChatGPT records the opt-in only; no route or login changes",
                 chose?["ok"] as? Bool == true && card()["opted_in"] as? Bool == true && KeychainHelper.load(key: ChatGPTRoute.routeKey) == nil
                 && KeychainHelper._testWriteCount == writes0 + 1)
+        try KeychainHelper.save(key: ProviderProfiles.activeProfileKey, value: "chatgpt")
+        c.check("menu: a legacy ChatGPT user who opted in sees the invitation", card()["invitation"] as? String == SIWCSurface.invitationText)
         let cont = await wf.handle(["action": "siwc_continue"])
         let flow = card()["flow"] as? [String: Any] ?? [:]
         c.check("menu: “Continue with ChatGPT” starts a sign-in (paste-back when no local browser) with its link",
@@ -142,6 +144,14 @@ extension SIWCSelftest {
         c.check("menu: the pasted address finishes the sign-in; the card shows the plan line",
                 pasted?["ok"] as? Bool == true && after["login"] as? String == "signed_in" && after["selected"] as? Bool == true
                 && (after["plan_text"] as? String)?.hasPrefix("Using ChatGPT plan") == true, "\(after)")
+        c.check("menu: the first sign-in carries the “You're using your ChatGPT plan” notice to the page",
+                (after["flow"] as? [String: Any])?["first_use"] as? Bool == true)
+        // The plan banner follows the saved plan state.
+        if let source = try? ChatGPTRoute.currentSource(), let t = try? SIWCPlanState.admit(source, userTurn: false) {
+            SIWCPlanState.observe(t, .failure(SIWCError(.limitReached, SIWCError.limitMessage)))
+        }
+        c.check("menu: a usage limit shows as the limit banner on the card", card()["plan_state"] as? String == "limit_reached"
+                && (card()["plan_text"] as? String)?.hasPrefix("Usage limit reached") == true)
         let modelChange = await wf.handle(["action": "chatgpt_model", "model": "gpt-6-luna"])
         c.check("menu: a model change on the SIWC route stays on the route (SIWC keys, no legacy model key)",
                 modelChange?["ok"] as? Bool == true && KeychainHelper.load(key: ChatGPTRoute.siwcModelKey) == "gpt-6-luna"
@@ -152,6 +162,8 @@ extension SIWCSelftest {
         let out = await wf.handle(["action": "siwc_logout"])
         c.check("menu: Sign out signs this login out (tombstone durable) and says so", out?["ok"] as? Bool == true
                 && card()["login"] as? String == "signed_out", "\(out ?? [:])")
+        c.check("menu: an unconfirmed remote revoke is said plainly (Disconnect in ChatGPT Settings → Usage)",
+                (out?["message"] as? String)?.contains("remote sign-out not confirmed") == true)
         _ = await wf.handle(["action": "lang", "lang": "it"])
         var entry = SIWCPlanEntry(); entry.state = .limitReached
         c.check("menu: Italian text for the plan banner", wf.planText(entry).hasPrefix("Limite di utilizzo raggiunto"))

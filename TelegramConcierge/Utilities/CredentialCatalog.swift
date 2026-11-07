@@ -118,6 +118,9 @@ enum CredentialCatalog {
         Entry(key: ChatGPTRoute.siwcModelKey, treatment: .notSecret),
         Entry(key: ChatGPTRoute.siwcEffortKey, treatment: .notSecret),
         Entry(key: ChatGPTRoute.siwcTextOnlyKey, treatment: .notSecret),
+        // Sign in with ChatGPT preview opt-in and the one-time invitation (stage D).
+        Entry(key: SIWCSurface.optInKey, treatment: .notSecret),
+        Entry(key: SIWCSurface.invitedKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.subscriptionTextOnlyKey, treatment: .notSecret),
 
         // Model providers (visible by owner decision)
