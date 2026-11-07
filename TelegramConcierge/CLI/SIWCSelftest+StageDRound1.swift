@@ -50,7 +50,7 @@ extension SIWCSelftest {
         // The other ordering: cancel's own writer return is delayed; a paste
         // arriving meanwhile is refused (nothing saved), and nothing later
         // overwrites the cancel outcome.
-        do {
+        for beforeBody in [true, false] {
             try resetLive()
             let gate = Gate(); gate.armedCalls = [1]
             let seen = Seen()
@@ -58,9 +58,11 @@ extension SIWCSelftest {
             let flow = flowFixture(owner, fake: fake, exchanged: { _, _ in exchanged += 1 }, sub: "sub-r2-order")
             let realWriter = flow.writer
             flow.writer = SIWCWriterAccess(run: { body in
-                let r = await realWriter.run(body)
                 gate.calls += 1
-                if gate.armedCalls.contains(gate.calls) { await withCheckedContinuation { gate.cont = $0 } }
+                let armed = gate.armedCalls.contains(gate.calls)
+                if armed, beforeBody { await withCheckedContinuation { gate.cont = $0 } }
+                let r = await realWriter.run(body)
+                if armed, !beforeBody { await withCheckedContinuation { gate.cont = $0 } }
                 return r
             })
             let s1 = await flow.start(mode: .paste, onFinish: { seen.outcomes.append($0.outcome ?? "") })
@@ -70,7 +72,7 @@ extension SIWCSelftest {
             gate.cont?.resume()
             let cancelled = await cancelTask.value
             try? await Task.sleep(nanoseconds: 50_000_000)
-            c.check("R2: a paste during the cancel is refused; the cancel outcome is the only one (nothing saved, nothing overwritten)",
+            c.check("R2: a paste during the cancel (its writer \(beforeBody ? "not yet run" : "already run")) is refused; the cancel outcome is the only one (nothing saved, nothing overwritten)",
                     reply == CallbackPaste.Rejection.noneWaiting.rawValue && exchanged == 0 && cancelled.outcome == "cancelled"
                     && seen.outcomes == ["cancelled"] && flow.status.outcome == "cancelled"
                     && ((try? SIWCStore.resolved().readTokens())?.records.isEmpty ?? true), "\(cancelled.json) \(seen.outcomes)")

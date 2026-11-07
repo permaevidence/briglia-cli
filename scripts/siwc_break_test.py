@@ -386,7 +386,7 @@ BREAKS = [
      "        if CallbackPaste.looksLikeCallback(trimmed) {", "        if attachments.isEmpty, CallbackPaste.looksLikeCallback(trimmed) {", "d-telegram"),
     ("D31 the activation does not carry the session's validity", "R2: cancelled at activation admission", W + "SIWCFlow.swift",
      "        let r = await commitActivation(change, validity.map { v in { try v.check() } })", "        let r = await commitActivation(change, nil)", "d-round1"),
-    ("D32 cancel does not revoke a running save/activation", "R2: cancelled while the save returned", W + "SIWCFlow.swift",
+    ("D32 cancel does not revoke a running save/activation", "R2: cancel while the save returns", W + "SIWCFlow.swift",
      "        s.validity.revoke()\n        // A publication in flight", "        // A publication in flight", "d-round1"),
     ("D33 the notice transport ignores the bot generation", "R3: the sign-in result is not sent through a replaced bot", S + "TelegramBotService.swift",
      "        guard NoticeChannelGenerations.current(.telegram) == expectedGeneration else { throw NoticeTransportError.credentialsChanged }\n        guard !botToken.isEmpty",
