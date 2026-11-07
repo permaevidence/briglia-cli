@@ -43,20 +43,36 @@ enum SIWCHost {
         var machineConfigRoot: URL
         var machineDir: URL
         /// Every store directory on the machine that may hold registrations:
-        /// the machine store and every extra's own config root.
-        var storeDirectories: () -> [URL]
+        /// the machine store and every extra's own config root. nil = the
+        /// census is uncertain (counts as "a user exists", fail safe).
+        var storeDirectories: () -> [URL]?
         var shareLock: URL
 
         static var live: Paths {
             Paths(machineConfigRoot: MachinePaths.defaultConfigRoot(), machineDir: MachinePaths.machineDir(),
-                  storeDirectories: {
-                      var out = [MachinePaths.defaultConfigRoot()]
-                      for name in AssistantProfile.listExtras() { out.append(AssistantProfile.extraConfigRoot(name)) }
-                      return out
-                  },
+                  storeDirectories: { liveStoreDirectories() },
                   shareLock: ChatGPTShare.lockURL)
         }
         var hostFile: URL { machineConfigRoot.appendingPathComponent(SIWCEndpoint.hostFileName) }
+
+        /// The conservative census (Codex round 1 R8): every directory under
+        /// the extras root, whether or not its profile metadata is readable
+        /// (the profile picker's `listExtras` filter is not used here). An
+        /// absent extras root is no extras; any other enumeration error is
+        /// uncertain.
+        static func liveStoreDirectories(environment: [String: String] = ProcessInfo.processInfo.environment) -> [URL]? {
+            var out = [MachinePaths.defaultConfigRoot()]
+            let root = AssistantProfile.configBase(environment).appendingPathComponent(AssistantProfile.extrasDirName, isDirectory: true)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) else { return out }
+            guard isDirectory.boolValue, let names = try? FileManager.default.contentsOfDirectory(atPath: root.path) else { return nil }
+            for name in names.sorted() where !name.hasPrefix(".") {
+                let url = root.appendingPathComponent(name, isDirectory: true)
+                guard let type = try? FileManager.default.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType else { return nil }
+                if type == .typeDirectory { out.append(url) }
+            }
+            return out
+        }
         var reservationsFile: URL { machineDir.appendingPathComponent(SIWCEndpoint.reservationsFileName) }
     }
 
@@ -131,7 +147,8 @@ enum SIWCHost {
     /// store's registrations cannot be read ("a user exists", fail safe).
     static func registrationHostFingerprints(_ paths: Paths) -> [String]? {
         var out: [String] = []
-        for directory in paths.storeDirectories() {
+        guard let directories = paths.storeDirectories() else { return nil }
+        for directory in directories {
             do {
                 guard let file = try SIWCStore(directory: directory).readRegistrations() else { continue }
                 out += file.registrations.map(\.hostFingerprint)

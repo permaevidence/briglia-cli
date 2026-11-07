@@ -99,6 +99,25 @@ enum ChatGPTRoute {
     }
 }
 
+/// The ChatGPT route of one multi-request operation that is not carried by a
+/// `ProviderExecutionContext` (a raw web run), captured once at its start.
+enum SIWCOperationCapture: Equatable {
+    case notSIWC
+    case source(SIWCCredentialSource)
+    case failure(String)
+
+    static func capture(stored: [String: String] = KeychainHelper.loadSnapshot()) -> SIWCOperationCapture {
+        switch ChatGPTRoute.resolve(stored: stored) {
+        case .notChatGPT, .legacy: return .notSIWC
+        case .ambiguous, .disabled, .siwc:
+            do {
+                guard let source = try ChatGPTRoute.currentSource(stored: stored) else { return .notSIWC }
+                return .source(source)
+            } catch { return .failure((error as? SIWCError)?.message ?? SIWCError.signInMessage) }
+        }
+    }
+}
+
 extension ProviderExecutionContext {
     /// Whether this operation runs on the ChatGPT plan (legacy or SIWC):
     /// spend gates and usage buckets treat both the same (§4.3).

@@ -69,7 +69,7 @@ extension SIWCSelftest {
                 && sent.contains("code_verifier=verifier-") && sent.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A62602%2Fauth%2Fcallback")
                 && sent.contains("resource=https%3A%2F%2Fapi.openai.com%2Fv1") && !sent.contains("client_secret"))
         c.check("exchange: the ID token is verified (sub, nonce, aud)", result.claims.sub == SIWCSelftestVectors.sub && result.newRegistration)
-        c.check("exchange: earliest_refresh_at kept as an absolute time", result.tokens.earliestRefreshAt == SIWCSelftestVectors.issuedAt + 3238)
+        c.check("exchange: earliest_refresh_at kept as an absolute time", result.tokens?.earliestRefreshAt == SIWCSelftestVectors.issuedAt + 3238)
         c.check("exchange: only auth.openai.com was contacted", Set(fake.hosts) == ["auth.openai.com"])
         // Publication through the store (clock: real, the reservation is real-time).
         var realClock = signIn; realClock.clock = Date.init
@@ -96,7 +96,7 @@ extension SIWCSelftest {
         await c.rejects("exchange: a boolean expires_in is refused") { _ = try await signIn.exchange(att, code: "C", clientId: SIWCSelftestVectors.clientId) }
         fake.tokenReplies = [tokenReply("Y", scope: "openid profile email")]
         let identityOnly = try await signIn.exchange(att, code: "C", clientId: SIWCSelftestVectors.clientId)
-        c.check("scope: the granted scope (token response) decides plan usage", !identityOnly.tokens.planUsage)
+        c.check("scope: the granted scope (token response) decides plan usage", identityOnly.tokens?.planUsage == false)
         let expired = attempt(store, expected: nil, pending: pending, id: "att-1", host: host, expiresAt: Int(vectorNow.timeIntervalSince1970) - 1)
         let before = fake.tokenCount()
         await c.rejects("exchange: an expired attempt contacts nobody") { _ = try await signIn.exchange(expired, code: "C", clientId: SIWCSelftestVectors.clientId) }

@@ -866,6 +866,10 @@ actor WebOrchestrator {
     private struct ExecutionState {
         var queriesUsed: [String] = []
         var spendUSD: Double = 0
+        /// The ChatGPT route of this web run, captured ONCE at run start
+        /// (SIWC plan §4.1; Codex round 1 R5): every round, retry and stage of
+        /// the run uses it; a later /provider or account switch never rebinds it.
+        var siwc = SIWCOperationCapture.capture()
     }
 
     private var executionStates: [UUID: ExecutionState] = [:]
@@ -1636,7 +1640,8 @@ actor WebOrchestrator {
         let maxAttempts = 3
         var attempt = 1
         while true {
-            let data = try await SubscriptionWebTransport.post(body: body, lane: .ephemeral(executionID), timeout: generous ? 600 : 180)
+            let data = try await SubscriptionWebTransport.post(body: body, lane: .ephemeral(executionID), timeout: generous ? 600 : 180,
+                                                               operation: executionStates[executionID]?.siwc)
             var detail = "empty response body"
             if let resp = try? JSONDecoder().decode(OAIResponsesResp.self, from: data) {
                 let output = resp.output ?? []
@@ -2255,7 +2260,8 @@ actor WebOrchestrator {
                                              readsGenerationHeaders: false, hostLabel: WebSearchBackend.chatgpt.displayName)
             var detail = "empty response body"
             do {
-                let data = try await SubscriptionWebTransport.post(body: body, lane: .ephemeral(executionID), timeout: max(timeout, 120), deadline: deadline)
+                let data = try await SubscriptionWebTransport.post(body: body, lane: .ephemeral(executionID), timeout: max(timeout, 120), deadline: deadline,
+                                                                   operation: executionStates[executionID]?.siwc)
                 if let resp = try? JSONDecoder().decode(OAIResponsesResp.self, from: data) {
                     let text = SubscriptionWebTransport.outputText(resp)
                     webLog("[WebOrchestrator] chatgpt response stage=\(stage) mode=\(modeLabel(mode)) status=\(resp.status ?? "nil") chars=\(text.count) tokens=\(resp.usage?.input_tokens.map(String.init) ?? "?")/\(resp.usage?.output_tokens.map(String.init) ?? "?")")

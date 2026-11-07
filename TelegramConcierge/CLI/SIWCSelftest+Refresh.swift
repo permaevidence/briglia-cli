@@ -126,8 +126,8 @@ extension SIWCSelftest {
         c.check("recovery: credentials are kept after exhaustion (transient never erases)", store.readTokens_unsafe("oaiappClientA")?.tokens != nil)
         // Process death after `sending`: the next call is THE recovery.
         let (s2, _, g2) = try await activeStore(root, tokens: tokens("B", expiresIn: 10))
-        try tamper(s2, "oaiappClientA") { $0.refreshOp = SubscriptionRefreshOp(opId: UUID().uuidString,
-            tokenFingerprint: SubscriptionRefreshFingerprint.of("synthetic-refresh-B"), generation: g2, startedAt: Date(), state: "sending") }
+        try rewriteBound(s2, "oaiappClientA") { $0.refreshOp = SIWCRefreshOp(opId: UUID().uuidString,
+            tokenFingerprint: SubscriptionRefreshFingerprint.of("synthetic-refresh-B"), generation: g2, startedAt: 1, state: "sending") }
         let ok = try await s2.credential(clientId: "oaiappClientA", generation: g2) { r in rotated(r) }
         c.check("recovery: an interrupted original makes the next send the recovery, which succeeds", ok.refresh == "synthetic-refresh-B-next"
                 && s2.readTokens_unsafe("oaiappClientA")?.refreshRecovery == nil)
@@ -137,7 +137,7 @@ extension SIWCSelftest {
         let identity = s3.readTokens_unsafe("oaiappClientA")!.identity!
         var rotation = SIWCPendingRotation(generation: g3, replaces: SubscriptionRefreshFingerprint.of("synthetic-refresh-K"),
                                            tokens: tokens("K2", expiresIn: 3600), identity: identity, mac: String(repeating: "0", count: 64))
-        rotation.mac = try SIWCStore.rotationMAC(key: key, rotation)
+        rotation.mac = try SIWCStore.rotationMAC(key: key, clientId: "oaiappClientA", rotation)
         try tamper(s3, "oaiappClientA") { $0.pendingRotation = rotation }
         let s3sends = Sends()
         let promoted = try await s3.credential(clientId: "oaiappClientA", generation: g3) { r in s3sends.add(); return rotated(r) }

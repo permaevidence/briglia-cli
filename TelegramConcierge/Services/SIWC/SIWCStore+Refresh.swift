@@ -48,6 +48,15 @@ extension SIWCStore {
         return try outcome.get()
     }
 
+    /// The canonical bound state of a record (binding included): what was
+    /// sent must still be exactly what is on disk before any settlement
+    /// write (Codex round 1 R1).
+    static func boundState(_ record: SIWCTokenRecord) -> Data? {
+        var bound = record.unboundCleared
+        bound.binding = record.binding
+        return try? encode(bound)
+    }
+
     private func settle(clientId: String, generation: String, rejectedAccess: String?,
                         caller: SubscriptionRefreshCaller.SIWC,
                         refresh: (String) async throws -> SIWCRefreshed) async throws -> SIWCTokens {
@@ -67,26 +76,41 @@ extension SIWCStore {
             guard let key, var old = record.tokens, let oldIdentity = record.identity else {
                 throw SIWCError(.signInRequired, SIWCError.signInMessage)
             }
-            func save() throws { file.update(clientId) { $0 = record }; try writeTokens(file) }
+            let registrationSubKey = Self.mac(key, "siwc-sub", Data(registration.sub.utf8))
+            // The record was verified bound above, so every write below may
+            // rebind it (the refresh records are bound fields, R7).
+            func save() throws { try Self.bind(&record, key: key); file.update(clientId) { $0 = record }; try writeTokens(file) }
+            func trySave() { try? save() }
+            /// The acceptance checks of a token set for this record (R2): its own
+            /// verified identity is the registration's subject, the set is
+            /// valid, and plan usage was not lost.
+            func acceptable(_ tokens: SIWCTokens, _ identity: SIWCIdentity) -> Bool {
+                identity.subKey == registrationSubKey && identity.subKey == oldIdentity.subKey
+                    && tokens.valid && (tokens.planUsage || !old.planUsage)
+            }
             // Disk first (§7 step 4 / §7.1 step 3): promote a checkpoint bound
-            // to this generation and this refresh token. A checkpoint whose
-            // MAC fails, or that is unrelated, is discarded (never promoted).
+            // to this client, generation and refresh token, re-applying every
+            // acceptance check. Wrong MAC or unrelated → discarded (its refresh
+            // token kept for revocation only). Proven for this token but not
+            // acceptable → the rotation happened for the wrong account or lost
+            // plan usage: blocked until an explicit sign-in.
             if let pending = record.pendingRotation {
                 record.pendingRotation = nil
-                let macOK = (try? Self.rotationMAC(key: key, pending)).map { SIWCJWT.constantTimeEqual($0, pending.mac) } ?? false
+                let macOK = (try? Self.rotationMAC(key: key, clientId: clientId, pending)).map { SIWCJWT.constantTimeEqual($0, pending.mac) } ?? false
                 if macOK, pending.generation == generation, pending.replaces == SubscriptionRefreshFingerprint.of(old.refresh) {
-                    guard pending.identity.subKey == oldIdentity.subKey else {
+                    guard acceptable(pending.tokens, pending.identity) else {
+                        record.cleanup = Array(((record.cleanup ?? []) + [pending.tokens.refresh]).suffix(64))
                         record.refreshOp = nil
                         record.requiresLogin = true
-                        try Self.bind(&record, key: key)
-                        try? save()
+                        trySave()
                         throw SIWCError(.signInRequired, Self.accountChangedMessage)
                     }
                     record.tokens = pending.tokens
                     record.identity = pending.identity
                     record.refreshOp = nil; record.refreshRecovery = nil
                     old = pending.tokens
-                    try Self.bind(&record, key: key)
+                } else {
+                    record.cleanup = Array(((record.cleanup ?? []) + [pending.tokens.refresh]).suffix(64))
                 }
                 try save()
             }
@@ -94,8 +118,9 @@ extension SIWCStore {
             let due = old.expiresAt - Int(SIWCEndpoint.refreshMargin) <= now
             let earliestOK = (old.earliestRefreshAt ?? 0) <= now
             let rejected = rejectedAccess != nil && rejectedAccess == old.access
-            // Fresh, or due but not yet allowed while still valid: use it.
-            if !rejected && (!due || (!earliestOK && old.expiresAt > now)) { return old }
+            // Never before earliest_refresh_at; the one documented exception is
+            // an access token the server just rejected (401).
+            if !rejected && (!due || !earliestOK) { return old }
             let fingerprint = SubscriptionRefreshFingerprint.of(old.refresh)
             if let recovery = record.refreshRecovery, recovery.generation == generation, recovery.tokenFingerprint == fingerprint {
                 throw SIWCError(.signInRequired, Self.refreshExhaustedMessage)
@@ -104,18 +129,40 @@ extension SIWCStore {
             if caller.cancelled { throw CancellationError() }
             let priorOp = record.refreshOp, priorRecovery = record.refreshRecovery
             if recovering { record.refreshRecovery = SubscriptionRefreshRecovery(tokenFingerprint: fingerprint, generation: generation, state: "reserved") }
-            record.refreshOp = SubscriptionRefreshOp(opId: UUID().uuidString, tokenFingerprint: fingerprint, generation: generation,
-                                                     startedAt: clock(), state: "sending")
+            record.refreshOp = SIWCRefreshOp(opId: UUID().uuidString, tokenFingerprint: fingerprint, generation: generation,
+                                             startedAt: nowSeconds, state: "sending")
             try save()
             if caller.cancelled {
                 record.refreshOp = priorOp; record.refreshRecovery = priorRecovery
-                try? save()
+                trySave()
                 throw CancellationError()
             }
-            let sentBinding = record.binding
+            // What was sent: the exact bound state now on disk.
+            guard let sent = Self.boundState(record) else { throw SIWCError(.local, "ChatGPT sign-in state could not be encoded") }
+            /// Re-read the record before ANY settlement write (R1): it must
+            /// still be bound and byte-identical (bound fields and binding) to
+            /// what was sent. A read failure or a mismatch is never equality.
+            func reloadUnchanged() -> Bool {
+                guard let diskFile = try? readTokens(), let disk = diskFile.record(clientId),
+                      let diskRegistration = (try? readRegistrations())??.registration(clientId),
+                      Self.bindingProblem(disk, registration: diskRegistration, key: key) == nil,
+                      Self.boundState(disk) == sent else { return false }
+                // Continue from the current file (keeps unrelated records and
+                // unbound fields written meanwhile), never a stale snapshot.
+                file = diskFile; record = disk
+                return true
+            }
+            /// A changed record keeps received tokens for revocation only,
+            /// written into the CURRENT file without touching anything else.
+            func quarantine(_ refreshToken: String?) {
+                guard let refreshToken, var current = try? readTokens(), current.record(clientId) != nil else { return }
+                current.update(clientId) { $0.cleanup = Array((($0.cleanup ?? []) + [refreshToken]).suffix(64)) }
+                try? writeTokens(current)
+            }
             let updated: SIWCRefreshed
             do { updated = try await refresh(old.refresh) }
             catch {
+                guard reloadUnchanged() else { throw SIWCError(.signInRequired, SIWCError.signInMessage) }
                 switch Self.disposition(error) {
                 case .terminal, .invalidClient:
                     if Self.disposition(error) == .invalidClient { record.invalidClient = true }
@@ -125,53 +172,43 @@ extension SIWCStore {
                         record.tokens = nil
                     }
                     record.refreshOp = nil
-                    try Self.bind(&record, key: key)
-                    try? save()
+                    trySave()
                     throw error
                 case .notSent:
                     record.refreshOp = priorOp; record.refreshRecovery = priorRecovery
-                    try? save()
+                    trySave()
                     throw error
                 case .ambiguous:
                     record.refreshOp?.state = "ambiguous"
                     if recovering { record.refreshRecovery?.state = "exhausted" }
-                    try? save()
+                    trySave()
                     if recovering { throw SIWCError(.signInRequired, Self.refreshExhaustedMessage) }
                     throw error
                 }
             }
-            // HTTP 200 (§7 step 3): checkpoint first (unusable, MAC-bound).
-            let sameAccount = updated.claims.map { Self.mac(key, "siwc-sub", Data($0.sub.utf8)) == oldIdentity.subKey } ?? true
-            let newIdentity = updated.claims.map { Self.identity(key: key, sub: registration.sub, accountId: $0.accountId) } ?? oldIdentity
-            var rotation = SIWCPendingRotation(generation: generation, replaces: fingerprint, tokens: updated.tokens,
-                                               identity: newIdentity, mac: String(repeating: "0", count: 64))
-            rotation.mac = try Self.rotationMAC(key: key, rotation)
-            record.pendingRotation = rotation
-            try? save()
-            // The record must still be the one whose refresh token was sent:
-            // a record changed meanwhile (outside the lock) keeps the received
-            // tokens for revocation only (§3.5 v2.9).
-            if let disk = try? readTokens()?.record(clientId), disk.binding != sentBinding || disk.generation != generation {
-                var current = disk
-                current.pendingRotation = nil
-                current.cleanup = Array(((current.cleanup ?? []) + [updated.tokens.refresh]).suffix(64))
-                file.update(clientId) { $0 = current }
-                try? writeTokens(file)
+            // HTTP 200. Verify the record first (R1), then checkpoint with the
+            // identity verified for THESE tokens (R2), then accept or block.
+            guard reloadUnchanged() else {
+                quarantine(updated.tokens.refresh)
                 throw SIWCError(.signInRequired, SIWCError.signInMessage)
             }
-            guard sameAccount, updated.tokens.valid, updated.tokens.planUsage || !old.planUsage else {
+            let newIdentity = updated.claims.map { Self.identity(key: key, sub: $0.sub, accountId: $0.accountId) } ?? oldIdentity
+            var rotation = SIWCPendingRotation(generation: generation, replaces: fingerprint, tokens: updated.tokens,
+                                               identity: newIdentity, mac: String(repeating: "0", count: 64))
+            rotation.mac = try Self.rotationMAC(key: key, clientId: clientId, rotation)
+            record.pendingRotation = rotation
+            trySave()
+            guard acceptable(updated.tokens, newIdentity) else {
                 record.pendingRotation = nil
                 record.refreshOp = nil
                 record.requiresLogin = true
                 record.cleanup = Array(((record.cleanup ?? []) + [updated.tokens.refresh]).suffix(64))
-                try Self.bind(&record, key: key)
-                try? save()
+                trySave()
                 throw SIWCError(.signInRequired, Self.accountChangedMessage)
             }
             record.tokens = updated.tokens
             record.identity = newIdentity
             record.pendingRotation = nil; record.refreshOp = nil; record.refreshRecovery = nil
-            try Self.bind(&record, key: key)
             do { try save() } catch { throw SIWCError(.transient, Self.refreshNotSavedMessage) }
             return updated.tokens
         }

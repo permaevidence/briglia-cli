@@ -86,21 +86,11 @@ extension ResponsesAdapter {
     static func siwcTransportSend(_ source: SIWCCredentialSource, request: URLRequest, context: ProviderExecutionContext?,
                                   overallTimeout: TimeInterval, connectTimeout: TimeInterval?, idleTimeout: TimeInterval?,
                                   transport: ResponsesHTTPTransport) async throws -> Data {
-        let task = Task<Data, Error> {
-            if adaCLIVersion.hasSuffix("-dev"), let override = siwcSendOverride { return try await override(request) }
+        let override = adaCLIVersion.hasSuffix("-dev") ? siwcSendOverride : nil
+        return try await SIWCFence.shared.runRegistered(source.fenceKey, epoch: source.epoch) {
+            if let override { return try await override(request) }
             return try await transport.send(request, overallTimeout: overallTimeout, connectTimeout: connectTimeout,
                                             idleTimeout: idleTimeout, subscription: false, siwc: true)
-        }
-        let token = try SIWCFence.shared.register(source.fenceKey, epoch: source.epoch) { task.cancel() }
-        defer { SIWCFence.shared.unregister(source.fenceKey, token) }
-        do {
-            return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-        } catch {
-            // Cancelled by a sign-out (not by the caller): typed outcome.
-            if !Task.isCancelled, (try? SIWCFence.shared.check(source.fenceKey, capturedEpoch: source.epoch)) == nil {
-                throw SIWCError(.signedOut, SIWCError.signedOutMessage)
-            }
-            throw error
         }
     }
 
@@ -250,16 +240,20 @@ enum SIWCModels {
                                                        refresh: ResponsesAdapter.siwcRefresher(source, budget: nil))
         try ResponsesAdapter.siwcPreSend(source, request: request)
         request.setValue("Bearer " + tokens.access, forHTTPHeaderField: "Authorization")
-        let (data, status): (Data, Int)
-        if adaCLIVersion.hasSuffix("-dev"), let fetchOverride { (data, status) = try await fetchOverride(request) }
-        else {
-            let reply = try await SubscriptionAuthHTTP(deadline: 30).perform(request)
-            (data, status) = (reply.0, reply.1)
+        let override = adaCLIVersion.hasSuffix("-dev") ? fetchOverride : nil
+        let pending = request
+        // Registered like every SIWC send (R4): a sign-out cancels it and a
+        // late reply is never cached or returned.
+        let (data, status): (Data, Int) = try await SIWCFence.shared.runRegistered(source.fenceKey, epoch: source.epoch) {
+            if let override { return try await override(pending) }
+            let reply = try await SubscriptionAuthHTTP(deadline: 30).perform(pending)
+            return (reply.0, reply.1)
         }
         guard status == 200 else {
             throw SIWCErrors.classify(status: status, body: data) ?? SIWCError(.transient, "ChatGPT's model list is unavailable (HTTP \(status)).")
         }
         let models = try parse(data)
+        try SIWCFence.shared.check(source.fenceKey, capturedEpoch: source.epoch)
         lock.lock(); cache[source.fenceKey] = (Date(), models); lock.unlock()
         return models
     }
@@ -270,8 +264,12 @@ enum SIWCModels {
     static func requireListed(_ model: String, source: SIWCCredentialSource) async throws {
         let models: [Model]
         if let cached = cached(source) { models = cached }
-        else if let fetched = try? await fetch(source) { models = fetched }
-        else { return }
+        else {
+            do { models = try await fetch(source) }
+            catch let error as SIWCError where error.kind != .transient && error.kind != .local && error.kind != .busy {
+                throw error   // definitive: sign-out, sign-in, eligibility, limit, kill switch
+            } catch { return } // catalogue temporarily unavailable: the request decides
+        }
         guard models.contains(where: { $0.slug == model }) else {
             throw SIWCError(.unsupported, "Model \(model) is not available on your ChatGPT plan. Nothing was retried and no paid path was used.")
         }

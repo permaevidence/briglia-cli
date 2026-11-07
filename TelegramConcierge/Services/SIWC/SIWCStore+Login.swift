@@ -10,7 +10,9 @@ import Crypto
 struct SIWCSignInResult {
     let clientId: String
     let newRegistration: Bool
-    let tokens: SIWCTokens
+    /// nil for a verified identity-only grant (no plan-usage scope, no
+    /// refresh token, §3.2 step 7 / P4a): saved with plan usage off.
+    let tokens: SIWCTokens?
     let claims: SIWCJWT.Claims
 }
 
@@ -23,6 +25,8 @@ enum SIWCSaveOutcome: Equatable {
 }
 
 extension SIWCStore {
+    /// Deviation 1 (Codex round 1): an explicit, workable recovery.
+    static let missingKeyMessage = "Briglia can't verify its saved ChatGPT sign-ins (their integrity key is missing), so they stay unusable. Delete this store's chatgpt-siwc-registrations.json and subscription-siwc-auth.json, then sign in again. Nothing was changed."
     static let supersededMessage = "This ChatGPT sign-in was cancelled or superseded; start it again."
     static let differentAccountMessage = "This ChatGPT account is not the one saved for this sign-in. Nothing was changed; sign in with the same account or add a new sign-in."
 
@@ -61,28 +65,34 @@ extension SIWCStore {
                         throw SIWCError(.local, Self.differentAccountMessage)
                     }
                 }
-                guard result.tokens.valid else { throw SIWCError(.local, "ChatGPT returned an invalid credential. Nothing was saved.") }
+                if let tokens = result.tokens {
+                    guard tokens.valid else { throw SIWCError(.local, "ChatGPT returned an invalid credential. Nothing was saved.") }
+                }
+                let planUsage = result.tokens?.planUsage ?? false
                 let hasRecords = !(file.records.isEmpty)
                 let key: SymmetricKeyBox
                 if let k = try integrityKey(create: false) { key = SymmetricKeyBox(k) }
                 else {
                     // A key missing while records exist is never re-created:
                     // those records would become "bound" under a new key.
-                    guard !hasRecords else { throw SIWCError(.local, "The ChatGPT integrity key is missing; sign-in records are kept unusable. Remove them with sign-out first.") }
+                    guard !hasRecords else { throw SIWCError(.local, Self.missingKeyMessage) }
                     key = SymmetricKeyBox(try integrityKey(create: true)!)
                 }
                 let identity = Self.identity(key: key.key, sub: result.claims.sub, accountId: result.claims.accountId)
                 if existing == nil {
                     registrations.registrations.append(SIWCRegistration(clientId: result.clientId, issuer: SIWCEndpoint.issuer,
                         sub: result.claims.sub, email: result.claims.email,
-                        label: label ?? (result.claims.email ?? "ChatGPT"), planUsageEnabled: result.tokens.planUsage,
+                        label: label ?? (result.claims.email ?? "ChatGPT"), planUsageEnabled: planUsage,
                         createdAt: nowSeconds, hostFingerprint: hostFingerprint))
                     // Harmless metadata first (an orphan entry after a crash
                     // has no tokens and changes no route).
                     try writeRegistrations(registrations)
                 } else if let index = registrations.registrations.firstIndex(where: { $0.clientId == result.clientId }) {
-                    if registrations.registrations[index].planUsageEnabled != result.tokens.planUsage {
-                        registrations.registrations[index].planUsageEnabled = result.tokens.planUsage
+                    // An identity-only grant never downgrades a record in use
+                    // (refused below); otherwise the display flag follows.
+                    if registrations.registrations[index].planUsageEnabled != planUsage,
+                       result.tokens != nil || !(inUseByCaller || registrations.active == result.clientId) {
+                        registrations.registrations[index].planUsageEnabled = planUsage
                         try writeRegistrations(registrations)
                     }
                 }
@@ -92,9 +102,11 @@ extension SIWCStore {
                     // An existing record must be intact to be extended: a
                     // tampered one is replaced only when it is not in use.
                     let intact = Self.bindingProblem(record, registration: registrations.registration(result.clientId), key: key.key) == nil
-                    if inUse && intact {
+                    if inUse && result.tokens == nil {
+                        throw SIWCError(.planUsageOff, "This sign-in didn't include plan usage, so the ChatGPT login in use was kept unchanged. Sign in again and allow plan usage.")
+                    } else if inUse && intact, let newTokens = result.tokens {
                         if let older = record.staged { record.cleanup = (record.cleanup ?? []) + [older.tokens.refresh] }
-                        let staged = SIWCStagedReplacement(replacementId: UUID().uuidString, tokens: result.tokens, identity: identity,
+                        let staged = SIWCStagedReplacement(replacementId: UUID().uuidString, tokens: newTokens, identity: identity,
                             hostFingerprint: hostFingerprint, generationToBe: UUID().uuidString)
                         record.staged = staged
                         outcome = .staged(clientId: result.clientId, replacementId: staged.replacementId, generationToBe: staged.generationToBe)
@@ -106,7 +118,8 @@ extension SIWCStore {
                         if let old = record.staged?.tokens.refresh { retired.append(old) }
                         if let old = record.pendingRotation?.tokens.refresh { retired.append(old) }
                         record = SIWCTokenRecord(clientId: result.clientId, generation: UUID().uuidString, tokens: result.tokens,
-                                                 identity: identity, signedInBy: file.pendingLoginBy)
+                                                 identity: identity, signedInBy: file.pendingLoginBy,
+                                                 planUsageOff: result.tokens == nil ? true : nil)
                         record.cleanup = retired.isEmpty ? nil : Array(retired.suffix(64))
                         outcome = .saved(clientId: result.clientId, generation: record.generation)
                     }
@@ -116,7 +129,8 @@ extension SIWCStore {
                     file.update(result.clientId) { $0 = record }
                 } else {
                     var record = SIWCTokenRecord(clientId: result.clientId, generation: UUID().uuidString, tokens: result.tokens,
-                                                 identity: identity, signedInBy: file.pendingLoginBy)
+                                                 identity: identity, signedInBy: file.pendingLoginBy,
+                                                 planUsageOff: result.tokens == nil ? true : nil)
                     record.lastEffect = effect; record.savedAt = nowSeconds
                     try Self.bind(&record, key: key.key)
                     file.records.append(record)

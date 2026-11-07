@@ -77,6 +77,21 @@ struct SIWCPendingRotation: Codable, Equatable {
     }
 }
 
+/// §7.1 operation record of the SIWC route. Whole-second time, and inside
+/// the record binding (Codex round 1 R7): it decides whether another
+/// refresh may be sent, so it is not an informational field.
+struct SIWCRefreshOp: Codable, Equatable {
+    var opId: String
+    var tokenFingerprint: String
+    var generation: String
+    var startedAt: Int
+    var state: String
+    var valid: Bool {
+        UUID(uuidString: opId) != nil && UUID(uuidString: generation) != nil
+            && SubscriptionRefreshFingerprint.wellFormed(tokenFingerprint) && SubscriptionRefreshOp.states.contains(state)
+    }
+}
+
 struct SIWCTokenRecord: Codable {
     var clientId: String
     var generation: String
@@ -86,12 +101,19 @@ struct SIWCTokenRecord: Codable {
     var invalidClient: Bool? = nil
     var staged: SIWCStagedReplacement? = nil
     var signedInBy: String? = nil
+    /// A verified identity-only grant (§3.2 step 7, P4a): the registration is
+    /// saved, plan usage is off, and there are no tokens to send with.
+    var planUsageOff: Bool? = nil
+    /// §7.1 records: they decide whether a refresh may be sent, so they are
+    /// bound (Codex round 1 R7), presence and absence alike.
+    var refreshOp: SIWCRefreshOp? = nil
+    var refreshRecovery: SubscriptionRefreshRecovery? = nil
     var bindingVersion: Int? = nil
     var binding: String? = nil
     // ---- Outside the binding (explicit, audited list: `unboundCleared`) ----
+    /// Unusable checkpoint with its own MAC (bound to client, generation,
+    /// replaced token and the identity verified for ITS tokens).
     var pendingRotation: SIWCPendingRotation? = nil
-    var refreshOp: SubscriptionRefreshOp? = nil
-    var refreshRecovery: SubscriptionRefreshRecovery? = nil
     /// Old refresh tokens kept only to be revoked; never sent as a credential.
     var cleanup: [String]? = nil
     var lastEffect: SIWCEffectMark? = nil
@@ -102,7 +124,7 @@ struct SIWCTokenRecord: Codable {
     var unboundCleared: SIWCTokenRecord {
         var copy = self
         copy.binding = nil
-        copy.pendingRotation = nil; copy.refreshOp = nil; copy.refreshRecovery = nil
+        copy.pendingRotation = nil
         copy.cleanup = nil; copy.lastEffect = nil; copy.savedAt = nil
         return copy
     }
@@ -294,7 +316,7 @@ struct SIWCStore {
                      accountKey: accountId.map { mac(key, "siwc-account", Data($0.utf8)) })
     }
 
-    static let bindingVersion = 1
+    static let bindingVersion = 2
 
     /// The binding over every bound field of `record` (the record itself with
     /// `unboundCleared` applied, canonical sorted-key JSON).
@@ -310,9 +332,10 @@ struct SIWCStore {
         record.binding = try binding(key: key, record: record)
     }
 
-    static func rotationMAC(key: SymmetricKey, _ rotation: SIWCPendingRotation) throws -> String {
+    /// The checkpoint MAC also names the registration it belongs to.
+    static func rotationMAC(key: SymmetricKey, clientId: String, _ rotation: SIWCPendingRotation) throws -> String {
         var copy = rotation; copy.mac = String(repeating: "0", count: 64)
-        return mac(key, "briglia-siwc-rotation-v1", try encode(copy))
+        return mac(key, "briglia-siwc-rotation-v2|" + clientId, try encode(copy))
     }
 
     /// Nil when `record` carries a valid binding for `registration`; else why
@@ -375,7 +398,9 @@ struct SIWCStore {
         if let problem = Self.bindingProblem(record, registration: registration, key: key) { return .signInRequired(problem) }
         if record.invalidClient == true { return .invalidClient }
         guard record.requiresLogin != true else { return .signInRequired("sign-in required") }
-        guard let tokens = record.tokens, record.identity != nil else { return .signInRequired("signed out") }
+        guard let tokens = record.tokens, record.identity != nil else {
+            return record.planUsageOff == true ? .planUsageOff : .signInRequired("signed out")
+        }
         guard tokens.planUsage else { return .planUsageOff }
         return .usable
     }
@@ -449,4 +474,3 @@ struct SIWCStore {
         return expires > nowSeconds
     }
 }
-

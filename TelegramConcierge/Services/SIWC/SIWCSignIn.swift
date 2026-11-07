@@ -99,10 +99,12 @@ struct SIWCSignIn {
     /// access token, a refresh token (rotated every refresh, §1), a bounded
     /// `expires_in`; `scope` absent keeps `previousScopes` only if there are
     /// some. Never echoes body text.
-    static func parseTokens(_ data: Data, now: Int, previousScopes: [String]?) throws -> (SIWCTokens, String?) {
+    /// Parse a token-endpoint reply. Returns nil tokens for a verified-to-be
+    /// identity-only grant (no plan-usage scope and no refresh token, P4a);
+    /// a plan grant without a refresh token is refused.
+    static func parseTokens(_ data: Data, now: Int, previousScopes: [String]?) throws -> (SIWCTokens?, String?) {
         let object = try SIWCAuthClient.object(data)
         guard let access = object["access_token"] as? String, !access.isEmpty,
-              let refresh = object["refresh_token"] as? String, !refresh.isEmpty,
               let type = object["token_type"] as? String, type.lowercased() == "bearer" else {
             throw SIWCError(.local, "ChatGPT sign-in returned an incomplete credential. Nothing was saved.")
         }
@@ -128,6 +130,15 @@ struct SIWCSignIn {
         }
         let idToken = (object["id_token"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         if object["id_token"] != nil && idToken == nil { throw SIWCError(.local, "ChatGPT sign-in returned a malformed ID token. Nothing was saved.") }
+        if object["refresh_token"] != nil && (object["refresh_token"] as? String ?? "").isEmpty {
+            throw SIWCError(.local, "ChatGPT sign-in returned an incomplete credential. Nothing was saved.")
+        }
+        guard let refresh = object["refresh_token"] as? String else {
+            guard !scopes.contains(SIWCEndpoint.planScope) else {
+                throw SIWCError(.local, "ChatGPT sign-in returned an incomplete credential. Nothing was saved.")
+            }
+            return (nil, idToken)   // identity only: the access token is never kept or sent
+        }
         let tokens = SIWCTokens(access: access, refresh: refresh, idToken: idToken, tokenType: "Bearer", scopes: scopes,
                                 expiresAt: now + Int(number.doubleValue), earliestRefreshAt: earliest)
         guard tokens.valid else { throw SIWCError(.local, "ChatGPT sign-in returned an invalid credential. Nothing was saved.") }
@@ -173,7 +184,10 @@ struct SIWCSignIn {
                                               ("refresh_token", refreshToken), ("resource", SIWCEndpoint.resource)])
             guard reply.status == 200 else { throw tokenFailure(status: reply.status, data: reply.data) }
             let now = Int(clock().timeIntervalSince1970)
-            let (tokens, idToken) = try parseTokens(reply.data, now: now, previousScopes: previousScopes)
+            let (parsed, idToken) = try parseTokens(reply.data, now: now, previousScopes: previousScopes)
+            guard let tokens = parsed else {
+                throw SIWCError(.local, "ChatGPT returned a refresh without plan usage. Nothing was changed.")
+            }
             var claims: SIWCJWT.Claims? = nil
             if let idToken {
                 let discovery = try await auth.discovery()
@@ -190,7 +204,7 @@ struct SIWCSignIn {
     func save(_ result: SIWCSignInResult, attempt: SIWCAttempt, inUseByCaller: Bool = false,
               effect: SIWCEffectMark? = nil) async throws -> SIWCSaveOutcome {
         guard now < attempt.expiresAt else {
-            await revokeBestEffort(result.tokens.refresh, clientId: result.clientId)
+            if let refresh = result.tokens?.refresh { await revokeBestEffort(refresh, clientId: result.clientId) }
             throw SIWCError(.local, SIWCHost.expiredMessage)
         }
         do {
@@ -199,7 +213,7 @@ struct SIWCSignIn {
                                         inUseByCaller: inUseByCaller, effect: effect)
         } catch {
             // A refused publication revokes the issued tokens best effort.
-            await revokeBestEffort(result.tokens.refresh, clientId: result.clientId)
+            if let refresh = result.tokens?.refresh { await revokeBestEffort(refresh, clientId: result.clientId) }
             throw error
         }
     }

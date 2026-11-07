@@ -74,7 +74,7 @@ extension SIWCSelftest {
             ("owner field", { $0.signedInBy = "other" }),
             ("requiresLogin", { $0.requiresLogin = false }),
             ("invalidClient", { $0.invalidClient = false }),
-            ("binding version", { $0.bindingVersion = 2 }),
+            ("binding version", { $0.bindingVersion = SIWCStore.bindingVersion + 1 }),
             ("binding removed", { $0.binding = nil }),
             ("binding malformed", { $0.binding = "zz" + String(repeating: "0", count: 62) }),
             ("staged replacement", { $0.staged = SIWCStagedReplacement(replacementId: UUID().uuidString, tokens: SIWCSelftest.tokens("S"),

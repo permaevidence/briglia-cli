@@ -48,11 +48,8 @@ extension SubscriptionWebTransport {
         return valid
     }
 
-    static func postSIWC(body: [String: JSONValue], lane: AffinityLane, timeout: TimeInterval,
+    static func postSIWC(body: [String: JSONValue], source: SIWCCredentialSource, lane: AffinityLane, timeout: TimeInterval,
                          deadline: ExtractorDeadline?) async throws -> Data {
-        guard let source = try ChatGPTRoute.currentSource() else {
-            throw SubscriptionError("The ChatGPT subscription is no longer the active provider")
-        }
         if let model = body["model"]?.responsesString { try await SIWCModels.requireListed(model, source: source) }
         var request = try buildSIWCRequest(body: body, source: source, lane: lane, timeout: timeout)
         let advertised = Set((body["tools"]?.responsesArray ?? []).compactMap { $0.responsesObject?["name"]?.responsesString })

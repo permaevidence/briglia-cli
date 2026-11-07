@@ -77,11 +77,15 @@ enum SubscriptionWebTransport {
     /// retried here); a pause that would reach it stops at once. The login
     /// lookup/refresh is never cut by it.
     static func post(body: [String: JSONValue], lane: AffinityLane, timeout: TimeInterval,
-                     deadline: ExtractorDeadline? = nil) async throws -> Data {
-        switch ChatGPTRoute.resolve(stored: KeychainHelper.loadSnapshot()) {
-        case .siwc, .ambiguous, .disabled:
-            return try await postSIWC(body: body, lane: lane, timeout: timeout, deadline: deadline)
-        case .legacy, .notChatGPT: break
+                     deadline: ExtractorDeadline? = nil, operation: SIWCOperationCapture? = nil) async throws -> Data {
+        // A web run passes its route captured at run start; without one the
+        // route is read now (one-shot callers).
+        switch operation ?? SIWCOperationCapture.capture() {
+        case .source(let source):
+            return try await postSIWC(body: body, source: source, lane: lane, timeout: timeout, deadline: deadline)
+        case .failure(let message):
+            throw SIWCError(.signInRequired, message)
+        case .notSIWC: break
         }
         guard let captured = activeGeneration() else {
             throw SubscriptionError("The ChatGPT subscription is no longer the active provider")

@@ -67,6 +67,52 @@ final class SIWCFence: @unchecked Sendable {
         }
     }
 
+    /// Run `operation` as a registered in-flight request of `key` (Codex
+    /// round 1 R3/R4). Admission happens BEFORE the operation can start:
+    /// a fenced registration never starts it. A sign-out that lands between
+    /// admission and the task's installation is not missed: the handle
+    /// cancels the task when it is installed, and the operation itself
+    /// re-checks the handle before it does anything. A result that arrives
+    /// after a sign-out is never delivered (`signedOut`).
+    func runRegistered<T>(_ key: String, epoch: Int, _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        let handle = SendHandle()
+        let token = try register(key, epoch: epoch) { handle.cancel() }
+        defer { unregister(key, token) }
+        let task = Task<T, Error> {
+            guard !handle.isCancelled else { throw CancellationError() }
+            return try await operation()
+        }
+        handle.install(task)
+        do {
+            let value = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+            try check(key, capturedEpoch: epoch)
+            return value
+        } catch {
+            if !Task.isCancelled, (try? check(key, capturedEpoch: epoch)) == nil {
+                throw SIWCError(.signedOut, SIWCError.signedOutMessage)
+            }
+            throw error
+        }
+    }
+
+    final class SendHandle: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        private var cancelTask: (() -> Void)?
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+        func cancel() {
+            lock.lock(); cancelled = true; let c = cancelTask; lock.unlock()
+            c?()
+        }
+        func install<T>(_ task: Task<T, Error>) {
+            lock.lock()
+            cancelTask = { task.cancel() }
+            let already = cancelled
+            lock.unlock()
+            if already { task.cancel() }
+        }
+    }
+
     /// Selftests only.
     func resetForTests() { lock.lock(); epochs = [:]; fenced = []; inflight = [:]; lock.unlock() }
 }

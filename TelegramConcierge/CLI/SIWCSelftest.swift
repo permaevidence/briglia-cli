@@ -61,6 +61,7 @@ struct SIWCSelftest: AsyncParsableCommand {
             ("body", Self.bodyTests), ("route", Self.routeTests), ("adapter", Self.adapterTests),
             ("adapter2", Self.adapterSignOutTests), ("web", Self.webTests), ("models", Self.modelsTests),
             ("errors", Self.errorTests), ("hostile", Self.hostilePrefixTests), ("legacy", Self.legacyUnchangedTests),
+            ("round1", Self.round1Tests), ("round1host", Self.round1HostTests),
         ]
         for (name, group) in groups where only == nil || only == name {
             print("— \(name)")
@@ -131,6 +132,18 @@ struct SIWCSelftest: AsyncParsableCommand {
     static func tamper(_ store: SIWCStore, _ clientId: String, _ change: (inout SIWCTokenRecord) -> Void) throws {
         var file = try store.readTokens()!
         file.update(clientId, change)
+        _ = try PrivateStorage.writeAtomically(try SIWCStore.encode(file), to: store.tokenFile)
+    }
+
+    /// Rewrite one record and REBIND it with the store's key: what a
+    /// cooperating process (the same store code, another moment) leaves.
+    static func rewriteBound(_ store: SIWCStore, _ clientId: String, _ change: (inout SIWCTokenRecord) -> Void) throws {
+        let key = try store.integrityKey(create: false)!
+        var file = try store.readTokens()!
+        var record = file.record(clientId)!
+        change(&record)
+        try SIWCStore.bind(&record, key: key)
+        file.update(clientId) { $0 = record }
         _ = try PrivateStorage.writeAtomically(try SIWCStore.encode(file), to: store.tokenFile)
     }
 
