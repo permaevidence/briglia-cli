@@ -145,8 +145,11 @@ extension SIWCSelftest {
                 && (try? s3.validate(clientId: "oaiappClientA", generation: g3)) != nil)
         // A tampered checkpoint is never promoted.
         let (s4, _, g4) = try await activeStore(root, tokens: tokens("M", expiresIn: 10))
+        // Correct generation, replaced token and identity; only the MAC is wrong.
         var forged = rotation; forged.generation = g4
         forged.replaces = SubscriptionRefreshFingerprint.of("synthetic-refresh-M")
+        forged.identity = s4.readTokens_unsafe("oaiappClientA")!.identity!
+        forged.mac = String(repeating: "e", count: 64)
         try tamper(s4, "oaiappClientA") { $0.pendingRotation = forged }
         let s4sends = Sends()
         let fresh = try await s4.credential(clientId: "oaiappClientA", generation: g4) { r in s4sends.add(); return rotated(r) }

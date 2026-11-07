@@ -109,9 +109,12 @@ BREAKS = [
      "                if let requiredNamespace, item[\"namespace\"] != nil, item[\"namespace\"]?.responsesString != requiredNamespace {"),
     ("S36 session_id uses the legacy derivation", "session_id: never the legacy derivation", W + "SIWCRoute.swift",
      "    var affinityKey: String { \"briglia-siwc-v1:\" + identityFingerprint }", "    var affinityKey: String { \"briglia-subscription-v1:\" + generation }"),
-    ("S37 the pre-send gate skips the fence", "signout: the next round cannot send (fenced)", W + "ResponsesAdapter+SIWC.swift",
-     "        try SIWCFence.shared.check(source.fenceKey, capturedEpoch: source.epoch)\n        try source.store.validate",
-     "        try source.store.validate"),
+    # The pre-send gate and the in-flight registry are independent layers
+    # (either alone refuses a fenced send), so each is broken on its own.
+    ("S37 the fence check admits a fenced registration", "fence: the pre-send check refuses after the fence", W + "SIWCFence.swift",
+     "        guard !fenced.contains(key), epochs[key, default: 0] == capturedEpoch else {", "        guard true else {"),
+    ("S51 the in-flight registry admits a fenced registration", "fence: a request started after the fence is refused", W + "SIWCFence.swift",
+     "        guard !fenced.contains(key), epochs[key, default: 0] == epoch else {", "        guard true else {"),
     ("S38 an ambiguous selection lets web move elsewhere", "web: an ambiguous SIWC selection still follows", S + "WebOrchestrator.swift",
      "        case .siwc, .ambiguous, .disabled: return true\n        case .legacy, .notChatGPT: break\n        }\n        guard stored[ProviderProfiles.activeProfileKey]",
      "        case .siwc: return true\n        case .ambiguous, .disabled: return false\n        case .legacy, .notChatGPT: break\n        }\n        guard stored[ProviderProfiles.activeProfileKey]"),
