@@ -115,6 +115,7 @@ struct SIWCError: Error, LocalizedError, Equatable {
         case local               // local refusal (destination, normalizer, store)
         case invalidClient       // registration configuration broken (§3.3)
         case planUsageOff        // granted scopes lack plan usage (§3.2 step 7)
+        case loginChanged        // the login changed under this operation: terminal for it, never retried
     }
     let kind: Kind
     let message: String
@@ -125,6 +126,7 @@ struct SIWCError: Error, LocalizedError, Equatable {
     }
     var errorDescription: String? { message }
 
+    static let loginChangedMessage = "The ChatGPT login changed while this request was running; start a new request."
     static let signInMessage = "ChatGPT sign-in for Briglia has expired or was revoked. Sign in again."
     static let signedOutMessage = "Signed out of ChatGPT."
     static let limitMessage = "ChatGPT usage limit reached for Briglia. Review your plan or this app's limit in ChatGPT settings (Manage usage: chatgpt.com/settings/usage). No API billing fallback was attempted."

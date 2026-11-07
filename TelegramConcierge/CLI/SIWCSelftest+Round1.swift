@@ -26,10 +26,12 @@ extension SIWCSelftest {
         c.check("R1: the edited record stays unusable (never repaired)", (try? s1.validate(clientId: client, generation: g1)) == nil)
         // R1 (b): a legitimately rebound replacement during the send.
         let (s1b, _, g1b) = try await activeStore(root, tokens: tokens("R1B", expiresIn: 10))
-        let refused1b = (try? await s1b.credential(clientId: client, generation: g1b) { refresh in
-            try rewriteBound(s1b, client) { $0.tokens?.access = "synthetic-rebound-access" }
-            return rotated(refresh, tag: "R1B-received")
-        }) == nil
+        var kind1b: SIWCError.Kind?
+        do { _ = try await s1b.credential(clientId: client, generation: g1b) { refresh in
+                try rewriteBound(s1b, client) { $0.tokens?.access = "synthetic-rebound-access" }
+                return rotated(refresh, tag: "R1B-received") } }
+        catch let e as SIWCError { kind1b = e.kind }
+        let refused1b = kind1b == .loginChanged
         let disk1b = s1b.readTokens_unsafe(client)
         c.check("R1: a rebound replacement during the refresh is kept, the received set is not activated",
                 refused1b && disk1b?.tokens?.access == "synthetic-rebound-access" && disk1b?.cleanup?.contains("synthetic-refresh-R1B-R1B-received") == true

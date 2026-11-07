@@ -159,10 +159,20 @@ extension SIWCStore {
                 current.update(clientId) { $0.cleanup = Array((($0.cleanup ?? []) + [refreshToken]).suffix(64)) }
                 try? writeTokens(current)
             }
+            /// Codex round 2 Q3: a changed but still usable current record ends
+            /// this operation with "login changed" (never retried, never
+            /// rebound); a missing, corrupt or unusable one needs a sign-in.
+            func changedOutcome() -> SIWCError {
+                guard let disk = (try? readTokens())??.record(clientId),
+                      usability(disk, registration: (try? readRegistrations())??.registration(clientId), key: key) == .usable else {
+                    return SIWCError(.signInRequired, SIWCError.signInMessage)
+                }
+                return SIWCError(.loginChanged, SIWCError.loginChangedMessage)
+            }
             let updated: SIWCRefreshed
             do { updated = try await refresh(old.refresh) }
             catch {
-                guard reloadUnchanged() else { throw SIWCError(.signInRequired, SIWCError.signInMessage) }
+                guard reloadUnchanged() else { throw changedOutcome() }
                 switch Self.disposition(error) {
                 case .terminal, .invalidClient:
                     if Self.disposition(error) == .invalidClient { record.invalidClient = true }
@@ -190,7 +200,7 @@ extension SIWCStore {
             // identity verified for THESE tokens (R2), then accept or block.
             guard reloadUnchanged() else {
                 quarantine(updated.tokens.refresh)
-                throw SIWCError(.signInRequired, SIWCError.signInMessage)
+                throw changedOutcome()
             }
             let newIdentity = updated.claims.map { Self.identity(key: key, sub: $0.sub, accountId: $0.accountId) } ?? oldIdentity
             var rotation = SIWCPendingRotation(generation: generation, replaces: fingerprint, tokens: updated.tokens,

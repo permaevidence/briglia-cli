@@ -873,6 +873,24 @@ actor WebOrchestrator {
     }
 
     private var executionStates: [UUID: ExecutionState] = [:]
+
+    /// Stage dispatch honours the run's captured SIWC route (round 2 R5).
+    static func stageBackend(_ current: WebSearchBackend, capture: SIWCOperationCapture?) -> WebSearchBackend {
+        switch capture {
+        case .source?, .failure?: return .chatgpt
+        case .notSIWC?, nil: return current
+        }
+    }
+
+    /// The route captured at the start of `executionID`'s run. A missing
+    /// state is a bug, never a reason to capture now (SIWC round 2 R5).
+    private func capturedOperation(_ executionID: UUID) throws -> SIWCOperationCapture {
+        guard let capture = executionStates[executionID]?.siwc else {
+            throw NSError(domain: "WebOrchestrator", code: 6, userInfo: [
+                NSLocalizedDescriptionKey: "internal: a ChatGPT web request outside a captured web run"])
+        }
+        return capture
+    }
     /// The legacy loop's agent-round backend per run, fixed at run start so a
     /// mid-run /provider hop (which moves `WebSearchBackend.active` on or off
     /// the subscription) never switches a transcript's transport. A
@@ -1069,6 +1087,11 @@ actor WebOrchestrator {
         executionID: UUID,
         agentService: OpenRouterService? = nil
     ) async throws -> String {
+        // `answer` is itself an entry point: a run without state gets one here
+        // (the ChatGPT route captured at its start, SIWC round 2 R5).
+        let ownsState = executionStates[executionID] == nil
+        if ownsState { executionStates[executionID] = ExecutionState() }
+        defer { if ownsState { executionStates.removeValue(forKey: executionID) } }
         let backend = WebSearchBackend.active
         agentBackend[executionID] = backend
         defer { agentBackend[executionID] = nil }
@@ -1641,7 +1664,7 @@ actor WebOrchestrator {
         var attempt = 1
         while true {
             let data = try await SubscriptionWebTransport.post(body: body, lane: .ephemeral(executionID), timeout: generous ? 600 : 180,
-                                                               operation: executionStates[executionID]?.siwc)
+                                                               operation: try capturedOperation(executionID))
             var detail = "empty response body"
             if let resp = try? JSONDecoder().decode(OAIResponsesResp.self, from: data) {
                 let output = resp.output ?? []
@@ -2038,10 +2061,14 @@ actor WebOrchestrator {
         executionID: UUID
     ) async throws -> String {
         let selection = WebSearchBackend.activeSelection
-        let backend = selection.backend
+        var backend = selection.backend
         let route = WebSearchBackend.stageRoute(followsMainOpenRouter: selection.followsMainOpenRouter,
             model: model, reasoning: reasoning, provider: provider, hasResponseFormat: responseFormat != nil)
         let model = route.model, reasoning = route.reasoning, provider = route.provider
+        // An operation captured on the SIWC route stays on it whatever the
+        // provider is now (SIWC round 2 R5): a later switch never moves its
+        // remaining stages to another (possibly paid) backend.
+        backend = Self.stageBackend(backend, capture: executionStates[executionID]?.siwc)
         if backend == .chatgpt {
             return try await callSubscriptionStage(
                 stage: stage, mode: mode, model: model, messages: messages,
@@ -2261,7 +2288,7 @@ actor WebOrchestrator {
             var detail = "empty response body"
             do {
                 let data = try await SubscriptionWebTransport.post(body: body, lane: .ephemeral(executionID), timeout: max(timeout, 120), deadline: deadline,
-                                                                   operation: executionStates[executionID]?.siwc)
+                                                                   operation: try capturedOperation(executionID))
                 if let resp = try? JSONDecoder().decode(OAIResponsesResp.self, from: data) {
                     let text = SubscriptionWebTransport.outputText(resp)
                     webLog("[WebOrchestrator] chatgpt response stage=\(stage) mode=\(modeLabel(mode)) status=\(resp.status ?? "nil") chars=\(text.count) tokens=\(resp.usage?.input_tokens.map(String.init) ?? "?")/\(resp.usage?.output_tokens.map(String.init) ?? "?")")
@@ -2575,8 +2602,11 @@ actor WebOrchestrator {
         let sectionOffset = max(0, sectionOffset)
         // One execution (= one affinity lane) for the whole fetch: the
         // one-shot compression, every parallel chunk and the merge pass
-        // share it (Codex round 1).
+        // share it (Codex round 1). Its state (and the ChatGPT route captured
+        // at its start, SIWC round 2 R5) lives until the fetch returns.
         let executionID = UUID()
+        executionStates[executionID] = ExecutionState()
+        defer { executionStates.removeValue(forKey: executionID) }
 
         let normalizedURL = normalize(url)
 

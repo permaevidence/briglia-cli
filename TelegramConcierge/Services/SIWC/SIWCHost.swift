@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
 #if canImport(CryptoKit)
 import CryptoKit
 #else
@@ -63,17 +68,39 @@ enum SIWCHost {
         static func liveStoreDirectories(environment: [String: String] = ProcessInfo.processInfo.environment) -> [URL]? {
             var out = [MachinePaths.defaultConfigRoot()]
             let root = AssistantProfile.configBase(environment).appendingPathComponent(AssistantProfile.extrasDirName, isDirectory: true)
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) else { return out }
-            guard isDirectory.boolValue, let names = try? FileManager.default.contentsOfDirectory(atPath: root.path) else { return nil }
+            // Error-preserving existence (round 2 R8): only a definite ENOENT
+            // on lstat means "no extras"; EACCES, a broken link, or anything
+            // else is uncertain. `fileExists` cannot tell these apart.
+            switch kind(root.path) {
+            case .absent: return out
+            case .directory: break
+            case .other, .uncertain: return nil
+            }
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: root.path) else { return nil }
             for name in names.sorted() where !name.hasPrefix(".") {
                 let url = root.appendingPathComponent(name, isDirectory: true)
-                guard let type = try? FileManager.default.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType else { return nil }
-                if type == .typeDirectory { out.append(url) }
+                switch kind(url.path) {
+                case .directory: out.append(url)
+                case .other: continue                 // a stray regular file is not a store
+                case .absent, .uncertain: return nil  // vanished or unknown: fail safe
+                }
             }
             return out
         }
         var reservationsFile: URL { machineDir.appendingPathComponent(SIWCEndpoint.reservationsFileName) }
+    }
+
+    enum PathKind { case absent, directory, other, uncertain }
+
+    /// lstat first (ENOENT = absent only when the path itself is missing),
+    /// then stat to follow a symbolic link; a broken or unreadable link, or
+    /// any other errno, is uncertain.
+    static func kind(_ path: String) -> PathKind {
+        var link = stat()
+        if lstat(path, &link) != 0 { return errno == ENOENT ? .absent : .uncertain }
+        var target = stat()
+        if stat(path, &target) != 0 { return .uncertain }
+        return (target.st_mode & S_IFMT) == S_IFDIR ? .directory : .other
     }
 
     static let unreadableMessage = "Briglia can't read this computer's ChatGPT app ID; nothing was changed."
