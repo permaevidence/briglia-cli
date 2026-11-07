@@ -49,20 +49,21 @@ extension ProfileHarness {
 
     func siwcSection() {
         let offline = ["BRIGLIA_TEST_SIWC_OFFLINE": "1"]
+        // Reuses the chatgpt section's extras (the machine allows 8 assistants).
         // 1. own → shared retires the own SIWC store in the journaled transition.
-        guard ensureExtra("sx", display: "Sx") else { check("siwc: extra sx", false); return }
-        let toOwn = run(["--profile", "sx", "subscription", "scope", "own"], extraEnv: offline)
+        guard ensureExtra("sa", display: "Sa") else { check("siwc: extra sa", false); return }
+        let toOwn = run(["--profile", "sa", "subscription", "scope", "own"], extraEnv: offline)
         check("siwc scope: an extra moves to its own login", toOwn.status == 0, toOwn.out)
-        let ownDir = URL(fileURLWithPath: configBase + "/briglia-profiles/sx", isDirectory: true)
+        let ownDir = URL(fileURLWithPath: configBase + "/briglia-profiles/sa", isDirectory: true)
         guard let generation = siwcSignedIn(ownDir, clientId: "oaiappScopeX", sub: "sub-scope-x") else { check("siwc: own login fixture", false); return }
         var selection: [String: String] = [:]
         for (k, v) in SIWCSelection.activationDelta(.init(clientId: "oaiappScopeX", sub: "sub-scope-x", generation: generation,
                                                           model: "gpt-6.1-sol", effort: nil, textOnly: false)) { if let v { selection[k] = v } }
-        writeExtraSecrets("sx", merging: selection)
-        let toShared = run(["--profile", "sx", "subscription", "scope", "shared"], extraEnv: offline)
+        writeExtraSecrets("sa", merging: selection)
+        let toShared = run(["--profile", "sa", "subscription", "scope", "shared"], extraEnv: offline)
         let ownStore = SIWCStore(directory: ownDir)
         let record = (try? ownStore.readTokens())?.record("oaiappScopeX")
-        let after = extraSecrets("sx")
+        let after = extraSecrets("sa")
         check("siwc scope: own → shared succeeds", toShared.status == 0, toShared.out)
         check("siwc scope: the own SIWC registrations are signed out with the attempt's effect mark",
               record?.tokens == nil && record?.lastEffect != nil && record?.generation != generation)
@@ -71,15 +72,15 @@ extension ProfileHarness {
         check("siwc scope: the remote revoke result is reported separately (offline: not confirmed)",
               toShared.out.contains("remote sign-out not confirmed"), toShared.out)
         // 2. An unreadable own SIWC store: nothing is published, the scope stays own.
-        guard ensureExtra("sy", display: "Sy") else { check("siwc: extra sy", false); return }
-        _ = run(["--profile", "sy", "subscription", "scope", "own"], extraEnv: offline)
-        let syDir = URL(fileURLWithPath: configBase + "/briglia-profiles/sy", isDirectory: true)
+        guard ensureExtra("sb", display: "Sb") else { check("siwc: extra sb", false); return }
+        _ = run(["--profile", "sb", "subscription", "scope", "own"], extraEnv: offline)
+        let syDir = URL(fileURLWithPath: configBase + "/briglia-profiles/sb", isDirectory: true)
         _ = siwcSignedIn(syDir, clientId: "oaiappScopeY", sub: "sub-scope-y")
         chmod(SIWCStore(directory: syDir).tokenFile.path, 0o644)
-        let refused = run(["--profile", "sy", "subscription", "scope", "shared"], extraEnv: offline)
+        let refused = run(["--profile", "sb", "subscription", "scope", "shared"], extraEnv: offline)
         chmod(SIWCStore(directory: syDir).tokenFile.path, 0o600)
         check("siwc scope: an unreadable own SIWC store refuses with nothing changed (scope stays own)",
-              refused.status != 0 && extraSecrets("sy")[SubscriptionSharing.scopeKey] == SubscriptionSharing.Scope.own.rawValue
+              refused.status != 0 && extraSecrets("sb")[SubscriptionSharing.scopeKey] == SubscriptionSharing.Scope.own.rawValue
               && (try? SIWCStore(directory: syDir).readTokens())?.record("oaiappScopeY")?.tokens != nil, refused.out)
         // 3. profiles add --copy-keys from a default on the SIWC route: selection keys, never a token.
         let machineDir = URL(fileURLWithPath: configBase + "/briglia", isDirectory: true)
@@ -90,6 +91,8 @@ extension ProfileHarness {
         let secretsFile = machineDir.appendingPathComponent("secrets.json")
         let original = FileManager.default.contents(atPath: secretsFile.path)
         try? writeDefaultSecrets(defaults)
+        // The machine allows 8 assistants: free one slot first (sb is done).
+        _ = run(["profiles", "remove", "sb", "--yes", "--no-export"], extraEnv: offline)
         let add = run(["profiles", "add", "sz", "--name", "Sz", "--home", root.appendingPathComponent("home-sz").path, "--copy-keys"], extraEnv: offline)
         let sz = extraSecrets("sz")
         let szText = (try? String(contentsOfFile: configBase + "/briglia-profiles/sz/secrets.json", encoding: .utf8)) ?? ""
