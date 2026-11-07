@@ -221,3 +221,43 @@ enum SIWCWipe {
         }
     }
 }
+
+// MARK: - Own → shared retirement of an own SIWC store (§3.8 R4, Codex C-R2)
+
+enum SIWCScopeRetire {
+    enum Outcome: Equatable {
+        /// Every own registration retired durably.
+        case retired([SIWCStore.Tombstone])
+        /// Retired (visible), durability not confirmed.
+        case retiredUnconfirmed([SIWCStore.Tombstone])
+        /// Nothing replaced.
+        case notRetired(String)
+        /// Not known: the journal stays for recovery.
+        case unknown(String)
+    }
+
+    /// Revocation material of `file` (every refresh token any record held),
+    /// kept across a post-replacement error.
+    static func revokeMaterial(_ file: SIWCTokenFile?) -> [SIWCStore.Tombstone] {
+        (file?.records ?? []).map { record in
+            var revoke = record.cleanup ?? []
+            if let t = record.tokens?.refresh { revoke.append(t) }
+            if let t = record.staged?.tokens.refresh { revoke.append(t) }
+            if let t = record.pendingRotation?.tokens.refresh { revoke.append(t) }
+            return SIWCStore.Tombstone(clientId: record.clientId, generation: "", revoke: revoke)
+        }.filter { !$0.revoke.isEmpty }
+    }
+
+    static func retire(_ store: SIWCStore, effect: SIWCJournalEffect, attempt: String, old: SIWCTokenFile?) async -> Outcome {
+        do {
+            return .retired(try await store.retireAll(effect: effect.mark(attempt: attempt)))
+        } catch {
+            let why = (error as? SIWCError)?.message ?? "\(error)"
+            switch SIWCRecovery.overall(SIWCRecovery.evaluate(effect, attempt: attempt)) {
+            case .applied: return .retiredUnconfirmed(revokeMaterial(old))
+            case .notApplied, .none: return .notRetired(why)
+            case .unknown: return .unknown(why)
+            }
+        }
+    }
+}

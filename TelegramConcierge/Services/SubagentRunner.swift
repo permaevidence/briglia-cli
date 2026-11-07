@@ -656,6 +656,11 @@ actor SubagentRunner {
                 textOnlyOverride: effectiveTextOnlyOverride, lane: .subagent(resolvedSessionId))
             : nil
         let runExecution: ProviderExecutionContext? = webExecution ?? (snapshot.wireProtocol == .responses ? snapshot : nil)
+        // Sign in with ChatGPT: this run is a job of its captured login (a
+        // sign-out of that login cancels it between model requests too).
+        // (A fenced login refuses at its first pre-send check.)
+        let siwcJob = try? SIWCFence.shared.registerCurrentTask(runExecution?.siwc ?? snapshot.siwc)
+        defer { SIWCFence.shared.unregisterJob(siwcJob ?? nil) }
         // WEB_OFFLINE_HANG (owner decision 2026-10-18): the researcher's
         // model ROUNDS (main round, in-loop force-finish, round-limit summary;
         // nested Agent(Web) runs this same code) retry a SILENCE timeout once,

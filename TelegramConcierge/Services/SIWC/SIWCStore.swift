@@ -279,14 +279,17 @@ struct SIWCStore {
         guard file.valid else { throw SIWCError(.local, "Invalid ChatGPT sign-in state; nothing was written.") }
         _ = try readTokens()   // never replace an unreadable/malformed target
         try beforeTokenWrite?()
-        _ = try PrivateStorage.writeAtomically(try Self.encode(file), to: tokenFile)
+        // Phased (stage C, Codex C-R2): a failure AFTER the rename is
+        // `ReplacedButNotDurable`, so callers can tell "nothing changed"
+        // from "changed, durability unknown".
+        _ = try PrivateStorage.writeAtomicallyPhased(try Self.encode(file), to: tokenFile)
         try afterTokenWrite?()
     }
 
     func writeRegistrations(_ file: SIWCRegistrationsFile) throws {
         guard file.valid else { throw SIWCError(.local, "Invalid ChatGPT registrations; nothing was written.") }
         _ = try readRegistrations()
-        _ = try PrivateStorage.writeAtomically(try Self.encode(file), to: registrationsFile)
+        _ = try PrivateStorage.writeAtomicallyPhased(try Self.encode(file), to: registrationsFile)
     }
 
     // MARK: Integrity key and binding (§3.1 v2.8/v2.9)

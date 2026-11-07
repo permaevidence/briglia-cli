@@ -409,14 +409,27 @@ enum SubscriptionSharing {
             _ = try? SettingsPendingStore.update { $0.attempts[attempt]?.steps.append("own-retired") }
         }
         if let siwcEffect {
-            do {
-                retired = try await ownSIWC.retireAll(effect: siwcEffect.mark(attempt: attempt))
-            } catch {
+            // Codex C-R2: the outcome comes from the records' evidence, never
+            // from the error alone; revoke material survives a late error.
+            switch await SIWCScopeRetire.retire(ownSIWC, effect: siwcEffect, attempt: attempt, old: oldOwnSIWC) {
+            case .retired(let tombstones):
+                retired = tombstones
+            case .retiredUnconfirmed(let material):
+                retired = material
+                SettingsSupersede.subscriptionChanged(store: StoragePaths.configRoot.path)
+                _ = try? SettingsPendingStore.update { $0.attempts[attempt]?.steps.append("siwc-retired-unconfirmed") }
+                let named = (retire ? "Own legacy login signed out; own" : "Own") + " Sign in with ChatGPT login signed out (not confirmed durable); scope still own. Run the command again."
+                finish("partial", named)
+                throw SubscriptionError(named)
+            case .notRetired(let why):
                 _ = try? SettingsPendingStore.update { $0.attempts[attempt]?.steps.append("siwc-retire-failed") }
                 let named = retire ? "Own legacy login signed out; own Sign in with ChatGPT login not signed out; scope still own."
                                    : "Own Sign in with ChatGPT login not signed out; nothing changed (scope still own)."
                 finish(retire ? "partial" : "failed", named)
-                throw SubscriptionError(named + " (\((error as? SIWCError)?.message ?? error.localizedDescription))")
+                throw SubscriptionError(named + " (\(why))")
+            case .unknown(let why):
+                // Unresolved: the journal stays; recovery reports from evidence.
+                throw SubscriptionError("Briglia couldn't confirm whether this assistant's own Sign in with ChatGPT login was signed out (\(why)); scope still own. Check `briglia subscription scope`.")
             }
             SettingsSupersede.subscriptionChanged(store: StoragePaths.configRoot.path)
             _ = try? SettingsPendingStore.update { $0.attempts[attempt]?.steps.append("own-siwc-retired") }

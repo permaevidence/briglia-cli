@@ -70,9 +70,13 @@ enum CredentialCatalog {
     /// cleanup list, with distinct labels per store and per registration.
     static func siwcRedactionValues(_ directories: [URL]) -> [String: String] {
         var values: [String: String] = [:]
-        for (index, dir) in directories.enumerated() {
+        // Deduplicated, collision-free labels (Codex C-R1): a store listed
+        // twice counts once; every further store gets its own index.
+        var seen = Set<String>()
+        let unique = directories.filter { seen.insert($0.standardizedFileURL.path).inserted }
+        for (index, dir) in unique.enumerated() {
             guard let file = try? SIWCStore(directory: dir).readTokens() else { continue }
-            let tag = index == 0 ? "" : "_own"
+            let tag = index == 0 ? "" : index == 1 ? "_own" : "_\(index)"
             for (r, record) in file.records.enumerated() {
                 let base = "siwc\(tag)_\(r)_"
                 func add(_ label: String, _ tokens: SIWCTokens?) {

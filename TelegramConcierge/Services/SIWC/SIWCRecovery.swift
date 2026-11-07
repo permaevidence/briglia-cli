@@ -136,7 +136,7 @@ enum SIWCRecovery {
         case .pointer: return "active ChatGPT account switched"
         case .tombstone: return "Sign in with ChatGPT signed out"
         case .retire: return "Sign in with ChatGPT logins signed out"
-        case .cancel: return "pending ChatGPT sign-in cancelled"
+        case .cancel: return "pending ChatGPT sign-in no longer pending"
         }
     }
 

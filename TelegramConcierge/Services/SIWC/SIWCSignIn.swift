@@ -217,10 +217,24 @@ struct SIWCSignIn {
                                         hostFingerprint: attempt.hostFingerprint, hostPaths: hostPaths,
                                         inUseByCaller: inUseByCaller, effect: effect)
         } catch {
-            // A refused publication revokes the issued tokens best effort.
-            if let refresh = result.tokens?.refresh { await revokeBestEffort(refresh, clientId: result.clientId) }
+            // A refused publication revokes the issued tokens best effort —
+            // but never a login that was published before the error (a
+            // failure after the replacement, Codex C-R2).
+            if Self.published(result, effect: effect, in: store) == false,
+               let refresh = result.tokens?.refresh { await revokeBestEffort(refresh, clientId: result.clientId) }
             throw error
         }
+    }
+
+    /// Whether `result` is in the store now: true (published), false (not),
+    /// nil (unknown: the store cannot be read — then nothing is revoked).
+    static func published(_ result: SIWCSignInResult, effect: SIWCEffectMark?, in store: SIWCStore) -> Bool? {
+        let file: SIWCTokenFile?
+        do { file = try store.readTokens() } catch { return nil }
+        guard let record = file?.record(result.clientId) else { return false }
+        if let effect, record.lastEffect == effect { return true }
+        guard let refresh = result.tokens?.refresh else { return record.planUsageOff == true && record.lastEffect == effect }
+        return record.tokens?.refresh == refresh || record.staged?.tokens.refresh == refresh
     }
 
     func revokeBestEffort(_ refreshToken: String, clientId: String) async {

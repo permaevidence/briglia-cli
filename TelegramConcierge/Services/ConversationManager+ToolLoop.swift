@@ -41,6 +41,10 @@ extension ConversationManager {
             reasoningEffortOverride: nil, textOnlyOverride: nil, lane: .main)
         let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
         defer { responsesExecution?.responsesTurn.close() }
+        // Sign in with ChatGPT: this turn is a job of its captured login; a
+        // sign-out of that login cancels it even between model requests.
+        let siwcJob = try SIWCFence.shared.registerCurrentTask(snapshot.siwc)
+        defer { SIWCFence.shared.unregisterJob(siwcJob) }
         if responsesExecution != nil && !saveConversation() {
             throw ResponsesFailure.failed("cannot persist canonical history before Responses dispatch")
         }

@@ -37,10 +37,44 @@ struct SIWCSettingsOp: Codable, Equatable {
 enum SIWCTypeBoundary {
     static let message = "This ChatGPT change would carry a sign-in credential into saved settings; nothing was saved."
 
-    /// Every token string held in `directories`' SIWC stores (current,
-    /// staged, checkpoint, cleanup).
-    static func tokens(in directories: [URL]) -> [String] {
-        Array(CredentialCatalog.siwcRedactionValues(directories).values).filter { $0.utf8.count >= 16 }
+    /// Every credential string held in the SIWC stores of `directories`
+    /// (deduplicated; current, staged, checkpoint and cleanup sets), as a set
+    /// — no labels, no length heuristic: any stored token value counts.
+    static func tokens(in directories: [URL]) -> Set<String> {
+        var seen = Set<String>()
+        var out = Set<String>()
+        for dir in directories where seen.insert(dir.standardizedFileURL.path).inserted {
+            guard let file = try? SIWCStore(directory: dir).readTokens() else { continue }
+            for record in file.records {
+                for set in [record.tokens, record.staged?.tokens, record.pendingRotation?.tokens].compactMap({ $0 }) {
+                    out.insert(set.access); out.insert(set.refresh)
+                    if let id = set.idToken { out.insert(id) }
+                }
+                for token in record.cleanup ?? [] { out.insert(token) }
+            }
+        }
+        out.remove("")
+        return out
+    }
+
+    /// Every string the change carries, DECODED (so JSON escaping cannot hide
+    /// a token): keys and values of the whole change, and of its reply text
+    /// parsed again as JSON.
+    static func strings(of change: PreparedChange) -> [String] {
+        var out: [String] = []
+        func walk(_ value: Any) {
+            switch value {
+            case let s as String:
+                out.append(s)
+                if let data = s.data(using: .utf8), s.first == "{" || s.first == "[",
+                   let nested = try? JSONSerialization.jsonObject(with: data) { walk(nested) }
+            case let d as [String: Any]: for (k, v) in d { out.append(k); walk(v) }
+            case let a as [Any]: for v in a { walk(v) }
+            default: break
+            }
+        }
+        if let data = try? change.encoded(), let object = try? JSONSerialization.jsonObject(with: data) { walk(object) }
+        return out
     }
 
     static func violation(_ change: PreparedChange) -> String? {
@@ -49,8 +83,11 @@ enum SIWCTypeBoundary {
         for key in change.writes.keys where SettingsKeyRoles.role(key) == .credential { return message }
         var directories = SubscriptionSharing.protectedStoreDirectories()
         directories.append(URL(fileURLWithPath: op.store, isDirectory: true))
-        guard let encoded = try? change.encoded(), let text = String(data: encoded, encoding: .utf8) else { return message }
-        for token in tokens(in: directories) where text.contains(token) { return message }
+        let held = tokens(in: directories)
+        guard !held.isEmpty else { return nil }
+        let carried = strings(of: change)
+        guard !carried.isEmpty else { return message }   // undecodable: refuse
+        for text in carried where held.contains(where: { text.contains($0) }) { return message }
         return nil
     }
 }
@@ -100,6 +137,12 @@ struct SIWCActivationPlan {
                                         targets: ["store"], oldEvidence: ["store": .pointer(registrations)])
         return SIWCActivationPlan(store: store, op: op, attempt: attempt, factsOld: factsOld, factsNew: factsNew,
                                   effects: [promote, pointer].compactMap { $0 }, promote: promote, pointer: pointer)
+    }
+
+    /// After a failed `apply`: what each effect's target shows now (read
+    /// under the SIWC lock the writer still holds; Codex C-R2).
+    func evidence() -> [SettingsRecovery.AuthEvidence] {
+        effects.map { SIWCRecovery.overall(SIWCRecovery.evaluate($0, attempt: attempt)) }
     }
 
     /// The durable SIWC step (after the journal intent, before secrets).
@@ -172,8 +215,12 @@ struct SIWCSaveRequest {
 
 enum SIWCSaveCommit: Equatable {
     case saved(SIWCSaveOutcome)
+    /// Published (visible), but the disk did not confirm durability.
+    case savedUnconfirmed(SIWCSaveOutcome)
     case refused(String)
     case failed(String)
+    /// Not known whether it was saved; the journal is kept for recovery.
+    case uncertain(String)
 }
 
 enum SIWCLogoutOutcome: Equatable {
@@ -187,6 +234,7 @@ enum SIWCLogoutOutcome: Equatable {
     static let unconfirmedMessage = "Signed out on this computer; remote sign-out not confirmed. Disconnect Briglia in ChatGPT Settings → Usage (chatgpt.com/settings/usage)."
     static let partialMessage = "Running ChatGPT work was stopped, but the sign-out was not saved. Try again. Until then this assistant sends nothing with that login; after a restart the saved login would be usable again, and other assistants were not stopped by this."
     static let othersMessage = "Signed out. Other assistants stop before their next ChatGPT request; one already under way may finish."
+    static let stoppedJobsMessage = "The ChatGPT work that was running (a reply or a background task) was stopped."
 
     var message: String {
         switch self {
@@ -198,6 +246,14 @@ enum SIWCLogoutOutcome: Equatable {
 }
 
 extension SettingsWriter {
+    /// How many running ChatGPT jobs (turns, subagent runs) the last SIWC
+    /// sign-out of this process stopped (for the surface's message, stage D).
+    nonisolated(unsafe) static var lastLogoutStoppedJobsStorage = 0
+    var lastLogoutStoppedJobs: Int {
+        get { Self.lastLogoutStoppedJobsStorage }
+        set { Self.lastLogoutStoppedJobsStorage = newValue }
+    }
+
     /// Selftest seams.
     nonisolated(unsafe) static var siwcAfterFenceForTesting: (() async -> Void)?
     nonisolated(unsafe) static var siwcBeforeTombstoneForTesting: (() throws -> Void)?
@@ -249,10 +305,29 @@ extension SettingsWriter {
                                pending: nil, state: "applied", message: nil)
             return .saved(outcome)
         } catch {
-            let why = (error as? SIWCError)?.message ?? error.localizedDescription
-            Self.finishAttempt(attempt, change: PreparedChange(id: attempt, origin: "siwc", label: "ChatGPT sign-in", epoch: request.epoch),
-                               pending: nil, state: "failed", message: why)
-            return .failed(why)
+            let why = (error as? SIWCError)?.message ?? "\(error)"
+            let change = PreparedChange(id: attempt, origin: "siwc", label: "ChatGPT sign-in", epoch: request.epoch)
+            // Codex C-R2: classify from the record's evidence, never from the
+            // error alone.
+            switch SIWCRecovery.overall(SIWCRecovery.evaluate(effect, attempt: attempt)) {
+            case .applied:
+                SettingsSupersede.subscriptionChanged(store: store.directory.path)
+                let record = (try? store.readTokens())?.record(request.result.clientId)
+                let outcome: SIWCSaveOutcome
+                if let staged = record?.staged, staged.tokens.refresh == request.result.tokens?.refresh {
+                    outcome = .staged(clientId: request.result.clientId, replacementId: staged.replacementId, generationToBe: staged.generationToBe)
+                } else {
+                    outcome = .saved(clientId: request.result.clientId, generation: record?.generation ?? "")
+                }
+                Self.finishAttempt(attempt, change: change, pending: nil, state: "partial",
+                                   message: "saved; the disk did not confirm the write is durable (\(why))")
+                return .savedUnconfirmed(outcome)
+            case .unknown:
+                return .uncertain("Briglia couldn't confirm whether the ChatGPT sign-in was saved (\(why)); check ChatGPT in the menu.")
+            case .notApplied, .none:
+                Self.finishAttempt(attempt, change: change, pending: nil, state: "failed", message: why)
+                return .failed(why)
+            }
         }
     }
 
@@ -303,8 +378,11 @@ extension SettingsWriter {
         if let why = host?.admissionRefusal() { return .refused(why) }
         guard let epoch = try? ReplacementEpoch.read() else { return .refused("Briglia's settings can't be read; nothing changed.") }
         let target: (clientId: String, generation: String)
-        do {
-            target = try await store.locked { () throws -> (String, String) in
+        // The write-free wait for the SIWC lock runs in a child the gate can
+        // cancel (a lifecycle operation closing admission, Codex C-R3),
+        // like the ordinary writer's pre-commit waits.
+        let validation = Task { () throws -> (String, String) in
+            try await store.locked { () throws -> (String, String) in
                 guard let registrations = try store.readRegistrations(), let id = clientId ?? registrations.active,
                       registrations.registration(id) != nil, let record = try store.readTokens()?.record(id) else {
                     throw SIWCError(.local, "No ChatGPT sign-in to sign out. Nothing changed.")
@@ -314,9 +392,17 @@ extension SettingsWriter {
                 }
                 return (id, record.generation)
             }
-        } catch {
+        }
+        gate.setCancelHandler(token) { validation.cancel() }
+        do { target = try await validation.value } catch {
+            if error is CancellationError { return .refused((gate.admissionClosedReason ?? "cancelled") + " Nothing changed.") }
             return .refused((error as? SIWCError)?.message ?? "\(error.localizedDescription) Nothing changed.")
         }
+        // Revalidated right before the transition (no await between this
+        // check and the fence): admission closed or data replaced during the
+        // write-free wait → refused, nothing interrupted.
+        if let why = host?.admissionRefusal() ?? gate.admissionClosedReason { return .refused(why + " Nothing changed.") }
+        guard (try? ReplacementEpoch.read()) == epoch else { return .refused(Self.epochMessage) }
         // 2. Fence this process's sends, in the same step as the gate phase.
         let key = SIWCFence.key(store: store.directory, clientId: target.clientId)
         gate.enterInterruptingPhase(token)
@@ -324,14 +410,17 @@ extension SettingsWriter {
         await Self.siwcAfterFenceForTesting?()
         // 3. Cancel and drain that login's in-flight requests, outside every lock.
         SIWCFence.shared.cancelAll(key)
+        let stoppedJobs = SIWCFence.shared.cancelJobs(key)
         let deadline = ProcessInfo.processInfo.systemUptime + drainTimeout
-        while SIWCFence.shared.inflightCount(key) > 0, ProcessInfo.processInfo.systemUptime < deadline {
+        while SIWCFence.shared.inflightCount(key) > 0 || SIWCFence.shared.jobCount(key) > 0,
+              ProcessInfo.processInfo.systemUptime < deadline {
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
+        lastLogoutStoppedJobs = stoppedJobs
         // A drain that timed out keeps the fence even after success: a late
         // result of a job that did not exit stays suppressed (its epoch is
         // stale in any case).
-        let drained = SIWCFence.shared.inflightCount(key) == 0
+        let drained = SIWCFence.shared.inflightCount(key) == 0 && SIWCFence.shared.jobCount(key) == 0
         // 4. Durable step: revalidate, journal, tombstone. A refusal now is partial.
         if let why = host?.admissionRefusal() ?? gate.admissionClosedReason {
             return .partial(SIWCLogoutOutcome.partialMessage + " (\(why))")

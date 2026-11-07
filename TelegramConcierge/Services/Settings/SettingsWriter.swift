@@ -127,7 +127,7 @@ final class SettingsWriter {
 
     private func commitHoldingCore(_ token: SettingsCommitGate.Token, _ change: PreparedChange, policy: Policy,
                                    stillValid: (@Sendable () throws -> Void)? = nil) async -> SettingsCommitResult {
-        guard change.subscription == nil || change.identity == nil else {
+        guard (change.subscription == nil && change.siwc == nil) || change.identity == nil else {
             return .refused("one settings change cannot combine an inbox change with a ChatGPT login change")
         }
         do { try SettingsSupersede.flushUnflushedInvalidations() } catch {
@@ -289,6 +289,8 @@ final class SettingsWriter {
                 }
                 return nil
             }
+            // Uncertain: slot and journal stay for startup recovery.
+            if result.state == .uncertain { return result }
             Self.finishPending(category: category, attempt: attempt, change: claimed.change,
                                ticket: claimed.ticket, result: result)
             return result
@@ -351,6 +353,9 @@ final class SettingsWriter {
         case done(routeChanged: Bool, wroteSecrets: Bool, authWritten: Bool, note: String?)
         case partial(String)
         case failed(String)
+        /// An effect may or may not have happened (SIWC, Codex C-R2): the
+        /// journal is kept so startup recovery decides from evidence.
+        case uncertain(String)
     }
 
     private func run(_ token: SettingsCommitGate.Token, _ change: PreparedChange, attempt: String,
@@ -410,6 +415,7 @@ final class SettingsWriter {
                                 enterDurable: { gate.enterDurablePhase(token) })
                             if case .done = inner { return }
                             if case .partial = inner { return }
+                            if case .uncertain = inner { return }
                             throw DecisionAbort(outcome: inner)
                         }
                     } catch let abort as DecisionAbort {
@@ -450,6 +456,9 @@ final class SettingsWriter {
             ticket?.abort()
             Self.finishAttempt(attempt, change: change, pending: pending, state: "failed", message: why)
             return .finished(SettingsCommitResult(state: .error, message: why), routeChanged: false, wrote: false)
+        case .uncertain(let why):
+            ticket?.abort()
+            return .finished(SettingsCommitResult(state: .uncertain, message: why), routeChanged: true, wrote: true)
         case .partial(let why):
             if let ticket { if IdentityChange.processMode == .assistant { IdentityChange.deferFinish(ticket) } else { ticket.finish() } }
             Self.finishAttempt(attempt, change: change, pending: pending, state: "partial", message: why)
@@ -705,7 +714,24 @@ final class SettingsWriter {
             }
             if let siwcPlan, let op = change.siwc {
                 do { try siwcPlan.apply() } catch {
-                    return .failed("interrupted before saving: \((error as? SIWCError)?.message ?? error.localizedDescription)")
+                    // Codex C-R2: a failure AFTER a replacement is not
+                    // "nothing happened". Re-read every effect's evidence.
+                    let why = (error as? SIWCError)?.message ?? "\(error)"
+                    let evidence = siwcPlan.evidence()
+                    if evidence.allSatisfy({ $0 == .notApplied }) {
+                        return .failed("interrupted before saving: \(why)")
+                    }
+                    if evidence.contains(.applied) { SettingsSupersede.subscriptionChanged(store: op.store, excludingAttempt: attempt) }
+                    if evidence.contains(.unknown) {
+                        // Unresolved: the journal is kept for startup recovery.
+                        return .uncertain("Briglia couldn't confirm what was saved while switching ChatGPT (\(why)); check ChatGPT in the menu.")
+                    }
+                    guard evidence.allSatisfy({ $0 == .applied }) else {
+                        return .partial("partly applied: Sign in with ChatGPT login switched only in part (\(why)); settings not saved")
+                    }
+                    // Every effect is visible, durability unconfirmed: handled
+                    // as written and reported as such.
+                    unconfirmed = true
                 }
                 authWritten = true
                 authNote = "Sign in with ChatGPT login activated"

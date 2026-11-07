@@ -113,6 +113,51 @@ final class SIWCFence: @unchecked Sendable {
         }
     }
 
+    // MARK: Jobs (Codex stage-C round 1: §3.7/§3.9 R2 "cancel and drain
+    // every job whose captured source names that registration")
+
+    /// Operations that captured an SIWC source and may be between model
+    /// requests (a main turn in tool work, a subagent run): their task is
+    /// cancelled by a sign-out of that registration and the sign-out waits
+    /// (bounded) for them to end. The task reference is only used while the
+    /// job is registered, and the job unregisters from inside its own task
+    /// before that task can finish, under this lock.
+    private var jobs: [String: [UUID: UnsafeCurrentTask]] = [:]
+
+    struct JobToken { let key: String; let id: UUID }
+
+    /// Register the CURRENT task as a job of `source` (nil source = no job).
+    /// A fenced registration refuses at once (signed out).
+    func registerCurrentTask(_ source: SIWCCredentialSource?) throws -> JobToken? {
+        guard let source else { return nil }
+        return try withUnsafeCurrentTask { task -> JobToken? in
+            guard let task else { return nil }
+            lock.lock(); defer { lock.unlock() }
+            guard !fenced.contains(source.fenceKey), epochs[source.fenceKey, default: 0] == source.epoch else {
+                throw SIWCError(.signedOut, SIWCError.signedOutMessage)
+            }
+            let id = UUID()
+            jobs[source.fenceKey, default: [:]][id] = task
+            return JobToken(key: source.fenceKey, id: id)
+        }
+    }
+
+    func unregisterJob(_ token: JobToken?) {
+        guard let token else { return }
+        lock.lock(); jobs[token.key]?[token.id] = nil; lock.unlock()
+    }
+
+    /// Cancel every registered job of `key` (after the fence).
+    @discardableResult
+    func cancelJobs(_ key: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let tasks = Array((jobs[key] ?? [:]).values)
+        for task in tasks { task.cancel() }
+        return tasks.count
+    }
+
+    func jobCount(_ key: String) -> Int { lock.lock(); defer { lock.unlock() }; return jobs[key]?.count ?? 0 }
+
     /// Selftests only.
-    func resetForTests() { lock.lock(); epochs = [:]; fenced = []; inflight = [:]; lock.unlock() }
+    func resetForTests() { lock.lock(); epochs = [:]; fenced = []; inflight = [:]; jobs = [:]; lock.unlock() }
 }
