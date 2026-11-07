@@ -686,6 +686,12 @@ extension ConversationManager {
             await interceptSIWCPaste(text, chatId: telegramMessage.chat.id, messageId: telegramMessage.messageId)
             return
         }
+        // The same address as a photo/document caption: the whole message is
+        // held back (its file is not taken either); the user is told why.
+        if let caption = telegramMessage.caption, CallbackPaste.looksLikeCallback(caption) {
+            await interceptSIWCPaste(caption, chatId: telegramMessage.chat.id, messageId: telegramMessage.messageId)
+            return
+        }
 
         if let text = telegramMessage.text,
            await handleControlCommandIfNeeded(text) {

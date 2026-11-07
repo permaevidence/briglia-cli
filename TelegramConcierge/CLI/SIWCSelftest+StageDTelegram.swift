@@ -111,6 +111,19 @@ extension SIWCSelftest {
         let pendingInbound = manager.pendingMidTurnMessages.map(\.content).joined()
         c.check("interceptor: not queued mid-turn, not persisted anywhere under the roots", !pendingInbound.contains("STRAY-SECRET") && !scanRoots("STRAY-SECRET"))
 
+        // A caption carrying the address: the whole message is held back.
+        let captionUpdate: TelegramUpdate = {
+            let message: [String: Any] = ["message_id": 109, "date": 1_790_000_000, "caption": "?code=CAPTION-SECRET&state=x",
+                                          "document": ["file_id": "doc1", "file_unique_id": "u1", "file_name": "a.txt"],
+                                          "chat": ["id": chat, "type": "private", "first_name": "Owner"],
+                                          "from": ["id": chat, "is_bot": false, "first_name": "Owner"]]
+            return try! JSONDecoder().decode(TelegramUpdate.self, from: JSONSerialization.data(withJSONObject: ["update_id": 109, "message": message]))
+        }()
+        await manager._testProcessUpdate(captionUpdate)
+        c.check("interceptor: an address in a caption holds the whole message back (no download, not in history or files)",
+                !log.all.contains { $0.0 == "getFile" } && manager._testMessages.isEmpty && !scanRoots("CAPTION-SECRET")
+                && log.all.contains { $0.0 == "deleteMessage" && ($0.1["message_id"] as? Int) == 109 })
+
         // The same interceptor in front of the terminal and the phone app's chat.
         let termPaste = "?code=TERM-SECRET&state=zz"
         let termOutcome = await manager.sendFromApp(text: termPaste, attachments: [], policy: .terminal)
