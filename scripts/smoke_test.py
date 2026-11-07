@@ -891,6 +891,11 @@ def main():
     check("refresh-settle-selftest (/stop during refresh, crash recovery, once-only retry, logout race)",
           result.returncode == 0, (result.stdout + result.stderr)[-1500:])
 
+    result = run_selftest([os.path.abspath(ADA), "__siwc-selftest"], capture_output=True,
+                            text=True, timeout=300)
+    check("siwc-selftest (Sign in with ChatGPT: ID token, paste-back, stores, host ID, refresh, routing, body)",
+          result.returncode == 0, (result.stdout + result.stderr)[-1500:])
+
     # Repository invariant: every URLRequest to a model endpoint is decorated
     # by SessionAffinity in the same function, or allowlisted with a reason.
     scan = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "model_request_scan.py")],

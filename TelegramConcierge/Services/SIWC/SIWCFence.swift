@@ -1,0 +1,72 @@
+import Foundation
+
+/// Process-local sign-out machinery (§3.7, §3.9 R2): a per-registration
+/// revocation epoch, a fence that refuses every further send for a
+/// registration from this process, and a registry of in-flight SIWC
+/// requests that a sign-out cancels. Cross-process the durable tombstone
+/// generation is the guarantee (§3.7 item 7).
+final class SIWCFence: @unchecked Sendable {
+    static let shared = SIWCFence()
+
+    private let lock = NSLock()
+    private var epochs: [String: Int] = [:]
+    private var fenced: Set<String> = []
+    private var inflight: [String: [UUID: () -> Void]] = [:]
+
+    /// Key = store directory + client (one registration in one store).
+    static func key(store: URL, clientId: String) -> String { store.standardizedFileURL.path + "\u{0}" + clientId }
+
+    func epoch(_ key: String) -> Int { lock.lock(); defer { lock.unlock() }; return epochs[key, default: 0] }
+
+    func isFenced(_ key: String) -> Bool { lock.lock(); defer { lock.unlock() }; return fenced.contains(key) }
+
+    /// Step 2 of the interrupting logout: one step bumps the epoch and fences.
+    @discardableResult
+    func fenceAndBump(_ key: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        fenced.insert(key)
+        epochs[key, default: 0] += 1
+        return epochs[key]!
+    }
+
+    /// Cleared only by a successful logout or an admitted activation of a
+    /// NEW generation (§3.9 step 6).
+    func unfence(_ key: String) { lock.lock(); fenced.remove(key); lock.unlock() }
+
+    /// Register a running request; returns a token to unregister. A request
+    /// started while fenced is refused here too.
+    func register(_ key: String, epoch: Int, cancel: @escaping () -> Void) throws -> UUID {
+        lock.lock(); defer { lock.unlock() }
+        guard !fenced.contains(key), epochs[key, default: 0] == epoch else {
+            throw SIWCError(.signedOut, SIWCError.signedOutMessage)
+        }
+        let id = UUID()
+        inflight[key, default: [:]][id] = cancel
+        return id
+    }
+
+    func unregister(_ key: String, _ id: UUID) {
+        lock.lock(); inflight[key]?[id] = nil; lock.unlock()
+    }
+
+    /// Cancel every registered request of `key` (after the fence).
+    @discardableResult
+    func cancelAll(_ key: String) -> Int {
+        lock.lock(); let cancels = Array((inflight[key] ?? [:]).values); lock.unlock()
+        for cancel in cancels { cancel() }
+        return cancels.count
+    }
+
+    func inflightCount(_ key: String) -> Int { lock.lock(); defer { lock.unlock() }; return inflight[key]?.count ?? 0 }
+
+    /// The pre-send check (§3.7 item 2): fenced or a changed epoch → signed out.
+    func check(_ key: String, capturedEpoch: Int) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !fenced.contains(key), epochs[key, default: 0] == capturedEpoch else {
+            throw SIWCError(.signedOut, SIWCError.signedOutMessage)
+        }
+    }
+
+    /// Selftests only.
+    func resetForTests() { lock.lock(); epochs = [:]; fenced = []; inflight = [:]; lock.unlock() }
+}

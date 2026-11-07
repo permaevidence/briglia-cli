@@ -674,6 +674,15 @@ final class SubscriptionAuthHTTP: NSObject, URLSessionDataDelegate, RoutedDataTa
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: fields)
         }
+        return try await perform(request)
+    }
+
+    /// One request on this object's bounded, redirect-refusing session. The
+    /// SIWC auth client (SIWCAuthClient) validates its exact URL allowlist
+    /// before calling this; `post` above keeps its own path allowlist.
+    func perform(_ request: URLRequest) async throws -> Reply {
+        var request = request
+        request.timeoutInterval = deadline
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock(); defer { lock.unlock() }

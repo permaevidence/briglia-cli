@@ -18,6 +18,9 @@ let package = Package(
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
+                // SIWC ID-token verification (RS256) on Linux; macOS uses Security.
+                // Underscored API: the resolved swift-crypto version is pinned (Package.resolved).
+                .product(name: "_CryptoExtras", package: "swift-crypto", condition: .when(platforms: [.linux])),
                 .product(name: "OpenCombine", package: "OpenCombine", condition: .when(platforms: [.linux])),
                 .product(name: "OpenCombineDispatch", package: "OpenCombine", condition: .when(platforms: [.linux])),
             ],

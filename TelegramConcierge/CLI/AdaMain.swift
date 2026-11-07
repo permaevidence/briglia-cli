@@ -41,7 +41,7 @@ struct AdaCLI: AsyncParsableCommand {
                       SetsidExec.self, GateExec.self, TTYHandoffSelftest.self, GateTTYSelftest.self, BashPipelineSelftest.self, BashFloodSelftest.self,
                       BashGoldenSelftest.self, BashJobsSelftest.self, AmbientStatusSelftest.self, CacheBoundarySelftest.self,
                       TriggerSelftest.self, WatcherTriageSelftest.self, LaneSelftest.self,
-                      AffinitySelftest.self, ChatWireSelftest.self, ChatAdapterSelftest.self, ChatRetrySelftest.self, ResponsesSelftest.self, ResponsesCacheSelftest.self, SubscriptionSelftest.self, RefreshSettleSelftest.self,
+                      AffinitySelftest.self, ChatWireSelftest.self, ChatAdapterSelftest.self, ChatRetrySelftest.self, ResponsesSelftest.self, ResponsesCacheSelftest.self, SubscriptionSelftest.self, RefreshSettleSelftest.self, SIWCSelftest.self,
                       // BGPRUNE{ A-SUB
                       BackgroundPruneSelftest.self,
                       // }BGPRUNE
