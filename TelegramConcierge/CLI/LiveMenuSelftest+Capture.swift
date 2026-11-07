@@ -82,7 +82,7 @@ extension LiveMenuHarness {
         // catalog scans is matched by exactly one role pattern.
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let files = ["Utilities/KeychainHelper.swift", "Services/ProviderProfiles.swift", "Services/ProviderServers.swift",
-                     "Services/OpenRouterPinMap.swift", "Services/SubscriptionSharing.swift"]
+                     "Services/OpenRouterPinMap.swift", "Services/SubscriptionSharing.swift", "Services/SIWC/SIWCRoute.swift"]
         var unmatched: [String] = []
         var doubled: [String] = []
         var scanned = 0

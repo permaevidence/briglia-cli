@@ -151,6 +151,10 @@ enum ProfileProvisioning {
     static var initAcceptedKeys: Set<String> {
         Set(copyableSecretKeys + [KeychainHelper.assistantNameKey, KeychainHelper.telegramBotTokenKey,
                                   ProviderProfiles.subscriptionGenerationKey, SubscriptionSharing.accountFingerprintKey,
+                                  // Sign in with ChatGPT selection (never a token).
+                                  ChatGPTRoute.routeKey, ChatGPTRoute.siwcRegistrationKey, ChatGPTRoute.siwcIdentityKey,
+                                  ChatGPTRoute.siwcGenerationKey, ChatGPTRoute.siwcModelKey, ChatGPTRoute.siwcEffortKey,
+                                  ChatGPTRoute.siwcTextOnlyKey,
                                   // Stage 4 (§28.3/§28.4): the owner's chat, the bot's @handle, the greeting flag.
                                   KeychainHelper.telegramChatIdKey, KeychainHelper.telegramBotUsernameKey,
                                   KeychainHelper.assistantGreetingPendingKey])
@@ -165,6 +169,17 @@ enum ProfileProvisioning {
         var out: [String: String] = [:]
         for key in copyableSecretKeys {
             if let value = KeychainHelper.load(key: key), !value.isEmpty { out[key] = value }
+        }
+        // Sign in with ChatGPT (SIWC plan §3.8 "Adding an assistant"): the
+        // route and the SIWC selection keys from one validated read of the
+        // shared store; never a token. Unusable → bound to nothing.
+        if ProviderProfiles.activeProfile() == .chatgpt, KeychainHelper.load(key: ChatGPTRoute.routeKey) == "siwc" {
+            for key in SIWCSelection.selectionKeys { out.removeValue(forKey: key) }
+            out.removeValue(forKey: KeychainHelper.openAICompatibleApiKeyKey)
+            let copied = SIWCSelection.copyForNewExtra(defaultStored: KeychainHelper.loadSnapshot(),
+                                                       machineStore: SIWCStore(directory: MachinePaths.defaultConfigRoot()))
+            for (key, value) in copied { out[key] = value }
+            return out
         }
         if ProviderProfiles.activeProfile() == .chatgpt,
            let state = try? SubscriptionAuthStore(directory: MachinePaths.defaultConfigRoot()).read(),

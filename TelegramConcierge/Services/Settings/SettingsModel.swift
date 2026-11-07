@@ -171,6 +171,8 @@ struct PreparedChange: Codable {
     var identity: SettingsIdentityOp?
     var subscription: SettingsSubscriptionOp?
     var subscriptionExpectations: [SettingsSubscriptionExpectation] = []
+    /// Sign in with ChatGPT activation (SIWC plan §3.9): token-free by type.
+    var siwc: SIWCSettingsOp?
     /// `AgentMailService.wipePrivateInstall` after the secrets write
     /// (email provider none + remove credentials).
     var wipeAgentMailInstall = false
@@ -183,8 +185,8 @@ struct PreparedChange: Codable {
     var acceptPending = false
 
     var touchedKeys: Set<String> { Set(writes.keys).union(deletes) }
-    var hasAuthEffect: Bool { subscription != nil }
-    var isEmpty: Bool { writes.isEmpty && deletes.isEmpty && identity == nil && subscription == nil && !wipeAgentMailInstall }
+    var hasAuthEffect: Bool { subscription != nil || siwc != nil }
+    var isEmpty: Bool { writes.isEmpty && deletes.isEmpty && identity == nil && subscription == nil && siwc == nil && !wipeAgentMailInstall }
     /// Nothing to write AND nothing to validate: the caller may skip the commit.
     var isNoop: Bool { isEmpty && validateOnly != true }
 

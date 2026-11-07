@@ -54,11 +54,14 @@ struct SIWCSignIn {
         do {
             let host = try SIWCHost.reserve(hostPaths, attemptId: id, profile: profile, storePath: store.directory.path,
                                             ownerLease: ownerLease(), now: now)
-            return SIWCAttempt(id: id, pending: pending, storeDirectory: store.directory, port: port,
+            let attempt = SIWCAttempt(id: id, pending: pending, storeDirectory: store.directory, port: port,
                                state: SIWCEndpoint.randomToken(bytes: 24), nonce: SIWCEndpoint.randomToken(bytes: 24),
                                verifier: SIWCEndpoint.randomToken(bytes: 32), expectedClientId: expectedClientId,
                                hostId: host.hostId, hostFingerprint: host.fingerprint,
                                expiresAt: now + Int(SIWCEndpoint.attemptLifetime), prompt: consent ? "consent" : nil)
+            // This process owns the attempt (upgrade pause, quiescence).
+            SIWCActivity.shared.register(attempt, signIn: self)
+            return attempt
         } catch {
             try? await store.cancelPending(pending)
             throw error
@@ -67,6 +70,7 @@ struct SIWCSignIn {
 
     /// Cancel this attempt (pending marker and reservation). Best effort.
     func cancel(_ attempt: SIWCAttempt) async {
+        SIWCActivity.shared.finish(attempt.id)
         try? await store.cancelPending(attempt.pending)
         try? SIWCHost.release(hostPaths, attemptId: attempt.id)
     }
@@ -203,6 +207,7 @@ struct SIWCSignIn {
     /// the registration is saved with plan usage off and no inference.
     func save(_ result: SIWCSignInResult, attempt: SIWCAttempt, inUseByCaller: Bool = false,
               effect: SIWCEffectMark? = nil) async throws -> SIWCSaveOutcome {
+        defer { SIWCActivity.shared.finish(attempt.id) }
         guard now < attempt.expiresAt else {
             if let refresh = result.tokens?.refresh { await revokeBestEffort(refresh, clientId: result.clientId) }
             throw SIWCError(.local, SIWCHost.expiredMessage)

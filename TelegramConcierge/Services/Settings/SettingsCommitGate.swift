@@ -12,7 +12,11 @@ import Foundation
 final class SettingsCommitGate {
     struct Token: Equatable, Sendable { fileprivate let id: UInt64 }
 
-    enum Phase { case preCommit, durable }
+    /// `interrupting` (SIWC plan §3.9 R2): an SIWC sign-out has fenced this
+    /// process's sends and is cancelling and draining the jobs of that login;
+    /// like `durable`, it is never cancelled by a lifecycle operation, which
+    /// waits for the holder instead.
+    enum Phase { case preCommit, interrupting, durable }
 
     private var counter: UInt64 = 0
     private var holder: Token?
@@ -68,6 +72,15 @@ final class SettingsCommitGate {
         guard holder == token, holderPhase == .preCommit else { return }
         holderCancel = handler
     }
+
+    /// SIWC sign-out step 2: entered in the same main-actor step as the
+    /// fence; from here the holder is never cancelled.
+    func enterInterruptingPhase(_ token: Token) {
+        guard holder == token else { return }
+        holderPhase = .interrupting; holderCancel = nil
+    }
+
+    var holderInterrupting: Bool { holder != nil && holderPhase == .interrupting }
 
     /// Step 8 reached: from now on the holder is never cancelled.
     func enterDurablePhase(_ token: Token) {

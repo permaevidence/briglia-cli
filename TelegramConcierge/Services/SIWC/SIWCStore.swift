@@ -383,6 +383,34 @@ struct SIWCStore {
         return try await operation()
     }
 
+    /// The same lock for a synchronous caller (the operation-start rebind of
+    /// §3.8, which runs while a request context is built): non-blocking
+    /// attempts between short sleeps, bounded by `wait` (never the full 45 s
+    /// on a request path). Busy → `.busy`, never a fallback.
+    func lockedSync<T>(wait: TimeInterval? = nil, _ operation: () throws -> T) throws -> T {
+        try PrivateStorage.ensureDirectory(directory)
+        let fd = open(lockFile.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0o600)
+        guard fd >= 0 else { throw SIWCError(.local, "Cannot open the ChatGPT sign-in lock") }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == getuid(),
+              info.st_nlink == 1, info.st_mode & 0o077 == 0 else {
+            throw SIWCError(.local, "Invalid ChatGPT sign-in lock owner/type/permissions")
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + (wait ?? lockWait)
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            guard errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR else {
+                throw SIWCError(.local, "Cannot acquire the ChatGPT sign-in lock")
+            }
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                throw SIWCError(.busy, "ChatGPT sign-in is busy; try again shortly.")
+            }
+            usleep(20_000)
+        }
+        defer { flock(fd, LOCK_UN) }
+        return try operation()
+    }
+
     // MARK: Usability (§3.1, §5.1)
 
     enum Usability: Equatable {
@@ -459,7 +487,11 @@ struct SIWCStore {
     /// Cancel the store's pending sign-in only when `profile` owns it (§25.12).
     @discardableResult
     func cancelOwnedPending(profile: String) async throws -> OwnedCancel {
-        try await locked {
+        try await locked { try cancelOwnedPendingLocked(profile: profile) }
+    }
+
+    func cancelOwnedPendingLocked(profile: String) throws -> OwnedCancel {
+        do {
             guard var file = try readTokens(), file.pendingLogin != nil else { return .none }
             guard (file.pendingLoginBy ?? AssistantProfile.defaultName) == profile else { return .foreign }
             file.pendingLogin = nil; file.pendingLoginBy = nil; file.pendingExpiresAt = nil

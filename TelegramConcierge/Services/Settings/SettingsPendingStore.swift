@@ -84,6 +84,9 @@ enum SettingsPendingStore {
         var direction: String?
         var retirement: String?
         var startedAt: Date
+        /// Route-qualified SIWC effects of this attempt (SIWC plan §3.9
+        /// "Recovery evidence"): per record or pointer, non-secret.
+        var siwcEffects: [SIWCJournalEffect]? = nil
     }
 
     struct Result: Codable, Equatable {

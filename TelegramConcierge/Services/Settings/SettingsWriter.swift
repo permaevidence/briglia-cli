@@ -203,6 +203,7 @@ final class SettingsWriter {
     /// client gets "replaced" in the results); an active attempt is never
     /// replaced.
     nonisolated static func stage(_ change: PreparedChange) throws -> String {
+        if let why = SIWCTypeBoundary.violation(change) { throw SettingsCommitError.refused(why) }
         let ticket = UUID().uuidString
         try SettingsPendingStore.update { doc in
             var slot = doc.slots[change.category] ?? SettingsPendingStore.Slot()
@@ -396,7 +397,7 @@ final class SettingsWriter {
               // non-blocking attempts between cancellable sleeps (Codex R2-4).
               let shareLock = needsShare ? try await Self.takeShareLockCancellable() : nil
               defer { shareLock?.release() }
-              return try await Self.withAuthLocks(stores) { () throws -> SectionOutcome in
+              return try await Self.withAuthLocks(stores, siwc: Self.siwcStoresToLock(change)) { () throws -> SectionOutcome in
                 let ticket = ticketBox.ticket
                 reached.value = true
                 if Task.isCancelled { return .refused(gate.admissionClosedReason ?? "cancelled", code: "admission") }
@@ -462,6 +463,11 @@ final class SettingsWriter {
                 }
             }
             if let mirror = change.webBackendMirror { Prefs.store.set(mirror, forKey: WebSearchBackend.selectionKey) }
+            // An admitted activation of a NEW generation clears a sign-out
+            // fence left by a partial logout (SIWC plan §3.9 step 6).
+            if let op = change.siwc, op.replacementId != nil {
+                SIWCFence.shared.unfence(SIWCFence.key(store: URL(fileURLWithPath: op.store), clientId: op.clientId))
+            }
             if pending == nil, change.hasAuthEffect {
                 Self.finishAttempt(attempt, change: change, pending: nil, state: "applied", message: nil)
             }
@@ -511,10 +517,26 @@ final class SettingsWriter {
         }
     }
 
-    nonisolated static func withAuthLocks<T>(_ stores: [String], _ body: () async throws -> T) async throws -> T {
-        guard let first = stores.first else { return try await body() }
+    nonisolated static func withAuthLocks<T>(_ stores: [String], siwc: [String] = [], _ body: () async throws -> T) async throws -> T {
+        guard let first = stores.first else { return try await withSIWCLocks(siwc, body) }
         let store = SubscriptionAuthStore(directory: URL(fileURLWithPath: first, isDirectory: true))
-        return try await store.locked { try await withAuthLocks(Array(stores.dropFirst()), body) }
+        return try await store.locked { try await withAuthLocks(Array(stores.dropFirst()), siwc: siwc, body) }
+    }
+
+    /// SIWC locks after the legacy ones, own then shared (SIWC plan §3.9
+    /// "Locks": … → legacy auth locks → SIWC locks → secrets.lock).
+    nonisolated static func withSIWCLocks<T>(_ stores: [String], _ body: () async throws -> T) async throws -> T {
+        guard let first = stores.first else { return try await body() }
+        let store = SIWCStore(directory: URL(fileURLWithPath: first, isDirectory: true))
+        return try await store.locked { try await withSIWCLocks(Array(stores.dropFirst()), body) }
+    }
+
+    /// Selftest seam: the order in which auth locks were taken (lock-order pin).
+    nonisolated(unsafe) static var lockOrderForTesting: ((String) -> Void)?
+
+    nonisolated static func siwcStoresToLock(_ change: PreparedChange) -> [String] {
+        guard let op = change.siwc else { return [] }
+        return [URL(fileURLWithPath: op.store).standardizedFileURL.path]
     }
 
     /// Selftest seams for the durable steps.
@@ -612,6 +634,14 @@ final class SettingsWriter {
                     authNote = "signed out"
                 }
             }
+            // Sign in with ChatGPT activation (SIWC plan §3.9): validated
+            // write-free against the exact record it was prepared from.
+            var siwcPlan: SIWCActivationPlan?
+            if let op = change.siwc {
+                if let why = SIWCTypeBoundary.violation(change) { return .refused(why) }
+                do { siwcPlan = try SIWCActivationPlan.decide(op, attempt: attempt) }
+                catch { return .refused((error as? SIWCError)?.message ?? error.localizedDescription, code: "conflict") }
+            }
             // A login published while ChatGPT is the active lane moves the
             // runtime binding with it, in the same secrets mutation: running
             // requests validate the bound generation, so the new login and
@@ -629,8 +659,9 @@ final class SettingsWriter {
             }
             var projected = current
             for (k, v) in secretsDelta { if let v { projected[k] = v } else { projected.removeValue(forKey: k) } }
-            let factsOld = change.subscription == nil ? SubscriptionRouteFacts.absent : SubscriptionRouteFacts(oldAuth)
-            let factsNew = change.subscription == nil ? SubscriptionRouteFacts.absent : SubscriptionRouteFacts(newAuth)
+            var factsOld = change.subscription == nil ? SubscriptionRouteFacts.absent : SubscriptionRouteFacts(oldAuth)
+            var factsNew = change.subscription == nil ? SubscriptionRouteFacts.absent : SubscriptionRouteFacts(newAuth)
+            if let siwcPlan { factsOld = .siwcOnly(siwcPlan.factsOld); factsNew = .siwcOnly(siwcPlan.factsNew) }
             let routeChanged = RouteSnapshot.of(stored: current, subscription: factsOld, switches: switches)
                 != RouteSnapshot.of(stored: projected, subscription: factsNew, switches: switches)
             if routeChanged && !holdsBarrier && !immediate { return .needsBarrier }
@@ -643,12 +674,12 @@ final class SettingsWriter {
                 let record = SettingsPendingStore.Attempt(
                     attempt: attempt, operation: pending == nil ? "commit" : "pending-apply", category: category,
                     ticket: pending?.ticket, clientRequestId: change.id, label: change.label,
-                    authEffect: change.hasAuthEffect, authKind: change.subscription?.kind.rawValue,
+                    authEffect: change.subscription != nil, authKind: change.subscription?.kind.rawValue ?? (change.siwc.map { "siwc-" + $0.kind.rawValue }),
                     storePath: change.subscription?.store,
                     oldEvidence: change.subscription.map { _ in SettingsPendingStore.AuthEvidence(oldAuth) },
                     projectedEvidence: newAuth.map { SettingsPendingStore.AuthEvidence($0) },
                     secretsKeys: change.touchedKeys.sorted(), steps: ["intent"], direction: nil, retirement: nil,
-                    startedAt: Date())
+                    startedAt: Date(), siwcEffects: siwcPlan?.effects)
                 do {
                     try SettingsPendingStore.update { doc in doc.attempts[attempt] = record }
                 } catch {
@@ -667,6 +698,17 @@ final class SettingsWriter {
                 case .notWritten(let error):
                     return .failed("interrupted before saving: \(error.localizedDescription)")
                 }
+                SettingsSupersede.subscriptionChanged(store: op.store, excludingAttempt: attempt)
+                do { try afterAuthWriteForTesting?() } catch {
+                    return .partial("partly applied: ChatGPT login \(authNote ?? "changed"); settings not saved")
+                }
+            }
+            if let siwcPlan, let op = change.siwc {
+                do { try siwcPlan.apply() } catch {
+                    return .failed("interrupted before saving: \((error as? SIWCError)?.message ?? error.localizedDescription)")
+                }
+                authWritten = true
+                authNote = "Sign in with ChatGPT login activated"
                 SettingsSupersede.subscriptionChanged(store: op.store, excludingAttempt: attempt)
                 do { try afterAuthWriteForTesting?() } catch {
                     return .partial("partly applied: ChatGPT login \(authNote ?? "changed"); settings not saved")
@@ -807,6 +849,7 @@ enum SettingsSupersede {
         let path = URL(fileURLWithPath: store).standardizedFileURL.path
         dropStaged { change in
             if let op = change.subscription, URL(fileURLWithPath: op.store).standardizedFileURL.path == path { return true }
+            if let op = change.siwc, URL(fileURLWithPath: op.store).standardizedFileURL.path == path { return true }
             return change.subscriptionExpectations.contains { URL(fileURLWithPath: $0.store).standardizedFileURL.path == path }
         }
     }

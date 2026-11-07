@@ -256,7 +256,13 @@ enum SIWCHost {
     /// has no host user left: no registration in any store and no live
     /// reservation. An unreadable store or reservation file counts as a user.
     static func removeIfUnused(_ paths: Paths = .live, now: Int) throws -> WipeOutcome {
-        try withShareLock(paths) {
+        try withShareLock(paths) { try removeIfUnusedLocked(paths, now: now) }
+    }
+
+    /// `removeIfUnused` for a caller that already holds `chatgpt-share.lock`
+    /// (the multi-assistant wipe).
+    static func removeIfUnusedLocked(_ paths: Paths, now: Int) throws -> WipeOutcome {
+        do {
             let reservations: ReservationsFile
             do { reservations = try readReservations(paths) } catch { return .unreadable }
             if reservations.reservations.contains(where: { isLive($0, now: now) }) { return .keptInUse }

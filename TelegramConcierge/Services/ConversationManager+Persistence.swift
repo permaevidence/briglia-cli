@@ -921,6 +921,12 @@ extension ConversationManager {
         // assistant's sign-in to the shared login is never cancelled here.
         do { try await SubscriptionAuthStore().cancelOwnedPending() }
         catch { return "cannot cancel ChatGPT login: \(error.localizedDescription)" }
+        // Sign in with ChatGPT (SIWC plan §3.1, §25.12): this process's own
+        // attempts, and the store's pending marker only when this profile
+        // owns it — never another assistant's sign-in.
+        await SIWCActivity.shared.cancelOwned()
+        do { try await SIWCStore.resolved().cancelOwnedPending(profile: AssistantProfile.selectedName) }
+        catch { return "cannot cancel the ChatGPT sign-in: \((error as? SIWCError)?.message ?? error.localizedDescription)" }
         let deadline = ProcessInfo.processInfo.systemUptime + timeoutSeconds
         while subscriptionLoginTask != nil && ProcessInfo.processInfo.systemUptime < deadline {
             try? await Task.sleep(nanoseconds: 50_000_000)

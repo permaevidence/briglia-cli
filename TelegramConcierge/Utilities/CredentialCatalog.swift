@@ -60,6 +60,33 @@ enum CredentialCatalog {
                 values["subscription_pending_refresh" + tag] = pending.refresh
             }
         }
+        for (key, value) in siwcRedactionValues(SubscriptionSharing.protectedStoreDirectories()) { values[key] = value }
+        return values
+    }
+
+    /// Sign in with ChatGPT tokens of every protected store (SIWC plan §3.8
+    /// "File tools and redaction"): access, refresh and ID tokens of the
+    /// committed set, the staged replacement, the refresh checkpoint and the
+    /// cleanup list, with distinct labels per store and per registration.
+    static func siwcRedactionValues(_ directories: [URL]) -> [String: String] {
+        var values: [String: String] = [:]
+        for (index, dir) in directories.enumerated() {
+            guard let file = try? SIWCStore(directory: dir).readTokens() else { continue }
+            let tag = index == 0 ? "" : "_own"
+            for (r, record) in file.records.enumerated() {
+                let base = "siwc\(tag)_\(r)_"
+                func add(_ label: String, _ tokens: SIWCTokens?) {
+                    guard let tokens else { return }
+                    values[base + label + "_access"] = tokens.access
+                    values[base + label + "_refresh"] = tokens.refresh
+                    if let id = tokens.idToken { values[base + label + "_id"] = id }
+                }
+                add("current", record.tokens)
+                add("staged", record.staged?.tokens)
+                add("pending", record.pendingRotation?.tokens)
+                for (c, token) in (record.cleanup ?? []).enumerated() { values[base + "cleanup_\(c)"] = token }
+            }
+        }
         return values
     }
 
@@ -78,6 +105,15 @@ enum CredentialCatalog {
         // account fingerprint (a SHA-256, never the account id).
         Entry(key: SubscriptionSharing.scopeKey, treatment: .notSecret),
         Entry(key: SubscriptionSharing.accountFingerprintKey, treatment: .notSecret),
+        // Sign in with ChatGPT selection (SIWC plan §3.8): route, fingerprints
+        // (SHA-256), generation and model choices. Tokens never live here.
+        Entry(key: ChatGPTRoute.routeKey, treatment: .notSecret),
+        Entry(key: ChatGPTRoute.siwcRegistrationKey, treatment: .notSecret),
+        Entry(key: ChatGPTRoute.siwcIdentityKey, treatment: .notSecret),
+        Entry(key: ChatGPTRoute.siwcGenerationKey, treatment: .notSecret),
+        Entry(key: ChatGPTRoute.siwcModelKey, treatment: .notSecret),
+        Entry(key: ChatGPTRoute.siwcEffortKey, treatment: .notSecret),
+        Entry(key: ChatGPTRoute.siwcTextOnlyKey, treatment: .notSecret),
         Entry(key: ProviderProfiles.subscriptionTextOnlyKey, treatment: .notSecret),
 
         // Model providers (visible by owner decision)

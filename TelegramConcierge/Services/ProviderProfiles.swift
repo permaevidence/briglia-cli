@@ -164,6 +164,8 @@ enum ProviderProfiles {
     static func isConfigured(_ profile: Profile) -> Bool {
         switch profile {
         case .chatgpt:
+            // Sign in with ChatGPT (SIWC plan §3.8): its own selection keys.
+            if value(ChatGPTRoute.routeKey) == "siwc" { return SIWCSelection.isConfigured(SIWCSelection.selectionSnapshot(load: value)) }
             guard let state = try? SubscriptionAuthStore().read(), state.credential != nil, state.requiresLogin != true else { return false }
             // Several assistants (§25.4): a usable shared login can be chosen
             // explicitly even when another assistant signed in again (the
@@ -190,7 +192,7 @@ enum ProviderProfiles {
     /// OpenRouter, which reports its runtime default).
     static func configuredModel(_ profile: Profile) -> String? {
         switch profile {
-        case .chatgpt: return value(subscriptionModelKey)
+        case .chatgpt: return value(ChatGPTRoute.routeKey) == "siwc" ? value(ChatGPTRoute.siwcModelKey) : value(subscriptionModelKey)
         case .openai: return value(openaiModelKey)
         case .opencode: return value(opencodeModelKey)
         case .openrouter:
@@ -205,7 +207,9 @@ enum ProviderProfiles {
 
     static func configuredEndpoint(_ profile: Profile) -> String? {
         switch profile {
-        case .chatgpt: return isConfigured(.chatgpt) ? SubscriptionEndpoint.inference : nil
+        case .chatgpt:
+            guard isConfigured(.chatgpt) else { return nil }
+            return value(ChatGPTRoute.routeKey) == "siwc" ? SIWCEndpoint.apiBase : SubscriptionEndpoint.inference
         case .openai: return isConfigured(.openai) ? "https://api.openai.com/v1" : nil
         case .opencode: return isConfigured(.opencode) ? OpenCodeGo.baseURL : nil
         case .openrouter: return isConfigured(.openrouter) ? "https://openrouter.ai/api/v1" : nil
@@ -311,6 +315,12 @@ enum ProviderProfiles {
             changes[subscriptionEffortKey] = effort
             changes[subscriptionTextOnlyKey] = textOnly ? "true" : "false"
             changes[subscriptionGenerationKey] = state.generation
+            // An explicit legacy selection switches this assistant's route
+            // back to legacy (SIWC plan §3.8): the SIWC selection keys go in
+            // the same transaction, so the result is never ambiguous.
+            if value(ChatGPTRoute.routeKey) != nil {
+                for key in SIWCSelection.selectionKeys { changes[key] = String?.none }
+            }
         case .openai:
             changes[openaiApiKeyKey] = apiKey
             changes[openaiModelKey] = model
@@ -360,6 +370,14 @@ enum ProviderProfiles {
         // "delete this key" in the batch.
         var changes: [String: String?] = [:]
         switch profile {
+        case .chatgpt where value(ChatGPTRoute.routeKey) == "siwc":
+            // Re-activating ChatGPT on the SIWC route: the runtime keys from
+            // the saved SIWC choices (slot deleted, SIWC endpoint); the
+            // selection itself is unchanged (SIWC plan §3.8).
+            guard let delta = SIWCSelection.reactivationDelta(stored: SIWCSelection.selectionSnapshot(load: value)) else {
+                throw SubscriptionError(ChatGPTRoute.chooseAgainMessage)
+            }
+            for (k, v) in delta { changes[k] = .some(v) }
         case .chatgpt:
             let saved = KeychainHelper.loadSnapshot()
             var generation = saved[subscriptionGenerationKey]

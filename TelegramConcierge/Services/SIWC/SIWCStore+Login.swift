@@ -153,7 +153,15 @@ extension SIWCStore {
     /// state: `expect` must still describe the record exactly, or nothing
     /// changes ("changed after you saved it"). Returns the generation in use.
     func activate(_ expect: ActivationExpectation, effect: SIWCEffectMark? = nil) async throws -> String {
-        try await locked {
+        try await locked { try activateLocked(expect, effect: effect) }
+    }
+
+    /// `activate` with this store's SIWC lock already held (the settings
+    /// writer takes it in its lock order, §3.9 "Locks").
+    func activateLocked(_ expect: ActivationExpectation, effect: SIWCEffectMark? = nil,
+                        pointerEffect: SIWCEffectMark? = nil) throws -> String {
+        let pointerMark = pointerEffect ?? effect
+        do {
             guard var file = try readTokens(), var record = file.record(expect.clientId),
                   var registrations = try readRegistrations(), registrations.registration(expect.clientId) != nil else {
                 throw SIWCError(.local, "That ChatGPT sign-in no longer exists; nothing was activated.")
@@ -193,10 +201,10 @@ extension SIWCStore {
                 if let effect { file.lastAttempt = effect.attempt }
                 try writeTokens(file)
             }
-            if registrations.active != expect.clientId || effect != nil {
+            if registrations.active != expect.clientId || pointerMark != nil {
                 registrations.active = expect.clientId
-                registrations.activeLastEffect = effect
-                if let effect { registrations.lastAttempt = effect.attempt }
+                registrations.activeLastEffect = pointerMark
+                if let pointerMark { registrations.lastAttempt = pointerMark.attempt }
                 try writeRegistrations(registrations)
             }
             return record.generation
@@ -218,7 +226,11 @@ extension SIWCStore {
     /// a newer sign-in wins and nothing is written. Registration entries are
     /// kept (D4).
     func tombstone(_ clientId: String, expectedGeneration: String? = nil, effect: SIWCEffectMark? = nil) async throws -> Tombstone {
-        try await locked {
+        try await locked { try tombstoneLocked(clientId, expectedGeneration: expectedGeneration, effect: effect) }
+    }
+
+    func tombstoneLocked(_ clientId: String, expectedGeneration: String? = nil, effect: SIWCEffectMark? = nil) throws -> Tombstone {
+        do {
             guard var file = try readTokens(), var record = file.record(clientId) else {
                 throw SIWCError(.local, "No ChatGPT sign-in to sign out.")
             }
@@ -251,7 +263,11 @@ extension SIWCStore {
     /// registrations in one store change together"). Each record carries the
     /// same effect mark.
     func retireAll(effect: SIWCEffectMark? = nil) async throws -> [Tombstone] {
-        try await locked {
+        try await locked { try retireAllLocked(effect: effect) }
+    }
+
+    func retireAllLocked(effect: SIWCEffectMark? = nil) throws -> [Tombstone] {
+        do {
             guard var file = try readTokens() else { return [] }
             let registrations = try readRegistrations()
             let key = try integrityKey(create: false)

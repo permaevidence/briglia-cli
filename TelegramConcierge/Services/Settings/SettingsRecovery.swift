@@ -92,9 +92,20 @@ enum SettingsRecovery {
             for (id, record) in doc.attempts.sorted(by: { $0.value.startedAt < $1.value.startedAt }) {
                 let evidence = authEvidence(record, read: read)
                 let outcome: (state: String, message: String)
-                if record.operation == "scope" {
+                let siwcEffects = record.siwcEffects ?? []
+                let siwcEvidence: (SIWCJournalEffect) -> AuthEvidence = { SIWCRecovery.overall(SIWCRecovery.evaluate($0, attempt: id)) }
+                if record.operation == "scope", !siwcEffects.isEmpty {
+                    let combined = siwcEffects.map(siwcEvidence)
+                    let siwc: AuthEvidence = combined.contains(.unknown) ? .unknown
+                        : combined.contains(.applied) ? (combined.allSatisfy { $0 == .applied } ? .applied : .unknown) : .notApplied
+                    outcome = SIWCRecovery.classifyScope(record, legacy: evidence, siwc: siwc,
+                                                         published: secrets[SettingsWriter.scopePublishedKey] == id)
+                } else if record.operation == "scope" {
                     outcome = classifyScope(record, evidence: evidence,
                                             published: secrets[SettingsWriter.scopePublishedKey] == id)
+                } else if !siwcEffects.isEmpty {
+                    outcome = SIWCRecovery.classify(record, marker: secrets[SettingsWriter.attemptMarkerKey(record.category)] == id,
+                                                    evaluate: siwcEvidence)
                 } else {
                     outcome = classify(record, evidence: evidence,
                                        marker: secrets[SettingsWriter.attemptMarkerKey(record.category)] == id)

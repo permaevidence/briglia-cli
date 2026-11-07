@@ -234,6 +234,7 @@ struct SecretStoreSelftest: ParsableCommand {
                     "TelegramConcierge/Utilities/KeychainHelper.swift",
                     "TelegramConcierge/Services/ProviderProfiles.swift",
                     "TelegramConcierge/Services/ProviderServers.swift",
+                    "TelegramConcierge/Services/SIWC/SIWCRoute.swift",
                 ]
                 var scanned = 0
                 var unclassified: [String] = []

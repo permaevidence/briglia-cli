@@ -38,7 +38,10 @@ extension SIWCStore {
         try Task.checkCancellation()
         let caller = SubscriptionRefreshCaller.SIWC()
         let store = self
+        // The upgrade pause waits for an in-flight settle (§3.8 "Upgrade pause").
+        SIWCActivity.shared.beginSettle()
         Task.detached {
+            defer { SIWCActivity.shared.endSettle() }
             do { caller.finish(.success(try await store.settle(clientId: clientId, generation: generation,
                 rejectedAccess: rejectedAccess, caller: caller, refresh: refresh))) }
             catch { caller.finish(.failure(error)) }

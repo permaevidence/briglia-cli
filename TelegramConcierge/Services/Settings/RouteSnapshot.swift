@@ -49,6 +49,10 @@ enum SettingsKeyRoles {
         KeychainHelper.keylessSearchKey, WebSearchBackend.secretsSelectionKey,
         KeychainHelper.emailCalendarProviderKey, KeychainHelper.agentMailInboxAddressKey,
         KeychainHelper.telegramBotTokenKey, KeychainHelper.telegramChatIdKey,
+        // Sign in with ChatGPT selection (SIWC plan §3.8, §3.9 "Route snapshot").
+        ChatGPTRoute.routeKey, ChatGPTRoute.siwcRegistrationKey, ChatGPTRoute.siwcIdentityKey,
+        ChatGPTRoute.siwcGenerationKey, ChatGPTRoute.siwcModelKey, ChatGPTRoute.siwcEffortKey,
+        ChatGPTRoute.siwcTextOnlyKey,
     ]
 
     static let credentialKeys: Set<String> = [
@@ -127,7 +131,8 @@ enum SettingsKeyRoles {
     /// Keys a same-account automatic rebind rewrites (plan B.5: maintenance,
     /// not a user change) — left out of the whole-store digest so a rebind
     /// while a change is staged does not refuse it.
-    static let maintenanceKeys: Set<String> = [ProviderProfiles.subscriptionGenerationKey, SubscriptionSharing.accountFingerprintKey]
+    static let maintenanceKeys: Set<String> = [ProviderProfiles.subscriptionGenerationKey, SubscriptionSharing.accountFingerprintKey,
+                                               ChatGPTRoute.siwcGenerationKey]
 
     /// Digest of the route state of `store` a whole-store preparation was
     /// computed from: route values and credential PRESENCE (a key replaced
@@ -154,8 +159,17 @@ struct SubscriptionRouteFacts: Equatable {
     /// a new login while ChatGPT is the active lane replaces it, so it is a
     /// route change even for the same account (it waits for an idle point).
     var generation: String?
+    /// The SIWC store's facts for this assistant's SIWC selection (§3.9),
+    /// nil when the change does not concern the SIWC route.
+    var siwc: SIWCRouteFacts? = nil
 
     static let absent = SubscriptionRouteFacts(present: false, requiresLogin: false, accountFingerprint: nil)
+
+    static func siwcOnly(_ facts: SIWCRouteFacts) -> SubscriptionRouteFacts {
+        var out = SubscriptionRouteFacts.absent
+        out.siwc = facts
+        return out
+    }
 
     init(present: Bool, requiresLogin: Bool, accountFingerprint: String?, generation: String? = nil) {
         self.present = present; self.requiresLogin = requiresLogin; self.accountFingerprint = accountFingerprint
@@ -209,6 +223,9 @@ struct RouteSnapshot: Equatable {
         // account, a sign-out or activating ChatGPT changes the route.
         if stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue {
             fields["sub"] = subscription.present ? "account|\(subscription.accountFingerprint ?? "")|\(subscription.generation ?? "")" : "absent"
+            // SIWC (§3.9): the record the selection uses (usable, plan usage,
+            // fingerprints, generation, the store's active registration).
+            if stored[ChatGPTRoute.routeKey] == "siwc" { fields["siwc"] = (subscription.siwc ?? .absent).snapshotText }
         }
         fields["switch"] = "\(switches.subagents)|\(switches.webSubagent)"
         // The request path's resolvers, evaluated on this dictionary.

@@ -70,7 +70,7 @@ enum ChatGPTRoute {
     /// Several assistants: a re-sign-in to the same registration is picked up
     /// only by stage C's rebind at operation start; here a changed generation
     /// is refused before any send (captured operations never rebind).
-    static func capture(_ selection: Selection, store: SIWCStore) throws -> SIWCCredentialSource {
+    static func capture(_ selection: Selection, store: SIWCStore, rebind: Bool = true) throws -> SIWCCredentialSource {
         guard let registrations = try store.readRegistrations(), let active = registrations.active,
               let registration = registrations.registration(active) else {
             throw SIWCError(.signInRequired, SIWCError.signInMessage)
@@ -79,9 +79,18 @@ enum ChatGPTRoute {
               SIWCEndpoint.identityFingerprint(clientId: active, sub: registration.sub) == selection.identityFingerprint else {
             throw SIWCError(.signInRequired, SubscriptionSharing.differentAccountMessage(changedBy: nil))
         }
-        try store.validate(clientId: active, generation: selection.generation)
+        // Stage C (§3.8, D21): at the START of an operation, a re-sign-in to
+        // the same registration (a new record generation, usable, same
+        // verified identity, no pending sign-in) is followed automatically.
+        // This is the only place a selection's generation moves on its own;
+        // an operation that already captured a source never rebinds.
+        var generation = selection.generation
+        if rebind, (try? store.readTokens())?.record(active)?.generation != selection.generation {
+            generation = try SIWCRebind.rebind(selection, clientId: active, store: store)
+        }
+        try store.validate(clientId: active, generation: generation)
         let key = SIWCFence.key(store: store.directory, clientId: active)
-        return SIWCCredentialSource(storeDirectory: store.directory, clientId: active, generation: selection.generation,
+        return SIWCCredentialSource(storeDirectory: store.directory, clientId: active, generation: generation,
                                     epoch: SIWCFence.shared.epoch(key), identityFingerprint: selection.identityFingerprint)
     }
 

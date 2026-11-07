@@ -187,7 +187,8 @@ actor FilesystemTools {
                 URL(fileURLWithPath: resolvedPath).standardizedFileURL
                     == SubscriptionAuthStore(directory: $0).file.resolvingSymlinksInPath().standardizedFileURL
             }
-            let text = isSubscription ? "[Subscription OAuth credentials omitted; use briglia subscription status]" : HarnessSecretStore.isSecretStore(resolvedPath)
+            let isSIWC = SIWCProtectedFiles.isProtected(resolvedPath)
+            let text = isSubscription || isSIWC ? "[Subscription OAuth credentials omitted; use briglia subscription status]" : HarnessSecretStore.isSecretStore(resolvedPath)
                 ? HarnessSecretStore.maskedForRead(decodedText)
                 : decodedText
 
@@ -306,6 +307,9 @@ actor FilesystemTools {
         }
         if HarnessSecretStore.isSecretStore(path) {
             return OpResult(content: jsonError(HarnessSecretStore.wholeFileRewriteRefusal))
+        }
+        if SIWCProtectedFiles.isProtected(path) {
+            return OpResult(content: jsonError(SIWCProtectedFiles.refusal))
         }
         if let suspicion = Self.escapedNewlineSuspicion(content: content, path: path) {
             return OpResult(content: jsonError(suspicion))
@@ -450,6 +454,9 @@ actor FilesystemTools {
         }
         guard FileManager.default.fileExists(atPath: path) else {
             return OpResult(content: jsonError("file not found: \(path). Use write_file to create it."))
+        }
+        if SIWCProtectedFiles.isProtected(path) {
+            return OpResult(content: jsonError(SIWCProtectedFiles.refusal))
         }
         if HarnessSecretStore.isSecretStore(path) {
             for edit in edits {

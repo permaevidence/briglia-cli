@@ -36,6 +36,9 @@ extension ConversationManager {
         if assistantsMenuOperations > 0 { return "an assistant being changed from the menu" }
         if browserSettingsMutation || isRestoringMind || subscriptionLoginTask != nil
             || botSwitchCutoverInProgress { return "a settings change" }
+        // Sign in with ChatGPT (SIWC plan §3.8 "Upgrade pause"): a pending
+        // sign-in this process owns, an in-flight refresh settle, a revoke.
+        if let reason = SIWCActivity.shared.busyReason() { return reason }
         // A settings commit or its reconciliation (plan B.4b: no "parked"
         // or exec while one is active).
         if settingsWriterStorage?.gate.isHeld == true || settingsApplyTask != nil { return "a settings change" }

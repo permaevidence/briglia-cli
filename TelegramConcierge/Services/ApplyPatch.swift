@@ -258,6 +258,16 @@ enum ApplyPatch {
     }
 
     private static func planOperation(_ op: Operation) async throws -> Plan {
+        // Sign in with ChatGPT files (SIWC plan §3.8): never written, deleted
+        // or moved by a file tool, as source or destination.
+        switch op {
+        case .add(let path, _), .delete(let path):
+            if SIWCProtectedFiles.isProtected(path) { throw PatchError(message: SIWCProtectedFiles.refusal) }
+        case .update(let path, _, let moveTo):
+            if SIWCProtectedFiles.isProtected(path) || moveTo.map({ SIWCProtectedFiles.isProtected($0) }) == true {
+                throw PatchError(message: SIWCProtectedFiles.refusal)
+            }
+        }
         switch op {
         case .add(let path, let content):
             if HarnessSecretStore.isSecretStore(path) {

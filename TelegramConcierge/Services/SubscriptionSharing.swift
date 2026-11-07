@@ -206,12 +206,25 @@ enum SubscriptionSharing {
 
     /// `/deleteuserdata`'s ChatGPT step.
     static func wipe(store: SubscriptionAuthStore = SubscriptionAuthStore(),
-                     shareLock: () throws -> ProfileFileLock? = { try ChatGPTShare.takeLock() }) async -> WipeResult {
+                     shareLock: () throws -> ProfileFileLock? = { try ChatGPTShare.takeLock() },
+                     siwc: SIWCWipe.Context = .live) async -> WipeResult {
+        // Sign in with ChatGPT (SIWC plan §3.8 "Wipe"): its step runs at the
+        // same points, under the same sharing lock.
+        var siwcResult = SIWCWipe.Result()
+        var result = await wipeCore(store: store, shareLock: shareLock, siwc: siwc, siwcResult: &siwcResult)
+        result.failures += siwcResult.failures
+        result.notes += siwcResult.notes
+        return result
+    }
+
+    private static func wipeCore(store: SubscriptionAuthStore, shareLock: () throws -> ProfileFileLock?,
+                                 siwc: SIWCWipe.Context, siwcResult: inout SIWCWipe.Result) async -> WipeResult {
         var result = WipeResult()
         guard CoordinationMode.multi else {
             // Never-multi: unchanged.
             do { if try store.read() != nil { try await store.logout() } }
             catch { result.failures.append("ChatGPT local sign-out: \(error.localizedDescription)") }
+            await SIWCWipe.run(siwc, shareLocked: false, into: &siwcResult)
             return result
         }
         let lock: ProfileFileLock?
@@ -220,6 +233,7 @@ enum SubscriptionSharing {
             // stage-2 R6): the selection binding is cleared, the scope (and
             // an own store) stay as they are, and the reset is reported.
             clearBinding(&result, removeScope: false)
+            await SIWCWipe.run(siwc, shareLocked: false, into: &siwcResult)
             if AssistantProfile.isExtra, scope() == .own {
                 result.failures.append("ChatGPT (own login) was not reset because another assistant is changing its ChatGPT setting; this assistant keeps its own login — run /deleteuserdata again in a moment")
             } else {
@@ -237,8 +251,11 @@ enum SubscriptionSharing {
                     result.failures.append("ChatGPT (own login) sign-out: \(error.localizedDescription); this assistant keeps its own login setting")
                     return result
                 }
+                await SIWCWipe.retireOwn(siwc, into: &siwcResult)
+                if siwcResult.ownRetirementFailed { return result }
             }
             clearBinding(&result, removeScope: true)
+            await SIWCWipe.run(siwc, shareLocked: true, into: &siwcResult)
             let others = displayNames(sharers().filter { $0 != AssistantProfile.selectedName })
             result.notes.append("ChatGPT stays signed in for \(others.joined(separator: ", ")); sign out from the menu to remove it for everyone. / ChatGPT resta connesso per \(others.joined(separator: ", ")); disconnettilo dal menu per rimuoverlo per tutti.")
             return result
@@ -253,6 +270,7 @@ enum SubscriptionSharing {
             let names = displayNames(others).joined(separator: ", ")
             result.notes.append("ChatGPT stays signed in for \(names); sign out from the menu to remove it for everyone. / ChatGPT resta connesso per \(names); disconnettilo dal menu per rimuoverlo per tutti.")
         }
+        await SIWCWipe.run(siwc, shareLocked: true, into: &siwcResult)
         return result
     }
 
@@ -281,6 +299,29 @@ enum SubscriptionSharing {
     /// `briglia --profile <n> subscription scope shared|own`. Idle-only:
     /// refused while this assistant runs. Clears the selection binding.
     static func changeScope(to target: Scope) async throws -> String {
+        // Own Sign in with ChatGPT registrations retired by own → shared are
+        // revoked after every lock is released (SIWC plan §3.8 "Scope
+        // changes": local tombstones durable first, revoke after).
+        var retired: [SIWCStore.Tombstone] = []
+        let outcome: Result<String, Error>
+        do { outcome = .success(try await changeScopeHolding(to: target, retired: &retired)) } catch { outcome = .failure(error) }
+        var unconfirmed = false
+        for tombstone in retired {
+            SIWCActivity.shared.beginRevoke()
+            let confirmed = await SIWCSignIn(store: SIWCStore(directory: StoragePaths.configRoot)).revokeAll(tombstone)
+            SIWCActivity.shared.endRevoke()
+            unconfirmed = unconfirmed || !confirmed
+        }
+        let note = unconfirmed ? " " + SIWCLogoutOutcome.unconfirmedMessage : ""
+        switch outcome {
+        case .success(let message): return message + note
+        case .failure(let error):
+            if note.isEmpty { throw error }
+            throw SubscriptionError("\((error as? SubscriptionError)?.message ?? error.localizedDescription)\(note)")
+        }
+    }
+
+    private static func changeScopeHolding(to target: Scope, retired: inout [SIWCStore.Tombstone]) async throws -> String {
         guard AssistantProfile.isExtra else { throw SubscriptionError("The default assistant owns the shared ChatGPT login; it has no separate login.") }
         // Lock order: chatgpt-share.lock → registry.lock (inside). The probe
         // of this profile's assistant leases and the publication of a
@@ -312,13 +353,31 @@ enum SubscriptionSharing {
         let oldOwn: SubscriptionAuthState?
         do { oldOwn = try own.read() } catch { throw SubscriptionError("ChatGPT (own login) can't be read: \(error.localizedDescription); nothing changed") }
         let retire = target == .shared && oldOwn != nil
+        // SIWC (§3.8 "Scope changes", R4): own → shared also retires every
+        // registration of the own SIWC store, in ONE token-file replacement,
+        // journaled as one grouped effect with per-record evidence.
+        let ownSIWC = SIWCStore(directory: StoragePaths.configRoot)
+        let oldOwnSIWC: SIWCTokenFile?
+        do { oldOwnSIWC = try ownSIWC.readTokens() } catch {
+            throw SubscriptionError("ChatGPT (own Sign in with ChatGPT login) can't be read: \((error as? SIWCError)?.message ?? error.localizedDescription); nothing changed")
+        }
+        let retireSIWC = target == .shared && !(oldOwnSIWC?.records.isEmpty ?? true)
+        let siwcEffect: SIWCJournalEffect? = retireSIWC ? {
+            let records = oldOwnSIWC?.records ?? []
+            let fps = records.map { SIWCEndpoint.registrationFingerprint(clientId: $0.clientId) }
+            var old: [String: SIWCRecordEvidence] = [:]
+            for record in records { old[SIWCEndpoint.registrationFingerprint(clientId: record.clientId)] = .record(record) }
+            return SIWCJournalEffect(effectId: UUID().uuidString, kind: .retire, storePath: ownSIWC.directory.standardizedFileURL.path,
+                                     file: "tokens", targets: fps, oldEvidence: old)
+        }() : nil
         var tombstone = SubscriptionAuthState(generation: UUID().uuidString)
         tombstone.lastAttempt = attempt
         let record = SettingsPendingStore.Attempt(attempt: attempt, operation: "scope", category: "ai", ticket: nil,
             clientRequestId: attempt, label: "ChatGPT login scope", authEffect: retire, authKind: retire ? "logout" : nil,
             storePath: StoragePaths.configRoot.path, oldEvidence: SettingsPendingStore.AuthEvidence(oldOwn),
             projectedEvidence: retire ? SettingsPendingStore.AuthEvidence(tombstone) : nil, secretsKeys: [scopeKey],
-            steps: ["intent"], direction: direction, retirement: retire ? "own" : "none", startedAt: Date())
+            steps: ["intent"], direction: direction, retirement: retire || retireSIWC ? "own" : "none", startedAt: Date(),
+            siwcEffects: siwcEffect.map { [$0] })
         try SettingsPendingStore.update { $0.attempts[attempt] = record }
         func finish(_ state: String, _ message: String?) {
             _ = try? SettingsPendingStore.update { doc in
@@ -349,6 +408,19 @@ enum SubscriptionSharing {
             SettingsSupersede.subscriptionChanged(store: StoragePaths.configRoot.path)
             _ = try? SettingsPendingStore.update { $0.attempts[attempt]?.steps.append("own-retired") }
         }
+        if let siwcEffect {
+            do {
+                retired = try await ownSIWC.retireAll(effect: siwcEffect.mark(attempt: attempt))
+            } catch {
+                _ = try? SettingsPendingStore.update { $0.attempts[attempt]?.steps.append("siwc-retire-failed") }
+                let named = retire ? "Own legacy login signed out; own Sign in with ChatGPT login not signed out; scope still own."
+                                   : "Own Sign in with ChatGPT login not signed out; nothing changed (scope still own)."
+                finish(retire ? "partial" : "failed", named)
+                throw SubscriptionError(named + " (\((error as? SIWCError)?.message ?? error.localizedDescription))")
+            }
+            SettingsSupersede.subscriptionChanged(store: StoragePaths.configRoot.path)
+            _ = try? SettingsPendingStore.update { $0.attempts[attempt]?.steps.append("own-siwc-retired") }
+        }
         // Publish: ONE secrets mutation — binding cleared, scope keys and the
         // publication marker — rechecked against the scope it started from.
         var published = false
@@ -366,16 +438,20 @@ enum SubscriptionSharing {
                    holding.store[KeychainHelper.openAICompatibleApiKeyKey] == bound {
                     change[KeychainHelper.openAICompatibleApiKeyKey] = .some(nil)
                 }
+                // Both directions clear the SIWC selection (§3.8).
+                for (k, v) in SIWCSelection.clearDelta(stored: holding.store) { change[k] = .some(v) }
                 do { try holding.mutateHolding(change) } catch is PrivateStorage.ReplacedButNotDurable {}
                 published = true
             }
         } catch {
-            finish(retire ? "partial" : "failed", retire ? "own login signed out; scope still own" : "nothing changed")
-            throw SubscriptionError("The new login scope could not be saved (\(error.localizedDescription))" + (retire ? "; this assistant's own login was signed out." : "."))
+            let any = retire || retireSIWC
+            finish(any ? "partial" : "failed", any ? "own login signed out; scope still own" : "nothing changed")
+            throw SubscriptionError("The new login scope could not be saved (\(error.localizedDescription))" + (any ? "; this assistant's own login was signed out." : "."))
         }
         guard published else {
-            finish(retire ? "partial" : "failed", "settings changed")
-            throw SubscriptionError(retire ? "This assistant's own login was signed out, but its scope stays own because settings changed meanwhile." : "Settings changed meanwhile; nothing changed.")
+            let any = retire || retireSIWC
+            finish(any ? "partial" : "failed", "settings changed")
+            throw SubscriptionError(any ? "This assistant's own login was signed out, but its scope stays own because settings changed meanwhile." : "Settings changed meanwhile; nothing changed.")
         }
         finish("persisted", nil)
         return target == .own
