@@ -66,6 +66,31 @@ extension SIWCSelftest {
                 c.check("R3: the retry after it confirms the sign-out", retry == .signedOut(remoteConfirmed: true))
             }
         }
+        // Codex round 4: a NEWER sign-in (another generation, bound, as a
+        // second process publishing and activating leaves it) between the
+        // early read and the lock: a known refusal before any write. The
+        // newer login stays saved and its tokens never reach revocation.
+        for armed in [false, true] {
+            (source, _) = try await liveSelection(clientId: "oaiappPostLogout", sub: "sub-pl")
+            revoked = []
+            let newer = "synthetic-refresh-newer-login-\(armed)"
+            SettingsWriter.siwcBeforeTombstoneForTesting = {
+                try rewriteBound(source.store, source.clientId) {
+                    $0.generation = UUID().uuidString
+                    $0.tokens?.refresh = newer; $0.tokens?.access = "synthetic-access-newer-login"
+                }
+                if armed { PrivateStorage.failPostRenameBarrierForTesting = { $0 == tokenPath } }
+            }
+            let result = await writer.commitSIWCLogout(store: source.store, expectedGeneration: source.generation,
+                                                       revoke: { t in revoked += t.revoke; return true })
+            SettingsWriter.siwcBeforeTombstoneForTesting = nil
+            PrivateStorage.failPostRenameBarrierForTesting = nil
+            let stored = (try? source.store.readTokens())?.record(source.clientId)
+            c.check("R4: a newer sign-in before the lock → partial, nothing revoked, the newer login kept (\(armed ? "barrier armed" : "control"))",
+                    result == .partial(SIWCLogoutOutcome.partialMessage) && revoked.isEmpty && stored?.tokens?.refresh == newer,
+                    "\(result) \(revoked)")
+            _ = await writer.commitSIWCLogout(store: source.store, revoke: { _ in true })
+        }
         // Nothing replaced: the old partial wording, nothing revoked.
         (source, _) = try await liveSelection(clientId: "oaiappPostLogout", sub: "sub-pl")
         revoked = []

@@ -210,8 +210,8 @@ BREAKS = [
     ("C15 the revoke runs while the token is held", "logout: the remote revoke runs after the commit token is released", SS + "SettingsWriter+SIWC.swift",
      "        release()\n        SIWCActivity.shared.beginRevoke()", "        SIWCActivity.shared.beginRevoke()", "c-logout"),
     ("C16 a failed tombstone is reported as signed out", "logout: a tombstone failure is partial", SS + "SettingsWriter+SIWC.swift",
-     "                Self.finishAttempt(attempt, change: change, pending: nil, state: \"partial\", message: SIWCLogoutOutcome.partialMessage)\n                return .partial(SIWCLogoutOutcome.partialMessage)",
-     "                Self.finishAttempt(attempt, change: change, pending: nil, state: \"partial\", message: SIWCLogoutOutcome.partialMessage)\n                return .signedOut(remoteConfirmed: false)", "c-logout"),
+     "            if material.value == nil {\n                Self.finishAttempt(attempt, change: change, pending: nil, state: \"partial\", message: SIWCLogoutOutcome.partialMessage)\n                return .partial(SIWCLogoutOutcome.partialMessage)",
+     "            if material.value == nil {\n                Self.finishAttempt(attempt, change: change, pending: nil, state: \"partial\", message: SIWCLogoutOutcome.partialMessage)\n                return .signedOut(remoteConfirmed: false)", "c-logout"),
     ("C17 the interrupting phase is cancellable", "logout: a lifecycle operation during the drain does not cancel the holder", SS + "SettingsCommitGate.swift",
      "        holderPhase = .interrupting; holderCancel = nil", "        holderPhase = .preCommit", "c-logout"),
     ("C18 admission is not rechecked after the drain", "logout: admission closed during the drain", SS + "SettingsWriter+SIWC.swift",
@@ -295,8 +295,17 @@ BREAKS = [
     ("C54 the stopped-jobs count is not reset per attempt", "R2-2: the count belongs to the latest attempt", SS + "SettingsWriter+SIWC.swift",
      "        lastLogoutStoppedJobs = 0\n", "", "c-round2"),
     ("C55 the logout revokes the pre-lock snapshot", "R3: a refresh between the early read and the lock", SS + "SettingsWriter+SIWC.swift",
-     "                let items = material.value ?? SIWCScopeRetire.revokeMaterial(oldRecord.map { SIWCTokenFile(records: [$0]) })",
+     "                let items = material.value ?? []",
      "                let items = SIWCScopeRetire.revokeMaterial(oldRecord.map { SIWCTokenFile(records: [$0]) })", "c-round2"),
+    ("C56 the material is captured before the generation check", "R4: a newer sign-in before the lock", SS + "SettingsWriter+SIWC.swift",
+     "                guard let current, current.generation == target.generation else {\n"
+     "                    throw SIWCError(.local, \"The ChatGPT sign-in changed meanwhile; nothing was signed out. Try again.\")\n"
+     "                }\n"
+     "                material.value = SIWCScopeRetire.revokeMaterial(SIWCTokenFile(records: [current]))\n",
+     "                material.value = SIWCScopeRetire.revokeMaterial(current.map { SIWCTokenFile(records: [$0]) })\n", "c-round2"),
+    ("C57 a refusal before the write is classified as uncertain", "R4: a newer sign-in before the lock", SS + "SettingsWriter+SIWC.swift",
+     "            if material.value == nil {\n",
+     "            if false {\n", "c-round2"),
 ]
 
 

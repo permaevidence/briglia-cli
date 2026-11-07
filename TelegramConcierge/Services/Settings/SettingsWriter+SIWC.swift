@@ -461,15 +461,28 @@ extension SettingsWriter {
         // same SIWC lock as the tombstone write (a concurrent refresh may
         // have replaced the tokens since any earlier read), before the write
         // can throw, and kept for a late error.
+        // Codex stage-C round 4: the material is captured only after the
+        // generation check passed under that lock. A newer sign-in (another
+        // generation) is a known refusal before any write: nothing replaced,
+        // and its tokens never reach revocation (no fallback either).
         let material = SIWCMaterialBox()
         do {
             try Self.siwcBeforeTombstoneForTesting?()
             tombstone = try await store.locked {
                 let current = try store.readTokens()?.record(target.clientId)
-                material.value = SIWCScopeRetire.revokeMaterial(current.map { SIWCTokenFile(records: [$0]) })
+                guard let current, current.generation == target.generation else {
+                    throw SIWCError(.local, "The ChatGPT sign-in changed meanwhile; nothing was signed out. Try again.")
+                }
+                material.value = SIWCScopeRetire.revokeMaterial(SIWCTokenFile(records: [current]))
                 return try store.tombstoneLocked(target.clientId, expectedGeneration: target.generation, effect: effect.mark(attempt: attempt))
             }
         } catch {
+            // Never reached the write (refused generation, or the lock/hook
+            // failed first): nothing of ours was replaced, nothing is revoked.
+            if material.value == nil {
+                Self.finishAttempt(attempt, change: change, pending: nil, state: "partial", message: SIWCLogoutOutcome.partialMessage)
+                return .partial(SIWCLogoutOutcome.partialMessage)
+            }
             // Codex stage-C round 2: classify from the record's evidence.
             switch SIWCRecovery.overall(SIWCRecovery.evaluate(effect, attempt: attempt)) {
             case .notApplied, .none:
@@ -487,7 +500,7 @@ extension SettingsWriter {
                 let message = visible ? SIWCLogoutOutcome.unconfirmedTombstoneMessage : SIWCLogoutOutcome.uncertainTombstoneMessage
                 if visible { Self.finishAttempt(attempt, change: change, pending: nil, state: "partial", message: message) }
                 release()
-                let items = material.value ?? SIWCScopeRetire.revokeMaterial(oldRecord.map { SIWCTokenFile(records: [$0]) })
+                let items = material.value ?? []
                 SIWCActivity.shared.beginRevoke()
                 for item in items { _ = await revoke(item) }
                 SIWCActivity.shared.endRevoke()
