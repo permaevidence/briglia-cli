@@ -117,7 +117,7 @@ BREAKS = [
     ("S51 the in-flight registry admits a fenced registration", "fence: a request started after the fence is refused", W + "SIWCFence.swift",
      "        guard !fenced.contains(key), epochs[key, default: 0] == epoch else {", "        guard true else {"),
     # Codex round 1 (CHATGPT_SIWC_IMPL_AB_CODEX_REVIEW_2026-11-06), R1–R8.
-    ("S52 R1 a record changed during the refresh counts as unchanged", "R1: a record edited during the refresh is never activated", W + "SIWCStore+Refresh.swift",
+    ("S52 R1 a record changed during the refresh counts as unchanged", "R1: a rebound replacement during the refresh is kept", W + "SIWCStore+Refresh.swift",
      "                      Self.boundState(disk) == sent else { return false }", "                      true else { return false }"),
     ("S53 R2 the checkpoint is stamped with the registration's subject", "R2: a checkpoint of another account's tokens is never promoted", W + "SIWCStore+Refresh.swift",
      "            let newIdentity = updated.claims.map { Self.identity(key: key, sub: $0.sub, accountId: $0.accountId) } ?? oldIdentity",

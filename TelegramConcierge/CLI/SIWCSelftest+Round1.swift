@@ -173,6 +173,12 @@ extension SIWCSelftest {
 
     /// R8 with the production `.live` resolver, under the temporary XDG roots.
     static func round1HostTests(_ root: URL, _ c: Checks) async throws {
+        // Isolation: earlier groups registered sign-ins in the machine store;
+        // remove them so the extra below is the machine's only host user.
+        let machine = SIWCStore(directory: MachinePaths.defaultConfigRoot())
+        _ = try? await machine.retireAll()
+        _ = try machine.removeFiles()
+        c.check("R8 setup: the machine store holds no registration", (try? machine.readRegistrations()) == .some(nil))
         let name = "r8-orphan"
         let store = SIWCStore(directory: AssistantProfile.extraConfigRoot(name))
         try PrivateStorage.ensureDirectory(store.directory)
