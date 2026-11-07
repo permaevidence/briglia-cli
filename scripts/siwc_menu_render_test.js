@@ -116,6 +116,20 @@ async function session(state) {
     check('R6: a plain successful sign-in shows no extra outcome notice', !s.el('siwc-flow-message'));
   }
 
+  // ---- The waiting state (paste and browser modes), and finishing ----
+  for (const lang of ['en', 'it']) {
+    for (const mode of ['paste', 'browser']) {
+      const siwc = { opted_in: true, route: 'siwc', login: 'none', selected: true, manage_usage: 'x',
+                     flow: { state: 'waiting', mode, url: 'https://auth.openai.com/api/accounts/authorize?x=1' } };
+      const s = await session({ posts: [], status: () => baseStatus(lang, siwc), act: () => ({}) });
+      check(`waiting: ${lang} ${mode} — the card shows the paste box, “Sign-in failed in the browser” and Cancel`,
+            !!s.el('siwc-paste') && !!s.el('siwc-paste-go') && !!s.el('siwc-failed') && !!s.el('siwc-route'), s.text().slice(0, 300));
+    }
+    const fin = { opted_in: true, route: 'siwc', login: 'none', selected: true, manage_usage: 'x', flow: { state: 'finishing', mode: 'paste' } };
+    const s = await session({ posts: [], status: () => baseStatus(lang, fin), act: () => ({}) });
+    check(`finishing: ${lang} — the card shows the “getting Briglia ready” line`, /Briglia/.test(s.text()) && !!find(statics.card, n => (n.className || '').includes('spinner')));
+  }
+
   // ---- R7: the selector round trip from the SIWC route ----
   for (const lang of ['en', 'it']) {
     for (const [label, login, legacy] of [['signed in, legacy saved', 'signed_in', true], ['signed in, no legacy login', 'signed_in', false], ['SIWC signed out', 'signed_out', false]]) {

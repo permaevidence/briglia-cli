@@ -1287,7 +1287,7 @@
     var f = sw.flow || {};
     out.push(h('div', { class: 'eyebrow', id: 'siwc-route', text: T('ChatGPT (Sign in with ChatGPT)', 'ChatGPT (Accedi con ChatGPT)') + (sw.scope ? ' · ' + sw.scope : '') }));
     if (siwcUI.selector) { out.push(methodSelector()); return out; }
-    if (f.state === 'waiting' || f.state === 'finishing') return out.concat(siwcWaiting(sw, f));
+    if (f.state === 'waiting' || f.state === 'finishing') { siwcWaiting(sw, f).forEach(function (n) { out.push(n); }); return out; }
     if (sw.notice) out.push(h('div', { class: 'notice warn' }, [sw.notice]));
     // The flow's own outcome (a browser callback error, the timeout, saved
     // but not switched): shown after polling, not only after a button.
