@@ -492,7 +492,7 @@ extension ConversationManager {
         • reminders and watchers (including pending triggers)
         • saved documents, files ledger and todo list
         • subagent session histories
-        • ChatGPT subscription login (signed out locally; your subscription itself is unchanged), including a Sign in with ChatGPT login (revoked where possible; with several assistants, only when no other assistant shares it). An older Briglia does not know about Sign in with ChatGPT files; this version removes any it finds
+        • ChatGPT subscription login (signed out locally; your subscription itself is unchanged), including a Sign in with ChatGPT login (also signed out at OpenAI where possible; with several assistants, only when no other assistant shares it). An older Briglia does not know about Sign in with ChatGPT files; this version removes any it finds
         • the local calendar and EMAIL ACCESS: the AgentMail API key is deleted (server-side mailboxes are untouched; set up AgentMail again in `briglia menu` to reconnect email)\(gwsConfigPresent ? "\n• NOT touched: Google's gws program. Briglia no longer uses it; if Google email was connected through it earlier, run `gws auth logout` and delete ~/.config/gws yourself" : "")
 
         Also stopped and discarded: running background jobs and subagents, their pending notifications, buffered attachments, pending replies, calendar/contacts caches, logs, and temporary tool outputs.
