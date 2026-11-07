@@ -353,7 +353,13 @@ def main():
             original = mutate(tree, rel, old, new)
             try:
                 binary = build(tree, scratch)
-                r = selftest(binary, work, group)
+                try:
+                    r = selftest(binary, work, group)
+                except subprocess.TimeoutExpired:
+                    print(f"✖ {label}: the selftest hung (timeout)", flush=True)
+                    failures += 1
+                    executed += 1
+                    continue
                 failed = [l for l in r.stdout.splitlines() if l.startswith("✖")]
                 caught = r.returncode != 0 and any(l.startswith(f"✖ {check}") for l in failed)
                 print(("✔" if caught else "✖") + f" {label}: '{check}' fails"

@@ -182,7 +182,7 @@ extension SIWCSelftest {
                 && flag.cancelled && flag.ended && SIWCFence.shared.jobCount(jobSource.fenceKey) == 0)
         c.check("jobs: the sign-out reports how many running jobs it stopped", writer.lastLogoutStoppedJobs == 1)
         c.check("jobs: a job of another login keeps running", SIWCFence.shared.jobCount(other.fenceKey) == 1)
-        otherJob.cancel(); _ = await job.value; _ = await otherJob.value
+        job.cancel(); otherJob.cancel(); _ = await job.value; _ = await otherJob.value
         // A fenced (partially signed-out) login refuses new jobs at once.
         let (fencedSource, _) = try await liveSelection(clientId: "oaiappJobs", sub: "sub-jobs")
         SIWCFence.shared.fenceAndBump(fencedSource.fenceKey)
