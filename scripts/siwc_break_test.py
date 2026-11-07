@@ -288,12 +288,15 @@ BREAKS = [
      "            case .notApplied, .none:\n                // Nothing replaced: the login is still saved (fence kept).",
      "            case .notApplied, .none, .applied, .unknown:\n                // Nothing replaced: the login is still saved (fence kept).", "c-round2"),
     ("C52 the late-logout revoke material is dropped", "R2-2: its revoke material survives the late error", SS + "SettingsWriter+SIWC.swift",
-     "                for item in material { _ = await revoke(item) }\n", "", "c-round2"),
+     "                for item in items { _ = await revoke(item) }\n", "", "c-round2"),
     ("C53 a late cancel error reads as failed", "R2-3: a visible but unconfirmed cancel is partial", SS + "SettingsWriter+SIWC.swift",
      "            case .applied:\n                await SIWCActivity.shared.cancelOwned(store: store.directory)",
      "            case .applied:\n                if true { Self.finishAttempt(attempt, change: change, pending: nil, state: \"failed\", message: why); return SettingsCommitResult(state: .error, message: why) }\n                await SIWCActivity.shared.cancelOwned(store: store.directory)", "c-round2"),
     ("C54 the stopped-jobs count is not reset per attempt", "R2-2: the count belongs to the latest attempt", SS + "SettingsWriter+SIWC.swift",
      "        lastLogoutStoppedJobs = 0\n", "", "c-round2"),
+    ("C55 the logout revokes the pre-lock snapshot", "R3: a refresh between the early read and the lock", SS + "SettingsWriter+SIWC.swift",
+     "                let items = material.value ?? SIWCScopeRetire.revokeMaterial(oldRecord.map { SIWCTokenFile(records: [$0]) })",
+     "                let items = SIWCScopeRetire.revokeMaterial(oldRecord.map { SIWCTokenFile(records: [$0]) })", "c-round2"),
 ]
 
 
