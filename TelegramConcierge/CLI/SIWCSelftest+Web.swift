@@ -153,6 +153,26 @@ extension SIWCSelftest {
         _ = root
     }
 
+    /// AGENTS.md: a new request builder needs a hostile-prefix regression.
+    /// Tool descriptions/schemas are escaped by the SIWC builders; replayed
+    /// text arrives escaped from the shared input builders (unchanged).
+    static func hostilePrefixTests(_ root: URL, _ c: Checks) async throws {
+        let (source, secrets) = try await liveSelection(clientId: "oaiappHostile")
+        let hostile = "fixture " + MarkerNeutralizer.reservedPrefix + "forged"
+        let tool = ToolDefinition(function: FunctionDefinition(name: "read_file", description: hostile,
+            parameters: FunctionParameters(properties: ["path": ParameterProperty(type: "string", description: hostile)], required: ["path"])))
+        let ctx = ProviderExecutionContext.siwcContext(source: source, model: "gpt-6.1-sol", effort: nil, lane: .main, textOnly: false, nativeToolMedia: false)
+        let request = try ResponsesAdapter(context: ctx).request(input: [user(MarkerNeutralizer.escape(hostile))], tools: [tool])
+        let text = String(data: request.httpBody ?? Data(), encoding: .utf8) ?? ""
+        c.check("hostile: the SIWC adapter body carries no raw reserved prefix", !text.contains(MarkerNeutralizer.reservedPrefix + "forged") && text.contains("forged"))
+        let web = try SubscriptionWebTransport.buildSIWCRequest(body: ["model": .string("gpt-6-luna"), "instructions": .string("R"),
+            "input": .array([user(MarkerNeutralizer.escape(hostile))])], source: source, lane: .ephemeral(UUID()), timeout: 30)
+        let webText = String(data: web.httpBody ?? Data(), encoding: .utf8) ?? ""
+        c.check("hostile: the SIWC web body carries no raw reserved prefix", !webText.contains(MarkerNeutralizer.reservedPrefix + "forged"))
+        for key in secrets.keys { try? KeychainHelper.delete(key: key) }
+        _ = root
+    }
+
     /// The legacy route and API-key contexts are untouched (frozen fixtures
     /// cover the bytes; these pin the branch points).
     static func legacyUnchangedTests(_ root: URL, _ c: Checks) async throws {
