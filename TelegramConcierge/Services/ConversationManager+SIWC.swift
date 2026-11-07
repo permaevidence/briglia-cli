@@ -166,7 +166,9 @@ extension ConversationManager {
         defer { siwcNoticeDelivery = false }
         let store = SIWCStore.resolved()
         let destination = SIWCNoticeDestination.current
-        for notice in SIWCPlanState.pendingNotices(store, destination: destination) {
+        // The store lock (bounded) is never waited for on the main actor.
+        let due = await Task.detached { SIWCPlanState.pendingNotices(store, destination: destination) }.value
+        for notice in due {
             guard SIWCPlanState.stillDue(store, notice), let chat = pairedChatId,
                   destination == SIWCNoticeDestination.current else { continue }
             var text = notice.text
@@ -184,7 +186,7 @@ extension ConversationManager {
             }
             do {
                 try await telegramService.sendMessageNoPreview(chatId: chat, text: text)
-                SIWCPlanState.markDelivered(store, notice)
+                _ = await Task.detached { SIWCPlanState.markDelivered(store, notice) }.value
             } catch {
                 print("[SIWC] plan notice not delivered now; it stays queued")
             }

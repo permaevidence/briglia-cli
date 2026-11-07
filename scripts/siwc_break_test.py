@@ -369,7 +369,7 @@ BREAKS = [
      "            do { try await telegramService.sendMessageNoPreview(chatId: chat, text: text) } catch {",
      "            do { try await telegramService.sendMessage(chatId: chat, text: text) } catch {", "d-telegram"),
     ("D24 a delivered notice is not marked", "notices: the usage-limit notice is pushed once by the opener", S + "ConversationManager+SIWC.swift",
-     "                SIWCPlanState.markDelivered(store, notice)", "                _ = notice", "d-telegram"),
+     "                _ = await Task.detached { SIWCPlanState.markDelivered(store, notice) }.value", "                _ = notice", "d-telegram"),
     ("D25 the invitation is not marked as sent", "invitation: sent once in Telegram", S + "ConversationManager+SIWC.swift",
      "            await SIWCSurface.markInvited(origin: \"telegram\")", "            _ = invite", "d-telegram"),
     ("D26 a finishing paste is answered twice", "telegram: the right paste signs in; one result message", S + "ConversationManager+SIWC.swift",

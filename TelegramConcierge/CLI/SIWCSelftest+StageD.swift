@@ -130,8 +130,8 @@ extension SIWCSelftest {
         await c.rejectsKind("plan: after a user action a background lane still sends nothing", .notAvailable) {
             _ = try SIWCPlanState.admit(source, userTurn: false)
         }
-        let t2 = try SIWCPlanState.admit(source, userTurn: true)
-        c.check("plan: after a user action the next user turn is admitted once", entry().retryAllowed == true)
+        let t2 = try? SIWCPlanState.admit(source, userTurn: true)
+        c.check("plan: after a user action the next user turn is admitted once", t2 != nil && entry().retryAllowed == true)
         _ = SIWCPlanState.observe(t2, .failure(SIWCError(.notAvailable, SIWCError.notEligibleMessage)))
         await c.rejectsKind("plan: the one attempt failed again → no further attempt", .notAvailable) {
             _ = try SIWCPlanState.admit(source, userTurn: true)
