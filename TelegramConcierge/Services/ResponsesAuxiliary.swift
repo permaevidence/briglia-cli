@@ -48,6 +48,12 @@ enum ResponsesAuxiliary {
             // Same scope identity the main-agent context carries (v0.2.31).
             context.profileIdentity = ProviderProfiles.Profile.opencode.rawValue
         }
+        if let siwc = ProviderExecutionContext.siwcFromStored(stored, model: model, effort: rawEffort, lane: lane, textOnly: false) {
+            var siwc = siwc
+            siwc.nativeToolMedia = false
+            siwc.configurationError = siwc.configurationError ?? (wire == "responses" ? nil : "unsupported explicit provider protocol")
+            return siwc
+        }
         if stored[ProviderProfiles.activeProfileKey] == "chatgpt" {
             context.profileIdentity = "chatgpt"
             context.subscriptionGeneration = stored[KeychainHelper.openAICompatibleApiKeyKey] ?? ""
@@ -57,13 +63,22 @@ enum ResponsesAuxiliary {
         return context
     }
 
+    /// SIWC only (§4.2 single owner): a leading system message is the typed
+    /// prompt, as the escaped text the input carries. Other routes ignore it.
+    static func siwcTypedPrompt(_ messages: [(String, String)]) -> String? {
+        guard let first = messages.first, first.0 == "system" else { return nil }
+        return MarkerNeutralizer.escape(first.1)
+    }
+
     static func text(context: ProviderExecutionContext, messages: [(String, String)],
                      maxOutputTokens: Int? = nil) async throws -> String {
         defer { context.responsesTurn.close() }
         let input = messages.map { ResponsesAdapter.message(role: $0.0, text: MarkerNeutralizer.escape($0.1)) }
         let receipt = PreparedRequestReceipt(requestID: UUID(),
             historyFingerprint: ResponsesReplayEnvelope.hash(try JSONEncoder().encode(input)), deliveryNonces: [])
-        let response = try await ResponsesAdapter(context: context).send(input: input, tools: nil,
+        var adapter = ResponsesAdapter(context: context)
+        adapter.typedPrompt = Self.siwcTypedPrompt(messages)
+        let response = try await adapter.send(input: input, tools: nil,
             receipt: receipt, maxOutputTokens: maxOutputTokens)
         guard case .text(let text, _, _, _, _, _, _, _) = response else { throw ResponsesFailure.malformed("auxiliary request returned tools") }
         return text
@@ -79,7 +94,9 @@ enum ResponsesAuxiliary {
         let input = messages.map { ResponsesAdapter.message(role: $0.0, text: MarkerNeutralizer.escape($0.1)) }
         let receipt = PreparedRequestReceipt(requestID: UUID(),
             historyFingerprint: ResponsesReplayEnvelope.hash(try JSONEncoder().encode(input)), deliveryNonces: [])
-        let response = try await ResponsesAdapter(context: context).send(input: input, tools: nil,
+        var adapter = ResponsesAdapter(context: context)
+        adapter.typedPrompt = Self.siwcTypedPrompt(messages)
+        let response = try await adapter.send(input: input, tools: nil,
             receipt: receipt, maxOutputTokens: nil)
         guard case .text(let text, _, _, let prompt, let completion, _, _, _) = response else {
             throw ResponsesFailure.malformed("auxiliary request returned tools")

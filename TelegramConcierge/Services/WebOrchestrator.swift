@@ -295,6 +295,13 @@ enum WebSearchBackend: String {
 
     /// Pure rule behind `subscriptionFollowActive` (selftest seam).
     static func followsSubscription(stored: [String: String]) -> Bool {
+        // Sign in with ChatGPT (SIWC plan §3.8): decided from the route keys,
+        // never from the runtime slot. An ambiguous or disabled SIWC selection
+        // still "follows" so its lanes refuse instead of moving to a paid key.
+        switch ChatGPTRoute.resolve(stored: stored) {
+        case .siwc, .ambiguous, .disabled: return true
+        case .legacy, .notChatGPT: break
+        }
         guard stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue,
               stored[KeychainHelper.llmProviderKey] == LLMProvider.openAICompatible.rawValue,
               !(stored[KeychainHelper.openAICompatibleApiKeyKey] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

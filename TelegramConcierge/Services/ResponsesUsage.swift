@@ -221,7 +221,7 @@ struct ResponsesUsageStore {
     }
 
     static func record(context: ProviderExecutionContext, requestID: UUID, attempt: Int, sentRoutingState: Bool) -> Record {
-        let provider: Provider = context.subscriptionGeneration != nil ? .subscription
+        let provider: Provider = context.isChatGPTPlan ? .subscription
             : (URL(string: context.endpoint)?.host?.lowercased() == "api.openai.com" ? .openaiAPI : .customAPI)
         let lane: String
         if let label = context.usageLaneLabel {

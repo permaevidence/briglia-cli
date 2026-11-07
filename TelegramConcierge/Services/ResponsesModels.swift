@@ -118,7 +118,7 @@ enum ResponsesRoundDecoder {
     /// A completed round with neither text nor calls (an empty reply).
     static let noVisibleAnswer = "no visible answer or calls"
     static func decode(_ data: Data, scope: ResponsesScope, receipt: PreparedRequestReceipt,
-                       allowedTools: Set<String>) throws -> ResponsesRound {
+                       allowedTools: Set<String>, requiredNamespace: String? = nil) throws -> ResponsesRound {
         guard data.count <= ResponsesLimits.roundBytes else { throw ResponsesFailure.overflow }
         let root = try JSONDecoder().decode(JSONValue.self, from: data)
         guard let object = root.responsesObject,
@@ -188,6 +188,12 @@ enum ResponsesRoundDecoder {
                       let name = item["name"]?.responsesString, allowedTools.contains(name),
                       let arguments = item["arguments"]?.responsesString else {
                     throw ResponsesFailure.malformed("duplicate/missing call identity or unexposed tool")
+                }
+                // SIWC (§4.2): namespace and function name together; a missing
+                // or foreign namespace is refused while only namespaced tools
+                // are advertised. nil = every other route, unchanged.
+                if let requiredNamespace, item["namespace"]?.responsesString != requiredNamespace {
+                    throw ResponsesFailure.malformed("tool call outside the advertised namespace")
                 }
                 guard arguments.utf8.count <= ResponsesLimits.argumentBytes else { throw ResponsesFailure.overflow }
                 guard (try? JSONDecoder().decode(JSONValue.self, from: Data(arguments.utf8)))?.responsesObject != nil else {

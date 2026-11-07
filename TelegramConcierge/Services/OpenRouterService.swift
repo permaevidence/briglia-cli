@@ -1502,6 +1502,12 @@ actor OpenRouterService {
             // OpenCode: the profile's one stored effort is resolved against
             // the model this request hits (Codex R1); other profiles untouched.
             let effort = ProviderProfiles.isOpenCodeRuntime(stored: stored) ? OpenCodeGo.compatibleEffort(rawEffort, for: model) : rawEffort
+            // Sign in with ChatGPT (SIWC plan §4.1): its own context from its
+            // own store; nil for legacy ChatGPT and every other profile.
+            if let siwc = ProviderExecutionContext.siwcFromStored(stored, model: model, effort: effort, lane: lane,
+                    textOnly: textOnlyOverride ?? (stored[KeychainHelper.textOnlyModelEnabledKey] == "true")) {
+                return siwc
+            }
             return ProviderExecutionContext(provider: .openAICompatible, model: model,
                 endpoint: stored[KeychainHelper.openAICompatibleBaseURLKey] ?? "",
                 authorization: "Bearer " + key, affinityKey: key, lane: lane,

@@ -50,7 +50,9 @@ enum ResearchSpend {
     /// (a custom profile pointed there pays the same rates; same host rule
     /// as `ResponsesUsageStore`).
     static func isPaidOpenAI(_ context: ProviderExecutionContext) -> Bool {
-        guard context.subscriptionGeneration == nil else { return false }
+        // Either ChatGPT route (legacy or Sign in with ChatGPT, SIWC plan
+        // §4.3): plan usage, never API dollars, although SIWC uses this host.
+        guard !context.isChatGPTPlan else { return false }
         return context.profileIdentity == ProviderProfiles.Profile.openai.rawValue
             || URL(string: context.endpoint)?.host?.lowercased() == "api.openai.com"
     }

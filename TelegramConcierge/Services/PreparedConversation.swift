@@ -49,6 +49,12 @@ struct ProviderExecutionContext {
     var configurationError: String? = nil
 
     var subscriptionGeneration: String? = nil
+    /// Sign in with ChatGPT (SIWC plan §4.1): the captured credential source.
+    /// nil for every other route; legacy contexts never set it.
+    var siwc: SIWCCredentialSource? = nil
+    /// The SIWC route was selected but no source could be captured: the
+    /// fixed reason; the adapter refuses before any send.
+    var siwcFailure: String? = nil
     var responsesTurn = ResponsesTurn()
     var responsesOperation: ResponsesOperation = .conversation
     /// Lane label recorded by `/cachestats` in place of the affinity lane's

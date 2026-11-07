@@ -13,7 +13,11 @@ struct SIWCAuthClient {
     typealias Reply = (data: Data, status: Int)
     typealias Send = (URLRequest, TimeInterval) async throws -> Reply
 
+    /// Selftest seam (development builds only): replaces every default send.
+    nonisolated(unsafe) static var sendOverride: Send?
+
     var send: Send = { request, deadline in
+        if adaCLIVersion.hasSuffix("-dev"), let override = SIWCAuthClient.sendOverride { return try await override(request, deadline) }
         let reply = try await SubscriptionAuthHTTP(deadline: deadline).perform(request)
         return (reply.0, reply.1)
     }

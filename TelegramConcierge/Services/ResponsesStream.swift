@@ -9,6 +9,8 @@ import FoundationNetworking
 /// Deltas are checked against it and never exposed for execution.
 struct ResponsesStreamAssembler {
     var subscription = false
+    /// SIWC route (§4.2/§5): its own error codes, checked before the legacy ones.
+    var siwc = false
     private var line = Data(), record = Data()
     private var total = 0
     private var responseID: String?
@@ -81,6 +83,7 @@ struct ResponsesStreamAssembler {
         ]
         guard semanticEvents.contains(type) else { return }
         if type == "error" {
+            if siwc, let failure = SIWCErrors.streamed(event) { throw failure }
             if subscription, let usage = SubscriptionEndpoint.streamedUsageError(event) { throw usage }
             throw ResponsesFailure.failed(event["code"]?.responsesString ?? "stream error")
         }
@@ -125,6 +128,7 @@ struct ResponsesStreamAssembler {
             // A usage limit reported as a failed terminal response is the
             // same typed error as the HTTP 429 body (never retried, no API
             // fallback), for the raw web transport and the adapter alike.
+            if siwc && type == "response.failed", let failure = SIWCErrors.streamed(event) { throw failure }
             if subscription && type == "response.failed", let usage = SubscriptionEndpoint.streamedUsageError(event) {
                 throw usage
             }
@@ -297,13 +301,17 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
     }
 
     func send(_ request: URLRequest, overallTimeout: TimeInterval = 360,
-              connectTimeout: TimeInterval? = nil, idleTimeout: TimeInterval? = nil, subscription: Bool = false) async throws -> Data {
+              connectTimeout: TimeInterval? = nil, idleTimeout: TimeInterval? = nil, subscription: Bool = false,
+              siwc: Bool = false) async throws -> Data {
         try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 if completed { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
-                self.assembler.subscription = subscription
+                // SIWC: the same tolerant terminal assembly as the subscription
+                // backend, its own error codes, SSE from the request contract.
+                self.assembler.subscription = subscription || siwc
+                self.assembler.siwc = siwc
                 self.requestBody = request.httpBody
                 self.continuation = continuation
                 let task: URLSessionDataTask
@@ -401,6 +409,7 @@ final class ResponsesHTTPTransport: NSObject, URLSessionDataDelegate, RoutedData
             if let error { throw error }
             guard let response else { throw ResponsesFailure.disconnected }
             guard response.statusCode == 200 else {
+                if assembler.siwc, let failure = SIWCErrors.classify(status: response.statusCode, body: data) { throw failure }
                 if assembler.subscription, let failure = SubscriptionEndpoint.providerError(status: response.statusCode, body: data) {
                     throw failure
                 }

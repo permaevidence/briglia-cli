@@ -10,6 +10,9 @@ struct ResponsesAdapter {
     var diagnosticsTailCount = 0
     /// Role of the ambient-status item, when the request carries one (diagnostics only).
     var diagnosticsAmbientRole: String?
+    /// The typed main prompt (SIWC only, §4.2 single owner): becomes
+    /// `instructions` byte-for-byte. Ignored by every other route.
+    var typedPrompt: String?
 
     init(context: ProviderExecutionContext) { self.context = context }
 
@@ -90,6 +93,7 @@ struct ResponsesAdapter {
 
     func request(input: [JSONValue], tools: [ToolDefinition]?, stream: Bool = true,
                  maxOutputTokens: Int? = nil) throws -> URLRequest {
+        if isSIWC { return try siwcRequest(input: input, tools: tools) }
         if let error = context.configurationError { throw ResponsesFailure.malformed(error) }
         var body: [String: JSONValue] = [
             "model": .string(context.model), "input": .array(input), "store": .bool(false),
@@ -161,6 +165,7 @@ struct ResponsesAdapter {
 
     func send(input: [JSONValue], tools: [ToolDefinition]?, receipt: PreparedRequestReceipt,
               maxOutputTokens: Int? = nil) async throws -> LLMResponse {
+        if isSIWC { return try await siwcSend(input: input, tools: tools, receipt: receipt) }
         defer { if Task.isCancelled { context.responsesTurn.close() } }
         var request = try request(input: input, tools: tools, maxOutputTokens: maxOutputTokens)
         // Cache diagnosis (off by default): reads the final body, never changes it.

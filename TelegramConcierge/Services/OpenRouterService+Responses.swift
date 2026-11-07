@@ -208,6 +208,7 @@ extension OpenRouterService {
         let receipt = PreparedRequestReceipt(requestID: UUID(),
             historyFingerprint: ResponsesReplayEnvelope.hash(try encoder.encode(input)), deliveryNonces: nonces)
         var adapter = ResponsesAdapter(context: context)
+        adapter.typedPrompt = conversation.systemPrompt
         adapter.diagnosticsTailCount = (conversation.tailSystemMessage?.isEmpty == false ? 1 : 0)
             + (conversation.tailUserMessage?.isEmpty == false ? 1 : 0) + (ambient == nil ? 0 : 1)
         adapter.diagnosticsAmbientRole = ambient == nil ? nil : AmbientStatus.role(for: context)

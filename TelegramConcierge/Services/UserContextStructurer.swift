@@ -21,6 +21,9 @@ struct UserContextStructurer {
         var nativeEffort: String? = nil
         var nativeConfigurationError: String? = nil
         var subscriptionGeneration: String? = nil
+        /// Sign in with ChatGPT: the captured source (SIWC plan §4.4).
+        var siwc: SIWCCredentialSource? = nil
+        var siwcFailure: String? = nil
 
         /// Builds a config from the persisted settings — used by callers that
         /// don't hold the provider fields in local state (onboarding).
@@ -33,7 +36,7 @@ struct UserContextStructurer {
                     openAICompatibleApiKey: native.affinityKey, lmStudioBaseURL: "", lmStudioModel: "",
                     wireProtocol: .responses, nativeEffort: native.reasoningEffort,
                     nativeConfigurationError: native.configurationError,
-                    subscriptionGeneration: native.subscriptionGeneration)
+                    subscriptionGeneration: native.subscriptionGeneration, siwc: native.siwc, siwcFailure: native.siwcFailure)
             }
             return Config(
                 provider: LLMProvider.fromStoredValue(KeychainHelper.load(key: KeychainHelper.llmProviderKey)),
@@ -207,6 +210,12 @@ struct UserContextStructurer {
                 lane: operationLane, effort: config.nativeEffort)
             context.responsesOperation = .userContext
             context.configurationError = config.nativeConfigurationError
+            if config.siwc != nil || config.siwcFailure != nil {
+                var siwc = ProviderExecutionContext.siwcContext(source: config.siwc, configurationError: config.siwcFailure,
+                    model: configuredModel, effort: config.nativeEffort, lane: operationLane, textOnly: false, nativeToolMedia: false)
+                siwc.responsesOperation = .userContext
+                return try await ResponsesAuxiliary.text(context: siwc, messages: [("user", prompt)])
+            }
             if let generation = config.subscriptionGeneration {
                 context.subscriptionGeneration = generation
                 context.profileIdentity = "chatgpt"

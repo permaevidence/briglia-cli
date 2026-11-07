@@ -47,6 +47,12 @@ struct SIWCSelftest: AsyncParsableCommand {
         try PrivateStorage.ensureDirectory(root)
         defer { try? FileManager.default.removeItem(at: root) }
         let c = Checks()
+        // No live network, ever: every SIWC transport seam refuses unless a
+        // group installs its fake.
+        let offline = SIWCError(.local, "selftest: network disabled")
+        SIWCAuthClient.sendOverride = { _, _ in throw offline }
+        SIWCModels.fetchOverride = { _ in throw offline }
+        ResponsesAdapter.siwcSendOverride = { _ in throw offline }
         let groups: [(String, (URL, Checks) async throws -> Void)] = [
             ("jwt", Self.jwtTests), ("paste", Self.pasteTests), ("listener", Self.listenerTests),
             ("store", Self.storeTests), ("binding", Self.bindingTests), ("host", Self.hostTests),
@@ -59,6 +65,9 @@ struct SIWCSelftest: AsyncParsableCommand {
         for (name, group) in groups where only == nil || only == name {
             print("— \(name)")
             SIWCFence.shared.resetForTests()
+            SIWCAuthClient.sendOverride = { _, _ in throw offline }
+            SIWCModels.fetchOverride = { _ in throw offline }
+            ResponsesAdapter.siwcSendOverride = { _ in throw offline }
             let dir = root.appendingPathComponent(name)
             try PrivateStorage.ensureDirectory(dir)
             try await group(dir, c)

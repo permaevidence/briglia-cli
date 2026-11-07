@@ -78,6 +78,11 @@ enum SubscriptionWebTransport {
     /// lookup/refresh is never cut by it.
     static func post(body: [String: JSONValue], lane: AffinityLane, timeout: TimeInterval,
                      deadline: ExtractorDeadline? = nil) async throws -> Data {
+        switch ChatGPTRoute.resolve(stored: KeychainHelper.loadSnapshot()) {
+        case .siwc, .ambiguous, .disabled:
+            return try await postSIWC(body: body, lane: lane, timeout: timeout, deadline: deadline)
+        case .legacy, .notChatGPT: break
+        }
         guard let captured = activeGeneration() else {
             throw SubscriptionError("The ChatGPT subscription is no longer the active provider")
         }
