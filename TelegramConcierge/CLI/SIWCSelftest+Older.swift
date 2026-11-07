@@ -9,6 +9,8 @@ extension SIWCSelftest {
     /// selected on the SIWC route (what the new binary writes), and the
     /// legacy selection a ChatGPT install had before.
     static func olderBinaryFixture() async throws {
+        try StoragePaths.ensureRootsChecked()
+        try PrivateStorage.ensureDirectory(StoragePaths.configRoot)
         let legacy = SubscriptionAuthStore()
         var state = SubscriptionAuthState(generation: UUID().uuidString)
         state.credential = SubscriptionCredential(access: "synthetic-legacy-access", refresh: "synthetic-legacy-refresh",

@@ -159,6 +159,7 @@ def provisioning(old, new, base):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--old-binary")
+    ap.add_argument("--save-old", help="copy the built v0.2.67 binary here for later runs")
     args = ap.parse_args()
     new_src = ROOT / ".build" / "debug" / "briglia"
     if not new_src.exists():
@@ -167,6 +168,8 @@ def main():
     base = Path(tempfile.mkdtemp(prefix="briglia-siwc-older-"))
     try:
         old_src = Path(args.old_binary) if args.old_binary else build_old(base / "build-old")
+        if args.save_old and not args.old_binary:
+            shutil.copy2(old_src, args.save_old)
         old, new = base / NAMES[0], base / NAMES[1]
         shutil.copy2(old_src, old)
         shutil.copy2(new_src, new)
