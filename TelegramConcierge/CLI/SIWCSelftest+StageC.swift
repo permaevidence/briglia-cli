@@ -205,6 +205,15 @@ extension SIWCSelftest {
             c.check("rebind: another active registration refuses (D18), never rebinds", e.message.contains("different account")
                     && KeychainHelper._testWriteCount == writesBefore)
         }
+        // The rebind's own layer (stage C), independent of capture's check.
+        let foreign = ChatGPTRoute.Selection(registrationFingerprint: SIWCEndpoint.registrationFingerprint(clientId: client),
+            identityFingerprint: SIWCEndpoint.identityFingerprint(clientId: client, sub: "sub-rebind"), generation: UUID().uuidString)
+        do {
+            _ = try SIWCRebind.rebind(foreign, clientId: client, store: store)
+            c.check("rebind: its own check refuses when another registration is active (D18)", false)
+        } catch let e as SIWCError {
+            c.check("rebind: its own check refuses when another registration is active (D18)", e.message.contains("different account"))
+        }
         // An unusable record (tombstoned) is not rebound to.
         for (k, v) in SIWCSelection.activationDelta(.init(clientId: "oaiappRebindOther", sub: "sub-other",
             generation: UUID().uuidString, model: "m", effort: nil, textOnly: false)) {

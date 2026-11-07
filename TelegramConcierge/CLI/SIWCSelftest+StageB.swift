@@ -158,7 +158,7 @@ extension SIWCSelftest {
         var regs = try store.readRegistrations()!
         c.check("capture: another registration active → D18 refusal, nothing inferred", {
             do { _ = try ChatGPTRoute.capture(.init(registrationFingerprint: SIWCEndpoint.registrationFingerprint(clientId: "oaiappLiveA"),
-                    identityFingerprint: SIWCEndpoint.identityFingerprint(clientId: "oaiappLiveA", sub: "user-sub-A"), generation: source.generation), store: store); return false }
+                    identityFingerprint: SIWCEndpoint.identityFingerprint(clientId: "oaiappLiveA", sub: "user-sub-A"), generation: source.generation), store: store, rebind: false); return false }
             catch let e as SIWCError { return e.message.contains("different account") } catch { return false } }())
         regs.active = "oaiappLiveA"
         _ = try PrivateStorage.writeAtomically(try SIWCStore.encode(regs), to: store.registrationsFile)

@@ -194,6 +194,8 @@ BREAKS = [
      "            try SettingsSupersede.$maintenanceWrite.withValue(true) {", "            try SettingsSupersede.$maintenanceWrite.withValue(false) {", "c-rebind"),
     ("C7 capture never rebinds", "rebind: the next operation follows the same registration's new record", W + "SIWCRoute.swift",
      "        if rebind, (try? store.readTokens())?.record(active)?.generation != selection.generation {", "        if false, rebind {", "c-rebind"),
+    ("C8 the rebind ignores the store's active registration", "rebind: its own check refuses when another registration is active", W + "SIWCRebind.swift",
+     "            guard let registrations = try store.readRegistrations(), registrations.active == clientId,", "            guard let registrations = try store.readRegistrations(),", "c-rebind"),
     ("C9 activation skips its generation expectation", "activate: prepared from an older record state", SS + "SettingsWriter+SIWC.swift",
      "            guard record.generation == op.expectGeneration, op.projectedGeneration == record.generation,\n                  store.usability(",
      "            guard store.usability(", "c-writer"),
