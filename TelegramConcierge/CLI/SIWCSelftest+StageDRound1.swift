@@ -14,28 +14,67 @@ extension SIWCSelftest {
         let owner = FakeSettingsOwner()
         let fake = FakeAuth()
 
-        // R2a: cancel while the save completes → the login stays saved, but
-        // nothing is activated, and the status says so.
-        final class Gate: @unchecked Sendable { var cont: CheckedContinuation<Void, Never>?; var armed = true }
-        let gate = Gate()
-        let flow = flowFixture(owner, fake: fake, sub: "sub-r2")
-        let realWriter = flow.writer
-        flow.writer = SIWCWriterAccess(run: { body in
-            let r = await realWriter.run(body)
-            if gate.armed { gate.armed = false; await withCheckedContinuation { gate.cont = $0 } }
-            return r
-        })
-        let s1 = await flow.start(mode: .paste)
-        let pasteTask = Task { @MainActor in await flow.paste(callbackURL(s1, code: "R2-SAVE")) }
-        for _ in 0..<200 where gate.cont == nil { try? await Task.sleep(nanoseconds: 10_000_000) }
-        let cancelled = await flow.cancel()
-        let routeAtCancel = KeychainHelper.load(key: ChatGPTRoute.routeKey)
-        gate.cont?.resume()
-        _ = await pasteTask.value
-        c.check("R2: cancelled while the save returned → saved but never activated; the status says so",
-                cancelled.state == "cancelled" && routeAtCancel == nil && KeychainHelper.load(key: ChatGPTRoute.routeKey) == nil
-                && flow.status.message == SIWCFlow.savedNotSwitchedMessage
-                && (try? SIWCStore.resolved().readTokens())?.records.isEmpty == false, "\(flow.status.json)")
+        // R2 (round 2): ONE definitive outcome reaches cancel, waitForEnd,
+        // onFinish and polling, whichever return comes first.
+        final class Gate: @unchecked Sendable { var cont: CheckedContinuation<Void, Never>?; var armedCalls: Set<Int> = []; var calls = 0 }
+        final class Seen: @unchecked Sendable { var outcomes: [String] = [] }
+        for browserFailed in [false, true] {
+            try resetLive()
+            let gate = Gate(); gate.armedCalls = [1]
+            let seen = Seen()
+            let flow = flowFixture(owner, fake: fake, sub: "sub-r2-\(browserFailed)")
+            let realWriter = flow.writer
+            flow.writer = SIWCWriterAccess(run: { body in
+                let r = await realWriter.run(body)
+                gate.calls += 1
+                if gate.armedCalls.contains(gate.calls) { await withCheckedContinuation { gate.cont = $0 } }
+                return r
+            })
+            let s1 = await flow.start(mode: .paste, onFinish: { seen.outcomes.append($0.outcome ?? "") })
+            let pasteTask = Task { @MainActor in await flow.paste(callbackURL(s1, code: "R2-SAVE")) }
+            for _ in 0..<300 where gate.cont == nil { try? await Task.sleep(nanoseconds: 10_000_000) }
+            let cancelTask = Task { @MainActor in await flow.cancel(browserFailed: browserFailed) }
+            let waitTask = Task { @MainActor in await flow.waitForEnd() }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            let routeAtCancel = KeychainHelper.load(key: ChatGPTRoute.routeKey)
+            gate.cont?.resume()
+            _ = await pasteTask.value
+            let cancelled = await cancelTask.value, waited = await waitTask.value
+            c.check("R2: cancel\(browserFailed ? " (sign-in failed in the browser)" : "") while the save returns → saved, never activated; cancel, waitForEnd, onFinish and polling all say “saved, not switched”",
+                    routeAtCancel == nil && KeychainHelper.load(key: ChatGPTRoute.routeKey) == nil
+                    && cancelled.outcome == "saved" && waited.outcome == "saved" && seen.outcomes == ["saved"]
+                    && flow.status.message == SIWCFlow.savedNotSwitchedMessage && cancelled.message == SIWCFlow.savedNotSwitchedMessage
+                    && (try? SIWCStore.resolved().readTokens())?.records.isEmpty == false,
+                    "cancel \(cancelled.json) wait \(waited.outcome ?? "") seen \(seen.outcomes)")
+        }
+        // The other ordering: cancel's own writer return is delayed; a paste
+        // arriving meanwhile is refused (nothing saved), and nothing later
+        // overwrites the cancel outcome.
+        do {
+            try resetLive()
+            let gate = Gate(); gate.armedCalls = [1]
+            let seen = Seen()
+            var exchanged = 0
+            let flow = flowFixture(owner, fake: fake, exchanged: { _, _ in exchanged += 1 }, sub: "sub-r2-order")
+            let realWriter = flow.writer
+            flow.writer = SIWCWriterAccess(run: { body in
+                let r = await realWriter.run(body)
+                gate.calls += 1
+                if gate.armedCalls.contains(gate.calls) { await withCheckedContinuation { gate.cont = $0 } }
+                return r
+            })
+            let s1 = await flow.start(mode: .paste, onFinish: { seen.outcomes.append($0.outcome ?? "") })
+            let cancelTask = Task { @MainActor in await flow.cancel() }
+            for _ in 0..<300 where gate.cont == nil { try? await Task.sleep(nanoseconds: 10_000_000) }
+            let reply = await flow.paste(callbackURL(s1, code: "R2-LATE"))
+            gate.cont?.resume()
+            let cancelled = await cancelTask.value
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            c.check("R2: a paste during the cancel is refused; the cancel outcome is the only one (nothing saved, nothing overwritten)",
+                    reply == CallbackPaste.Rejection.noneWaiting.rawValue && exchanged == 0 && cancelled.outcome == "cancelled"
+                    && seen.outcomes == ["cancelled"] && flow.status.outcome == "cancelled"
+                    && ((try? SIWCStore.resolved().readTokens())?.records.isEmpty ?? true), "\(cancelled.json) \(seen.outcomes)")
+        }
 
         // R2b: cancel while exchanging → nothing saved, the issued token revoked.
         try resetLive()
@@ -51,25 +90,32 @@ extension SIWCSelftest {
         let revokes0 = fake.revoked.count
         let t2 = Task { @MainActor in await flow2.paste(callbackURL(s2, code: "R2-EXCH")) }
         for _ in 0..<200 where gate2.cont == nil { try? await Task.sleep(nanoseconds: 10_000_000) }
-        _ = await flow2.cancel()
+        let cancel2 = Task { @MainActor in await flow2.cancel() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
         gate2.cont?.resume()
         _ = await t2.value
-        c.check("R2: cancelled during the exchange → nothing saved, no route, the issued refresh token revoked",
+        let c2 = await cancel2.value
+        c.check("R2: cancelled during the exchange → nothing saved, no route, the issued refresh token revoked, outcome cancelled",
                 (try? SIWCStore.resolved().readTokens())?.records.isEmpty ?? true && KeychainHelper.load(key: ChatGPTRoute.routeKey) == nil
-                && fake.revoked.count == revokes0 + 1)
+                && fake.revoked.count == revokes0 + 1 && c2.outcome == "cancelled")
 
         // R2c: cancel right before the activation's decision point → refused there.
         try resetLive()
         let flow3 = flowFixture(owner, fake: fake, sub: "sub-r2c")
         let realActivate = flow3.commitActivation
+        final class Box: @unchecked Sendable { var task: Task<SIWCFlow.Status, Never>? }
+        let box = Box()
         flow3.commitActivation = { change, stillValid in
-            _ = await flow3.cancel()
+            box.task = Task { @MainActor in await flow3.cancel() }
+            try? await Task.sleep(nanoseconds: 50_000_000)
             return await realActivate(change, stillValid)
         }
         let s3 = await flow3.start(mode: .paste)
         _ = await flow3.paste(callbackURL(s3, code: "R2-ACT"))
-        c.check("R2: cancelled at activation admission → the writer's decision point refuses; route unchanged",
-                KeychainHelper.load(key: ChatGPTRoute.routeKey) == nil && flow3.status.message == SIWCFlow.savedNotSwitchedMessage, "\(flow3.status.json)")
+        let c3 = await box.task?.value
+        c.check("R2: cancelled at activation admission → the writer's decision point refuses; route unchanged; one saved-not-switched outcome",
+                KeychainHelper.load(key: ChatGPTRoute.routeKey) == nil && flow3.status.message == SIWCFlow.savedNotSwitchedMessage
+                && c3?.outcome == "saved", "\(flow3.status.json)")
 
         // R5: a first identity-only login stays reachable (display, consent, use), also after a restart.
         try resetLive()

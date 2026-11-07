@@ -1369,6 +1369,8 @@
     out.push(notice('ai'));
     var sw = c.siwc || {};
     var legacyShown = siwcUI.method === 'legacy' && sw.route === 'siwc';
+    // An open selector wins over either panel (Codex D-R7 round 2).
+    if (siwcUI.selector && !c.login) { out.push(methodSelector()); out.push(navButtons('ai')); return out; }
     if (legacyShown && !c.login) { legacyPanel(out, sw); out.push(navButtons('ai')); return out; }
     if (!legacyShown && (sw.opted_in || sw.route === 'siwc' || ((sw.flow || {}).state === 'waiting'))) {
       siwcView(out);

@@ -387,7 +387,7 @@ BREAKS = [
     ("D31 the activation does not carry the session's validity", "R2: cancelled at activation admission", W + "SIWCFlow.swift",
      "        let r = await commitActivation(change, validity.map { v in { try v.check() } })", "        let r = await commitActivation(change, nil)", "d-round1"),
     ("D32 cancel does not revoke a running save/activation", "R2: cancelled while the save returned", W + "SIWCFlow.swift",
-     "        s.validity.revoke()\n        s.task?.cancel()", "        s.task?.cancel()", "d-round1"),
+     "        s.validity.revoke()\n        // A publication in flight", "        // A publication in flight", "d-round1"),
     ("D33 the notice transport ignores the bot generation", "R3: the sign-in result is not sent through a replaced bot", S + "TelegramBotService.swift",
      "        guard NoticeChannelGenerations.current(.telegram) == expectedGeneration else { throw NoticeTransportError.credentialsChanged }\n        guard !botToken.isEmpty",
      "        guard !botToken.isEmpty", "d-telegram"),
@@ -404,6 +404,12 @@ BREAKS = [
     ("D38 choosing legacy from the SIWC route is refused", "R7: choosing legacy on the SIWC route is accepted", "TelegramConcierge/CLI/Menu/MenuWorkflow+SIWC.swift",
      "            if route == \"legacy\", SIWCSurface.route() == \"siwc\" { return (true, nil) }",
      "            if route == \"legacy\", SIWCSurface.route() == \"siwc\" { return (false, nil) }", "d-round1"),
+    # ---- Stage D, Codex round 2 corrections ----
+    ("D39 cancel during a publication races it instead of waiting for its outcome", "R2: cancel while the save returns", W + "SIWCFlow.swift",
+     "        if status.state == \"finishing\" || status.state == \"cancelling\" {\n            return await waitForEnd()\n        }",
+     "        if false {\n            return await waitForEnd()\n        }", "d-round1"),
+    ("D40 a paste during a cancel is still accepted", "R2: a paste during the cancel is refused", W + "SIWCFlow.swift",
+     "        status.state = \"cancelling\"   // a paste arriving now is refused\n", "", "d-round1"),
 ]
 
 

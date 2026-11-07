@@ -1167,6 +1167,12 @@ def main():
                             capture_output=True, text=True, timeout=300)
     check("menu end-to-end (real server, mock providers)", result.returncode == 0,
           (result.stdout + result.stderr)[-2500:])
+    # The Sign in with ChatGPT card, rendered by the production menu.js on a
+    # DOM shim (SIWC stage D, Codex R6/R7). Needs node; skipped without it.
+    if shutil.which("node"):
+        result = subprocess.run(["node", os.path.join(REPO_ROOT, "scripts", "siwc_menu_render_test.js")],
+                                capture_output=True, text=True, timeout=120)
+        check("siwc menu render test", result.returncode == 0, (result.stdout + result.stderr)[-2500:])
     # The live menu (KEYLESS_WEB_AND_LIVE_MENU plan Part B): the single
     # settings writer — capture, classification, staging, superseding, the
     # idle apply, subscription journal, recovery, the commit token, agent

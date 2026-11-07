@@ -172,7 +172,7 @@ final class SIWCFlow {
     /// `newRegistration` = "register Briglia again" / another account.
     func start(mode: Mode, consent: Bool = false, newRegistration: Bool = false,
                onFinish: ((Status) -> Void)? = nil) async -> Status {
-        if session != nil, status.state == "waiting" || status.state == "finishing" {
+        if session != nil, ["waiting", "finishing", "cancelling"].contains(status.state) {
             return fail(Self.alreadyWaitingMessage, outcome: "refused", keepSession: true)
         }
         if SIWCEndpoint.disabledByEnvironment() { return fail(SIWCEndpoint.disabledMessage, outcome: "refused") }
@@ -257,7 +257,7 @@ final class SIWCFlow {
     }
 
     private func handle(_ outcome: SIWCCallbackOutcome, _ s: Session) async {
-        guard session === s, !s.finished else { return }
+        guard session === s, !s.finished, !s.validity.isRevoked else { return }
         switch outcome {
         case .rejected: return
         case .error(let recognized):
@@ -274,7 +274,7 @@ final class SIWCFlow {
             // refresh token is revoked best effort.
             if s.validity.isRevoked {
                 if let refresh = result.tokens?.refresh { await s.signIn.revokeBestEffort(refresh, clientId: result.clientId) }
-                await s.signIn.cancel(s.attempt)
+                await end(s, state: "cancelled", message: Self.cancelledMessage, outcome: "cancelled")
                 return
             }
             await publish(result, s)
@@ -302,7 +302,7 @@ final class SIWCFlow {
         // Cancelled while the save ran: the published login stays (a save
         // is route-neutral) but nothing is activated, and the user is told.
         if s.validity.isRevoked {
-            if session === s { status = Status(state: "cancelled", mode: s.mode, message: Self.savedNotSwitchedMessage, outcome: "saved") }
+            await end(s, final: Status(state: "cancelled", mode: s.mode, message: Self.savedNotSwitchedMessage, outcome: "saved"))
             return
         }
         guard result.tokens != nil else {
@@ -319,7 +319,7 @@ final class SIWCFlow {
             if !applied { outcome = "pending" }
         case .failure(let why):
             if s.validity.isRevoked {
-                if session === s { status = Status(state: "cancelled", mode: s.mode, message: Self.savedNotSwitchedMessage, outcome: "saved") }
+                await end(s, final: Status(state: "cancelled", mode: s.mode, message: Self.savedNotSwitchedMessage, outcome: "saved"))
                 return
             }
             message = "Your ChatGPT sign-in is saved, but switching to it was not applied: \(why) Use /subscription use, or Use ChatGPT in briglia menu."
@@ -368,6 +368,13 @@ final class SIWCFlow {
         // First: a save or activation still running for this session can no
         // longer switch Briglia to it (Codex D-R2).
         s.validity.revoke()
+        // A publication in flight (exchange, save, activation) settles the
+        // ONE definitive outcome itself — saved-not-switched or not saved —
+        // and every consumer gets that result (Codex D-R2 round 2).
+        if status.state == "finishing" || status.state == "cancelling" {
+            return await waitForEnd()
+        }
+        status.state = "cancelling"   // a paste arriving now is refused
         s.task?.cancel()
         await s.listener?.stop()
         var result = SettingsCommitResult(state: .applied, message: nil)
