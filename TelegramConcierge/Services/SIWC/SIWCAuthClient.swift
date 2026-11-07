@@ -18,6 +18,10 @@ struct SIWCAuthClient {
 
     var send: Send = { request, deadline in
         if adaCLIVersion.hasSuffix("-dev"), let override = SIWCAuthClient.sendOverride { return try await override(request, deadline) }
+        // Development builds only: child processes of selftests run offline.
+        if adaCLIVersion.hasSuffix("-dev"), ProcessInfo.processInfo.environment["BRIGLIA_TEST_SIWC_OFFLINE"] == "1" {
+            throw SIWCError(.local, "selftest: network disabled")
+        }
         let reply = try await SubscriptionAuthHTTP(deadline: deadline).perform(request)
         return (reply.0, reply.1)
     }

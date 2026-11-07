@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deliberate breaks for Sign in with ChatGPT, stages A and B (SIWC plan v3.2 §8).
+"""Deliberate breaks for Sign in with ChatGPT, stages A, B and C (SIWC plan v3.2 §8).
 
 Same method as keyless_web_break_test.py: copy the tree to a scratch
 directory, build once (positive control: `__siwc-selftest` passes), then
@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 W = "TelegramConcierge/Services/SIWC/"
 S = "TelegramConcierge/Services/"
+SS = "TelegramConcierge/Services/Settings/"
 
 # (label, failing check label prefix, file, old, new)
 BREAKS = [
@@ -165,7 +166,8 @@ BREAKS = [
     ("S45 a returning sign-in carries agent_name_hint", "authorize: returning sign-in uses the issued client", W + "SIWCSignIn.swift",
      "        if attempt.newRegistration { items.append((\"agent_name_hint\"", "        if true { items.append((\"agent_name_hint\""),
     ("S46 the store lock is not taken", "refresh: two processes on one store", W + "SIWCStore.swift",
-     "        while flock(fd, LOCK_EX | LOCK_NB) != 0 {", "        while false && flock(fd, LOCK_EX | LOCK_NB) != 0 {"),
+     "        let deadline = ProcessInfo.processInfo.systemUptime + lockWait\n        while flock(fd, LOCK_EX | LOCK_NB) != 0 {",
+     "        let deadline = ProcessInfo.processInfo.systemUptime + lockWait\n        while false && flock(fd, LOCK_EX | LOCK_NB) != 0 {"),
     ("S47 a returning sign-in with another sub is saved", "store: a returning sign-in with another sub is refused", W + "SIWCStore+Login.swift",
      "                    guard let existing, existing.sub == result.claims.sub else {", "                    guard existing != nil else {"),
     ("S48 another assistant's pending sign-in is overridden", "pending: one per store; another assistant is refused", W + "SIWCStore.swift",
@@ -176,6 +178,86 @@ BREAKS = [
     ("S50 the usage limit is retried", "errors: usage limit → no retry", W + "ResponsesAdapter+SIWC.swift",
      "                    retry = failure.kind == .transient\n                } else if case ResponsesFailure.http(let code, let after) = error {\n                    retry = [408, 409, 429, 500, 502, 503, 504].contains(code)\n                    if let after { delay = after }\n                } else if let e = error as? URLError {\n                    retry = [.timedOut, .networkConnectionLost, .cannotConnectToHost, .notConnectedToInternet].contains(e.code)\n                } else { retry = false }\n                if let limit",
      "                    retry = failure.kind == .transient || failure.kind == .limitReached\n                } else if case ResponsesFailure.http(let code, let after) = error {\n                    retry = [408, 409, 429, 500, 502, 503, 504].contains(code)\n                    if let after { delay = after }\n                } else if let e = error as? URLError {\n                    retry = [.timedOut, .networkConnectionLost, .cannotConnectToHost, .notConnectedToInternet].contains(e.code)\n                } else { retry = false }\n                if let limit"),
+    # ---- Stage C (settings writer and several assistants); 6th field = selftest group ----
+    ("C1 the SIWC selection keeps the legacy selection keys", "select: the SIWC selection removes this assistant's legacy selection keys",
+     W + "SIWCSelection.swift", "        for key in legacySelectionKeys { delta[key] = String?.none }\n        return delta", "        return delta", "c-select"),
+    ("C2 the runtime slot keeps a sentinel", "select: the runtime credential slot is deleted", W + "SIWCSelection.swift",
+     "            KeychainHelper.openAICompatibleApiKeyKey: String?.none,", "            KeychainHelper.openAICompatibleApiKeyKey: \"siwc-sentinel\",", "c-select"),
+    ("C3 an explicit legacy selection leaves the SIWC keys", "profiles: an explicit legacy selection removes the SIWC selection keys",
+     S + "ProviderProfiles.swift", "                for key in SIWCSelection.selectionKeys { changes[key] = String?.none }", "                _ = SIWCSelection.selectionKeys", "c-select"),
+    ("C4 copy-keys binds an unusable login", "copy-keys: an unusable login binds nothing", W + "SIWCSelection.swift",
+     "              machineStore.usability(record, registration: registration, key: try? machineStore.integrityKey(create: false)) == .usable,",
+     "              machineStore.usability(record, registration: registration, key: try? machineStore.integrityKey(create: false)) != .invalidClient,", "c-select"),
+    ("C5 rebind ignores a pending sign-in", "rebind: none while a sign-in is pending in the store", W + "SIWCRebind.swift",
+     "            guard let file = try store.readTokens(), file.pendingLogin == nil, let record", "            guard let file = try store.readTokens(), let record", "c-rebind"),
+    ("C6 the rebind is not a maintenance write", "rebind: a maintenance write never supersedes a staged change", W + "SIWCRebind.swift",
+     "            try SettingsSupersede.$maintenanceWrite.withValue(true) {", "            try SettingsSupersede.$maintenanceWrite.withValue(false) {", "c-rebind"),
+    ("C7 capture never rebinds", "rebind: the next operation follows the same registration's new record", W + "SIWCRoute.swift",
+     "        if rebind, (try? store.readTokens())?.record(active)?.generation != selection.generation {", "        if false, rebind {", "c-rebind"),
+    ("C9 activation skips its generation expectation", "activate: prepared from an older record state", SS + "SettingsWriter+SIWC.swift",
+     "            guard record.generation == op.expectGeneration, op.projectedGeneration == record.generation,\n                  store.usability(",
+     "            guard store.usability(", "c-writer"),
+    ("C10 staging skips the type boundary", "boundary: staging refuses a change carrying an SIWC token", SS + "SettingsWriter.swift",
+     "        if let why = SIWCTypeBoundary.violation(change) { throw SettingsCommitError.refused(why) }\n", "", "c-writer"),
+    ("C11 the boundary does not scan for tokens", "boundary: a reply carrying an SIWC token is refused", SS + "SettingsWriter+SIWC.swift",
+     "        for token in tokens(in: directories) where text.contains(token) { return message }\n", "", "c-writer"),
+    ("C13 sign-out does not fence or bump the epoch", "logout: no further send from an operation that captured the old source", SS + "SettingsWriter+SIWC.swift",
+     "        SIWCFence.shared.fenceAndBump(key)\n        await Self.siwcAfterFenceForTesting?()", "        await Self.siwcAfterFenceForTesting?()", "c-logout"),
+    ("C14 sign-out does not cancel running requests", "logout: the running request was cancelled and drained", SS + "SettingsWriter+SIWC.swift",
+     "        SIWCFence.shared.cancelAll(key)\n", "", "c-logout"),
+    ("C15 the revoke runs while the token is held", "logout: the remote revoke runs after the commit token is released", SS + "SettingsWriter+SIWC.swift",
+     "        release()\n        SIWCActivity.shared.beginRevoke()", "        SIWCActivity.shared.beginRevoke()", "c-logout"),
+    ("C16 a failed tombstone is reported as signed out", "logout: a tombstone failure is partial", SS + "SettingsWriter+SIWC.swift",
+     "            Self.finishAttempt(attempt, change: change, pending: nil, state: \"partial\", message: SIWCLogoutOutcome.partialMessage)\n            return .partial(SIWCLogoutOutcome.partialMessage)",
+     "            Self.finishAttempt(attempt, change: change, pending: nil, state: \"partial\", message: SIWCLogoutOutcome.partialMessage)\n            return .signedOut(remoteConfirmed: false)", "c-logout"),
+    ("C17 the interrupting phase is cancellable", "logout: a lifecycle operation during the drain does not cancel the holder", SS + "SettingsCommitGate.swift",
+     "        holderPhase = .interrupting; holderCancel = nil", "        holderPhase = .preCommit", "c-logout"),
+    ("C18 admission is not rechecked after the drain", "logout: admission closed during the drain", SS + "SettingsWriter+SIWC.swift",
+     "        if let why = host?.admissionRefusal() ?? gate.admissionClosedReason {\n            return .partial(", "        if false, let why = host?.admissionRefusal() {\n            return .partial(", "c-logout"),
+    ("C19 a timed-out drain clears the fence", "logout: a drain that timed out keeps the fence", SS + "SettingsWriter+SIWC.swift",
+     "        if drained { SIWCFence.shared.unfence(key) }", "        SIWCFence.shared.unfence(key)", "c-logout"),
+    ("C20 a stale sign-out is not refused", "logout: a stale sign-out is refused", SS + "SettingsWriter+SIWC.swift",
+     "                if let expectedGeneration, record.generation != expectedGeneration {", "                if let expectedGeneration, record.generation != expectedGeneration, false {", "c-logout"),
+    ("C21 mixed targets of one grouped effect count as applied", "recovery: B is never reported retired from A's marker", W + "SIWCRecovery.swift",
+     "        return .unknown   // mixed targets", "        return .applied   // mixed targets", "c-recovery"),
+    ("C22 a missing secrets marker is ignored", "recovery: SIWC activated but settings not saved", W + "SIWCRecovery.swift",
+     "        if needsSecrets && !marker {\n            return (\"partial\", \"partly applied (\\(detail)); settings not saved\")\n        }\n", "", "c-recovery"),
+    ("C23 unreadable evidence reads as not applied", "recovery: unreadable evidence", W + "SIWCRecovery.swift",
+     "            return Dictionary(uniqueKeysWithValues: effect.targets.map { ($0, Evidence.unknown) })",
+     "            return Dictionary(uniqueKeysWithValues: effect.targets.map { ($0, Evidence.notApplied) })", "c-recovery"),
+    ("C24 a partial scope transition reads as nothing changed", "recovery: scope with legacy retired and SIWC not", W + "SIWCRecovery.swift",
+     "        if legacy == .applied || siwc == .applied { return (\"partial\", detail) }\n", "", "c-recovery"),
+    ("C25 a shared extra's wipe signs the shared login out", "wipe shared extra: nothing revoked", W + "SIWCLifecycle.swift",
+     "            // `own` was retired by `retireOwn` before the scope moved.\n            clear(ctx, into: &result)",
+     "            _ = await signOutAndRemove(ctx.machineStore, ctx, label: \"x\", into: &result)\n            clear(ctx, into: &result)", "c-wipe"),
+    ("C26 the host is removed while a registration exists elsewhere", "wipe shared extra: the host file is kept", W + "SIWCHost.swift",
+     "            guard users.isEmpty else { return .keptInUse }", "            _ = users", "c-wipe"),
+    ("C27 default signs the shared login out with sharers", "wipe default with sharers", W + "SIWCLifecycle.swift",
+     "            if others.isEmpty {\n                _ = await signOutAndRemove(ctx.machineStore", "            if true {\n                _ = await signOutAndRemove(ctx.machineStore", "c-wipe"),
+    ("C28 a failed own retirement lets the scope move", "wipe own extra: a failed retirement keeps the scope own", W + "SIWCLifecycle.swift",
+     "            result.ownRetirementFailed = true\n", "", "c-wipe"),
+    ("C29 the host file is not protected", "files: the host file is protected", W + "SIWCLifecycle.swift",
+     "        out.append(hostPaths.hostFile)\n", "", "c-files"),
+    ("C30 redaction misses the staged replacement", "redaction: staged replacement", "TelegramConcierge/Utilities/CredentialCatalog.swift",
+     "                add(\"staged\", record.staged?.tokens)\n", "", "c-files"),
+    ("C31 a refresh settle is not tracked", "activity: a running refresh settle is tracked", W + "SIWCStore+Refresh.swift",
+     "        SIWCActivity.shared.beginSettle()\n", "", "c-activity"),
+    ("C32 a pending sign-in does not park the upgrade", "activity: a pending sign-in this process owns parks the upgrade", W + "SIWCSignIn.swift",
+     "            SIWCActivity.shared.register(attempt, signIn: self)\n", "", "c-activity"),
+    ("C33 a save ignores the replacement epoch", "save: refused after a wipe/import (epoch)", SS + "SettingsWriter+SIWC.swift",
+     "        guard (try? ReplacementEpoch.read()) == request.epoch else { return await refuse(Self.epochMessage) }\n", "", "c-writer"),
+    ("C34 an SIWC store write does not supersede a staged activation", "supersede: a later SIWC store write drops the staged activation", SS + "SettingsWriter.swift",
+     "            if let op = change.siwc, URL(fileURLWithPath: op.store).standardizedFileURL.path == path { return true }\n", "", "c-writer"),
+    ("C35 a promotion leaves the fence", "replacement: an admitted activation of a new generation clears the fence", SS + "SettingsWriter.swift",
+     "                SIWCFence.shared.unfence(SIWCFence.key(store: URL(fileURLWithPath: op.store), clientId: op.clientId))", "                _ = op", "c-writer"),
+    ("C36 SIWC locks are not taken", "locks: legacy auth lock, then SIWC lock", SS + "SettingsWriter.swift",
+     "        guard let first = stores.first else { return try await withSIWCLocks(siwc, body) }", "        guard let first = stores.first else { return try await body() }", "c-writer"),
+    ("C37 a 'login changed' refresh is swallowed and the send repeated", "login changed: exactly one inference request", W + "ResponsesAdapter+SIWC.swift",
+     "                    _ = try await source.store.credential(clientId: source.clientId, generation: source.generation,\n                        rejectedAccess: usedAccess,",
+     "                    _ = try? await source.store.credential(clientId: source.clientId, generation: source.generation,\n                        rejectedAccess: usedAccess,", "c-notes"),
+    ("C38 save decides 'in use' without this assistant's binding", "save: route-neutral", SS + "SettingsWriter+SIWC.swift",
+     "        do { try siwcJournal(attempt, label: \"ChatGPT sign-in\", kind: \"siwc-save\", effects: [effect]) } catch {",
+     "        try? KeychainHelper.save(key: \"siwc-break\", value: \"1\")\n        do { try siwcJournal(attempt, label: \"ChatGPT sign-in\", kind: \"siwc-save\", effects: [effect]) } catch {", "c-writer"),
 ]
 
 
@@ -191,11 +273,11 @@ def build(tree, scratch):
     return Path(out) / "briglia"
 
 
-def selftest(binary, workdir):
+def selftest(binary, workdir, group=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("BRIGLIA_")}
     env["XDG_CONFIG_HOME"] = str(Path(workdir) / "outer-config")
     env["XDG_DATA_HOME"] = str(Path(workdir) / "outer-data")
-    return run([str(binary), "__siwc-selftest"], workdir, timeout=900, env=env)
+    return run([str(binary), "__siwc-selftest"] + (["--only", group] if group else []), workdir, timeout=900, env=env)
 
 
 def mutate(tree, rel, old, new):
@@ -216,7 +298,8 @@ def main():
     args = ap.parse_args()
     if args.check_anchors:
         bad = 0
-        for label, _, rel, old, _ in BREAKS:
+        for entry in BREAKS:
+            label, _, rel, old, _ = entry[:5]
             n = (ROOT / rel).read_text().count(old)
             if n != 1:
                 bad += 1
@@ -239,13 +322,15 @@ def main():
         if not ok:
             print((r.stdout + r.stderr)[-3000:])
             return 1
-        for label, check, rel, old, new in BREAKS:
+        for entry in BREAKS:
+            label, check, rel, old, new = entry[:5]
+            group = entry[5] if len(entry) > 5 else None
             if args.only and label.split()[0] not in args.only.split(","):
                 continue
             original = mutate(tree, rel, old, new)
             try:
                 binary = build(tree, scratch)
-                r = selftest(binary, work)
+                r = selftest(binary, work, group)
                 failed = [l for l in r.stdout.splitlines() if l.startswith("✖")]
                 caught = r.returncode != 0 and any(l.startswith(f"✖ {check}") for l in failed)
                 print(("✔" if caught else "✖") + f" {label}: '{check}' fails"

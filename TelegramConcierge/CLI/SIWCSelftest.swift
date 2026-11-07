@@ -15,6 +15,11 @@ struct SIWCSelftest: AsyncParsableCommand {
         abstract: "Internal Sign in with ChatGPT tests (offline)", shouldDisplay: false)
     @Option var worker: String?
     @Option var only: String?
+    /// Older-binary guard script (scripts/siwc_older_binary_test.py): write
+    /// the fixture into, or report the route of, the CURRENT roots. Refused
+    /// unless those roots are the script's scratch roots.
+    @Flag(name: .customLong("older-fixture")) var olderFixture = false
+    @Flag(name: .customLong("resolve")) var resolveRoute = false
 
     final class Checks {
         var total = 0, failed = 0
@@ -39,6 +44,13 @@ struct SIWCSelftest: AsyncParsableCommand {
         AdaCLI.prepareIO()
         guard adaCLIVersion.hasSuffix("-dev") else { throw ValidationError("Development build required") }
         if let worker { try await Self.refreshWorker(URL(fileURLWithPath: worker)); return }
+        if olderFixture || resolveRoute {
+            guard (ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"] ?? "").contains("briglia-siwc-older-") else {
+                throw ValidationError("refusing: not the older-binary script's scratch roots")
+            }
+            if olderFixture { try await Self.olderBinaryFixture() } else { Self.printRoute() }
+            return
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("briglia-siwc-test-\(UUID())")
         for (key, directory) in [("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")] {
             setenv(key, root.appendingPathComponent(directory).path, 1)

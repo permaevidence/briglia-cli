@@ -81,7 +81,8 @@ extension SIWCSelftest {
         // 6. An activation prepared from an older state never activates a later, different login.
         let stale = try SIWCSettings.prepareActivation(store: store, clientId: "oaiappWriterC", model: "m", effort: nil, textOnly: false,
                                                        origin: "selftest", acceptPending: false)
-        _ = try await store.tombstone("oaiappWriterC")
+        // Another process moved C to a new (still usable) record meanwhile.
+        try rewriteBound(store, "oaiappWriterC") { $0.generation = UUID().uuidString }
         let writes6 = KeychainHelper._testWriteCount
         let r6 = await writer.commit(stale)
         c.check("activate: prepared from an older record state → refused, nothing written",

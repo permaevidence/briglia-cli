@@ -172,7 +172,7 @@ extension SIWCSelftest {
         _ = try SettingsWriter.stage(staged)
         c.check("rebind: a captured source never rebinds (its next validation refuses)",
                 (try? store.validate(clientId: client, generation: first.generation)) == nil)
-        let next = try ChatGPTRoute.currentSource()
+        let next = try? ChatGPTRoute.currentSource()
         c.check("rebind: the next operation follows the same registration's new record", next?.generation == toBe
                 && KeychainHelper.load(key: ChatGPTRoute.siwcGenerationKey) == toBe)
         c.check("rebind: a maintenance write never supersedes a staged change",

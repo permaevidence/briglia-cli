@@ -39,6 +39,7 @@ struct MultiAssistantSelftest: ParsableCommand {
         if h.section("stage3") { h.stage3Section() }
         if h.section("stage3e2e") { h.stage3ProcessSection() }
         if h.section("restartargv") { h.restartArgvSection() }
+        if h.section("siwc") { h.siwcSection() }
         print("\n\(h.total - h.failures)/\(h.total) multi-assistant checks passed")
         if h.failures > 0 { throw ExitCode(1) }
     }
