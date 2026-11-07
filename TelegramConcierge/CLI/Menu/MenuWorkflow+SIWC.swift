@@ -126,15 +126,17 @@ extension MenuWorkflow {
         case "siwc_paste":
             let reply = await siwcFlow.paste(str(body, "text"))
             await reload()
+            // A finished flow's outcome is shown once, by the card itself
+            // (flow_message); only a refused paste or a success answers here.
             switch siwcFlow.status.state {
             case "waiting": return (false, siwcMessage(reply))
-            case "done": return (siwcFlow.status.outcome != "plan_usage_off", siwcMessage(siwcFlow.status.message))
-            default: return (false, siwcMessage(siwcFlow.status.message ?? reply))
+            case "done" where siwcFlow.status.outcome == "signed_in": return (true, siwcMessage(siwcFlow.status.message))
+            default: return (true, nil)
             }
         case "siwc_cancel", "siwc_failed":
-            let status = await siwcFlow.cancel(browserFailed: action == "siwc_failed")
+            _ = await siwcFlow.cancel(browserFailed: action == "siwc_failed")
             await reload()
-            return (true, siwcMessage(status.message))
+            return (true, nil)   // the card shows the outcome (flow_message), once
         case "siwc_logout":
             let r = await SIWCSurface.logout(writer: siwcFlow.writer)
             await reload()

@@ -1274,7 +1274,7 @@
     }
     var box = h('input', { type: 'text', id: 'siwc-paste', value: siwcUI.paste, autocomplete: 'off', spellcheck: 'false', placeholder: '127.0.0.1:…/auth/callback?code=…',
       oninput: function (e) { siwcUI.paste = e.target.value; } });
-    out.push(h('div', { class: 'field' }, [box]));
+    out.push(h('div', { class: 'input-wrap' }, [h('div', { class: 'input-row' }, [box])]));
     out.push(h('div', { class: 'actions' }, [
       h('button', { class: 'btn primary', type: 'button', id: 'siwc-paste-go', disabled: inflight > 0, onclick: function () { var t = siwcUI.paste; siwcUI.paste = ''; act('siwc_paste', { text: t }, 'ai'); } }, [T('Finish sign-in', 'Completa l’accesso')]),
       h('button', { class: 'btn secondary', type: 'button', id: 'siwc-failed', onclick: function () { act('siwc_failed', {}, 'ai'); } }, [T('Sign-in failed in the browser', 'L’accesso non è riuscito nel browser')]),
