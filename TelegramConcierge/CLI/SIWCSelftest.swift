@@ -6,7 +6,7 @@ import Glibc
 import Darwin
 #endif
 
-/// `__siwc-selftest`: Sign in with ChatGPT, stages A and B (SIWC plan v3.2
+/// `__siwc-selftest`: Sign in with ChatGPT, stages A, B and C (SIWC plan v3.2
 /// §8). Offline only: fake auth/inference transports, synthetic tokens,
 /// temporary XDG roots. Groups are separate functions in separate files
 /// (Linux CI frontend memory, feedback_linux_selftest_size_split).
@@ -62,10 +62,15 @@ struct SIWCSelftest: AsyncParsableCommand {
             ("adapter2", Self.adapterSignOutTests), ("web", Self.webTests), ("models", Self.modelsTests),
             ("errors", Self.errorTests), ("hostile", Self.hostilePrefixTests), ("legacy", Self.legacyUnchangedTests),
             ("round1", Self.round1Tests), ("round1host", Self.round1HostTests), ("round2", Self.round2Tests),
+            // Stage C (settings writer and several assistants).
+            ("c-select", Self.stageCSelectionTests), ("c-rebind", Self.stageCRebindTests), ("c-files", Self.stageCFilesTests),
+            ("c-activity", Self.stageCActivityTests), ("c-writer", Self.stageCWriterTests), ("c-logout", Self.stageCLogoutTests),
+            ("c-recovery", Self.stageCRecoveryTests), ("c-wipe", Self.stageCWipeTests), ("c-notes", Self.stageCNotesTests),
         ]
         for (name, group) in groups where only == nil || only == name {
             print("— \(name)")
             SIWCFence.shared.resetForTests()
+            SIWCActivity.shared.resetForTests()
             SIWCAuthClient.sendOverride = { _, _ in throw offline }
             SIWCModels.fetchOverride = { _ in throw offline }
             ResponsesAdapter.siwcSendOverride = { _ in throw offline }

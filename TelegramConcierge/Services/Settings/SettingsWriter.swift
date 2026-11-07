@@ -520,7 +520,7 @@ final class SettingsWriter {
     nonisolated static func withAuthLocks<T>(_ stores: [String], siwc: [String] = [], _ body: () async throws -> T) async throws -> T {
         guard let first = stores.first else { return try await withSIWCLocks(siwc, body) }
         let store = SubscriptionAuthStore(directory: URL(fileURLWithPath: first, isDirectory: true))
-        return try await store.locked { try await withAuthLocks(Array(stores.dropFirst()), siwc: siwc, body) }
+        return try await store.locked { lockOrderForTesting?("legacy:" + first); return try await withAuthLocks(Array(stores.dropFirst()), siwc: siwc, body) }
     }
 
     /// SIWC locks after the legacy ones, own then shared (SIWC plan §3.9
@@ -528,7 +528,7 @@ final class SettingsWriter {
     nonisolated static func withSIWCLocks<T>(_ stores: [String], _ body: () async throws -> T) async throws -> T {
         guard let first = stores.first else { return try await body() }
         let store = SIWCStore(directory: URL(fileURLWithPath: first, isDirectory: true))
-        return try await store.locked { try await withSIWCLocks(Array(stores.dropFirst()), body) }
+        return try await store.locked { lockOrderForTesting?("siwc:" + first); return try await withSIWCLocks(Array(stores.dropFirst()), body) }
     }
 
     /// Selftest seam: the order in which auth locks were taken (lock-order pin).

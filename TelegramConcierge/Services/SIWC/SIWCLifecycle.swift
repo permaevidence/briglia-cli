@@ -22,7 +22,13 @@ enum SIWCProtectedFiles {
         return out
     }
 
-    static func canonical(_ url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
+    /// The real path, resolving links in the PARENT too when the file
+    /// itself does not exist yet (a write that would create it).
+    static func canonical(_ url: URL) -> String {
+        if FileManager.default.fileExists(atPath: url.path) { return url.resolvingSymlinksInPath().standardizedFileURL.path }
+        let parent = url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+        return parent.appendingPathComponent(url.lastPathComponent).path
+    }
 
     static func isProtected(_ path: String, storeDirectories: [URL] = SubscriptionSharing.protectedStoreDirectories(),
                             hostPaths: SIWCHost.Paths = .live) -> Bool {

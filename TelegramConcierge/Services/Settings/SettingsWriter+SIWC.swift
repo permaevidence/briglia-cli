@@ -301,6 +301,7 @@ extension SettingsWriter {
         defer { release() }
         // 1. Validate, write-free.
         if let why = host?.admissionRefusal() { return .refused(why) }
+        guard let epoch = try? ReplacementEpoch.read() else { return .refused("Briglia's settings can't be read; nothing changed.") }
         let target: (clientId: String, generation: String)
         do {
             target = try await store.locked { () throws -> (String, String) in
@@ -327,10 +328,15 @@ extension SettingsWriter {
         while SIWCFence.shared.inflightCount(key) > 0, ProcessInfo.processInfo.systemUptime < deadline {
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
+        // A drain that timed out keeps the fence even after success: a late
+        // result of a job that did not exit stays suppressed (its epoch is
+        // stale in any case).
+        let drained = SIWCFence.shared.inflightCount(key) == 0
         // 4. Durable step: revalidate, journal, tombstone. A refusal now is partial.
         if let why = host?.admissionRefusal() ?? gate.admissionClosedReason {
             return .partial(SIWCLogoutOutcome.partialMessage + " (\(why))")
         }
+        guard (try? ReplacementEpoch.read()) == epoch else { return .partial(SIWCLogoutOutcome.partialMessage) }
         let attempt = UUID().uuidString
         let fp = SIWCEndpoint.registrationFingerprint(clientId: target.clientId)
         let oldRecord = (try? store.readTokens())?.record(target.clientId)
@@ -353,7 +359,7 @@ extension SettingsWriter {
         }
         SettingsSupersede.subscriptionChanged(store: store.directory.path)
         Self.finishAttempt(attempt, change: change, pending: nil, state: "applied", message: nil)
-        SIWCFence.shared.unfence(key)
+        if drained { SIWCFence.shared.unfence(key) }
         // 5–6. Remote revoke outside every lock, after the token is released.
         release()
         SIWCActivity.shared.beginRevoke()
