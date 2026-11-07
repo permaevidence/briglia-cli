@@ -276,6 +276,9 @@ class ConversationManager: ObservableObject {
     /// can be salvaged on cancellation (/stop). Keying by run id prevents a
     /// cancelled task from clearing or stealing a newer turn's partial work.
     var activeTurnCheckpoints: [UUID: TurnCheckpoint] = [:]
+    /// Sign in with ChatGPT: a turn's job registration (SIWC plan §3.7),
+    /// held by the outer turn until its final delivery decision is over.
+    var siwcTurnJobs: [UUID: SIWCFence.JobToken] = [:]
     var checkpointWriteFailure: String?
     var recoveryBlocked = false
     /// Set when conversation.json EXISTS but could not be read or decoded.

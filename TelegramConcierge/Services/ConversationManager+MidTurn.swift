@@ -677,6 +677,10 @@ extension ConversationManager {
     nonisolated(unsafe) static var turnsHeldByRestoreGateForTesting = 0
     nonisolated(unsafe) static var turnsDroppedAfterReplacementForTesting = 0
 
+    /// SIWC selftest seam (stage C, Codex round 2): runs after the final
+    /// history save and before the final delivery decision. nil in production.
+    nonisolated(unsafe) static var beforeFinalDeliveryForTesting: (@MainActor () async -> Void)?
+
     private func runActiveProcessing(
         for userMessage: Message,
         runId: UUID,
@@ -706,6 +710,9 @@ extension ConversationManager {
             print("[ConversationManager] Dropped a turn held during a memory wipe/import: its history was replaced")
         }
         defer {
+            // Sign in with ChatGPT: the turn stops being a job of its login
+            // only here, after its final delivery and cleanup.
+            SIWCFence.shared.unregisterJob(siwcTurnJobs.removeValue(forKey: runId))
             // Every non-crash exit passes here — answer delivered, /stop,
             // error, context exhaustion — and each of those persisted its
             // outcome, so the power-failure marker comes off. Only a hard
@@ -907,6 +914,7 @@ extension ConversationManager {
                 clearTurnSalvageFile(ifStillOwnedBy: runId)
             } else { recoveryBlocked = true }
 
+            await Self.beforeFinalDeliveryForTesting?()
             let turnReplyAddress = userMessage.originChannel ?? replyAddress
             if let replyTo = turnReplyAddress {
                 if !agentChoseSilence {

@@ -167,6 +167,9 @@ final class MidturnHarness {
         // 1b round 4: every distinct memory-held copy of a charge is kept
         // and released copy by copy.
         if section("charge") { try await heldCopySection() }
+        // Sign in with ChatGPT stage C (Codex round 2): a real turn is a job
+        // of its login through its final delivery.
+        if section("siwc") { try await siwcTurnSection() }
     }
 
     // MARK: Provider and scripting

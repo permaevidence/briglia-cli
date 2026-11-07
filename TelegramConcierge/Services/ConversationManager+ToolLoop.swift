@@ -43,8 +43,13 @@ extension ConversationManager {
         defer { responsesExecution?.responsesTurn.close() }
         // Sign in with ChatGPT: this turn is a job of its captured login; a
         // sign-out of that login cancels it even between model requests.
+        // The outer turn (runId) keeps the registration through its final
+        // delivery and cleanup (Codex stage-C round 2); without one, this
+        // call owns it.
         let siwcJob = try SIWCFence.shared.registerCurrentTask(snapshot.siwc)
-        defer { SIWCFence.shared.unregisterJob(siwcJob) }
+        let ownsSIWCJob = salvageRunId == nil
+        if let runId = salvageRunId, let siwcJob { siwcTurnJobs[runId] = siwcJob }
+        defer { if ownsSIWCJob { SIWCFence.shared.unregisterJob(siwcJob) } }
         if responsesExecution != nil && !saveConversation() {
             throw ResponsesFailure.failed("cannot persist canonical history before Responses dispatch")
         }

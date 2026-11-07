@@ -66,14 +66,19 @@ enum SIWCTypeBoundary {
             switch value {
             case let s as String:
                 out.append(s)
-                if let data = s.data(using: .utf8), s.first == "{" || s.first == "[",
-                   let nested = try? JSONSerialization.jsonObject(with: data) { walk(nested) }
+                // Every JSON text the reply parser accepts (leading
+                // whitespace included, Codex stage-C round 2).
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.first == "{" || trimmed.first == "[", let data = s.data(using: .utf8),
+                   let nested = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) { walk(nested) }
             case let d as [String: Any]: for (k, v) in d { out.append(k); walk(v) }
             case let a as [Any]: for v in a { walk(v) }
             default: break
             }
         }
         if let data = try? change.encoded(), let object = try? JSONSerialization.jsonObject(with: data) { walk(object) }
+        // And the reply exactly as its consumer decodes it.
+        if let reply = change.replyObject { walk(reply) }
         return out
     }
 
@@ -234,6 +239,8 @@ enum SIWCLogoutOutcome: Equatable {
     static let unconfirmedMessage = "Signed out on this computer; remote sign-out not confirmed. Disconnect Briglia in ChatGPT Settings → Usage (chatgpt.com/settings/usage)."
     static let partialMessage = "Running ChatGPT work was stopped, but the sign-out was not saved. Try again. Until then this assistant sends nothing with that login; after a restart the saved login would be usable again, and other assistants were not stopped by this."
     static let othersMessage = "Signed out. Other assistants stop before their next ChatGPT request; one already under way may finish."
+    static let unconfirmedTombstoneMessage = "Signed out on this computer, but the disk did not confirm the sign-out is saved. Running ChatGPT work was stopped, this assistant sends nothing more with that login, and its tokens were revoked where possible. Sign out again to confirm."
+    static let uncertainTombstoneMessage = "Briglia couldn't confirm whether the sign-out was saved. Running ChatGPT work was stopped, this assistant sends nothing more with that login, and its tokens were revoked where possible. Sign out again to confirm."
     static let stoppedJobsMessage = "The ChatGPT work that was running (a reply or a background task) was stopped."
 
     var message: String {
@@ -356,9 +363,21 @@ extension SettingsWriter {
             SettingsSupersede.subscriptionChanged(store: store.directory.path)
             return SettingsCommitResult(state: .applied, message: outcome == .cancelled ? "ChatGPT sign-in cancelled." : "No pending ChatGPT sign-in.")
         } catch {
-            let why = (error as? SIWCError)?.message ?? error.localizedDescription
-            Self.finishAttempt(attempt, change: change, pending: nil, state: "failed", message: why)
-            return SettingsCommitResult(state: .error, message: why)
+            let why = (error as? SIWCError)?.message ?? "\(error)"
+            // Codex stage-C round 2: classify from the marker's evidence.
+            switch SIWCRecovery.overall(SIWCRecovery.evaluate(effect, attempt: attempt)) {
+            case .applied:
+                await SIWCActivity.shared.cancelOwned(store: store.directory)
+                SettingsSupersede.subscriptionChanged(store: store.directory.path)
+                let note = "ChatGPT sign-in cancelled; the disk did not confirm the change is saved (\(why))."
+                Self.finishAttempt(attempt, change: change, pending: nil, state: "partial", message: note)
+                return SettingsCommitResult(state: .partial, message: note)
+            case .unknown:
+                return SettingsCommitResult(state: .uncertain, message: "Briglia couldn't confirm whether the ChatGPT sign-in was cancelled (\(why)).")
+            case .notApplied, .none:
+                Self.finishAttempt(attempt, change: change, pending: nil, state: "failed", message: why)
+                return SettingsCommitResult(state: .error, message: why)
+            }
         }
     }
 
@@ -368,6 +387,7 @@ extension SettingsWriter {
     func commitSIWCLogout(store: SIWCStore, clientId: String? = nil, expectedGeneration: String? = nil,
                           revoke: @escaping (SIWCStore.Tombstone) async -> Bool,
                           drainTimeout: TimeInterval = 10) async -> SIWCLogoutOutcome {
+        lastLogoutStoppedJobs = 0
         guard let token = await gate.acquire() else {
             return .refused(gate.admissionClosedReason ?? "Briglia is busy; try again in a moment. Nothing changed.")
         }
@@ -443,8 +463,29 @@ extension SettingsWriter {
                 try store.tombstoneLocked(target.clientId, expectedGeneration: target.generation, effect: effect.mark(attempt: attempt))
             }
         } catch {
-            Self.finishAttempt(attempt, change: change, pending: nil, state: "partial", message: SIWCLogoutOutcome.partialMessage)
-            return .partial(SIWCLogoutOutcome.partialMessage)
+            // Codex stage-C round 2: classify from the record's evidence.
+            switch SIWCRecovery.overall(SIWCRecovery.evaluate(effect, attempt: attempt)) {
+            case .notApplied, .none:
+                // Nothing replaced: the login is still saved (fence kept).
+                Self.finishAttempt(attempt, change: change, pending: nil, state: "partial", message: SIWCLogoutOutcome.partialMessage)
+                return .partial(SIWCLogoutOutcome.partialMessage)
+            case .applied, .unknown:
+                // The tombstone is (or may be) visible but not confirmed
+                // durable. Policy: the user asked to sign out, so the tokens
+                // the record held are revoked now (material kept from the
+                // read before the write); the fence stays; never claimed as
+                // a durable sign-out.
+                let visible = SIWCRecovery.overall(SIWCRecovery.evaluate(effect, attempt: attempt)) == .applied
+                SettingsSupersede.subscriptionChanged(store: store.directory.path)
+                let message = visible ? SIWCLogoutOutcome.unconfirmedTombstoneMessage : SIWCLogoutOutcome.uncertainTombstoneMessage
+                if visible { Self.finishAttempt(attempt, change: change, pending: nil, state: "partial", message: message) }
+                release()
+                let material = SIWCScopeRetire.revokeMaterial(oldRecord.map { SIWCTokenFile(records: [$0]) })
+                SIWCActivity.shared.beginRevoke()
+                for item in material { _ = await revoke(item) }
+                SIWCActivity.shared.endRevoke()
+                return .partial(message)
+            }
         }
         SettingsSupersede.subscriptionChanged(store: store.directory.path)
         Self.finishAttempt(attempt, change: change, pending: nil, state: "applied", message: nil)

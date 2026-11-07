@@ -78,7 +78,7 @@ struct SIWCSelftest: AsyncParsableCommand {
             ("c-select", Self.stageCSelectionTests), ("c-rebind", Self.stageCRebindTests), ("c-files", Self.stageCFilesTests),
             ("c-activity", Self.stageCActivityTests), ("c-writer", Self.stageCWriterTests), ("c-logout", Self.stageCLogoutTests),
             ("c-recovery", Self.stageCRecoveryTests), ("c-wipe", Self.stageCWipeTests), ("c-notes", Self.stageCNotesTests),
-            ("c-round1", Self.stageCRound1Tests),
+            ("c-round1", Self.stageCRound1Tests), ("c-round2", Self.stageCRound2Tests),
         ]
         for (name, group) in groups where only == nil || only == name {
             print("— \(name)")
