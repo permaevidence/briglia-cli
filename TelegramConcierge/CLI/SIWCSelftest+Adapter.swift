@@ -117,7 +117,11 @@ extension SIWCSelftest {
             catch { return (error, wire.count - before) }
         }
         let limit = await failing(SIWCErrors.classify(status: 429, body: Data(#"{"error":{"code":"subscription_sharing_usage_limit_exceeded"}}"#.utf8))!)
-        c.check("errors: usage limit → no retry, no API billing, limit message", (limit.0 as? SIWCError)?.kind == .limitReached && limit.1 == 1)
+        // Stage D: the plan-state gate would also stop a retried send, so the
+        // row checks that the answer reported is the server's own (a retry
+        // would end on the gate's paused message instead).
+        c.check("errors: usage limit → no retry, no API billing, limit message", (limit.0 as? SIWCError)?.kind == .limitReached && limit.1 == 1
+                && (limit.0 as? SIWCError)?.message == SIWCError.limitMessage)
         // Stage D: that answer paused the plan for background lanes; the rows
         // below exercise the transport itself, so they start from a fresh state.
         clearPlanState(sourceA2.store)
