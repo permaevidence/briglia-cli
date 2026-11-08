@@ -54,6 +54,7 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
+          PIN_GATE_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [ "$REF_TYPE" = "tag" ] || { echo "✖ not a tag push"; exit 1; }
@@ -96,8 +97,12 @@ jobs:
           # actions/checkout replaces the annotated tag with a lightweight
           # ref in this clone, so the reader re-fetches the real tag object
           # (fail-closed; see the script header).
+          # The gate's GitHub advisory lookups authenticate with this run's
+          # own read-only token, scoped to the gate command only: anonymous
+          # calls share the runner IP's 60/h limit and failed v0.2.68 with
+          # HTTP 403 (RELEASE_RUNBOOKS.md §2a).
           ./.github/scripts/read-pin-gate-record.sh "$REF_NAME" "$GITHUB_SHA" dist/pin-gate-record.txt
-          python3 scripts/pin_gate.py --mode precheck --source dir:. --commit "$GITHUB_SHA" \
+          GITHUB_TOKEN="$PIN_GATE_GITHUB_TOKEN" python3 scripts/pin_gate.py --mode precheck --source dir:. --commit "$GITHUB_SHA" \
             --tag-record dist/pin-gate-record.txt
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -259,8 +264,13 @@ jobs:
         # issues with a read-only token held only by this environment; a
         # missing token or any feed failure refuses. Applied overrides must
         # all be quoted in the tag's record (what the owner approved).
+        # GITHUB_TOKEN: this run's own read-only token (permissions:
+        # contents: read) for the public GitHub advisory lookups (C1);
+        # anonymous calls hit the shared runner-IP limit (v0.2.68 burned on
+        # HTTP 403). BRIGLIA_PIN_GATE_ISSUES_TOKEN stays the only C2 credential.
         env:
           BRIGLIA_PIN_GATE_ISSUES_TOKEN: ${{ secrets.BRIGLIA_PIN_GATE_ISSUES_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [ -n "$BRIGLIA_PIN_GATE_ISSUES_TOKEN" ] || {

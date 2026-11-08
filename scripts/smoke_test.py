@@ -470,6 +470,15 @@ def main():
     check("pin-gate-tag-fetch", result.returncode == 0,
           (result.stdout + result.stderr)[-1500:])
 
+    # 3c1a6. the pin gate's GitHub advisory lookups run with this run's own
+    # github.token in both the authorize precheck and the sign job (v0.2.68
+    # burned on an anonymous HTTP 403): each gate command runs with only its
+    # step's env and a recording python3 shim; deliberate breaks rejected.
+    result = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "scripts", "pin_gate_token_test.py")],
+                            capture_output=True, text=True, timeout=120, cwd=REPO_ROOT)
+    check("pin-gate-token", result.returncode == 0,
+          (result.stdout + result.stderr)[-1500:])
+
     # 3c1b. userdata toolchain installer: fake-apt/dpkg-backed prefix
     # install, alternatives-aware wrappers, probe enforcement, cleanup.
     result = run_selftest([ADA, "__toolchain-selftest"], capture_output=True, text=True, timeout=600)
