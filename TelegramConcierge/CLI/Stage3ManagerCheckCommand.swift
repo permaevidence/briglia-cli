@@ -1022,11 +1022,19 @@ struct Stage3ManagerCheckCommand: AsyncParsableCommand {
             KeychainHelper.openAICompatibleModelKey: "synthetic-model",
             KeychainHelper.openAICompatibleApiKeyKey: "synthetic-key",
         ])
+        // 0.2.68 flake fix: memory maintenance left over from an earlier
+        // case (or the archive recovery this startup's configure() schedules)
+        // makes beginMindRestore refuse for THAT reason, not for the startup
+        // under test (public macOS flake on 0.2.67). Wait for it to settle
+        // both before the startup and once it is held, so the refusals below
+        // can only come from "Briglia still starting up".
+        await awaitArchiveIdle(m)
         let hold = StepGate()
         ConversationManager.startupAfterConfigureForTesting = { await hold.wait() }
         let start = Task { @MainActor in await m.startPolling() }
         let heldBy = Date().addingTimeInterval(20)
         while !hold.hasEntered && Date() < heldBy { try? await Task.sleep(nanoseconds: 10_000_000) }
+        await awaitArchiveIdle(m)
         await m.startPolling()   // the second caller (terminal session) returns at once
         check("S3-R11-1: a real startup is held after configure() with no poll/app ingress; a second start returns",
               hold.hasEntered && m.isStartingPolling && m.browserSettingsPollIngress == 0 && m.browserSettingsAppIngress == 0,

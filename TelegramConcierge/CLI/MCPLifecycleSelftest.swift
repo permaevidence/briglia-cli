@@ -91,11 +91,20 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
         //     escalation can only be triggered by the descendant tracking.
         let zombie = try Self.rawSpawn(["/bin/sh", "-c", ":"], newGroup: false)
         let shim = try Self.rawSpawn([selfPath, "__setsid-exec", "--", "/bin/sleep", "300"], newGroup: true)
-        let detachedIgnoringTerm = "import os,signal,time; os.setsid(); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)"
+        // SIGTERM is ignored BEFORE setsid(), so "leads its own session"
+        // (polled below) implies "already ignores SIGTERM".
+        let detachedIgnoringTerm = "import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); os.setsid(); time.sleep(300)"
         let obedient = try Self.rawSpawn(["/bin/sh", "-c", "\(python) -c '\(detachedIgnoringTerm)' & exec /bin/sleep 300"], newGroup: false)
         usleep(400_000)
         let server = Self.waitForChild(of: shim, seconds: 3)
-        let detached = Self.waitForChild(of: obedient, seconds: 3)
+        // 0.2.68 flake fix: a fixed 400 ms was not always enough for the
+        // python interpreter to start and setsid() on a loaded CI runner
+        // (private macOS flake on 0.2.67). Wait (≤ 10 s) until the
+        // descendant actually leads its own session.
+        let detached = Self.waitForChild(of: obedient, seconds: 3).map { pid -> Int32 in
+            Self.waitOwnSession(pid, seconds: 10)
+            return pid
+        }
         check("1.3 planted shim took the posix_spawn fallback (server is the shim's child)", server != nil,
               "shim=\(shim) table=\(Self.describeTree(shim))")
         check("1.4 planted server sits in its own session/group", server.map { getpgid($0) == $0 } ?? false)
@@ -560,6 +569,16 @@ struct MCPLifecycleSelftest: AsyncParsableCommand {
             usleep(50_000)
         }
         return nil
+    }
+
+    /// Polls until `pid` leads its own process group (it called setsid()),
+    /// or the time is up; the caller's check reports the outcome.
+    private static func waitOwnSession(_ pid: Int32, seconds: Double) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if getpgid(pid) == pid { return }
+            usleep(20_000)
+        }
     }
 
     private static func exists(_ pid: Int32) -> Bool {
