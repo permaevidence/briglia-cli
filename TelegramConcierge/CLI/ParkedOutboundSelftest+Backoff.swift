@@ -49,6 +49,27 @@ extension ParkedOutboundSelftest {
                   queue.nextAttemptAt == clk.t.addingTimeInterval(30), "")
         }
 
+        // B1b. A delivery resets the count even when a LATER reply in the
+        //      same flush fails: that failure starts again at the first step.
+        do {
+            let clk = SimClock()
+            let queue = ParkedOutboundQueue(now: { clk.t })
+            queue.park("a", address: tg)
+            for _ in 0..<3 {   // three failures: next step would be 5 min
+                while !queue.isDue { clk.t += 1 }
+                await queue.flush(deliver: { _ in throw Down() })
+            }
+            queue.park("b", address: tg)
+            while !queue.isDue { clk.t += 1 }
+            var delay: TimeInterval?
+            await queue.flush(deliver: { item in
+                if item.text == "b" { throw Down() }
+                return true
+            }, onFailed: { _, _, _, d in delay = d })
+            check("B1b after a delivery, the next reply's failure backs off from the start (30 s, not 5 min)",
+                  delay == 30 && queue.items.map(\.text) == ["b"], "\(String(describing: delay))")
+        }
+
         // B2. 429 retry_after longer than the schedule step wins.
         do {
             let clk = SimClock()
