@@ -11,6 +11,7 @@ extension StopVisibilityHarness {
         await parkedChurnRows()
         await repeatHeldAcrossCompletionRows()
         await whatsappRows()
+        await finalReplyCancelAfterHeadersRows()
     }
 
     /// SV8: the completion becomes due while the reply's send is suspended

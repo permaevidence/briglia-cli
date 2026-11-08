@@ -12,6 +12,24 @@ import FoundationNetworking
 /// `BoundedHTTP` does. The body is capped (Telegram answers are small).
 final class NoticeHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataTaskDelegate, @unchecked Sendable {
     static let maxBodyBytes = 64 * 1024
+    /// Ordinary replies (`sendCancellable`): a sendMessage answer is a few
+    /// KiB; 4 MiB is a backstop, and going past it fails explicitly
+    /// (`bodyTooLarge`) instead of handing a truncated answer to the JSON
+    /// decoder (Codex round-2 note).
+    static let ordinaryMaxBodyBytes = 4 * 1024 * 1024
+
+    /// Thrown by `sendCancellable` when an answer exceeds its limit.
+    struct BodyTooLarge: Error {}
+
+    private let bodyLimit: Int
+    private let failOnOverflow: Bool
+    private var overflowed = false
+
+    init(bodyLimit: Int = NoticeHTTPTransport.maxBodyBytes, failOnOverflow: Bool = false) {
+        self.bodyLimit = bodyLimit
+        self.failOnOverflow = failOnOverflow
+        super.init()
+    }
     let refusesRedirects = true
 
     private let lock = NSLock()
@@ -35,7 +53,7 @@ final class NoticeHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataTas
     /// then deliver a duplicate. Unlike `send`, this one honours task
     /// cancellation (/stop) by cancelling the data task.
     static func sendCancellable(_ request: URLRequest) async throws -> (Data, URLResponse) {
-        let transport = NoticeHTTPTransport()
+        let transport = NoticeHTTPTransport(bodyLimit: ordinaryMaxBodyBytes, failOnOverflow: true)
         return try await withTaskCancellationHandler {
             try await transport.run(request)
         } onCancel: {
@@ -84,7 +102,8 @@ final class NoticeHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataTas
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.lock()
-        if body.count < Self.maxBodyBytes { body.append(data.prefix(Self.maxBodyBytes - body.count)) }
+        if body.count + data.count > bodyLimit { overflowed = true }
+        if body.count < bodyLimit { body.append(data.prefix(bodyLimit - body.count)) }
         lock.unlock()
     }
 
@@ -92,8 +111,21 @@ final class NoticeHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataTas
         lock.lock()
         let c = continuation; continuation = nil
         let response = self.response, body = self.body
+        let wasCancelled = cancelled, overflowed = self.overflowed
         lock.unlock()
         guard let c else { return }
+        // Explicit task cancellation (/stop on `sendCancellable`) stays a
+        // cancellation even after the response started (Codex round-2 P2):
+        // callers route URLError.cancelled to their stop path. Every other
+        // post-response failure stays ambiguous (connection lost) below.
+        if wasCancelled, error != nil {
+            c.resume(throwing: URLError(.cancelled))
+            return
+        }
+        if failOnOverflow, overflowed, response != nil {
+            c.resume(throwing: BodyTooLarge())
+            return
+        }
         if let response, error == nil {
             c.resume(returning: (body, response))
         } else if response != nil {
