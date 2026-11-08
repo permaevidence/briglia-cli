@@ -369,15 +369,23 @@ actor TelegramBotService {
     /// plain message with the request body unchanged from before keyboards
     /// existed.
     func sendMessage(chatId: Int, text: String, keyboard: TelegramInlineKeyboardMarkup? = nil) async throws {
-        let request = try makeSendMessageRequest(chatId: chatId, text: text, keyboard: keyboard)
+        let request = try makeSendMessageRequest(chatId: chatId, text: text, keyboard: keyboard,
+                                                 timeout: Self.ordinarySendTimeout)
         let (data, response) = try await transportData(for: request)
         try checkSendMessageResponse(data: data, response: response)
     }
 
+    /// How long an ordinary reply waits for Telegram's answer before the send
+    /// counts as failed (0.2.68; was 15 s). A slow acknowledgement used to
+    /// time out after Telegram had already delivered the message, and the
+    /// retry delivered it again. Visibility notices keep 15 s.
+    nonisolated static let ordinarySendTimeout: TimeInterval = 60
+
     /// Builds the sendMessage request from the CURRENT token. Synchronous:
     /// the token is captured at this call, with no suspension inside.
     private func makeSendMessageRequest(chatId: Int, text: String,
-                                        keyboard: TelegramInlineKeyboardMarkup?) throws -> URLRequest {
+                                        keyboard: TelegramInlineKeyboardMarkup?,
+                                        timeout: TimeInterval = 15) throws -> URLRequest {
         guard !botToken.isEmpty else {
             throw TelegramError.notConfigured
         }
@@ -386,7 +394,7 @@ actor TelegramBotService {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 15
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let cleanedText = normalizeTelegramText(text)

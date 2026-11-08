@@ -52,11 +52,17 @@ extension ConversationManager {
     /// Silently no-ops when no destination is configured — mirroring the old
     /// `if let chatId = pairedChatId` guards.
     ///
-    /// Bounded retry (3 attempts) rides out transient network blips. On final
-    /// failure the message is PARKED and re-attempted on the next successful
-    /// poll tick or send — previously a single failed attempt lost the reply
-    /// silently (it survived in history, but the user experienced being
-    /// ignored). Still throws on failure so callers can react.
+    /// Delivery is at-least-once and a reply is never abandoned (0.2.68
+    /// duplicate-send fix). Telegram's sendMessage has no idempotency key, so
+    /// a failure that may have reached the chat (a timeout, a dropped
+    /// connection, a 5xx) is NOT retried on the spot: the request already
+    /// waits up to 60 s for Telegram's answer, and the reply is then PARKED
+    /// and retried with backoff (30 s, 1 min, 2 min, then every 5 min) until
+    /// it goes through. Only failures that prove nothing was sent (DNS,
+    /// connection refused, TLS) get the quick in-line retries (3 attempts).
+    /// A permanent refusal (HTTP 400) is logged and not parked — it would
+    /// block every later reply. The text is in conversation history either
+    /// way. Still throws on failure so callers can react.
     func sendText(_ text: String, to address: ChannelAddress? = nil) async throws {
         // Local command window: collect command responses for the REPL/app to
         // render instead of sending them over a wire (the .app channel has
@@ -79,24 +85,65 @@ extension ConversationManager {
                 return
             } catch {
                 lastError = error
-                if attempt < 3 {
-                    try? await Task.sleep(nanoseconds: UInt64(2 * attempt) * 1_000_000_000)
-                }
+                guard Self.sendFailureProvesNotSent(error), attempt < 3 else { break }
+                try? await Task.sleep(nanoseconds: UInt64(2 * attempt) * 1_000_000_000)
             }
         }
-        parkOutbound(text, address: address)
-        throw lastError ?? URLError(.cannotConnectToHost)
+        let error = lastError ?? URLError(.cannotConnectToHost)
+        switch Self.parkedDisposition(for: error) {
+        case .discard:
+            print("[ConversationManager] Telegram refused a reply permanently, not retrying (it stays in conversation history): \(Self.redactedSendError(error))")
+        case .retryLater(let retryAfter):
+            parkOutbound(text, address: address, error: error, retryAfter: retryAfter)
+        }
+        throw error
     }
 
-    private func parkOutbound(_ text: String, address: ChannelAddress) {
-        let queued = parkedOutbound.park(text, address: address)
-        print("[ConversationManager] Parked undeliverable reply (\(queued) queued) — will retry when the channel recovers")
+    private func parkOutbound(_ text: String, address: ChannelAddress, error: Error, retryAfter: TimeInterval?) {
+        let queued = parkedOutbound.park(text, address: address, retryAfter: retryAfter)
+        let wait = parkedOutbound.nextAttemptAt.map { max(0, Int($0.timeIntervalSinceNow.rounded())) }
+        print("[ConversationManager] Send failed (\(Self.redactedSendError(error))); parked reply (\(queued) queued), next try in \(wait.map { "\($0) s" } ?? "a moment")")
+    }
+
+    /// True only for transport failures that prove no request byte reached
+    /// Telegram (name resolution, connection establishment, TLS) — the only
+    /// failures that are safe to retry immediately without risking a
+    /// duplicate message.
+    nonisolated static func sendFailureProvesNotSent(_ error: Error) -> Bool {
+        if case TelegramError.transport(let code, _) = error {
+            return TelegramBotService.preSendTransportCodes.contains(code)
+        }
+        if let urlError = error as? URLError {
+            return TelegramBotService.preSendTransportCodes.contains(urlError.code.rawValue)
+        }
+        return false
+    }
+
+    /// How the parked queue treats a failed send: HTTP 400 is Telegram's
+    /// permanent refusal of this exact message (bad chat id, empty text) and
+    /// is discarded; a 429 waits at least its `retry_after`; everything else
+    /// (timeouts, 5xx, 401/403, network) keeps the reply and backs off.
+    nonisolated static func parkedDisposition(for error: Error) -> ParkedOutboundQueue.FailureDisposition {
+        if case TelegramError.invalidResponse(let status, let body) = error {
+            if status == 400 { return .discard }
+            if status == 429, let body,
+               let json = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any],
+               let retry = (json["parameters"] as? [String: Any])?["retry_after"] as? Int {
+                return .retryLater(retryAfter: TimeInterval(retry))
+            }
+        }
+        return .retryLater(retryAfter: nil)
+    }
+
+    nonisolated static func redactedSendError(_ error: Error) -> String {
+        String(TelegramBotService.redactBotTokens(in: "\(error.localizedDescription)").prefix(200))
     }
 
     /// Re-attempt parked replies in order; stops at the first failure so a
-    /// still-broken channel isn't hammered. Called from the poll loop's
-    /// success path and after any successful send; a flush already in
-    /// progress makes this a no-op (the running flush drains new items too).
+    /// still-broken channel isn't hammered, and waits out the backoff after a
+    /// failed attempt. Called from the poll loop's success path and after
+    /// any successful send; a flush already in progress (or not yet due)
+    /// makes this a no-op (the running flush drains new items too).
     func flushParkedOutbound() async {
         await parkedOutbound.flush(
             deliver: { [weak self] item in
@@ -104,8 +151,16 @@ extension ConversationManager {
                 try await channel.sendText(chatId: item.address.chatId, text: item.text)
                 return true
             },
+            classify: { Self.parkedDisposition(for: $0) },
             onDelivered: { _, left in
                 print("[ConversationManager] Delivered parked reply (\(left) left)")
+            },
+            onFailed: { _, error, failures, delay in
+                if let delay {
+                    print("[ConversationManager] Parked reply retry \(failures) failed (\(Self.redactedSendError(error))); next try in \(Int(delay)) s")
+                } else {
+                    print("[ConversationManager] Telegram refused a parked reply permanently, removed from the send queue (it stays in conversation history): \(Self.redactedSendError(error))")
+                }
             }
         )
     }

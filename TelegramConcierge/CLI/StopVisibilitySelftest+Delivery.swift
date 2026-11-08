@@ -68,8 +68,8 @@ extension StopVisibilityHarness {
         check("SV9 ordinary parked queue still empty", manager._svParkedTexts.isEmpty)
     }
 
-    /// SV10: 25 ordinary replies fail and park (and trim) while the series
-    /// reply is in flight: series order unaffected, trimming unchanged.
+    /// SV10: 25 ordinary replies fail and park while the series reply is in
+    /// flight: series order unaffected, nothing trimmed (0.2.68).
     private func parkedChurnRows() async {
         let channel = SVRecordingChannel(kind: .telegram)
         let manager = await freshManager(channel: channel)
@@ -91,8 +91,10 @@ extension StopVisibilityHarness {
             }
         }
         let parked = manager._svParkedTexts
-        check("SV10 ordinary failures park and trim exactly as before (20 kept, all ordinary)",
-              parked.count == ParkedOutboundQueue.capacity && parked.allSatisfy { $0.hasPrefix("ordinary-") }, "\(parked.count)")
+        // 0.2.68: replies are no longer trimmed at 20 (capacity is a 1000-item
+        // memory backstop), so all 25 ordinary failures stay parked.
+        check("SV10 ordinary failures all park (none trimmed, all ordinary)",
+              parked.count == 25 && parked.allSatisfy { $0.hasPrefix("ordinary-") }, "\(parked.count)")
         await finish(manager, hold)
         channel.release(call: 1)
         _ = await waitUntil(timeout: 10) { channel.stopTexts.count >= 2 }
