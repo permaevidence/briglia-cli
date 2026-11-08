@@ -925,9 +925,16 @@ final class MenuSelftestContext {
         w = world()
         w.snap.chatgpt = .signedIn(active: true, model: "gpt-6-sol", effort: "high", generation: "g0")
         wf = await make(w)
-        check("ChatGPT offers Light to Deepest", (aiProvider(wf, "chatgpt")["efforts"] as? [String]) == ["low", "medium", "high", "xhigh"] && ai(wf)["openai_required"] as? Bool == false)
+        check("ChatGPT offers Light to Maximum (0.2.68: max where the model takes it)", (aiProvider(wf, "chatgpt")["efforts"] as? [String]) == ["low", "medium", "high", "xhigh", "max"] && ai(wf)["openai_required"] as? Bool == false)
         r = await act(wf, ["action": "effort", "effort": "xhigh"])
         check("the ChatGPT thinking level goes through the subscription", ok(r) && w.snap.chatgpt == .signedIn(active: true, model: "gpt-6-sol", effort: "xhigh", generation: "g1"))
+        r = await act(wf, ["action": "effort", "effort": "max"])
+        check("ChatGPT Maximum (max) goes through the subscription verbatim", ok(r) && w.snap.chatgpt == .signedIn(active: true, model: "gpt-6-sol", effort: "max", generation: "g1"))
+        check("ChatGPT: a model without max offers up to Deepest only; GPT-6.1 Sol/Luna/Astra offer Maximum",
+              wf.effortChoices(.chatgpt, model: "o-unknown") == ["low", "medium", "high", "xhigh"]
+              && ["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"].allSatisfy { wf.effortChoices(.chatgpt, model: $0).last == "max" })
+        check("other lanes unchanged: OpenCode/local Responses models still stop at Deepest",
+              wf.effortChoices(.opencode, model: "gpt-5.6-luna").last == "xhigh")
         r = await act(wf, ["action": "finish", "what": "stop"])
         check("Stop is allowed with steps still missing and closes as stop", ok(r) && wf.closing == "stop")
     }

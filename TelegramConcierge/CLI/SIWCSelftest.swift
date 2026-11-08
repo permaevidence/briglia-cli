@@ -101,6 +101,8 @@ struct SIWCSelftest: AsyncParsableCommand {
             ("d-round1", Self.stageDRound1Tests),
             // Live gates 2026-11-07: real-shaped fixtures for BUGS 1–3.
             ("live-listener", Self.liveListenerTests), ("live-startup", Self.liveStartupTests), ("live-replay", Self.liveReplayTests),
+            // 0.2.68: max reasoning effort on both ChatGPT routes.
+            ("effort-max", Self.maxEffortTests),
         ]
         for (name, group) in groups where only == nil || only == name {
             print("— \(name)")

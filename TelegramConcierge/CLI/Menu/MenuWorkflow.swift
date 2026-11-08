@@ -474,7 +474,8 @@ final class MenuWorkflow {
     }
 
     /// The reasoning levels the menu offers for one model: Light, Balanced,
-    /// Deep, plus Deepest where the model takes xhigh. Local servers take
+    /// Deep, plus Deepest where the model takes xhigh (and, for ChatGPT,
+    /// Maximum where it takes max). Local servers take
     /// none (Briglia sends no effort to them).
     func effortChoices(_ lane: MenuLane, model: String) -> [String] {
         effortChoicesFor(lane, model: model)
@@ -492,8 +493,12 @@ final class MenuWorkflow {
             return (base + ["xhigh"]).filter(allowed.contains)
         case .openrouter: return base + ["max"]  // D11: OpenRouter takes max
         case .chatgpt:
+            // 0.2.68 (owner): ChatGPT also offers Maximum (`max`) where the
+            // model takes it (ResponsesAdapter.allowedEfforts: GPT-6 Sol /
+            // Luna / Astra, GPT-6.1 Sol, GPT-5.6), on both sign-in routes.
+            // Sent verbatim as `reasoning.effort`, like OpenRouter's D11.
             let allowed = ResponsesAdapter.allowedEfforts(model: model)
-            return (base + ["xhigh"]).filter(allowed.contains)
+            return (base + ["xhigh", "max"]).filter(allowed.contains)
         case .opencode:
             guard OpenCodeGo.usesResponses(model) else { return base }
             let allowed = ResponsesAdapter.allowedEfforts(model: model)
