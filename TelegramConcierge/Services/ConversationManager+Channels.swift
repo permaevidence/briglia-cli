@@ -101,7 +101,7 @@ extension ConversationManager {
 
     private func parkOutbound(_ text: String, address: ChannelAddress, error: Error, retryAfter: TimeInterval?) {
         let queued = parkedOutbound.park(text, address: address, retryAfter: retryAfter)
-        let wait = parkedOutbound.nextAttemptAt.map { max(0, Int($0.timeIntervalSinceNow.rounded())) }
+        let wait = parkedOutbound.nextSendAt.map { max(0, Int($0.timeIntervalSinceNow.rounded())) }
         print("[ConversationManager] Send failed (\(Self.redactedSendError(error))); parked reply (\(queued) queued), next try in \(wait.map { "\($0) s" } ?? "a moment")")
     }
 

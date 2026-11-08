@@ -49,8 +49,14 @@ final class ParkedOutboundQueue {
     private var flushInProgress = false
     /// Failed attempts since the last successful delivery.
     private(set) var consecutiveFailures = 0
-    /// Earliest time the next flush may send; nil = due now.
+    /// Earliest time the next flush may send under the ordinary backoff;
+    /// nil = due now.
     private(set) var nextAttemptAt: Date?
+    /// Telegram's own minimum wait (429 `retry_after`), kept apart from the
+    /// ordinary backoff (Codex round-1 finding 1): a delivery that completes
+    /// meanwhile resets the backoff but never this, and a different
+    /// attempt's failure cannot shorten it. Cleared once it has passed.
+    private(set) var cooldownUntil: Date?
     private let now: () -> Date
 
     /// Selftests: a simulated clock for queues built with the default clock
@@ -65,7 +71,19 @@ final class ParkedOutboundQueue {
     var isEmpty: Bool { items.isEmpty }
     var isFlushing: Bool { flushInProgress }
     /// Whether a flush started now would send (not waiting out a backoff).
-    var isDue: Bool { nextAttemptAt.map { now() >= $0 } ?? true }
+    var isDue: Bool {
+        let t = now()
+        if let c = cooldownUntil, t < c { return false }
+        return nextAttemptAt.map { t >= $0 } ?? true
+    }
+
+    /// Records a server cooldown, never moving an existing one earlier.
+    private func extendCooldown(_ retryAfter: TimeInterval?) {
+        guard let retryAfter, retryAfter > 0 else { return }
+        let until = now().addingTimeInterval(retryAfter)
+        if let existing = cooldownUntil, existing >= until { return }
+        cooldownUntil = until
+    }
 
     /// Append (trimming only past the memory backstop) and start the backoff
     /// clock when none is running: a reply is parked because its send just
@@ -79,28 +97,40 @@ final class ParkedOutboundQueue {
             items.removeFirst(dropped)
             print("[ConversationManager] Send queue over \(Self.capacity): dropped the \(dropped) oldest waiting repl\(dropped == 1 ? "y" : "ies") (still in conversation history)")
         }
-        if nextAttemptAt == nil || retryAfter != nil {
+        extendCooldown(retryAfter)
+        if nextAttemptAt == nil {
             consecutiveFailures = max(consecutiveFailures, 1)
-            let delay = Self.backoffDelay(afterFailures: consecutiveFailures, retryAfter: retryAfter)
-            let candidate = now().addingTimeInterval(delay)
-            if let existing = nextAttemptAt, existing >= candidate {} else { nextAttemptAt = candidate }
+            nextAttemptAt = now().addingTimeInterval(Self.backoffDelay(afterFailures: consecutiveFailures))
         }
         return items.count
     }
 
     func removeAll(where predicate: (Item) -> Bool) {
         items.removeAll(where: predicate)
-        if items.isEmpty { resetBackoff() }
+        if items.isEmpty { resetBackoff(); cooldownUntil = nil }
     }
 
     func removeAll() {
         items.removeAll()
         resetBackoff()
+        cooldownUntil = nil
     }
 
+    /// When the next flush may send (the later of backoff and cooldown).
+    var nextSendAt: Date? {
+        switch (nextAttemptAt, cooldownUntil) {
+        case let (a?, c?): return max(a, c)
+        case let (a?, nil): return a
+        case let (nil, c?): return c
+        default: return nil
+        }
+    }
+
+    /// Ordinary backoff only; a server cooldown stays until it has passed.
     private func resetBackoff() {
         consecutiveFailures = 0
         nextAttemptAt = nil
+        if let c = cooldownUntil, now() >= c { cooldownUntil = nil }
     }
 
     /// What a failed delivery attempt means for the queue.
@@ -138,7 +168,12 @@ final class ParkedOutboundQueue {
         guard isDue else { return false }
         flushInProgress = true
         defer { flushInProgress = false }
+        var first = true
         while let item = items.first {
+            // A cooldown recorded while an earlier send was in flight (a 429
+            // on another send) holds the rest of the queue (Codex R1-1).
+            if !first, let c = cooldownUntil, now() < c { return true }
+            first = false
             do {
                 let sent = try await deliver(item)
                 // The array may have changed during the await (a park can
@@ -158,9 +193,11 @@ final class ParkedOutboundQueue {
                     continue
                 case .retryLater(let retryAfter):
                     consecutiveFailures += 1
-                    let delay = Self.backoffDelay(afterFailures: consecutiveFailures, retryAfter: retryAfter)
-                    nextAttemptAt = now().addingTimeInterval(delay)
-                    onFailed(item, error, consecutiveFailures, delay)
+                    extendCooldown(retryAfter)
+                    nextAttemptAt = now().addingTimeInterval(Self.backoffDelay(afterFailures: consecutiveFailures))
+                    // Reported delay = the real wait, including any cooldown.
+                    let wait = max(nextAttemptAt!, cooldownUntil ?? .distantPast).timeIntervalSince(now())
+                    onFailed(item, error, consecutiveFailures, wait)
                     return true
                 }
             }

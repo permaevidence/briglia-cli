@@ -18,6 +18,8 @@ final class NoticeHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataTas
     private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
     private var response: URLResponse?
     private var body = Data()
+    private var task: URLSessionTask?
+    private var cancelled = false
 
     /// Test seam: the number of requests this transport has started.
     nonisolated(unsafe) static var requestsStartedForTesting = 0
@@ -26,19 +28,46 @@ final class NoticeHTTPTransport: NSObject, URLSessionDataDelegate, RoutedDataTas
         try await NoticeHTTPTransport().run(request)
     }
 
+    /// The same one-request, no-redirect wire for ORDINARY replies (0.2.68,
+    /// Codex round-1 finding 2): with redirects followed, a connect/DNS/TLS
+    /// failure could belong to a later hop after the first POST had reached
+    /// Telegram, and the in-line retry for "proven not sent" failures would
+    /// then deliver a duplicate. Unlike `send`, this one honours task
+    /// cancellation (/stop) by cancelling the data task.
+    static func sendCancellable(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let transport = NoticeHTTPTransport()
+        return try await withTaskCancellationHandler {
+            try await transport.run(request)
+        } onCancel: {
+            transport.cancel()
+        }
+    }
+
+    private func cancel() {
+        lock.lock(); cancelled = true; let t = task; lock.unlock()
+        t?.cancel()
+    }
+
+    /// Registers the started task; cancels it at once when cancellation came first.
+    private func adopt(_ t: URLSessionTask) {
+        lock.lock(); task = t; let wasCancelled = cancelled; lock.unlock()
+        t.resume()
+        if wasCancelled { t.cancel() }
+    }
+
     private func run(_ request: URLRequest) async throws -> (Data, URLResponse) {
         Self.requestsStartedForTesting += 1
         if let shared = SharedDataTaskSession.active {
             return try await withCheckedThrowingContinuation { (c: CheckedContinuation<(Data, URLResponse), Error>) in
                 lock.lock(); continuation = c; lock.unlock()
-                shared.dataTask(with: request, delegate: self).resume()
+                adopt(shared.dataTask(with: request, delegate: self))
             }
         }
         let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         return try await withCheckedThrowingContinuation { (c: CheckedContinuation<(Data, URLResponse), Error>) in
             lock.lock(); continuation = c; lock.unlock()
-            session.dataTask(with: request).resume()
+            adopt(session.dataTask(with: request))
         }
     }
 

@@ -371,7 +371,7 @@ actor TelegramBotService {
     func sendMessage(chatId: Int, text: String, keyboard: TelegramInlineKeyboardMarkup? = nil) async throws {
         let request = try makeSendMessageRequest(chatId: chatId, text: text, keyboard: keyboard,
                                                  timeout: Self.ordinarySendTimeout)
-        let (data, response) = try await transportData(for: request)
+        let (data, response) = try await ordinarySendData(for: request)
         try checkSendMessageResponse(data: data, response: response)
     }
 
@@ -966,6 +966,28 @@ actor TelegramBotService {
         if let override = Self.transportOverrideForTesting { return try await override(request) }
         do {
             return try await URLSession.shared.data(for: request)
+        } catch let urlError as URLError {
+            if urlError.code == .cancelled { throw URLError(.cancelled) }
+            throw TelegramError.transport(code: urlError.code.rawValue,
+                                          description: scrubToken(urlError.localizedDescription))
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let nsError = error as NSError
+            throw TelegramError.transport(code: nsError.code,
+                                          description: scrubToken(error.localizedDescription))
+        }
+    }
+
+    /// sendMessage's wire (0.2.68): one request, redirects refused (a 3xx is
+    /// returned as the outcome), cancellable. A connect/DNS/TLS failure can
+    /// then only belong to the one request there was, which is what the
+    /// in-line retry for "proven not sent" failures relies on. Errors are
+    /// mapped exactly like `transportData`.
+    private func ordinarySendData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        if let override = Self.transportOverrideForTesting { return try await override(request) }
+        do {
+            return try await NoticeHTTPTransport.sendCancellable(request)
         } catch let urlError as URLError {
             if urlError.code == .cancelled { throw URLError(.cancelled) }
             throw TelegramError.transport(code: urlError.code.rawValue,

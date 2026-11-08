@@ -83,7 +83,50 @@ extension ParkedOutboundSelftest {
             check("B2 a 429 retry_after (90 s) beats the 60 s step", delay == 90 && !queue.isDue, "\(String(describing: delay))")
             let queue2 = ParkedOutboundQueue(now: { clk.t })
             queue2.park("q", address: tg, retryAfter: 120)
-            check("B2 parking with retry_after waits at least that long", queue2.nextAttemptAt == clk.t.addingTimeInterval(120), "")
+            check("B2 parking with retry_after waits at least that long",
+                  queue2.cooldownUntil == clk.t.addingTimeInterval(120) && queue2.nextSendAt == clk.t.addingTimeInterval(120), "")
+            clk.t += 119
+            check("B2 not due one second before the cooldown ends", !queue2.isDue, "")
+            clk.t += 1
+            check("B2 due when the cooldown ends", queue2.isDue, "")
+        }
+
+        // B6 (Codex round-1 finding 1). A 429 cooldown recorded while an
+        //     older parked reply is on the wire survives that reply's
+        //     success or failure, and holds the rest of the queue.
+        for aSucceeds in [true, false] {
+            let clk = SimClock()
+            let queue = ParkedOutboundQueue(now: { clk.t })
+            queue.park("A", address: tg)
+            clk.t += 30
+            let gate = Gate()
+            var sends: [String] = []
+            let flush = Task { @MainActor in
+                await queue.flush(deliver: { item in
+                    sends.append(item.text)
+                    if item.text == "A" {
+                        await gate.wait()
+                        if !aSucceeds { throw Down() }
+                    }
+                    return true
+                })
+            }
+            for _ in 0..<50 where gate.arrivals == 0 { await Task.yield() }
+            queue.park("B", address: tg, retryAfter: 120)   // t=30 → not before t=150
+            gate.release()
+            _ = await flush.value
+            let label = aSucceeds ? "A succeeds" : "A fails"
+            check("B6 \(label): B is not sent before its 429 cooldown",
+                  sends == ["A"] && queue.items.last?.text == "B", "\(sends)")
+            check("B6 \(label): the cooldown is neither cleared nor shortened (next send ≥ t+120)",
+                  (queue.nextSendAt ?? .distantPast) >= Date(timeIntervalSince1970: 1_000_000 + 150) && !queue.isDue,
+                  "\(String(describing: queue.nextSendAt?.timeIntervalSince1970))")
+            clk.t = Date(timeIntervalSince1970: 1_000_000 + 150)
+            while !queue.isDue { clk.t += 1 }
+            sends = []
+            await queue.flush(deliver: { sends.append($0.text); return true })
+            check("B6 \(label): after the cooldown everything goes out once, in order",
+                  sends == (aSucceeds ? ["B"] : ["A", "B"]) && queue.isEmpty, "\(sends)")
         }
 
         // B3. A permanent refusal (discard) is removed, logged, and the flush
@@ -245,6 +288,33 @@ extension ParkedOutboundSelftest {
             }
             check("M1 once acknowledgements return the reply is delivered within one backoff step, exactly once more",
                   manager._svParkedTexts.isEmpty && channel.copies.count == before + 1, "copies \(before)→\(channel.copies.count)")
+        }
+
+        // M4 (Codex round-1 finding 2). The real TelegramBotService send
+        //     path refuses redirects: a 307 whose next hop would fail to
+        //     connect (-1004, "proven not sent" if it were the only request)
+        //     is ONE POST, parked, never retried in-line. Loopback fixture
+        //     only; the redirect target is a closed local port.
+        do {
+            let server = try WebFixtureServer()
+            defer { server.stop() }
+            server.route = { _ in
+                WebFixtureServer.Response(status: 307, contentType: "text/plain", body: "",
+                                          headers: ["Location": "http://127.0.0.1:9/elsewhere"])
+            }
+            setenv("BRIGLIA_TELEGRAM_API_BASE", "http://127.0.0.1:\(server.port)/bot", 1)
+            let service = TelegramBotService()
+            await service.configure(token: "1234567890:" + String(repeating: "B", count: 35))
+            let manager = ConversationManager()
+            manager._svRegisterChannel(service)
+            var threw = false
+            do { try await manager.sendText("reply-R", to: tg) } catch { threw = true }
+            let posts = server.requests.filter { $0.method == "POST" }.count
+            check("M4 a redirected send is one POST (redirect refused), parked, no in-line retry",
+                  threw && posts == 1 && manager._svParkedTexts == ["reply-R"], "posts=\(posts) parked=\(manager._svParkedTexts)")
+            setenv("BRIGLIA_TELEGRAM_API_BASE", "http://127.0.0.1:9/bot", 1)
+        } catch {
+            check("M4 fixture server started", false, "\(error)")
         }
 
         // M2. A failure that proves nothing was sent keeps the quick in-line
