@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// 0.2.68 duplicate-send fix. When Telegram delivers a message but its
 /// acknowledgement is lost, every retry delivers another copy (one incident:

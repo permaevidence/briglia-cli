@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// The SIWC request format (§4.2). Applied as the LAST step to every
 /// Responses body that will carry an SIWC token, and only then, so every
