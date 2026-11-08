@@ -107,8 +107,11 @@ enum SIWCBody {
         }
         for item in body["input"]?.responsesArray ?? [] {
             if let object = item.responsesObject {
-                if object["role"] != nil && object["type"] != nil && object["type"]?.responsesString == "message" {
-                    throw Failure(reason: "typed message item")
+                // Only an explicitly typed SYSTEM item is refused by the route
+                // (D16). Native replay of Briglia's own assistant answers is
+                // `type:"message", role:"assistant"` and must pass.
+                if object["type"]?.responsesString == "message" && object["role"]?.responsesString == "system" {
+                    throw Failure(reason: "typed system item")
                 }
                 if object["type"]?.responsesString == "function_call", object["namespace"]?.responsesString != SIWCEndpoint.namespace {
                     throw Failure(reason: "call outside the namespace")

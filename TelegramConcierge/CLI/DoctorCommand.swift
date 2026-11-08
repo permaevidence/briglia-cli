@@ -99,7 +99,8 @@ struct Doctor: AsyncParsableCommand {
             mainKey = KeychainHelper.load(key: KeychainHelper.openAICompatibleApiKeyKey)
         }
         check("main agent endpoint configured (\(model.isEmpty ? "—" : model))",
-              ok: !baseURL.isEmpty && !model.isEmpty && (provider == .lmStudio || !(mainKey ?? "").isEmpty),
+              ok: Self.mainEndpointConfigured(provider: provider, baseURL: baseURL, model: model, mainKey: mainKey,
+                                              stored: KeychainHelper.loadSnapshot()),
               hint: "run `briglia setup`, section 1")
         if let advisory = Self.legacyOpenCodeAliasAdvisory(model: model, baseURL: baseURL,
                                                             activeProfile: ProviderProfiles.activeProfile()) {
@@ -540,6 +541,14 @@ extension Doctor {
         guard activeProfile == .opencode, textOnly, OpenCodeGo.usesResponses(model),
               let entry = OpenCodeGo.catalogEntry(for: model), !entry.textOnly else { return nil }
         return "\(entry.label) is stored as text-only from the pre-0.2.31 catalog; since 0.2.31 it sees images natively over the Responses API — re-select it with /model \(entry.id) (or `briglia setup`) to turn OCR preprocessing off"
+    }
+
+    /// The doctor's "main agent endpoint configured" rule. Sign in with
+    /// ChatGPT has no runtime key by design (SIWC plan §3.8, D25).
+    static func mainEndpointConfigured(provider: LLMProvider, baseURL: String, model: String, mainKey: String?,
+                                       stored: [String: String]) -> Bool {
+        !baseURL.isEmpty && !model.isEmpty
+            && (provider == .lmStudio || !(mainKey ?? "").isEmpty || ChatGPTRoute.isSIWCSelected(stored: stored))
     }
 
     static func legacyOpenCodeAliasAdvisory(model: String, baseURL: String,

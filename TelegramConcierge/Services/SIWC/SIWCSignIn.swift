@@ -276,7 +276,7 @@ actor SIWCCallbackListener {
 
     /// Bind 127.0.0.1 with an OS-chosen port; returns the port.
     func start() throws -> Int {
-        let server = QuickSetupHTTPServer(port: 0) { [weak self] request in
+        let server = QuickSetupHTTPServer(port: 0, policy: .oauthCallback) { [weak self] request in
             guard let self else { return .status(400) }
             return await self.receive(request)
         }

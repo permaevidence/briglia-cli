@@ -58,7 +58,8 @@ extension ConversationManager {
                 error = "Please configure your OpenAI-compatible model name"
                 return
             }
-            guard !compatibleKey.isEmpty else {
+            // Sign in with ChatGPT keeps no runtime key (SIWC plan §3.8, D25).
+            guard !compatibleKey.isEmpty || ChatGPTRoute.isSIWCSelected(stored: KeychainHelper.loadSnapshot()) else {
                 error = "Please configure your OpenAI-compatible API key"
                 return
             }
@@ -516,7 +517,8 @@ extension ConversationManager {
         case .openAICompatible:
             return !stored(KeychainHelper.openAICompatibleBaseURLKey).isEmpty
                 && !stored(KeychainHelper.openAICompatibleModelKey).isEmpty
-                && !stored(KeychainHelper.openAICompatibleApiKeyKey).isEmpty
+                && (!stored(KeychainHelper.openAICompatibleApiKeyKey).isEmpty
+                    || ChatGPTRoute.isSIWCSelected(stored: KeychainHelper.loadSnapshot()))
         case .lmStudio:
             return !stored(KeychainHelper.lmStudioModelKey).isEmpty
         }

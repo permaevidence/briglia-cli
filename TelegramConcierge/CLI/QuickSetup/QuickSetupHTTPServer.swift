@@ -50,7 +50,25 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
         }
     }
 
-    static let maxRequestLine = 2048
+    /// Wire limits and refusal behaviour of one server. `standard` is the
+    /// Quick Setup / menu / legacy-login contract, byte-for-byte unchanged.
+    /// `oauthCallback` is the Sign in with ChatGPT loopback listener: a real
+    /// OpenAI callback line is ~2.1 KB (code ≈1.9 KB) and its `scope` is
+    /// `+`-joined, so it takes a bounded 8 KiB line and the RFC 3986 query
+    /// bytes (escapes are decoded and validated by `CallbackPaste`), and every
+    /// refusal carries a short text body so a browser shows a page instead of
+    /// saving an empty download.
+    struct Policy: Equatable {
+        var maxRequestLine: Int
+        var rfc3986Query: Bool
+        /// Body for every status-only (empty, untyped) response, nil = none.
+        var refusalText: String?
+        static let standard = Policy(maxRequestLine: 2048, rfc3986Query: false, refusalText: nil)
+        static let oauthCallback = Policy(maxRequestLine: 8192, rfc3986Query: true, refusalText:
+            "Briglia could not use this sign-in address. If Briglia is still waiting, copy the whole address from this tab's address bar and paste it into Briglia.")
+    }
+
+    static let maxRequestLine = Policy.standard.maxRequestLine
     static let maxHeaderBytes = 8192
     static let maxHeaderLines = 64
     static let maxBody = 65_536
@@ -59,6 +77,7 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
     static let maxConnections = 16
 
     private let requestedPort: UInt16
+    let policy: Policy
     private let reuseAddress: Bool
     private let handler: (Request) async -> Response
     private var listenFD: Int32 = -1
@@ -82,7 +101,7 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
 
     @discardableResult
     func writeResponse(_ response: Response, to fd: Int32) -> Bool {
-        let written = Self.writeAll(fd, Self.serialize(response))
+        let written = Self.writeAll(fd, Self.serialize(response, policy: policy))
         if written && response.completesSetup {
             lock.lock(); completionDelivered = true; lock.unlock()
         }
@@ -90,8 +109,10 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
     }
     var activeConnections: Int { lock.lock(); defer { lock.unlock() }; return active }
 
-    init(port: UInt16 = 0, reuseAddress: Bool = false, handler: @escaping (Request) async -> Response) {
+    init(port: UInt16 = 0, reuseAddress: Bool = false, policy: Policy = .standard,
+         handler: @escaping (Request) async -> Response) {
         self.requestedPort = port
+        self.policy = policy
         self.reuseAddress = reuseAddress
         self.handler = handler
     }
@@ -163,7 +184,7 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
             if !over { active += 1 }
             lock.unlock()
             if over {
-                Self.writeAll(fd, Self.serialize(Response(status: 503)))
+                Self.writeAll(fd, Self.serialize(Response(status: 503), policy: policy))
                 close(fd)
                 continue
             }
@@ -196,16 +217,16 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
             if chunk.isEmpty { continue }
             buffer.append(chunk)
             headEnd = buffer.range(of: Data("\r\n\r\n".utf8))
-            if headEnd == nil && buffer.count > Self.maxRequestLine + Self.maxHeaderBytes + 4 {
-                Self.writeAll(fd, Self.serialize(Response(status: 400)))
+            if headEnd == nil && buffer.count > policy.maxRequestLine + Self.maxHeaderBytes + 4 {
+                Self.writeAll(fd, Self.serialize(Response(status: 400), policy: policy))
                 return
             }
         }
         let head = buffer[buffer.startIndex..<headEnd!.lowerBound]
         var request: Request
-        switch Self.parseHead([UInt8](head)) {
+        switch Self.parseHead([UInt8](head), policy: policy) {
         case .failure(let f):
-            Self.writeAll(fd, Self.serialize(Response(status: f.status)))
+            Self.writeAll(fd, Self.serialize(Response(status: f.status), policy: policy))
             return
         case .success(let r):
             request = r
@@ -234,7 +255,7 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
 
     // MARK: Parser (pure, selftest-callable)
 
-    static func parseHead(_ bytes: [UInt8]) -> Result<Request, ParseFailure> {
+    static func parseHead(_ bytes: [UInt8], policy: Policy = .standard) -> Result<Request, ParseFailure> {
         // Split lines on CRLF exactly.
         var lines: [[UInt8]] = []
         var cur: [UInt8] = []
@@ -246,7 +267,7 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
             cur.append(bytes[i]); i += 1
         }
         lines.append(cur)
-        guard let first = lines.first, first.count <= maxRequestLine else { return .failure(.badRequest("request line too long")) }
+        guard let first = lines.first, first.count <= policy.maxRequestLine else { return .failure(.badRequest("request line too long")) }
         guard first.allSatisfy({ $0 >= 0x20 && $0 < 0x7F }) else { return .failure(.badRequest("control bytes in the request line")) }
         let requestLine = String(decoding: first, as: UTF8.self)
         let parts = requestLine.split(separator: " ", omittingEmptySubsequences: false)
@@ -259,17 +280,22 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
         }
         // origin-form only
         guard target.hasPrefix("/") else { return .failure(.badRequest("absolute-form/authority-form target")) }
-        guard !target.contains("%") else { return .failure(.badRequest("percent-encoding refused")) }
         var path = target
         var query: String?
         if let q = target.firstIndex(of: "?") {
             path = String(target[..<q])
             query = String(target[target.index(after: q)...])
         }
+        // Standard: no escapes anywhere. The OAuth callback admits them in
+        // the query only; the path stays escape-free.
+        guard !(policy.rfc3986Query ? path : target).contains("%") else { return .failure(.badRequest("percent-encoding refused")) }
         guard path.allSatisfy({ $0.isASCII && !$0.isWhitespace && $0 != "#" }) else { return .failure(.badRequest("bad path bytes")) }
         if path.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }) { return .failure(.badRequest("dot segments")) }
-        if let query, !query.allSatisfy({ $0.isASCII && $0.isLetter || $0.isNumber || "=&-_.".contains($0) }) {
-            return .failure(.badRequest("bad query bytes"))
+        if let query {
+            let allowed: (Character) -> Bool = policy.rfc3986Query
+                ? { $0.isASCII && ($0.isLetter || $0.isNumber || "-._~!$&'()*+,;=:@/?%".contains($0)) }
+                : { $0.isASCII && $0.isLetter || $0.isNumber || "=&-_.".contains($0) }
+            guard query.allSatisfy(allowed) else { return .failure(.badRequest("bad query bytes")) }
         }
 
         let headerLines = lines.dropFirst()
@@ -374,7 +400,13 @@ final class QuickSetupHTTPServer: @unchecked Sendable {
     ]
 
     /// Every response carries the §5.7 headers and `Connection: close`.
-    static func serialize(_ response: Response) -> Data {
+    static func serialize(_ response: Response, policy: Policy = .standard) -> Data {
+        var response = response
+        if let text = policy.refusalText, response.body.isEmpty,
+           !response.headers.contains(where: { $0.0.lowercased() == "content-type" }) {
+            response.headers.append(("Content-Type", "text/plain; charset=utf-8"))
+            response.body = Data(text.utf8)
+        }
         var head = "HTTP/1.1 \(response.status) \(reasonPhrases[response.status] ?? "Status")\r\n"
         var headers = response.headers
         headers.append(("Content-Length", "\(response.body.count)"))

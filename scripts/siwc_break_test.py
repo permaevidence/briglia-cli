@@ -23,6 +23,7 @@ LINUX_JOBS = ["-j", "2"] if sys.platform.startswith("linux") else []
 W = "TelegramConcierge/Services/SIWC/"
 S = "TelegramConcierge/Services/"
 SS = "TelegramConcierge/Services/Settings/"
+Q = "TelegramConcierge/CLI/QuickSetup/QuickSetupHTTPServer.swift"
 
 # (label, failing check label prefix, file, old, new)
 BREAKS = [
@@ -410,6 +411,35 @@ BREAKS = [
      "        if false {\n            return await waitForEnd()\n        }", "d-round1"),
     ("D40 a paste during a cancel is still accepted", "R2: a paste during the cancel (its writer not yet run)", W + "SIWCFlow.swift",
      "        status.state = \"cancelling\"   // a paste arriving now is refused\n", "", "d-round1"),
+    # ---- Live gates 2026-11-07: BUGS 1–3 (each break restores the 7353e0e behaviour) ----
+    ("L1 the callback listener keeps the 2,048-byte request line", "live1: a real-length callback", Q,
+     "        static let oauthCallback = Policy(maxRequestLine: 8192,", "        static let oauthCallback = Policy(maxRequestLine: 2048,", "live-listener"),
+    ("L2 the callback query refuses + and escapes (strict filter)", "live1: a real-length callback", Q,
+     "        static let oauthCallback = Policy(maxRequestLine: 8192, rfc3986Query: true,", "        static let oauthCallback = Policy(maxRequestLine: 8192, rfc3986Query: false,", "live-listener"),
+    ("L3 refusals are empty and untyped (the browser saves a download)", "live1: a refused long callback is a 400 with a text body", Q,
+     "        if let text = policy.refusalText, response.body.isEmpty,", "        if let text = policy.refusalText, false, response.body.isEmpty,", "live-listener"),
+    ("L4 the SIWC listener uses the standard server policy", "live1: a real-length callback", W + "SIWCSignIn.swift",
+     "QuickSetupHTTPServer(port: 0, policy: .oauthCallback)", "QuickSetupHTTPServer(port: 0, policy: .standard)", "live-listener"),
+    ("L5 other servers get the callback limits", "live1: the standard policy still refuses the same line", Q,
+     "        static let standard = Policy(maxRequestLine: 2048, rfc3986Query: false,", "        static let standard = Policy(maxRequestLine: 8192, rfc3986Query: true,", "live-listener"),
+    ("L6 a 405 refusal keeps an empty body", "live1: every status-only refusal (405) carries a text body", Q,
+     "            Self.writeAll(fd, Self.serialize(Response(status: f.status), policy: policy))", "            Self.writeAll(fd, Self.serialize(Response(status: f.status)))", "live-listener"),
+    ("L7 startup requires the runtime key on the SIWC route", "live2: startup configure() accepts an SIWC-only login", S + "ConversationManager+Inbound.swift",
+     "            guard !compatibleKey.isEmpty || ChatGPTRoute.isSIWCSelected(stored: KeychainHelper.loadSnapshot()) else {",
+     "            guard !compatibleKey.isEmpty else {", "live-startup"),
+    ("L8 the polling gate requires the runtime key on the SIWC route", "live2: the polling gate accepts an SIWC-only login", S + "ConversationManager+Inbound.swift",
+     "                    || ChatGPTRoute.isSIWCSelected(stored: KeychainHelper.loadSnapshot()))\n", "                    || false)\n", "live-startup"),
+    ("L9 doctor requires the runtime key on the SIWC route", "live2: doctor counts the SIWC route", "TelegramConcierge/CLI/DoctorCommand.swift",
+     "|| !(mainKey ?? \"\").isEmpty || ChatGPTRoute.isSIWCSelected(stored: stored))", "|| !(mainKey ?? \"\").isEmpty)", "live-startup"),
+    ("L10 the key exemption covers today's ChatGPT route too", "live2: the legacy ChatGPT route without a key still refuses", W + "SIWCRoute.swift",
+     "        stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue && stored[routeKey] == \"siwc\"\n",
+     "        stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue\n", "live-startup"),
+    ("L11 every typed message item is refused (Briglia's own replay too)", "live3: a follow-up after a final answer is sent", W + "SIWCBody.swift",
+     "                if object[\"type\"]?.responsesString == \"message\" && object[\"role\"]?.responsesString == \"system\" {",
+     "                if object[\"role\"] != nil && object[\"type\"]?.responsesString == \"message\" {", "live-replay"),
+    ("L12 a typed system item is no longer refused", "live3: an explicitly typed system item is still refused", W + "SIWCBody.swift",
+     "                if object[\"type\"]?.responsesString == \"message\" && object[\"role\"]?.responsesString == \"system\" {",
+     "                if object[\"type\"]?.responsesString == \"message\" && object[\"role\"]?.responsesString == \"never\" {", "live-replay"),
 ]
 
 

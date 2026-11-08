@@ -46,6 +46,7 @@ enum CallbackPaste {
         "login_required", "interaction_required", "invalid_scope", "server_error", "temporarily_unavailable"]
 
     static let maxInput = 8192
+    static let maxCodeBytes = 4096
 
     // MARK: Interceptor recognizer (§3.4 inbound, v3.1)
 
@@ -238,7 +239,9 @@ enum CallbackPaste {
         if let error = q["error"] {
             return .error(recognized: recognizedErrors.contains(error) ? error : nil)
         }
-        guard let code = q["code"], !code.isEmpty, code.utf8.count <= 2048 else { return .rejected(.incomplete) }
+        // A real code is ~1.9 KB (live 2026-11-07); 4 KiB keeps headroom
+        // inside the listener's 8 KiB line and the paste's 8 KiB input.
+        guard let code = q["code"], !code.isEmpty, code.utf8.count <= maxCodeBytes else { return .rejected(.incomplete) }
         let cid = q["client_id"]
         if let expected = expectation.expectedClientId {
             if let cid, cid != expected { return .rejected(.differentClient) }

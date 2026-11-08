@@ -22,6 +22,8 @@ struct SIWCSelftest: AsyncParsableCommand {
     @Flag(name: .customLong("resolve")) var resolveRoute = false
     /// Stage D Telegram rows, inside the isolated child (its own HOME).
     @Flag(name: .customLong("telegram-child")) var telegramChild = false
+    /// Live-bug fix round: the startup rows, inside the isolated child.
+    @Flag(name: .customLong("startup-child")) var startupChild = false
 
     final class Checks {
         var total = 0, failed = 0
@@ -51,6 +53,12 @@ struct SIWCSelftest: AsyncParsableCommand {
                 throw ValidationError("refusing: not the stage D Telegram child's roots")
             }
             try await Self.telegramChild(); return
+        }
+        if startupChild {
+            guard (ProcessInfo.processInfo.environment["CFFIXED_USER_HOME"] ?? "").contains("/st-") else {
+                throw ValidationError("refusing: not the live-startup child's roots")
+            }
+            try await Self.startupChild(); return
         }
         if olderFixture || resolveRoute {
             guard (ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"] ?? "").contains("briglia-siwc-older-") else {
@@ -91,6 +99,8 @@ struct SIWCSelftest: AsyncParsableCommand {
             ("d-plan", Self.stageDPlanTests), ("d-plan2", Self.stageDPlanStatesTests), ("d-plan3", Self.stageDPlanTransportTests),
             ("d-flow", Self.stageDFlowTests), ("d-surface", Self.stageDSurfaceTests), ("d-telegram", Self.stageDTelegramTests),
             ("d-round1", Self.stageDRound1Tests),
+            // Live gates 2026-11-07: real-shaped fixtures for BUGS 1–3.
+            ("live-listener", Self.liveListenerTests), ("live-startup", Self.liveStartupTests), ("live-replay", Self.liveReplayTests),
         ]
         for (name, group) in groups where only == nil || only == name {
             print("— \(name)")

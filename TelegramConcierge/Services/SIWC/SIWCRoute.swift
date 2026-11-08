@@ -50,6 +50,16 @@ enum ChatGPTRoute {
 
     static let chooseAgainMessage = "Choose ChatGPT again: this assistant's ChatGPT selection is incomplete or was changed by an older Briglia. Nothing was sent. (/provider chatgpt)"
 
+    /// Whether this assistant's ChatGPT route is Sign in with ChatGPT. Such a
+    /// selection deliberately has NO runtime credential slot (older-binary
+    /// guard, D25): its credential lives in the SIWC store and is checked per
+    /// request, so startup and configuration checks must not require the
+    /// OpenAI-compatible key. An incomplete or disabled SIWC selection also
+    /// counts: it starts, and every request reports the specific reason.
+    static func isSIWCSelected(stored: [String: String]) -> Bool {
+        stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue && stored[routeKey] == "siwc"
+    }
+
     /// Pure rule over one secrets snapshot.
     static func resolve(stored: [String: String], environment: [String: String] = ProcessInfo.processInfo.environment) -> Resolved {
         guard stored[ProviderProfiles.activeProfileKey] == ProviderProfiles.Profile.chatgpt.rawValue else { return .notChatGPT }
