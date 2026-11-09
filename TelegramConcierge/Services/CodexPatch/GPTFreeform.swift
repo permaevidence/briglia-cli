@@ -41,8 +41,10 @@ enum GPTFreeform {
 ///   format), with a code from `refusalCodes`; or
 /// - `param` is the whole entry `tools[k]` with a type-specific code from
 ///   `typeCodes`.
-/// Errors about the entry's name, description or any other field, other
-/// tools' errors and history/namespace errors never classify. OpenRouter may
+/// Explicit subfield errors about the entry's name, description or any other
+/// field, other tools' errors and history/namespace errors never classify
+/// (OpenRouter's coarse whole-entry validation issue below does not say
+/// which nested field failed; accepted because the entry is fixed — plan §24). OpenRouter may
 /// wrap the upstream body in `error.metadata.raw`; both shapes are read.
 ///
 /// Real refusals captured live on 2026-11-09 (fixtures
