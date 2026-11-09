@@ -207,10 +207,35 @@ enum CodexPatchTransaction {
     /// a failed unlink keeps it so rollback retries and reports it (Codex S1
     /// round 2).
     static func discard(_ staged: StagedFile, journal: Journal) {
-        if let id = try? FileIdentity.lstatPath(staged.tempPath), id.inode == staged.identity.inode {
-            guard unlink(staged.tempPath) == 0 else { return }
+        switch inspectTemp(staged.tempPath, inode: staged.identity.inode) {
+        case .gone, .other: journal.consumeTemp(staged.tempPath)
+        case .ours: if unlink(staged.tempPath) == 0 { journal.consumeTemp(staged.tempPath) }
+        case .unknown: return   // cannot verify: keep the receipt (Codex S1 round 3)
         }
-        journal.consumeTemp(staged.tempPath)
+    }
+
+    /// What a temp's name holds now. An inspection error is `.unknown`: it
+    /// proves neither absence nor replacement, so the receipt is kept and the
+    /// path is reported, never forgotten or unlinked blindly.
+    enum TempState { case gone, ours, other, unknown }
+
+    static func inspectTemp(_ path: String, inode: UInt64) -> TempState {
+        do {
+            guard let id = try FileIdentity.lstatPath(path) else { return .gone }
+            return id.inode == inode ? .ours : .other
+        } catch {
+            return .unknown
+        }
+    }
+
+    /// Cleans one temp receipt: true when it is gone (or the name holds
+    /// another object); false when it could not be removed or checked.
+    static func cleanTemp(_ path: String, inode: UInt64) -> Bool {
+        switch inspectTemp(path, inode: inode) {
+        case .gone, .other: return true
+        case .ours: return unlink(path) == 0
+        case .unknown: return false
+        }
     }
 
     /// Consumes a temp receipt only when the name is verifiably absent.
@@ -352,9 +377,8 @@ enum CodexPatchTransaction {
     /// Removes the outstanding temps of a journal (identity-checked); a temp
     /// that cannot be removed is reported, never silently left behind.
     static func cleanTemps(_ journal: Journal, _ report: inout RollbackReport) {
-        for case .temp(let p, _, let ino) in journal.receipts {
-            guard let id = try? FileIdentity.lstatPath(p), id.inode == ino else { continue }
-            if unlink(p) != 0 { report.leftoverTemps.append(p) }
+        for case .temp(let p, _, let ino) in journal.receipts where !cleanTemp(p, inode: ino) {
+            report.leftoverTemps.append(p)
         }
     }
 
@@ -367,15 +391,16 @@ enum CodexPatchTransaction {
         for receipt in journal.receipts.reversed() {
             switch receipt {
             case .temp(let path, _, let inode):
-                if let id = try? FileIdentity.lstatPath(path), id.inode == inode, unlink(path) != 0 {
-                    report.leftoverTemps.append(path)
-                }
+                if !cleanTemp(path, inode: inode) { report.leftoverTemps.append(path) }
 
             case .createdDirectory(let path, let device, let inode, let mode):
                 guard let id = try? FileIdentity.lstatPath(path), id.kind == .directory,
                       id.device == device, id.inode == inode, id.mode == mode,
                       CodexPatchFS.isEmptyDirectory(path) else {
-                    if (try? FileIdentity.lstatPath(path)) != nil { report.conflicts.append(path) }
+                    // Verifiably absent: nothing to undo. Present but different,
+                    // or not inspectable: reported, never skipped silently.
+                    if case .some(.none) = try? FileIdentity.lstatPath(path) { continue }
+                    report.conflicts.append(path)
                     continue
                 }
                 if rmdir(path) != 0 { report.conflicts.append(path) }

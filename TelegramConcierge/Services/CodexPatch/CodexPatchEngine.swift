@@ -437,7 +437,7 @@ extension CodexPatch {
             if !report.conflicts.isEmpty || !report.stillChanged.isEmpty { outcome.status = .partial }
             var text = transactionFailureText(reason: failure.message, outcome: outcome)
             if !report.leftoverTemps.isEmpty {
-                text += "\nTemporary files that could not be removed: \(report.leftoverTemps.joined(separator: ", "))"
+                text += "\nTemporary files that could not be removed or checked: \(report.leftoverTemps.joined(separator: ", "))"
             }
             return Result(text: text, outcome: outcome)
         }
@@ -448,7 +448,7 @@ extension CodexPatch {
         var leftover = CodexPatchTransaction.RollbackReport()
         CodexPatchTransaction.cleanTemps(journal, &leftover)
         if !leftover.leftoverTemps.isEmpty {
-            result.text += "\nnote: temporary files that could not be removed: \(leftover.leftoverTemps.joined(separator: ", "))"
+            result.text += "\nnote: temporary files that could not be removed or checked: \(leftover.leftoverTemps.joined(separator: ", "))"
         }
         return result
     }

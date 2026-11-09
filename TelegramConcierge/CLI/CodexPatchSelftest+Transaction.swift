@@ -357,9 +357,57 @@ extension CodexPatchSelftest {
         let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.contains(".tmp-") }
         let accounted = leftovers.allSatisfy { r.text.contains($0) }
         t.check("T.21 a temp whose unlink fails during rollback stays accounted for and is named (Codex S1 round 2)",
-                getuid() == 0 || (accounted && r.outcome.status == .partial && r.text.contains("Temporary files that could not be removed") == !leftovers.isEmpty
+                getuid() == 0 || (accounted && r.outcome.status == .partial && r.text.contains("Temporary files that could not be removed or checked") == !leftovers.isEmpty
                                   && !leftovers.isEmpty), "\(leftovers) \(r.text)")
         for name in leftovers { unlink(d + "/" + name) }
+    }
+
+    /// Codex S1 round 3: the parent becomes unsearchable (0400), so even
+    /// inspecting the temp fails — it must be named, never forgotten.
+    static func unsearchableParentTests(_ t: CPTest) async {
+        for (label, rollbackFault) in [("revalidation", false), ("stageFsync", true)] {
+            let d = t.dir("rs4")
+            t.write(d + "/a.txt", "old\n"); t.write(d + "/b.txt", "old\n")
+            CodexPatchTransaction.faultInjector = { p, path in p == .stageWrite && path.hasSuffix("/b.txt") }
+            CodexPatchTransaction.beforeRollbackHook = {
+                if rollbackFault {
+                    CodexPatchTransaction.faultInjector = { p, path in
+                        guard p == .stageFsync, path.hasSuffix("/a.txt") else { return false }
+                        chmod(d, 0o400); return true
+                    }
+                } else {
+                    CodexPatchTransaction.faultInjector = nil
+                    CodexPatchTransaction.beforeRevalidateHook = { _ in chmod(d, 0o400) }
+                }
+            }
+            let r = await t.apply(t.wrap("*** Update File: \(d)/a.txt\n@@\n-old\n+new\n*** Update File: \(d)/b.txt\n@@\n-old\n+new"))
+            chmod(d, 0o700)
+            CodexPatchTransaction.faultInjector = nil
+            CodexPatchTransaction.beforeRollbackHook = nil
+            CodexPatchTransaction.beforeRevalidateHook = nil
+            let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: d)) ?? []).filter { $0.contains(".tmp-") }
+            t.check("T.22 \(label): with an unsearchable parent the surviving temp is named, not forgotten (Codex S1 round 3)",
+                    getuid() == 0 || (!leftovers.isEmpty && leftovers.allSatisfy { r.text.contains($0) }
+                                      && r.text.contains("Temporary files that could not be removed or checked") && r.outcome.status == .partial),
+                    "\(leftovers) \(r.text)")
+            for name in leftovers { unlink(d + "/" + name) }
+        }
+        do {
+            // Direct helper check: an inspection error keeps the receipt.
+            let d = t.dir("rs5")
+            let journal = CodexPatchTransaction.Journal()
+            if let staged = try? CodexPatchTransaction.stage(Data("x".utf8), forTarget: d + "/f.txt", finalMode: 0o600, journal: journal) {
+                chmod(d, 0o400)
+                CodexPatchTransaction.discard(staged, journal: journal)
+                var report = CodexPatchTransaction.RollbackReport()
+                CodexPatchTransaction.cleanTemps(journal, &report)
+                chmod(d, 0o700)
+                let kept = journal.receipts.contains { if case .temp = $0 { return true }; return false }
+                t.check("T.23 discard/cleanTemps keep and report a temp they cannot inspect",
+                        getuid() == 0 || (kept && report.leftoverTemps == [staged.tempPath]), "kept \(kept) report \(report.leftoverTemps)")
+                unlink(staged.tempPath)
+            } else { t.check("T.23 fixture", false) }
+        }
     }
 
     final class HitFlag: @unchecked Sendable {
