@@ -205,7 +205,7 @@ BREAKS = [
     ("T1 streamed grammar refusal not recognised", "Y live SSE fixture or-badgrammar.json: stream-classified = true", [(C + "GPTFreeform.swift",
         "              message.hasPrefix(larkRefusalPrefix) else { return nil }",
         "              message.hasPrefix(larkRefusalPrefix), false else { return nil }")]),
-    ("T7 assembler does not record streamed output", "Y ChatGPT incomplete with a streamed output item is ordinary", [
+    ("T7 assembler does not record streamed output", "Y a lark failure after a streamed output item is not a refusal", [
         (S + "ResponsesStream.swift", "        if type.hasSuffix(\".delta\") || type.hasPrefix(\"response.output_\") || type.hasPrefix(\"response.content_part\")",
          "        if type.hasSuffix(\".delta\") || type.hasPrefix(\"response.content_part\")"),
         (S + "ResponsesStream.swift", "        case \"response.output_item.added\", \"response.output_item.done\":\n            sawOutput = true\n",
