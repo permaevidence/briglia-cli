@@ -122,6 +122,38 @@ extension MidturnHarness {
                   childResult?.content.hasPrefix("Success. Updated the following files:") == true,
                   childResult?.content ?? "no child result in \(sessions.count) session(s)")
         }
+        // 5. Fast completion (Codex S2 round 2): the worker is released while
+        // /stop waits in its grace period; the run ends within it, so the
+        // stop reply itself must name the applied edit.
+        do {
+            _ = await seed("e.txt")
+            let manager = await freshManager()
+            let gate = GPTProfileSelftest.GateBox()
+            ToolExecutor.gptPatchWorkerHookForTesting = { await gate.wait() }
+            let box = ReplyBox()
+            ConversationManager.stopReplyObserverForTesting = { box.set($0) }
+            defer { ConversationManager.stopReplyObserverForTesting = nil; ToolExecutor.gptPatchWorkerHookForTesting = nil }
+            server.script([Self.chatTools([("gp_c5", "apply_patch", ["input": patch("e.txt")])]), Self.chatText("done")])
+            manager._testStartTurn(for: user("edit fast"))
+            let committed = await waitUntil(timeout: 30) {
+                GPTPatchSettlement.shared.isCommitting && (try? String(contentsOfFile: resolved + "/e.txt", encoding: .utf8)) == "new\n"
+            }
+            let stopTask = Task { await manager._testStop() }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            await gate.open()
+            await stopTask.value
+            _ = await manager._testAwaitIdle(timeout: 30)
+            let reply = box.value ?? ""
+            check("gptpatch fast completion: the stop reply names the applied edit (Codex S2 round 2)",
+                  committed && reply.contains("The file edit was applied to 1 file") && !reply.contains("still finishing"), reply)
+        }
         try? FileManager.default.removeItem(atPath: dir)
     }
+}
+
+final class ReplyBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: String?
+    func set(_ v: String) { lock.lock(); _value = v; lock.unlock() }
+    var value: String? { lock.lock(); defer { lock.unlock() }; return _value }
 }

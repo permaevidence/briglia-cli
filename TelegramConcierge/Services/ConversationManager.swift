@@ -131,6 +131,8 @@ class ConversationManager: ObservableObject {
         /// Tool calls of the run's batch at /stop time (GPT_APPLY_PATCH_PLAN
         /// §12.2: a GPT patch commit's outcome is named when the run ends).
         var batchCallIds: [String] = []
+        /// The stop path pinned the run's patch results for the notice.
+        var gptNoticePinned = false
     }
     @Published var stoppedRunsFinishing: [UUID: StoppedRunFinishing] = [:]
     var stoppedRunWatchers: [UUID: Task<Void, Never>] = [:]
@@ -1254,6 +1256,8 @@ class ConversationManager: ObservableObject {
     /// Test seam (SV10d): runs synchronously right after a "still
     /// finishing" decision was delivered. nil in production.
     nonisolated(unsafe) static var afterStopDecisionForTesting: (@MainActor (ConversationManager, UUID) -> Void)?
+    /// Selftest seam (GPT apply_patch S2): the composed /stop reply text.
+    nonisolated(unsafe) static var stopReplyObserverForTesting: ((String) -> Void)?
 
     static let stopBashConfirmSeconds: TimeInterval = 3
     /// A repeated /stop whose request ended during its wait (Codex impl

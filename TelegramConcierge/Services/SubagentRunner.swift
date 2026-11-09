@@ -699,7 +699,8 @@ actor SubagentRunner {
         // scope, joined and recorded if a batch is cut short.
         let gptSettlementScope = "sub:" + resolvedSessionId + ":" + UUID().uuidString
         await toolExecutor.setGPTSettlementScope(gptSettlementScope)
-        defer { GPTPatchSettlement.shared.retire(scope: gptSettlementScope) }
+        GPTPatchSettlement.shared.pin(scope: gptSettlementScope)
+        defer { GPTPatchSettlement.shared.unpin(scope: gptSettlementScope) }
         if let editingRun, editingRun.config.isGPT {
             filteredTools = await buildInventory(editingRun.config)
             allowedToolNames = Set(filteredTools.map { $0.function.name })

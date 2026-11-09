@@ -50,6 +50,8 @@ extension ConversationManager {
         // its own scope until its history and notices consumed them.
         let gptSettlementScope = salvageRunId.map(GPTPatchSettlement.mainScope) ?? "main:" + UUID().uuidString
         await toolExecutor.setGPTSettlementScope(gptSettlementScope)
+        GPTPatchSettlement.shared.pin(scope: gptSettlementScope)
+        defer { GPTPatchSettlement.shared.unpin(scope: gptSettlementScope) }
         let responsesExecution: ProviderExecutionContext? = snapshot.wireProtocol == .responses ? snapshot : nil
         defer { responsesExecution?.responsesTurn.close() }
         // Sign in with ChatGPT: this turn is a job of its captured login; a

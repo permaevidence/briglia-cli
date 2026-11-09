@@ -16,11 +16,16 @@ struct GPTEvidenceSettlement {
 
     var isEmpty: Bool { receipts.isEmpty && forget.isEmpty }
 
+    /// Stops at the first operation the tracker refuses because the owning
+    /// task was cancelled (admission is checked inside the tracker, in the
+    /// same actor step as the write).
     func publish() async {
-        for key in forget { await FileTimeTracker.shared.forgetGPT(key: key) }
+        for key in forget {
+            guard await FileTimeTracker.shared.forgetGPTIfAdmitted(key: key) else { return }
+        }
         for receipt in receipts {
             guard let now = try? FileIdentity.lstatPath(receipt.key), now.sameState(as: receipt.identity) else { continue }
-            await FileTimeTracker.shared.publishGPT(receipt)
+            guard await FileTimeTracker.shared.publishGPTIfAdmitted(receipt) else { return }
         }
     }
 
@@ -57,6 +62,10 @@ final class GPTPatchSettlement: @unchecked Sendable {
     private let lock = NSLock()
     private var running: [String: Set<String>] = [:]
     private var settled: [String: [String: Settled]] = [:]
+    /// Consumers that still need a scope's results (the running owner, a
+    /// `/stop` reply in its grace wait, a pending completion notice). A
+    /// pinned scope is never evicted (Codex S2 round 2).
+    private var pins: [String: Int] = [:]
     private var scopeOrder: [String] = []
     private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
 
@@ -87,21 +96,36 @@ final class GPTPatchSettlement: @unchecked Sendable {
         scopeOrder.append(scope)
     }
 
+    /// Only released scopes (no consumer pin, no running worker) are
+    /// bounded; an outcome still owed is never dropped.
     private func evict() {
         while scopeOrder.count > Self.retainedScopes,
-              let index = scopeOrder.firstIndex(where: { running[$0] == nil }), index < scopeOrder.count - 1 {
+              let index = scopeOrder.firstIndex(where: { running[$0] == nil && (pins[$0] ?? 0) == 0 }) {
             let old = scopeOrder.remove(at: index)
             settled.removeValue(forKey: old)
         }
     }
 
-    /// The owner is done with its scope (history recorded, notices built).
-    func retire(scope: String) {
+    /// A consumer starts needing `scope`'s results.
+    func pin(scope: String) {
+        lock.lock(); pins[scope, default: 0] += 1; touch(scope); lock.unlock()
+    }
+
+    /// A consumer is done. The last release of a scope with no running
+    /// worker retires it (its results were consumed).
+    func unpin(scope: String) {
         lock.lock()
-        settled.removeValue(forKey: scope)
-        if running[scope] == nil { scopeOrder.removeAll { $0 == scope } }
+        let left = max(0, (pins[scope] ?? 0) - 1)
+        if left == 0 { pins.removeValue(forKey: scope) } else { pins[scope] = left }
+        if left == 0, running[scope] == nil {
+            settled.removeValue(forKey: scope)
+            scopeOrder.removeAll { $0 == scope }
+        }
         lock.unlock()
     }
+
+    /// Owner exit without a pin of its own (kept for callers that never pinned).
+    func retire(scope: String) { unpin(scope: scope) }
 
     func isCommitting(scope: String, callID: String) -> Bool {
         lock.lock(); defer { lock.unlock() }; return running[scope]?.contains(callID) == true

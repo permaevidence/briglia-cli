@@ -264,6 +264,36 @@ extension GPTProfileSelftest {
         await GPTEvidenceSettlement.publish([pr])
         t.check("K a receipt for a version that changed before delivery is not published",
                 await FileTimeTracker.shared.gptRecord(forKey: CodexPatch.evidenceKey(d + "/p.txt")) == nil)
+        // Codex S2 round 2: cancellation while publication waits for the
+        // tracker earns nothing; an older record stays (single receipt queued
+        // behind tracker work, and a result with forget + receipt).
+        do {
+            t.write(d + "/m1.txt", "m1\n"); t.write(d + "/m2.txt", "m2\n")
+            let k1 = CodexPatch.evidenceKey(d + "/m1.txt"), k2 = CodexPatch.evidenceKey(d + "/m2.txt")
+            guard let id1 = (try? FileIdentity.lstatPath(k1)) ?? nil, let id2 = (try? FileIdentity.lstatPath(k2)) ?? nil else {
+                t.check("K publication fixture", false); return
+            }
+            await FileTimeTracker.shared.publishGPT(GPTEvidence.Receipt(key: k2, identity: id2, source: .shellRead))
+            usleep(20_000); t.write(d + "/m1.txt", "m1 replaced\n")
+            let newID1 = ((try? FileIdentity.lstatPath(k1)) ?? nil) ?? id1
+            for (label, settlement) in [("single receipt", GPTEvidenceSettlement(receipts: [GPTEvidence.Receipt(key: k1, identity: newID1, source: .gptPatch)])),
+                                        ("forget + receipt", GPTEvidenceSettlement(receipts: [GPTEvidence.Receipt(key: k1, identity: newID1, source: .gptPatch)], forget: [k2]))] {
+                let gate = GateBox()
+                FileTimeTracker.beforeGPTMutationHookForTesting = { await gate.wait() }
+                var r = ToolResultMessage(toolCallId: "pub", content: "x"); r.gptEvidence = settlement
+                let task = Task { await GPTEvidenceSettlement.publish([r]) }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                task.cancel()
+                await gate.open()
+                await task.value
+                FileTimeTracker.beforeGPTMutationHookForTesting = nil
+                let rec1 = await FileTimeTracker.shared.gptRecord(forKey: k1)
+                let rec2 = await FileTimeTracker.shared.gptRecord(forKey: k2)
+                t.check("K cancelled during publication (\(label)): nothing published, older record kept (Codex S2 round 2)",
+                        rec1 == nil && rec2?.identity == id2 && rec2?.source == .shellRead,
+                        "rec1 \(String(describing: rec1?.source)) rec2 \(String(describing: rec2?.source))")
+            }
+        }
         // P20: a GPT write never unlocks the standard edit_file.
         let addQ = await exec(executor, call("apply_patch", ["input": "*** Begin Patch\n*** Add File: \(d)/q.txt\n+q\n*** End Patch"], editing: .gptJSON))
         await GPTEvidenceSettlement.publish([addQ])

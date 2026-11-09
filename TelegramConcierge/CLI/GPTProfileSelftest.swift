@@ -84,7 +84,7 @@ struct GPTProfileSelftest: AsyncParsableCommand {
         if t.runs("R") { resolutionTests(t) }
         if t.runs("U") { surfaceTests(t) }
         if t.runs("P") { await promptTests(t) }
-        if t.runs("L") { leaseTests(t) }
+        if t.runs("L") { await leaseTests(t) }
         if t.runs("D") { await dispatchTests(t); claimAndClassificationTests(t) }
         if t.runs("I") { await interceptTests(t) }
         if t.runs("K") { await ledgerTests(t) }
@@ -335,7 +335,7 @@ struct GPTProfileSelftest: AsyncParsableCommand {
 
     // MARK: L — run lease (§3.2 F1, §5.6)
 
-    static func leaseTests(_ t: CPTest) {
+    static func leaseTests(_ t: CPTest) async {
         let gptChat = chat("openai/gpt-6-luna")
         let other = chat("deepseek/deepseek-v4.1-flash-1017")
         let run = EditingRun(context: gptChat, config: EditingConfig.resolve(gptChat, switchOn: true, rejected: { _ in false }), switchOn: true)
@@ -390,12 +390,22 @@ struct GPTProfileSelftest: AsyncParsableCommand {
         for i in 0..<300 { reg.begin(scope: "run-C", callID: "c\(i)"); reg.finish(scope: "run-C", callID: "c\(i)", applied) }
         t.check("L hundreds of outcomes in one scope never drop another scope's (R4)",
                 reg.outcome(scope: "run-A", callID: "reused") == applied.outcome && reg.outcome(scope: "run-C", callID: "c299") == applied.outcome)
+        // Codex S2 round 2: a pinned (owed) scope is never evicted; only
+        // released scopes are bounded; the last release retires a scope.
+        reg.pin(scope: "owed")
+        reg.begin(scope: "owed", callID: "p"); reg.finish(scope: "owed", callID: "p", applied)
         for i in 0..<(GPTPatchSettlement.retainedScopes + 4) { reg.begin(scope: "old-\(i)", callID: "x"); reg.finish(scope: "old-\(i)", callID: "x", applied) }
-        t.check("L completed scopes beyond the bound are retired oldest first; a running scope is kept (R4)",
-                reg.outcome(scope: "run-A", callID: "reused") == nil && reg.isCommitting(scope: "run-B", callID: "reused")
-                && reg.outcome(scope: "old-\(GPTPatchSettlement.retainedScopes + 3)", callID: "x") != nil)
-        reg.retire(scope: "old-\(GPTPatchSettlement.retainedScopes + 3)")
-        t.check("L retire drops a consumed scope", reg.outcome(scope: "old-\(GPTPatchSettlement.retainedScopes + 3)", callID: "x") == nil)
+        t.check("L an unconsumed (pinned) scope survives any number of other scopes (R4 round 2)",
+                reg.outcome(scope: "owed", callID: "p") == applied.outcome && reg.isCommitting(scope: "run-B", callID: "reused"))
+        t.check("L released scopes beyond the bound are evicted oldest first",
+                reg.outcome(scope: "old-0", callID: "x") == nil && reg.outcome(scope: "old-\(GPTPatchSettlement.retainedScopes + 3)", callID: "x") != nil)
+        reg.pin(scope: "owed")
+        reg.unpin(scope: "owed")
+        t.check("L a scope with another consumer pin is kept", reg.outcome(scope: "owed", callID: "p") == applied.outcome)
+        reg.unpin(scope: "owed")
+        t.check("L the last release retires the scope", reg.outcome(scope: "owed", callID: "p") == nil)
+        let settledOwed = await reg.settle(scope: "owed", callIDs: ["p"])
+        t.check("L settle after retirement finds nothing (consumed)", settledOwed.isEmpty)
         t.check("L the stamp copies the producing context's editing",
                 {
                     let response = LLMResponse.toolCalls(assistantMessage: AssistantToolCallMessage(content: "", toolCalls: []),

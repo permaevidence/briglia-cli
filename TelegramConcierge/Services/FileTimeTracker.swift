@@ -32,6 +32,31 @@ actor FileTimeTracker {
         gptSnapshots[receipt.key] = GPTEvidence.Record(identity: receipt.identity, recordedAt: Date(), source: receipt.source)
     }
 
+    /// Selftest seam: runs inside the tracker before an admitted mutation's
+    /// cancellation check (a queued operation held behind tracker work).
+    nonisolated(unsafe) static var beforeGPTMutationHookForTesting: (@Sendable () async -> Void)?
+
+    /// Delivery-admitted publication (Codex S2 round 2): the calling task's
+    /// cancellation is checked in the same actor step as the write, so a
+    /// round cancelled while its publication waits for the tracker earns
+    /// nothing. Returns whether the receipt was published.
+    @discardableResult
+    func publishGPTIfAdmitted(_ receipt: GPTEvidence.Receipt) async -> Bool {
+        if let hook = Self.beforeGPTMutationHookForTesting { await hook() }
+        guard !Task.isCancelled else { return false }
+        publishGPT(receipt)
+        return true
+    }
+
+    /// Same admission for forgetting a key (a delivered Delete or Move source).
+    @discardableResult
+    func forgetGPTIfAdmitted(key: String) async -> Bool {
+        if let hook = Self.beforeGPTMutationHookForTesting { await hook() }
+        guard !Task.isCancelled else { return false }
+        forgetGPT(key: key)
+        return true
+    }
+
     func gptRecord(forKey key: String) -> GPTEvidence.Record? { gptSnapshots[key] }
 
     /// A GPT delete forgets only the GPT record of that path.

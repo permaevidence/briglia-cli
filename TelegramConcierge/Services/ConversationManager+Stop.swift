@@ -132,6 +132,10 @@ extension ConversationManager {
             if case .tools(let ids, _, _)? = runPhases[run] { return ids }
             return nil
         } ?? []
+        // The reply below may name a patch that settles during the grace
+        // wait: its results stay available until the reply has read them.
+        let stopReplyScope = observedRun.map(GPTPatchSettlement.mainScope)
+        if let stopReplyScope { GPTPatchSettlement.shared.pin(scope: stopReplyScope) }
         // A repeat for an ALREADY-ANNOUNCED run reserves its place in that
         // run's ordered notices now, before any await (Codex impl review
         // R1): if the run ends during the grace wait below, its completion
@@ -213,7 +217,13 @@ extension ConversationManager {
             if !patchOutcomes.isEmpty {
                 text += " " + patchOutcomes.map(GPTPatchSettlement.describe).joined(separator: "; ").capitalizedFirst + "."
             }
+        } else if let run = stillFinishing, repeatRun == nil {
+            // The completion notice will name the outcome: it pins the scope
+            // until `stoppedRunEnded` has read it.
+            GPTPatchSettlement.shared.pin(scope: GPTPatchSettlement.mainScope(run))
+            stoppedRunsFinishing[run]?.gptNoticePinned = true
         }
+        if let stopReplyScope { GPTPatchSettlement.shared.unpin(scope: stopReplyScope) }
         if killedBackgroundSubagents > 0 {
             text += " Also stopped \(killedBackgroundSubagents) background assistant\(killedBackgroundSubagents == 1 ? "" : "s")."
         }
@@ -239,6 +249,7 @@ extension ConversationManager {
         if markerFailure != nil {
             text += " (I couldn't save the stop to disk — if Briglia restarts in the next moments it may resume the stopped request.)"
         }
+        Self.stopReplyObserverForTesting?(text)
         if let run = stillFinishing {
             // Ordered delivery (§4): the reply heads (or joins) the run's
             // notice series; the stop path does not wait for its retries.
@@ -336,8 +347,8 @@ extension ConversationManager {
         }
         gaveUpNoticeSeries.subtract(entry.series.values)
         stoppedRunsFinishing.removeValue(forKey: run)
-        // §12.2: the run's history and notices are done with its patch results.
-        GPTPatchSettlement.shared.retire(scope: GPTPatchSettlement.mainScope(run))
+        // §12.2: the completion notice has read the run's patch results.
+        if entry.gptNoticePinned { GPTPatchSettlement.shared.unpin(scope: GPTPatchSettlement.mainScope(run)) }
     }
 
     /// "2m 10s"-style durations for the visibility texts.
